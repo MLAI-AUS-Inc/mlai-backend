@@ -263,15 +263,194 @@ def record_delivery_status(
     return delivery
 
 
+def _article_performance_digest(run: AutomationRun) -> Optional[dict[str, Any]]:
+    """Latest article-performance digest for the automation's org, or None.
+
+    Imported lazily: content_analytics.services.report_notifications imports
+    this module at load time, so a top-level import back into content_analytics
+    would be circular. Any failure degrades to a topics-only reminder — the
+    daily message must never be lost to an analytics hiccup.
+    """
+    try:
+        from content_analytics.services.report_digest import latest_report_digest
+
+        return latest_report_digest(run.automation.organization)
+    except Exception:
+        logger.warning(
+            "Article performance digest unavailable for run %s", run.id, exc_info=True
+        )
+        return None
+
+
+def _performance_text_lines(digest: Optional[dict[str, Any]]) -> list[str]:
+    if not digest:
+        return []
+    lines = [
+        f"Article performance for {digest.get('domain')} (last {digest.get('window_days')} days):",
+        str(digest.get("summary_line") or ""),
+    ]
+    top_pages = digest.get("top_pages") or []
+    if top_pages:
+        lines.append("Top pages:")
+        for page in top_pages:
+            lines.append(f"{page.get('rank')}. {page.get('title')} — {page.get('summary')}")
+    attention_pages = digest.get("attention_pages") or []
+    if attention_pages:
+        lines.append("Needs attention:")
+        for page in attention_pages:
+            lines.append(f"- {page.get('title')} — {page.get('summary')}")
+        extra = int(digest.get("extra_attention_count") or 0)
+        if extra:
+            lines.append(f"(+{extra} more in the full brief)")
+    brief = str(digest.get("brief_url") or "")
+    if brief:
+        lines.append(f"Full brief: {brief}")
+    lines.append("")
+    return lines
+
+
+def _performance_slack_blocks(digest: Optional[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not digest:
+        return []
+    blocks: list[dict[str, Any]] = [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": (
+                    f"*Article performance — {digest.get('domain')}* "
+                    f"(last {digest.get('window_days')} days)\n{digest.get('summary_line')}"
+                ),
+            },
+        }
+    ]
+    top_pages = digest.get("top_pages") or []
+    if top_pages:
+        page_lines = [
+            f"{page.get('rank')}. *{page.get('title')}* — {page.get('summary')}"
+            for page in top_pages
+        ]
+        blocks.append(
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": "*Top pages*\n" + "\n".join(page_lines)},
+            }
+        )
+    attention_pages = digest.get("attention_pages") or []
+    if attention_pages:
+        attention_lines = [
+            f"• *{page.get('title')}* — {page.get('summary')}" for page in attention_pages
+        ]
+        extra = int(digest.get("extra_attention_count") or 0)
+        if extra:
+            attention_lines.append(f"…and {extra} more in the full brief.")
+        blocks.append(
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": "*Needs attention*\n" + "\n".join(attention_lines),
+                },
+            }
+        )
+    brief = str(digest.get("brief_url") or "")
+    if brief:
+        blocks.append(
+            {
+                "type": "context",
+                "elements": [{"type": "mrkdwn", "text": f"<{brief}|Open the full brief>"}],
+            }
+        )
+    blocks.append({"type": "divider"})
+    return blocks
+
+
+def _performance_email_html(digest: Optional[dict[str, Any]]) -> str:
+    if not digest:
+        return ""
+    domain = html.escape(str(digest.get("domain") or ""))
+    summary = html.escape(str(digest.get("summary_line") or ""))
+    parts = [
+        f"<p><strong>Article performance for {domain}</strong> — "
+        f"last {int(digest.get('window_days') or 0)} days: {summary}</p>"
+    ]
+    top_pages = digest.get("top_pages") or []
+    if top_pages:
+        items = []
+        for page in top_pages:
+            title = html.escape(str(page.get("title") or ""))
+            page_summary = html.escape(str(page.get("summary") or ""))
+            url = _https_image_url(page.get("url"))
+            title_html = (
+                f'<a href="{html.escape(url)}">{title}</a>' if url else f"<strong>{title}</strong>"
+            )
+            items.append(f"<li>{title_html} — {page_summary}</li>")
+        parts.append(f"<p><strong>Top pages</strong></p><ol>{''.join(items)}</ol>")
+    attention_pages = digest.get("attention_pages") or []
+    if attention_pages:
+        items = []
+        for page in attention_pages:
+            title = html.escape(str(page.get("title") or ""))
+            page_summary = html.escape(str(page.get("summary") or ""))
+            items.append(f"<li><strong>{title}</strong> — {page_summary}</li>")
+        extra = int(digest.get("extra_attention_count") or 0)
+        if extra:
+            items.append(f"<li>…and {extra} more in the full brief.</li>")
+        parts.append(f"<p><strong>Needs attention</strong></p><ul>{''.join(items)}</ul>")
+    brief = str(digest.get("brief_url") or "")
+    if brief.startswith("https://"):
+        parts.append(f'<p><a href="{html.escape(brief)}">Open the full brief</a></p>')
+    parts.append("<hr>")
+    return "".join(parts)
+
+
+def _performance_message_data(digest: Optional[dict[str, Any]]) -> dict[str, Any]:
+    """Customer.io message_data block; available=False keeps Liquid guards simple."""
+    if not digest:
+        return {"available": False}
+    return {
+        "available": True,
+        "report_date": str(digest.get("report_date") or ""),
+        "window_days": int(digest.get("window_days") or 0),
+        "human_visits": int(digest.get("human_visits") or 0),
+        "visits_delta_display": str(digest.get("visits_delta_display") or ""),
+        "engaged_rate_display": str(digest.get("engaged_rate_display") or ""),
+        "cta_clickers": int(digest.get("cta_clickers") or 0),
+        "conversion_display": str(digest.get("conversion_display") or ""),
+        "summary_line": str(digest.get("summary_line") or ""),
+        "top_pages": [
+            {
+                "rank": int(page.get("rank") or 0),
+                "title": str(page.get("title") or ""),
+                "url": str(page.get("url") or ""),
+                "summary": str(page.get("summary") or ""),
+            }
+            for page in (digest.get("top_pages") or [])
+        ],
+        "attention_pages": [
+            {
+                "title": str(page.get("title") or ""),
+                "url": str(page.get("url") or ""),
+                "summary": str(page.get("summary") or ""),
+            }
+            for page in (digest.get("attention_pages") or [])
+        ],
+        "extra_attention_count": int(digest.get("extra_attention_count") or 0),
+        "brief_url": str(digest.get("brief_url") or ""),
+    }
+
+
 def _plain_topic_message(
     run: AutomationRun,
     data: dict[str, Any],
     channel: Optional[NotificationChannel] = None,
     *,
     confirmation_required: bool = False,
+    digest: Optional[dict[str, Any]] = None,
 ) -> str:
     domain = data.get("domain") or run.automation.organization.domain
-    lines = [f"Research topics are ready for {domain}:"]
+    lines = _performance_text_lines(digest)
+    lines.append(f"Research topics are ready for {domain}:")
     for index, option in enumerate(_topic_options(data), start=1):
         keyword = _option_keyword(option)
         title = _option_title(option)
@@ -305,7 +484,12 @@ def _unsubscribe_url(run: AutomationRun, channel: Optional[NotificationChannel] 
     return build_action_url(run, "unsubscribe")
 
 
-def _topic_email_html(run: AutomationRun, data: dict[str, Any], channel: Optional[NotificationChannel] = None) -> str:
+def _topic_email_html(
+    run: AutomationRun,
+    data: dict[str, Any],
+    channel: Optional[NotificationChannel] = None,
+    digest: Optional[dict[str, Any]] = None,
+) -> str:
     domain = html.escape(str(data.get("domain") or run.automation.organization.domain or "your site"))
     rows = []
     for index, option in enumerate(_topic_options(data), start=1):
@@ -344,7 +528,8 @@ def _topic_email_html(run: AutomationRun, data: dict[str, Any], channel: Optiona
         )
     unsubscribe_url = html.escape(_unsubscribe_url(run, channel))
     return (
-        f"<p>Research topics are ready for <strong>{domain}</strong>.</p>"
+        _performance_email_html(digest)
+        + f"<p>Research topics are ready for <strong>{domain}</strong>.</p>"
         f"<ol>{''.join(rows)}</ol>"
         f'<p><a href="{unsubscribe_url}">Pause or unsubscribe</a></p>'
     )
@@ -372,6 +557,7 @@ def _topic_email_message_data(
     run: AutomationRun,
     data: dict[str, Any],
     channel: Optional[NotificationChannel] = None,
+    digest: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     """message_data for the Customer.io daily-topics transactional template.
 
@@ -412,6 +598,7 @@ def _topic_email_message_data(
     return {
         "first_name": _recipient_first_name(run),
         "domain": domain,
+        "analytics": _performance_message_data(digest),
         "topics": topics,
         "unsubscribe_url": _unsubscribe_url(run, channel),
     }
@@ -420,11 +607,22 @@ def _topic_email_message_data(
 WHATSAPP_TOPIC_TITLE_SLOTS = 3
 
 
-def _whatsapp_topic_variables(run: AutomationRun, data: dict[str, Any]) -> dict[str, str]:
-    """ContentVariables for the approved daily-topics utility template.
+def _whatsapp_topic_analytics_content_sid() -> str:
+    return str(getattr(settings, "TWILIO_WHATSAPP_TOPIC_ANALYTICS_CONTENT_SID", "") or "").strip()
 
-    Template contract: {{1}} domain, {{2}}-{{4}} topic titles (daily runs
-    request 3 topics). Twilio rejects sends with missing declared variables,
+
+def _whatsapp_topic_variables(
+    run: AutomationRun,
+    data: dict[str, Any],
+    digest: Optional[dict[str, Any]] = None,
+) -> dict[str, str]:
+    """ContentVariables for the approved daily-topics template.
+
+    Legacy template contract: {{1}} domain, {{2}}-{{4}} topic titles (daily
+    runs request 3 topics). When the analytics-lead template is configured the
+    contract becomes {{1}} domain, {{2}} article-performance summary,
+    {{3}}-{{5}} topic titles — the variable shape must follow the ContentSid
+    the send will use. Twilio rejects sends with missing declared variables,
     so absent options are padded with "-"; extras beyond the slots are cut.
     """
     domain = str(data.get("domain") or run.automation.organization.domain or "your site")
@@ -432,14 +630,25 @@ def _whatsapp_topic_variables(run: AutomationRun, data: dict[str, Any]) -> dict[
     while len(titles) < WHATSAPP_TOPIC_TITLE_SLOTS:
         titles.append("-")
     variables = {"1": domain}
-    for index, title in enumerate(titles[:WHATSAPP_TOPIC_TITLE_SLOTS], start=2):
+    first_topic_slot = 2
+    if _whatsapp_topic_analytics_content_sid():
+        summary = str((digest or {}).get("summary_line") or "").strip()
+        variables["2"] = summary or "No measured visits yet."
+        first_topic_slot = 3
+    for index, title in enumerate(titles[:WHATSAPP_TOPIC_TITLE_SLOTS], start=first_topic_slot):
         variables[str(index)] = title or "-"
     return variables
 
 
-def _topic_slack_blocks(run: AutomationRun, data: dict[str, Any], channel: Optional[NotificationChannel] = None) -> list[dict[str, Any]]:
+def _topic_slack_blocks(
+    run: AutomationRun,
+    data: dict[str, Any],
+    channel: Optional[NotificationChannel] = None,
+    digest: Optional[dict[str, Any]] = None,
+) -> list[dict[str, Any]]:
     domain = data.get("domain") or run.automation.organization.domain
-    blocks: list[dict[str, Any]] = [
+    blocks: list[dict[str, Any]] = _performance_slack_blocks(digest)
+    blocks += [
         {
             "type": "header",
             "text": {"type": "plain_text", "text": "Article Topics Selected", "emoji": True},
@@ -867,7 +1076,12 @@ def _send_channel_delivery(
         elif channel.channel_type == NotificationChannelType.WHATSAPP:
             content_sid = str(channel.provider_metadata.get(f"{event_type}_content_sid") or "").strip()
             if not content_sid and event_type == "topic_selection":
-                content_sid = str(getattr(settings, "TWILIO_WHATSAPP_TOPIC_CONTENT_SID", "") or "").strip()
+                # The analytics-lead template wins when configured; the
+                # ContentVariables shape from _whatsapp_topic_variables keys
+                # off the same setting so sid and variables stay in step.
+                content_sid = _whatsapp_topic_analytics_content_sid() or str(
+                    getattr(settings, "TWILIO_WHATSAPP_TOPIC_CONTENT_SID", "") or ""
+                ).strip()
                 if not content_sid:
                     # Business-initiated sends outside a 24h service window need an
                     # approved template; plain text only delivers inside a window.
@@ -960,6 +1174,9 @@ def send_topic_selection(data: dict[str, Any]) -> list[NotificationDelivery]:
     run.last_error = ""
     run.save(update_fields=["callback_payload", "content_factory_run_id", "status", "last_error", "updated_at"])
 
+    # One digest for the whole fan-out: the analytics update leads the message
+    # on every channel, then the research topics follow.
+    digest = _article_performance_digest(run)
     return _fan_out_event(
         run=run,
         event_type="topic_selection",
@@ -970,14 +1187,15 @@ def send_topic_selection(data: dict[str, Any]) -> list[NotificationDelivery]:
                 data,
                 channel,
                 confirmation_required=channel.channel_type == NotificationChannelType.EMAIL,
+                digest=digest,
             ),
             "subject": f"Article topics for {run.automation.organization.domain}",
-            "blocks": _topic_slack_blocks(run, data, channel),
+            "blocks": _topic_slack_blocks(run, data, channel, digest=digest),
             # Raw-HTML fallback used when no Customer.io template id is configured
             # (or when email goes via Resend).
-            "html_body": _topic_email_html(run, data, channel),
-            "whatsapp_variables": _whatsapp_topic_variables(run, data),
-            "email_message_data": _topic_email_message_data(run, data, channel),
+            "html_body": _topic_email_html(run, data, channel, digest=digest),
+            "whatsapp_variables": _whatsapp_topic_variables(run, data, digest=digest),
+            "email_message_data": _topic_email_message_data(run, data, channel, digest=digest),
             "email_transactional_message_id": str(
                 getattr(settings, "CUSTOMERIO_TOPIC_TEMPLATE_ID", "") or ""
             ).strip(),

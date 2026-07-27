@@ -10,6 +10,7 @@ from startup_updates.models import (
     StartupEventDatePrecision,
     StartupEventType,
 )
+from vibe_raising.serializer_fields import AudienceVisibilityField
 
 
 class RoundingDecimalField(serializers.DecimalField):
@@ -328,6 +329,20 @@ class DraftResultSerializer(serializers.Serializer):
     evidence_metric_ids = serializers.ListField(child=serializers.IntegerField(), required=False, default=list)
     carry_forward_event_ids = serializers.ListField(child=serializers.IntegerField(), required=False, default=list)
     groundedness_notes = serializers.CharField(required=False, allow_blank=True, default="")
+    audience_visibility = AudienceVisibilityField(required=False)
+    audienceVisibility = AudienceVisibilityField(required=False)
+
+    def validate(self, attrs):
+        snake_case_visibility = attrs.get("audience_visibility")
+        camel_case_visibility = attrs.pop("audienceVisibility", None)
+        if snake_case_visibility is not None and camel_case_visibility is not None:
+            if snake_case_visibility != camel_case_visibility:
+                raise serializers.ValidationError(
+                    {"audienceVisibility": "Use one audience visibility value set per draft."}
+                )
+        if snake_case_visibility is None and camel_case_visibility is not None:
+            attrs["audience_visibility"] = camel_case_visibility
+        return attrs
 
 
 class DraftResultsSerializer(serializers.Serializer):

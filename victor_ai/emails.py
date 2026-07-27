@@ -7,6 +7,8 @@ from .models import VictorApplication
 
 logger = logging.getLogger(__name__)
 
+VICTOR_APPLICATION_DEADLINE = '6 August 2026'
+
 
 def send_registration_confirmation(application: VictorApplication):
     """Send the Victor:AI registration receipt through Customer.io."""
@@ -32,6 +34,7 @@ def send_registration_confirmation(application: VictorApplication):
             'full_name': full_name,
             'team_name': application.team_name,
             'startup_stage': application.startup_stage,
+            'application_deadline': VICTOR_APPLICATION_DEADLINE,
             'website_url': 'https://victorai.win',
         },
         'to': application.email,

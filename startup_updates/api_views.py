@@ -56,6 +56,7 @@ from startup_updates.metric_catalog import (
     startup_update_metric_key,
     startup_update_metric_label,
 )
+from vibe_raising.audience_visibility import monthly_update_visibility
 from integrations.services.external_connectors import (
     ConnectorConfigurationError,
     ConnectorOAuthError,
@@ -302,6 +303,8 @@ def _serialize_attachment(attachment) -> dict:
 
 
 def _serialize_draft(draft) -> dict:
+    audience_visibility = monthly_update_visibility(draft)
+    published_at = draft.published_at.isoformat() if draft.published_at else None
     return {
         "id": draft.id,
         "organization_id": draft.organization_id,
@@ -316,6 +319,10 @@ def _serialize_draft(draft) -> dict:
         "evidence_metric_ids": draft.evidence_metric_ids or [],
         "carry_forward_event_ids": draft.carry_forward_event_ids or [],
         "groundedness_notes": draft.groundedness_notes or "",
+        "audience_visibility": audience_visibility,
+        "audienceVisibility": audience_visibility,
+        "published_at": published_at,
+        "publishedAt": published_at,
         "created_at": draft.created_at.isoformat(),
         "updated_at": draft.updated_at.isoformat(),
     }
@@ -3698,6 +3705,7 @@ class StartupUpdateDraftResultsView(APIView):
                     evidence_metric_ids=evidence_metric_ids,
                     carry_forward_event_ids=item.get("carry_forward_event_ids", []),
                     groundedness_notes=item.get("groundedness_notes", ""),
+                    audience_visibility=item.get("audience_visibility"),
                     replace=replace_existing,
                 )
                 saved.append(_serialize_draft(draft))

@@ -5,6 +5,7 @@ import json
 import uuid
 from datetime import date, datetime, time, timedelta, timezone
 
+import requests
 from django.conf import settings
 from django.db import IntegrityError, transaction
 from django.db.models import Q
@@ -24,7 +25,9 @@ from workflow_runs.models import (
 )
 from integrations.models import (
     ExternalFinancialRecord,
+    ExternalServiceConnection,
     ExternalServiceProvider,
+    HumanitixPayout,
     ReconciliationMapping,
     ReconciliationDecision,
     ReconciliationPartyIdentity,
@@ -36,6 +39,14 @@ from integrations.models import (
     XeroStatementScan,
     XeroStatementSuggestion,
 )
+from integrations.services.humanitix_payouts import (
+    HumanitixPayoutImportError,
+    build_humanitix_xero_correction_batch,
+    build_humanitix_xero_preview,
+    import_payout_csv,
+    post_humanitix_xero_bank_transaction,
+    serialize_humanitix_payout,
+)
 from integrations.services.reconciliation import (
     ReconciliationReportService,
     StripeAPIError,
@@ -44,6 +55,7 @@ from integrations.services.reconciliation import (
 from integrations.services.xero_reconciliation import (
     ReconciliationValidationError,
     XeroPostingError,
+    build_xero_correction_batch,
     build_xero_preview,
     persist_report,
     post_xero_bank_transaction,
@@ -463,6 +475,8 @@ class ReconciliationProfileView(ReconciliationAdminView):
         "xero_bank_account_name",
         "xero_contact_id",
         "xero_contact_name",
+        "humanitix_contact_id",
+        "humanitix_contact_name",
         "revenue_account_code",
         "fee_account_code",
         "refund_account_code",
@@ -2457,6 +2471,279 @@ class ReconciliationPayoutListView(ReconciliationAdminView):
             return error
         records = StripePayoutReconciliation.objects.filter(organization=organization).order_by("-arrival_date", "-id")[:250]
         return Response({"payouts": [serialize_payout(record) for record in records]})
+
+
+class ReconciliationPayoutCorrectionPreviewView(ReconciliationAdminView):
+    """Build a read-only Stripe/Luma-to-Xero correction pack.
+
+    The preview fetches Xero's accounting transactions but never creates,
+    edits, voids, unreconciles, or reconciles anything.
+    """
+
+    def post(self, request):
+        _, organization, error = self.context(request, from_body=True)
+        if error:
+            return error
+        try:
+            max_count = max(1, min(int(request.data.get("max_count") or 250), 250))
+        except (TypeError, ValueError):
+            return Response(
+                {"error": "max_count must be an integer"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        queryset = StripePayoutReconciliation.objects.filter(
+            organization=organization,
+        ).order_by("arrival_date", "id")
+        cashflow_period = {"since": None, "until": None}
+        for field_name, lookup in (("since", "arrival_date__gte"), ("until", "arrival_date__lte")):
+            raw_value = str(request.data.get(field_name) or "").strip()
+            if not raw_value:
+                continue
+            try:
+                parsed_value = datetime.fromisoformat(raw_value).date()
+            except ValueError:
+                return Response(
+                    {"error": f"{field_name} must use YYYY-MM-DD"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            cashflow_period[field_name] = parsed_value
+            queryset = queryset.filter(**{lookup: parsed_value})
+
+        records = list(queryset[:max_count])
+        try:
+            preview = build_xero_correction_batch(
+                records,
+                cashflow_period_start=cashflow_period["since"],
+                cashflow_period_end=cashflow_period["until"],
+            )
+        except ReconciliationProfile.DoesNotExist:
+            return Response(
+                {"error": "Reconciliation profile is not configured."},
+                status=status.HTTP_409_CONFLICT,
+            )
+        except ReconciliationValidationError as exc:
+            return Response(
+                {"error": str(exc), "errors": exc.errors},
+                status=status.HTTP_409_CONFLICT,
+            )
+        except requests.RequestException:
+            return Response(
+                {"error": "Unable to read Xero bank transactions for the correction preview."},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+        return Response(
+            {
+                "dry_run": True,
+                "xero_writes": False,
+                **preview,
+            }
+        )
+
+
+class HumanitixPayoutListView(ReconciliationAdminView):
+    def get(self, request):
+        _, organization, error = self.context(request)
+        if error:
+            return error
+        records = (
+            HumanitixPayout.objects.filter(organization=organization)
+            .prefetch_related("lines")
+            .order_by("-payout_date", "-id")[:500]
+        )
+        return Response(
+            {
+                "payouts": [
+                    serialize_humanitix_payout(record)
+                    for record in records
+                ]
+            }
+        )
+
+
+class HumanitixPayoutCorrectionPreviewView(ReconciliationAdminView):
+    """Compare Humanitix payout previews with Xero without making Xero writes."""
+
+    def post(self, request):
+        _, organization, error = self.context(request, from_body=True)
+        if error:
+            return error
+        try:
+            max_count = max(1, min(int(request.data.get("max_count") or 500), 500))
+        except (TypeError, ValueError):
+            return Response(
+                {"error": "max_count must be an integer"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        records = list(
+            HumanitixPayout.objects.filter(organization=organization)
+            .prefetch_related("lines")
+            .order_by("payout_date", "id")[:max_count]
+        )
+        try:
+            preview = build_humanitix_xero_correction_batch(records)
+        except ReconciliationProfile.DoesNotExist:
+            return Response(
+                {"error": "Reconciliation profile is not configured."},
+                status=status.HTTP_409_CONFLICT,
+            )
+        except ReconciliationValidationError as exc:
+            return Response(
+                {"error": str(exc), "errors": exc.errors},
+                status=status.HTTP_409_CONFLICT,
+            )
+        except requests.RequestException:
+            return Response(
+                {
+                    "error": (
+                        "Unable to read Xero bank transactions for the "
+                        "Humanitix correction preview."
+                    )
+                },
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+        return Response(
+            {
+                "dry_run": True,
+                "xero_writes": False,
+                **preview,
+            }
+        )
+
+
+class HumanitixPayoutImportView(ReconciliationAdminView):
+    MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+
+    def post(self, request):
+        _, organization, error = self.context(request, from_body=True)
+        if error:
+            return error
+        connection = (
+            ExternalServiceConnection.objects.filter(
+                organization=organization,
+                provider=ExternalServiceProvider.HUMANITIX,
+            )
+            .exclude(status="disconnected")
+            .order_by("-updated_at", "-id")
+            .first()
+        )
+        if connection is None:
+            return Response(
+                {"error": "Humanitix is not connected for this organisation."},
+                status=status.HTTP_409_CONFLICT,
+            )
+        upload = request.FILES.get("file")
+        if upload is not None:
+            if upload.size > self.MAX_UPLOAD_BYTES:
+                return Response(
+                    {"error": "Humanitix payout CSV must be 10 MB or smaller."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            raw_csv = upload.read()
+        else:
+            raw_csv = request.data.get("csv") or request.data.get("csv_content") or ""
+            if len(raw_csv.encode("utf-8")) > self.MAX_UPLOAD_BYTES:
+                return Response(
+                    {"error": "Humanitix payout CSV must be 10 MB or smaller."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        if not raw_csv:
+            return Response(
+                {"error": "Upload the Humanitix global Payouts CSV."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            payouts = import_payout_csv(
+                organization=organization,
+                connection=connection,
+                source=raw_csv,
+            )
+            previews = [
+                build_humanitix_xero_preview(payout)
+                for payout in payouts
+            ]
+        except (HumanitixPayoutImportError, UnicodeDecodeError) as exc:
+            return Response(
+                {"error": str(exc)},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return Response(
+            {
+                "payouts": [
+                    serialize_humanitix_payout(payout, include_payload=True)
+                    for payout in payouts
+                ],
+                "previews": previews,
+                "posted_to_xero": False,
+            }
+        )
+
+
+class HumanitixPayoutPreviewView(ReconciliationAdminView):
+    def get(self, request, payout_reference: str):
+        _, organization, error = self.context(request)
+        if error:
+            return error
+        record = HumanitixPayout.objects.filter(
+            organization=organization,
+            payout_reference=payout_reference,
+        ).first()
+        if record is None:
+            return Response(
+                {"error": "Humanitix payout was not found"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        preview = build_humanitix_xero_preview(record)
+        return Response(
+            {
+                "payout": serialize_humanitix_payout(record),
+                "preview": preview,
+            }
+        )
+
+
+class HumanitixPayoutPostView(ReconciliationAdminView):
+    def post(self, request, payout_reference: str):
+        slack_user_id, organization, error = self.context(request, from_body=True)
+        if error:
+            return error
+        if request.data.get("confirm") is not True:
+            return Response(
+                {"error": "confirm must be true to post to Xero"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        record = HumanitixPayout.objects.filter(
+            organization=organization,
+            payout_reference=payout_reference,
+        ).first()
+        if record is None:
+            return Response(
+                {"error": "Humanitix payout was not found"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        try:
+            posted = post_humanitix_xero_bank_transaction(
+                record,
+                approved_by_slack_id=slack_user_id,
+            )
+        except ReconciliationValidationError as exc:
+            return Response(
+                {"error": str(exc), "errors": exc.errors},
+                status=status.HTTP_409_CONFLICT,
+            )
+        except XeroPostingError as exc:
+            return Response(
+                {"error": str(exc)},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+        return Response(
+            {
+                "payout": serialize_humanitix_payout(
+                    posted,
+                    include_payload=True,
+                )
+            }
+        )
 
 
 class ReconciliationPayoutPreviewView(ReconciliationAdminView):

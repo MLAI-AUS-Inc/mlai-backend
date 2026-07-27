@@ -5,7 +5,7 @@ import django.db.models.deletion
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("integrations", "0028_xero_statement_posting"),
+        ("integrations", "0029_humanitix_reconciliation_foundation"),
     ]
 
     operations = [

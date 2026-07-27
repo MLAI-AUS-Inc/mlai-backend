@@ -5,7 +5,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("integrations", "0031_reconciliation_decision_approval_types"),
+        ("integrations", "0032_reconciliation_decision_approval_types"),
     ]
 
     operations = [

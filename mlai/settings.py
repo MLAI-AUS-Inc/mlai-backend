@@ -515,9 +515,25 @@ WATT_CAMPAIGN_START = os.getenv('WATT_CAMPAIGN_START', '2026-06-04T22:00:00+10:0
 WATT_CAMPAIGN_LENGTH_DAYS = int(os.getenv('WATT_CAMPAIGN_LENGTH_DAYS', '46'))
 WATT_CAMPAIGN_DAY_SECONDS = float(os.getenv('WATT_CAMPAIGN_DAY_SECONDS', '700'))
 
+# --- Session length ----------------------------------------------------------------------
+# The access token is the short-lived credential every API call carries; the refresh token is
+# the long-lived one that silently mints new access tokens (see core.views.CookieTokenRefreshView
+# and the website worker's session-refresh middleware). A user stays logged in for as long as
+# they keep visiting inside REFRESH_TOKEN_LIFETIME — rotation restarts that clock on every
+# refresh, so an active user is never bounced to the magic-link screen.
+JWT_ACCESS_TOKEN_MINUTES = int(os.getenv('JWT_ACCESS_TOKEN_MINUTES', '1440'))  # 1 day
+JWT_REFRESH_TOKEN_DAYS = int(os.getenv('JWT_REFRESH_TOKEN_DAYS', '90'))
+
 SIMPLE_JWT = {
-    'ACCESS_TOKEN_LIFETIME': timedelta(minutes=1440),
-    'REFRESH_TOKEN_LIFETIME': timedelta(days=1),
+    'ACCESS_TOKEN_LIFETIME': timedelta(minutes=JWT_ACCESS_TOKEN_MINUTES),
+    'REFRESH_TOKEN_LIFETIME': timedelta(days=JWT_REFRESH_TOKEN_DAYS),
+    # Hand back a new refresh token on every refresh so the 90-day window slides forward with
+    # use instead of expiring a fixed 90 days after the magic-link login.
+    'ROTATE_REFRESH_TOKENS': True,
+    # Deliberately off: blacklisting needs the token_blacklist app (extra table + migration) and
+    # would break the common case of two tabs/SSR requests refreshing concurrently — the loser
+    # of that race would be logged out. Superseded refresh tokens simply age out on their own.
+    'BLACKLIST_AFTER_ROTATION': False,
     'AUTH_COOKIE': 'access_token',  # Cookie name for access token
     'AUTH_COOKIE_REFRESH': 'refresh_token',  # Cookie name for refresh token
     'AUTH_COOKIE_SECURE': not DEBUG,  # Set to True in production with HTTPS
@@ -684,6 +700,26 @@ CUSTOMERIO_VICTOR_REGISTRATION_TEMPLATE_ID = os.getenv(
 # Customer.io. When set, the daily topic_selection email renders through that
 # template (Liquid loop over message_data.topics) instead of a raw HTML body.
 CUSTOMERIO_TOPIC_TEMPLATE_ID = os.getenv('CUSTOMERIO_TOPIC_TEMPLATE_ID', '3')
+# Friendly monthly-update renewal reminders. Production delivery stays off
+# until both Customer.io templates have been reviewed and their ids configured.
+MONTHLY_UPDATE_REMINDERS_ENABLED = _env_is_true('MONTHLY_UPDATE_REMINDERS_ENABLED', False)
+MONTHLY_UPDATE_REMINDER_TIMEZONE = os.getenv(
+    'MONTHLY_UPDATE_REMINDER_TIMEZONE', 'Australia/Melbourne'
+)
+MONTHLY_UPDATE_REMINDER_HOUR = int(os.getenv('MONTHLY_UPDATE_REMINDER_HOUR', '9'))
+MONTHLY_UPDATE_REMINDER_MINUTE = int(os.getenv('MONTHLY_UPDATE_REMINDER_MINUTE', '0'))
+MONTHLY_UPDATE_REMINDERS_QUEUE_DRAFT = _env_is_true(
+    'MONTHLY_UPDATE_REMINDERS_QUEUE_DRAFT', True
+)
+CUSTOMERIO_MONTHLY_UPDATE_7D_TEMPLATE_ID = os.getenv(
+    'CUSTOMERIO_MONTHLY_UPDATE_7D_TEMPLATE_ID', ''
+)
+CUSTOMERIO_MONTHLY_UPDATE_1D_TEMPLATE_ID = os.getenv(
+    'CUSTOMERIO_MONTHLY_UPDATE_1D_TEMPLATE_ID', ''
+)
+MONTHLY_UPDATE_REMINDER_APP_URL = os.getenv(
+    'MONTHLY_UPDATE_REMINDER_APP_URL', 'https://mlai.au'
+).rstrip('/')
 # Twilio credentials drive WhatsApp sends (Messages API) and inbound webhook
 # validation (X-Twilio-Signature is HMAC-SHA1 keyed by the auth token).
 TWILIO_ACCOUNT_SID = os.getenv('TWILIO_ACCOUNT_SID', '')
@@ -697,6 +733,13 @@ TWILIO_WHATSAPP_OTP_CONTENT_SID = os.getenv('TWILIO_WHATSAPP_OTP_CONTENT_SID', '
 # {{1}} domain, {{2}}-{{4}} topic titles). Without it, topic sends fall back to
 # plain text and only deliver inside an open 24h service window.
 TWILIO_WHATSAPP_TOPIC_CONTENT_SID = os.getenv('TWILIO_WHATSAPP_TOPIC_CONTENT_SID', '')
+# Analytics-lead variant of the daily-topics template ({{1}} domain, {{2}}
+# article-performance summary, {{3}}-{{5}} topic titles). When set it wins over
+# TWILIO_WHATSAPP_TOPIC_CONTENT_SID and switches the ContentVariables shape.
+# Only set this once the template is APPROVED in Twilio — sends against an
+# unapproved SID fail outright. Incompatible with per-channel
+# provider_metadata topic_selection_content_sid overrides of the legacy shape.
+TWILIO_WHATSAPP_TOPIC_ANALYTICS_CONTENT_SID = os.getenv('TWILIO_WHATSAPP_TOPIC_ANALYTICS_CONTENT_SID', '')
 # Approved utility Content template for article review notifications (variables:
 # {{1}} title, {{2}} domain, {{3}} expanded founder-tools review URL). The fixed
 # template copy must include "Reply STOP to opt out.".
@@ -1070,8 +1113,44 @@ COWORKING_BOOKING_ADVANCE_DAYS = int(os.environ.get('COWORKING_BOOKING_ADVANCE_D
 # Internal API Key for service-to-service auth (e.g. from Roo agent)
 MLAI_API_KEY = os.environ.get('MLAI_API_KEY')
 INTERNAL_API_KEY = os.environ.get('INTERNAL_API_KEY') or ROO_API_KEY or MLAI_API_KEY
+
+# Dedicated, fail-closed access for read-only Victor application reports in Roo.
+# This secret is used only to sign short-lived Slack actor assertions; the
+# generic Roo/internal API keys are deliberately not accepted by these views.
+VICTOR_AI_ROO_ENABLED = _env_is_true('VICTOR_AI_ROO_ENABLED', False)
+VICTOR_AI_ROO_SIGNING_SECRET = os.environ.get('VICTOR_AI_ROO_SIGNING_SECRET', '').strip()
+VICTOR_AI_ROO_ASSERTION_MAX_AGE_SECONDS = int(
+    os.environ.get('VICTOR_AI_ROO_ASSERTION_MAX_AGE_SECONDS', '60') or 60
+)
+VICTOR_AI_ROO_ASSERTION_CLOCK_SKEW_SECONDS = int(
+    os.environ.get('VICTOR_AI_ROO_ASSERTION_CLOCK_SKEW_SECONDS', '5') or 5
+)
+VICTOR_AI_ROO_EXPORT_MAX_ROWS = int(
+    os.environ.get('VICTOR_AI_ROO_EXPORT_MAX_ROWS', '5000') or 5000
+)
+if VICTOR_AI_ROO_ENABLED:
+    if len(VICTOR_AI_ROO_SIGNING_SECRET) < 32:
+        raise ImproperlyConfigured(
+            'VICTOR_AI_ROO_SIGNING_SECRET must contain at least 32 characters when enabled.'
+        )
+    if not 10 <= VICTOR_AI_ROO_ASSERTION_MAX_AGE_SECONDS <= 300:
+        raise ImproperlyConfigured(
+            'VICTOR_AI_ROO_ASSERTION_MAX_AGE_SECONDS must be between 10 and 300.'
+        )
+    if not 0 <= VICTOR_AI_ROO_ASSERTION_CLOCK_SKEW_SECONDS <= 30:
+        raise ImproperlyConfigured(
+            'VICTOR_AI_ROO_ASSERTION_CLOCK_SKEW_SECONDS must be between 0 and 30.'
+        )
+    if not 1 <= VICTOR_AI_ROO_EXPORT_MAX_ROWS <= 10000:
+        raise ImproperlyConfigured(
+            'VICTOR_AI_ROO_EXPORT_MAX_ROWS must be between 1 and 10000.'
+        )
 LUMA_API_KEY = os.environ.get('LUMA_API_KEY')
 LUMA_BASE_URL = os.environ.get('LUMA_BASE_URL', 'https://public-api.luma.com')
+HUMANITIX_API_BASE_URL = os.environ.get(
+    'HUMANITIX_API_BASE_URL',
+    'https://api.humanitix.com/v1',
+)
 
 # MedHack Game Configuration
 MEDHACK_ADMIN_IDS = [s.strip() for s in os.getenv('MEDHACK_ADMIN_IDS', '').split(',') if s.strip()]

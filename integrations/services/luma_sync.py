@@ -166,6 +166,8 @@ def upsert_luma_event_catalog(
                 "event_name": str(event.get("name") or event_id).strip()[:255],
                 "event_url": str(event.get("url") or "").strip()[:512],
                 "start_at": start_at,
+                "registration_count": int(item.get("registration_count") or 0),
+                "checked_in_count": int(item.get("checked_in_count") or 0),
                 "raw_payload": event,
                 "last_synced_at": synced_at,
             },

@@ -97,3 +97,24 @@ class VictorApplicationSerializer(serializers.ModelSerializer):
         if errors:
             raise serializers.ValidationError(errors)
         return attrs
+
+
+class VictorApplicationListSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = VictorApplication
+        fields = [
+            'id', 'first_name', 'last_name', 'email', 'stage', 'role',
+            'startup_stage', 'industry_sector', 'team_name', 'team_size',
+            'created_at',
+        ]
+
+
+class VictorApplicationDetailSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = VictorApplication
+        fields = [
+            'id', 'stage', 'first_name', 'last_name', 'email', 'linkedin',
+            'team_name', 'role', 'startup_stage', 'industry_sector', 'location',
+            'team_size', 'team_members', 'revenue_last_3_months', 'idea',
+            'support', 'consent', 'created_at', 'updated_at',
+        ]

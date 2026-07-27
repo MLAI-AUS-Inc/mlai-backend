@@ -17,6 +17,7 @@ from integrations.services.research_automations import run_research_automation_s
 from integrations.services.xero_reconciliation import run_daily_payout_reconciliation
 from jobs.services.job_pipeline import run_daily_jobs_scheduler
 from hospital.sim_retention import run_scheduled_sim_conversation_cleanup
+from startup_updates.monthly_update_reminders import run_monthly_update_reminder_scheduler
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +96,10 @@ class Command(BaseCommand):
             # report's unique constraint makes every later tick a cheap
             # existence check.
             ("article_performance_reports", run_daily_article_report_scheduler),
+            # Sends exact-day seven-day and one-day monthly-update reminders.
+            # Feature-gated, scheduled in Melbourne time, and idempotent per
+            # recipient/reminder/date so the minute loop cannot double-send.
+            ("monthly_update_reminders", run_monthly_update_reminder_scheduler),
         ):
             try:
                 results[name] = runner()

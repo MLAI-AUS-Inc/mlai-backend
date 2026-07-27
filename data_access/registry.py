@@ -383,7 +383,7 @@ RESOURCES = {
         "startup_bindings",
         su_models.UserStartupBinding,
         "User to startup organization bindings.",
-        (f("id"), f("user_id"), f("user_email", "user__email", searchable=True), f("organization_id"), f("organization_domain", "organization__domain", searchable=True), f("role", searchable=True), f("is_default_for_gmail"), f("created_at"), f("updated_at")),
+        (f("id"), f("user_id"), f("user_email", "user__email", searchable=True), f("organization_id"), f("organization_domain", "organization__domain", searchable=True), f("role", searchable=True), f("is_default_for_gmail"), f("coworking_discount_eligible"), f("created_at"), f("updated_at")),
         (self_user_policy("user_id"), founder_org_policy("organization_id")) + INTERNAL_ALL,
         default_order_by=("-updated_at",),
     ),

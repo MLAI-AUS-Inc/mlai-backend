@@ -42,8 +42,34 @@ urlpatterns = [
     path('reconciliation/statement-suggestions/execute-safe', api_views_reconciliation.ReconciliationStatementSafeBatchView.as_view(), name='reconciliation_statement_safe_batch'),
     path('reconciliation/suggestions/<int:suggestion_id>/decision', api_views_reconciliation.ReconciliationSuggestionDecisionView.as_view(), name='reconciliation_suggestion_decision'),
     path('reconciliation/payouts', api_views_reconciliation.ReconciliationPayoutListView.as_view(), name='reconciliation_payouts'),
+    path('reconciliation/payouts/correction-preview', api_views_reconciliation.ReconciliationPayoutCorrectionPreviewView.as_view(), name='reconciliation_payout_correction_preview'),
     path('reconciliation/payouts/<str:payout_id>/preview', api_views_reconciliation.ReconciliationPayoutPreviewView.as_view(), name='reconciliation_payout_preview'),
     path('reconciliation/payouts/<str:payout_id>/post', api_views_reconciliation.ReconciliationPayoutPostView.as_view(), name='reconciliation_payout_post'),
+    path(
+        'reconciliation/humanitix/payouts',
+        api_views_reconciliation.HumanitixPayoutListView.as_view(),
+        name='reconciliation_humanitix_payouts',
+    ),
+    path(
+        'reconciliation/humanitix/payouts/correction-preview',
+        api_views_reconciliation.HumanitixPayoutCorrectionPreviewView.as_view(),
+        name='reconciliation_humanitix_payout_correction_preview',
+    ),
+    path(
+        'reconciliation/humanitix/payouts/import',
+        api_views_reconciliation.HumanitixPayoutImportView.as_view(),
+        name='reconciliation_humanitix_payout_import',
+    ),
+    path(
+        'reconciliation/humanitix/payouts/<str:payout_reference>/preview',
+        api_views_reconciliation.HumanitixPayoutPreviewView.as_view(),
+        name='reconciliation_humanitix_payout_preview',
+    ),
+    path(
+        'reconciliation/humanitix/payouts/<str:payout_reference>/post',
+        api_views_reconciliation.HumanitixPayoutPostView.as_view(),
+        name='reconciliation_humanitix_payout_post',
+    ),
 
     # Pending Intents
     path('pending-intent/', api_views.IntentView.as_view(), name='pending_intent_list'), # POST save
@@ -63,6 +89,11 @@ urlpatterns = [
         name='connector_source_connection_detail',
     ),
     path('luma/connect', api_views_connectors.LumaConnectView.as_view(), name='luma_connect'),
+    path(
+        'humanitix/connect',
+        api_views_connectors.HumanitixConnectView.as_view(),
+        name='humanitix_connect',
+    ),
     path('luma/events', api_views_connectors.LumaEventListView.as_view(), name='luma_events'),
     path('luma/selections', api_views_connectors.LumaSelectionView.as_view(), name='luma_selections'),
     path('financial/status', api_views_finance.FinancialStatusView.as_view(), name='financial_sources_status'),

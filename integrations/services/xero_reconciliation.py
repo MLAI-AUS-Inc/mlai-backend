@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections import Counter
 from datetime import date, timedelta
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any
 
 from django.conf import settings
@@ -114,6 +116,8 @@ def serialize_profile(profile: ReconciliationProfile) -> dict[str, Any]:
         "xero_bank_account_name": profile.xero_bank_account_name,
         "xero_contact_id": profile.xero_contact_id,
         "xero_contact_name": profile.xero_contact_name,
+        "humanitix_contact_id": profile.humanitix_contact_id,
+        "humanitix_contact_name": profile.humanitix_contact_name,
         "revenue_account_code": profile.revenue_account_code,
         "fee_account_code": profile.fee_account_code,
         "refund_account_code": profile.refund_account_code,
@@ -393,6 +397,821 @@ def _xero_headers(connection: ExternalServiceConnection) -> dict[str, str]:
     }
 
 
+def _money_to_cents(value: Any) -> int:
+    try:
+        amount = Decimal(str(value or "0"))
+    except (InvalidOperation, TypeError, ValueError):
+        return 0
+    return int((amount * 100).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+
+
+def _xero_line_cents(line: dict[str, Any]) -> int:
+    if line.get("UnitAmount") not in (None, ""):
+        try:
+            quantity = Decimal(str(line.get("Quantity") or "1"))
+            unit_amount = Decimal(str(line.get("UnitAmount") or "0"))
+        except (InvalidOperation, TypeError, ValueError):
+            return 0
+        return int((quantity * unit_amount * 100).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+    return _money_to_cents(line.get("LineAmount"))
+
+
+def _tracking_key(item: dict[str, Any]) -> tuple[str, str]:
+    category = str(item.get("Name") or item.get("TrackingCategoryID") or "").strip().casefold()
+    option = str(
+        item.get("Option")
+        or item.get("TrackingOptionName")
+        or item.get("TrackingOptionID")
+        or ""
+    ).strip().casefold()
+    return category, option
+
+
+def _xero_line_key(line: dict[str, Any]) -> tuple[int, str, str, tuple[tuple[str, str], ...]]:
+    tracking = tuple(
+        sorted(
+            _tracking_key(item)
+            for item in line.get("Tracking") or []
+            if isinstance(item, dict)
+        )
+    )
+    return (
+        _xero_line_cents(line),
+        str(line.get("AccountCode") or "").strip().casefold(),
+        str(line.get("TaxType") or "").strip().casefold(),
+        tracking,
+    )
+
+
+def _line_key_payload(
+    key: tuple[int, str, str, tuple[tuple[str, str], ...]]
+) -> dict[str, Any]:
+    return {
+        "amount_cents": key[0],
+        "account_code": key[1],
+        "tax_type": key[2],
+        "tracking": [
+            {"category": category, "option": option}
+            for category, option in key[3]
+        ],
+    }
+
+
+def _xero_transaction_date(payload: dict[str, Any]) -> str:
+    raw = str(payload.get("DateString") or payload.get("Date") or "").strip()
+    if len(raw) >= 10 and raw[:4].isdigit() and raw[4] == "-" and raw[7] == "-":
+        return raw[:10]
+    return ""
+
+
+def _xero_transaction_total_cents(payload: dict[str, Any]) -> int:
+    if payload.get("Total") not in (None, ""):
+        return _money_to_cents(payload.get("Total"))
+    return sum(
+        _xero_line_cents(line)
+        for line in payload.get("LineItems") or []
+        if isinstance(line, dict)
+    )
+
+
+def _xero_bank_account_id(payload: dict[str, Any]) -> str:
+    bank_account = payload.get("BankAccount")
+    if not isinstance(bank_account, dict):
+        return ""
+    return str(bank_account.get("AccountID") or "").strip()
+
+
+def _xero_transaction_summary(
+    payload: dict[str, Any],
+    *,
+    match_basis: str,
+) -> dict[str, Any]:
+    line_items = [
+        line for line in payload.get("LineItems") or [] if isinstance(line, dict)
+    ]
+    return {
+        "bank_transaction_id": str(payload.get("BankTransactionID") or "").strip(),
+        "reference": str(payload.get("Reference") or "").strip(),
+        "date": _xero_transaction_date(payload),
+        "type": str(payload.get("Type") or "").strip(),
+        "status": str(payload.get("Status") or "").strip(),
+        "is_reconciled": bool(payload.get("IsReconciled")),
+        "total_cents": _xero_transaction_total_cents(payload),
+        "line_count": len(line_items),
+        "tracking_count": sum(
+            len(line.get("Tracking") or [])
+            for line in line_items
+        ),
+        "match_basis": match_basis,
+    }
+
+
+def fetch_xero_bank_transactions(
+    profile: ReconciliationProfile,
+    *,
+    max_pages: int = 50,
+) -> list[dict[str, Any]]:
+    """Fetch Xero bank transactions once for a correction-preview batch.
+
+    The Accounting API does not expose the bank-feed statement queue, but it
+    does expose the accounting transactions already created against it.  This
+    read-only fetch lets the preview distinguish a missing transaction from a
+    reconciled legacy net-only transaction before any posting is attempted.
+    """
+    connection = profile.xero_connection
+    if connection is None:
+        raise ReconciliationValidationError("A Xero connection must be selected.")
+    if not xero_has_bank_transaction_scope(connection.scopes):
+        raise ReconciliationValidationError(
+            "Reconnect Xero with the accounting.banktransactions scope before auditing payouts."
+        )
+
+    headers = _xero_headers(connection)
+    transactions: list[dict[str, Any]] = []
+    for page in range(1, max(1, max_pages) + 1):
+        response = http_client.get(
+            f"{XERO_API_URL}/BankTransactions",
+            headers=headers,
+            params={"page": page, "unitdp": 4},
+            timeout=(3, 30),
+        )
+        response.raise_for_status()
+        payload = response.json()
+        rows = payload.get("BankTransactions") if isinstance(payload, dict) else []
+        rows = [item for item in rows or [] if isinstance(item, dict)]
+        transactions.extend(rows)
+        if len(rows) < 100:
+            return transactions
+    raise ReconciliationValidationError(
+        "Xero bank-transaction audit exceeded its page limit; no correction "
+        "classification was produced from partial data."
+    )
+
+
+def _matching_xero_transactions(
+    record: StripePayoutReconciliation,
+    profile: ReconciliationProfile,
+    bank_transactions: list[dict[str, Any]],
+) -> list[tuple[dict[str, Any], str]]:
+    expected_date = record.arrival_date.isoformat() if record.arrival_date else ""
+    expected_cents = int((record.report_payload or {}).get("deposit_cents") or record.amount_cents)
+    bank_account_id = str(profile.xero_bank_account_id or "").strip()
+    eligible = [
+        item
+        for item in bank_transactions
+        if (
+            not bank_account_id
+            or not _xero_bank_account_id(item)
+            or _xero_bank_account_id(item) == bank_account_id
+        )
+    ]
+    exact_reference = [
+        (item, "payout_reference")
+        for item in eligible
+        if str(item.get("Reference") or "").strip().casefold()
+        == record.payout_id.strip().casefold()
+    ]
+    if exact_reference:
+        return exact_reference
+    return [
+        (item, "date_and_amount")
+        for item in eligible
+        if _xero_transaction_date(item) == expected_date
+        and _xero_transaction_total_cents(item) == expected_cents
+    ]
+
+
+def _line_item_differences(
+    existing: dict[str, Any],
+    proposed: dict[str, Any],
+) -> dict[str, Any]:
+    current_lines = [
+        line for line in existing.get("LineItems") or [] if isinstance(line, dict)
+    ]
+    proposed_lines = [
+        line for line in proposed.get("LineItems") or [] if isinstance(line, dict)
+    ]
+    current = Counter(_xero_line_key(line) for line in current_lines)
+    desired = Counter(_xero_line_key(line) for line in proposed_lines)
+
+    def expanded(counter: Counter) -> list[dict[str, Any]]:
+        return [
+            _line_key_payload(key)
+            for key, count in counter.items()
+            for _index in range(count)
+        ]
+
+    return {
+        "line_items_match": current == desired,
+        "current_line_count": len(current_lines),
+        "proposed_line_count": len(proposed_lines),
+        "missing_proposed_lines": expanded(desired - current),
+        "unexpected_existing_lines": expanded(current - desired),
+    }
+
+
+def build_xero_correction_preview(
+    record: StripePayoutReconciliation,
+    *,
+    bank_transactions: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Compare Stripe's desired split with the accounting transaction in Xero.
+
+    This function is deliberately read-only against Xero.  It identifies the
+    legacy net-only transactions that must be unreconciled and replaced, while
+    allowing genuinely missing payouts to continue through the existing,
+    explicit posting workflow.
+    """
+    proposed = build_xero_preview(record)
+    try:
+        profile = ReconciliationProfile.objects.select_related("xero_connection").get(
+            organization=record.organization
+        )
+    except ReconciliationProfile.DoesNotExist:
+        raise ReconciliationValidationError("Reconciliation profile is not configured.")
+
+    if bank_transactions is None:
+        bank_transactions = fetch_xero_bank_transactions(profile)
+    matches = _matching_xero_transactions(record, profile, bank_transactions)
+    candidate_summaries = [
+        _xero_transaction_summary(item, match_basis=basis)
+        for item, basis in matches
+    ]
+    result: dict[str, Any] = {
+        "payout_id": record.payout_id,
+        "arrival_date": record.arrival_date.isoformat() if record.arrival_date else None,
+        "amount_cents": record.amount_cents,
+        "proposed_ready": proposed["ready"],
+        "proposed_errors": proposed["errors"],
+        "candidate_count": len(matches),
+        "existing_transactions": candidate_summaries,
+        "classification": "",
+        "recommended_action": "",
+        "automatic_action_allowed": False,
+        "requires_manual_unreconcile": False,
+        "human_reconciliation_required": True,
+        "differences": {},
+        "proposed_xero_payload": proposed["xero_payload"],
+        "context_notes": proposed["context_notes"],
+    }
+    if not matches:
+        result.update(
+            {
+                "classification": "missing_xero_transaction",
+                "recommended_action": "create_receive_money",
+                "automatic_action_allowed": bool(proposed["ready"]),
+            }
+        )
+        return result
+    if len(matches) > 1:
+        result.update(
+            {
+                "classification": "ambiguous_existing_transactions",
+                "recommended_action": "manual_review",
+            }
+        )
+        return result
+
+    existing, basis = matches[0]
+    differences = _line_item_differences(existing, proposed["xero_payload"])
+    summary = _xero_transaction_summary(existing, match_basis=basis)
+    result["differences"] = differences
+    if differences["line_items_match"]:
+        reconciled = summary["is_reconciled"]
+        result.update(
+            {
+                "classification": (
+                    "already_correct"
+                    if reconciled
+                    else "correct_transaction_ready_to_match"
+                ),
+                "recommended_action": "no_action" if reconciled else "match_existing",
+            }
+        )
+        return result
+
+    looks_net_only = (
+        differences["current_line_count"] == 1
+        and (
+            differences["proposed_line_count"] > 1
+            or summary["tracking_count"] == 0
+        )
+        and summary["total_cents"] == int(proposed["expected_total_cents"])
+    )
+    reconciled = summary["is_reconciled"]
+    result.update(
+        {
+            "classification": (
+                "legacy_net_only"
+                if looks_net_only
+                else "mismatched_xero_transaction"
+            ),
+            "recommended_action": (
+                "unreconcile_then_replace"
+                if reconciled
+                else "replace_before_matching"
+            ),
+            "requires_manual_unreconcile": reconciled,
+        }
+    )
+    return result
+
+
+def build_event_revenue_rollup(
+    records: list[StripePayoutReconciliation],
+) -> list[dict[str, Any]]:
+    """Aggregate Stripe cash contribution and persisted Luma attendance by source."""
+    if not records:
+        return []
+    organization = records[0].organization
+    mappings = {
+        (item.source_type, item.source_id): item
+        for item in ReconciliationMapping.objects.filter(
+            organization=organization,
+            active=True,
+        )
+    }
+    luma_ids = {
+        str(group.get("source_id") or group.get("event_api_id") or "")
+        for record in records
+        for group in (
+            (record.report_payload or {}).get("revenue_groups")
+            or (record.report_payload or {}).get("events")
+            or []
+        )
+        if isinstance(group, dict)
+        and str(group.get("source_type") or "luma_event") == "luma_event"
+    }
+    from startup_updates.models import LumaEventSelection
+
+    luma_events: dict[str, LumaEventSelection] = {}
+    for event in LumaEventSelection.objects.filter(
+        organization=organization,
+        event_id__in=luma_ids,
+    ).order_by("-last_synced_at", "-updated_at"):
+        luma_events.setdefault(event.event_id, event)
+
+    rows: dict[tuple[str, str], dict[str, Any]] = {}
+
+    def row_for(source_type: str, source_id: str, source_label: str) -> dict[str, Any]:
+        key = (source_type, source_id)
+        mapping = mappings.get(key)
+        luma = luma_events.get(source_id) if source_type == "luma_event" else None
+        return rows.setdefault(
+            key,
+            {
+                "source_type": source_type,
+                "source_id": source_id,
+                "source_label": source_label,
+                "mapping_status": "approved" if mapping else "missing",
+                "event_name": (
+                    mapping.event_tracking_option_name
+                    if mapping
+                    else (luma.event_name if luma else "")
+                ),
+                "project_name": mapping.project_tracking_option_name if mapping else "",
+                "luma_event_name": luma.event_name if luma else "",
+                "luma_event_url": luma.event_url if luma else "",
+                "luma_start_at": luma.start_at.isoformat() if luma and luma.start_at else None,
+                "luma_last_synced_at": (
+                    luma.last_synced_at.isoformat()
+                    if luma and luma.last_synced_at
+                    else None
+                ),
+                "luma_registration_count": luma.registration_count if luma else None,
+                "luma_checked_in_count": luma.checked_in_count if luma else None,
+                "stripe_charge_count": 0,
+                "gross_cents": 0,
+                "refunds_cents": 0,
+                "stripe_fee_cents": 0,
+                "payout_ids": set(),
+            },
+        )
+
+    for record in records:
+        report = record.report_payload or {}
+        for group in report.get("revenue_groups") or report.get("events") or []:
+            if not isinstance(group, dict):
+                continue
+            source_type = str(group.get("source_type") or "luma_event")
+            source_id = str(group.get("source_id") or group.get("event_api_id") or "")
+            if not source_id:
+                continue
+            row = row_for(
+                source_type,
+                source_id,
+                str(group.get("source_label") or group.get("event_name") or source_id),
+            )
+            row["stripe_charge_count"] += int(group.get("ticket_count") or 0)
+            row["gross_cents"] += int(group.get("gross_cents") or 0)
+            row["stripe_fee_cents"] += int(group.get("stripe_fee_cents") or 0)
+            row["payout_ids"].add(record.payout_id)
+        for refund in report.get("refunds") or []:
+            if not isinstance(refund, dict):
+                continue
+            source_type = str(refund.get("source_type") or "unattributed")
+            source_id = str(refund.get("source_id") or refund.get("id") or "")
+            if not source_id:
+                continue
+            row = row_for(
+                source_type,
+                source_id,
+                str(refund.get("source_label") or refund.get("description") or source_id),
+            )
+            row["refunds_cents"] += int(refund.get("net_cents") or 0)
+            row["payout_ids"].add(record.payout_id)
+
+    result: list[dict[str, Any]] = []
+    for row in rows.values():
+        payout_ids = sorted(row.pop("payout_ids"))
+        row["payout_ids"] = payout_ids
+        row["payout_count"] = len(payout_ids)
+        row["net_revenue_before_fees_cents"] = (
+            row["gross_cents"] + row["refunds_cents"]
+        )
+        row["net_cash_contribution_cents"] = (
+            row["gross_cents"]
+            + row["refunds_cents"]
+            - row["stripe_fee_cents"]
+        )
+        result.append(row)
+    return sorted(
+        result,
+        key=lambda item: (
+            item["event_name"] or item["project_name"] or item["source_label"]
+        ).casefold(),
+    )
+
+
+def _xero_tracking_option(
+    line: dict[str, Any],
+    *,
+    category_id: str,
+    category_name: str,
+) -> str:
+    target_id = str(category_id or "").strip().casefold()
+    target_name = str(category_name or "").strip().casefold()
+    for item in line.get("Tracking") or []:
+        if not isinstance(item, dict):
+            continue
+        item_id = str(item.get("TrackingCategoryID") or "").strip().casefold()
+        item_name = str(item.get("Name") or "").strip().casefold()
+        if not (
+            (target_id and item_id == target_id)
+            or (target_name and item_name == target_name)
+        ):
+            continue
+        return str(
+            item.get("Option")
+            or item.get("TrackingOptionName")
+            or item.get("TrackingOptionID")
+            or ""
+        ).strip()
+    return ""
+
+
+def build_event_cashflow_validation(
+    *,
+    event_revenue: list[dict[str, Any]],
+    bank_transactions: list[dict[str, Any]],
+    payout_previews: list[dict[str, Any]],
+    profile: ReconciliationProfile,
+    period_start: date | None = None,
+    period_end: date | None = None,
+) -> dict[str, Any]:
+    """Estimate event/project cashflow without double-counting Stripe payouts.
+
+    Stripe is the source of truth for gross ticket revenue, refunds, and fees.
+    Other Xero RECEIVE/SPEND lines supply sponsorship and operating cashflows.
+    Any Xero transaction matched to a Stripe payout is excluded because its
+    gross/refund/fee split is already represented by ``event_revenue``.
+    """
+    stripe_transaction_ids = {
+        str(transaction.get("bank_transaction_id") or "").strip()
+        for preview in payout_previews
+        for transaction in preview.get("existing_transactions") or []
+        if str(transaction.get("bank_transaction_id") or "").strip()
+    }
+    stripe_lines: list[dict[str, Any]] = []
+    tracked_lines: list[dict[str, Any]] = []
+    for transaction in bank_transactions:
+        transaction_id = str(transaction.get("BankTransactionID") or "").strip()
+        status = str(transaction.get("Status") or "").strip().upper()
+        if status in {"DELETED", "VOIDED"}:
+            continue
+        transaction_type = str(transaction.get("Type") or "").strip().upper()
+        if transaction_type not in {"RECEIVE", "SPEND"}:
+            continue
+        transaction_date = parse_date(_xero_transaction_date(transaction))
+        if period_start and (
+            transaction_date is None or transaction_date < period_start
+        ):
+            continue
+        if period_end and (
+            transaction_date is None or transaction_date > period_end
+        ):
+            continue
+        for index, line in enumerate(transaction.get("LineItems") or []):
+            if not isinstance(line, dict):
+                continue
+            event_name = _xero_tracking_option(
+                line,
+                category_id=profile.event_tracking_category_id,
+                category_name=profile.event_tracking_category_name,
+            )
+            project_name = _xero_tracking_option(
+                line,
+                category_id=profile.project_tracking_category_id,
+                category_name=profile.project_tracking_category_name,
+            )
+            if not (event_name or project_name):
+                continue
+            raw_cents = _xero_line_cents(line)
+            if not raw_cents:
+                continue
+            if transaction_id in stripe_transaction_ids:
+                stripe_lines.append(
+                    {
+                        "event_name": event_name,
+                        "project_name": project_name,
+                        "account_code": str(line.get("AccountCode") or "").strip(),
+                        "raw_cents": raw_cents,
+                    }
+                )
+                continue
+            cents = abs(raw_cents)
+            tracked_lines.append(
+                {
+                    "line_id": f"{transaction_id}:{index}",
+                    "bank_transaction_id": transaction_id,
+                    "date": _xero_transaction_date(transaction),
+                    "event_name": event_name,
+                    "project_name": project_name,
+                    "signed_cents": cents if transaction_type == "RECEIVE" else -cents,
+                }
+            )
+
+    matched_line_ids: set[str] = set()
+    rows: list[dict[str, Any]] = []
+    for revenue in event_revenue:
+        event_key = str(revenue.get("event_name") or "").strip().casefold()
+        project_key = str(revenue.get("project_name") or "").strip().casefold()
+        matching_lines = [
+            line
+            for line in tracked_lines
+            if (
+                event_key
+                and str(line["event_name"]).strip().casefold() == event_key
+            )
+            or (
+                project_key
+                and str(line["project_name"]).strip().casefold() == project_key
+            )
+        ]
+        matching_stripe_lines = [
+            line
+            for line in stripe_lines
+            if (
+                event_key
+                and str(line["event_name"]).strip().casefold() == event_key
+            )
+            or (
+                project_key
+                and str(line["project_name"]).strip().casefold() == project_key
+            )
+        ]
+        matched_line_ids.update(line["line_id"] for line in matching_lines)
+        xero_other_income_cents = sum(
+            int(line["signed_cents"])
+            for line in matching_lines
+            if int(line["signed_cents"]) > 0
+        )
+        xero_cost_cents = sum(
+            -int(line["signed_cents"])
+            for line in matching_lines
+            if int(line["signed_cents"]) < 0
+        )
+        stripe_net_cents = int(revenue.get("net_cash_contribution_cents") or 0)
+        fee_account_code = str(profile.fee_account_code or "").strip().casefold()
+        xero_current_stripe_gross_cents = sum(
+            int(line["raw_cents"])
+            for line in matching_stripe_lines
+            if str(line["account_code"]).strip().casefold() != fee_account_code
+            and int(line["raw_cents"]) > 0
+        )
+        xero_current_stripe_refunds_cents = sum(
+            int(line["raw_cents"])
+            for line in matching_stripe_lines
+            if str(line["account_code"]).strip().casefold() != fee_account_code
+            and int(line["raw_cents"]) < 0
+        )
+        xero_current_stripe_fee_cents = sum(
+            -int(line["raw_cents"])
+            for line in matching_stripe_lines
+            if str(line["account_code"]).strip().casefold() == fee_account_code
+            and int(line["raw_cents"]) < 0
+        )
+        current_stripe_net_cents = (
+            xero_current_stripe_gross_cents
+            + xero_current_stripe_refunds_cents
+            - xero_current_stripe_fee_cents
+        )
+        desired_components = (
+            int(revenue.get("gross_cents") or 0),
+            int(revenue.get("refunds_cents") or 0),
+            int(revenue.get("stripe_fee_cents") or 0),
+        )
+        current_components = (
+            xero_current_stripe_gross_cents,
+            xero_current_stripe_refunds_cents,
+            xero_current_stripe_fee_cents,
+        )
+        if current_components == desired_components:
+            xero_stripe_coding_status = "correct"
+        elif not any(current_components) and any(desired_components):
+            xero_stripe_coding_status = "missing_tracking_or_split"
+        else:
+            xero_stripe_coding_status = "mismatch"
+        estimated_cashflow_cents = (
+            stripe_net_cents + xero_other_income_cents - xero_cost_cents
+        )
+        flags: list[str] = []
+        if revenue.get("mapping_status") == "missing":
+            flags.append("missing_reconciliation_mapping")
+        if (
+            revenue.get("source_type") == ReconciliationMapping.SOURCE_LUMA_EVENT
+            and revenue.get("luma_registration_count") is None
+        ):
+            flags.append("luma_attendance_not_synced")
+        if (
+            revenue.get("luma_registration_count") is not None
+            and int(revenue.get("stripe_charge_count") or 0)
+            > int(revenue.get("luma_registration_count") or 0)
+        ):
+            flags.append("stripe_charges_exceed_luma_registrations")
+        if int(revenue.get("net_revenue_before_fees_cents") or 0) < 0:
+            flags.append("refunds_exceed_gross_revenue")
+        if not xero_cost_cents:
+            flags.append("no_xero_costs_recorded")
+        if xero_stripe_coding_status != "correct":
+            flags.append("xero_stripe_coding_incomplete")
+        if estimated_cashflow_cents < 0:
+            flags.append("negative_cashflow")
+
+        if revenue.get("mapping_status") == "missing":
+            status = "mapping_required"
+        elif estimated_cashflow_cents < 0:
+            status = "negative"
+        elif estimated_cashflow_cents == 0:
+            status = "break_even"
+        else:
+            status = "positive"
+        rows.append(
+            {
+                **revenue,
+                "xero_other_income_cents": xero_other_income_cents,
+                "xero_cost_cents": xero_cost_cents,
+                "xero_current_stripe_gross_cents": xero_current_stripe_gross_cents,
+                "xero_current_stripe_refunds_cents": xero_current_stripe_refunds_cents,
+                "xero_current_stripe_fee_cents": xero_current_stripe_fee_cents,
+                "xero_current_stripe_net_cents": current_stripe_net_cents,
+                "xero_stripe_variance_cents": (
+                    current_stripe_net_cents - stripe_net_cents
+                ),
+                "xero_stripe_coding_status": xero_stripe_coding_status,
+                "estimated_cashflow_cents": estimated_cashflow_cents,
+                "profitability_status": status,
+                "validation_flags": flags,
+                "matched_xero_line_count": len(matching_lines),
+            }
+        )
+
+    unmatched: dict[tuple[str, str], dict[str, Any]] = {}
+    for line in tracked_lines:
+        if line["line_id"] in matched_line_ids:
+            continue
+        key = (
+            str(line["event_name"]).strip(),
+            str(line["project_name"]).strip(),
+        )
+        row = unmatched.setdefault(
+            key,
+            {
+                "event_name": key[0],
+                "project_name": key[1],
+                "xero_other_income_cents": 0,
+                "xero_cost_cents": 0,
+                "matched_xero_line_count": 0,
+                "validation_flag": "xero_tracking_without_stripe_revenue",
+            },
+        )
+        signed_cents = int(line["signed_cents"])
+        if signed_cents > 0:
+            row["xero_other_income_cents"] += signed_cents
+        else:
+            row["xero_cost_cents"] -= signed_cents
+        row["matched_xero_line_count"] += 1
+
+    status_counts = Counter(row["profitability_status"] for row in rows)
+    return {
+        "basis": (
+            "Stripe gross revenue, refunds, and fees plus non-Stripe Xero "
+            "Receive/Spend Money lines carrying Event Name or Project Name tracking."
+        ),
+        "period_start": period_start.isoformat() if period_start else None,
+        "period_end": period_end.isoformat() if period_end else None,
+        "limitations": [
+            "This is a cashflow validation, not an accrual P&L.",
+            "Bills and journals that do not appear as Xero bank transactions are not included.",
+            "Untracked Xero lines cannot be assigned to an event or project.",
+        ],
+        "event_count": len(rows),
+        "status_counts": dict(sorted(status_counts.items())),
+        "negative_count": status_counts.get("negative", 0),
+        "mapping_required_count": status_counts.get("mapping_required", 0),
+        "xero_stripe_coding_incomplete_count": sum(
+            1
+            for row in rows
+            if row["xero_stripe_coding_status"] != "correct"
+        ),
+        "rows": rows,
+        "unmatched_xero_tracking": sorted(
+            unmatched.values(),
+            key=lambda item: (
+                item["event_name"] or item["project_name"]
+            ).casefold(),
+        ),
+    }
+
+
+def build_xero_correction_batch(
+    records: list[StripePayoutReconciliation],
+    *,
+    cashflow_period_start: date | None = None,
+    cashflow_period_end: date | None = None,
+) -> dict[str, Any]:
+    if not records:
+        return {
+            "payout_count": 0,
+            "classification_counts": {},
+            "payouts": [],
+            "event_revenue": [],
+            "event_cashflow_validation": {
+                "period_start": (
+                    cashflow_period_start.isoformat()
+                    if cashflow_period_start
+                    else None
+                ),
+                "period_end": (
+                    cashflow_period_end.isoformat()
+                    if cashflow_period_end
+                    else None
+                ),
+                "event_count": 0,
+                "status_counts": {},
+                "negative_count": 0,
+                "mapping_required_count": 0,
+                "xero_stripe_coding_incomplete_count": 0,
+                "rows": [],
+                "unmatched_xero_tracking": [],
+            },
+        }
+    profile = ReconciliationProfile.objects.select_related("xero_connection").get(
+        organization=records[0].organization
+    )
+    bank_transactions = fetch_xero_bank_transactions(profile)
+    previews = [
+        build_xero_correction_preview(
+            record,
+            bank_transactions=bank_transactions,
+        )
+        for record in records
+    ]
+    counts = Counter(item["classification"] for item in previews)
+    event_revenue = build_event_revenue_rollup(records)
+    return {
+        "payout_count": len(records),
+        "xero_bank_transaction_count": len(bank_transactions),
+        "classification_counts": dict(sorted(counts.items())),
+        "automatic_create_count": sum(
+            1 for item in previews if item["automatic_action_allowed"]
+        ),
+        "manual_unreconcile_count": sum(
+            1 for item in previews if item["requires_manual_unreconcile"]
+        ),
+        "payouts": previews,
+        "event_revenue": event_revenue,
+        "event_cashflow_validation": build_event_cashflow_validation(
+            event_revenue=event_revenue,
+            bank_transactions=bank_transactions,
+            payout_previews=previews,
+            profile=profile,
+            period_start=cashflow_period_start,
+            period_end=cashflow_period_end,
+        ),
+    }
+
+
 def _tracking_category_options(categories: list[dict[str, Any]], category_id: str) -> list[dict[str, Any]]:
     for category in categories:
         if str(category.get("TrackingCategoryID") or "") == category_id:
@@ -536,7 +1355,29 @@ def post_xero_bank_transaction(record: StripePayoutReconciliation, *, approved_b
         )
         existing_response.raise_for_status()
         existing = existing_response.json().get("BankTransactions", [])
-        bank_transaction = existing[0] if existing else None
+        bank_transaction = next(
+            (
+                item
+                for item in existing
+                if str(item.get("Status") or "").strip().upper() != "DELETED"
+            ),
+            None,
+        )
+        if bank_transaction is not None:
+            differences = _line_item_differences(
+                bank_transaction,
+                preview["xero_payload"],
+            )
+            if not differences["line_items_match"]:
+                raise ReconciliationValidationError(
+                    "A Xero transaction already exists for this payout, but its "
+                    "account, tax, tracking, or split lines do not match Stripe. "
+                    "Run the payout correction preview; do not create another transaction.",
+                    errors=[
+                        "Existing Xero transaction requires correction before this "
+                        "payout can be marked posted."
+                    ],
+                )
         if bank_transaction is None:
             response = http_client.put(
                 f"{XERO_API_URL}/BankTransactions",

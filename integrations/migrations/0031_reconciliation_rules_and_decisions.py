@@ -5,7 +5,7 @@ import django.db.models.deletion
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("integrations", "0029_xero_statement_scan_and_confidence"),
+        ("integrations", "0030_xero_statement_scan_and_confidence"),
     ]
 
     operations = [

@@ -1,0 +1,1598 @@
+"""Humanitix payout-report import and safe Xero Receive Money preview.
+
+Humanitix's public API does not expose payout records.  The global Payouts CSV
+is therefore the accounting source of truth.  Import is idempotent by payout
+reference, stores no attendee data, and never writes to Xero.
+"""
+
+from __future__ import annotations
+
+import csv
+import hashlib
+import io
+import json
+import re
+import zipfile
+from collections import defaultdict
+from datetime import date, datetime
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from pathlib import Path
+from typing import Any, BinaryIO, Iterable, TextIO
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+from django.db import transaction
+from django.utils import timezone
+from pypdf import PdfReader
+
+from integrations import http_client
+from integrations.models import (
+    ExternalServiceConnection,
+    ExternalServiceProvider,
+    HumanitixEvent,
+    HumanitixPayout,
+    HumanitixPayoutLine,
+    ReconciliationMapping,
+    ReconciliationProfile,
+)
+from integrations.services.xero_reconciliation import (
+    XERO_API_URL,
+    ReconciliationValidationError,
+    XeroPostingError,
+    _created_tracking_option,
+    _line_item_differences,
+    _tracking_category_options,
+    _xero_bank_account_id,
+    _xero_headers,
+    _xero_transaction_date,
+    _xero_transaction_summary,
+    _xero_transaction_total_cents,
+    fetch_xero_bank_transactions,
+    xero_has_bank_transaction_scope,
+    xero_has_settings_write_scope,
+)
+
+
+MONEY_QUANTUM = Decimal("0.01")
+RECEIPT_MONEY_PATTERN = r"\(?\$[\d,]+\.\d{2}\)?"
+MAX_RECEIPT_PDF_BYTES = 10 * 1024 * 1024
+MAX_RECEIPT_BUNDLE_BYTES = 200 * 1024 * 1024
+MAX_RECEIPTS_PER_BUNDLE = 100
+
+
+class HumanitixPayoutImportError(RuntimeError):
+    pass
+
+
+def _header_key(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").strip().lower())
+
+
+def _row_map(row: dict[str, Any]) -> dict[str, Any]:
+    return {_header_key(key): value for key, value in row.items()}
+
+
+def _value(row: dict[str, Any], *aliases: str) -> Any:
+    mapped = _row_map(row)
+    for alias in aliases:
+        key = _header_key(alias)
+        if key in mapped and str(mapped[key] or "").strip():
+            return mapped[key]
+    return ""
+
+
+def _money(value: Any) -> Decimal:
+    raw = str(value or "").strip()
+    if not raw:
+        return Decimal("0.00")
+    negative = raw.startswith("(") and raw.endswith(")")
+    raw = raw.strip("()").replace(",", "").replace("$", "").replace("AUD", "").strip()
+    try:
+        parsed = Decimal(raw)
+    except (InvalidOperation, ValueError):
+        raise HumanitixPayoutImportError(f"Invalid money value: {value}")
+    if negative:
+        parsed = -parsed
+    return parsed.quantize(MONEY_QUANTUM, rounding=ROUND_HALF_UP)
+
+
+def _positive_deduction(value: Any) -> Decimal:
+    return abs(_money(value))
+
+
+def _parse_date(value: Any):
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    normalized = re.sub(r"(?<=\d)(?:st|nd|rd|th)\b", "", raw, flags=re.IGNORECASE)
+    normalized = re.sub(r"^[A-Za-z]{3,9}\s+", "", normalized).strip()
+    candidates = list(
+        dict.fromkeys(
+            [
+                raw,
+                normalized,
+                normalized.split(",", 1)[0].strip(),
+            ]
+        )
+    )
+    for fmt in (
+        "%Y-%m-%d",
+        "%d/%m/%Y",
+        "%d-%m-%Y",
+        "%d %b %Y",
+        "%d %B %Y",
+        "%Y-%m-%dT%H:%M:%S%z",
+    ):
+        for candidate in candidates:
+            try:
+                return datetime.strptime(candidate, fmt).date()
+            except ValueError:
+                continue
+    raise HumanitixPayoutImportError(f"Invalid date value: {value}")
+
+
+def _stable_hash(payload: Any) -> str:
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    ).hexdigest()
+
+
+def _normalized_name(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).strip()
+
+
+def _event_local_date(event: HumanitixEvent):
+    if event.start_at is None:
+        return None
+    if event.timezone_name:
+        try:
+            return event.start_at.astimezone(ZoneInfo(event.timezone_name)).date()
+        except ZoneInfoNotFoundError:
+            pass
+    return event.start_at.date()
+
+
+def _event_matches_for_row(*, organization, event_name: str, row: dict[str, Any]):
+    normalized = _normalized_name(event_name)
+    matches = [
+        candidate
+        for candidate in HumanitixEvent.objects.filter(organization=organization)
+        if _normalized_name(candidate.event_name) == normalized
+    ]
+    raw_event_date = _value(row, "event date", "event start date", "start date")
+    if len(matches) > 1 and str(raw_event_date or "").strip():
+        try:
+            event_date = _parse_date(raw_event_date)
+        except HumanitixPayoutImportError:
+            event_date = None
+        if event_date is not None:
+            dated_matches = [
+                candidate
+                for candidate in matches
+                if _event_local_date(candidate) == event_date
+            ]
+            if len(dated_matches) == 1:
+                return dated_matches, True
+    return matches, False
+
+
+def _first_nonempty(rows: list[dict[str, Any]], *aliases: str) -> Any:
+    for row in rows:
+        value = _value(row, *aliases)
+        if str(value or "").strip():
+            return value
+    return ""
+
+
+def _sum_money(rows: list[dict[str, Any]], *aliases: str, deduction: bool = False) -> Decimal:
+    parser = _positive_deduction if deduction else _money
+    return sum((parser(_value(row, *aliases)) for row in rows), Decimal("0.00")).quantize(
+        MONEY_QUANTUM
+    )
+
+
+def _payout_amount(rows: list[dict[str, Any]]) -> Decimal:
+    values = [
+        _money(_value(row, "payout amount", "amount paid", "net payout", "payment amount", "amount"))
+        for row in rows
+        if str(
+            _value(row, "payout amount", "amount paid", "net payout", "payment amount", "amount")
+            or ""
+        ).strip()
+    ]
+    if not values:
+        return Decimal("0.00")
+    unique = set(values)
+    # Global payout exports commonly repeat the total on each event/component
+    # row.  Distinct values indicate per-row payout amounts and are summed.
+    return values[0] if len(unique) == 1 else sum(values, Decimal("0.00")).quantize(MONEY_QUANTUM)
+
+
+def _event_for_row(
+    *,
+    organization,
+    row: dict[str, Any],
+) -> tuple[HumanitixEvent | None, str, str, list[str]]:
+    external_event_id = str(
+        _value(row, "event id", "eventid", "humanitix event id", "event identifier") or ""
+    ).strip()
+    event_name = str(_value(row, "event", "event name", "event title") or "").strip()
+    warnings: list[str] = []
+    if external_event_id:
+        event = HumanitixEvent.objects.filter(
+            organization=organization,
+            external_event_id=external_event_id,
+        ).first()
+        if event is not None:
+            return event, event.external_event_id, event_name or event.event_name, warnings
+
+        matches, matched_on_date = _event_matches_for_row(
+            organization=organization,
+            event_name=event_name,
+            row=row,
+        )
+        if len(matches) == 1:
+            event = matches[0]
+            warnings.append(
+                f"Humanitix report event ID {external_event_id} was linked by exact event "
+                f"name{' and date' if matched_on_date else ''}."
+            )
+            return event, event.external_event_id, event_name or event.event_name, warnings
+        if not event_name:
+            warnings.append(
+                f"Humanitix event ID {external_event_id} is not in the synced catalogue."
+            )
+        elif not matches:
+            warnings.append(
+                f'Humanitix report event ID {external_event_id} and event "{event_name}" '
+                "are not in the synced catalogue."
+            )
+        else:
+            warnings.append(
+                f'Humanitix report event ID {external_event_id} has an ambiguous event name '
+                f'"{event_name}".'
+            )
+        return None, external_event_id, event_name, warnings
+
+    matches, _matched_on_date = _event_matches_for_row(
+        organization=organization,
+        event_name=event_name,
+        row=row,
+    )
+    if len(matches) == 1:
+        return matches[0], matches[0].external_event_id, event_name, warnings
+    if not event_name:
+        warnings.append("Payout row is missing an event name.")
+    elif not matches:
+        warnings.append(f'Humanitix event "{event_name}" is not in the synced catalogue.')
+    else:
+        warnings.append(f'Humanitix event name "{event_name}" is ambiguous.')
+    return None, "", event_name, warnings
+
+
+def _component_values(row: dict[str, Any]) -> dict[str, Decimal]:
+    total_sales = _money(
+        _value(
+            row,
+            "sales via humanitix payments",
+            "humanitix sales",
+            "online sales",
+            "sales",
+        )
+    )
+    box_office = _money(
+        _value(row, "sales via box office card payments", "box office card sales", "box office sales")
+    )
+    donations = _money(_value(row, "additional donations", "donations", "donation"))
+    add_ons = _money(_value(row, "add-on sales", "add ons", "addons", "add-on earnings"))
+    explicit_ticket_sales = _value(row, "ticket sales", "ticket earnings")
+    if str(explicit_ticket_sales or "").strip():
+        ticket_sales = _money(explicit_ticket_sales)
+    else:
+        ticket_sales = max(total_sales + box_office - donations - add_ons, Decimal("0.00"))
+    return {
+        HumanitixPayoutLine.COMPONENT_TICKET_SALES: ticket_sales,
+        HumanitixPayoutLine.COMPONENT_DONATIONS: donations,
+        HumanitixPayoutLine.COMPONENT_ADD_ONS: add_ons,
+        HumanitixPayoutLine.COMPONENT_REFUNDS: -_positive_deduction(
+            _value(row, "refunds", "refund amount")
+        ),
+        HumanitixPayoutLine.COMPONENT_ABSORBED_FEES: -_positive_deduction(
+            _value(row, "absorbed humanitix fees", "absorbed fees", "fees absorbed")
+        ),
+        HumanitixPayoutLine.COMPONENT_ADJUSTMENTS: _money(
+            _value(row, "adjustments", "adjustment amount")
+        ),
+    }
+
+
+def _ensure_event_mapping(event: HumanitixEvent) -> ReconciliationMapping:
+    mapping, created = ReconciliationMapping.objects.get_or_create(
+        organization=event.organization,
+        source_type=ReconciliationMapping.SOURCE_HUMANITIX_EVENT,
+        source_id=event.external_event_id,
+        defaults={
+            "source_label": event.event_name,
+            "accounting_treatment": ReconciliationMapping.TREATMENT_REVENUE,
+            "event_tracking_option_name": event.event_name[:255],
+            "active": True,
+        },
+    )
+    changed = []
+    if not mapping.source_label:
+        mapping.source_label = event.event_name
+        changed.append("source_label")
+    if not mapping.event_tracking_option_name:
+        mapping.event_tracking_option_name = event.event_name[:255]
+        changed.append("event_tracking_option_name")
+    if created is False and changed:
+        mapping.save(update_fields=[*changed, "updated_at"])
+    return mapping
+
+
+def import_payout_rows(
+    *,
+    organization,
+    connection: ExternalServiceConnection,
+    rows: Iterable[dict[str, Any]],
+) -> list[HumanitixPayout]:
+    if connection.provider != ExternalServiceProvider.HUMANITIX:
+        raise HumanitixPayoutImportError("Connection is not a Humanitix connection.")
+    if connection.organization_id != organization.id:
+        raise HumanitixPayoutImportError("Humanitix connection belongs to another organisation.")
+
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for raw_row in rows:
+        row = dict(raw_row or {})
+        reference = str(
+            _value(
+                row,
+                "payout reference",
+                "payment reference",
+                "bank reference",
+                "reference",
+                "payout id",
+            )
+            or ""
+        ).strip()
+        if not reference:
+            if not any(str(value or "").strip() for value in row.values()):
+                continue
+            raise HumanitixPayoutImportError("Every payout row must include a payout reference.")
+        grouped[reference].append(row)
+
+    imported: list[HumanitixPayout] = []
+    for reference, payout_rows in grouped.items():
+        payout_amount = _payout_amount(payout_rows)
+        payout_date = _parse_date(
+            _first_nonempty(
+                payout_rows,
+                "payout date",
+                "paid date",
+                "date paid",
+                "payment date",
+                "date",
+            )
+        )
+        cleared_date = _parse_date(
+            _first_nonempty(payout_rows, "cleared date", "bank cleared date")
+        )
+        currency = str(_first_nonempty(payout_rows, "currency") or "AUD").upper().strip()
+        humanitix_sales = _sum_money(
+            payout_rows,
+            "sales via humanitix payments",
+            "humanitix sales",
+            "online sales",
+            "sales",
+        )
+        box_office_sales = _sum_money(
+            payout_rows,
+            "sales via box office card payments",
+            "box office card sales",
+            "box office sales",
+        )
+        refunds = _sum_money(payout_rows, "refunds", "refund amount", deduction=True)
+        absorbed_fees = _sum_money(
+            payout_rows,
+            "absorbed humanitix fees",
+            "absorbed fees",
+            "fees absorbed",
+            deduction=True,
+        )
+        adjustments = _sum_money(payout_rows, "adjustments", "adjustment amount")
+        safe_source = {
+            "payout_reference": reference,
+            "payout_date": payout_date.isoformat() if payout_date else None,
+            "cleared_date": cleared_date.isoformat() if cleared_date else None,
+            "receipt_processed_date": str(
+                _first_nonempty(payout_rows, "receipt processed date") or ""
+            ),
+            "currency": currency,
+            "payout_amount": str(payout_amount),
+            "humanitix_sales": str(humanitix_sales),
+            "box_office_card_sales": str(box_office_sales),
+            "reported_ticket_sales": str(
+                _sum_money(payout_rows, "reported ticket sales")
+            ),
+            "non_humanitix_earnings_excluded": str(
+                _sum_money(payout_rows, "non-humanitix earnings excluded")
+            ),
+            "refunds": str(refunds),
+            "absorbed_fees": str(absorbed_fees),
+            "adjustments": str(adjustments),
+            "row_count": len(payout_rows),
+        }
+        warnings: list[str] = []
+        component_columns_present = any(
+            str(
+                _value(
+                    row,
+                    "sales via humanitix payments",
+                    "humanitix sales",
+                    "online sales",
+                    "sales",
+                    "ticket sales",
+                    "additional donations",
+                    "donations",
+                    "add-on sales",
+                    "absorbed humanitix fees",
+                    "refunds",
+                    "adjustments",
+                )
+                or ""
+            ).strip()
+            for row in payout_rows
+        )
+        component_total = sum(
+            (
+                sum(_component_values(row).values(), Decimal("0.00"))
+                for row in payout_rows
+            ),
+            Decimal("0.00"),
+        ).quantize(MONEY_QUANTUM)
+        expected = (
+            component_total
+            if component_columns_present
+            else (
+                humanitix_sales
+                + box_office_sales
+                - refunds
+                - absorbed_fees
+                + adjustments
+            ).quantize(MONEY_QUANTUM)
+        )
+        if payout_amount == 0:
+            warnings.append("Payout amount is missing or zero.")
+        if component_columns_present and expected != payout_amount:
+            warnings.append(
+                f"Payout components total {expected} but the bank payout is {payout_amount}."
+            )
+        if not component_columns_present:
+            warnings.append(
+                "Payout export contains only a net amount; import a payout breakdown before posting."
+            )
+
+        with transaction.atomic():
+            payout, created = HumanitixPayout.objects.get_or_create(
+                organization=organization,
+                payout_reference=reference,
+                defaults={"connection": connection},
+            )
+            previous_hash = payout.source_hash
+            payout.connection = connection
+            payout.payout_date = payout_date
+            payout.cleared_date = cleared_date
+            payout.currency = currency[:12]
+            payout.payout_amount = payout_amount
+            payout.humanitix_sales = humanitix_sales
+            payout.box_office_card_sales = box_office_sales
+            payout.refunds = refunds
+            payout.absorbed_fees = absorbed_fees
+            payout.adjustments = adjustments
+            payout.source_payload = safe_source
+            payout.source_hash = _stable_hash(safe_source)
+            payout.preview_payload = {}
+            payout.warnings = list(warnings)
+            if payout.status != HumanitixPayout.STATUS_POSTED:
+                payout.status = HumanitixPayout.STATUS_NEEDS_REVIEW
+            elif previous_hash and previous_hash != payout.source_hash:
+                payout.warnings.append(
+                    "Humanitix source data changed after this payout was posted."
+                )
+            payout.save()
+            if not created and payout.status != HumanitixPayout.STATUS_POSTED:
+                payout.lines.all().delete()
+
+            for row_number, row in enumerate(payout_rows, start=1):
+                event, external_event_id, event_name, event_warnings = _event_for_row(
+                    organization=organization,
+                    row=row,
+                )
+                payout.warnings.extend(event_warnings)
+                if event:
+                    _ensure_event_mapping(event)
+                components = _component_values(row) if component_columns_present else {}
+                nonzero_components = [
+                    (component, amount)
+                    for component, amount in components.items()
+                    if amount != 0
+                ]
+                if not nonzero_components:
+                    if len(payout_rows) == 1:
+                        net_amount = payout_amount
+                    else:
+                        net_amount = _money(
+                            _value(row, "event payout amount", "row amount", "net event payout", "amount")
+                        )
+                    nonzero_components = [
+                        (HumanitixPayoutLine.COMPONENT_NET_PAYOUT, net_amount)
+                    ]
+                for component, amount in nonzero_components:
+                    HumanitixPayoutLine.objects.update_or_create(
+                        payout=payout,
+                        source_line_key=f"{row_number}:{external_event_id or _normalized_name(event_name)}:{component}",
+                        defaults={
+                            "event": event,
+                            "external_event_id": external_event_id,
+                            "event_name": event_name[:500],
+                            "component": component,
+                            "amount": amount,
+                            "tax_amount": (
+                                _money(_value(row, "tax", "tax amount", "gst"))
+                                if component
+                                == HumanitixPayoutLine.COMPONENT_TICKET_SALES
+                                else Decimal("0.00")
+                            ),
+                            "metadata": {
+                                "row_number": row_number,
+                                "gateway_breakdown": (
+                                    event.financial_summary.gateway_breakdown
+                                    if event and hasattr(event, "financial_summary")
+                                    else {}
+                                ),
+                            },
+                        },
+                    )
+            payout.warnings = list(dict.fromkeys(payout.warnings))
+            payout.save(update_fields=["warnings", "updated_at"])
+        imported.append(payout)
+    return imported
+
+
+def import_payout_csv(
+    *,
+    organization,
+    connection: ExternalServiceConnection,
+    source: TextIO | str | bytes,
+) -> list[HumanitixPayout]:
+    if isinstance(source, bytes):
+        stream = io.StringIO(source.decode("utf-8-sig"))
+    elif isinstance(source, str):
+        stream = io.StringIO(source)
+    else:
+        stream = source
+    reader = csv.DictReader(stream)
+    if not reader.fieldnames:
+        raise HumanitixPayoutImportError("Humanitix payout CSV has no header row.")
+    return import_payout_rows(
+        organization=organization,
+        connection=connection,
+        rows=reader,
+    )
+
+
+def _receipt_match(text: str, pattern: str, *, label: str) -> str:
+    match = re.search(pattern, text, flags=re.IGNORECASE | re.DOTALL)
+    if match is None:
+        raise HumanitixPayoutImportError(
+            f"Humanitix payout receipt is missing {label}."
+        )
+    return str(match.group(1) or "").strip()
+
+
+def parse_humanitix_payout_receipt_text(text: str) -> dict[str, Any]:
+    """Convert a Humanitix payout-receipt PDF text layer into one safe import row."""
+
+    normalized = str(text or "").replace("\xa0", " ")
+    normalized = re.sub(r"\bT\s+o\b", "To", normalized)
+    normalized = re.sub(r"\bT\s+otal\b", "Total", normalized)
+    normalized = re.sub(r"\bT\s+ax\b", "Tax", normalized)
+    reference = re.sub(
+        r"[ \t]+",
+        "",
+        _receipt_match(
+            normalized,
+            r"Reference:[ \t]*([A-Z0-9_-]+(?:[ \t]+[A-Z0-9_-]+)*)[ \t]*(?:\r?\n|Generated at:)",
+            label="its payout reference",
+        ),
+    )
+    event_name = _receipt_match(
+        normalized,
+        r"Event name:\s*(.+?)\s*Event date:",
+        label="its event name",
+    )
+    payout_amount = _money(
+        _receipt_match(
+            normalized,
+            rf"Payout details\s*({RECEIPT_MONEY_PATTERN})",
+            label="its payout amount",
+        )
+    )
+    payout_date = _parse_date(
+        _receipt_match(
+            normalized,
+            r"Processed at:\s*([^\r\n]+)",
+            label="its processed date",
+        )
+    )
+
+    def receipt_money(label: str) -> Decimal:
+        return _money(
+            _receipt_match(
+                normalized,
+                rf"{label}\s*({RECEIPT_MONEY_PATTERN})",
+                label=label.lower(),
+            )
+        )
+
+    humanitix_sales = receipt_money("Sales via Humanitix payments")
+    reported_ticket_sales = receipt_money("Ticket sales")
+    add_on_sales = receipt_money("Add-on sales")
+    additional_donations = receipt_money("Additional donations")
+    # The earnings table includes manual/invoice sales that never enter this
+    # Humanitix bank payout. Keep non-ticket categories, then derive the ticket
+    # amount from the payout-specific "Humanitix payments" total.
+    attributable_ticket_sales = (
+        humanitix_sales - add_on_sales - additional_donations
+    ).quantize(MONEY_QUANTUM)
+    if attributable_ticket_sales < 0:
+        raise HumanitixPayoutImportError(
+            "Humanitix payout receipt cannot allocate its Humanitix payment sales "
+            "across ticket, add-on, and donation revenue."
+        )
+    non_humanitix_earnings = max(
+        (
+            reported_ticket_sales
+            + add_on_sales
+            + additional_donations
+            - humanitix_sales
+        ).quantize(MONEY_QUANTUM),
+        Decimal("0.00"),
+    )
+
+    return {
+        "payout reference": reference,
+        "payout date": payout_date.isoformat() if payout_date else "",
+        "receipt processed date": payout_date.isoformat() if payout_date else "",
+        "currency": "AUD",
+        "payout amount": str(payout_amount),
+        "event name": re.sub(r"\s+", " ", event_name).strip(),
+        "sales via humanitix payments": str(humanitix_sales),
+        "reported ticket sales": str(reported_ticket_sales),
+        "non-humanitix earnings excluded": str(non_humanitix_earnings),
+        "ticket sales": str(attributable_ticket_sales),
+        "add-on sales": str(add_on_sales),
+        "additional donations": str(additional_donations),
+        "refunds": str(abs(receipt_money("Refunds"))),
+        "absorbed humanitix fees": str(
+            abs(receipt_money("Absorbed Humanitix fees"))
+        ),
+    }
+
+
+def import_humanitix_payout_receipt_text(
+    *,
+    organization,
+    connection: ExternalServiceConnection,
+    text: str,
+) -> HumanitixPayout:
+    row = parse_humanitix_payout_receipt_text(text)
+    existing = (
+        HumanitixPayout.objects.filter(
+            organization=organization,
+            payout_reference=row["payout reference"],
+        )
+        .prefetch_related("lines__event")
+        .first()
+    )
+    if existing is not None and existing.status == HumanitixPayout.STATUS_POSTED:
+        raise HumanitixPayoutImportError(
+            f"Humanitix payout {existing.payout_reference} is already posted to Xero."
+        )
+    if existing is not None:
+        if existing.payout_date is not None:
+            row["payout date"] = existing.payout_date.isoformat()
+        if existing.cleared_date is not None:
+            row["cleared date"] = existing.cleared_date.isoformat()
+        linked_events = {
+            line.event
+            for line in existing.lines.all()
+            if line.event_id is not None
+        }
+        if len(linked_events) == 1:
+            linked_event = linked_events.pop()
+            row["event id"] = linked_event.external_event_id
+            row["event name"] = linked_event.event_name
+    return import_payout_rows(
+        organization=organization,
+        connection=connection,
+        rows=[row],
+    )[0]
+
+
+def extract_humanitix_payout_receipt_text(
+    source: BinaryIO | bytes | str | Path,
+) -> str:
+    """Read a bounded Humanitix receipt PDF and return only its text layer."""
+
+    close_stream = False
+    if isinstance(source, bytes):
+        if len(source) > MAX_RECEIPT_PDF_BYTES:
+            raise HumanitixPayoutImportError("Humanitix payout receipt PDF is too large.")
+        stream: BinaryIO = io.BytesIO(source)
+    elif isinstance(source, (str, Path)):
+        pdf_path = Path(source).expanduser()
+        if pdf_path.stat().st_size > MAX_RECEIPT_PDF_BYTES:
+            raise HumanitixPayoutImportError("Humanitix payout receipt PDF is too large.")
+        stream = pdf_path.open("rb")
+        close_stream = True
+    else:
+        stream = source
+    if not stream.seekable():
+        payload = stream.read(MAX_RECEIPT_PDF_BYTES + 1)
+        if len(payload) > MAX_RECEIPT_PDF_BYTES:
+            raise HumanitixPayoutImportError("Humanitix payout receipt PDF is too large.")
+        stream = io.BytesIO(payload)
+        close_stream = True
+    try:
+        reader = PdfReader(stream)
+        if not reader.pages or len(reader.pages) > 10:
+            raise HumanitixPayoutImportError(
+                "Humanitix payout receipt has an unexpected page count."
+            )
+        text = "\n".join(page.extract_text() or "" for page in reader.pages)
+    except HumanitixPayoutImportError:
+        raise
+    except Exception as exc:
+        raise HumanitixPayoutImportError(
+            "Unable to read the Humanitix payout receipt PDF."
+        ) from exc
+    finally:
+        if close_stream:
+            stream.close()
+    return text
+
+
+def import_humanitix_payout_receipt_pdf(
+    *,
+    organization,
+    connection: ExternalServiceConnection,
+    source: BinaryIO | bytes | str | Path,
+) -> HumanitixPayout:
+    """Enrich one net-only payout from Humanitix's receipt PDF without Xero writes."""
+
+    return import_humanitix_payout_receipt_text(
+        organization=organization,
+        connection=connection,
+        text=extract_humanitix_payout_receipt_text(source),
+    )
+
+
+def import_humanitix_payout_receipt_bundle(
+    *,
+    organization,
+    connection: ExternalServiceConnection,
+    source: BinaryIO | bytes,
+    expected_references: Iterable[str] | None = None,
+) -> list[HumanitixPayout]:
+    """Validate and atomically import a ZIP of receipt PDFs without Xero writes."""
+
+    if isinstance(source, bytes):
+        payload = source
+    else:
+        payload = source.read(MAX_RECEIPT_BUNDLE_BYTES + 1)
+    if len(payload) > MAX_RECEIPT_BUNDLE_BYTES:
+        raise HumanitixPayoutImportError("Humanitix receipt bundle is too large.")
+
+    parsed_receipts: list[tuple[str, str, dict[str, Any]]] = []
+    try:
+        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+            infos = [info for info in archive.infolist() if not info.is_dir()]
+            if not infos:
+                raise HumanitixPayoutImportError(
+                    "Humanitix receipt bundle does not contain any files."
+                )
+            if len(infos) > MAX_RECEIPTS_PER_BUNDLE:
+                raise HumanitixPayoutImportError(
+                    "Humanitix receipt bundle contains too many files."
+                )
+            names = [info.filename for info in infos]
+            if len(names) != len(set(names)):
+                raise HumanitixPayoutImportError(
+                    "Humanitix receipt bundle contains duplicate filenames."
+                )
+            for info in infos:
+                filename = Path(info.filename)
+                if (
+                    filename.name != info.filename
+                    or "\\" in info.filename
+                    or filename.suffix.lower() != ".pdf"
+                ):
+                    raise HumanitixPayoutImportError(
+                        f"Humanitix receipt bundle has an invalid filename: {info.filename}"
+                    )
+                if info.file_size > MAX_RECEIPT_PDF_BYTES:
+                    raise HumanitixPayoutImportError(
+                        f"Humanitix payout receipt PDF is too large: {info.filename}"
+                    )
+                receipt_bytes = archive.read(info)
+                text = extract_humanitix_payout_receipt_text(receipt_bytes)
+                row = parse_humanitix_payout_receipt_text(text)
+                parsed_receipts.append((info.filename, text, row))
+    except HumanitixPayoutImportError:
+        raise
+    except (zipfile.BadZipFile, OSError) as exc:
+        raise HumanitixPayoutImportError(
+            "Unable to read the Humanitix receipt ZIP bundle."
+        ) from exc
+
+    references = [
+        str(row["payout reference"]).strip().upper()
+        for _, _, row in parsed_receipts
+    ]
+    duplicates = sorted(
+        reference for reference in set(references) if references.count(reference) > 1
+    )
+    if duplicates:
+        raise HumanitixPayoutImportError(
+            "Humanitix receipt bundle contains duplicate payout references: "
+            + ", ".join(duplicates)
+        )
+    actual = set(references)
+    if expected_references is not None:
+        expected = {
+            str(reference or "").strip().upper()
+            for reference in expected_references
+            if str(reference or "").strip()
+        }
+        missing = sorted(expected - actual)
+        unexpected = sorted(actual - expected)
+        problems = []
+        if missing:
+            problems.append("missing " + ", ".join(missing))
+        if unexpected:
+            problems.append("unexpected " + ", ".join(unexpected))
+        if problems:
+            raise HumanitixPayoutImportError(
+                "Humanitix receipt bundle does not match the expected payouts: "
+                + "; ".join(problems)
+            )
+
+    payouts: list[HumanitixPayout] = []
+    with transaction.atomic():
+        for _filename, text, _row in parsed_receipts:
+            payout = import_humanitix_payout_receipt_text(
+                organization=organization,
+                connection=connection,
+                text=text,
+            )
+            build_humanitix_xero_preview(payout)
+            payouts.append(payout)
+    return payouts
+
+
+def _tracking(profile: ReconciliationProfile, mapping: ReconciliationMapping) -> list[dict[str, str]]:
+    if not (mapping.event_tracking_option_id or mapping.event_tracking_option_name):
+        return []
+    item = {
+        "TrackingCategoryID": profile.event_tracking_category_id,
+        "Name": profile.event_tracking_category_name,
+        "TrackingOptionID": mapping.event_tracking_option_id,
+        "Option": mapping.event_tracking_option_name,
+    }
+    return [{key: value for key, value in item.items() if value}]
+
+
+def _xero_line(
+    *,
+    description: str,
+    amount: Decimal,
+    account_code: str,
+    tax_type: str,
+    tracking: list[dict[str, str]],
+) -> dict[str, Any]:
+    line = {
+        "Description": description[:4000],
+        "Quantity": 1,
+        "UnitAmount": float(amount.quantize(MONEY_QUANTUM)),
+        "AccountCode": account_code,
+        "TaxType": tax_type,
+    }
+    if tracking:
+        line["Tracking"] = tracking
+    return line
+
+
+def build_humanitix_xero_preview(payout: HumanitixPayout) -> dict[str, Any]:
+    errors: list[str] = []
+    try:
+        profile = ReconciliationProfile.objects.select_related("xero_connection").get(
+            organization=payout.organization
+        )
+    except ReconciliationProfile.DoesNotExist:
+        profile = None
+        errors.append("Reconciliation profile is not configured.")
+
+    if profile:
+        connection = profile.xero_connection
+        if not profile.enabled:
+            errors.append("Reconciliation is disabled for this organisation.")
+        if connection is None:
+            errors.append("A Xero connection must be selected.")
+        elif not xero_has_bank_transaction_scope(connection.scopes):
+            errors.append(
+                "Reconnect Xero with accounting.banktransactions before posting."
+            )
+        for label, value in (
+            ("Xero bank account", profile.xero_bank_account_id),
+            ("revenue account code", profile.revenue_account_code),
+            ("fee account code", profile.fee_account_code),
+            ("refund account code", profile.refund_account_code),
+            ("revenue tax type", profile.revenue_tax_type),
+            ("fee tax type", profile.fee_tax_type),
+            ("refund tax type", profile.refund_tax_type),
+        ):
+            if not str(value or "").strip():
+                errors.append(f"Configure {label}.")
+    lines: list[dict[str, Any]] = []
+    line_total = Decimal("0.00")
+    component_order = {
+        HumanitixPayoutLine.COMPONENT_TICKET_SALES: 0,
+        HumanitixPayoutLine.COMPONENT_DONATIONS: 1,
+        HumanitixPayoutLine.COMPONENT_ADD_ONS: 2,
+        HumanitixPayoutLine.COMPONENT_REFUNDS: 3,
+        HumanitixPayoutLine.COMPONENT_ABSORBED_FEES: 4,
+        HumanitixPayoutLine.COMPONENT_ADJUSTMENTS: 5,
+        HumanitixPayoutLine.COMPONENT_NET_PAYOUT: 6,
+    }
+    payout_lines = sorted(
+        payout.lines.select_related("event").all(),
+        key=lambda line: (
+            line.event_name.casefold(),
+            component_order.get(line.component, 99),
+            line.source_line_key,
+        ),
+    )
+    for source_line in payout_lines:
+        if source_line.event is None:
+            errors.append(f'Map Humanitix payout row for "{source_line.event_name or "unknown event"}".')
+            continue
+        mapping = ReconciliationMapping.objects.filter(
+            organization=payout.organization,
+            source_type=ReconciliationMapping.SOURCE_HUMANITIX_EVENT,
+            source_id=source_line.event.external_event_id,
+            active=True,
+        ).first()
+        if mapping is None:
+            errors.append(f"Map Humanitix event {source_line.event.event_name}.")
+            continue
+        if source_line.component == HumanitixPayoutLine.COMPONENT_NET_PAYOUT:
+            errors.append(
+                f"{source_line.event.event_name} has only a net payout amount; import its payout breakdown."
+            )
+            continue
+        if profile is None:
+            continue
+        if source_line.component == HumanitixPayoutLine.COMPONENT_ABSORBED_FEES:
+            account_code = profile.fee_account_code
+            tax_type = profile.fee_tax_type
+            label = "Humanitix absorbed fees"
+        elif source_line.component == HumanitixPayoutLine.COMPONENT_REFUNDS:
+            account_code = mapping.account_code or profile.refund_account_code
+            tax_type = mapping.tax_type or profile.refund_tax_type
+            label = "Humanitix refunds"
+        else:
+            account_code = mapping.account_code or profile.revenue_account_code
+            tax_type = mapping.tax_type or profile.revenue_tax_type
+            label = {
+                HumanitixPayoutLine.COMPONENT_TICKET_SALES: "Humanitix ticket sales",
+                HumanitixPayoutLine.COMPONENT_DONATIONS: "Humanitix donations",
+                HumanitixPayoutLine.COMPONENT_ADD_ONS: "Humanitix add-ons",
+                HumanitixPayoutLine.COMPONENT_ADJUSTMENTS: "Humanitix adjustment",
+            }.get(source_line.component, "Humanitix revenue")
+        lines.append(
+            _xero_line(
+                description=f"{label} — {source_line.event.event_name}",
+                amount=source_line.amount,
+                account_code=account_code,
+                tax_type=tax_type,
+                tracking=_tracking(profile, mapping),
+            )
+        )
+        line_total += source_line.amount
+
+    line_total = line_total.quantize(MONEY_QUANTUM)
+    if line_total != payout.payout_amount:
+        errors.append(
+            f"Xero lines total {line_total} but the Humanitix payout is {payout.payout_amount}."
+        )
+    if payout.warnings:
+        errors.extend(
+            warning
+            for warning in payout.warnings
+            if "changed after" not in warning.lower()
+        )
+
+    if profile:
+        contact = (
+            {"ContactID": profile.humanitix_contact_id}
+            if profile.humanitix_contact_id
+            else {"Name": profile.humanitix_contact_name or "Humanitix"}
+        )
+        payload = {
+            "Type": "RECEIVE",
+            "Contact": contact,
+            "BankAccount": {"AccountID": profile.xero_bank_account_id},
+            "Date": (
+                payout.cleared_date
+                or payout.payout_date
+                or date.today()
+            ).isoformat(),
+            "Reference": payout.payout_reference,
+            "CurrencyCode": payout.currency,
+            "LineAmountTypes": profile.line_amount_types,
+            "Status": "AUTHORISED",
+            "LineItems": lines,
+        }
+    else:
+        payload = {}
+    preview = {
+        "ready": not errors,
+        "errors": list(dict.fromkeys(errors)),
+        "payout_reference": payout.payout_reference,
+        "expected_total": str(payout.payout_amount),
+        "line_total": str(line_total),
+        "xero_payload": payload,
+        "human_reconciliation_required": True,
+        "note": (
+            "Execution will create a matching Receive Money transaction; "
+            "a human must still click Match/OK in Xero."
+        ),
+    }
+    payout.preview_payload = preview
+    if payout.status != HumanitixPayout.STATUS_POSTED:
+        payout.status = (
+            HumanitixPayout.STATUS_READY
+            if preview["ready"]
+            else HumanitixPayout.STATUS_NEEDS_REVIEW
+        )
+    payout.save(update_fields=["preview_payload", "status", "updated_at"])
+    return preview
+
+
+def _matching_humanitix_xero_transactions(
+    payout: HumanitixPayout,
+    profile: ReconciliationProfile,
+    bank_transactions: list[dict[str, Any]],
+) -> list[tuple[dict[str, Any], str]]:
+    expected_date = payout.payout_date.isoformat() if payout.payout_date else ""
+    expected_cents = int(
+        (payout.payout_amount * 100).quantize(
+            Decimal("1"),
+            rounding=ROUND_HALF_UP,
+        )
+    )
+    bank_account_id = str(profile.xero_bank_account_id or "").strip()
+    eligible = [
+        item
+        for item in bank_transactions
+        if (
+            str(item.get("Status") or "").strip().upper()
+            not in {"DELETED", "VOIDED"}
+            and str(item.get("Type") or "").strip().upper() == "RECEIVE"
+            and (
+                not bank_account_id
+                or not _xero_bank_account_id(item)
+                or _xero_bank_account_id(item) == bank_account_id
+            )
+        )
+    ]
+    exact_reference = [
+        (item, "payout_reference")
+        for item in eligible
+        if str(item.get("Reference") or "").strip().casefold()
+        == payout.payout_reference.strip().casefold()
+    ]
+    if exact_reference:
+        return exact_reference
+    return [
+        (item, "date_and_amount")
+        for item in eligible
+        if _xero_transaction_date(item) == expected_date
+        and _xero_transaction_total_cents(item) == expected_cents
+    ]
+
+
+def build_humanitix_xero_correction_preview(
+    payout: HumanitixPayout,
+    *,
+    bank_transactions: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Classify existing Xero transactions without making any Xero writes."""
+
+    proposed = build_humanitix_xero_preview(payout)
+    try:
+        profile = ReconciliationProfile.objects.select_related(
+            "xero_connection"
+        ).get(organization=payout.organization)
+    except ReconciliationProfile.DoesNotExist:
+        raise ReconciliationValidationError(
+            "Reconciliation profile is not configured."
+        )
+    if bank_transactions is None:
+        bank_transactions = fetch_xero_bank_transactions(profile)
+    matches = _matching_humanitix_xero_transactions(
+        payout,
+        profile,
+        bank_transactions,
+    )
+    summaries = [
+        _xero_transaction_summary(item, match_basis=basis)
+        for item, basis in matches
+    ]
+    result: dict[str, Any] = {
+        "payout_reference": payout.payout_reference,
+        "payout_date": payout.payout_date.isoformat() if payout.payout_date else None,
+        "amount": str(payout.payout_amount),
+        "proposed_ready": proposed["ready"],
+        "proposed_errors": proposed["errors"],
+        "candidate_count": len(matches),
+        "existing_transactions": summaries,
+        "classification": "",
+        "recommended_action": "",
+        "automatic_action_allowed": False,
+        "requires_manual_unreconcile": False,
+        "human_reconciliation_required": True,
+        "differences": {},
+        "proposed_xero_payload": proposed["xero_payload"],
+    }
+    if not matches:
+        result.update(
+            {
+                "classification": "missing_xero_transaction",
+                "recommended_action": "create_receive_money",
+                "automatic_action_allowed": bool(proposed["ready"]),
+            }
+        )
+        return result
+    if len(matches) > 1:
+        result.update(
+            {
+                "classification": "ambiguous_existing_transactions",
+                "recommended_action": "manual_review",
+            }
+        )
+        return result
+
+    existing, basis = matches[0]
+    summary = _xero_transaction_summary(existing, match_basis=basis)
+    differences = _line_item_differences(
+        existing,
+        proposed["xero_payload"],
+    )
+    result["differences"] = differences
+    expected_cents = int(
+        (payout.payout_amount * 100).quantize(
+            Decimal("1"),
+            rounding=ROUND_HALF_UP,
+        )
+    )
+    identity_matches = (
+        summary["type"].upper() == "RECEIVE"
+        and summary["total_cents"] == expected_cents
+        and (
+            payout.payout_date is None
+            or summary["date"] == payout.payout_date.isoformat()
+        )
+    )
+    if identity_matches and differences["line_items_match"]:
+        reconciled = summary["is_reconciled"]
+        result.update(
+            {
+                "classification": (
+                    "already_correct"
+                    if reconciled
+                    else "correct_transaction_ready_to_match"
+                ),
+                "recommended_action": (
+                    "record_existing"
+                    if reconciled
+                    else "record_existing_then_match"
+                ),
+                "automatic_action_allowed": bool(proposed["ready"]),
+            }
+        )
+        return result
+
+    looks_net_only = (
+        differences["current_line_count"] == 1
+        and (
+            differences["proposed_line_count"] > 1
+            or summary["tracking_count"] == 0
+        )
+        and summary["total_cents"] == expected_cents
+    )
+    reconciled = summary["is_reconciled"]
+    result.update(
+        {
+            "classification": (
+                "legacy_net_only"
+                if looks_net_only
+                else "mismatched_xero_transaction"
+            ),
+            "recommended_action": (
+                "unreconcile_then_replace"
+                if reconciled
+                else "replace_before_matching"
+            ),
+            "requires_manual_unreconcile": reconciled,
+        }
+    )
+    return result
+
+
+def build_humanitix_xero_correction_batch(
+    payouts: Iterable[HumanitixPayout],
+) -> dict[str, Any]:
+    records = list(payouts)
+    if not records:
+        return {
+            "payouts": [],
+            "summary": {
+                "payout_count": 0,
+                "safe_action_count": 0,
+                "manual_unreconcile_count": 0,
+            },
+        }
+    profile = ReconciliationProfile.objects.select_related("xero_connection").get(
+        organization=records[0].organization
+    )
+    bank_transactions = fetch_xero_bank_transactions(profile)
+    previews = [
+        build_humanitix_xero_correction_preview(
+            payout,
+            bank_transactions=bank_transactions,
+        )
+        for payout in records
+    ]
+    return {
+        "payouts": previews,
+        "summary": {
+            "payout_count": len(previews),
+            "safe_action_count": sum(
+                1 for item in previews if item["automatic_action_allowed"]
+            ),
+            "manual_unreconcile_count": sum(
+                1 for item in previews if item["requires_manual_unreconcile"]
+            ),
+            "classification_counts": {
+                classification: sum(
+                    1
+                    for item in previews
+                    if item["classification"] == classification
+                )
+                for classification in sorted(
+                    {item["classification"] for item in previews}
+                )
+            },
+        },
+    }
+
+
+def ensure_humanitix_tracking_options(
+    payout: HumanitixPayout,
+    *,
+    profile: ReconciliationProfile | None = None,
+) -> list[ReconciliationMapping]:
+    """Resolve approved Humanitix event names to Xero tracking option IDs."""
+    profile = profile or ReconciliationProfile.objects.select_related("xero_connection").get(
+        organization=payout.organization
+    )
+    connection = profile.xero_connection
+    if connection is None:
+        raise ReconciliationValidationError("A Xero connection must be selected.")
+    event_ids = {
+        event_id
+        for event_id in payout.lines.values_list("external_event_id", flat=True)
+        if event_id
+    }
+    mappings = list(
+        ReconciliationMapping.objects.filter(
+            organization=payout.organization,
+            source_type=ReconciliationMapping.SOURCE_HUMANITIX_EVENT,
+            source_id__in=event_ids,
+            active=True,
+        )
+    )
+    missing = [
+        mapping
+        for mapping in mappings
+        if mapping.event_tracking_option_name and not mapping.event_tracking_option_id
+    ]
+    if not missing:
+        return mappings
+    if not xero_has_settings_write_scope(connection.scopes):
+        raise ReconciliationValidationError(
+            "Reconnect Xero with accounting.settings before posting missing Event Name options."
+        )
+    if not profile.event_tracking_category_id:
+        raise ReconciliationValidationError(
+            "Configure the Xero Event Name tracking category ID."
+        )
+
+    headers = _xero_headers(connection)
+    response = http_client.get(
+        f"{XERO_API_URL}/TrackingCategories",
+        headers=headers,
+        timeout=(3, 30),
+    )
+    response.raise_for_status()
+    payload = response.json()
+    categories = payload.get("TrackingCategories") if isinstance(payload, dict) else []
+    categories = [item for item in categories or [] if isinstance(item, dict)]
+    for mapping in missing:
+        option = next(
+            (
+                item
+                for item in _tracking_category_options(
+                    categories,
+                    profile.event_tracking_category_id,
+                )
+                if str(item.get("Name") or "").strip().casefold()
+                == mapping.event_tracking_option_name.strip().casefold()
+            ),
+            None,
+        )
+        if option is None:
+            create_response = http_client.put(
+                (
+                    f"{XERO_API_URL}/TrackingCategories/"
+                    f"{profile.event_tracking_category_id}/Options"
+                ),
+                headers=headers,
+                json={"Options": [{"Name": mapping.event_tracking_option_name}]},
+                timeout=(3, 30),
+            )
+            create_response.raise_for_status()
+            option = _created_tracking_option(create_response.json())
+        option_id = str(
+            option.get("TrackingOptionID") or option.get("OptionID") or ""
+        ).strip()
+        if not option_id:
+            raise XeroPostingError(
+                f"Xero did not return an ID for tracking option {mapping.event_tracking_option_name}."
+            )
+        mapping.event_tracking_option_id = option_id
+        mapping.save(update_fields=["event_tracking_option_id", "updated_at"])
+    return mappings
+
+
+def post_humanitix_xero_bank_transaction(
+    payout: HumanitixPayout,
+    *,
+    approved_by_slack_id: str,
+    bank_transactions: list[dict[str, Any]] | None = None,
+) -> HumanitixPayout:
+    """Create one idempotent Xero Receive Money transaction for a reviewed payout.
+
+    A caller posting a reviewed batch may provide one fresh Xero ledger
+    snapshot.  Reusing it avoids refetching every bank-transaction page for
+    each payout while preserving the same duplicate and conflict checks.
+    """
+    current = HumanitixPayout.objects.get(pk=payout.pk)
+    if current.xero_bank_transaction_id:
+        return current
+    preview = build_humanitix_xero_preview(current)
+    if not preview["ready"]:
+        raise ReconciliationValidationError(
+            "Humanitix payout is not ready to post.",
+            errors=preview["errors"],
+        )
+    profile = ReconciliationProfile.objects.select_related("xero_connection").get(
+        organization=current.organization
+    )
+    connection = profile.xero_connection
+    if connection is None:
+        raise ReconciliationValidationError("A Xero connection must be selected.")
+    correction = build_humanitix_xero_correction_preview(
+        current,
+        bank_transactions=bank_transactions,
+    )
+    allowed_classifications = {
+        "missing_xero_transaction",
+        "already_correct",
+        "correct_transaction_ready_to_match",
+    }
+    if correction["classification"] not in allowed_classifications:
+        raise ReconciliationValidationError(
+            "Humanitix payout cannot be posted safely while a conflicting Xero "
+            "transaction exists.",
+            errors=[
+                (
+                    f'{correction["classification"]}: '
+                    f'{correction["recommended_action"]}'
+                )
+            ],
+        )
+    existing_transaction_id = ""
+    if correction["candidate_count"] == 1:
+        existing_transaction_id = str(
+            correction["existing_transactions"][0].get("bank_transaction_id")
+            or ""
+        ).strip()
+    ensure_humanitix_tracking_options(current, profile=profile)
+    preview = build_humanitix_xero_preview(current)
+    if not preview["ready"]:
+        raise ReconciliationValidationError(
+            "Humanitix payout is not ready to post.",
+            errors=preview["errors"],
+        )
+
+    with transaction.atomic():
+        locked = HumanitixPayout.objects.select_for_update().get(pk=current.pk)
+        if locked.xero_bank_transaction_id:
+            return locked
+        if locked.status == HumanitixPayout.STATUS_POSTING:
+            raise ReconciliationValidationError("This Humanitix payout is already being posted.")
+        locked.status = HumanitixPayout.STATUS_POSTING
+        locked.approved_by_slack_id = approved_by_slack_id
+        locked.approved_at = timezone.now()
+        locked.last_error = ""
+        locked.save(
+            update_fields=[
+                "status",
+                "approved_by_slack_id",
+                "approved_at",
+                "last_error",
+                "updated_at",
+            ]
+        )
+
+    try:
+        headers = _xero_headers(connection)
+        reference_hash = hashlib.sha256(
+            current.payout_reference.encode("utf-8")
+        ).hexdigest()[:32]
+        headers["Idempotency-Key"] = f"humanitix-payout-{reference_hash}"
+        bank_transaction = (
+            {"BankTransactionID": existing_transaction_id}
+            if existing_transaction_id
+            else None
+        )
+        if bank_transaction is None:
+            escaped_reference = current.payout_reference.replace('"', '""')
+            existing_response = http_client.get(
+                f"{XERO_API_URL}/BankTransactions",
+                headers=headers,
+                params={"where": f'Reference=="{escaped_reference}"'},
+                timeout=(3, 30),
+            )
+            existing_response.raise_for_status()
+            existing = existing_response.json().get("BankTransactions", [])
+            existing = [item for item in existing or [] if isinstance(item, dict)]
+            if existing:
+                exact_matches = _matching_humanitix_xero_transactions(
+                    current,
+                    profile,
+                    existing,
+                )
+                if len(exact_matches) != 1:
+                    raise XeroPostingError(
+                        "An existing Xero transaction uses this Humanitix reference "
+                        "but does not match the approved bank account and transaction type."
+                    )
+                candidate = exact_matches[0][0]
+                summary = _xero_transaction_summary(
+                    candidate,
+                    match_basis="payout_reference",
+                )
+                differences = _line_item_differences(
+                    candidate,
+                    preview["xero_payload"],
+                )
+                expected_cents = int(
+                    (current.payout_amount * 100).quantize(
+                        Decimal("1"),
+                        rounding=ROUND_HALF_UP,
+                    )
+                )
+                if (
+                    summary["total_cents"] != expected_cents
+                    or (
+                        current.payout_date is not None
+                        and summary["date"] != current.payout_date.isoformat()
+                    )
+                    or not differences["line_items_match"]
+                ):
+                    raise XeroPostingError(
+                        "An existing Xero transaction uses this Humanitix reference "
+                        "but does not match the approved payout preview."
+                    )
+                bank_transaction = candidate
+            else:
+                response = http_client.put(
+                    f"{XERO_API_URL}/BankTransactions",
+                    headers=headers,
+                    json={"BankTransactions": [preview["xero_payload"]]},
+                    timeout=(3, 30),
+                )
+                response.raise_for_status()
+                payload = response.json()
+                rows = payload.get("BankTransactions") if isinstance(payload, dict) else None
+                bank_transaction = rows[0] if isinstance(rows, list) and rows else {}
+                validation_errors = bank_transaction.get("ValidationErrors") or []
+                if bank_transaction.get("HasErrors") or validation_errors:
+                    messages = [str(item.get("Message") or item) for item in validation_errors]
+                    raise XeroPostingError(
+                        "; ".join(messages)
+                        or "Xero rejected the Humanitix bank transaction."
+                    )
+        transaction_id = str(
+            bank_transaction.get("BankTransactionID") or ""
+        ).strip()
+        if not transaction_id:
+            raise XeroPostingError("Xero did not return a BankTransactionID.")
+    except Exception as exc:
+        HumanitixPayout.objects.filter(pk=current.pk).update(
+            status=HumanitixPayout.STATUS_FAILED,
+            last_error=str(exc)[:2000],
+            updated_at=timezone.now(),
+        )
+        if isinstance(exc, (ReconciliationValidationError, XeroPostingError)):
+            raise
+        raise XeroPostingError(
+            "Unable to create the Humanitix Xero bank transaction."
+        ) from exc
+
+    HumanitixPayout.objects.filter(pk=current.pk).update(
+        status=HumanitixPayout.STATUS_POSTED,
+        xero_bank_transaction_id=transaction_id,
+        posted_at=timezone.now(),
+        last_error="",
+        updated_at=timezone.now(),
+    )
+    return HumanitixPayout.objects.get(pk=current.pk)
+
+
+def serialize_humanitix_payout(
+    payout: HumanitixPayout,
+    *,
+    include_payload: bool = False,
+) -> dict[str, Any]:
+    result = {
+        "payout_reference": payout.payout_reference,
+        "payout_date": payout.payout_date.isoformat() if payout.payout_date else None,
+        "cleared_date": payout.cleared_date.isoformat() if payout.cleared_date else None,
+        "currency": payout.currency,
+        "payout_amount": str(payout.payout_amount),
+        "status": payout.status,
+        "warnings": payout.warnings,
+        "approved_by_slack_id": payout.approved_by_slack_id,
+        "approved_at": payout.approved_at.isoformat() if payout.approved_at else None,
+        "xero_bank_transaction_id": payout.xero_bank_transaction_id,
+        "posted_at": payout.posted_at.isoformat() if payout.posted_at else None,
+        "last_error": payout.last_error,
+        "lines": [
+            {
+                "event_id": line.external_event_id,
+                "event_name": line.event_name,
+                "component": line.component,
+                "amount": str(line.amount),
+                "tax_amount": str(line.tax_amount),
+            }
+            for line in payout.lines.all()
+        ],
+    }
+    if include_payload:
+        result["source"] = payout.source_payload
+        result["preview"] = payout.preview_payload
+    return result

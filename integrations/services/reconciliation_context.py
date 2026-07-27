@@ -5,10 +5,16 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from django.core.exceptions import ObjectDoesNotExist
 from django.db import transaction
 from django.utils import timezone
 
-from integrations.models import ReconciliationMapping, ReconciliationSuggestion, StripePayoutReconciliation
+from integrations.models import (
+    HumanitixEvent,
+    ReconciliationMapping,
+    ReconciliationSuggestion,
+    StripePayoutReconciliation,
+)
 from integrations.services.xero_statement_reconciliation import build_statement_reconciliation_context
 from startup_updates.models import LinearProjectArtifact, LinearProjectSelection, LumaEventSelection
 
@@ -18,6 +24,7 @@ ALLOWED_EVIDENCE_PROVIDERS = {
     "slack",
     "linear",
     "luma",
+    "humanitix",
     "stripe",
     "xero",
     "startup_memory",
@@ -121,6 +128,36 @@ def _luma_events(organization) -> list[dict[str, Any]]:
     return list(events.values())
 
 
+def _humanitix_events(organization) -> list[dict[str, Any]]:
+    events: list[dict[str, Any]] = []
+    queryset = HumanitixEvent.objects.filter(organization=organization).select_related(
+        "financial_summary"
+    ).order_by("-start_at", "event_name")
+    for event in queryset:
+        try:
+            summary = event.financial_summary
+        except ObjectDoesNotExist:
+            summary = None
+        events.append(
+            {
+                "source_type": "humanitix",
+                "source_id": event.external_event_id,
+                "name": event.event_name,
+                "start_at": event.start_at.isoformat() if event.start_at else None,
+                "end_at": event.end_at.isoformat() if event.end_at else None,
+                "url": event.event_url,
+                "currency": event.currency,
+                "orders": summary.order_count if summary else 0,
+                "tickets": summary.ticket_count if summary else 0,
+                "gross_sales": str(summary.gross_sales) if summary else "0.00",
+                "net_sales": str(summary.net_sales) if summary else "0.00",
+                "refunds": str(summary.refunds) if summary else "0.00",
+                "gateway_breakdown": summary.gateway_breakdown if summary else {},
+            }
+        )
+    return events
+
+
 def _source_rows(record: StripePayoutReconciliation) -> list[dict[str, Any]]:
     report = record.report_payload or {}
     rows: list[dict[str, Any]] = []
@@ -180,6 +217,7 @@ def build_reconciliation_enrichment_context(*, organization, run_id: str = "") -
     timeline/startup memory rather than duplicating raw private messages here.
     """
     luma_events = _luma_events(organization)
+    humanitix_events = _humanitix_events(organization)
     linear_projects = _linear_projects(organization)
     linear_by_name: dict[str, list[dict[str, Any]]] = {}
     for project in linear_projects:
@@ -188,6 +226,16 @@ def build_reconciliation_enrichment_context(*, organization, run_id: str = "") -
         event["exact_linear_matches"] = [
             {"source_id": project["source_id"], "name": project["name"]}
             for project in linear_by_name.get(_normalized_name(event["name"]), [])
+        ]
+    for event in humanitix_events:
+        event["exact_linear_matches"] = [
+            {"source_id": project["source_id"], "name": project["name"]}
+            for project in linear_by_name.get(_normalized_name(event["name"]), [])
+        ]
+        event["matching_luma_events"] = [
+            {"source_id": luma["source_id"], "name": luma["name"]}
+            for luma in luma_events
+            if _normalized_name(luma["name"]) == _normalized_name(event["name"])
         ]
     luma_by_name: dict[str, list[dict[str, Any]]] = {}
     for event in luma_events:
@@ -253,12 +301,16 @@ def build_reconciliation_enrichment_context(*, organization, run_id: str = "") -
         "domain": organization.domain,
         "run_id": run_id,
         "source_policy": {
-            "events": "Luma is canonical; a same-name Linear record is the event cross-reference, not automatically a Project Name.",
+            "events": (
+                "Luma and Humanitix are canonical for events on their respective platforms; "
+                "a same-name Linear record is an event cross-reference, not automatically a Project Name."
+            ),
             "projects": "Linear is canonical for Project Name. Prefer Linear-only records marked dimension_hint=project.",
             "narrative_context": "Gmail and Slack may support the review note but cannot establish amounts, tax, or accounts.",
         },
         "candidates": candidates,
         "luma_events": luma_events,
+        "humanitix_events": humanitix_events,
         "linear_projects": linear_projects,
         **statement_context,
     }

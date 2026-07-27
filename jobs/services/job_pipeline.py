@@ -191,16 +191,25 @@ def infer_company_name_from_description(description: Any) -> str | None:
         return None
 
     patterns = (
-        r"\bjoin\s+([A-Z][A-Za-z0-9&.'’,-]*(?:\s+[A-Z][A-Za-z0-9&.'’,-]*){0,5})\s+(?:as|to|and|for|with)",
-        r"\b(?:join|joining|work(?:ing)?|role|position|opportunity)\s+(?:at|with|for)\s+([A-Z][A-Za-z0-9&.'’,-]*(?:\s+[A-Z][A-Za-z0-9&.'’,-]*){0,5})",
-        r"\b(?:at|with|for)\s+([A-Z][A-Za-z0-9&.'’,-]*(?:\s+[A-Z][A-Za-z0-9&.'’,-]*){0,5})\s+(?:we|you|as|in|is|are|,|\.)",
-        r"\b([A-Z][A-Za-z0-9&.'’,-]*(?:\s+[A-Z][A-Za-z0-9&.'’,-]*){0,5})\s+(?:is|are)\s+(?:expanding|seeking|looking for|hiring|recruiting)",
+        r"\b(?i:join)\s+([A-Z][A-Za-z0-9&.'’,-]*(?:\s+[A-Z][A-Za-z0-9&.'’,-]*){0,5})\s+(?i:as|to|and|for|with)",
+        r"\b(?i:join|joining|work(?:ing)?|role|position|opportunity)\s+(?i:at|with|for)\s+([A-Z][A-Za-z0-9&.'’,-]*(?:\s+[A-Z][A-Za-z0-9&.'’,-]*){0,5})",
+        r"\b(?i:at|with|for)\s+([A-Z][A-Za-z0-9&.'’,-]*(?:\s+[A-Z][A-Za-z0-9&.'’,-]*){0,5})\s+(?i:we|you|as|in|is|are|,|\.)",
+        r"\b([A-Z][A-Za-z0-9&.'’,-]*(?:\s+[A-Z][A-Za-z0-9&.'’,-]*){0,5})\s+(?i:is|are)\s+(?i:expanding|seeking|looking for|hiring|recruiting)",
     )
     for pattern in patterns:
         match = re.search(pattern, text)
         if match:
             return clean_inferred_company_name(match.group(1))
     return None
+
+
+GENERIC_COMPANY_PHRASE_WORDS = {
+    "remote", "startup", "scaleup", "scale-up", "growing", "fast-growing",
+    "leading", "innovative", "dynamic", "small", "large", "global", "local",
+    "australian", "team", "company", "client", "clients", "business",
+    "organisation", "organization", "group", "platform", "role", "position",
+    "opportunity", "employer", "this", "our", "the",
+}
 
 
 def clean_inferred_company_name(value: str) -> str | None:
@@ -216,7 +225,10 @@ def clean_inferred_company_name(value: str) -> str | None:
         return None
     if not company[0].isupper():
         return None
-    if company.lower() in {"the", "this", "our", "your", "a", "an", "we", "our dynamic team", "dynamic team", "the team"}:
+    if company.lower() in {"the", "this", "our", "your", "a", "an", "we", "us", "you", "them", "it", "our dynamic team", "dynamic team", "the team"}:
+        return None
+    words = company.lower().split()
+    if words and all(word in GENERIC_COMPANY_PHRASE_WORDS for word in words):
         return None
     return company[:255]
 
@@ -421,9 +433,50 @@ def insert_matched_jobs(run: JobRun, raw_jobs: list[dict[str, Any]]) -> list[Job
             row.save()
             inserted.append(row)
         except IntegrityError:
+            existing = next((item for item in inserted if item.dedupe_key == row.dedupe_key), None)
+            if existing and float(scored.get("source_score") or 0.0) > float(existing.source_score or 0.0):
+                for field in JOB_LISTING_DEDUPE_REPLACE_FIELDS:
+                    setattr(existing, field, getattr(row, field))
+                existing.save()
             continue
 
     return inserted
+
+
+JOB_LISTING_DEDUPE_REPLACE_FIELDS = (
+    "title",
+    "company_name",
+    "company_logo_url",
+    "company_domain",
+    "company_stage",
+    "company_size",
+    "company_quality_score",
+    "location",
+    "is_remote",
+    "remote_region",
+    "remote_eligibility",
+    "remote_eligibility_score",
+    "country",
+    "city",
+    "job_url",
+    "apply_url",
+    "source_name",
+    "source_type",
+    "date_posted",
+    "posted_text",
+    "description",
+    "ai_score",
+    "startup_score",
+    "australia_score",
+    "remote_score",
+    "recency_score",
+    "source_score",
+    "quality_score",
+    "ranking_score",
+    "bucket",
+    "summary",
+    "why_selected",
+)
 
 
 def select_top_jobs(run: JobRun, limit: int | None = None) -> list[JobListing]:
@@ -433,6 +486,12 @@ def select_top_jobs(run: JobRun, limit: int | None = None) -> list[JobListing]:
     previous_top_pick_keys = set(
         JobListing.objects.filter(run_date__lt=run.run_date, is_top_pick=True).values_list("dedupe_key", flat=True)
     )
+    previous_top_pick_pairs = {
+        f"{normalize_words(title)}|{normalize_words(company_name)}"
+        for title, company_name in JobListing.objects.filter(
+            run_date__lt=run.run_date, is_top_pick=True
+        ).values_list("title", "company_name")
+    }
     candidates = [job for job in candidates if apply_publish_screen(job)]
     for job in candidates:
         job.save(
@@ -451,11 +510,16 @@ def select_top_jobs(run: JobRun, limit: int | None = None) -> list[JobListing]:
             ]
         )
     candidates.sort(key=lambda job: (-job.ranking_score, job.id))
-    unseen_candidates = [job for job in candidates if job.dedupe_key not in previous_top_pick_keys]
-    repeat_candidates = [job for job in candidates if job.dedupe_key in previous_top_pick_keys]
-    unseen_candidates, unseen_reasons = judge_top_candidates(unseen_candidates, candidate_limit=10)
-    repeat_candidates, repeat_reasons = judge_top_candidates(repeat_candidates, candidate_limit=10)
-    llm_reasons = {**repeat_reasons, **unseen_reasons}
+    # Jobs already shown as a top pick on a previous day are excluded outright, not
+    # used as a fallback to pad out to `limit` - a light day posts fewer than 7
+    # rather than repeating an old pick (Slack history already has it).
+    unseen_candidates = [
+        job
+        for job in candidates
+        if job.dedupe_key not in previous_top_pick_keys
+        and f"{normalize_words(job.title)}|{normalize_words(job.company_name)}" not in previous_top_pick_pairs
+    ]
+    unseen_candidates, llm_reasons = judge_top_candidates(unseen_candidates, candidate_limit=10)
 
     selected: list[JobListing] = []
     companies: set[str] = set()
@@ -494,8 +558,6 @@ def select_top_jobs(run: JobRun, limit: int | None = None) -> list[JobListing]:
 
     unseen_ai_candidates = [job for job in unseen_candidates if float(job.ai_score or 0.0) >= 0.35]
     unseen_startup_fallbacks = [job for job in unseen_candidates if float(job.ai_score or 0.0) < 0.35]
-    repeat_ai_candidates = [job for job in repeat_candidates if float(job.ai_score or 0.0) >= 0.35]
-    repeat_startup_fallbacks = [job for job in repeat_candidates if float(job.ai_score or 0.0) < 0.35]
 
     # Fresh AI/data/ML roles are the primary digest. Source/company diversity is
     # softened only after score-first passes fail to fill the seven slots.
@@ -511,15 +573,9 @@ def select_top_jobs(run: JobRun, limit: int | None = None) -> list[JobListing]:
     pick_from(unseen_startup_fallbacks, max_per_source=None)
     pick_from(unseen_startup_fallbacks, max_per_source=None, allow_same_company=True)
 
-    # A valid repeat is preferable to publishing fewer than seven jobs. Historical
-    # dedupe remains a ranking preference, while role-pair dedupe remains strict.
-    pick_from(repeat_ai_candidates, max_per_source=3)
-    pick_from(repeat_ai_candidates, max_per_source=None)
-    pick_from(repeat_ai_candidates, max_per_source=None, allow_same_company=True)
-    pick_from(repeat_startup_fallbacks, max_per_source=3)
-    pick_from(repeat_startup_fallbacks, max_per_source=None)
-    pick_from(repeat_startup_fallbacks, max_per_source=None, allow_same_company=True)
-
+    # `selected` is in pick order (diversified across source/company caps), not score
+    # order, so re-sort before numbering - otherwise #1 can score lower than #4.
+    selected.sort(key=lambda job: (-job.ranking_score, job.id))
     for index, job in enumerate(selected, start=1):
         job.is_top_pick = True
         job.rank = index

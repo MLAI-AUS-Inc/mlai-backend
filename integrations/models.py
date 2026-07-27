@@ -32,6 +32,7 @@ class CommunityBridgeReceiptStatus(models.TextChoices):
 
 class ExternalServiceProvider(models.TextChoices):
     STRIPE = "stripe", "Stripe"
+    HUMANITIX = "humanitix", "Humanitix"
     XERO = "xero", "Xero"
     BANK_FEED = "bank_feed", "Bank Feed"
     NOTION = "notion", "Notion"
@@ -583,6 +584,8 @@ class ReconciliationProfile(models.Model):
     xero_bank_account_name = models.CharField(max_length=255, blank=True, default="")
     xero_contact_id = models.CharField(max_length=255, blank=True, default="")
     xero_contact_name = models.CharField(max_length=255, default="Stripe Payments")
+    humanitix_contact_id = models.CharField(max_length=255, blank=True, default="")
+    humanitix_contact_name = models.CharField(max_length=255, default="Humanitix")
     revenue_account_code = models.CharField(max_length=64, blank=True, default="")
     fee_account_code = models.CharField(max_length=64, blank=True, default="")
     refund_account_code = models.CharField(max_length=64, blank=True, default="")
@@ -608,12 +611,18 @@ class ReconciliationMapping(models.Model):
     """Maps an immutable Stripe/Luma source ID to approved Xero dimensions."""
 
     SOURCE_LUMA_EVENT = "luma_event"
+    SOURCE_HUMANITIX_EVENT = "humanitix_event"
+    SOURCE_HUMANITIX_TICKET_TYPE = "humanitix_ticket_type"
+    SOURCE_HUMANITIX_PAYOUT = "humanitix_payout"
     SOURCE_STRIPE_PRODUCT = "stripe_product"
     SOURCE_STRIPE_INVOICE = "stripe_invoice"
     SOURCE_STRIPE_METADATA = "stripe_metadata"
     SOURCE_UNATTRIBUTED = "unattributed"
     SOURCE_CHOICES = [
         (SOURCE_LUMA_EVENT, "Luma event"),
+        (SOURCE_HUMANITIX_EVENT, "Humanitix event"),
+        (SOURCE_HUMANITIX_TICKET_TYPE, "Humanitix ticket type"),
+        (SOURCE_HUMANITIX_PAYOUT, "Humanitix payout"),
         (SOURCE_STRIPE_PRODUCT, "Stripe product"),
         (SOURCE_STRIPE_INVOICE, "Stripe invoice"),
         (SOURCE_STRIPE_METADATA, "Stripe metadata"),
@@ -664,6 +673,209 @@ class ReconciliationMapping(models.Model):
         indexes = [
             models.Index(fields=["organization", "active"], name="recon_mapping_org_active_idx"),
         ]
+
+
+class HumanitixEvent(models.Model):
+    """PII-free Humanitix event catalogue used for accounting attribution."""
+
+    organization = models.ForeignKey(
+        "organizations.Organization",
+        on_delete=models.CASCADE,
+        related_name="humanitix_events",
+    )
+    connection = models.ForeignKey(
+        ExternalServiceConnection,
+        on_delete=models.CASCADE,
+        related_name="humanitix_events",
+    )
+    external_event_id = models.CharField(max_length=255)
+    event_name = models.CharField(max_length=500)
+    event_url = models.URLField(max_length=1000, blank=True, default="")
+    currency = models.CharField(max_length=12, blank=True, default="")
+    timezone_name = models.CharField(max_length=100, blank=True, default="")
+    start_at = models.DateTimeField(null=True, blank=True)
+    end_at = models.DateTimeField(null=True, blank=True)
+    total_capacity = models.PositiveIntegerField(null=True, blank=True)
+    published = models.BooleanField(default=False)
+    archived = models.BooleanField(default=False)
+    source_hash = models.CharField(max_length=64, blank=True, default="")
+    source_payload = models.JSONField(default=dict, blank=True)
+    last_synced_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "humanitix_event"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["organization", "external_event_id"],
+                name="humanitix_event_org_external_uniq",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["organization", "start_at"], name="humanitix_event_org_start_idx"),
+            models.Index(fields=["connection", "last_synced_at"], name="humanitix_event_conn_sync_idx"),
+        ]
+        ordering = ["-start_at", "event_name", "external_event_id"]
+
+    def __str__(self):
+        return self.event_name or self.external_event_id
+
+
+class HumanitixEventFinancialSummary(models.Model):
+    """Aggregate event finances; deliberately excludes buyer/attendee PII."""
+
+    event = models.OneToOneField(
+        HumanitixEvent,
+        on_delete=models.CASCADE,
+        related_name="financial_summary",
+    )
+    order_count = models.PositiveIntegerField(default=0)
+    paid_order_count = models.PositiveIntegerField(default=0)
+    free_order_count = models.PositiveIntegerField(default=0)
+    ticket_count = models.PositiveIntegerField(default=0)
+    gross_sales = models.DecimalField(max_digits=18, decimal_places=2, default=0)
+    net_sales = models.DecimalField(max_digits=18, decimal_places=2, default=0)
+    refunds = models.DecimalField(max_digits=18, decimal_places=2, default=0)
+    discounts = models.DecimalField(max_digits=18, decimal_places=2, default=0)
+    donations = models.DecimalField(max_digits=18, decimal_places=2, default=0)
+    humanitix_fees = models.DecimalField(max_digits=18, decimal_places=2, default=0)
+    absorbed_fees = models.DecimalField(max_digits=18, decimal_places=2, default=0)
+    taxes = models.DecimalField(max_digits=18, decimal_places=2, default=0)
+    gateway_breakdown = models.JSONField(default=dict, blank=True)
+    ticket_type_breakdown = models.JSONField(default=dict, blank=True)
+    source_hash = models.CharField(max_length=64, blank=True, default="")
+    last_synced_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "humanitix_event_financial_summary"
+
+
+class HumanitixPayout(models.Model):
+    """Durable import and preview state for a Humanitix-native payout."""
+
+    STATUS_NEEDS_REVIEW = "needs_review"
+    STATUS_READY = "ready"
+    STATUS_POSTING = "posting"
+    STATUS_POSTED = "posted"
+    STATUS_FAILED = "failed"
+    STATUS_CHOICES = [
+        (STATUS_NEEDS_REVIEW, "Needs review"),
+        (STATUS_READY, "Ready"),
+        (STATUS_POSTING, "Posting"),
+        (STATUS_POSTED, "Posted"),
+        (STATUS_FAILED, "Failed"),
+    ]
+
+    organization = models.ForeignKey(
+        "organizations.Organization",
+        on_delete=models.CASCADE,
+        related_name="humanitix_payouts",
+    )
+    connection = models.ForeignKey(
+        ExternalServiceConnection,
+        on_delete=models.CASCADE,
+        related_name="humanitix_payouts",
+    )
+    payout_reference = models.CharField(max_length=255)
+    payout_date = models.DateField(null=True, blank=True)
+    cleared_date = models.DateField(null=True, blank=True)
+    currency = models.CharField(max_length=12, blank=True, default="")
+    payout_amount = models.DecimalField(max_digits=18, decimal_places=2, default=0)
+    humanitix_sales = models.DecimalField(max_digits=18, decimal_places=2, default=0)
+    box_office_card_sales = models.DecimalField(max_digits=18, decimal_places=2, default=0)
+    refunds = models.DecimalField(max_digits=18, decimal_places=2, default=0)
+    absorbed_fees = models.DecimalField(max_digits=18, decimal_places=2, default=0)
+    adjustments = models.DecimalField(max_digits=18, decimal_places=2, default=0)
+    source_hash = models.CharField(max_length=64, blank=True, default="")
+    source_payload = models.JSONField(default=dict, blank=True)
+    preview_payload = models.JSONField(default=dict, blank=True)
+    warnings = models.JSONField(default=list, blank=True)
+    status = models.CharField(
+        max_length=32,
+        choices=STATUS_CHOICES,
+        default=STATUS_NEEDS_REVIEW,
+        db_index=True,
+    )
+    approved_by_slack_id = models.CharField(max_length=100, blank=True, default="")
+    approved_at = models.DateTimeField(null=True, blank=True)
+    xero_bank_transaction_id = models.CharField(max_length=255, blank=True, default="")
+    posted_at = models.DateTimeField(null=True, blank=True)
+    last_error = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "humanitix_payout"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["organization", "payout_reference"],
+                name="humanitix_payout_org_reference_uniq",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["organization", "payout_date"], name="humanitix_payout_org_date_idx"),
+        ]
+        ordering = ["-payout_date", "-id"]
+
+    def __str__(self):
+        return self.payout_reference
+
+
+class HumanitixPayoutLine(models.Model):
+    COMPONENT_TICKET_SALES = "ticket_sales"
+    COMPONENT_DONATIONS = "donations"
+    COMPONENT_ADD_ONS = "add_ons"
+    COMPONENT_REFUNDS = "refunds"
+    COMPONENT_ABSORBED_FEES = "absorbed_fees"
+    COMPONENT_ADJUSTMENTS = "adjustments"
+    COMPONENT_NET_PAYOUT = "net_payout"
+    COMPONENT_CHOICES = [
+        (COMPONENT_TICKET_SALES, "Ticket sales"),
+        (COMPONENT_DONATIONS, "Donations"),
+        (COMPONENT_ADD_ONS, "Add-ons"),
+        (COMPONENT_REFUNDS, "Refunds"),
+        (COMPONENT_ABSORBED_FEES, "Absorbed fees"),
+        (COMPONENT_ADJUSTMENTS, "Adjustments"),
+        (COMPONENT_NET_PAYOUT, "Net payout"),
+    ]
+
+    payout = models.ForeignKey(
+        HumanitixPayout,
+        on_delete=models.CASCADE,
+        related_name="lines",
+    )
+    event = models.ForeignKey(
+        HumanitixEvent,
+        on_delete=models.SET_NULL,
+        related_name="payout_lines",
+        null=True,
+        blank=True,
+    )
+    source_line_key = models.CharField(max_length=255)
+    external_event_id = models.CharField(max_length=255, blank=True, default="")
+    event_name = models.CharField(max_length=500, blank=True, default="")
+    component = models.CharField(max_length=32, choices=COMPONENT_CHOICES)
+    amount = models.DecimalField(max_digits=18, decimal_places=2, default=0)
+    tax_amount = models.DecimalField(max_digits=18, decimal_places=2, default=0)
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "humanitix_payout_line"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["payout", "source_line_key"],
+                name="humanitix_payout_line_source_uniq",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["event", "component"], name="humanitix_line_event_comp_idx"),
+        ]
+        ordering = ["payout_id", "source_line_key"]
 
 
 class StripePayoutReconciliation(models.Model):

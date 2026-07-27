@@ -590,6 +590,30 @@ class CoworkingServiceTests(TestCase):
         account = PointsAccount.objects.get(user=self.user)
         self.assertEqual(account.balance, 2)  # charged once at the standard 8
 
+    @patch('roo.services.connection')
+    def test_booking_date_lock_uses_postgres_transaction_advisory_lock(self, mock_connection):
+        mock_connection.vendor = 'postgresql'
+        cursor = mock_connection.cursor.return_value.__enter__.return_value
+        booking_date = date(2026, 7, 24)
+
+        CoworkingService._lock_booking_date(booking_date)
+
+        cursor.execute.assert_called_once_with(
+            "SELECT pg_advisory_xact_lock(%s, %s)",
+            [
+                CoworkingService.BOOKING_DATE_LOCK_NAMESPACE,
+                booking_date.toordinal(),
+            ],
+        )
+
+    @patch('roo.services.connection')
+    def test_booking_date_lock_is_skipped_off_postgres(self, mock_connection):
+        mock_connection.vendor = 'sqlite'
+
+        CoworkingService._lock_booking_date(date(2026, 7, 24))
+
+        mock_connection.cursor.assert_not_called()
+
 
 class CoworkingMonthlyUpdateDiscountTests(TestCase):
     """The coworking cost drops to 4 when the user's startup is an ABR-verified
@@ -695,6 +719,69 @@ class CoworkingMonthlyUpdateDiscountTests(TestCase):
         from startup_updates.models import MonthlyUpdateDraftStatus
         today = date.today()
         self._make_update(today, MonthlyUpdateDraftStatus.READY)
+        self.assertEqual(
+            CoworkingService.get_coworking_cost(user=self.user, booking_date=today),
+            4,
+        )
+
+    def test_ready_update_does_not_discount_ineligible_binding(self):
+        from startup_updates.models import MonthlyUpdateDraftStatus, UserStartupBinding
+
+        today = date.today()
+        self._make_update(today, MonthlyUpdateDraftStatus.READY)
+        UserStartupBinding.objects.filter(user=self.user, organization=self.org).update(
+            coworking_discount_eligible=False
+        )
+
+        self.assertEqual(
+            CoworkingService.get_coworking_cost(user=self.user, booking_date=today),
+            8,
+        )
+
+    def test_rebinding_does_not_restore_discount_eligibility(self):
+        from startup_updates.models import MonthlyUpdateDraftStatus, UserStartupBinding
+        from startup_updates.services import bind_user_to_startup
+
+        today = date.today()
+        self._make_update(today, MonthlyUpdateDraftStatus.READY)
+        binding = UserStartupBinding.objects.get(user=self.user, organization=self.org)
+        binding.coworking_discount_eligible = False
+        binding.save(update_fields=['coworking_discount_eligible', 'updated_at'])
+
+        rebound = bind_user_to_startup(
+            user=self.user,
+            organization=self.org,
+            role='founder',
+            is_default_for_gmail=True,
+        )
+
+        self.assertFalse(rebound.coworking_discount_eligible)
+        self.assertEqual(
+            CoworkingService.get_coworking_cost(user=self.user, booking_date=today),
+            8,
+        )
+
+    def test_ineligible_binding_does_not_block_discount_from_eligible_binding(self):
+        from organizations.models import Organization
+        from startup_updates.models import (
+            MonthlyUpdateDraft,
+            MonthlyUpdateDraftStatus,
+            UserStartupBinding,
+        )
+
+        UserStartupBinding.objects.filter(user=self.user, organization=self.org).update(
+            coworking_discount_eligible=False
+        )
+        second_org = Organization.objects.create(name='Beta', domain='eligible-beta.example')
+        UserStartupBinding.objects.create(user=self.user, organization=second_org)
+        self._company_for(second_org, name='Beta Pty Ltd', verified=True)
+        today = date.today()
+        MonthlyUpdateDraft.objects.create(
+            organization=second_org,
+            month=today.replace(day=1),
+            status=MonthlyUpdateDraftStatus.READY,
+        )
+
         self.assertEqual(
             CoworkingService.get_coworking_cost(user=self.user, booking_date=today),
             4,

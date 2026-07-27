@@ -4,7 +4,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("integrations", "0030_reconciliation_rules_and_decisions"),
+        ("integrations", "0033_xero_statement_reconciliation_outcomes"),
     ]
 
     operations = [
@@ -21,6 +21,9 @@ class Migration(migrations.Migration):
                     ("preview_ready", "Posting preview ready"),
                     ("preview_blocked", "Posting preview blocked"),
                     ("execution_blocked", "Approved execution blocked"),
+                    ("reconciled_confirmed", "Human reconciliation confirmed"),
+                    ("learning_rule_promoted", "Learning candidate promoted"),
+                    ("learning_rule_rejected", "Learning candidate rejected"),
                     ("duplicate_recovered", "Existing Xero object recovered"),
                     ("executed", "Xero object created"),
                 ],

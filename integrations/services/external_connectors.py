@@ -50,6 +50,11 @@ from integrations.services.luma import (
     LumaAttendeeReportService,
     LumaConfigurationError,
 )
+from integrations.services.humanitix import (
+    HumanitixAPIError,
+    HumanitixClient,
+    HumanitixConfigurationError,
+)
 from integrations.services.gmail_scopes import (
     GMAIL_RECONNECT_WARNING,
     gmail_scope_status_payload,
@@ -95,6 +100,13 @@ CONNECTOR_DEFINITIONS: dict[str, ConnectorDefinition] = {
         "stripe",
         "Stripe",
         ("metrics",),
+        financial=True,
+    ),
+    ExternalServiceProvider.HUMANITIX: ConnectorDefinition(
+        ExternalServiceProvider.HUMANITIX,
+        "humanitix",
+        "Humanitix",
+        ("metrics", "reconciliation"),
         financial=True,
     ),
     ExternalServiceProvider.XERO: ConnectorDefinition(
@@ -154,6 +166,7 @@ PROVIDER_ALIASES = {
     "google": "gmail",
     "google_gmail": "gmail",
     "stripe": ExternalServiceProvider.STRIPE,
+    "humanitix": ExternalServiceProvider.HUMANITIX,
     "xero": ExternalServiceProvider.XERO,
     "bank-feed": ExternalServiceProvider.BANK_FEED,
     "bank_feed": ExternalServiceProvider.BANK_FEED,
@@ -174,6 +187,7 @@ PROVIDER_ALIASES = {
 
 EXTERNAL_PROVIDER_ORDER = (
     ExternalServiceProvider.STRIPE,
+    ExternalServiceProvider.HUMANITIX,
     ExternalServiceProvider.XERO,
     ExternalServiceProvider.BANK_FEED,
     ExternalServiceProvider.NOTION,
@@ -364,8 +378,8 @@ def _provider_configuration_error(provider: str) -> Optional[str]:
     provider = normalize_provider(provider)
     definition = CONNECTOR_DEFINITIONS[provider]
 
-    if provider == ExternalServiceProvider.LUMA:
-        # Luma is connected per-founder with their own API key, so there is no
+    if provider in {ExternalServiceProvider.LUMA, ExternalServiceProvider.HUMANITIX}:
+        # Luma and Humanitix are connected per-founder with their own API keys, so there is no
         # backend-level OAuth/config to validate — it is always available.
         return None
 
@@ -1260,6 +1274,42 @@ def connect_luma_connection(user, api_key: str, company=None) -> ExternalService
         external_account_id=external_account_id,
         account_label="Luma",
         provider_metadata={},
+    )
+
+
+def connect_humanitix_connection(user, api_key: str, company=None) -> ExternalServiceConnection:
+    """Validate and store a founder-supplied Humanitix public API key."""
+    api_key = str(api_key or "").strip()
+    if not api_key:
+        raise ConnectorConfigurationError("A Humanitix API key is required.")
+
+    try:
+        HumanitixClient(api_key=api_key).list_events_page(page=1, page_size=1)
+    except HumanitixAPIError as exc:
+        if exc.status_code in (401, 403):
+            raise ConnectorConfigurationError(
+                "Humanitix rejected this API key. Copy the current key from Account > Advanced and try again."
+            ) from exc
+        raise ConnectorConfigurationError(
+            "Could not verify the Humanitix API key right now. Please try again."
+        ) from exc
+    except HumanitixConfigurationError as exc:
+        raise ConnectorConfigurationError(str(exc)) from exc
+
+    organization = resolve_connector_organization(user, company=company)
+    external_account_id = str(getattr(user, "email", "") or user.id)
+    return _upsert_connection(
+        user=user,
+        provider=ExternalServiceProvider.HUMANITIX,
+        organization=organization,
+        access_token=api_key,
+        refresh_token="",
+        token_type="api_key",
+        token_expires_at=None,
+        scopes=["events:read", "orders:read", "tickets:read"],
+        external_account_id=external_account_id,
+        account_label="Humanitix",
+        provider_metadata={"api_version": "v1"},
     )
 
 
@@ -5157,6 +5207,10 @@ def _serialize_luma_event_selection(selection: LumaEventSelection) -> dict[str, 
         "event_url": selection.event_url,
         "startAt": selection.start_at.isoformat() if selection.start_at else None,
         "start_at": selection.start_at.isoformat() if selection.start_at else None,
+        "registrationCount": selection.registration_count,
+        "registration_count": selection.registration_count,
+        "checkedInCount": selection.checked_in_count,
+        "checked_in_count": selection.checked_in_count,
         "selected": bool(selection.selected),
     }
 
@@ -5571,6 +5625,34 @@ def mark_sources_sync_requested(
                 )
                 connection.status = ExternalServiceConnectionStatus.ERROR
                 connection.last_error = str(exc) or "Luma sync failed."
+                connection.save(update_fields=["status", "last_error", "updated_at"])
+                updated.append(
+                    {
+                        "connectionId": connection.id,
+                        "connection_id": connection.id,
+                        "provider": connection.provider,
+                        "status": "error",
+                        "error": connection.last_error,
+                    }
+                )
+            continue
+
+        if connection.provider == ExternalServiceProvider.HUMANITIX:
+            from integrations.services.humanitix import sync_humanitix_connection
+
+            try:
+                updated.append(sync_humanitix_connection(connection, full_backfill=True))
+            except (
+                HumanitixConfigurationError,
+                HumanitixAPIError,
+                requests.RequestException,
+            ) as exc:
+                logger.exception(
+                    "Humanitix sync failed",
+                    extra={"connection_id": connection.id, "user_id": user.id},
+                )
+                connection.status = ExternalServiceConnectionStatus.ERROR
+                connection.last_error = str(exc) or "Humanitix sync failed."
                 connection.save(update_fields=["status", "last_error", "updated_at"])
                 updated.append(
                     {

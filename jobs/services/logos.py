@@ -28,16 +28,13 @@ def logo_url_for_company(company_name: str | None, existing_url: str | None = No
 
 
 def domain_for_company(company_name: str | None) -> str | None:
+    # Only resolve a logo for companies we can verify a real domain for. Guessing
+    # "{name}.com" for anything else risks showing an unrelated company's branding
+    # whenever that guessed domain happens to belong to someone else.
     normalized = normalize_company(company_name)
     if not normalized:
         return None
-    if normalized in KNOWN_COMPANY_DOMAINS:
-        return KNOWN_COMPANY_DOMAINS[normalized]
-    compact = re.sub(r"\b(pty|ltd|limited|inc|llc|plc|co|company|group|australia)\b", "", normalized)
-    compact = re.sub(r"[^a-z0-9]+", "", compact)
-    if len(compact) < 3:
-        return None
-    return f"{compact}.com"
+    return KNOWN_COMPANY_DOMAINS.get(normalized)
 
 
 def normalize_company(company_name: str | None) -> str:

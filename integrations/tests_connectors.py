@@ -209,6 +209,7 @@ class ConnectorEndpointTests(TestCase):
             {
                 "gmail",
                 "stripe",
+                "humanitix",
                 "xero",
                 "bank_feed",
                 "notion",

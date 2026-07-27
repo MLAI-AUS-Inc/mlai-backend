@@ -5,7 +5,7 @@ import django.db.models.deletion
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("startup_updates", "0016_userstartupbinding_monthly_updates_enabled"),
+        ("startup_updates", "0020_luma_event_attendance_counts"),
     ]
 
     operations = [

@@ -9,6 +9,7 @@ from core.permissions import HasRooApiKey
 from integrations.services.external_connectors import (
     _ACTIVE_ORG,
     ConnectorConfigurationError,
+    connect_humanitix_connection,
     connect_luma_connection,
     disconnect_external_connection,
     mark_sources_sync_requested,
@@ -243,6 +244,35 @@ class LumaConnectView(APIView):
         except ConnectorConfigurationError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         return Response(serialize_source_status(request.user, organization=scope), status=status.HTTP_200_OK)
+
+
+class HumanitixConnectView(APIView):
+    """Link a Humanitix account via its public read-only API key."""
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        api_key = str(request.data.get("apiKey") or request.data.get("api_key") or "").strip()
+        if not api_key:
+            return Response(
+                {"detail": "A Humanitix API key is required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        scope, error_response = _org_scope_or_response(request)
+        if error_response:
+            return error_response
+        try:
+            connect_humanitix_connection(
+                request.user,
+                api_key,
+                company=_company_for_scope(request),
+            )
+        except ConnectorConfigurationError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(
+            serialize_source_status(request.user, organization=scope),
+            status=status.HTTP_200_OK,
+        )
 
 
 class LumaEventListView(APIView):

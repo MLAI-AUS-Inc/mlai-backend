@@ -10,6 +10,7 @@ from .models import (
     LinearProjectSelection,
     LinearProjectUpdateArtifact,
     MonthlyUpdateDraft,
+    MonthlyUpdateReminderDelivery,
     SlackChannelSelection,
     SlackMessageArtifact,
     SlackThreadArtifact,
@@ -31,9 +32,17 @@ class StartupProfileAdmin(admin.ModelAdmin):
 
 @admin.register(UserStartupBinding)
 class UserStartupBindingAdmin(admin.ModelAdmin):
-    list_display = ("user", "organization", "google_connection", "role", "is_default_for_gmail", "updated_at")
+    list_display = (
+        "user",
+        "organization",
+        "google_connection",
+        "role",
+        "is_default_for_gmail",
+        "coworking_discount_eligible",
+        "updated_at",
+    )
     search_fields = ("user__email", "organization__domain", "role")
-    list_filter = ("is_default_for_gmail", "updated_at")
+    list_filter = ("is_default_for_gmail", "coworking_discount_eligible", "updated_at")
 
 
 @admin.register(StartupManualDocument)
@@ -189,6 +198,48 @@ class MonthlyUpdateDraftAdmin(admin.ModelAdmin):
     list_display = ("organization", "month", "status", "groundedness_status", "model_name", "updated_at")
     search_fields = ("organization__domain", "title", "model_name")
     list_filter = ("status", "groundedness_status", "month")
+
+
+@admin.register(MonthlyUpdateReminderDelivery)
+class MonthlyUpdateReminderDeliveryAdmin(admin.ModelAdmin):
+    list_display = (
+        "user",
+        "reminder_kind",
+        "reminder_date",
+        "status",
+        "recipient_email",
+        "customerio_delivery_id",
+        "attempt_count",
+        "dispatched_at",
+    )
+    search_fields = ("user__email", "recipient_email", "idempotency_key", "customerio_delivery_id")
+    list_filter = ("reminder_kind", "status", "reminder_date")
+    readonly_fields = (
+        "user",
+        "reminder_kind",
+        "reminder_date",
+        "status",
+        "idempotency_key",
+        "recipient_email",
+        "template_id",
+        "target_snapshot",
+        "customerio_delivery_id",
+        "provider_response",
+        "attempt_count",
+        "last_error",
+        "dispatched_at",
+        "created_at",
+        "updated_at",
+    )
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
 
 
 @admin.register(StartupDataDeletionRequest)

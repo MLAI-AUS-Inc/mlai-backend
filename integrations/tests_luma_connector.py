@@ -278,6 +278,8 @@ class SyncLumaConnectionTests(TestCase):
         event = LumaEventSelection.objects.get(connection=connection, event_id="m1")
         self.assertEqual(event.event_name, "March")
         self.assertEqual(event.start_at, datetime(2026, 3, 5, 3, 0, tzinfo=ZoneInfo("UTC")))
+        self.assertEqual(event.registration_count, 12)
+        self.assertEqual(event.checked_in_count, 9)
         self.assertFalse(event.selected)
 
     def test_sync_requires_linked_organization(self):

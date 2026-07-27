@@ -294,13 +294,17 @@ def rerank_for_relevance(job: dict[str, Any]) -> dict[str, Any]:
 
 
 def dedupe_key(job: dict[str, Any]) -> str:
-    canonical_url = normalize_url(job.get("apply_url") or job.get("job_url"))
     title = normalize_words(job.get("title"))
     company = normalize_words(job.get("company_name"))
     location = normalize_words(job.get("location"))
-    if canonical_url:
-        return f"{title}|{company}|{canonical_url}"
-    return f"{title}|{company}|{location}"
+    # Same role commonly gets reposted across SEEK, LinkedIn, and portfolio boards with a
+    # different apply/tracking URL each time, so title+company+location is the primary
+    # fingerprint. The URL is only added when the company is unknown, to avoid collapsing
+    # unrelated blank-company postings into one key.
+    if company:
+        return f"{title}|{company}|{location}"
+    canonical_url = normalize_url(job.get("apply_url") or job.get("job_url"))
+    return f"{title}|{company}|{location}|{canonical_url}"
 
 
 def infer_bucket(ai_score: float, startup_score: float, australia_score: float, remote_score: float) -> str | None:
