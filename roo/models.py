@@ -112,6 +112,8 @@ class PointsPurchase(models.Model):
     currency = models.CharField(max_length=3, default='aud')
     status = models.CharField(max_length=32, choices=STATUS_CHOICES, default='pending', db_index=True)
     stripe_checkout_session_id = models.CharField(max_length=255, unique=True, blank=True, null=True)
+    stripe_checkout_session_url = models.URLField(max_length=2048, blank=True, null=True)
+    checkout_request_id = models.CharField(max_length=255, blank=True, null=True, db_index=True)
     terms_version_accepted = models.CharField(max_length=100, blank=True, null=True)
     terms_accepted_at = models.DateTimeField(blank=True, null=True)
     privacy_version_accepted = models.CharField(max_length=100, blank=True, null=True)
@@ -138,6 +140,13 @@ class PointsPurchase(models.Model):
             models.Index(fields=['user', 'status'], name='roo_purchase_user_status_idx'),
             models.Index(fields=['slack_user_id', 'status'], name='roo_purchase_slack_status_idx'),
             models.Index(fields=['status', 'created_at'], name='roo_purchase_status_ct_idx'),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=['checkout_request_id', 'pack_id'],
+                condition=models.Q(checkout_request_id__isnull=False),
+                name='roo_purchase_request_pack_uniq',
+            ),
         ]
 
     def __str__(self):

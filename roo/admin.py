@@ -49,6 +49,7 @@ class PointsPurchaseAdmin(admin.ModelAdmin):
         'user',
         'slack_user_id',
         'pack_id',
+        'checkout_request_id',
         'points_amount',
         'amount_cents',
         'currency',
@@ -65,6 +66,7 @@ class PointsPurchaseAdmin(admin.ModelAdmin):
         'slack_user_id',
         'pack_id',
         'stripe_checkout_session_id',
+        'checkout_request_id',
     )
     readonly_fields = (
         'id',
@@ -76,6 +78,8 @@ class PointsPurchaseAdmin(admin.ModelAdmin):
         'currency',
         'status',
         'stripe_checkout_session_id',
+        'stripe_checkout_session_url',
+        'checkout_request_id',
         'terms_version_accepted',
         'terms_accepted_at',
         'privacy_version_accepted',

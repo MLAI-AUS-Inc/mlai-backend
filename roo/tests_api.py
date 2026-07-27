@@ -5,6 +5,8 @@ import time
 from datetime import date, timedelta
 import threading
 
+import requests
+
 from django.db import close_old_connections
 from django.test import TransactionTestCase, override_settings
 from django.urls import reverse
@@ -169,6 +171,10 @@ class PointsPurchaseViewSetTests(APITestCase):
 
         purchase.refresh_from_db()
         self.assertEqual(purchase.stripe_checkout_session_id, 'cs_test_roo_points')
+        self.assertEqual(
+            purchase.stripe_checkout_session_url,
+            'https://checkout.stripe.com/c/pay/cs_test_roo_points',
+        )
         self.assertEqual(purchase.terms_version_accepted, 'roo-points-terms-2026-05-04')
         self.assertIsNotNone(purchase.terms_accepted_at)
         self.assertEqual(purchase.privacy_version_accepted, 'privacy-2026-05-04')
@@ -179,6 +185,10 @@ class PointsPurchaseViewSetTests(APITestCase):
         mock_post.assert_called_once()
         _, kwargs = mock_post.call_args
         self.assertEqual(kwargs['auth'], ('sk_test_roo', ''))
+        self.assertEqual(
+            kwargs['headers']['Idempotency-Key'],
+            f'roo-points-purchase:{purchase.id}',
+        )
         stripe_data = kwargs['data']
         self.assertEqual(stripe_data['mode'], 'payment')
         self.assertEqual(stripe_data['client_reference_id'], str(purchase.id))
@@ -192,8 +202,149 @@ class PointsPurchaseViewSetTests(APITestCase):
         self.assertEqual(stripe_data['metadata[slack_user_id]'], self.slack_user_id)
         self.assertEqual(stripe_data['metadata[pack_id]'], 'topup_10')
         self.assertEqual(stripe_data['metadata[points_amount]'], '10')
-        self.assertEqual(stripe_data['metadata[terms_version_accepted]'], 'roo-points-terms-2026-05-04')
-        self.assertEqual(stripe_data['metadata[privacy_version_accepted]'], 'privacy-2026-05-04')
+        self.assertEqual(stripe_data['metadata[terms_version]'], 'roo-points-terms-2026-05-04')
+        self.assertEqual(stripe_data['metadata[privacy_version]'], 'privacy-2026-05-04')
+        self.assertEqual(stripe_data['metadata[checkout_consent_mode]'], 'frontend')
+        self.assertNotIn('consent_collection[terms_of_service]', stripe_data)
+
+    @override_settings(
+        DEFAULT_FRONTEND_URL='https://mlai.test',
+        STRIPE_SECRET_KEY='sk_test_roo',
+        ROO_POINTS_TERMS_VERSION='roo-points-terms-v2',
+        ROO_POINTS_PRIVACY_VERSION='privacy-v2',
+    )
+    @patch('core.permissions.HasRooApiKey.has_permission', return_value=True)
+    @patch('roo.services.requests.post')
+    def test_checkout_options_create_three_idempotent_stripe_buttons(
+        self,
+        mock_post,
+        mock_permission,
+    ):
+        def stripe_response(*args, **kwargs):
+            pack_id = kwargs['data']['metadata[pack_id]']
+            return Mock(
+                status_code=200,
+                json=Mock(
+                    return_value={
+                        'id': f'cs_test_{pack_id}',
+                        'url': f'https://checkout.stripe.com/c/pay/cs_test_{pack_id}',
+                    }
+                ),
+            )
+
+        mock_post.side_effect = stripe_response
+        url = reverse('points-purchase-checkout-options')
+        payload = {
+            'slack_user_id': self.slack_user_id,
+            'checkout_request_id': 'Ev123456789',
+            'purchase_from': {
+                'slack_channel_id': 'C123',
+                'slack_thread_ts': '1712345678.000100',
+            },
+        }
+
+        first_response = self.client.post(url, payload, format='json')
+        second_response = self.client.post(url, payload, format='json')
+
+        self.assertEqual(first_response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(second_response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(len(first_response.data['options']), 3)
+        self.assertEqual(len(second_response.data['options']), 3)
+        self.assertEqual(PointsPurchase.objects.count(), 3)
+        self.assertEqual(mock_post.call_count, 3)
+        self.assertEqual(
+            [option['points_amount'] for option in first_response.data['options']],
+            [10, 20, 50],
+        )
+        self.assertTrue(
+            all(
+                option['checkout_session_url'].startswith(
+                    'https://checkout.stripe.com/'
+                )
+                for option in first_response.data['options']
+            )
+        )
+
+        for call in mock_post.call_args_list:
+            stripe_data = call.kwargs['data']
+            self.assertEqual(
+                stripe_data['consent_collection[terms_of_service]'],
+                'required',
+            )
+            self.assertEqual(
+                stripe_data['metadata[checkout_consent_mode]'],
+                'stripe',
+            )
+            self.assertEqual(
+                stripe_data['metadata[terms_version]'],
+                'roo-points-terms-v2',
+            )
+            self.assertEqual(
+                stripe_data['metadata[privacy_version]'],
+                'privacy-v2',
+            )
+
+        purchases = PointsPurchase.objects.order_by('pack_id')
+        for purchase in purchases:
+            self.assertEqual(purchase.checkout_request_id, 'Ev123456789')
+            self.assertEqual(
+                purchase.purchase_from['surface'],
+                'roo_topup_buttons',
+            )
+            self.assertIsNone(purchase.terms_accepted_at)
+            self.assertEqual(
+                purchase.metadata['checkout_consent_mode'],
+                'stripe',
+            )
+
+    @override_settings(STRIPE_SECRET_KEY='sk_test_roo')
+    @patch('core.permissions.HasRooApiKey.has_permission', return_value=True)
+    @patch(
+        'roo.services.requests.post',
+        side_effect=requests.Timeout('Stripe timed out'),
+    )
+    def test_checkout_options_returns_service_unavailable_on_stripe_timeout(
+        self,
+        mock_post,
+        mock_permission,
+    ):
+        response = self.client.post(
+            reverse('points-purchase-checkout-options'),
+            {
+                'slack_user_id': self.slack_user_id,
+                'checkout_request_id': 'EvStripeTimeout',
+                'pack_ids': ['topup_5'],
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
+        self.assertEqual(response.data['errors'], [
+            {
+                'pack_id': 'topup_5',
+                'error': 'Stripe Checkout Session request failed',
+            }
+        ])
+        self.assertEqual(mock_post.call_count, 1)
+
+    @patch('core.permissions.HasRooApiKey.has_permission', return_value=True)
+    def test_checkout_options_reject_invalid_pack_before_creating_purchase(
+        self,
+        mock_permission,
+    ):
+        response = self.client.post(
+            reverse('points-purchase-checkout-options'),
+            {
+                'slack_user_id': self.slack_user_id,
+                'checkout_request_id': 'EvInvalidPack',
+                'pack_ids': ['topup_999'],
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('Unsupported top-up pack', response.data['error'])
+        self.assertFalse(PointsPurchase.objects.exists())
 
     @override_settings(STRIPE_SECRET_KEY='sk_test_roo')
     @patch('roo.services.requests.post')
@@ -418,6 +569,65 @@ class StripeWebhookViewTests(APITestCase):
         self.assertEqual(ledger.reference_type, 'POINTS_PURCHASE')
         self.assertEqual(ledger.reference_id, str(self.purchase.id))
         self.assertEqual(ledger.idempotency_key, 'stripe_checkout_session:cs_test_roo_paid')
+
+    @override_settings(
+        STRIPE_WEBHOOK_SECRET=webhook_secret,
+        ROO_POINTS_TERMS_VERSION='roo-points-terms-v2',
+        ROO_POINTS_PRIVACY_VERSION='privacy-v2',
+    )
+    def test_direct_checkout_webhook_records_stripe_terms_consent(self):
+        payload = self._payload(
+            session={
+                'id': 'cs_test_roo_paid',
+                'status': 'complete',
+                'payment_status': 'paid',
+                'consent': {'terms_of_service': 'accepted'},
+                'metadata': {
+                    'points_purchase_id': str(self.purchase.id),
+                    'checkout_consent_mode': 'stripe',
+                    'terms_version': 'roo-points-terms-v2',
+                    'privacy_version': 'privacy-v2',
+                },
+            }
+        )
+
+        response = self._post_webhook(payload)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.purchase.refresh_from_db()
+        self.assertEqual(
+            self.purchase.terms_version_accepted,
+            'roo-points-terms-v2',
+        )
+        self.assertIsNotNone(self.purchase.terms_accepted_at)
+        self.assertEqual(self.purchase.privacy_version_accepted, 'privacy-v2')
+        self.assertEqual(
+            self.purchase.metadata['stripe_terms_consent'],
+            'accepted',
+        )
+
+    @override_settings(STRIPE_WEBHOOK_SECRET=webhook_secret)
+    def test_direct_checkout_webhook_rejects_missing_terms_consent(self):
+        payload = self._payload(
+            session={
+                'id': 'cs_test_roo_paid',
+                'status': 'complete',
+                'payment_status': 'paid',
+                'metadata': {
+                    'points_purchase_id': str(self.purchase.id),
+                    'checkout_consent_mode': 'stripe',
+                    'terms_version': 'roo-points-terms-v2',
+                    'privacy_version': 'privacy-v2',
+                },
+            }
+        )
+
+        response = self._post_webhook(payload)
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.purchase.refresh_from_db()
+        self.assertEqual(self.purchase.status, 'pending')
+        self.assertFalse(Ledger.objects.exists())
 
     @override_settings(STRIPE_WEBHOOK_SECRET=webhook_secret)
     def test_checkout_completed_webhook_is_idempotent(self):
