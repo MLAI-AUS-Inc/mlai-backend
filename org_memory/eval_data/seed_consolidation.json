@@ -1,0 +1,62 @@
+[
+  {
+    "id": "strict-decision-valid",
+    "mode": "schema",
+    "decision": {
+      "operation": "SUPERSEDES",
+      "matched_claim_id": "claim-1",
+      "confidence": 0.92,
+      "reason": "A newer authoritative project status replaces the previous state."
+    },
+    "expected": {"valid": true}
+  },
+  {
+    "id": "strict-decision-rejects-action",
+    "mode": "schema",
+    "decision": {
+      "operation": "NEW",
+      "matched_claim_id": null,
+      "confidence": 1.0,
+      "reason": "No match.",
+      "send_slack_message": true
+    },
+    "expected": {"valid": false}
+  },
+  {
+    "id": "strict-decision-rejects-unknown-operation",
+    "mode": "schema",
+    "decision": {
+      "operation": "DELETE",
+      "matched_claim_id": null,
+      "confidence": 1.0,
+      "reason": "Unsupported operation."
+    },
+    "expected": {"valid": false}
+  },
+  {
+    "id": "active-can-be-superseded",
+    "mode": "transition",
+    "from_status": "active",
+    "to_status": "superseded",
+    "expected": {"allowed": true}
+  },
+  {
+    "id": "archived-cannot-reactivate",
+    "mode": "transition",
+    "from_status": "archived",
+    "to_status": "active",
+    "expected": {"allowed": false}
+  },
+  {
+    "id": "project-status-stales-after-thirty-days",
+    "mode": "staleness",
+    "kind": "project_status",
+    "expected": {"days": 30, "non_expiring": false}
+  },
+  {
+    "id": "decision-does-not-auto-expire",
+    "mode": "staleness",
+    "kind": "decision",
+    "expected": {"days": null, "non_expiring": true}
+  }
+]

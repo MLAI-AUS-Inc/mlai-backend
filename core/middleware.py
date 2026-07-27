@@ -1,6 +1,7 @@
 import logging
 import os
 import time
+from urllib.parse import parse_qsl, urlencode, urlsplit
 from uuid import uuid4
 
 from django.conf import settings
@@ -8,6 +9,30 @@ from django.db import OperationalError, connection, transaction
 from django.http import JsonResponse
 
 logger = logging.getLogger(__name__)
+SENSITIVE_QUERY_PARAMETERS = {
+    "access_token",
+    "client_secret",
+    "code",
+    "id_token",
+    "refresh_token",
+    "state",
+    "token",
+}
+
+
+def safe_request_path(request) -> str:
+    """Return a log-safe request path with OAuth credentials redacted."""
+
+    full_path = request.get_full_path()
+    try:
+        parsed = urlsplit(full_path)
+        query = [
+            (key, "[REDACTED]" if key.lower() in SENSITIVE_QUERY_PARAMETERS else value)
+            for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+        ]
+    except (TypeError, ValueError):
+        return str(getattr(request, "path", "") or "")
+    return parsed.path + ("?" + urlencode(query) if query else "")
 
 
 class RequestLoggingMiddleware:
@@ -23,7 +48,7 @@ class RequestLoggingMiddleware:
         path = request.path
         if any(path.startswith(prefix) for prefix in cls._REDACT_QUERY_PATH_PREFIXES):
             return f"{path}?<redacted>" if request.META.get("QUERY_STRING") else path
-        return request.get_full_path()
+        return safe_request_path(request)
 
     def __call__(self, request):
         started_at = time.monotonic()
@@ -174,7 +199,7 @@ class PointsEndpointTimeoutMiddleware:
                 request_id,
                 os.getpid(),
                 request.method,
-                request.get_full_path(),
+                safe_request_path(request),
                 duration_ms,
                 exc.__class__.__name__,
                 error_code,

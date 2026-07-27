@@ -36,6 +36,8 @@ urlpatterns = [
     path('api/v1/victor-ai/', include('victor_ai.urls')),
     path('api/v1/data/', include('data_access.urls')),
     path('api/v1/points/', include('roo.urls')),
+    path('api/v1/org-memory/', include('org_memory.urls')),
+    path('api/v1/public-brain/', include('org_memory.public_urls')),
     path('api/v1/jobs/', include('jobs.urls')),
     path('api/v1/medhack/', include('hospital.medhack_urls')),
     # Content Factory API

@@ -1,0 +1,85 @@
+[
+  {
+    "id": "strict-grounded-answer-valid",
+    "mode": "answer_schema",
+    "answer": {
+      "answer": "The pilot is green.",
+      "cited_memory_ids": ["claim:1"],
+      "confidence": 0.87,
+      "suggested_follow_up": null
+    },
+    "expected": {"valid": true}
+  },
+  {
+    "id": "strict-answer-rejects-action-field",
+    "mode": "answer_schema",
+    "answer": {
+      "answer": "The pilot is green.",
+      "cited_memory_ids": ["claim:1"],
+      "confidence": 0.87,
+      "suggested_follow_up": null,
+      "send_slack_message": true
+    },
+    "expected": {"valid": false}
+  },
+  {
+    "id": "strict-answer-rejects-duplicate-citations",
+    "mode": "answer_schema",
+    "answer": {
+      "answer": "The pilot is green.",
+      "cited_memory_ids": ["claim:1", "claim:1"],
+      "confidence": 0.87,
+      "suggested_follow_up": null
+    },
+    "expected": {"valid": false}
+  },
+  {
+    "id": "citation-inside-selected-bundle",
+    "mode": "citation_boundary",
+    "cited_memory_ids": ["claim:1"],
+    "selected_memory_ids": ["claim:1", "claim:2"],
+    "expected": {"allowed": true}
+  },
+  {
+    "id": "citation-outside-selected-bundle",
+    "mode": "citation_boundary",
+    "cited_memory_ids": ["claim:1", "claim:secret"],
+    "selected_memory_ids": ["claim:1", "claim:2"],
+    "expected": {"allowed": false}
+  },
+  {
+    "id": "empty-citation-is-not-grounded",
+    "mode": "citation_boundary",
+    "cited_memory_ids": [],
+    "selected_memory_ids": ["claim:1"],
+    "expected": {"allowed": false}
+  },
+  {
+    "id": "query-secret-redaction",
+    "mode": "query_redaction",
+    "query": "Find api_key=super-secret and sk-abcdefghijklmnop",
+    "expected": {"redacted": "Find [REDACTED] and [REDACTED]"}
+  },
+  {
+    "id": "stable-query-terms",
+    "mode": "query_terms",
+    "query": "What is the Pilot roadmap status?",
+    "expected": {"terms": ["pilot", "roadmap", "status"]}
+  },
+  {
+    "id": "exact-authorised-evidence-abstention",
+    "mode": "abstention",
+    "expected": {
+      "answer": "I do not have enough authorised evidence to answer that reliably."
+    }
+  },
+  {
+    "id": "untrusted-evidence-no-tools-policy",
+    "mode": "prompt_policy",
+    "expected": {
+      "marks_evidence_untrusted": true,
+      "forbids_tools": true,
+      "requires_supplied_memory_ids": true
+    }
+  }
+]

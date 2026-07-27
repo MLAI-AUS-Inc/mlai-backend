@@ -9,6 +9,7 @@ that carries no organization FK, and leave the founder's user + profile intact.
 from __future__ import annotations
 
 from io import StringIO
+import hashlib
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
@@ -30,7 +31,21 @@ from content_factory.models import (
     ResearchAutomationStatus,
 )
 from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
+from integrations.models import ExternalServiceConnection
 from organizations.models import Organization
+from org_memory.kernel import capture_source_version
+from org_memory.models import (
+    AgentActionProposal,
+    AgentActionRiskLevel,
+    AgentActionStatus,
+    AgentActionType,
+    MemoryChunk,
+    MemoryConnectionConfiguration,
+    MemoryConnectionState,
+    MemorySource,
+    MemorySourceLifecycle,
+    ServicePrincipal,
+)
 from startup_updates.models import StartupProfile
 from workflow_runs.models import ContentFactoryRun
 
@@ -112,6 +127,53 @@ class TeardownCompanyTests(TestCase):
             run_id="run-1", workflow="discovery", domain=self.DOMAIN
         )
 
+        self.memory_connection = ExternalServiceConnection.objects.create(
+            provider="linear",
+            user=self.user,
+            organization=self.org,
+            external_account_id="teardown-linear",
+        )
+        self.memory_configuration = MemoryConnectionConfiguration.objects.create(
+            organization=self.org,
+            provider="linear",
+            external_connection=self.memory_connection,
+            created_by=self.user,
+        )
+        self.memory_principal = ServicePrincipal.objects.create(
+            name="teardown-admin-roo",
+            organization=self.org,
+            scopes=["source.manage"],
+            allowed_surfaces=["admin_roo"],
+        )
+        self.agent_action = AgentActionProposal.objects.create(
+            organization=self.org,
+            configuration=self.memory_configuration,
+            requested_by=self.user,
+            action_type=AgentActionType.CREATE_LINEAR_ISSUE,
+            target_system="linear",
+            input_payload={"title": "Teardown fixture"},
+            input_hash="a" * 64,
+            risk_level=AgentActionRiskLevel.MEDIUM,
+            requires_approval=True,
+            status=AgentActionStatus.AWAITING_APPROVAL,
+            idempotency_key="teardown-action-fixture",
+            creation_request_hash="b" * 64,
+        )
+        evidence_text = "This organisation has durable private memory."
+        self.memory_source, _version, _created = capture_source_version(
+            organization=self.org,
+            provider="linear",
+            external_account_id="teardown-linear",
+            source_type="issue",
+            external_id="TEAR-1",
+            version_key="v1",
+            content_hash=hashlib.sha256(evidence_text.encode("utf-8")).hexdigest(),
+            classification="committee",
+            acl={"is_accessible": True, "principal_refs": ["user:founder"]},
+            chunks=[{"ordinal": 0, "text": evidence_text}],
+            configuration=self.memory_configuration,
+        )
+
     def _run(self, **opts):
         buf = StringIO()
         call_command("teardown_company", domain=self.DOMAIN, stdout=buf, stderr=buf, **opts)
@@ -144,6 +206,16 @@ class TeardownCompanyTests(TestCase):
         # Cascade children removed by Organization.delete().
         self.assertFalse(StartupProfile.objects.filter(pk=self.startup_profile.pk).exists())
         self.assertFalse(OrganizationContentConfig.objects.filter(pk=self.config.pk).exists())
+        self.assertFalse(MemorySource.objects.filter(pk=self.memory_source.pk).exists())
+        self.assertFalse(
+            AgentActionProposal.objects.filter(pk=self.agent_action.pk).exists()
+        )
+        self.assertFalse(
+            MemoryConnectionConfiguration.objects.filter(
+                pk=self.memory_configuration.pk
+            ).exists()
+        )
+        self.assertFalse(ServicePrincipal.objects.filter(pk=self.memory_principal.pk).exists())
 
         # Domain-keyed residue swept.
         self.assertFalse(ContentFactoryJob.objects.filter(pk=self.job.pk).exists())
@@ -165,3 +237,20 @@ class TeardownCompanyTests(TestCase):
         # Reset-in-place does not purge automations or residue.
         self.assertTrue(ResearchAutomation.objects.filter(pk=self.automation.pk).exists())
         self.assertTrue(ContentFactoryJob.objects.filter(pk=self.job.pk).exists())
+        self.memory_source.refresh_from_db()
+        self.assertEqual(
+            self.memory_source.lifecycle_state,
+            MemorySourceLifecycle.TOMBSTONED,
+        )
+        self.assertFalse(
+            MemoryChunk.objects.filter(
+                source_version__source=self.memory_source,
+                active_for_retrieval=True,
+            ).exists()
+        )
+        self.memory_configuration.refresh_from_db()
+        self.assertEqual(
+            self.memory_configuration.lifecycle_state,
+            MemoryConnectionState.DELETE_PENDING,
+        )
+        self.assertTrue(ServicePrincipal.objects.filter(pk=self.memory_principal.pk).exists())

@@ -67,6 +67,26 @@ test.sqlite3
 /*.md
 /docs/*.md
 /docs/**/*.md
+!/docs/org-memory-service-identity.md
+!/docs/org-memory-source-control.md
+!/docs/org-memory-evidence-kernel.md
+!/docs/org-memory-runtime.md
+!/docs/org-memory-daily-reconciliation.md
+!/docs/org-memory-review-summaries-digests.md
+!/docs/org-memory-publication.md
+!/docs/org-memory-actions.md
+!/docs/org-memory-search.md
+!/docs/org-memory-drive.md
+!/docs/org-memory-extraction.md
+!/docs/org-memory-consolidation.md
+!/docs/org-memory-retrieval.md
+!/docs/org-memory-selector-shadow.md
+!/docs/org-memory-pilot-rollout.md
+!/docs/org-memory-pilot-evidence.md
+!/docs/org-memory-gmail.md
+!/docs/org-memory-linear-slack.md
+!/docs/org-memory-notion.md
+!/docs/org-memory-structured-aggregates.md
 
 # Flask stuff:
 instance/

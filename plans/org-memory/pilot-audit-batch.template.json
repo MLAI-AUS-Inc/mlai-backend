@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "organization_domain": "replace.example.org",
+  "reviewer_email": "independent-reviewer@example.org",
+  "rubric_version": "admin-roo-pilot-v1",
+  "audits": [
+    {
+      "query_id": "00000000-0000-0000-0000-000000000000",
+      "idempotency_key": "pilot-audit-replace-001",
+      "reviewed_at": "2026-01-01T00:00:00Z",
+      "risk": "standard",
+      "answer_correct": true,
+      "faithfulness_correct": true,
+      "abstention_correct": true,
+      "current_state_correct": true,
+      "temporal_correct": null,
+      "correct_citation_count": 1,
+      "permission_leak": false,
+      "public_admin_leak": false
+    }
+  ]
+}

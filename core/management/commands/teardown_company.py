@@ -55,6 +55,38 @@ class Command(BaseCommand):
         ("content_factory.models", "GeneratedComponent"),
         ("integrations.models", "ExternalServiceConnection"),
         ("integrations.models", "FinancialAccount"),
+        ("org_memory.models", "MemorySource"),
+        ("org_memory.models", "MemorySourceVersion"),
+        ("org_memory.models", "MemoryChunk"),
+        ("org_memory.models", "MemoryExtractionRun"),
+        ("org_memory.models", "MemoryEntity"),
+        ("org_memory.models", "MemoryClaim"),
+        ("org_memory.models", "MemoryEvidence"),
+        ("org_memory.models", "MemoryConsolidationRun"),
+        ("org_memory.models", "MemoryCurrentState"),
+        ("org_memory.models", "MemorySummary"),
+        ("org_memory.models", "MemoryDigest"),
+        ("org_memory.models", "MemoryPublication"),
+        ("org_memory.models", "PublicKnowledgeItem"),
+        ("org_memory.models", "MemoryEntityResolutionEvent"),
+        ("org_memory.models", "MemoryCorrectionProposal"),
+        ("org_memory.models", "MemoryQueryLog"),
+        ("org_memory.models", "MemoryFeedback"),
+        ("org_memory.models", "MemoryPilotQueryAudit"),
+        ("org_memory.models", "MemoryPilotDeployment"),
+        ("org_memory.models", "MemorySelectorShadowRun"),
+        ("org_memory.models", "MemorySelectorShadowResult"),
+        ("org_memory.models", "MemoryWorkItem"),
+        ("org_memory.models", "MemorySyncRun"),
+        ("org_memory.models", "MemoryRuntimeLane"),
+        ("org_memory.models", "MemoryDeletionRequest"),
+        ("org_memory.models", "MemoryDailyReconciliationReport"),
+        ("org_memory.models", "MemoryConnectionHealthSnapshot"),
+        ("org_memory.models", "MemoryDailyCostLedger"),
+        ("org_memory.models", "MemoryCostReservation"),
+        ("org_memory.models", "NotionPageArtifact"),
+        ("org_memory.models", "GmailScopedMessageArtifact"),
+        ("org_memory.models", "StructuredAggregateArtifact"),
     ]
 
     def add_arguments(self, parser):
@@ -133,8 +165,21 @@ class Command(BaseCommand):
             ResearchAutomation,
         )
         from founder_tools.models import VibeRaisingCompany
+        from org_memory.models import (
+            AgentActionProposal,
+            MemoryConnectionConfiguration,
+            MemoryDeadLetter,
+            ServicePrincipal,
+        )
 
         return [
+            # Organisational-memory dependency roots use PROTECT so operators cannot
+            # erase credentials/work history accidentally. Full company teardown is
+            # the explicit exception and removes them in dependency order.
+            ("A.memory", "MemoryDeadLetter", MemoryDeadLetter.objects.filter(organization=org)),
+            ("A.memory", "AgentActionProposal (+events)", AgentActionProposal.objects.filter(organization=org)),
+            ("A.memory", "MemoryConnectionConfiguration", MemoryConnectionConfiguration.objects.filter(organization=org)),
+            ("A.memory", "ServicePrincipal (+credentials)", ServicePrincipal.objects.filter(organization=org)),
             # A. PROTECT subgraph -- deleting the automations cascades AutomationRun
             #    and NotificationDelivery, which clears BOTH protectors of
             #    NotificationChannel; the channel can then be deleted.
