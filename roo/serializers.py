@@ -68,6 +68,8 @@ class PointsPurchaseSerializer(serializers.ModelSerializer):
             'currency',
             'status',
             'stripe_checkout_session_id',
+            'stripe_checkout_session_url',
+            'checkout_request_id',
             'terms_version_accepted',
             'terms_accepted_at',
             'privacy_version_accepted',

@@ -41,6 +41,13 @@ class CoworkingBatchBookingError(ValueError):
 class PointsPurchaseService:
     """Business rules for Top-up Roo Points purchases."""
 
+    DEFAULT_TERMS_VERSION = 'roo-points-terms-2026-05-04'
+    DEFAULT_PRIVACY_VERSION = 'privacy-2026-05-04'
+    DEFAULT_TERMS_ACCEPTANCE_TEXT = (
+        'I understand that Roo Points are not money, have no cash value, are not '
+        'refundable except where required by law, and cannot be transferred or sold.'
+    )
+
     # NOTE: pack ids are opaque (kept stable across the points-doubling change so
     # in-flight purchases, the Slack reverse-map, and the frontend "popular" key
     # keep working); the id number no longer matches the points it grants.
@@ -95,6 +102,7 @@ class PointsPurchaseService:
         *,
         purchase_from: Optional[dict] = None,
         manual_balance_approval: bool = False,
+        checkout_request_id: Optional[str] = None,
     ) -> PointsPurchase:
         cleaned_slack_user_id = (slack_user_id or '').strip()
         if not cleaned_slack_user_id:
@@ -117,14 +125,34 @@ class PointsPurchaseService:
         origin.setdefault('source', 'slack')
         origin['slack_user_id'] = cleaned_slack_user_id
 
+        cleaned_request_id = (checkout_request_id or '').strip() or None
+        if cleaned_request_id and len(cleaned_request_id) > 255:
+            raise ValueError("checkout_request_id must be 255 characters or fewer")
+
+        purchase_defaults = {
+            'user': user,
+            'slack_user_id': cleaned_slack_user_id,
+            'points_amount': pack['points'],
+            'amount_cents': pack['amount_cents'],
+            'currency': pack['currency'],
+            'purchase_from': origin,
+        }
+        if cleaned_request_id:
+            purchase, created = PointsPurchase.objects.get_or_create(
+                checkout_request_id=cleaned_request_id,
+                pack_id=cleaned_pack_id,
+                defaults=purchase_defaults,
+            )
+            if not created and purchase.user_id != user.id:
+                raise PermissionDeniedError(
+                    "That top-up checkout request belongs to a different user"
+                )
+            return purchase
+
         return PointsPurchase.objects.create(
-            user=user,
-            slack_user_id=cleaned_slack_user_id,
             pack_id=cleaned_pack_id,
-            points_amount=pack['points'],
-            amount_cents=pack['amount_cents'],
-            currency=pack['currency'],
-            purchase_from=origin,
+            checkout_request_id=None,
+            **purchase_defaults,
         )
 
     @staticmethod
@@ -167,11 +195,33 @@ class PointsPurchaseService:
     @transaction.atomic
     def create_checkout_session(
         purchase: PointsPurchase,
-        terms_version_accepted: str,
-        privacy_version_accepted: str,
+        terms_version_accepted: Optional[str] = None,
+        privacy_version_accepted: Optional[str] = None,
+        *,
+        collect_terms_in_checkout: bool = False,
     ) -> dict:
-        cleaned_terms_version = (terms_version_accepted or '').strip()
-        cleaned_privacy_version = (privacy_version_accepted or '').strip()
+        if collect_terms_in_checkout:
+            cleaned_terms_version = (
+                terms_version_accepted
+                or getattr(
+                    settings,
+                    'ROO_POINTS_TERMS_VERSION',
+                    PointsPurchaseService.DEFAULT_TERMS_VERSION,
+                )
+                or ''
+            ).strip()
+            cleaned_privacy_version = (
+                privacy_version_accepted
+                or getattr(
+                    settings,
+                    'ROO_POINTS_PRIVACY_VERSION',
+                    PointsPurchaseService.DEFAULT_PRIVACY_VERSION,
+                )
+                or ''
+            ).strip()
+        else:
+            cleaned_terms_version = (terms_version_accepted or '').strip()
+            cleaned_privacy_version = (privacy_version_accepted or '').strip()
         if not cleaned_terms_version or not cleaned_privacy_version:
             raise ValueError("terms_version_accepted and privacy_version_accepted are required")
 
@@ -180,6 +230,12 @@ class PointsPurchaseService:
             raise ValueError(f"Points purchase is {purchase.status} and cannot start Checkout")
         if purchase.expires_at <= timezone.now():
             raise ValueError("Points purchase has expired")
+        if purchase.stripe_checkout_session_id and purchase.stripe_checkout_session_url:
+            return {
+                'purchase': purchase,
+                'checkout_session_id': purchase.stripe_checkout_session_id,
+                'checkout_session_url': purchase.stripe_checkout_session_url,
+            }
 
         PointsPurchaseService.validate_purchase_limits(purchase.user, purchase.points_amount)
         pack = PointsPurchaseService.get_pack_config(purchase.pack_id)
@@ -194,29 +250,52 @@ class PointsPurchaseService:
             'slack_user_id': purchase.slack_user_id,
             'pack_id': purchase.pack_id,
             'points_amount': str(purchase.points_amount),
-            'terms_version_accepted': cleaned_terms_version,
-            'privacy_version_accepted': cleaned_privacy_version,
+            'terms_version': cleaned_terms_version,
+            'privacy_version': cleaned_privacy_version,
+            'checkout_consent_mode': (
+                'stripe' if collect_terms_in_checkout else 'frontend'
+            ),
         }
         data = {
             'mode': 'payment',
             'client_reference_id': str(purchase.id),
             'success_url': PointsPurchaseService.stripe_return_url(purchase, 'success'),
             'cancel_url': PointsPurchaseService.stripe_return_url(purchase, 'cancelled'),
+            'expires_at': str(int(purchase.expires_at.timestamp())),
             'line_items[0][quantity]': '1',
             'line_items[0][price_data][currency]': purchase.currency,
             'line_items[0][price_data][unit_amount]': str(purchase.amount_cents),
             'line_items[0][price_data][product_data][name]': pack['label'],
         }
+        if collect_terms_in_checkout:
+            data['consent_collection[terms_of_service]'] = 'required'
+            data['custom_text[terms_of_service_acceptance][message]'] = str(
+                getattr(
+                    settings,
+                    'ROO_POINTS_TERMS_ACCEPTANCE_TEXT',
+                    PointsPurchaseService.DEFAULT_TERMS_ACCEPTANCE_TEXT,
+                )
+                or PointsPurchaseService.DEFAULT_TERMS_ACCEPTANCE_TEXT
+            ).strip()
         for key, value in metadata.items():
             data[f'metadata[{key}]'] = value
             data[f'payment_intent_data[metadata][{key}]'] = value
 
-        response = requests.post(
-            'https://api.stripe.com/v1/checkout/sessions',
-            auth=(stripe_secret_key, ''),
-            data=data,
-            timeout=20,
-        )
+        try:
+            response = requests.post(
+                'https://api.stripe.com/v1/checkout/sessions',
+                auth=(stripe_secret_key, ''),
+                headers={'Idempotency-Key': f'roo-points-purchase:{purchase.id}'},
+                data=data,
+                timeout=20,
+            )
+        except requests.RequestException as exc:
+            logger.warning(
+                "Stripe Checkout Session request failed for PointsPurchase %s: %s",
+                purchase.id,
+                exc.__class__.__name__,
+            )
+            raise RuntimeError("Stripe Checkout Session request failed") from exc
         if response.status_code >= 400:
             try:
                 error_data = response.json()
@@ -232,20 +311,37 @@ class PointsPurchaseService:
             raise RuntimeError("Stripe Checkout Session response was missing id or url")
 
         purchase.stripe_checkout_session_id = checkout_session_id
-        purchase.terms_version_accepted = cleaned_terms_version
-        purchase.terms_accepted_at = timezone.now()
-        purchase.privacy_version_accepted = cleaned_privacy_version
-        purchase.privacy_accepted_at = purchase.terms_accepted_at
-        purchase.save(
-            update_fields=[
-                'stripe_checkout_session_id',
-                'terms_version_accepted',
-                'terms_accepted_at',
-                'privacy_version_accepted',
-                'privacy_accepted_at',
-                'updated_at',
-            ]
-        )
+        purchase.stripe_checkout_session_url = checkout_session_url
+        update_fields = [
+            'stripe_checkout_session_id',
+            'stripe_checkout_session_url',
+            'updated_at',
+        ]
+        if collect_terms_in_checkout:
+            purchase_metadata = dict(purchase.metadata or {})
+            purchase_metadata.update(
+                {
+                    'checkout_consent_mode': 'stripe',
+                    'terms_version_presented': cleaned_terms_version,
+                    'privacy_version_presented': cleaned_privacy_version,
+                }
+            )
+            purchase.metadata = purchase_metadata
+            update_fields.append('metadata')
+        else:
+            purchase.terms_version_accepted = cleaned_terms_version
+            purchase.terms_accepted_at = timezone.now()
+            purchase.privacy_version_accepted = cleaned_privacy_version
+            purchase.privacy_accepted_at = purchase.terms_accepted_at
+            update_fields.extend(
+                [
+                    'terms_version_accepted',
+                    'terms_accepted_at',
+                    'privacy_version_accepted',
+                    'privacy_accepted_at',
+                ]
+            )
+        purchase.save(update_fields=update_fields)
 
         return {
             'purchase': purchase,

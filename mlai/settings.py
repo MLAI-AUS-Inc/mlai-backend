@@ -935,6 +935,21 @@ STRIPE_VIBE_RAISING_KEY = _env_first(
     "STRIPE_VIBE_RAISING_SECRET_KEY",
 )
 STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
+ROO_POINTS_TERMS_VERSION = os.environ.get(
+    "ROO_POINTS_TERMS_VERSION",
+    "roo-points-terms-2026-05-04",
+).strip()
+ROO_POINTS_PRIVACY_VERSION = os.environ.get(
+    "ROO_POINTS_PRIVACY_VERSION",
+    "privacy-2026-05-04",
+).strip()
+ROO_POINTS_TERMS_ACCEPTANCE_TEXT = os.environ.get(
+    "ROO_POINTS_TERMS_ACCEPTANCE_TEXT",
+    (
+        "I understand that Roo Points are not money, have no cash value, are not "
+        "refundable except where required by law, and cannot be transferred or sold."
+    ),
+).strip()
 STRIPE_OAUTH_REDIRECT_URI = os.environ.get(
     "STRIPE_OAUTH_REDIRECT_URI",
     f"{DEFAULT_BACKEND_URL}/integrations/callback/stripe",

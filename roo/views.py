@@ -298,6 +298,15 @@ class StripeWebhookView(APIView):
         slack_confirmation_sent = False
         with transaction.atomic():
             purchase = self._find_purchase_for_session(session)
+            session_metadata = session.get('metadata') or {}
+            checkout_consent_mode = session_metadata.get('checkout_consent_mode')
+            if (
+                checkout_consent_mode == 'stripe'
+                and (session.get('consent') or {}).get('terms_of_service') != 'accepted'
+            ):
+                raise ValueError(
+                    'Stripe terms consent is required for this Roo Points purchase'
+                )
 
             if purchase.stripe_checkout_session_id and purchase.stripe_checkout_session_id != session_id:
                 raise ValueError('Stripe checkout session does not match the purchase')
@@ -332,13 +341,42 @@ class StripeWebhookView(APIView):
             purchase.paid_at = timezone.now()
             purchase.stripe_checkout_session_id = session_id
             purchase.ledger_entry = ledger
-            purchase.save(update_fields=[
+            purchase_update_fields = [
                 'status',
                 'paid_at',
                 'stripe_checkout_session_id',
                 'ledger_entry',
                 'updated_at',
-            ])
+            ]
+            if checkout_consent_mode == 'stripe':
+                purchase.terms_version_accepted = str(
+                    session_metadata.get('terms_version')
+                    or getattr(settings, 'ROO_POINTS_TERMS_VERSION', '')
+                ).strip()
+                purchase.terms_accepted_at = purchase.paid_at
+                purchase.privacy_version_accepted = str(
+                    session_metadata.get('privacy_version')
+                    or getattr(settings, 'ROO_POINTS_PRIVACY_VERSION', '')
+                ).strip()
+                purchase.privacy_accepted_at = purchase.paid_at
+                purchase_metadata = dict(purchase.metadata or {})
+                purchase_metadata.update(
+                    {
+                        'stripe_terms_consent': 'accepted',
+                        'stripe_terms_consent_recorded_at': purchase.paid_at.isoformat(),
+                    }
+                )
+                purchase.metadata = purchase_metadata
+                purchase_update_fields.extend(
+                    [
+                        'terms_version_accepted',
+                        'terms_accepted_at',
+                        'privacy_version_accepted',
+                        'privacy_accepted_at',
+                        'metadata',
+                    ]
+                )
+            purchase.save(update_fields=purchase_update_fields)
             should_post_slack_confirmation = True
 
         if should_post_slack_confirmation:
@@ -1900,6 +1938,112 @@ class PointsPurchaseViewSet(viewsets.ViewSet):
 
         return Response(
             self._response_data(purchase),
+            status=status.HTTP_201_CREATED,
+        )
+
+    @action(detail=False, methods=['post'], url_path='checkout-options')
+    def checkout_options(self, request):
+        """Create idempotent, Stripe-hosted checkout buttons for Roo in Slack."""
+        slack_user_id = (request.data.get('slack_user_id') or '').strip()
+        checkout_request_id = (request.data.get('checkout_request_id') or '').strip()
+        purchase_from = request.data.get('purchase_from') or {}
+        requested_pack_ids = request.data.get('pack_ids')
+
+        if not slack_user_id or not checkout_request_id:
+            return Response(
+                {'error': 'slack_user_id and checkout_request_id are required'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if len(checkout_request_id) > 255:
+            return Response(
+                {'error': 'checkout_request_id must be 255 characters or fewer'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not isinstance(purchase_from, dict):
+            return Response(
+                {'error': 'purchase_from must be an object when provided'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if requested_pack_ids is None:
+            pack_ids = list(PointsPurchaseService.ROO_TOPUP_PACKS)
+        elif isinstance(requested_pack_ids, list):
+            pack_ids = list(dict.fromkeys(str(value).strip() for value in requested_pack_ids))
+        else:
+            return Response(
+                {'error': 'pack_ids must be an array when provided'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not pack_ids:
+            return Response(
+                {'error': 'At least one pack_id is required'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            pack_configs = {
+                pack_id: PointsPurchaseService.get_pack_config(pack_id)
+                for pack_id in pack_ids
+            }
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        origin = {
+            **purchase_from,
+            'source': 'slack',
+            'surface': 'roo_topup_buttons',
+            'checkout_request_id': checkout_request_id,
+        }
+        options = []
+        errors = []
+        for pack_id in pack_ids:
+            try:
+                purchase = PointsPurchaseService.create_purchase(
+                    slack_user_id=slack_user_id,
+                    pack_id=pack_id,
+                    purchase_from=origin,
+                    checkout_request_id=checkout_request_id,
+                )
+                checkout_result = PointsPurchaseService.create_checkout_session(
+                    purchase=purchase,
+                    collect_terms_in_checkout=True,
+                )
+            except PermissionDeniedError as exc:
+                return Response({'error': str(exc)}, status=status.HTTP_403_FORBIDDEN)
+            except ValueError as exc:
+                errors.append({'pack_id': pack_id, 'error': str(exc)})
+                continue
+            except RuntimeError as exc:
+                logger.warning(
+                    "Failed to create direct Stripe Checkout for PointsPurchase pack %s: %s",
+                    pack_id,
+                    exc,
+                )
+                errors.append({'pack_id': pack_id, 'error': str(exc)})
+                continue
+
+            pack = pack_configs[pack_id]
+            options.append(
+                {
+                    **self._response_data(checkout_result['purchase']),
+                    'label': pack['label'],
+                    'checkout_session_url': checkout_result['checkout_session_url'],
+                }
+            )
+
+        if not options:
+            return Response(
+                {
+                    'error': 'Stripe Checkout is temporarily unavailable for Roo Points top-ups',
+                    'errors': errors,
+                },
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        return Response(
+            {
+                'checkout_request_id': checkout_request_id,
+                'options': options,
+                'errors': errors,
+            },
             status=status.HTTP_201_CREATED,
         )
 

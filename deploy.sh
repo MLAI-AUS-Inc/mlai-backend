@@ -205,6 +205,9 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     # Stripe API version expected by the production runtime.
     sed -i '/^[[:space:]]*STRIPE_API_VERSION[[:space:]]*=/d' .env
     upsert_env_value STRIPE_API_VERSION "2026-02-25.clover"
+    upsert_env_value ROO_POINTS_TERMS_VERSION "roo-points-terms-2026-05-04"
+    upsert_env_value ROO_POINTS_PRIVACY_VERSION "privacy-2026-05-04"
+    upsert_env_value ROO_POINTS_TERMS_ACCEPTANCE_TEXT "I understand that Roo Points are not money, have no cash value, are not refundable except where required by law, and cannot be transferred or sold."
     # Preserve reporting access and the granular write scopes required by the
     # explicit payout approval workflow and tracking-option creation.
     upsert_env_value XERO_OAUTH_SCOPES "offline_access accounting.invoices.read accounting.payments.read accounting.settings.read accounting.settings accounting.contacts.read accounting.reports.balancesheet.read accounting.reports.profitandloss.read accounting.banktransactions"
