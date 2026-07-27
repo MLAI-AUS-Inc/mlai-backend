@@ -692,6 +692,59 @@ class LinearProjectArtifact(models.Model):
         return f"{self.organization.domain}:{self.name or self.linear_project_id}"
 
 
+class LinearProjectMemberArtifact(models.Model):
+    """A direct Linear project member available as allocation evidence."""
+
+    SOURCE_DIRECT = "direct"
+    SOURCE_TEAM_FALLBACK = "team_fallback"
+    SOURCE_CHOICES = [
+        (SOURCE_DIRECT, "Direct project member"),
+        (SOURCE_TEAM_FALLBACK, "Team fallback"),
+    ]
+
+    organization = models.ForeignKey(
+        "organizations.Organization",
+        on_delete=models.CASCADE,
+        related_name="linear_project_member_artifacts",
+    )
+    connection = models.ForeignKey(
+        "integrations.ExternalServiceConnection",
+        on_delete=models.CASCADE,
+        related_name="linear_project_member_artifacts",
+    )
+    project = models.ForeignKey(
+        LinearProjectArtifact,
+        on_delete=models.CASCADE,
+        related_name="members",
+    )
+    linear_user_id = models.CharField(max_length=100)
+    name = models.CharField(max_length=255, blank=True, default="")
+    email = models.EmailField(max_length=255, blank=True, default="")
+    membership_source = models.CharField(max_length=24, choices=SOURCE_CHOICES, default=SOURCE_DIRECT)
+    active = models.BooleanField(default=True, db_index=True)
+    raw_payload = models.JSONField(default=dict, blank=True)
+    synced_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "integrations_linearprojectmemberartifact"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["organization", "connection", "project", "linear_user_id"],
+                name="linear_member_org_proj_user_uniq",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["organization", "active", "name"], name="linear_member_org_active_idx"),
+            models.Index(fields=["project", "active"], name="linear_member_proj_active_idx"),
+        ]
+        ordering = ["name", "linear_user_id"]
+
+    def __str__(self):
+        return f"{self.project_id}:{self.name or self.linear_user_id}"
+
+
 class LinearIssueArtifact(models.Model):
     organization = models.ForeignKey(
         "organizations.Organization",

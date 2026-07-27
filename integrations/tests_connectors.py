@@ -2289,3 +2289,40 @@ class LinearProjectArtifactUpsertTests(TestCase):
         artifact.refresh_from_db()
         self.assertEqual(artifact.relevance_label, GmailRelevanceLabel.PENDING)
         self.assertEqual(artifact.extraction_status, ArtifactProcessingStatus.HYDRATED)
+
+    def test_syncs_direct_project_members_and_deactivates_removed_members(self):
+        from integrations.services.external_connectors import (
+            _sync_linear_project_members,
+            _upsert_linear_project_artifact,
+        )
+        from startup_updates.models import LinearProjectMemberArtifact
+
+        project = {"id": "proj-aaron", "name": "[Studio] Aaron AI"}
+        artifact = _upsert_linear_project_artifact(connection=self.connection, project=project)
+        count = _sync_linear_project_members(
+            connection=self.connection,
+            project_artifact=artifact,
+            project={
+                **project,
+                "members": {"nodes": [{
+                    "id": "usr-luiz",
+                    "name": "Luiz Flavio",
+                    "email": "hello@luiz-flavio.com",
+                    "active": True,
+                }]},
+            },
+        )
+
+        self.assertEqual(count, 1)
+        member = LinearProjectMemberArtifact.objects.get(linear_user_id="usr-luiz")
+        self.assertEqual(member.project, artifact)
+        self.assertEqual(member.membership_source, LinearProjectMemberArtifact.SOURCE_DIRECT)
+        self.assertTrue(member.active)
+
+        _sync_linear_project_members(
+            connection=self.connection,
+            project_artifact=artifact,
+            project={**project, "members": {"nodes": []}},
+        )
+        member.refresh_from_db()
+        self.assertFalse(member.active)

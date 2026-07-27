@@ -15,16 +15,21 @@ from integrations.models import (
     ExternalServiceProvider,
     GoogleConnection,
     ReconciliationMapping,
+    ReconciliationDecision,
+    ReconciliationPartyIdentity,
     ReconciliationProfile,
+    ReconciliationRule,
     ReconciliationSuggestion,
     StripePayoutReconciliation,
     XeroStatementLineSnapshot,
     XeroStatementPosting,
+    XeroStatementScan,
     XeroStatementSuggestion,
 )
 from startup_updates.models import (
     GmailMessageArtifact,
     LinearProjectArtifact,
+    LinearProjectMemberArtifact,
     LumaEventSelection,
     SlackMessageArtifact,
 )
@@ -34,6 +39,7 @@ from integrations.services.reconciliation import (
 )
 from integrations.services.xero_reconciliation import (
     ReconciliationValidationError,
+    XeroPostingError,
     build_xero_preview,
     ensure_xero_tracking_options,
     persist_report,
@@ -48,6 +54,7 @@ from integrations.services.xero_statement_reconciliation import (
     build_statement_reconciliation_context,
     format_statement_browser_comment,
     import_xero_statement_lines,
+    merchant_key,
     save_statement_suggestions,
     serialize_statement_suggestion,
 )
@@ -58,7 +65,12 @@ from integrations.services.xero_statement_posting import (
 from integrations.services.external_connectors import _upsert_xero_payments
 from integrations.tests_reconciliation import FakeSession
 from roo.models import PointsAdmin
-from workflow_runs.models import ContentFactoryRun
+from workflow_runs.models import (
+    ContentFactoryRun,
+    ContentFactoryRunStatus,
+    ContentFactoryRunStep,
+    ContentFactoryStepStatus,
+)
 
 
 User = get_user_model()
@@ -457,6 +469,7 @@ class XeroReconciliationWorkflowTests(TestCase):
                     "account": "406 - Travel-national",
                     "description": "uber trip",
                     "tax_type": "GST on Expenses",
+                    "ui_mode": "green_match",
                     "has_ok": True,
                 },
                 {
@@ -616,6 +629,7 @@ class XeroReconciliationWorkflowTests(TestCase):
                 "current_event_name": "HealthHack | Sydney",
                 "current_project_name": "MedHack: Sydney",
                 "current_tax_type": "GST on Expenses",
+                "ui_mode": "green_match",
                 "has_ok": True,
             }],
         )
@@ -641,6 +655,108 @@ class XeroReconciliationWorkflowTests(TestCase):
                     "description": "Uber trip",
                 }],
             },
+        )
+
+    def test_prefilled_create_with_ok_is_still_a_candidate(self):
+        line = import_xero_statement_lines(
+            organization=self.organization,
+            bank_account_id="bank-1",
+            lines=[{
+                "statement_line_id": "prefilled-luiz",
+                "date": "30 Jun 2026",
+                "narration": "Transfer To LUIZ F OLIVEIRA ARAUJO",
+                "reference": "NPP",
+                "direction": "debit",
+                "amount": "520.00",
+                "contact": "Luiz F Oliveira Araujo",
+                "account": "405 - Contractor Expenses",
+                "description": "Contractor work for Aaron AI.",
+                "project_name": "[Studio] Aaron AI",
+                "tax_type": "GST Free Expenses",
+                "has_ok": True,
+            }],
+        )[0]
+
+        self.assertEqual(line.ui_mode, XeroStatementLineSnapshot.UI_CREATE_PREFILLED)
+        self.assertTrue(line.create_prefill_complete)
+        self.assertFalse(line.is_green_match)
+        context = build_statement_reconciliation_context(organization=self.organization)
+        self.assertEqual(
+            [item["statement_line_id"] for item in context["statement_candidates"]],
+            ["prefilled-luiz"],
+        )
+        self.assertEqual(context["prior_xero_examples"], [])
+
+    def test_incomplete_scan_does_not_deactivate_unseen_rows(self):
+        import_xero_statement_lines(
+            organization=self.organization,
+            bank_account_id="bank-1",
+            lines=[{
+                "statement_line_id": "first-row",
+                "date": "30 Jun 2026",
+                "narration": "First",
+                "direction": "debit",
+                "amount": "10.00",
+            }, {
+                "statement_line_id": "second-row",
+                "date": "30 Jun 2026",
+                "narration": "Second",
+                "direction": "debit",
+                "amount": "20.00",
+            }],
+            expected_count=2,
+        )
+
+        import_xero_statement_lines(
+            organization=self.organization,
+            bank_account_id="bank-1",
+            lines=[{
+                "statement_line_id": "first-row",
+                "date": "30 Jun 2026",
+                "narration": "First",
+                "direction": "debit",
+                "amount": "10.00",
+            }],
+            expected_count=2,
+            complete_scan=False,
+        )
+
+        second = XeroStatementLineSnapshot.objects.get(statement_line_id="second-row")
+        self.assertTrue(second.active)
+        self.assertEqual(
+            XeroStatementScan.objects.latest("id").status,
+            XeroStatementScan.STATUS_INCOMPLETE,
+        )
+
+    def test_complete_scan_count_mismatch_does_not_change_queue(self):
+        import_xero_statement_lines(
+            organization=self.organization,
+            bank_account_id="bank-1",
+            lines=[{
+                "statement_line_id": "existing-row",
+                "date": "30 Jun 2026",
+                "narration": "Existing",
+                "direction": "debit",
+                "amount": "10.00",
+            }],
+        )
+
+        with self.assertRaisesMessage(ValueError, "expected 2 rows but observed 1"):
+            import_xero_statement_lines(
+                organization=self.organization,
+                bank_account_id="bank-1",
+                lines=[{
+                    "statement_line_id": "replacement-row",
+                    "date": "30 Jun 2026",
+                    "narration": "Replacement",
+                    "direction": "debit",
+                    "amount": "20.00",
+                }],
+                expected_count=2,
+            )
+
+        self.assertTrue(
+            XeroStatementLineSnapshot.objects.get(statement_line_id="existing-row").active
         )
 
     def test_statement_context_finds_date_amount_and_merchant_evidence(self):
@@ -837,6 +953,250 @@ class XeroReconciliationWorkflowTests(TestCase):
             {("luma", "evt-watt"), ("linear", "project-watt")},
         )
 
+    def test_reconciliation_context_includes_direct_linear_project_members(self):
+        project = LinearProjectArtifact.objects.create(
+            connection=self.linear_connection,
+            organization=self.organization,
+            linear_project_id="project-aaron",
+            name="[Studio] Aaron AI",
+            start_date=datetime(2026, 6, 9).date(),
+        )
+        LinearProjectMemberArtifact.objects.create(
+            connection=self.linear_connection,
+            organization=self.organization,
+            project=project,
+            linear_user_id="usr-luiz",
+            name="Luiz Flavio",
+            email="hello@luiz-flavio.com",
+        )
+
+        context = build_reconciliation_enrichment_context(organization=self.organization)
+
+        linear_project = next(
+            item for item in context["linear_projects"]
+            if item["source_id"] == "project-aaron"
+        )
+        self.assertEqual(linear_project["members"], [{
+            "source_type": "linear_user",
+            "source_id": "usr-luiz",
+            "name": "Luiz Flavio",
+            "email": "hello@luiz-flavio.com",
+            "membership_source": "direct",
+        }])
+
+    def test_verified_party_identity_is_supplied_to_statement_agent(self):
+        line = import_xero_statement_lines(
+            organization=self.organization,
+            bank_account_id="bank-1",
+            lines=[{
+                "statement_line_id": "luiz-identity-520",
+                "date": "30 Jun 2026",
+                "narration": "Transfer To LUIZ F OLIVEIRA ARAUJO",
+                "direction": "debit",
+                "amount": "520.00",
+            }],
+        )[0]
+        ReconciliationPartyIdentity.objects.create(
+            organization=self.organization,
+            bank_narration_key=merchant_key(line.narration),
+            direction="debit",
+            canonical_name="Luiz Flavio",
+            xero_contact_name="Luiz F Oliveira Araujo",
+            linear_user_id="usr-luiz",
+            linear_name="Luiz Flavio",
+            linear_email="hello@luiz-flavio.com",
+            status=ReconciliationPartyIdentity.STATUS_VERIFIED,
+            confidence=1.0,
+            verified_by_slack_id="UADMIN",
+        )
+
+        candidate = next(
+            item for item in build_statement_reconciliation_context(
+                organization=self.organization
+            )["statement_candidates"]
+            if item["statement_line_id"] == line.statement_line_id
+        )
+
+        self.assertEqual(candidate["verified_identity"]["linear_user_id"], "usr-luiz")
+        self.assertEqual(candidate["verified_identity"]["canonical_name"], "Luiz Flavio")
+
+    def test_verified_date_bounded_rule_authoritatively_codes_luiz_to_aaron_ai(self):
+        project = LinearProjectArtifact.objects.create(
+            connection=self.linear_connection,
+            organization=self.organization,
+            linear_project_id="project-aaron-ai",
+            name="[Studio] Aaron AI",
+            description="Aaron AI client delivery.",
+        )
+        line = import_xero_statement_lines(
+            organization=self.organization,
+            bank_account_id="bank-1",
+            lines=[{
+                "statement_line_id": "luiz-aaron-rule-520",
+                "date": "30 Jun 2026",
+                "narration": "Transfer To LUIZ F OLIVEIRA ARAUJO",
+                "direction": "debit",
+                "amount": "520.00",
+            }],
+        )[0]
+        rule = ReconciliationRule.objects.create(
+            organization=self.organization,
+            name="Luiz contractor payments – Aaron AI",
+            scope=ReconciliationRule.SCOPE_MERCHANT,
+            bank_narration_key=merchant_key(line.narration),
+            direction="debit",
+            effective_from=datetime(2026, 6, 1).date(),
+            effective_to=datetime(2026, 7, 31).date(),
+            contact_name="Luiz F Oliveira Araujo",
+            account_code="405",
+            account_name="Contractor Expenses",
+            tax_type="GST Free Expenses",
+            description_template="Contractor work for {project}.",
+            project_source_id=project.linear_project_id,
+            project_tracking_option_name=project.name,
+            status=ReconciliationRule.STATUS_VERIFIED,
+            active=True,
+            verified_by_slack_id="UADMIN",
+            verified_at=datetime.now(timezone.utc),
+        )
+
+        context = build_statement_reconciliation_context(organization=self.organization)
+        candidate = next(
+            item for item in context["statement_candidates"]
+            if item["statement_line_id"] == line.statement_line_id
+        )
+        self.assertEqual(candidate["verified_rule"]["id"], rule.id)
+        saved = save_statement_suggestions(
+            organization=self.organization,
+            run_id="run-luiz-rule",
+            suggestions=[{
+                "statement_line_id": line.statement_line_id,
+                "proposed_action": "needs_review",
+                "confidence": 0.35,
+                "document_confidence": 0.20,
+            }],
+        )[0]
+
+        self.assertEqual(saved.proposed_action, "create_bank_transaction")
+        self.assertEqual(saved.contact_name, "Luiz F Oliveira Araujo")
+        self.assertEqual(saved.account_code, "405")
+        self.assertEqual(saved.project_source_id, "project-aaron-ai")
+        self.assertEqual(saved.description, "Contractor work for [Studio] Aaron AI.")
+        self.assertTrue(saved.execution_ready)
+        self.assertEqual(saved.identity_confidence, 1.0)
+        self.assertEqual(saved.allocation_confidence, 1.0)
+        decision = ReconciliationDecision.objects.get(
+            suggestion=saved,
+            decision_type=ReconciliationDecision.TYPE_RULE_APPLIED,
+        )
+        self.assertEqual(decision.rule, rule)
+        self.assertEqual(decision.actor_type, ReconciliationDecision.ACTOR_SYSTEM)
+
+    def test_equal_priority_verified_rule_conflict_blocks_agent_output(self):
+        line = import_xero_statement_lines(
+            organization=self.organization,
+            bank_account_id="bank-1",
+            lines=[{
+                "statement_line_id": "luiz-conflicting-rules",
+                "date": "30 Jun 2026",
+                "narration": "Transfer To LUIZ F OLIVEIRA ARAUJO",
+                "direction": "debit",
+                "amount": "455.00",
+            }],
+        )[0]
+        common = {
+            "organization": self.organization,
+            "scope": ReconciliationRule.SCOPE_MERCHANT,
+            "bank_narration_key": merchant_key(line.narration),
+            "direction": "debit",
+            "contact_name": "Luiz F Oliveira Araujo",
+            "account_code": "405",
+            "account_name": "Contractor Expenses",
+            "tax_type": "GST Free Expenses",
+            "description_template": "Contractor work.",
+            "priority": 100,
+            "status": ReconciliationRule.STATUS_VERIFIED,
+            "active": True,
+            "verified_at": datetime.now(timezone.utc),
+        }
+        ReconciliationRule.objects.create(name="Aaron AI", project_source_id="lin_project_1", **common)
+        ReconciliationRule.objects.create(name="Community", project_source_id="lin_event_1", **common)
+
+        saved = save_statement_suggestions(
+            organization=self.organization,
+            run_id="run-rule-conflict",
+            suggestions=[{
+                "statement_line_id": line.statement_line_id,
+                "proposed_action": "create_bank_transaction",
+                "account_code": "405",
+                "account_name": "Contractor Expenses",
+                "tax_type": "GST Free Expenses",
+            }],
+        )[0]
+        self.assertEqual(saved.proposed_action, XeroStatementSuggestion.ACTION_NEEDS_REVIEW)
+        self.assertFalse(saved.execution_ready)
+        self.assertTrue(ReconciliationDecision.objects.filter(
+            statement_line=line,
+            decision_type=ReconciliationDecision.TYPE_RULE_CONFLICT,
+        ).exists())
+
+    def test_statement_override_wins_and_merchant_rule_stays_date_bounded(self):
+        line = import_xero_statement_lines(
+            organization=self.organization,
+            bank_account_id="bank-1",
+            lines=[{
+                "statement_line_id": "specific-rule-line",
+                "date": "30 Jun 2026",
+                "narration": "Transfer To CONTRACTOR ONE",
+                "direction": "debit",
+                "amount": "100.00",
+            }, {
+                "statement_line_id": "outside-rule-window",
+                "date": "1 Aug 2026",
+                "narration": "Transfer To CONTRACTOR ONE",
+                "direction": "debit",
+                "amount": "120.00",
+            }],
+        )[0]
+        common = {
+            "organization": self.organization,
+            "contact_name": "Contractor One",
+            "account_code": "405",
+            "account_name": "Contractor Expenses",
+            "tax_type": "GST Free Expenses",
+            "description_template": "Contractor work.",
+            "status": ReconciliationRule.STATUS_VERIFIED,
+            "active": True,
+            "verified_at": datetime.now(timezone.utc),
+        }
+        ReconciliationRule.objects.create(
+            name="June/July merchant policy",
+            scope=ReconciliationRule.SCOPE_MERCHANT,
+            bank_narration_key=merchant_key(line.narration),
+            direction="debit",
+            effective_from=datetime(2026, 6, 1).date(),
+            effective_to=datetime(2026, 7, 31).date(),
+            project_source_id="lin_project_1",
+            **common,
+        )
+        statement_rule = ReconciliationRule.objects.create(
+            name="One-line correction",
+            scope=ReconciliationRule.SCOPE_STATEMENT_LINE,
+            statement_line=line,
+            project_source_id="lin_event_1",
+            priority=1,
+            **common,
+        )
+
+        candidates = {
+            item["statement_line_id"]: item
+            for item in build_statement_reconciliation_context(
+                organization=self.organization
+            )["statement_candidates"]
+        }
+        self.assertEqual(candidates[line.statement_line_id]["verified_rule"]["id"], statement_rule.id)
+        self.assertIsNone(candidates["outside-rule-window"]["verified_rule"])
+
     def _statement_suggestion(
         self,
         *,
@@ -894,7 +1254,7 @@ class XeroReconciliationWorkflowTests(TestCase):
         created.raise_for_status.return_value = None
         with patch(
             "integrations.services.xero_statement_posting.http_client.get",
-            side_effect=[empty, contacts],
+            side_effect=[empty, empty, contacts],
         ) as get_mock, patch(
             "integrations.services.xero_statement_posting.http_client.put",
             return_value=created,
@@ -904,11 +1264,27 @@ class XeroReconciliationWorkflowTests(TestCase):
         self.assertEqual(posting.status, XeroStatementPosting.STATUS_MATCH_READY)
         self.assertEqual(posting.xero_bank_transaction_id, "bt-statement-1")
         self.assertEqual(again.id, posting.id)
-        self.assertEqual(get_mock.call_count, 2)
+        self.assertEqual(get_mock.call_count, 3)
         self.assertEqual(put_mock.call_count, 1)
         body = put_mock.call_args.kwargs["json"]["BankTransactions"][0]
         self.assertEqual(body["Contact"], {"ContactID": "contact-uber"})
         self.assertEqual(body["LineItems"][0]["UnitAmount"], 31.07)
+
+    def test_dimension_scores_can_be_executable_when_document_confidence_is_low(self):
+        suggestion = self._statement_suggestion(line_id="luiz-aaron", confidence=0.62)
+        suggestion.identity_confidence = 0.98
+        suggestion.accounting_confidence = 0.95
+        suggestion.allocation_confidence = 0.94
+        suggestion.document_confidence = 0.40
+        suggestion.project_source_id = "project-aaron"
+        suggestion.project_tracking_option_name = "[Studio] Aaron AI"
+        suggestion.execution_ready = True
+        suggestion.save()
+
+        preview = build_statement_posting_preview(suggestion)
+
+        self.assertTrue(preview["ready"])
+        self.assertFalse(preview["errors"])
 
     def test_statement_post_translates_xero_tax_rate_label_to_api_code(self):
         suggestion = self._statement_suggestion(line_id="tax-label")
@@ -936,7 +1312,7 @@ class XeroReconciliationWorkflowTests(TestCase):
 
         with patch(
             "integrations.services.xero_statement_posting.http_client.get",
-            side_effect=[empty, contacts, tax_rates],
+            side_effect=[empty, empty, contacts, tax_rates],
         ), patch(
             "integrations.services.xero_statement_posting.http_client.put",
             return_value=created,
@@ -993,6 +1369,38 @@ class XeroReconciliationWorkflowTests(TestCase):
         self.assertEqual(recovered.xero_bank_transaction_id, "bt-recovered")
         put_mock.assert_not_called()
 
+    def test_semantic_xero_duplicate_blocks_a_second_bank_transaction(self):
+        suggestion = self._statement_suggestion(line_id="semantic-duplicate")
+        no_reference = Mock()
+        no_reference.json.return_value = {"BankTransactions": []}
+        no_reference.raise_for_status.return_value = None
+        semantic_match = Mock()
+        semantic_match.json.return_value = {"BankTransactions": [{
+            "BankTransactionID": "bt-manual-existing",
+            "Type": "SPEND",
+            "Total": 31.07,
+            "CurrencyCode": "AUD",
+            "BankAccount": {"AccountID": "bank-1"},
+            "Contact": {"Name": "uber"},
+        }]}
+        semantic_match.raise_for_status.return_value = None
+
+        with patch(
+            "integrations.services.xero_statement_posting.http_client.get",
+            side_effect=[no_reference, semantic_match],
+        ), patch("integrations.services.xero_statement_posting.http_client.put") as put_mock:
+            with self.assertRaisesMessage(XeroPostingError, "same bank account"):
+                execute_statement_posting(suggestion, requested_by_slack_id="UFIN")
+
+        put_mock.assert_not_called()
+        decision = ReconciliationDecision.objects.filter(
+            suggestion=suggestion,
+            decision_type=ReconciliationDecision.TYPE_PREVIEW_BLOCKED,
+            outcome__reason="semantic_duplicate",
+        ).first()
+        self.assertIsNotNone(decision)
+        self.assertEqual(decision.outcome["xero_bank_transaction_ids"], ["bt-manual-existing"])
+
     def test_existing_bill_creates_payment_not_spend_money(self):
         bill = ExternalFinancialRecord.objects.create(
             provider=ExternalServiceProvider.XERO,
@@ -1042,6 +1450,10 @@ class XeroReconciliationWorkflowTests(TestCase):
         preview = build_statement_posting_preview(suggestion)
         self.assertTrue(preview["ready"])
         self.assertEqual(preview["operation"], "bill_payment")
+        self.assertEqual(
+            serialize_statement_suggestion(suggestion)["routing"]["source"],
+            "exact_xero_bill",
+        )
 
         no_payment = Mock()
         no_payment.json.return_value = {"Payments": []}
@@ -1098,6 +1510,1451 @@ class ReconciliationWorkflowApiTests(APITestCase):
         self.organization = Organization.objects.create(name="MLAI", domain="mlai.au")
         self.user = User.objects.create_user(email="agent@example.com", slack_id="UAGENT")
         PointsAdmin.objects.create(slack_user_id="UADMIN", role="admin", is_active=True)
+
+    def _agent_run_suggestion(self, *, run_id="xero-agent-api-run", line_id="agent-api-line"):
+        connection = ExternalServiceConnection.objects.create(
+            provider=ExternalServiceProvider.XERO,
+            user=self.user,
+            organization=self.organization,
+            access_token="access-token",
+            external_account_id="tenant-agent-api",
+            scopes=["accounting.banktransactions", "accounting.payments"],
+        )
+        ReconciliationProfile.objects.create(
+            organization=self.organization,
+            xero_connection=connection,
+            xero_bank_account_id="bank-1",
+        )
+        line = import_xero_statement_lines(
+            organization=self.organization,
+            bank_account_id="bank-1",
+            expected_count=1,
+            requested_by="UADMIN",
+            lines=[{
+                "statement_line_id": line_id,
+                "date": "20 Jul 2026",
+                "narration": "Transfer To CONTRACTOR ONE",
+                "direction": "debit",
+                "amount": "845.00",
+            }],
+        )[0]
+        run = ContentFactoryRun.objects.create(
+            run_id=run_id,
+            workflow="xero_reconciliation_agent",
+            domain=self.organization.domain,
+            organization=self.organization,
+            status=ContentFactoryRunStatus.COMPLETED,
+        )
+        suggestion = XeroStatementSuggestion.objects.create(
+            organization=self.organization,
+            statement_line=line,
+            run_id=run.run_id,
+            proposed_action=XeroStatementSuggestion.ACTION_CREATE_BANK_TRANSACTION,
+            contact_name="Contractor One",
+            account_code="405",
+            account_name="Contractor Expenses",
+            tax_type="GST Free Expenses",
+            description="Contractor work for the client project.",
+            confidence=0.99,
+            source_hash=line.source_hash,
+            evidence=[{"source_provider": "xero_ui", "source_record_id": line.statement_line_id}],
+        )
+        return run, suggestion
+
+    @patch("core.permissions.HasRooApiKey.has_permission", return_value=True)
+    def test_reconciliation_readiness_reports_missing_prerequisites(self, _permission):
+        response = self.client.get(
+            reverse("reconciliation_readiness"),
+            {"slack_user_id": "UADMIN", "domain": "mlai.au"},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertFalse(response.data["ready_to_start"])
+        self.assertFalse(response.data["ready_to_execute_bank_transactions"])
+        self.assertFalse(response.data["ready_to_execute_bill_payments"])
+        self.assertIsNone(response.data["latest_statement_scan"])
+        self.assertIsNone(response.data["monthly_context"])
+        self.assertIn(
+            "Import the current complete Xero bank-feed queue.",
+            response.data["blockers"],
+        )
+        self.assertIn(
+            "Reconnect Xero with accounting.payments before paying existing bills.",
+            response.data["warnings"],
+        )
+
+    @patch("core.permissions.HasRooApiKey.has_permission", return_value=True)
+    def test_reconciliation_readiness_confirms_fresh_context_and_xero_scopes(self, _permission):
+        connection = ExternalServiceConnection.objects.create(
+            provider=ExternalServiceProvider.XERO,
+            user=self.user,
+            organization=self.organization,
+            access_token="access-token",
+            external_account_id="tenant-readiness",
+            scopes=["accounting.banktransactions", "accounting.payments"],
+        )
+        ReconciliationProfile.objects.create(
+            organization=self.organization,
+            xero_connection=connection,
+            xero_bank_account_id="bank-1",
+            event_tracking_category_id="event-category",
+            project_tracking_category_id="project-category",
+        )
+        monthly_run = ContentFactoryRun.objects.create(
+            run_id="monthly-readiness",
+            workflow="startup_monthly_update",
+            domain=self.organization.domain,
+            organization=self.organization,
+            status=ContentFactoryRunStatus.COMPLETED,
+        )
+        line = import_xero_statement_lines(
+            organization=self.organization,
+            bank_account_id="bank-1",
+            expected_count=1,
+            requested_by="UADMIN",
+            lines=[{
+                "statement_line_id": "readiness-unreconciled",
+                "date": "20 Jul 2026",
+                "narration": "Transfer To CONTRACTOR",
+                "direction": "debit",
+                "amount": "845.00",
+            }],
+        )[0]
+
+        response = self.client.get(
+            reverse("reconciliation_readiness"),
+            {"slack_user_id": "UADMIN", "domain": "mlai.au"},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data["ready_to_start"])
+        self.assertTrue(response.data["ready_to_execute_bank_transactions"])
+        self.assertTrue(response.data["ready_to_execute_bill_payments"])
+        self.assertTrue(response.data["tracking_ready"])
+        self.assertEqual(response.data["latest_statement_scan"]["candidate_count"], 1)
+        self.assertEqual(
+            response.data["latest_statement_scan"]["id"],
+            line.last_scan_id,
+        )
+        self.assertEqual(
+            response.data["monthly_context"]["run_id"],
+            monthly_run.run_id,
+        )
+        self.assertEqual(response.data["blockers"], [])
+        self.assertEqual(
+            response.data["recommended_next_action"],
+            "Start Xero reconciliation in preview-only mode.",
+        )
+
+    @patch("integrations.services.valley_harness.notify_valley_run_created")
+    @patch("core.permissions.HasRooApiKey.has_permission", return_value=True)
+    def test_latest_incomplete_scan_blocks_readiness_and_agent_start(
+        self, _permission, notify_valley
+    ):
+        import_xero_statement_lines(
+            organization=self.organization,
+            bank_account_id="bank-1",
+            expected_count=1,
+            requested_by="UADMIN",
+            lines=[{
+                "statement_line_id": "complete-before-partial",
+                "date": "20 Jul 2026",
+                "narration": "Jaycar - Franklin",
+                "direction": "debit",
+                "amount": "95.05",
+            }],
+        )
+        import_xero_statement_lines(
+            organization=self.organization,
+            bank_account_id="bank-1",
+            expected_count=2,
+            complete_scan=False,
+            requested_by="UADMIN",
+            lines=[{
+                "statement_line_id": "partial-latest",
+                "date": "21 Jul 2026",
+                "narration": "UBER *TRIP HELP.",
+                "direction": "debit",
+                "amount": "31.07",
+            }],
+        )
+
+        readiness = self.client.get(
+            reverse("reconciliation_readiness"),
+            {"slack_user_id": "UADMIN", "domain": "mlai.au"},
+        )
+        started = self.client.post(
+            reverse("reconciliation_agent_runs"),
+            {"slack_user_id": "UADMIN", "domain": "mlai.au"},
+            format="json",
+        )
+
+        self.assertFalse(readiness.data["ready_to_start"])
+        self.assertEqual(
+            readiness.data["latest_statement_scan"]["status"],
+            XeroStatementScan.STATUS_INCOMPLETE,
+        )
+        self.assertIn(
+            "The latest Xero statement scan is incomplete.",
+            readiness.data["blockers"],
+        )
+        self.assertEqual(started.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(
+            started.data["error"],
+            "The latest Xero statement scan is incomplete.",
+        )
+        notify_valley.assert_not_called()
+
+    @patch("core.permissions.HasRooApiKey.has_permission", return_value=True)
+    def test_statement_scan_endpoint_records_explicit_prefill_state(self, _permission):
+        response = self.client.post(
+            reverse("reconciliation_statement_scans"),
+            {
+                "slack_user_id": "UADMIN",
+                "domain": "mlai.au",
+                "bank_account_id": "bank-1",
+                "expected_count": 1,
+                "complete": True,
+                "lines": [{
+                    "statement_line_id": "api-prefilled-luiz",
+                    "date": "30 Jun 2026",
+                    "narration": "Transfer To LUIZ F OLIVEIRA ARAUJO",
+                    "direction": "debit",
+                    "amount": "520.00",
+                    "contact": "Luiz F Oliveira Araujo",
+                    "account": "405 - Contractor Expenses",
+                    "description": "Contractor work for Aaron AI.",
+                    "project_name": "[Studio] Aaron AI",
+                    "tax_type": "GST Free Expenses",
+                    "has_ok": True,
+                }],
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["scan"]["status"], XeroStatementScan.STATUS_COMPLETE)
+        self.assertEqual(
+            response.data["statement_lines"][0]["ui_mode"],
+            XeroStatementLineSnapshot.UI_CREATE_PREFILLED,
+        )
+
+    @patch("core.permissions.HasRooApiKey.has_permission", return_value=True)
+    def test_admin_can_verify_bank_to_xero_party_identity(self, _permission):
+        line = import_xero_statement_lines(
+            organization=self.organization,
+            bank_account_id="bank-1",
+            lines=[{
+                "statement_line_id": "identity-api-luiz",
+                "date": "30 Jun 2026",
+                "narration": "Transfer To LUIZ F OLIVEIRA ARAUJO",
+                "direction": "debit",
+                "amount": "520.00",
+            }],
+        )[0]
+
+        response = self.client.put(
+            reverse("reconciliation_party_identities"),
+            {
+                "slack_user_id": "UADMIN",
+                "domain": "mlai.au",
+                "statement_line_id": line.statement_line_id,
+                "canonical_name": "Luiz Flavio",
+                "xero_contact_name": "Luiz F Oliveira Araujo",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["identity"]["status"], "verified")
+        self.assertEqual(response.data["identity"]["verified_by_slack_id"], "UADMIN")
+
+    @patch("core.permissions.HasRooApiKey.has_permission", return_value=True)
+    def test_admin_can_create_confirmed_date_bounded_reconciliation_rule(self, _permission):
+        linear_connection = ExternalServiceConnection.objects.create(
+            provider=ExternalServiceProvider.LINEAR,
+            user=self.user,
+            organization=self.organization,
+            access_token="linear-token",
+            external_account_id="linear-api",
+        )
+        project = LinearProjectArtifact.objects.create(
+            connection=linear_connection,
+            organization=self.organization,
+            linear_project_id="api-aaron-ai",
+            name="[Studio] Aaron AI",
+        )
+        line = import_xero_statement_lines(
+            organization=self.organization,
+            bank_account_id="bank-1",
+            lines=[{
+                "statement_line_id": "api-rule-luiz",
+                "date": "30 Jun 2026",
+                "narration": "Transfer To LUIZ F OLIVEIRA ARAUJO",
+                "direction": "debit",
+                "amount": "520.00",
+            }],
+        )[0]
+        payload = {
+            "slack_user_id": "UADMIN",
+            "domain": "mlai.au",
+            "scope": "merchant",
+            "statement_line_id": line.statement_line_id,
+            "name": "Luiz – Aaron AI",
+            "effective_from": "2026-06-01",
+            "effective_to": "2026-07-31",
+            "contact_name": "Luiz F Oliveira Araujo",
+            "account_code": "405",
+            "account_name": "Contractor Expenses",
+            "tax_type": "GST Free Expenses",
+            "description_template": "Contractor work for {project}.",
+            "project_source_id": project.linear_project_id,
+            "status": "verified",
+        }
+        unconfirmed = self.client.post(
+            reverse("reconciliation_rules"),
+            payload,
+            format="json",
+        )
+        self.assertEqual(unconfirmed.status_code, status.HTTP_400_BAD_REQUEST)
+
+        confirmed = self.client.post(
+            reverse("reconciliation_rules"),
+            {**payload, "confirm": True},
+            format="json",
+        )
+        self.assertEqual(confirmed.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(confirmed.data["rule"]["status"], "verified")
+        self.assertTrue(confirmed.data["rule"]["active"])
+        self.assertEqual(confirmed.data["rule"]["project"]["source_id"], "api-aaron-ai")
+        self.assertEqual(confirmed.data["rule"]["verified_by_slack_id"], "UADMIN")
+
+        listed = self.client.get(
+            reverse("reconciliation_rules"),
+            {"slack_user_id": "UADMIN", "domain": "mlai.au"},
+        )
+        self.assertEqual(listed.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(listed.data["rules"]), 1)
+
+    @patch("core.permissions.HasRooApiKey.has_permission", return_value=True)
+    def test_agent_run_requires_approval_then_executes_only_approved_suggestions(self, _permission):
+        run, suggestion = self._agent_run_suggestion()
+
+        preview = self.client.get(
+            reverse("reconciliation_agent_run_preview", kwargs={"run_id": run.run_id}),
+            {"slack_user_id": "UADMIN", "domain": "mlai.au"},
+        )
+        self.assertEqual(preview.status_code, status.HTTP_200_OK)
+        self.assertEqual(preview.data["ready_count"], 1)
+        self.assertEqual(preview.data["approved_count"], 0)
+
+        before_approval = self.client.post(
+            reverse("reconciliation_agent_run_execute", kwargs={"run_id": run.run_id}),
+            {"slack_user_id": "UADMIN", "domain": "mlai.au", "confirm": True},
+            format="json",
+        )
+        self.assertEqual(before_approval.status_code, status.HTTP_200_OK)
+        self.assertEqual(before_approval.data["executed_count"], 0)
+        self.assertIn("not approval", before_approval.data["results"][0]["error"])
+
+        approval = self.client.post(
+            reverse("reconciliation_agent_run_decisions", kwargs={"run_id": run.run_id}),
+            {
+                "slack_user_id": "UADMIN",
+                "domain": "mlai.au",
+                "confirm": True,
+                "approve_all_ready": True,
+            },
+            format="json",
+        )
+        self.assertEqual(approval.status_code, status.HTTP_200_OK)
+        self.assertEqual(approval.data["recorded_count"], 1)
+        decision = ReconciliationDecision.objects.get(
+            suggestion=suggestion,
+            decision_type=ReconciliationDecision.TYPE_ADMIN_APPROVED,
+        )
+        self.assertTrue(decision.outcome["payload_hash"])
+
+        posting = Mock(
+            id=123,
+            status=XeroStatementPosting.STATUS_MATCH_READY,
+            xero_bank_transaction_id="bt-agent-approved",
+            xero_payment_id="",
+        )
+        with patch(
+            "integrations.api_views_reconciliation.execute_statement_posting",
+            return_value=posting,
+        ) as execute_mock:
+            executed = self.client.post(
+                reverse("reconciliation_agent_run_execute", kwargs={"run_id": run.run_id}),
+                {"slack_user_id": "UADMIN", "domain": "mlai.au", "confirm": True},
+                format="json",
+            )
+        self.assertEqual(executed.status_code, status.HTTP_200_OK)
+        self.assertEqual(executed.data["executed_count"], 1)
+        self.assertTrue(executed.data["human_reconciliation_required"])
+        execute_mock.assert_called_once_with(
+            suggestion,
+            requested_by_slack_id="UADMIN",
+            automatic=False,
+        )
+
+    @patch("core.permissions.HasRooApiKey.has_permission", return_value=True)
+    def test_agent_run_execution_blocks_when_approved_payload_changes(self, _permission):
+        run, suggestion = self._agent_run_suggestion(
+            run_id="xero-agent-stale-approval",
+            line_id="agent-stale-line",
+        )
+        approval = self.client.post(
+            reverse("reconciliation_agent_run_decisions", kwargs={"run_id": run.run_id}),
+            {
+                "slack_user_id": "UADMIN",
+                "domain": "mlai.au",
+                "confirm": True,
+                "approve_all_ready": True,
+            },
+            format="json",
+        )
+        self.assertEqual(approval.data["recorded_count"], 1)
+        suggestion.description = "Changed contractor allocation after approval."
+        suggestion.save(update_fields=["description", "updated_at"])
+
+        with patch("integrations.api_views_reconciliation.execute_statement_posting") as execute_mock:
+            response = self.client.post(
+                reverse("reconciliation_agent_run_execute", kwargs={"run_id": run.run_id}),
+                {"slack_user_id": "UADMIN", "domain": "mlai.au", "confirm": True},
+                format="json",
+            )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["executed_count"], 0)
+        self.assertIn("Approval is stale", response.data["results"][0]["error"])
+        execute_mock.assert_not_called()
+        self.assertTrue(ReconciliationDecision.objects.filter(
+            suggestion=suggestion,
+            decision_type=ReconciliationDecision.TYPE_EXECUTION_BLOCKED,
+        ).exists())
+        preview = self.client.get(
+            reverse("reconciliation_agent_run_preview", kwargs={"run_id": run.run_id}),
+            {"slack_user_id": "UADMIN", "domain": "mlai.au"},
+        )
+        self.assertEqual(preview.data["approved_count"], 0)
+        self.assertEqual(
+            preview.data["results"][0]["suggestion"]["approval"]["status"],
+            "stale",
+        )
+
+    @patch("core.permissions.HasRooApiKey.has_permission", return_value=True)
+    def test_agent_run_can_reapprove_after_a_later_rejection(self, _permission):
+        run, suggestion = self._agent_run_suggestion(
+            run_id="xero-agent-reapproval",
+            line_id="agent-reapproval-line",
+        )
+        endpoint = reverse(
+            "reconciliation_agent_run_decisions", kwargs={"run_id": run.run_id}
+        )
+        common = {
+            "slack_user_id": "UADMIN",
+            "domain": "mlai.au",
+            "confirm": True,
+        }
+
+        first_approval = self.client.post(
+            endpoint,
+            {**common, "approve_all_ready": True, "decision_request_id": "approval-1"},
+            format="json",
+        )
+        rejection = self.client.post(
+            endpoint,
+            {
+                **common,
+                "decision_request_id": "rejection-1",
+                "decisions": [{
+                    "suggestion_id": suggestion.id,
+                    "decision": "reject",
+                    "reason": "Check the allocation.",
+                }],
+            },
+            format="json",
+        )
+        second_approval = self.client.post(
+            endpoint,
+            {**common, "approve_all_ready": True, "decision_request_id": "approval-2"},
+            format="json",
+        )
+
+        self.assertEqual(first_approval.data["recorded_count"], 1)
+        self.assertEqual(rejection.data["recorded_count"], 1)
+        self.assertEqual(second_approval.data["recorded_count"], 1)
+        decisions = list(
+            ReconciliationDecision.objects.filter(
+                suggestion=suggestion,
+                decision_type__in=[
+                    ReconciliationDecision.TYPE_ADMIN_APPROVED,
+                    ReconciliationDecision.TYPE_ADMIN_REJECTED,
+                ],
+            ).order_by("id")
+        )
+        self.assertEqual(len(decisions), 3)
+        self.assertEqual(
+            decisions[-1].decision_type,
+            ReconciliationDecision.TYPE_ADMIN_APPROVED,
+        )
+
+    @patch("integrations.services.valley_harness.notify_valley_run_created")
+    @patch("core.permissions.HasRooApiKey.has_permission", return_value=True)
+    def test_agent_run_requires_fresh_scan_and_dispatches_preview_workflow(
+        self, _permission, notify_valley
+    ):
+        from integrations.services.valley_harness import ValleyHarnessResult
+
+        notify_valley.return_value = ValleyHarnessResult(
+            ok=True,
+            payload={"job_id": "job-agent-1", "status": "queued"},
+        )
+        missing_scan = self.client.post(
+            reverse("reconciliation_agent_runs"),
+            {"slack_user_id": "UADMIN", "domain": "mlai.au"},
+            format="json",
+        )
+        self.assertEqual(missing_scan.status_code, status.HTTP_409_CONFLICT)
+
+        line = import_xero_statement_lines(
+            organization=self.organization,
+            bank_account_id="bank-1",
+            lines=[{
+                "statement_line_id": "agent-luiz-520",
+                "date": "30 Jun 2026",
+                "narration": "Transfer To LUIZ F OLIVEIRA ARAUJO",
+                "direction": "debit",
+                "amount": "520.00",
+            }],
+            expected_count=1,
+            requested_by="UADMIN",
+        )[0]
+
+        response = self.client.post(
+            reverse("reconciliation_agent_runs"),
+            {
+                "slack_user_id": "UADMIN",
+                "domain": "mlai.au",
+                "instruction": "Allocate Luiz contractor payments to Aaron AI.",
+                "statement_line_ids": [line.statement_line_id],
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        run = ContentFactoryRun.objects.get(run_id=response.data["run_id"])
+        self.assertEqual(run.workflow, "xero_reconciliation_agent")
+        self.assertEqual(run.step_order, ["reconciliation_enrichment"])
+        self.assertTrue(run.run_request["dry_run"])
+        self.assertEqual(run.run_request["statement_line_ids"], [line.statement_line_id])
+        self.assertEqual(
+            run.run_request["requested_statement_line_ids"],
+            [line.statement_line_id],
+        )
+        self.assertEqual(response.data["deterministic_suggestion_count"], 0)
+        self.assertEqual(response.data["agent_line_count"], 1)
+        self.assertTrue(response.data["valley_dispatched"])
+        notify_valley.assert_called_once_with(run.run_id)
+
+        detail = self.client.get(
+            reverse("reconciliation_agent_run_detail", kwargs={"run_id": run.run_id}),
+            {"slack_user_id": "UADMIN", "domain": "mlai.au"},
+        )
+        self.assertEqual(detail.status_code, status.HTTP_200_OK)
+        self.assertEqual(detail.data["suggestions"], [])
+        early_approval = self.client.post(
+            reverse("reconciliation_agent_run_decisions", kwargs={"run_id": run.run_id}),
+            {
+                "slack_user_id": "UADMIN",
+                "domain": "mlai.au",
+                "confirm": True,
+                "approve_all_ready": True,
+            },
+            format="json",
+        )
+        self.assertEqual(early_approval.status_code, status.HTTP_409_CONFLICT)
+
+    @patch("integrations.services.valley_harness.notify_valley_run_created")
+    @patch("core.permissions.HasRooApiKey.has_permission", return_value=True)
+    def test_repeated_identical_agent_start_reuses_run_without_duplicate_dispatch(
+        self, _permission, notify_valley
+    ):
+        from integrations.services.valley_harness import ValleyHarnessResult
+
+        notify_valley.return_value = ValleyHarnessResult(
+            ok=True,
+            payload={"job_id": "job-idempotent", "status": "queued"},
+        )
+        line = import_xero_statement_lines(
+            organization=self.organization,
+            bank_account_id="bank-1",
+            expected_count=1,
+            requested_by="UADMIN",
+            lines=[{
+                "statement_line_id": "agent-idempotent-line",
+                "date": "20 Jul 2026",
+                "narration": "Jaycar - Franklin",
+                "direction": "debit",
+                "amount": "95.05",
+            }],
+        )[0]
+        payload = {
+            "slack_user_id": "UADMIN",
+            "domain": "mlai.au",
+            "instruction": "Use monthly context to identify the project.",
+            "statement_line_ids": [line.statement_line_id],
+        }
+
+        first = self.client.post(
+            reverse("reconciliation_agent_runs"),
+            payload,
+            format="json",
+        )
+        second = self.client.post(
+            reverse("reconciliation_agent_runs"),
+            payload,
+            format="json",
+        )
+
+        self.assertEqual(first.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
+        self.assertFalse(first.data["idempotent"])
+        self.assertTrue(second.data["idempotent"])
+        self.assertEqual(first.data["run_id"], second.data["run_id"])
+        self.assertEqual(
+            first.data["request_fingerprint"],
+            second.data["request_fingerprint"],
+        )
+        self.assertEqual(
+            ContentFactoryRun.objects.filter(
+                workflow="xero_reconciliation_agent"
+            ).count(),
+            1,
+        )
+        notify_valley.assert_called_once_with(first.data["run_id"])
+
+        changed = self.client.post(
+            reverse("reconciliation_agent_runs"),
+            {
+                **payload,
+                "instruction": "Use monthly context and inspect the Aaron AI project.",
+            },
+            format="json",
+        )
+        self.assertEqual(changed.status_code, status.HTTP_201_CREATED)
+        self.assertNotEqual(changed.data["run_id"], first.data["run_id"])
+        self.assertEqual(notify_valley.call_count, 2)
+
+    @patch("integrations.services.valley_harness.notify_valley_run_created")
+    @patch("core.permissions.HasRooApiKey.has_permission", return_value=True)
+    def test_agent_run_completes_without_valley_when_verified_rule_resolves_every_line(
+        self, _permission, notify_valley
+    ):
+        connection = ExternalServiceConnection.objects.create(
+            provider=ExternalServiceProvider.XERO,
+            user=self.user,
+            organization=self.organization,
+            access_token="access-token",
+            external_account_id="tenant-deterministic",
+            scopes=["accounting.banktransactions", "accounting.payments"],
+        )
+        ReconciliationProfile.objects.create(
+            organization=self.organization,
+            xero_connection=connection,
+            xero_bank_account_id="bank-1",
+            project_tracking_category_id="tracking-projects",
+        )
+        project = LinearProjectArtifact.objects.create(
+            connection=ExternalServiceConnection.objects.create(
+                provider=ExternalServiceProvider.LINEAR,
+                user=self.user,
+                organization=self.organization,
+                access_token="linear-token",
+                external_account_id="linear-deterministic",
+            ),
+            organization=self.organization,
+            linear_project_id="project-deterministic-aaron",
+            name="[Studio] Aaron AI",
+        )
+        line = import_xero_statement_lines(
+            organization=self.organization,
+            bank_account_id="bank-1",
+            expected_count=1,
+            requested_by="UADMIN",
+            lines=[{
+                "statement_line_id": "agent-rule-luiz-520",
+                "date": "30 Jun 2026",
+                "narration": "Transfer To LUIZ F OLIVEIRA ARAUJO",
+                "direction": "debit",
+                "amount": "520.00",
+            }],
+        )[0]
+        rule = ReconciliationRule.objects.create(
+            organization=self.organization,
+            name="Luiz – Aaron AI",
+            scope=ReconciliationRule.SCOPE_MERCHANT,
+            bank_narration_key=merchant_key(line.narration),
+            direction=line.direction,
+            effective_from=datetime(2026, 6, 1).date(),
+            effective_to=datetime(2026, 7, 31).date(),
+            contact_name="Luiz F Oliveira Araujo",
+            account_code="405",
+            account_name="Contractor Expenses",
+            tax_type="GST Free Expenses",
+            description_template="Contractor work for {project}.",
+            project_source_id=project.linear_project_id,
+            project_tracking_option_name=project.name,
+            status=ReconciliationRule.STATUS_VERIFIED,
+            active=True,
+            verified_by_slack_id="UADMIN",
+            verified_at=datetime.now(timezone.utc),
+        )
+
+        response = self.client.post(
+            reverse("reconciliation_agent_runs"),
+            {
+                "slack_user_id": "UADMIN",
+                "domain": "mlai.au",
+                "statement_line_ids": [line.statement_line_id],
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["status"], ContentFactoryRunStatus.COMPLETED)
+        self.assertEqual(response.data["deterministic_suggestion_count"], 1)
+        self.assertEqual(response.data["agent_line_count"], 0)
+        self.assertFalse(response.data["valley_dispatched"])
+        notify_valley.assert_not_called()
+        run = ContentFactoryRun.objects.get(run_id=response.data["run_id"])
+        self.assertEqual(run.run_request["statement_line_ids"], [])
+        self.assertEqual(
+            run.run_request["deterministic_statement_line_ids"],
+            [line.statement_line_id],
+        )
+        step = ContentFactoryRunStep.objects.get(run=run)
+        self.assertEqual(step.status, ContentFactoryStepStatus.COMPLETED)
+        suggestion = XeroStatementSuggestion.objects.get(
+            run_id=run.run_id,
+            statement_line=line,
+        )
+        self.assertEqual(suggestion.model_name, "deterministic_verified_rule")
+        self.assertEqual(
+            suggestion.proposed_action,
+            XeroStatementSuggestion.ACTION_CREATE_BANK_TRANSACTION,
+        )
+        self.assertEqual(suggestion.project_source_id, project.linear_project_id)
+        self.assertTrue(suggestion.execution_ready)
+        self.assertTrue(ReconciliationDecision.objects.filter(
+            suggestion=suggestion,
+            rule=rule,
+            decision_type=ReconciliationDecision.TYPE_RULE_APPLIED,
+        ).exists())
+
+        preview = self.client.get(
+            reverse("reconciliation_agent_run_preview", kwargs={"run_id": run.run_id}),
+            {"slack_user_id": "UADMIN", "domain": "mlai.au"},
+        )
+        self.assertEqual(preview.status_code, status.HTTP_200_OK)
+        self.assertEqual(preview.data["ready_count"], 1)
+        self.assertEqual(
+            preview.data["results"][0]["suggestion"]["routing"],
+            {
+                "source": "verified_rule",
+                "verified_rule_id": rule.id,
+                "xero_bill_id": None,
+                "model_name": "deterministic_verified_rule",
+            },
+        )
+        self.assertEqual(preview.data["routing_counts"], {"verified_rule": 1})
+        self.assertEqual(
+            preview.data["deterministic_reconciliation"]["deterministic_suggestion_count"],
+            1,
+        )
+
+    @patch("integrations.services.valley_harness.notify_valley_run_created")
+    @patch("core.permissions.HasRooApiKey.has_permission", return_value=True)
+    def test_agent_run_sends_only_unresolved_lines_to_valley(
+        self, _permission, notify_valley
+    ):
+        from integrations.services.valley_harness import ValleyHarnessResult
+
+        notify_valley.return_value = ValleyHarnessResult(
+            ok=True,
+            payload={"job_id": "job-mixed", "status": "queued"},
+        )
+        lines = import_xero_statement_lines(
+            organization=self.organization,
+            bank_account_id="bank-1",
+            expected_count=2,
+            requested_by="UADMIN",
+            lines=[{
+                "statement_line_id": "agent-rule-contractor",
+                "date": "30 Jun 2026",
+                "narration": "Transfer To CONTRACTOR ONE",
+                "direction": "debit",
+                "amount": "845.00",
+            }, {
+                "statement_line_id": "agent-unresolved-jaycar",
+                "date": "24 May 2026",
+                "narration": "Jaycar - Franklin",
+                "direction": "debit",
+                "amount": "95.05",
+            }],
+        )
+        rule_line, unresolved_line = lines
+        ReconciliationRule.objects.create(
+            organization=self.organization,
+            name="Contractor One",
+            scope=ReconciliationRule.SCOPE_MERCHANT,
+            bank_narration_key=merchant_key(rule_line.narration),
+            direction=rule_line.direction,
+            contact_name="Contractor One",
+            account_code="405",
+            account_name="Contractor Expenses",
+            tax_type="GST Free Expenses",
+            description_template="Contractor work.",
+            status=ReconciliationRule.STATUS_VERIFIED,
+            active=True,
+            verified_by_slack_id="UADMIN",
+            verified_at=datetime.now(timezone.utc),
+        )
+
+        response = self.client.post(
+            reverse("reconciliation_agent_runs"),
+            {
+                "slack_user_id": "UADMIN",
+                "domain": "mlai.au",
+                "statement_line_ids": [
+                    rule_line.statement_line_id,
+                    unresolved_line.statement_line_id,
+                ],
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["deterministic_suggestion_count"], 1)
+        self.assertEqual(response.data["agent_line_count"], 1)
+        self.assertTrue(response.data["valley_dispatched"])
+        run = ContentFactoryRun.objects.get(run_id=response.data["run_id"])
+        self.assertEqual(
+            run.run_request["requested_statement_line_ids"],
+            [rule_line.statement_line_id, unresolved_line.statement_line_id],
+        )
+        self.assertEqual(
+            run.run_request["statement_line_ids"],
+            [unresolved_line.statement_line_id],
+        )
+        self.assertTrue(XeroStatementSuggestion.objects.filter(
+            run_id=run.run_id,
+            statement_line=rule_line,
+            model_name="deterministic_verified_rule",
+        ).exists())
+        notify_valley.assert_called_once_with(run.run_id)
+
+    @patch("integrations.services.valley_harness.notify_valley_run_created")
+    @patch("core.permissions.HasRooApiKey.has_permission", return_value=True)
+    def test_failed_valley_dispatch_can_retry_same_run_without_duplicate_suggestions(
+        self, _permission, notify_valley
+    ):
+        from integrations.services.valley_harness import ValleyHarnessResult
+
+        notify_valley.side_effect = [
+            ValleyHarnessResult(
+                ok=False,
+                failure_kind="connection",
+                detail="Valley unavailable",
+            ),
+            ValleyHarnessResult(
+                ok=True,
+                payload={"job_id": "job-retry", "status": "queued"},
+            ),
+        ]
+        rule_line, unresolved_line = import_xero_statement_lines(
+            organization=self.organization,
+            bank_account_id="bank-1",
+            expected_count=2,
+            requested_by="UADMIN",
+            lines=[{
+                "statement_line_id": "retry-rule-contractor",
+                "date": "20 Jul 2026",
+                "narration": "Transfer To CONTRACTOR ONE",
+                "direction": "debit",
+                "amount": "845.00",
+            }, {
+                "statement_line_id": "retry-unresolved-jaycar",
+                "date": "20 Jul 2026",
+                "narration": "Jaycar - Franklin",
+                "direction": "debit",
+                "amount": "95.05",
+            }],
+        )
+        ReconciliationRule.objects.create(
+            organization=self.organization,
+            name="Contractor default",
+            scope=ReconciliationRule.SCOPE_MERCHANT,
+            bank_narration_key=merchant_key(rule_line.narration),
+            direction=rule_line.direction,
+            contact_name="Contractor One",
+            account_code="405",
+            account_name="Contractor Expenses",
+            tax_type="GST Free Expenses",
+            description_template="Contractor work.",
+            status=ReconciliationRule.STATUS_VERIFIED,
+            active=True,
+            verified_by_slack_id="UADMIN",
+            verified_at=datetime.now(timezone.utc),
+        )
+
+        started = self.client.post(
+            reverse("reconciliation_agent_runs"),
+            {
+                "slack_user_id": "UADMIN",
+                "domain": "mlai.au",
+                "statement_line_ids": [
+                    rule_line.statement_line_id,
+                    unresolved_line.statement_line_id,
+                ],
+            },
+            format="json",
+        )
+
+        self.assertEqual(started.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
+        self.assertTrue(started.data["retryable"])
+        run = ContentFactoryRun.objects.get(run_id=started.data["run_id"])
+        self.assertTrue(run.resume_available)
+        self.assertEqual(
+            XeroStatementSuggestion.objects.filter(run_id=run.run_id).count(),
+            1,
+        )
+
+        retried = self.client.post(
+            reverse("reconciliation_agent_run_retry", kwargs={"run_id": run.run_id}),
+            {
+                "slack_user_id": "UADMIN",
+                "domain": "mlai.au",
+                "confirm": True,
+            },
+            format="json",
+        )
+
+        self.assertEqual(retried.status_code, status.HTTP_200_OK)
+        self.assertTrue(retried.data["valley_dispatched"])
+        self.assertFalse(retried.data["idempotent"])
+        run.refresh_from_db()
+        self.assertFalse(run.resume_available)
+        self.assertEqual((run.result or {})["_valley_meta"]["dispatch_status"], "queued")
+        self.assertEqual(
+            XeroStatementSuggestion.objects.filter(run_id=run.run_id).count(),
+            1,
+        )
+        self.assertEqual(notify_valley.call_count, 2)
+
+        already_queued = self.client.post(
+            reverse("reconciliation_agent_run_retry", kwargs={"run_id": run.run_id}),
+            {
+                "slack_user_id": "UADMIN",
+                "domain": "mlai.au",
+                "confirm": True,
+            },
+            format="json",
+        )
+        self.assertEqual(already_queued.status_code, status.HTTP_200_OK)
+        self.assertTrue(already_queued.data["idempotent"])
+        self.assertFalse(already_queued.data["valley_dispatched"])
+        self.assertEqual(notify_valley.call_count, 2)
+
+    @patch("integrations.services.valley_harness.notify_valley_run_created")
+    @patch("core.permissions.HasRooApiKey.has_permission", return_value=True)
+    def test_reconciliation_retry_rejects_changed_statement_queue(
+        self, _permission, notify_valley
+    ):
+        from integrations.services.valley_harness import ValleyHarnessResult
+
+        notify_valley.return_value = ValleyHarnessResult(
+            ok=False,
+            failure_kind="connection",
+            detail="Valley unavailable",
+        )
+        line = import_xero_statement_lines(
+            organization=self.organization,
+            bank_account_id="bank-1",
+            expected_count=1,
+            requested_by="UADMIN",
+            lines=[{
+                "statement_line_id": "retry-old-queue",
+                "date": "20 Jul 2026",
+                "narration": "Jaycar - Franklin",
+                "direction": "debit",
+                "amount": "95.05",
+            }],
+        )[0]
+        started = self.client.post(
+            reverse("reconciliation_agent_runs"),
+            {
+                "slack_user_id": "UADMIN",
+                "domain": "mlai.au",
+                "statement_line_ids": [line.statement_line_id],
+            },
+            format="json",
+        )
+        self.assertEqual(started.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
+        import_xero_statement_lines(
+            organization=self.organization,
+            bank_account_id="bank-1",
+            expected_count=1,
+            requested_by="UADMIN",
+            lines=[{
+                "statement_line_id": "retry-new-queue",
+                "date": "21 Jul 2026",
+                "narration": "UBER *TRIP HELP.",
+                "direction": "debit",
+                "amount": "31.07",
+            }],
+        )
+
+        retried = self.client.post(
+            reverse(
+                "reconciliation_agent_run_retry",
+                kwargs={"run_id": started.data["run_id"]},
+            ),
+            {
+                "slack_user_id": "UADMIN",
+                "domain": "mlai.au",
+                "confirm": True,
+            },
+            format="json",
+        )
+
+        self.assertEqual(retried.status_code, status.HTTP_409_CONFLICT)
+        self.assertIn("queue changed", retried.data["error"])
+        notify_valley.assert_called_once()
+
+    @patch("integrations.services.valley_harness.notify_valley_run_created")
+    @patch("core.permissions.HasRooApiKey.has_permission", return_value=True)
+    def test_exact_outstanding_bill_defers_verified_spend_rule_to_valley(
+        self, _permission, notify_valley
+    ):
+        from integrations.services.valley_harness import ValleyHarnessResult
+
+        notify_valley.return_value = ValleyHarnessResult(
+            ok=True,
+            payload={"job_id": "job-bill", "status": "queued"},
+        )
+        connection = ExternalServiceConnection.objects.create(
+            provider=ExternalServiceProvider.XERO,
+            user=self.user,
+            organization=self.organization,
+            access_token="access-token",
+            external_account_id="tenant-bill-deferral",
+        )
+        line = import_xero_statement_lines(
+            organization=self.organization,
+            bank_account_id="bank-1",
+            expected_count=1,
+            requested_by="UADMIN",
+            lines=[{
+                "statement_line_id": "agent-rule-with-bill",
+                "date": "20 Jul 2026",
+                "narration": "Transfer To CONTRACTOR ONE",
+                "direction": "debit",
+                "amount": "845.00",
+            }],
+        )[0]
+        rule = ReconciliationRule.objects.create(
+            organization=self.organization,
+            name="Contractor spend default",
+            scope=ReconciliationRule.SCOPE_MERCHANT,
+            bank_narration_key=merchant_key(line.narration),
+            direction=line.direction,
+            contact_name="Contractor One",
+            account_code="405",
+            account_name="Contractor Expenses",
+            tax_type="GST Free Expenses",
+            description_template="Contractor work.",
+            status=ReconciliationRule.STATUS_VERIFIED,
+            active=True,
+            verified_by_slack_id="UADMIN",
+            verified_at=datetime.now(timezone.utc),
+        )
+        ExternalFinancialRecord.objects.create(
+            provider=ExternalServiceProvider.XERO,
+            record_type=ExternalFinancialRecord.RECORD_XERO_BILL,
+            connection=connection,
+            user=self.user,
+            organization=self.organization,
+            external_record_id="bill-agent-845",
+            external_account_id=connection.external_account_id,
+            currency="AUD",
+            amount=line.amount,
+            direction="debit",
+            status="AUTHORISED",
+            transaction_date=line.transaction_date,
+            merchant_name="Contractor One",
+            class_name="ACCPAY",
+        )
+
+        response = self.client.post(
+            reverse("reconciliation_agent_runs"),
+            {
+                "slack_user_id": "UADMIN",
+                "domain": "mlai.au",
+                "statement_line_ids": [line.statement_line_id],
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["deterministic_suggestion_count"], 0)
+        self.assertEqual(response.data["deferred_bill_count"], 1)
+        self.assertEqual(response.data["agent_line_count"], 1)
+        run = ContentFactoryRun.objects.get(run_id=response.data["run_id"])
+        self.assertEqual(
+            run.run_request["deferred_bill_statement_line_ids"],
+            [line.statement_line_id],
+        )
+        self.assertFalse(XeroStatementSuggestion.objects.filter(
+            run_id=run.run_id,
+            statement_line=line,
+        ).exists())
+        context = build_statement_reconciliation_context(
+            organization=self.organization,
+            include_external_evidence=False,
+        )
+        candidate = next(
+            item for item in context["statement_candidates"]
+            if item["statement_line_id"] == line.statement_line_id
+        )
+        self.assertIsNone(candidate["verified_rule"])
+        self.assertEqual(candidate["deferred_verified_rule"]["id"], rule.id)
+        self.assertEqual(
+            candidate["matching_xero_bills"][0]["xero_bill_id"],
+            "bill-agent-845",
+        )
+        notify_valley.assert_called_once_with(run.run_id)
+
+    @patch("core.permissions.HasRooApiKey.has_permission", return_value=True)
+    def test_complete_empty_scan_confirms_match_ready_posting_and_preserves_pattern(self, _permission):
+        run, suggestion = self._agent_run_suggestion(
+            run_id="xero-agent-outcome",
+            line_id="contractor-outcome-845",
+        )
+        preview = build_statement_posting_preview(suggestion)
+        posting = XeroStatementPosting.objects.get(pk=preview["posting_id"])
+        posting.status = XeroStatementPosting.STATUS_MATCH_READY
+        posting.xero_bank_transaction_id = "bt-confirmed-845"
+        posting.posted_at = datetime.now(timezone.utc)
+        posting.save(update_fields=[
+            "status", "xero_bank_transaction_id", "posted_at", "updated_at",
+        ])
+        suggestion.status = XeroStatementSuggestion.STATUS_APPLIED
+        suggestion.applied_at = datetime.now(timezone.utc)
+        suggestion.save(update_fields=["status", "applied_at", "updated_at"])
+
+        scan_response = self.client.post(
+            reverse("reconciliation_statement_scans"),
+            {
+                "slack_user_id": "UADMIN",
+                "domain": "mlai.au",
+                "bank_account_id": "bank-1",
+                "expected_count": 0,
+                "complete": True,
+                "lines": [],
+            },
+            format="json",
+        )
+
+        self.assertEqual(scan_response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(scan_response.data["scan"]["observed_count"], 0)
+        self.assertEqual(scan_response.data["scan"]["confirmed_reconciled_count"], 1)
+        posting.refresh_from_db()
+        suggestion.statement_line.refresh_from_db()
+        self.assertEqual(posting.status, XeroStatementPosting.STATUS_RECONCILED)
+        self.assertIsNotNone(posting.reconciled_at)
+        self.assertEqual(posting.reconciled_scan_id, scan_response.data["scan"]["id"])
+        post_confirmation_preview = build_statement_posting_preview(suggestion)
+        posting.refresh_from_db()
+        self.assertFalse(post_confirmation_preview["ready"])
+        self.assertEqual(posting.status, XeroStatementPosting.STATUS_RECONCILED)
+        self.assertFalse(suggestion.statement_line.active)
+        self.assertEqual(
+            suggestion.statement_line.queue_state,
+            XeroStatementLineSnapshot.QUEUE_RECONCILED,
+        )
+        self.assertTrue(ReconciliationDecision.objects.filter(
+            suggestion=suggestion,
+            decision_type=ReconciliationDecision.TYPE_RECONCILED_CONFIRMED,
+        ).exists())
+
+        new_line = import_xero_statement_lines(
+            organization=self.organization,
+            bank_account_id="bank-1",
+            expected_count=1,
+            requested_by="UADMIN",
+            lines=[{
+                "statement_line_id": "contractor-outcome-845-next",
+                "date": "21 Jul 2026",
+                "narration": "Transfer To CONTRACTOR ONE",
+                "direction": "debit",
+                "amount": "845.00",
+            }],
+        )[0]
+        candidate = next(
+            item
+            for item in build_statement_reconciliation_context(
+                organization=self.organization,
+                include_external_evidence=False,
+            )["statement_candidates"]
+            if item["statement_line_id"] == new_line.statement_line_id
+        )
+        self.assertEqual(
+            candidate["allowed_historical_patterns"][0]["outcome_source"],
+            "confirmed_api_posting",
+        )
+        self.assertEqual(
+            candidate["allowed_historical_patterns"][0]["account_code"],
+            "405",
+        )
+
+        outcomes = self.client.get(
+            reverse("reconciliation_outcomes"),
+            {"slack_user_id": "UADMIN", "domain": "mlai.au"},
+        )
+        self.assertEqual(outcomes.status_code, status.HTTP_200_OK)
+        self.assertEqual(outcomes.data["confirmed_reconciled_count"], 1)
+        self.assertEqual(
+            outcomes.data["recent_confirmed"][0]["xero_bank_transaction_id"],
+            "bt-confirmed-845",
+        )
+
+    def test_empty_complete_scan_requires_explicit_zero_expected_count(self):
+        with self.assertRaisesRegex(ValueError, "expected_count=0"):
+            import_xero_statement_lines(
+                organization=self.organization,
+                bank_account_id="bank-1",
+                lines=[],
+                complete_scan=True,
+                requested_by="UADMIN",
+            )
+
+    @patch("core.permissions.HasRooApiKey.has_permission", return_value=True)
+    def test_learning_candidate_blocks_inconsistent_descriptions(self, _permission):
+        common = {
+            "narration": "JAYCAR - FRANKLIN",
+            "direction": "debit",
+            "contact": "Jaycar Franklin",
+            "account": "404 - Event supplies",
+            "tax_type": "GST on Expenses",
+        }
+        import_xero_statement_lines(
+            organization=self.organization,
+            bank_account_id="bank-1",
+            expected_count=2,
+            requested_by="UADMIN",
+            lines=[
+                {
+                    **common,
+                    "statement_line_id": "manual-jaycar-1",
+                    "date": "24 May 2026",
+                    "amount": "95.05",
+                    "description": "Cables for Aaron AI.",
+                },
+                {
+                    **common,
+                    "statement_line_id": "manual-jaycar-2",
+                    "date": "25 May 2026",
+                    "amount": "20.00",
+                    "description": "Parts for Present Studio.",
+                },
+            ],
+        )
+        import_xero_statement_lines(
+            organization=self.organization,
+            bank_account_id="bank-1",
+            expected_count=0,
+            lines=[],
+            requested_by="UADMIN",
+        )
+
+        outcomes = self.client.get(
+            reverse("reconciliation_outcomes"),
+            {"slack_user_id": "UADMIN", "domain": "mlai.au"},
+        )
+
+        self.assertEqual(outcomes.status_code, status.HTTP_200_OK)
+        self.assertEqual(outcomes.data["rule_review_candidate_count"], 0)
+        candidate = outcomes.data["learning_candidates"][0]
+        self.assertFalse(candidate["eligible_for_rule_review"])
+        self.assertFalse(candidate["eligible_for_promotion"])
+        self.assertEqual(candidate["conflicting_pattern_count"], 1)
+        self.assertIn("disagree", candidate["blocking_reasons"][0])
+
+    @patch("core.permissions.HasRooApiKey.has_permission", return_value=True)
+    def test_two_confirmed_manual_patterns_become_rule_review_candidate(self, _permission):
+        linear_connection = ExternalServiceConnection.objects.create(
+            provider=ExternalServiceProvider.LINEAR,
+            user=self.user,
+            organization=self.organization,
+            access_token="linear-learning-token",
+            external_account_id="linear-learning",
+        )
+        project = LinearProjectArtifact.objects.create(
+            connection=linear_connection,
+            organization=self.organization,
+            linear_project_id="watt-the-hack-project",
+            name="[AI Week] Watt The Hack",
+        )
+        fields = {
+            "narration": "UBER *TRIP HELP.",
+            "direction": "debit",
+            "contact": "Uber",
+            "account": "406 - Travel-national",
+            "description": "Uber trip for Watt The Hack.",
+            "project_name": "[AI Week] Watt The Hack",
+            "tax_type": "GST on Expenses",
+        }
+        import_xero_statement_lines(
+            organization=self.organization,
+            bank_account_id="bank-1",
+            expected_count=2,
+            requested_by="UADMIN",
+            lines=[
+                {
+                    **fields,
+                    "statement_line_id": "manual-uber-1",
+                    "date": "22 May 2026",
+                    "amount": "26.08",
+                },
+                {
+                    **fields,
+                    "statement_line_id": "manual-uber-2",
+                    "date": "23 May 2026",
+                    "amount": "28.40",
+                },
+            ],
+        )
+        empty_scan = self.client.post(
+            reverse("reconciliation_statement_scans"),
+            {
+                "slack_user_id": "UADMIN",
+                "domain": "mlai.au",
+                "bank_account_id": "bank-1",
+                "expected_count": 0,
+                "complete": True,
+                "lines": [],
+            },
+            format="json",
+        )
+        self.assertEqual(empty_scan.status_code, status.HTTP_201_CREATED)
+
+        outcomes = self.client.get(
+            reverse("reconciliation_outcomes"),
+            {"slack_user_id": "UADMIN", "domain": "mlai.au"},
+        )
+        self.assertEqual(outcomes.status_code, status.HTTP_200_OK)
+        self.assertEqual(outcomes.data["rule_review_candidate_count"], 1)
+        candidate = outcomes.data["learning_candidates"][0]
+        self.assertTrue(candidate["eligible_for_rule_review"])
+        self.assertTrue(candidate["eligible_for_promotion"])
+        self.assertEqual(candidate["confirmed_example_count"], 2)
+        self.assertEqual(candidate["suggested_rule"]["contact_name"], "Uber")
+        self.assertEqual(
+            candidate["suggested_rule"]["project_source_id"],
+            project.linear_project_id,
+        )
+        self.assertTrue(candidate["candidate_id"])
+        self.assertTrue(candidate["candidate_version"])
+        self.assertFalse(outcomes.data["automatic_rule_creation"])
+
+        candidate_url = reverse(
+            "reconciliation_learning_candidate",
+            kwargs={"candidate_id": candidate["candidate_id"]},
+        )
+        preview = self.client.get(
+            candidate_url,
+            {"slack_user_id": "UADMIN", "domain": "mlai.au"},
+        )
+        self.assertEqual(preview.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            preview.data["candidate"]["candidate_version"],
+            candidate["candidate_version"],
+        )
+
+        stale = self.client.post(
+            candidate_url,
+            {
+                "slack_user_id": "UADMIN",
+                "domain": "mlai.au",
+                "decision": "promote",
+                "candidate_version": "stale-version",
+                "confirm": True,
+            },
+            format="json",
+        )
+        self.assertEqual(stale.status_code, status.HTTP_409_CONFLICT)
+        self.assertIn("changed after preview", stale.data["error"])
+
+        rejected = self.client.post(
+            candidate_url,
+            {
+                "slack_user_id": "UADMIN",
+                "domain": "mlai.au",
+                "decision": "reject",
+                "candidate_version": candidate["candidate_version"],
+                "reason": "Wait until the accountant confirms this recurring treatment.",
+                "confirm": True,
+            },
+            format="json",
+        )
+        self.assertEqual(rejected.status_code, status.HTTP_200_OK)
+        self.assertEqual(rejected.data["candidate"]["review_status"], "rejected")
+        self.assertTrue(ReconciliationDecision.objects.filter(
+            decision_type=ReconciliationDecision.TYPE_LEARNING_RULE_REJECTED,
+            outcome__candidate_id=candidate["candidate_id"],
+        ).exists())
+
+        promoted = self.client.post(
+            candidate_url,
+            {
+                "slack_user_id": "UADMIN",
+                "domain": "mlai.au",
+                "decision": "promote",
+                "candidate_version": candidate["candidate_version"],
+                "confirm": True,
+            },
+            format="json",
+        )
+        self.assertEqual(promoted.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(promoted.data["candidate"]["review_status"], "promoted")
+        self.assertFalse(promoted.data["idempotent"])
+        rule = ReconciliationRule.objects.get(id=promoted.data["rule"]["id"])
+        self.assertTrue(rule.active)
+        self.assertEqual(rule.status, ReconciliationRule.STATUS_VERIFIED)
+        self.assertEqual(rule.project_source_id, project.linear_project_id)
+        self.assertEqual(rule.effective_from.isoformat(), "2026-05-22")
+        self.assertEqual(rule.verified_by_slack_id, "UADMIN")
+        self.assertTrue(ReconciliationDecision.objects.filter(
+            decision_type=ReconciliationDecision.TYPE_LEARNING_RULE_PROMOTED,
+            rule=rule,
+        ).exists())
+
+        repeated = self.client.post(
+            candidate_url,
+            {
+                "slack_user_id": "UADMIN",
+                "domain": "mlai.au",
+                "decision": "promote",
+                "candidate_version": candidate["candidate_version"],
+                "confirm": True,
+            },
+            format="json",
+        )
+        self.assertEqual(repeated.status_code, status.HTTP_200_OK)
+        self.assertTrue(repeated.data["idempotent"])
+        self.assertEqual(ReconciliationRule.objects.count(), 1)
 
     @patch("core.permissions.HasRooApiKey.has_permission", return_value=True)
     def test_profile_and_mapping_configuration_endpoints(self, _permission):
