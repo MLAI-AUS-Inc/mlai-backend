@@ -995,6 +995,181 @@ class ReconciliationSuggestion(models.Model):
         ]
 
 
+class XeroStatementScan(models.Model):
+    """One browser observation of Xero's unreconciled statement queue.
+
+    Xero does not expose this queue through the Accounting API.  Recording the
+    scan boundary prevents a partial browser scrape from silently deactivating
+    unseen rows or being treated as current enough for posting decisions.
+    """
+
+    STATUS_STARTED = "started"
+    STATUS_COMPLETE = "complete"
+    STATUS_INCOMPLETE = "incomplete"
+    STATUS_FAILED = "failed"
+    STATUS_CHOICES = [
+        (STATUS_STARTED, "Started"),
+        (STATUS_COMPLETE, "Complete"),
+        (STATUS_INCOMPLETE, "Incomplete"),
+        (STATUS_FAILED, "Failed"),
+    ]
+
+    organization = models.ForeignKey(
+        "organizations.Organization",
+        on_delete=models.CASCADE,
+        related_name="xero_statement_scans",
+    )
+    bank_account_id = models.CharField(max_length=255)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_STARTED, db_index=True)
+    source = models.CharField(max_length=32, blank=True, default="browser")
+    requested_by = models.CharField(max_length=100, blank=True, default="")
+    expected_count = models.PositiveIntegerField(null=True, blank=True)
+    observed_count = models.PositiveIntegerField(default=0)
+    payload_hash = models.CharField(max_length=64, blank=True, default="")
+    error = models.TextField(blank=True, default="")
+    started_at = models.DateTimeField(auto_now_add=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "xero_statement_scan"
+        indexes = [
+            models.Index(fields=["organization", "bank_account_id", "-started_at"], name="xero_scan_org_bank_time_idx"),
+            models.Index(fields=["organization", "status"], name="xero_scan_org_status_idx"),
+        ]
+
+
+class ReconciliationPartyIdentity(models.Model):
+    """Admin-confirmed link between a bank narration and business identities."""
+
+    STATUS_PROPOSED = "proposed"
+    STATUS_VERIFIED = "verified"
+    STATUS_REVOKED = "revoked"
+    STATUS_CHOICES = [
+        (STATUS_PROPOSED, "Proposed"),
+        (STATUS_VERIFIED, "Verified"),
+        (STATUS_REVOKED, "Revoked"),
+    ]
+
+    organization = models.ForeignKey(
+        "organizations.Organization",
+        on_delete=models.CASCADE,
+        related_name="reconciliation_party_identities",
+    )
+    bank_narration_key = models.CharField(max_length=255)
+    direction = models.CharField(max_length=16, blank=True, default="")
+    canonical_name = models.CharField(max_length=255)
+    xero_contact_id = models.CharField(max_length=255, blank=True, default="")
+    xero_contact_name = models.CharField(max_length=255, blank=True, default="")
+    linear_user_id = models.CharField(max_length=100, blank=True, default="")
+    linear_name = models.CharField(max_length=255, blank=True, default="")
+    linear_email = models.EmailField(max_length=255, blank=True, default="")
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_PROPOSED, db_index=True)
+    confidence = models.FloatField(default=0.0)
+    verified_by_slack_id = models.CharField(max_length=100, blank=True, default="")
+    verified_at = models.DateTimeField(null=True, blank=True)
+    active = models.BooleanField(default=True, db_index=True)
+    notes = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "reconciliation_party_identity"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["organization", "bank_narration_key", "direction"],
+                name="recon_identity_org_key_dir_uniq",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["organization", "status", "active"], name="recon_identity_org_status_idx"),
+            models.Index(fields=["organization", "linear_user_id"], name="recon_identity_org_linear_idx"),
+        ]
+
+
+class ReconciliationRule(models.Model):
+    """Admin-verified accounting and allocation policy for statement rows.
+
+    Merchant rules apply to a narration key, direction and bounded date range.
+    Statement-line overrides are deliberately more specific and win over a
+    merchant rule. Agents may consume these rules but cannot create or verify
+    them; only the admin reconciliation API can do that.
+    """
+
+    SCOPE_MERCHANT = "merchant"
+    SCOPE_STATEMENT_LINE = "statement_line"
+    SCOPE_CHOICES = [
+        (SCOPE_MERCHANT, "Merchant and date range"),
+        (SCOPE_STATEMENT_LINE, "One statement line"),
+    ]
+    STATUS_PROPOSED = "proposed"
+    STATUS_VERIFIED = "verified"
+    STATUS_REVOKED = "revoked"
+    STATUS_CHOICES = [
+        (STATUS_PROPOSED, "Proposed"),
+        (STATUS_VERIFIED, "Verified"),
+        (STATUS_REVOKED, "Revoked"),
+    ]
+    ACTION_CREATE_BANK_TRANSACTION = "create_bank_transaction"
+    ACTION_CHOICES = [
+        (ACTION_CREATE_BANK_TRANSACTION, "Create bank transaction"),
+    ]
+
+    organization = models.ForeignKey(
+        "organizations.Organization",
+        on_delete=models.CASCADE,
+        related_name="reconciliation_rules",
+    )
+    name = models.CharField(max_length=255)
+    scope = models.CharField(max_length=24, choices=SCOPE_CHOICES, default=SCOPE_MERCHANT, db_index=True)
+    statement_line = models.ForeignKey(
+        "XeroStatementLineSnapshot",
+        on_delete=models.CASCADE,
+        related_name="reconciliation_rules",
+        null=True,
+        blank=True,
+    )
+    bank_narration_key = models.CharField(max_length=255, blank=True, default="")
+    direction = models.CharField(max_length=16, blank=True, default="")
+    effective_from = models.DateField(null=True, blank=True)
+    effective_to = models.DateField(null=True, blank=True)
+    proposed_action = models.CharField(
+        max_length=32,
+        choices=ACTION_CHOICES,
+        default=ACTION_CREATE_BANK_TRANSACTION,
+    )
+    contact_name = models.CharField(max_length=255)
+    account_code = models.CharField(max_length=64)
+    account_name = models.CharField(max_length=255)
+    tax_type = models.CharField(max_length=255)
+    description_template = models.TextField()
+    event_source_id = models.CharField(max_length=255, blank=True, default="")
+    event_tracking_option_name = models.CharField(max_length=255, blank=True, default="")
+    project_source_id = models.CharField(max_length=255, blank=True, default="")
+    project_tracking_option_name = models.CharField(max_length=255, blank=True, default="")
+    priority = models.IntegerField(default=100)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_PROPOSED, db_index=True)
+    active = models.BooleanField(default=False, db_index=True)
+    evidence = models.JSONField(default=list, blank=True)
+    notes = models.TextField(blank=True, default="")
+    verified_by_slack_id = models.CharField(max_length=100, blank=True, default="")
+    verified_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "reconciliation_rule"
+        indexes = [
+            models.Index(
+                fields=["organization", "status", "active", "scope"],
+                name="recon_rule_org_status_idx",
+            ),
+            models.Index(
+                fields=["organization", "bank_narration_key", "direction"],
+                name="recon_rule_org_merchant_idx",
+            ),
+        ]
+
+
 class XeroStatementLineSnapshot(models.Model):
     """A browser-observed unreconciled Xero statement line.
 
@@ -1009,6 +1184,28 @@ class XeroStatementLineSnapshot(models.Model):
     DIRECTION_CHOICES = [
         (DIRECTION_DEBIT, "Debit"),
         (DIRECTION_CREDIT, "Credit"),
+    ]
+    QUEUE_ACTIVE = "active"
+    QUEUE_RECONCILED = "reconciled"
+    QUEUE_INACTIVE = "inactive"
+    QUEUE_UNKNOWN = "unknown"
+    QUEUE_STATE_CHOICES = [
+        (QUEUE_ACTIVE, "Active"),
+        (QUEUE_RECONCILED, "Reconciled or removed"),
+        (QUEUE_INACTIVE, "Inactive"),
+        (QUEUE_UNKNOWN, "Unknown"),
+    ]
+    UI_BLANK_CREATE = "blank_create"
+    UI_CREATE_PREFILLED = "create_prefilled"
+    UI_GREEN_MATCH = "green_match"
+    UI_DISCUSS = "discuss"
+    UI_UNKNOWN = "unknown"
+    UI_MODE_CHOICES = [
+        (UI_BLANK_CREATE, "Blank Create"),
+        (UI_CREATE_PREFILLED, "Create Prefilled"),
+        (UI_GREEN_MATCH, "Green Match"),
+        (UI_DISCUSS, "Discuss"),
+        (UI_UNKNOWN, "Unknown"),
     ]
 
     organization = models.ForeignKey(
@@ -1030,6 +1227,29 @@ class XeroStatementLineSnapshot(models.Model):
     current_event_name = models.CharField(max_length=255, blank=True, default="")
     current_project_name = models.CharField(max_length=255, blank=True, default="")
     current_tax_type = models.CharField(max_length=255, blank=True, default="")
+    queue_state = models.CharField(
+        max_length=20,
+        choices=QUEUE_STATE_CHOICES,
+        default=QUEUE_UNKNOWN,
+        db_index=True,
+    )
+    ui_mode = models.CharField(
+        max_length=24,
+        choices=UI_MODE_CHOICES,
+        default=UI_UNKNOWN,
+        db_index=True,
+    )
+    create_prefill_complete = models.BooleanField(default=False)
+    matched_xero_transaction_id = models.CharField(max_length=255, blank=True, default="")
+    last_scan = models.ForeignKey(
+        XeroStatementScan,
+        on_delete=models.SET_NULL,
+        related_name="statement_lines",
+        null=True,
+        blank=True,
+    )
+    # Deprecated compatibility field. New code uses ``ui_mode`` because an OK
+    # button also appears beside a prefilled Create form.
     ready_in_xero = models.BooleanField(default=False, db_index=True)
     active = models.BooleanField(default=True, db_index=True)
     source_hash = models.CharField(max_length=64)
@@ -1046,8 +1266,21 @@ class XeroStatementLineSnapshot(models.Model):
         ]
         indexes = [
             models.Index(fields=["organization", "active", "ready_in_xero"], name="xero_stmt_org_queue_idx"),
+            models.Index(fields=["organization", "queue_state", "ui_mode"], name="xero_stmt_org_ui_queue_idx"),
             models.Index(fields=["organization", "transaction_date"], name="xero_stmt_org_date_idx"),
         ]
+
+    @property
+    def is_green_match(self) -> bool:
+        if self.ui_mode == self.UI_GREEN_MATCH:
+            return True
+        # Rows written before the explicit UI-state migration remain safe until
+        # the next complete browser scan gives them an unambiguous mode.
+        return self.ui_mode == self.UI_UNKNOWN and self.ready_in_xero
+
+    @property
+    def is_reconciliation_candidate(self) -> bool:
+        return self.active and self.queue_state != self.QUEUE_RECONCILED and not self.is_green_match
 
 
 class XeroStatementSuggestion(models.Model):
@@ -1101,6 +1334,12 @@ class XeroStatementSuggestion(models.Model):
     project_tracking_option_name = models.CharField(max_length=255, blank=True, default="")
     matched_xero_bill_id = models.CharField(max_length=255, blank=True, default="")
     confidence = models.FloatField(default=0.0)
+    identity_confidence = models.FloatField(default=0.0)
+    accounting_confidence = models.FloatField(default=0.0)
+    allocation_confidence = models.FloatField(default=0.0)
+    document_confidence = models.FloatField(default=0.0)
+    execution_ready = models.BooleanField(default=False, db_index=True)
+    blocking_reasons = models.JSONField(default=list, blank=True)
     rationale = models.TextField(blank=True, default="")
     review_note = models.TextField(blank=True, default="")
     evidence = models.JSONField(default=list, blank=True)
@@ -1124,6 +1363,93 @@ class XeroStatementSuggestion(models.Model):
         ]
 
 
+class ReconciliationDecision(models.Model):
+    """Immutable audit record for rule, agent, preview and posting decisions."""
+
+    TYPE_RULE_APPLIED = "rule_applied"
+    TYPE_RULE_CONFLICT = "rule_conflict"
+    TYPE_SUGGESTION_SAVED = "suggestion_saved"
+    TYPE_ADMIN_APPROVED = "admin_approved"
+    TYPE_ADMIN_REJECTED = "admin_rejected"
+    TYPE_PREVIEW_READY = "preview_ready"
+    TYPE_PREVIEW_BLOCKED = "preview_blocked"
+    TYPE_EXECUTION_BLOCKED = "execution_blocked"
+    TYPE_RECONCILED_CONFIRMED = "reconciled_confirmed"
+    TYPE_LEARNING_RULE_PROMOTED = "learning_rule_promoted"
+    TYPE_LEARNING_RULE_REJECTED = "learning_rule_rejected"
+    TYPE_DUPLICATE_RECOVERED = "duplicate_recovered"
+    TYPE_EXECUTED = "executed"
+    TYPE_CHOICES = [
+        (TYPE_RULE_APPLIED, "Verified rule applied"),
+        (TYPE_RULE_CONFLICT, "Verified rule conflict"),
+        (TYPE_SUGGESTION_SAVED, "Suggestion saved"),
+        (TYPE_ADMIN_APPROVED, "Admin approved"),
+        (TYPE_ADMIN_REJECTED, "Admin rejected"),
+        (TYPE_PREVIEW_READY, "Posting preview ready"),
+        (TYPE_PREVIEW_BLOCKED, "Posting preview blocked"),
+        (TYPE_EXECUTION_BLOCKED, "Approved execution blocked"),
+        (TYPE_RECONCILED_CONFIRMED, "Human reconciliation confirmed"),
+        (TYPE_LEARNING_RULE_PROMOTED, "Learning candidate promoted"),
+        (TYPE_LEARNING_RULE_REJECTED, "Learning candidate rejected"),
+        (TYPE_DUPLICATE_RECOVERED, "Existing Xero object recovered"),
+        (TYPE_EXECUTED, "Xero object created"),
+    ]
+    ACTOR_SYSTEM = "system"
+    ACTOR_AGENT = "agent"
+    ACTOR_ADMIN = "admin"
+    ACTOR_CHOICES = [
+        (ACTOR_SYSTEM, "System"),
+        (ACTOR_AGENT, "Agent"),
+        (ACTOR_ADMIN, "Admin"),
+    ]
+
+    organization = models.ForeignKey(
+        "organizations.Organization",
+        on_delete=models.CASCADE,
+        related_name="reconciliation_decisions",
+    )
+    statement_line = models.ForeignKey(
+        XeroStatementLineSnapshot,
+        on_delete=models.CASCADE,
+        related_name="reconciliation_decisions",
+    )
+    suggestion = models.ForeignKey(
+        XeroStatementSuggestion,
+        on_delete=models.SET_NULL,
+        related_name="reconciliation_decisions",
+        null=True,
+        blank=True,
+    )
+    rule = models.ForeignKey(
+        ReconciliationRule,
+        on_delete=models.SET_NULL,
+        related_name="decisions",
+        null=True,
+        blank=True,
+    )
+    decision_key = models.CharField(max_length=64, unique=True)
+    run_id = models.CharField(max_length=255, blank=True, default="", db_index=True)
+    decision_type = models.CharField(max_length=32, choices=TYPE_CHOICES, db_index=True)
+    actor_type = models.CharField(max_length=16, choices=ACTOR_CHOICES, default=ACTOR_SYSTEM)
+    actor_id = models.CharField(max_length=100, blank=True, default="")
+    outcome = models.JSONField(default=dict, blank=True)
+    evidence = models.JSONField(default=list, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "reconciliation_decision"
+        indexes = [
+            models.Index(
+                fields=["organization", "statement_line", "-created_at"],
+                name="recon_decision_org_line_idx",
+            ),
+            models.Index(
+                fields=["organization", "decision_type", "-created_at"],
+                name="recon_decision_org_type_idx",
+            ),
+        ]
+
+
 class XeroStatementPosting(models.Model):
     """Idempotent Xero write for one observed bank-statement line.
 
@@ -1142,12 +1468,14 @@ class XeroStatementPosting(models.Model):
     STATUS_READY = "ready"
     STATUS_POSTING = "posting"
     STATUS_MATCH_READY = "match_ready"
+    STATUS_RECONCILED = "reconciled"
     STATUS_FAILED = "failed"
     STATUS_CHOICES = [
         (STATUS_PREVIEWED, "Previewed"),
         (STATUS_READY, "Ready"),
         (STATUS_POSTING, "Posting"),
         (STATUS_MATCH_READY, "Ready to Match"),
+        (STATUS_RECONCILED, "Reconciled"),
         (STATUS_FAILED, "Failed"),
     ]
 
@@ -1179,6 +1507,14 @@ class XeroStatementPosting(models.Model):
     xero_payment_id = models.CharField(max_length=255, blank=True, default="")
     xero_bill_id = models.CharField(max_length=255, blank=True, default="")
     posted_at = models.DateTimeField(null=True, blank=True)
+    reconciled_at = models.DateTimeField(null=True, blank=True)
+    reconciled_scan = models.ForeignKey(
+        XeroStatementScan,
+        on_delete=models.SET_NULL,
+        related_name="confirmed_postings",
+        null=True,
+        blank=True,
+    )
     last_error = models.TextField(blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

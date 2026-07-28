@@ -14,6 +14,13 @@ class Command(BaseCommand):
         parser.add_argument("--domain", default="mlai.au")
         parser.add_argument("--bank-account-id", required=True)
         parser.add_argument("--currency", default="AUD")
+        parser.add_argument("--expected-count", type=int)
+        parser.add_argument(
+            "--incomplete",
+            action="store_true",
+            help="Record a partial observation without deactivating unseen statement rows.",
+        )
+        parser.add_argument("--requested-by", default="")
 
     def handle(self, *args, **options):
         organization = Organization.objects.filter(domain__iexact=options["domain"]).first()
@@ -29,10 +36,13 @@ class Command(BaseCommand):
                 bank_account_id=options["bank_account_id"],
                 currency=options["currency"],
                 lines=payload,
+                expected_count=options.get("expected_count"),
+                complete_scan=not options.get("incomplete", False),
+                requested_by=options.get("requested_by") or "",
             )
         except ValueError as exc:
             raise CommandError(str(exc)) from exc
-        ready = sum(1 for line in saved if line.ready_in_xero)
+        ready = sum(1 for line in saved if line.is_green_match)
         self.stdout.write(self.style.SUCCESS(
-            f"Imported {len(saved)} Xero statement lines ({ready} already ready, {len(saved) - ready} candidates)."
+            f"Imported {len(saved)} Xero statement lines ({ready} green matches, {len(saved) - ready} candidates)."
         ))
