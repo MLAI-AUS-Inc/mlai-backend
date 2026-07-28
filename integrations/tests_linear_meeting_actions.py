@@ -701,6 +701,52 @@ class LinearProjectSizingContextApiTests(SimpleTestCase):
             precedent_limit="22",
         )
 
+    @patch("integrations.services.linear_meeting_actions._graphql")
+    def test_sizing_context_retries_basic_query_when_linear_query_is_too_complex(
+        self,
+        mock_graphql,
+    ):
+        from integrations.services.linear_meeting_actions import (
+            LinearMeetingGraphQLError,
+            _fetch_linear_project_sizing_detail,
+        )
+
+        mock_graphql.side_effect = [
+            LinearMeetingGraphQLError(
+                "Query too complex",
+                operation="LinearProjectSizingContext",
+            ),
+            {
+                "project": {
+                    "id": "project-studio",
+                    "name": "[Studio] Founder Games",
+                }
+            },
+        ]
+
+        project, relations_available = _fetch_linear_project_sizing_detail(
+            "project-studio",
+            update_limit=5,
+            issue_limit=70,
+        )
+
+        self.assertEqual(project["id"], "project-studio")
+        self.assertFalse(relations_available)
+        self.assertEqual(mock_graphql.call_count, 2)
+        self.assertEqual(
+            mock_graphql.call_args_list[0].kwargs["operation_name"],
+            "LinearProjectSizingContext",
+        )
+        self.assertEqual(
+            mock_graphql.call_args_list[1].kwargs["operation_name"],
+            "LinearProjectSizingContextBasic",
+        )
+        self.assertIn("relations(first: 10)", mock_graphql.call_args_list[0].args[0])
+        self.assertNotIn(
+            "relations(first: 10)",
+            mock_graphql.call_args_list[1].args[0],
+        )
+
     @patch("integrations.services.linear_meeting_actions.list_issue_labels")
     @patch(
         "integrations.services.linear_meeting_actions._fetch_linear_project_sizing_detail"
