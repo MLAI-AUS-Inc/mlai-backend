@@ -1,5 +1,6 @@
 import uuid
 
+from django.conf import settings
 from django.db import models
 from django.contrib.auth.models import AbstractBaseUser, PermissionsMixin, BaseUserManager
 from django.db.models.functions import Lower
@@ -156,6 +157,60 @@ class PasswordResetEmailDelivery(models.Model):
 
     def __str__(self):
         return f"{self.challenge_id}:{self.status}"
+
+
+class SlackFounderAccountLink(models.Model):
+    """Verified association between Roo's Slack user and a Founder Tools user."""
+
+    slack_user = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="slack_founder_account_link",
+    )
+    founder_user = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="founder_slack_account_link",
+    )
+    verified_at = models.DateTimeField(default=timezone.now)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "core_slackfounderaccountlink"
+
+    def __str__(self):
+        return f"Slack user {self.slack_user_id} -> Founder user {self.founder_user_id}"
+
+
+class SlackFounderLinkRequest(models.Model):
+    """Single-use request proving possession of a Roo Slack identity."""
+
+    slack_user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="slack_founder_link_requests",
+    )
+    token_digest = models.CharField(max_length=64, unique=True)
+    expires_at = models.DateTimeField(db_index=True)
+    consumed_at = models.DateTimeField(null=True, blank=True)
+    invalidated_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "core_slackfounderlinkrequest"
+        indexes = [
+            models.Index(
+                fields=["slack_user", "expires_at"],
+                name="core_sflr_user_exp_idx",
+            ),
+        ]
+
+    def __str__(self):
+        return f"Slack founder link request {self.pk} for user {self.slack_user_id}"
+
+
 class Hackathon(models.Model):
     name = models.CharField(max_length=255)
     slug = models.SlugField(unique=True)

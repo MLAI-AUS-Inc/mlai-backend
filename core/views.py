@@ -34,7 +34,7 @@ from .refresh_sessions import (
     issue_refresh_token,
     revoke_refresh_credential,
 )
-from .models import Hackathon
+from .models import Hackathon, SlackFounderAccountLink
 from .serializers import (
     HackathonSerializer,
     MyTokenObtainPairSerializer,
@@ -47,6 +47,12 @@ from .permissions import (
     HasRooApiKey,
     HasStrictRooApiKey,
     IsOwnerOrTeammateOrSuperuser,
+)
+from .slack_founder_links import (
+    SlackFounderLinkError,
+    complete_slack_founder_link,
+    create_slack_founder_link_request,
+    preview_slack_founder_link,
 )
 from .throttles import AuthEndpointRateThrottle, MagicLinkSendRateThrottle
 from .user_compat import DEFAULT_USER_ROLE, get_compat_user_role, user_has_team
@@ -1053,6 +1059,105 @@ class LinkSlackView(APIView):
                 "error": "That MLAI account is already linked to another Slack identity",
             },
             status=status.HTTP_409_CONFLICT,
+        )
+
+
+def _slack_founder_link_error_response(exc):
+    logger.info("slack_founder_link_rejected code=%s", exc.code)
+    return Response(
+        {"code": exc.code, "error": str(exc)},
+        status=exc.status_code,
+    )
+
+
+class SlackFounderLinkStartView(APIView):
+    authentication_classes = []
+    permission_classes = [HasStrictRooApiKey]
+
+    def post(self, request):
+        slack_user_id = str(request.data.get("slack_user_id") or "").strip()
+        if not slack_user_id:
+            return Response(
+                {
+                    "code": "invalid_request",
+                    "error": "slack_user_id is required",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        slack_user = User.objects.filter(slack_id=slack_user_id).first()
+        if slack_user is None:
+            return Response(
+                {
+                    "code": "slack_user_not_found",
+                    "error": "Ask Roo to register your Slack account before linking.",
+                },
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        if SlackFounderAccountLink.objects.filter(slack_user=slack_user).exists():
+            return Response(
+                {"status": "already_linked"},
+                status=status.HTTP_200_OK,
+            )
+
+        link_request, raw_token = create_slack_founder_link_request(slack_user)
+        base_url = _frontend_base_url("founder-tools").rstrip("/")
+        link_url = (
+            f"{base_url}/founder-tools/link-roo?"
+            f"{urlencode({'token': raw_token})}"
+        )
+        return Response(
+            {
+                "status": "link_required",
+                "link_url": link_url,
+                "expires_at": link_request.expires_at.isoformat(),
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class SlackFounderLinkPreviewView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        try:
+            preview = preview_slack_founder_link(
+                request.data.get("token"),
+                founder_user=request.user,
+            )
+        except SlackFounderLinkError as exc:
+            return _slack_founder_link_error_response(exc)
+
+        slack_display_name = (
+            preview.request.slack_user.full_name
+            or "Your Roo Slack account"
+        )
+        return Response(
+            {
+                "status": preview.status,
+                "slack_display_name": slack_display_name,
+                "expires_at": preview.request.expires_at.isoformat(),
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class SlackFounderLinkCompleteView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        try:
+            _, created = complete_slack_founder_link(
+                request.data.get("token"),
+                founder_user=request.user,
+            )
+        except SlackFounderLinkError as exc:
+            return _slack_founder_link_error_response(exc)
+
+        return Response(
+            {"status": "linked" if created else "already_linked"},
+            status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
         )
 
 

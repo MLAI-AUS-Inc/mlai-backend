@@ -43,7 +43,7 @@ from .permissions import (
     PermissionDeniedError,
 )
 from .committee_candidates import CommitteeCandidateEmailService
-from core.models import User
+from core.models import SlackFounderAccountLink, User
 from core.permissions import HasAPIKey, HasRooApiKey, HasStrictRooApiKey
 from core.slack_users import resolve_existing_user_from_profile
 from integrations.services import SlackService
@@ -1699,6 +1699,10 @@ class CoworkingViewSet(viewsets.ViewSet):
             standard_cost = CoworkingService.get_standard_coworking_cost()
             response_data["standard_points_cost"] = standard_cost
             response_data["monthly_update_discount_applied"] = booking.points_cost < standard_cost
+            from core.slack_founder_links import founder_tools_account_linked
+            response_data["founder_tools_account_linked"] = founder_tools_account_linked(
+                booking.user
+            )
             if not created:
                 response_data["already_booked"] = True
                 response_data["idempotent"] = True
@@ -1821,6 +1825,13 @@ class CoworkingViewSet(viewsets.ViewSet):
             return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
         standard_cost = CoworkingService.get_standard_coworking_cost()
+        linked_slack_user_ids = set(
+            SlackFounderAccountLink.objects.filter(
+                slack_user_id__in=[
+                    booking.user_id for booking, _created in booking_results
+                ]
+            ).values_list('slack_user_id', flat=True)
+        )
         results = []
         created_count = 0
         for booking, created in booking_results:
@@ -1833,6 +1844,9 @@ class CoworkingViewSet(viewsets.ViewSet):
                 'points_cost': booking.points_cost,
                 'standard_points_cost': standard_cost,
                 'monthly_update_discount_applied': booking.points_cost < standard_cost,
+                'founder_tools_account_linked': (
+                    booking.user_id in linked_slack_user_ids
+                ),
             })
 
         return Response(

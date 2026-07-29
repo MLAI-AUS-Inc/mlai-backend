@@ -1121,8 +1121,10 @@ class CoworkingService:
         ``ready_at`` is stamped once, the first time a draft becomes ready, so
         re-approving an old draft cannot renew the window.
         """
-        # Imported lazily to avoid a hard import dependency between the roo and
-        # startup_updates / founder_tools apps at module load time.
+        # Imported lazily to avoid hard app dependencies at module load time.
+        # A verified explicit link changes only the user whose Founder Tools
+        # bindings are checked; points and bookings continue to use ``user``.
+        from core.slack_founder_links import coworking_eligibility_user
         from founder_tools.models import VibeRaisingCompany
         from startup_updates.models import (
             MonthlyUpdateDraft,
@@ -1130,9 +1132,10 @@ class CoworkingService:
             UserStartupBinding,
         )
 
+        eligibility_user = coworking_eligibility_user(user)
         org_ids = list(
             UserStartupBinding.objects.filter(
-                user=user,
+                user=eligibility_user,
                 coworking_discount_eligible=True,
             ).values_list('organization_id', flat=True)
         )
