@@ -344,7 +344,6 @@ def list_issue_labels(limit: int = 100) -> list[dict[str, Any]]:
           color
           archivedAt
           team { id key name }
-          group { id name }
         }
         pageInfo { hasNextPage endCursor }
       }
@@ -371,7 +370,7 @@ def list_issue_labels(limit: int = 100) -> list[dict[str, Any]]:
         except LinearMeetingGraphQLError as exc:
             message = str(exc).lower()
             if use_basic_query or not any(
-                field in message for field in ("archivedat", "group", "team", "color")
+                field in message for field in ("archivedat", "team", "color")
             ):
                 raise
             logger.warning("linear_meeting_actions_label_metadata_unavailable detail=%s", str(exc))

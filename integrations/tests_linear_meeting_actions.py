@@ -143,7 +143,27 @@ class LinearMeetingActionsApiTests(SimpleTestCase):
                     }
                 }
             ),
-            FakeLinearResponse({"data": {"issueLabels": {"nodes": [{"id": "label-1", "name": "meeting-action"}]}}}),
+            FakeLinearResponse(
+                {
+                    "data": {
+                        "issueLabels": {
+                            "nodes": [
+                                {
+                                    "id": "label-1",
+                                    "name": "meeting-action",
+                                    "color": "#4EA7FC",
+                                    "archivedAt": None,
+                                    "team": {
+                                        "id": "team-1",
+                                        "key": "ENG",
+                                        "name": "Engineering",
+                                    },
+                                }
+                            ]
+                        }
+                    }
+                }
+            ),
             FakeLinearResponse({"data": {"issues": {"nodes": [{"id": "issue-1", "identifier": "ENG-1", "title": "Open task"}]}}}),
         ]
 
@@ -168,6 +188,8 @@ class LinearMeetingActionsApiTests(SimpleTestCase):
             ["user-1", "lead-1"],
         )
         self.assertEqual(payload["labels"][0]["id"], "label-1")
+        self.assertEqual(payload["labels"][0]["team"]["id"], "team-1")
+        self.assertIsNone(payload["labels"][0]["archivedAt"])
         self.assertEqual(payload["recentIssues"][0]["identifier"], "ENG-1")
         headers = mock_post.call_args_list[0].kwargs["headers"]
         self.assertEqual(headers["Authorization"], "lin-api-key")
@@ -184,6 +206,11 @@ class LinearMeetingActionsApiTests(SimpleTestCase):
         self.assertIn("description", project_request["query"])
         self.assertIn("content", project_request["query"])
         self.assertIn("slackChannelId", project_request["query"])
+        label_request = mock_post.call_args_list[3].kwargs["json"]
+        self.assertEqual(label_request["operationName"], "LinearIssueLabels")
+        self.assertIn("archivedAt", label_request["query"])
+        self.assertIn("team { id key name }", label_request["query"])
+        self.assertNotIn("group { id name }", label_request["query"])
 
     @patch("integrations.services.linear_meeting_actions.http_requests.post")
     def test_project_graphql_errors_include_operation(self, mock_post):
