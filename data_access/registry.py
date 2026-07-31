@@ -734,8 +734,14 @@ def get_resource(key: str) -> Resource | None:
     return RESOURCES.get(key)
 
 
-def list_resources() -> list[dict]:
-    return [RESOURCES[key].catalog_entry() for key in sorted(RESOURCES)]
+def list_resources(actor: Actor) -> list[dict]:
+    visible_resources = []
+    for key in sorted(RESOURCES):
+        resource = RESOURCES[key]
+        operations = resource.accessible_operations(actor)
+        if operations:
+            visible_resources.append(resource.catalog_entry(operations=operations))
+    return visible_resources
 
 
 def assert_no_sensitive_fields_registered():

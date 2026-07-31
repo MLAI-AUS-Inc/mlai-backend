@@ -2,10 +2,14 @@
 
 `data_access` exposes curated read-only resources to Roo through:
 
-- `GET /api/v1/data/catalog/`
+- `GET /api/v1/data/catalog/?requester_slack_id=U123`
 - `POST /api/v1/data/query/`
 
 Roo never sends SQL and the backend never exposes arbitrary Django models. Each resource is registered in Python with explicit `allowed_fields`, filters, ordering, limits, and role scopes.
+
+The catalog is requester-scoped. It includes only resources and operations
+available to the supplied Slack actor; its fields are the allow-listed fields
+that actor can query on those resources.
 
 On PostgreSQL, query execution runs inside a read-only transaction with a 30 second statement timeout. This is a backend safety net, not a substitute for resource allow-lists and role scopes.
 
@@ -63,7 +67,7 @@ Catalog:
 
 ```bash
 curl -H "X-API-Key: $ROO_API_KEY" \
-  "$MLAI_BACKEND_URL/api/v1/data/catalog/"
+  "$MLAI_BACKEND_URL/api/v1/data/catalog/?requester_slack_id=U123"
 ```
 
 Count Vibe Raising companies visible to a requester:

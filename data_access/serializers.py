@@ -5,6 +5,20 @@ FILTER_OPERATORS = ("eq", "neq", "gt", "gte", "lt", "lte", "in", "icontains")
 QUERY_OPERATIONS = ("list", "count", "aggregate")
 
 
+class RequesterSlackIdSerializer(serializers.Serializer):
+    requester_slack_id = serializers.CharField(max_length=80, trim_whitespace=True)
+
+    def validate_requester_slack_id(self, value):
+        value = str(value or "").strip()
+        if not value:
+            raise serializers.ValidationError("requester_slack_id is required.")
+        return value
+
+
+class DataCatalogSerializer(RequesterSlackIdSerializer):
+    pass
+
+
 class DataFilterSerializer(serializers.Serializer):
     field = serializers.CharField(max_length=120)
     operator = serializers.ChoiceField(choices=FILTER_OPERATORS)
@@ -25,8 +39,7 @@ class DataOrderBySerializer(serializers.Serializer):
     direction = serializers.ChoiceField(choices=("asc", "desc"), default="asc")
 
 
-class DataQuerySerializer(serializers.Serializer):
-    requester_slack_id = serializers.CharField(max_length=80, trim_whitespace=True)
+class DataQuerySerializer(RequesterSlackIdSerializer):
     resource = serializers.CharField(max_length=120)
     operation = serializers.ChoiceField(choices=QUERY_OPERATIONS, default="list")
     fields = serializers.ListField(
@@ -43,9 +56,3 @@ class DataQuerySerializer(serializers.Serializer):
     order_by = DataOrderBySerializer(many=True, required=False)
     limit = serializers.IntegerField(required=False, min_value=1)
     offset = serializers.IntegerField(required=False, min_value=0, default=0)
-
-    def validate_requester_slack_id(self, value):
-        value = str(value or "").strip()
-        if not value:
-            raise serializers.ValidationError("requester_slack_id is required.")
-        return value
