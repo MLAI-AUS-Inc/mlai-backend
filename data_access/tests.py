@@ -35,8 +35,20 @@ class DataAccessApiTests(TestCase):
     def post_query(self, payload):
         return self.client.post(reverse("data_access_query"), payload, format="json")
 
-    def test_catalog_exposes_allowlisted_fields_only(self):
+    def get_catalog(self, requester_slack_id):
+        return self.client.get(
+            reverse("data_access_catalog"),
+            {"requester_slack_id": requester_slack_id},
+        )
+
+    def test_catalog_requires_requester_identity(self):
         response = self.client.get(reverse("data_access_catalog"))
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("requester_slack_id", response.json())
+
+    def test_catalog_exposes_allowlisted_fields_only(self):
+        response = self.get_catalog("UADMIN")
 
         self.assertEqual(response.status_code, 200)
         resources = {resource["key"]: resource for resource in response.json()["resources"]}
@@ -48,6 +60,50 @@ class DataAccessApiTests(TestCase):
             self.assertNotIn("refresh_token", joined)
             self.assertNotIn("raw_payload", joined)
             self.assertNotIn("storage_path", joined)
+
+    def test_catalog_hides_resources_not_available_to_requester(self):
+        response = self.get_catalog("UOTHER")
+
+        self.assertEqual(response.status_code, 200)
+        resources = {resource["key"]: resource for resource in response.json()["resources"]}
+        self.assertIn("core_users", resources)
+        self.assertIn("task_templates", resources)
+        self.assertEqual(resources["task_templates"]["operations"], ["list", "count"])
+        self.assertNotIn("organizations", resources)
+        self.assertNotIn("points_admins", resources)
+        self.assertNotIn("monthly_update_drafts", resources)
+
+    def test_catalog_includes_founder_org_resources_and_fields(self):
+        response = self.get_catalog("UFOUNDER")
+
+        self.assertEqual(response.status_code, 200)
+        resources = {resource["key"]: resource for resource in response.json()["resources"]}
+        self.assertIn("organizations", resources)
+        self.assertEqual(
+            resources["organizations"]["operations"],
+            ["list", "count", "aggregate"],
+        )
+        self.assertIn("competitors", resources["organizations"]["fields"])
+        self.assertNotIn("points_admins", resources)
+
+    def test_catalog_filters_operations_by_requester_policy(self):
+        partner_user = User.objects.create_user(email="partner@example.com", slack_id="UPARTNER")
+        PointsAdmin.objects.create(
+            slack_user_id="UPARTNER",
+            user=partner_user,
+            role="partner",
+            is_active=True,
+        )
+
+        response = self.get_catalog("UPARTNER")
+
+        self.assertEqual(response.status_code, 200)
+        resources = {resource["key"]: resource for resource in response.json()["resources"]}
+        self.assertEqual(
+            resources["coworking_capacity"]["operations"],
+            ["count", "aggregate"],
+        )
+        self.assertEqual(resources["task_templates"]["operations"], ["list", "count"])
 
     def test_sensitive_field_registry_assertion(self):
         assert_no_sensitive_fields_registered()

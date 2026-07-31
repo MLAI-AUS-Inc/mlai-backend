@@ -7,7 +7,7 @@ from core.permissions import HasRooApiKey
 
 from .registry import build_actor, get_resource, list_resources
 from .resolvers import DataAccessError, DataAccessPermissionDenied
-from .serializers import DataQuerySerializer
+from .serializers import DataCatalogSerializer, DataQuerySerializer
 
 
 class DataCatalogView(APIView):
@@ -15,7 +15,10 @@ class DataCatalogView(APIView):
     permission_classes = [HasRooApiKey]
 
     def get(self, request):
-        return Response({"resources": list_resources()})
+        serializer = DataCatalogSerializer(data=request.query_params)
+        serializer.is_valid(raise_exception=True)
+        actor = build_actor(serializer.validated_data["requester_slack_id"])
+        return Response({"resources": list_resources(actor)})
 
 
 class DataQueryView(APIView):

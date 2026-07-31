@@ -113,11 +113,22 @@ class Resource:
     def searchable_fields(self) -> set[str]:
         return {name for name, spec in self.fields.items() if spec.searchable}
 
-    def catalog_entry(self) -> dict[str, Any]:
+    def accessible_operations(self, actor: Actor) -> tuple[str, ...]:
+        return tuple(
+            operation
+            for operation in self.operations
+            if any(
+                policy.allows(actor, operation) and policy.as_q(actor) is not None
+                for policy in self.policies
+            )
+        )
+
+    def catalog_entry(self, *, operations: Iterable[str] | None = None) -> dict[str, Any]:
+        visible_operations = tuple(self.operations if operations is None else operations)
         return {
             "key": self.key,
             "description": self.description,
-            "operations": list(self.operations),
+            "operations": list(visible_operations),
             "fields": sorted(self.fields),
             "filters": sorted(self.filter_fields),
             "order_by": sorted(self.order_fields),
