@@ -1,11 +1,13 @@
 from django.contrib import admin, messages
 from django.core.exceptions import ValidationError
 from django.shortcuts import redirect
+from django.utils import timezone
 from django.utils.html import format_html
 from .models import (
     PointsAdmin, Minter, Task, Ledger, PointsAccount, PointsPurchase, BoostPostAdmission,
     TaskSubmission, CoworkingBooking, CoworkingDayCapacity,
     MeetingRoom, MeetingRoomBlock, MeetingRoomBooking,
+    OfficeManagerAssignment, OfficeManagerDay,
     RewardsCatalog, RewardRedemption, TaskTemplate, QuestProgress,
 )
 
@@ -268,6 +270,75 @@ class MeetingRoomBookingAdmin(admin.ModelAdmin):
     )
     readonly_fields = [field.name for field in MeetingRoomBooking._meta.fields]
     ordering = ('-starts_at',)
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(OfficeManagerDay)
+class OfficeManagerDayAdmin(admin.ModelAdmin):
+    list_display = (
+        'date', 'status', 'announcement_status', 'slack_channel_id',
+        'announced_at', 'claim_cutoff_at',
+    )
+    list_filter = ('status', 'announcement_status', 'date')
+    readonly_fields = (
+        'slack_message_ts', 'announcement_attempt_count',
+        'announcement_last_error', 'announced_at', 'created_at', 'updated_at',
+    )
+    actions = ('close_open_days', 'reopen_closed_days')
+
+    @admin.action(description='Close selected open Office Manager days')
+    def close_open_days(self, request, queryset):
+        updated = queryset.filter(status='open').update(
+            status='closed',
+            closed_at=timezone.now(),
+            message_update_pending=True,
+        )
+        self.message_user(request, f'Closed {updated} Office Manager day(s).')
+
+    @admin.action(description='Reopen selected days before their claim cutoff')
+    def reopen_closed_days(self, request, queryset):
+        reopened = 0
+        for day in queryset.filter(status='closed'):
+            if timezone.now() >= day.claim_cutoff_at:
+                continue
+            day.status = 'open'
+            day.closed_at = None
+            day.message_update_pending = True
+            day.save(
+                update_fields=[
+                    'status', 'closed_at', 'message_update_pending', 'updated_at',
+                ]
+            )
+            reopened += 1
+        self.message_user(request, f'Reopened {reopened} Office Manager day(s).')
+
+
+@admin.register(OfficeManagerAssignment)
+class OfficeManagerAssignmentAdmin(admin.ModelAdmin):
+    list_display = (
+        'day', 'user', 'status', 'points_refunded', 'claimed_at',
+        'relinquished_at', 'winner_channel_announcement_status',
+        'winner_dm_status', 'end_of_day_reminder_status',
+    )
+    list_filter = (
+        'status', 'winner_channel_announcement_status', 'winner_dm_status',
+        'end_of_day_reminder_status', 'claimed_at',
+    )
+    search_fields = ('user__email', 'user__slack_id')
+    readonly_fields = (
+        'day', 'user', 'booking', 'status', 'points_refunded',
+        'refund_ledger_entry', 'winner_dm_status', 'winner_dm_sent_at',
+        'winner_dm_last_error', 'winner_channel_announcement_status',
+        'winner_channel_announcement_sent_at',
+        'winner_channel_announcement_last_error', 'end_of_day_reminder_status',
+        'end_of_day_reminder_sent_at', 'end_of_day_reminder_last_error',
+        'claimed_at', 'relinquished_at',
+    )
 
     def has_add_permission(self, request):
         return False

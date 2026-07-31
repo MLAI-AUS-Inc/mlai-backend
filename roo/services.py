@@ -1185,6 +1185,13 @@ class CoworkingService:
         return standard
 
     @staticmethod
+    def monthly_update_discount_applied(booking: CoworkingBooking) -> bool:
+        """Return true only for a points-priced monthly-update discount."""
+        if booking.booking_source != 'points':
+            return False
+        return booking.points_cost < CoworkingService.get_standard_coworking_cost()
+
+    @staticmethod
     def _lock_booking_date(booking_date: date) -> None:
         """Serialize capacity checks for one date on PostgreSQL.
 
@@ -1579,7 +1586,7 @@ class CoworkingService:
         refunded = False
         
         # Check if refund is applicable
-        if CoworkingService.is_refundable(booking.date):
+        if booking.points_cost > 0 and CoworkingService.is_refundable(booking.date):
             idempotency_key = f"coworking_refund:{booking.id}"
             
             ledger, created = PointsService.refund(
@@ -1597,6 +1604,15 @@ class CoworkingService:
             refunded = True
         
         booking.save()
+
+        booking._office_manager_day_reopened = False
+        booking._office_manager_day_id = None
+        if booking.booking_source == 'office_manager':
+            from .office_manager import OfficeManagerService
+
+            reopened, day_id = OfficeManagerService.relinquish_for_booking(booking)
+            booking._office_manager_day_reopened = reopened
+            booking._office_manager_day_id = day_id
         
         return booking, refunded
     

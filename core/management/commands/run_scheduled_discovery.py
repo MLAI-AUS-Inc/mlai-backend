@@ -19,6 +19,7 @@ from integrations.services.xero_reconciliation import run_daily_payout_reconcili
 from jobs.services.job_pipeline import run_daily_jobs_scheduler
 from hospital.sim_retention import run_scheduled_sim_conversation_cleanup
 from roo.coding import reconcile_coding_reservations
+from roo.office_manager import run_office_manager_scheduler
 from startup_updates.monthly_update_reminders import run_monthly_update_reminder_scheduler
 
 logger = logging.getLogger(__name__)
@@ -112,6 +113,9 @@ class Command(BaseCommand):
             # Authenticated request paths only reconcile their own account;
             # this production scheduler is the sole global sweep.
             ("coding_reconciliation", reconcile_coding_reservations),
+            # Posts one weekday Office Manager callout, closes the volunteer
+            # window, repairs message state, and sends the end-of-day reminder.
+            ("office_manager", run_office_manager_scheduler),
         ):
             try:
                 results[name] = runner()

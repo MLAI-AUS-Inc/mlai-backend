@@ -856,6 +856,127 @@ class CoworkingBooking(models.Model):
         return f"{self.user.email} - {self.date} ({self.status})"
 
 
+class OfficeManagerDay(models.Model):
+    STATUS_CHOICES = (
+        ('open', 'Open'),
+        ('claimed', 'Claimed'),
+        ('closed', 'Closed'),
+    )
+    ANNOUNCEMENT_STATUS_CHOICES = (
+        ('pending', 'Pending'),
+        ('sending', 'Sending'),
+        ('sent', 'Sent'),
+        ('failed', 'Failed'),
+        ('unknown', 'Unknown'),
+    )
+
+    date = models.DateField(unique=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='open')
+    slack_channel_id = models.CharField(max_length=50)
+    slack_message_ts = models.CharField(max_length=50, blank=True, default='')
+    announcement_status = models.CharField(
+        max_length=20,
+        choices=ANNOUNCEMENT_STATUS_CHOICES,
+        default='pending',
+    )
+    announcement_attempt_count = models.PositiveIntegerField(default=0)
+    announcement_last_error = models.TextField(blank=True, default='')
+    announced_at = models.DateTimeField(blank=True, null=True)
+    claim_cutoff_at = models.DateTimeField()
+    closed_at = models.DateTimeField(blank=True, null=True)
+    message_update_pending = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-date']
+
+    def __str__(self):
+        return f"Office manager {self.date} ({self.status})"
+
+
+class OfficeManagerAssignment(models.Model):
+    STATUS_CHOICES = (
+        ('active', 'Active'),
+        ('relinquished', 'Relinquished'),
+    )
+    DELIVERY_STATUS_CHOICES = (
+        ('pending', 'Pending'),
+        ('sending', 'Sending'),
+        ('sent', 'Sent'),
+        ('failed', 'Failed'),
+        ('unknown', 'Unknown'),
+    )
+
+    day = models.ForeignKey(
+        OfficeManagerDay,
+        on_delete=models.CASCADE,
+        related_name='assignments',
+    )
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='office_manager_assignments',
+    )
+    booking = models.ForeignKey(
+        CoworkingBooking,
+        on_delete=models.PROTECT,
+        related_name='office_manager_assignments',
+    )
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='active')
+    points_refunded = models.PositiveIntegerField(default=0)
+    refund_ledger_entry = models.ForeignKey(
+        Ledger,
+        on_delete=models.SET_NULL,
+        blank=True,
+        null=True,
+        related_name='office_manager_refunds',
+    )
+    winner_dm_status = models.CharField(
+        max_length=20,
+        choices=DELIVERY_STATUS_CHOICES,
+        default='pending',
+    )
+    winner_dm_sent_at = models.DateTimeField(blank=True, null=True)
+    winner_dm_last_error = models.TextField(blank=True, default='')
+    winner_channel_announcement_status = models.CharField(
+        max_length=20,
+        choices=DELIVERY_STATUS_CHOICES,
+        default='pending',
+    )
+    winner_channel_announcement_sent_at = models.DateTimeField(
+        blank=True,
+        null=True,
+    )
+    winner_channel_announcement_last_error = models.TextField(
+        blank=True,
+        default='',
+    )
+    end_of_day_reminder_status = models.CharField(
+        max_length=20,
+        choices=DELIVERY_STATUS_CHOICES,
+        default='pending',
+    )
+    end_of_day_reminder_sent_at = models.DateTimeField(blank=True, null=True)
+    end_of_day_reminder_last_error = models.TextField(blank=True, default='')
+    claimed_at = models.DateTimeField(default=timezone.now)
+    relinquished_at = models.DateTimeField(blank=True, null=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-claimed_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['day'],
+                condition=Q(status='active'),
+                name='unique_active_office_manager_per_day',
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.day.date}: {self.user} ({self.status})"
+
+
 class MeetingRoom(models.Model):
     """A reservable room managed by Roo."""
 
