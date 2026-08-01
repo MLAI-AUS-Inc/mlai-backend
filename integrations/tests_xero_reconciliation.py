@@ -2339,6 +2339,8 @@ class ReconciliationWorkflowApiTests(APITestCase):
                 "statement_line_id": line.statement_line_id,
                 "canonical_name": "Luiz Flavio",
                 "xero_contact_name": "Luiz F Oliveira Araujo",
+                "status": "verified",
+                "confirm": True,
             },
             format="json",
         )
@@ -2346,6 +2348,38 @@ class ReconciliationWorkflowApiTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["identity"]["status"], "verified")
         self.assertEqual(response.data["identity"]["verified_by_slack_id"], "UADMIN")
+
+    @patch("core.permissions.HasRooApiKey.has_permission", return_value=True)
+    def test_identity_proposal_is_inactive_until_explicit_verification(self, _permission):
+        proposed = self.client.put(
+            reverse("reconciliation_party_identities"),
+            {
+                "slack_user_id": "UADMIN",
+                "domain": "mlai.au",
+                "bank_narration_key": "redacted contractor",
+                "direction": "debit",
+                "canonical_name": "Redacted Contractor",
+                "status": "proposed",
+            },
+            format="json",
+        )
+        unconfirmed = self.client.put(
+            reverse("reconciliation_party_identities"),
+            {
+                "slack_user_id": "UADMIN",
+                "domain": "mlai.au",
+                "bank_narration_key": "redacted contractor",
+                "direction": "debit",
+                "canonical_name": "Redacted Contractor",
+                "status": "verified",
+            },
+            format="json",
+        )
+
+        self.assertEqual(proposed.status_code, status.HTTP_200_OK)
+        self.assertEqual(proposed.data["identity"]["status"], "proposed")
+        self.assertFalse(proposed.data["identity"]["active"])
+        self.assertEqual(unconfirmed.status_code, status.HTTP_400_BAD_REQUEST)
 
     @patch("core.permissions.HasRooApiKey.has_permission", return_value=True)
     def test_admin_can_create_confirmed_date_bounded_reconciliation_rule(self, _permission):
@@ -2520,6 +2554,42 @@ class ReconciliationWorkflowApiTests(APITestCase):
             preview.data["results"][0]["suggestion"]["approval"]["status"],
             "stale",
         )
+
+    @patch("core.permissions.HasRooApiKey.has_permission", return_value=True)
+    def test_agent_run_decision_rejects_hashes_that_differ_from_reviewed_preview(self, _permission):
+        run, suggestion = self._agent_run_suggestion(
+            run_id="xero-agent-hash-bound",
+            line_id="agent-hash-bound-line",
+        )
+        preview = self.client.get(
+            reverse("reconciliation_agent_run_preview", kwargs={"run_id": run.run_id}),
+            {"slack_user_id": "UADMIN", "domain": "mlai.au"},
+        ).data["results"][0]
+
+        response = self.client.post(
+            reverse("reconciliation_agent_run_decisions", kwargs={"run_id": run.run_id}),
+            {
+                "slack_user_id": "UADMIN",
+                "domain": "mlai.au",
+                "confirm": True,
+                "decision_request_id": "reviewed-hash-mismatch",
+                "decisions": [{
+                    "suggestion_id": suggestion.id,
+                    "decision": "approve",
+                    "expected_source_hash": preview["suggestion"]["source_hash"],
+                    "expected_payload_hash": "f" * 64,
+                }],
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["recorded_count"], 0)
+        self.assertIn("payload changed", response.data["results"][0]["error"].lower())
+        self.assertFalse(ReconciliationDecision.objects.filter(
+            suggestion=suggestion,
+            decision_type=ReconciliationDecision.TYPE_ADMIN_APPROVED,
+        ).exists())
 
     @patch("core.permissions.HasRooApiKey.has_permission", return_value=True)
     def test_agent_run_can_reapprove_after_a_later_rejection(self, _permission):

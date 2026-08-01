@@ -800,12 +800,30 @@ class ReconciliationPartyIdentityView(ReconciliationAdminView):
             return Response({"error": "A statement line or bank narration key is required."}, status=status.HTTP_400_BAD_REQUEST)
         if direction not in {"", XeroStatementLineSnapshot.DIRECTION_DEBIT, XeroStatementLineSnapshot.DIRECTION_CREDIT}:
             return Response({"error": "direction must be debit or credit"}, status=status.HTTP_400_BAD_REQUEST)
-        identity_status = str(request.data.get("status") or ReconciliationPartyIdentity.STATUS_VERIFIED).strip().lower()
+        identity_status = str(
+            request.data.get("status") or ReconciliationPartyIdentity.STATUS_PROPOSED
+        ).strip().lower()
         if identity_status not in {
+            ReconciliationPartyIdentity.STATUS_PROPOSED,
             ReconciliationPartyIdentity.STATUS_VERIFIED,
             ReconciliationPartyIdentity.STATUS_REVOKED,
         }:
-            return Response({"error": "status must be verified or revoked"}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {"error": "status must be proposed, verified or revoked"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if (
+            identity_status
+            in {
+                ReconciliationPartyIdentity.STATUS_VERIFIED,
+                ReconciliationPartyIdentity.STATUS_REVOKED,
+            }
+            and request.data.get("confirm") is not True
+        ):
+            return Response(
+                {"error": "confirm must be true to verify or revoke an identity"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         linear_user_id = str(request.data.get("linear_user_id") or "").strip()
         linear_name = str(request.data.get("linear_name") or "").strip()
         linear_email = str(request.data.get("linear_email") or "").strip()
@@ -830,6 +848,20 @@ class ReconciliationPartyIdentityView(ReconciliationAdminView):
             identity_confidence = max(0.0, min(float(request.data.get("confidence", 1.0)), 1.0))
         except (TypeError, ValueError):
             return Response({"error": "confidence must be a number"}, status=status.HTTP_400_BAD_REQUEST)
+        existing = ReconciliationPartyIdentity.objects.filter(
+            organization=organization,
+            bank_narration_key=narration_key,
+            direction=direction,
+        ).first()
+        if (
+            identity_status == ReconciliationPartyIdentity.STATUS_PROPOSED
+            and existing is not None
+            and existing.status == ReconciliationPartyIdentity.STATUS_VERIFIED
+        ):
+            return Response(
+                {"error": "A proposal cannot replace an existing verified identity; revoke it first."},
+                status=status.HTTP_409_CONFLICT,
+            )
         identity, _created = ReconciliationPartyIdentity.objects.update_or_create(
             organization=organization,
             bank_narration_key=narration_key,
@@ -2218,6 +2250,26 @@ class ReconciliationAgentRunDecisionView(ReconciliationAdminView):
                     "recorded": False,
                     "error": "Suggestion is not ready for approval.",
                     "errors": preview.get("errors") or [],
+                })
+                continue
+            expected_source_hash = str(item.get("expected_source_hash") or "").strip()
+            expected_payload_hash = str(item.get("expected_payload_hash") or "").strip()
+            if expected_source_hash and expected_source_hash != suggestion.source_hash:
+                results.append({
+                    "suggestion_id": suggestion.id,
+                    "recorded": False,
+                    "error": "Suggestion source changed after review.",
+                    "expected_source_hash": expected_source_hash,
+                    "current_source_hash": suggestion.source_hash,
+                })
+                continue
+            if expected_payload_hash and expected_payload_hash != preview.get("payload_hash"):
+                results.append({
+                    "suggestion_id": suggestion.id,
+                    "recorded": False,
+                    "error": "Posting payload changed after review.",
+                    "expected_payload_hash": expected_payload_hash,
+                    "current_payload_hash": preview.get("payload_hash") or "",
                 })
                 continue
             decision = record_reconciliation_decision(
