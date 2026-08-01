@@ -153,6 +153,9 @@ class DeviceAuthAuthorizeView(APIView):
     def post(self, request):
         _require_eligible(request.user)
         origin = _request_origin(request)
+        browser_origin = str(settings.COMMUNITY_CHAT_FRONTEND_URL).strip().rstrip("/")
+        if not secrets.compare_digest(origin, browser_origin):
+            raise PermissionDenied("Device approval must come from the MLAI Chat browser origin.")
         request_id = request.data.get("request_id")
         now = timezone.now()
         try:
@@ -160,8 +163,6 @@ class DeviceAuthAuthorizeView(APIView):
                 auth_request = CommunityChatDeviceAuthRequest.objects.select_for_update().get(
                     id=request_id
                 )
-                if auth_request.origin != origin:
-                    raise PermissionDenied("Login request origin does not match.")
                 if auth_request.expires_at <= now:
                     return Response(
                         {"error": "authorization_expired"},

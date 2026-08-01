@@ -15,6 +15,7 @@ from community_chat.models import (
 
 
 ORIGIN = "https://chat.mlai.au"
+NATIVE_ORIGIN = "mlaichat://callback"
 
 
 def _public_key(private_key):
@@ -26,7 +27,8 @@ def _challenge(verifier):
 
 
 @override_settings(
-    COMMUNITY_CHAT_ALLOWED_ORIGINS=[ORIGIN],
+    COMMUNITY_CHAT_ALLOWED_ORIGINS=[ORIGIN, NATIVE_ORIGIN],
+    COMMUNITY_CHAT_FRONTEND_URL=ORIGIN,
     COMMUNITY_CHAT_DEVICE_AUTH_TTL_SECONDS=900,
     COMMUNITY_CHAT_BOOTSTRAP_TOKEN_TTL_SECONDS=1200,
 )
@@ -110,6 +112,45 @@ class CommunityChatDeviceAuthTests(APITestCase):
             HTTP_ORIGIN=ORIGIN,
         )
         self.assertEqual(wrong_key.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_native_request_is_approved_by_browser_then_exchanged_by_native_origin(self):
+        started = self.client.post(
+            reverse("community_chat_auth_start"),
+            {
+                "public_key": self.public_key,
+                "state": self.state,
+                "code_challenge": _challenge(self.verifier),
+                "origin": NATIVE_ORIGIN,
+            },
+            format="json",
+            HTTP_ORIGIN=NATIVE_ORIGIN,
+        )
+        self.assertEqual(started.status_code, status.HTTP_201_CREATED)
+        request_id = started.data["request_id"]
+
+        self.client.force_authenticate(user=self.user)
+        approved = self.client.post(
+            reverse("community_chat_auth_authorize"),
+            {"request_id": request_id, "origin": ORIGIN},
+            format="json",
+            HTTP_ORIGIN=ORIGIN,
+        )
+        self.assertEqual(approved.status_code, status.HTTP_200_OK)
+
+        self.client.force_authenticate(user=None)
+        exchanged = self.client.post(
+            reverse("community_chat_auth_exchange"),
+            {
+                "request_id": request_id,
+                "state": self.state,
+                "code_verifier": self.verifier,
+                "origin": NATIVE_ORIGIN,
+            },
+            format="json",
+            HTTP_ORIGIN=NATIVE_ORIGIN,
+        )
+        self.assertEqual(exchanged.status_code, status.HTTP_200_OK)
+        self.assertEqual(exchanged.data["public_key"], self.public_key)
 
     def test_bad_state_origin_and_verifier_fail_without_consuming_request(self):
         request_id = self.start().data["request_id"]
