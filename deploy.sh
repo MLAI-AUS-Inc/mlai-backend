@@ -436,7 +436,9 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     upsert_env_value HEALTH_HACK_AI_MAX_COMPLETION_TOKENS "2000"
     # Admin Brain retrieval remains fail-closed unless the separately governed
     # production rollout is explicitly enabled. Every mutation path remains
-    # hard-disabled in either state.
+    # hard-disabled in either state. Even when enabled, the query API is
+    # switched back off below if the staging readiness gate reports that the
+    # pilot is still awaiting its first retrievable evidence.
     if [ "\$org_memory_production_deploy_enabled" = "true" ]; then
         upsert_env_value ORG_MEMORY_QUERY_API_ENABLED "true"
     else
@@ -660,32 +662,59 @@ PY
         }
 
         echo "🔐 Applying the reviewed Admin Brain production binding..."
-        compose_run_web_with_approval python manage.py stage_org_memory_pilot \
+        stage_stdout=\$(mktemp)
+        if compose_run_web_with_approval python manage.py stage_org_memory_pilot \
             --organization-domain mlai.au \
             --approval-manifest "\$approval_manifest_container" \
             --operator-email "\$stage_operator" \
             --idempotency-key "\$stage_idempotency_key" \
             --environment production \
-            --apply
-        compose_run_web_with_approval python manage.py activate_org_memory_pilot \
-            --organization-domain mlai.au \
-            --approval-manifest "\$approval_manifest_container" \
-            --operator-email "\$activation_operator" \
-            --idempotency-key "\$activation_idempotency_key" \
-            --environment production \
-            --apply
-        unset stage_operator activation_operator approval_hash approval_hash_short
+            --apply > "\$stage_stdout"; then
+            staging_applied=1
+        else
+            staging_applied=0
+        fi
+        cat "\$stage_stdout"
+        if [ "\$staging_applied" = "1" ]; then
+            compose_run_web_with_approval python manage.py activate_org_memory_pilot \
+                --organization-domain mlai.au \
+                --approval-manifest "\$approval_manifest_container" \
+                --operator-email "\$activation_operator" \
+                --idempotency-key "\$activation_idempotency_key" \
+                --environment production \
+                --apply
 
-        echo "🔐 Verifying enforced, active, non-shadow Admin Brain production..."
-        compose_run_web python manage.py check_org_memory_pilot_release_gate \
-            --organization-domain mlai.au \
-            --require-active
-        compose_run_web python manage.py report_org_memory_pilot_deployment \
-            --organization-domain mlai.au \
-            --fail-if-ineffective
-        compose_run_web_with_approval python manage.py check_org_memory_pilot_access_matrix \
-            --organization-domain mlai.au \
-            --approval-manifest "\$approval_manifest_container"
+            echo "🔐 Verifying enforced, active, non-shadow Admin Brain production..."
+            compose_run_web python manage.py check_org_memory_pilot_release_gate \
+                --organization-domain mlai.au \
+                --require-active
+            compose_run_web python manage.py report_org_memory_pilot_deployment \
+                --organization-domain mlai.au \
+                --fail-if-ineffective
+            compose_run_web_with_approval python manage.py check_org_memory_pilot_access_matrix \
+                --organization-domain mlai.au \
+                --approval-manifest "\$approval_manifest_container"
+        elif python3 scripts/org_memory_staging_skip.py "\$stage_stdout"; then
+            # Evidence ingestion and restoration run in the memory worker,
+            # which only receives new code when a deploy completes. While the
+            # pilot's only readiness blocker is missing retrievable evidence,
+            # skip the binding instead of hard-failing so the deploy is not
+            # deadlocked against the very ingestion it ships. Retrieval stays
+            # fail-closed on two independent layers: no staged or active
+            # deployment binding exists, and the query API flag is switched
+            # back off before the runtime services start.
+            echo "⚠️ Admin Brain pilot staging skipped: the pilot has no retrievable evidence yet."
+            echo "⚠️ Keeping the Admin Brain query API disabled; retrieval remains fail-closed."
+            echo "⚠️ The next deploy after ingestion restores evidence will stage and activate the binding."
+            upsert_env_value ORG_MEMORY_QUERY_API_ENABLED "false"
+        else
+            echo "❌ Admin Brain production staging failed; aborting the deploy."
+            rm -f "\$stage_stdout"
+            # Fail via a command (not exit) so the ERR trap restores web.
+            false
+        fi
+        rm -f "\$stage_stdout"
+        unset stage_operator activation_operator approval_hash approval_hash_short
     else
         echo "ℹ️ Skipping Admin Brain production staging and activation; query API remains disabled."
     fi
