@@ -59,6 +59,9 @@ APP_CONTEXT_ALIASES = {
     "content-factory": "content-factory",
     "content_factory": "content-factory",
     "contentfactory": "content-factory",
+    "community-chat": "community-chat",
+    "community_chat": "community-chat",
+    "chat": "community-chat",
     "admin": "admin",
 }
 
@@ -160,6 +163,8 @@ def _frontend_base_url(app_context):
         )
     if app_context == 'content-factory':
         return _origin_from_url(getattr(settings, 'CONTENT_FACTORY_FRONTEND_URL', None), default_origin)
+    if app_context == 'community-chat':
+        return _origin_from_url(getattr(settings, 'COMMUNITY_CHAT_FRONTEND_URL', None), default_origin)
     if app_context == 'admin':
         return _origin_from_url(getattr(settings, 'ADMIN_FRONTEND_URL', None), default_origin)
     return default_origin
@@ -396,6 +401,8 @@ class MagicLinkVerifyView(APIView):
                 elif app_param == 'content-factory':
                     redirect_path = "/content-factory"
                 elif app_param == 'admin':
+                    redirect_path = "/"
+                elif app_param == 'community-chat':
                     redirect_path = "/"
                 else:
                     redirect_path = "/hospital/app"

@@ -4,6 +4,31 @@ MLAI accounts and Buzz/Nostr device keys remain separate security identities.
 The `community_chat` Django app binds them only after the logged-in MLAI user
 proves control of the device key with a short-lived Nostr event.
 
+## Browser-to-device account handoff
+
+Desktop and mobile clients do not receive the MLAI website's session cookie.
+Instead, they use a short-lived OAuth-style handoff that is bound to the exact
+device key, approved origin, random state, and PKCE S256 verifier:
+
+1. The app creates a device key, random state and PKCE verifier, then calls
+   `POST /api/v1/community-chat/auth/device/start/` with the public key,
+   approved origin, state and code challenge.
+2. The app opens the returned `/auth/callback?request=...` URL on
+   `chat.mlai.au`. An unauthenticated user first completes MLAI magic-link
+   authentication; the callback then calls
+   `POST .../auth/device/authorize/` using the browser's normal MLAI session.
+3. The app polls `POST .../auth/device/exchange/` with the request ID, original
+   state and verifier. Before browser approval it receives `202 pending`.
+4. After approval, one successful exchange returns a short-lived opaque
+   `mlai_chat_...` bearer credential. The request is consumed atomically, so
+   state, verifier, request ID, or origin replays fail closed.
+5. The credential authenticates only `community_chat` endpoints and is scoped
+   to the one public key. It cannot authenticate any other MLAI API or enrol a
+   different key, and it is never persisted by the client.
+
+Hosted web clients already have access to the credentialed MLAI session and
+may skip this handoff. Both paths enter the same membership request flow below.
+
 ## Request flow
 
 1. `GET /api/v1/community-chat/session/` returns account eligibility and the
@@ -43,4 +68,3 @@ adapter's database calls hardcode `max_uses=1`, the shared invite claim path
 hardcodes `role=member`, and revocation uses an atomic `role=member` predicate.
 It has no endpoint for role changes, owners/admins, arbitrary signing, relay
 configuration, or key export.
-

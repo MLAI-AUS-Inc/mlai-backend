@@ -103,3 +103,53 @@ class CommunityChatInviteAudit(models.Model):
             models.Index(fields=("device", "issued_at"), name="chat_invite_device_idx"),
         ]
 
+
+class CommunityChatDeviceAuthRequest(models.Model):
+    """Short-lived, PKCE-bound handoff from an MLAI browser session to an app."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    public_key = models.CharField(max_length=64)
+    origin = models.CharField(max_length=255)
+    state_hash = models.CharField(max_length=64)
+    code_challenge = models.CharField(max_length=64)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        blank=True,
+        null=True,
+        related_name="community_chat_auth_requests",
+    )
+    authorized_at = models.DateTimeField(blank=True, null=True)
+    consumed_at = models.DateTimeField(blank=True, null=True)
+    expires_at = models.DateTimeField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ("-created_at",)
+        indexes = [
+            models.Index(fields=("expires_at",), name="chat_auth_request_expiry_idx"),
+            models.Index(fields=("public_key", "created_at"), name="chat_auth_request_key_idx"),
+        ]
+
+
+class CommunityChatBootstrapToken(models.Model):
+    """Opaque, narrowly scoped bearer used only while enrolling one device key."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="community_chat_bootstrap_tokens",
+    )
+    public_key = models.CharField(max_length=64)
+    token_hash = models.CharField(max_length=64, unique=True)
+    expires_at = models.DateTimeField()
+    revoked_at = models.DateTimeField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ("-created_at",)
+        indexes = [
+            models.Index(fields=("user", "public_key"), name="chat_bootstrap_user_key_idx"),
+            models.Index(fields=("expires_at",), name="chat_bootstrap_expiry_idx"),
+        ]

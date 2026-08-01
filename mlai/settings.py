@@ -261,6 +261,7 @@ CORS_ALLOWED_ORIGINS = _env_list(
     'CORS_ALLOWED_ORIGINS',
     [
         'http://localhost:3000',
+        'http://localhost:3001',
         'http://localhost:5173',
         'https://mlai.au',
         'https://www.mlai.au',
@@ -272,6 +273,7 @@ CSRF_TRUSTED_ORIGINS = _env_list(
     'CSRF_TRUSTED_ORIGINS',
     [
         'http://localhost:3000',
+        'http://localhost:3001',
         'http://localhost:5173',
         'https://mlai.au',
         'https://www.mlai.au',
@@ -461,11 +463,22 @@ COMMUNITY_CHAT_ADAPTER_TIMEOUT_SECONDS = float(
 COMMUNITY_CHAT_CHALLENGE_TTL_SECONDS = int(
     os.getenv('COMMUNITY_CHAT_CHALLENGE_TTL_SECONDS', '300')
 )
+COMMUNITY_CHAT_DEVICE_AUTH_TTL_SECONDS = int(
+    os.getenv('COMMUNITY_CHAT_DEVICE_AUTH_TTL_SECONDS', '900')
+)
+COMMUNITY_CHAT_BOOTSTRAP_TOKEN_TTL_SECONDS = int(
+    os.getenv('COMMUNITY_CHAT_BOOTSTRAP_TOKEN_TTL_SECONDS', '1200')
+)
+COMMUNITY_CHAT_FRONTEND_URL = os.getenv(
+    'COMMUNITY_CHAT_FRONTEND_URL',
+    'http://localhost:3001' if DEBUG else 'https://chat.mlai.au',
+)
 COMMUNITY_CHAT_ALLOWED_ORIGINS = _env_list(
     'COMMUNITY_CHAT_ALLOWED_ORIGINS',
     [
         'https://chat.mlai.au',
         'http://localhost:5173',
+        'http://localhost:3001',
         'http://127.0.0.1:4173',
         'tauri://localhost',
         'http://tauri.localhost',

@@ -1,4 +1,6 @@
 import hashlib
+import base64
+import re
 import secrets
 from datetime import datetime, timedelta, timezone as datetime_timezone
 
@@ -7,7 +9,7 @@ from django.db import IntegrityError, transaction
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.exceptions import PermissionDenied, ValidationError
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -18,9 +20,17 @@ from .adapter import (
     issue_member_invite,
     revoke_relay_membership,
 )
+from hospital.authentication import CustomJWTAuthentication
+
+from .authentication import (
+    TOKEN_PREFIX,
+    CommunityChatBootstrapAuthentication,
+)
 from .models import (
+    CommunityChatBootstrapToken,
     CommunityChatChallenge,
     CommunityChatDevice,
+    CommunityChatDeviceAuthRequest,
     CommunityChatInviteAudit,
     DeviceBindingStatus,
 )
@@ -34,6 +44,11 @@ from .throttles import CommunityChatScopedThrottle, enforce_bootstrap_limits
 
 
 BOOTSTRAP_ACTION = "community-chat:enrol-device"
+AUTHENTICATION_CLASSES = (
+    CommunityChatBootstrapAuthentication,
+    CustomJWTAuthentication,
+)
+PKCE_CHALLENGE_RE = re.compile(r"^[A-Za-z0-9_-]{43}$")
 
 
 def _is_eligible(user):
@@ -64,6 +79,18 @@ def _public_key(value):
         raise ValidationError({"public_key": str(exc)}) from exc
 
 
+def _require_token_key(request, public_key):
+    scoped_key = getattr(request, "community_chat_public_key", None)
+    if scoped_key is not None and not secrets.compare_digest(scoped_key, public_key):
+        raise PermissionDenied("This authorization is bound to a different device key.")
+
+
+def _pkce_challenge(verifier):
+    return base64.urlsafe_b64encode(
+        hashlib.sha256(verifier.encode("utf-8")).digest()
+    ).decode("ascii").rstrip("=")
+
+
 def _device_payload(device):
     return {
         "id": str(device.id),
@@ -75,7 +102,160 @@ def _device_payload(device):
     }
 
 
+class DeviceAuthStartView(APIView):
+    """Create an origin/key/state/PKCE-bound browser-to-app login request."""
+
+    authentication_classes = []
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        public_key = _public_key(request.data.get("public_key"))
+        origin = _request_origin(request)
+        state = str(request.data.get("state") or "")
+        code_challenge = str(request.data.get("code_challenge") or "")
+        if len(state) < 32 or len(state) > 256:
+            raise ValidationError({"state": "State must contain at least 32 characters."})
+        if not PKCE_CHALLENGE_RE.fullmatch(code_challenge):
+            raise ValidationError({"code_challenge": "Invalid PKCE S256 challenge."})
+        enforce_bootstrap_limits(
+            request,
+            action="auth-start",
+            public_key=public_key,
+            user_limit=20,
+            key_limit=10,
+            ip_limit=30,
+        )
+        auth_request = CommunityChatDeviceAuthRequest.objects.create(
+            public_key=public_key,
+            origin=origin,
+            state_hash=hashlib.sha256(state.encode("utf-8")).hexdigest(),
+            code_challenge=code_challenge,
+            expires_at=timezone.now()
+            + timedelta(seconds=settings.COMMUNITY_CHAT_DEVICE_AUTH_TTL_SECONDS),
+        )
+        callback_path = f"/auth/callback?request={auth_request.id}"
+        return Response(
+            {
+                "request_id": str(auth_request.id),
+                "callback_path": callback_path,
+                "expires_at": auth_request.expires_at,
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class DeviceAuthAuthorizeView(APIView):
+    """Authorize a pending app handoff using the browser's MLAI session."""
+
+    authentication_classes = (CustomJWTAuthentication,)
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        _require_eligible(request.user)
+        origin = _request_origin(request)
+        request_id = request.data.get("request_id")
+        now = timezone.now()
+        try:
+            with transaction.atomic():
+                auth_request = CommunityChatDeviceAuthRequest.objects.select_for_update().get(
+                    id=request_id
+                )
+                if auth_request.origin != origin:
+                    raise PermissionDenied("Login request origin does not match.")
+                if auth_request.expires_at <= now:
+                    return Response(
+                        {"error": "authorization_expired"},
+                        status=status.HTTP_410_GONE,
+                    )
+                if auth_request.consumed_at is not None:
+                    return Response(
+                        {"error": "authorization_consumed"},
+                        status=status.HTTP_409_CONFLICT,
+                    )
+                if auth_request.user_id and auth_request.user_id != request.user.id:
+                    raise PermissionDenied("Login request belongs to another MLAI account.")
+                auth_request.user = request.user
+                auth_request.authorized_at = now
+                auth_request.save(update_fields=("user", "authorized_at"))
+        except (CommunityChatDeviceAuthRequest.DoesNotExist, ValueError):
+            return Response({"error": "authorization_not_found"}, status=status.HTTP_404_NOT_FOUND)
+        return Response({"status": "authorized", "request_id": str(auth_request.id)})
+
+
+class DeviceAuthExchangeView(APIView):
+    """Exchange the state + PKCE verifier for a one-purpose bootstrap token."""
+
+    authentication_classes = []
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        request_id = request.data.get("request_id")
+        state_value = str(request.data.get("state") or "")
+        verifier = str(request.data.get("code_verifier") or "")
+        origin = _request_origin(request)
+        now = timezone.now()
+        try:
+            with transaction.atomic():
+                auth_request = CommunityChatDeviceAuthRequest.objects.select_for_update().get(
+                    id=request_id
+                )
+                enforce_bootstrap_limits(
+                    request,
+                    action="auth-exchange",
+                    public_key=auth_request.public_key,
+                    user_limit=40,
+                    key_limit=30,
+                    ip_limit=60,
+                )
+                if auth_request.origin != origin:
+                    raise PermissionDenied("Login request origin does not match.")
+                if auth_request.expires_at <= now:
+                    return Response(
+                        {"error": "authorization_expired"},
+                        status=status.HTTP_410_GONE,
+                    )
+                if auth_request.consumed_at is not None:
+                    return Response(
+                        {"error": "authorization_consumed"},
+                        status=status.HTTP_409_CONFLICT,
+                    )
+                state_hash = hashlib.sha256(state_value.encode("utf-8")).hexdigest()
+                verifier_challenge = _pkce_challenge(verifier)
+                if not secrets.compare_digest(auth_request.state_hash, state_hash) or not secrets.compare_digest(
+                    auth_request.code_challenge, verifier_challenge
+                ):
+                    raise PermissionDenied("Login state or verifier is invalid.")
+                if auth_request.authorized_at is None or auth_request.user_id is None:
+                    return Response(
+                        {"status": "pending"},
+                        status=status.HTTP_202_ACCEPTED,
+                    )
+
+                raw_token = f"{TOKEN_PREFIX}{secrets.token_urlsafe(48)}"
+                token = CommunityChatBootstrapToken.objects.create(
+                    user=auth_request.user,
+                    public_key=auth_request.public_key,
+                    token_hash=hashlib.sha256(raw_token.encode("utf-8")).hexdigest(),
+                    expires_at=now
+                    + timedelta(seconds=settings.COMMUNITY_CHAT_BOOTSTRAP_TOKEN_TTL_SECONDS),
+                )
+                auth_request.consumed_at = now
+                auth_request.save(update_fields=("consumed_at",))
+        except (CommunityChatDeviceAuthRequest.DoesNotExist, ValueError):
+            return Response({"error": "authorization_not_found"}, status=status.HTTP_404_NOT_FOUND)
+
+        return Response(
+            {
+                "status": "authorized",
+                "access_token": raw_token,
+                "expires_at": token.expires_at,
+                "public_key": token.public_key,
+            }
+        )
+
+
 class SessionView(APIView):
+    authentication_classes = AUTHENTICATION_CLASSES
     permission_classes = [IsAuthenticated]
     throttle_classes = [CommunityChatScopedThrottle]
     community_chat_throttle_scope = "community_chat_session"
@@ -85,6 +265,9 @@ class SessionView(APIView):
             user=request.user,
             status__in=(DeviceBindingStatus.PENDING, DeviceBindingStatus.VERIFIED),
         )
+        scoped_key = getattr(request, "community_chat_public_key", None)
+        if scoped_key:
+            devices = devices.filter(public_key=scoped_key)
         return Response(
             {
                 "authenticated": True,
@@ -96,6 +279,7 @@ class SessionView(APIView):
 
 
 class ChallengeView(APIView):
+    authentication_classes = AUTHENTICATION_CLASSES
     permission_classes = [IsAuthenticated]
     throttle_classes = [CommunityChatScopedThrottle]
     community_chat_throttle_scope = "community_chat_challenge"
@@ -103,6 +287,7 @@ class ChallengeView(APIView):
     def post(self, request):
         _require_eligible(request.user)
         public_key = _public_key(request.data.get("public_key"))
+        _require_token_key(request, public_key)
         origin = _request_origin(request)
         enforce_bootstrap_limits(
             request,
@@ -157,6 +342,7 @@ class ChallengeView(APIView):
 
 
 class InviteView(APIView):
+    authentication_classes = AUTHENTICATION_CLASSES
     permission_classes = [IsAuthenticated]
     throttle_classes = [CommunityChatScopedThrottle]
     community_chat_throttle_scope = "community_chat_invite"
@@ -178,6 +364,7 @@ class InviteView(APIView):
                     user=request.user,
                 )
                 public_key = challenge.public_key
+                _require_token_key(request, public_key)
                 enforce_bootstrap_limits(
                     request,
                     action="invite",
@@ -269,6 +456,7 @@ class InviteView(APIView):
 
 
 class ConfirmView(APIView):
+    authentication_classes = AUTHENTICATION_CLASSES
     permission_classes = [IsAuthenticated]
     throttle_classes = [CommunityChatScopedThrottle]
     community_chat_throttle_scope = "community_chat_confirm"
@@ -276,6 +464,7 @@ class ConfirmView(APIView):
     def post(self, request):
         _require_eligible(request.user)
         public_key = _public_key(request.data.get("public_key"))
+        _require_token_key(request, public_key)
         _request_origin(request)
         enforce_bootstrap_limits(
             request,
@@ -318,6 +507,7 @@ class ConfirmView(APIView):
 
 
 class DeviceView(APIView):
+    authentication_classes = AUTHENTICATION_CLASSES
     permission_classes = [IsAuthenticated]
     throttle_classes = [CommunityChatScopedThrottle]
     community_chat_throttle_scope = "community_chat_revoke"
@@ -325,6 +515,7 @@ class DeviceView(APIView):
     def delete(self, request, public_key):
         _require_eligible(request.user)
         public_key = _public_key(public_key)
+        _require_token_key(request, public_key)
         enforce_bootstrap_limits(
             request,
             action="revoke",
@@ -366,4 +557,3 @@ class DeviceView(APIView):
             )
         )
         return Response({"status": "revoked", "relay_status": relay_status})
-

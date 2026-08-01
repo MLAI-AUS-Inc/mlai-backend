@@ -1,6 +1,12 @@
 from django.contrib import admin
 
-from .models import CommunityChatChallenge, CommunityChatDevice, CommunityChatInviteAudit
+from .models import (
+    CommunityChatBootstrapToken,
+    CommunityChatChallenge,
+    CommunityChatDevice,
+    CommunityChatDeviceAuthRequest,
+    CommunityChatInviteAudit,
+)
 
 
 @admin.register(CommunityChatDevice)
@@ -37,3 +43,14 @@ class CommunityChatInviteAuditAdmin(admin.ModelAdmin):
     list_display = ("id", "device_id", "adapter_invite_id", "issued_at", "confirmed_at")
     readonly_fields = tuple(field.name for field in CommunityChatInviteAudit._meta.fields)
 
+
+@admin.register(CommunityChatDeviceAuthRequest)
+class CommunityChatDeviceAuthRequestAdmin(admin.ModelAdmin):
+    list_display = ("id", "public_key", "user_id", "origin", "expires_at", "consumed_at")
+    readonly_fields = tuple(field.name for field in CommunityChatDeviceAuthRequest._meta.fields)
+
+
+@admin.register(CommunityChatBootstrapToken)
+class CommunityChatBootstrapTokenAdmin(admin.ModelAdmin):
+    list_display = ("id", "user_id", "public_key", "expires_at", "revoked_at")
+    readonly_fields = tuple(field.name for field in CommunityChatBootstrapToken._meta.fields)
