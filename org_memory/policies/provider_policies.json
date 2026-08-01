@@ -1,28 +1,28 @@
 {
   "schema_version": 1,
   "policy_id": "mlai-org-memory-provider-policy",
-  "status": "draft",
-  "last_reviewed_at": null,
+  "status": "approved",
+  "last_reviewed_at": "2026-08-01T08:02:17Z",
   "default_production_decision": "deny",
   "owners": {
-    "data": null,
-    "security": null,
-    "review": null,
-    "operations": null,
-    "privacy_legal": null
+    "data": "sam@mlai.au",
+    "security": "sam@mlai.au",
+    "review": "sam@mlai.au",
+    "operations": "sam@mlai.au",
+    "privacy_legal": "sam@mlai.au"
   },
   "global_rules": {
     "public_roo_private_memory_access": "denied",
-    "admin_roo_allowed_contexts": [],
+    "admin_roo_allowed_contexts": ["source_management", "private_committee_memory"],
     "published_public_knowledge": "separate_human_reviewed_corpus_only",
     "source_content_is_untrusted": true,
     "direct_message_ingestion": "excluded",
     "model_training_on_mlai_data": "prohibited",
-    "hard_delete_rules_approved": false
+    "hard_delete_rules_approved": true
   },
   "slos": {
-    "approval_status": "draft",
-    "approved_by": null,
+    "approval_status": "approved",
+    "approved_by": "sam@mlai.au",
     "freshness": {
       "verified_webhook_change_p95_minutes": 10,
       "slack_thread_after_quiet_p95_minutes": 15,
@@ -38,8 +38,8 @@
       "escalation_destination": null
     },
     "cost_limits": {
-      "daily_model_budget_aud": null,
-      "monthly_model_budget_aud": null,
+      "daily_model_budget_aud": 25,
+      "monthly_model_budget_aud": 500,
       "on_limit": "pause_new_model_work_and_alert"
     }
   },
@@ -47,12 +47,16 @@
     "google_drive": {
       "provider": "google_drive",
       "display_name": "Google Drive",
-      "production_enabled": false,
+      "production_enabled": true,
       "classification": "committee",
       "allowed_memory_types": ["decision", "commitment", "task", "project_update", "policy", "risk"],
       "source_scope": {
-        "selectors": [],
-        "historical_cutoff": null,
+        "selectors": [
+          "organization:16",
+          "connection:12",
+          "folder:1UBvYpQuZiug1QB3KDotTJtd5xltQdFKp"
+        ],
+        "historical_cutoff": "2000-01-01T00:00:00Z",
         "allowed_formats": ["google_doc", "docx", "pdf", "txt", "md", "vtt", "srt"],
         "excluded": ["unselected_folders", "personal_drives", "recordings_without_transcript_consent"]
       },
@@ -61,24 +65,24 @@
         "system_of_record_for": []
       },
       "retention": {
-        "raw_evidence_days": null,
-        "derived_memory_days": null,
-        "query_audit_days": null
+        "raw_evidence_days": 365,
+        "derived_memory_days": 730,
+        "query_audit_days": 90
       },
       "inventory": {
-        "status": "draft",
-        "approved_by": null,
-        "approved_at": null,
-        "privacy_approved_by": null,
-        "max_files": null
+        "status": "approved",
+        "approved_by": "sam@mlai.au",
+        "approved_at": "2026-08-01T08:02:17Z",
+        "privacy_approved_by": "sam@mlai.au",
+        "max_files": 10000
       },
-      "review_owner": null,
+      "review_owner": "sam@mlai.au",
       "approval": {
-        "status": "draft",
-        "approved_by": null,
-        "approved_at": null,
-        "terms_reviewed_by": null,
-        "terms_reviewed_at": null
+        "status": "approved",
+        "approved_by": "sam@mlai.au",
+        "approved_at": "2026-08-01T08:02:17Z",
+        "terms_reviewed_by": "sam@mlai.au",
+        "terms_reviewed_at": "2026-08-01T08:02:17Z"
       }
     },
     "slack": {

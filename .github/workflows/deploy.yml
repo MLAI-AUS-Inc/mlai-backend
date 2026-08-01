@@ -33,7 +33,7 @@ jobs:
 
     - name: Validate organisational-memory governance
       env:
-        ORG_MEMORY_ENABLED_PROVIDERS: ""
+        ORG_MEMORY_ENABLED_PROVIDERS: "google_drive"
       run: python manage.py validate_org_memory_governance --environment production
 
     - name: Run organisational-memory extraction seed evals
