@@ -537,9 +537,14 @@ def _digest_allowed(expected, candidates) -> bool:
     )
 
 
-def actor_has_active_pilot_access(actor, *, now=None) -> bool:
+def actor_has_active_pilot_access(
+    actor,
+    *,
+    now=None,
+    allowed_surfaces=("admin_roo",),
+) -> bool:
     now = now or timezone.now()
-    if actor is None or actor.surface != "admin_roo":
+    if actor is None or actor.surface not in set(allowed_surfaces):
         return False
     try:
         version, secret = pilot_allowlist_key()

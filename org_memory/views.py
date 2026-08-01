@@ -3,19 +3,31 @@ from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .authentication import OrgMemoryActorAuthentication
+from .authentication import OrgMemoryActorAuthentication, RooGatewayActorAuthentication
+from .authorization import (
+    OrganizationAuthorizationError,
+    actor_is_active_committee_points_admin,
+    resolve_actor_authorization,
+)
+from .pilot_deployment import actor_has_active_pilot_access
 from .permissions import (
     HasActiveOrgMemoryPilotAccess,
+    HasCommitteePointsAdminClass,
     HasOrgMemoryCapability,
     HasOrgMemoryServiceScope,
 )
+from .service_principals import record_service_principal_audit
 
 
 class OrgMemoryActorContextView(APIView):
     """A data-free probe for validating the private-memory trust boundary."""
 
     authentication_classes = (OrgMemoryActorAuthentication,)
-    permission_classes = (HasOrgMemoryServiceScope, HasOrgMemoryCapability)
+    permission_classes = (
+        HasOrgMemoryServiceScope,
+        HasOrgMemoryCapability,
+        HasCommitteePointsAdminClass,
+    )
     required_service_scope = "org_memory.read"
     required_actor_capability = "view_general_memory"
 
@@ -48,6 +60,7 @@ class OrgMemoryPilotAccessProbeView(APIView):
     permission_classes = (
         HasOrgMemoryServiceScope,
         HasOrgMemoryCapability,
+        HasCommitteePointsAdminClass,
         HasActiveOrgMemoryPilotAccess,
     )
     required_service_scope = "org_memory.read"
@@ -68,5 +81,58 @@ class OrgMemoryPilotAccessProbeView(APIView):
                 "schema_version": "org-memory-pilot-access-probe-v1",
                 "ready": True,
                 "code": "active_pilot_access_granted",
+            }
+        )
+
+
+class RooGatewayEligibilityView(APIView):
+    """Return a content-free Admin Brain routing decision to the Slack gateway."""
+
+    authentication_classes = (RooGatewayActorAuthentication,)
+    permission_classes = (HasOrgMemoryServiceScope,)
+    required_service_scope = "org_memory.route"
+
+    def post(self, request):
+        actor = request.org_memory_actor
+        try:
+            authorization = resolve_actor_authorization(actor)
+        except OrganizationAuthorizationError:
+            authorization = None
+
+        has_capability = bool(
+            authorization
+            and authorization.has_capability("view_general_memory")
+        )
+        is_committee = actor_is_active_committee_points_admin(actor)
+        private_context_allowed = actor_has_active_pilot_access(
+            actor,
+            allowed_surfaces=("roo_gateway",),
+        )
+        eligible = bool(
+            settings.ORG_MEMORY_QUERY_API_ENABLED
+            and has_capability
+            and is_committee
+            and private_context_allowed
+        )
+        record_service_principal_audit(
+            "routing_eligibility_checked",
+            principal=request.auth.principal,
+            credential=request.auth.credential,
+            request_id=actor.request_id,
+            remote_address=request.META.get("REMOTE_ADDR") or None,
+            metadata={
+                "eligible": eligible,
+                "private_context_allowed": private_context_allowed,
+                "policy_version": "roo-unified-routing-v1",
+            },
+        )
+        return Response(
+            {
+                "schema_version": "roo-admin-routing-eligibility-v1",
+                "admin_brain_eligible": eligible,
+                # Do not expose which individual policy dimension denied the
+                # route; callers receive one aggregate decision only.
+                "private_context_allowed": eligible,
+                "policy_version": "roo-unified-routing-v1",
             }
         )

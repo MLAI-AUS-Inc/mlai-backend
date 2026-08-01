@@ -3,6 +3,7 @@ from django.urls import path
 from .views import (
     OrgMemoryActorContextView,
     OrgMemoryPilotAccessProbeView,
+    RooGatewayEligibilityView,
 )
 from .drive_webhook_views import DriveChangesWebhookView
 from .kernel_views import MemoryKernelHealthView
@@ -74,6 +75,11 @@ urlpatterns = [
     path("webhooks/xero/events", XeroMemoryWebhookView.as_view(), name="org-memory-xero-webhook"),
     path("webhooks/gmail/push", GmailMemoryPushView.as_view(), name="org-memory-gmail-push"),
     path("auth/context", OrgMemoryActorContextView.as_view(), name="org-memory-actor-context"),
+    path(
+        "routing/eligibility",
+        RooGatewayEligibilityView.as_view(),
+        name="org-memory-routing-eligibility",
+    ),
     path(
         "pilot/access-check",
         OrgMemoryPilotAccessProbeView.as_view(),

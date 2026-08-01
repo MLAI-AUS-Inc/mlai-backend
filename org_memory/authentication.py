@@ -52,3 +52,22 @@ class OrgMemoryActorAuthentication(ServicePrincipalAuthentication):
         except ActorAssertionError as exc:
             raise AuthenticationFailed(str(exc)) from exc
         return user, auth
+
+
+class RooGatewayActorAuthentication(ServicePrincipalAuthentication):
+    """Authenticate the single Slack-facing Roo gateway without memory access."""
+
+    def authenticate(self, request):
+        result = super().authenticate(request)
+        if result is None:
+            return None
+        user, auth = result
+        try:
+            request.org_memory_actor = verify_and_resolve_actor_assertion(
+                request,
+                auth,
+                required_surface="roo_gateway",
+            )
+        except ActorAssertionError as exc:
+            raise AuthenticationFailed(str(exc)) from exc
+        return user, auth

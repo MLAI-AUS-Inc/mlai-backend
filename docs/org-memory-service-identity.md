@@ -10,10 +10,14 @@ Private organisational-memory endpoints do not accept `ROO_API_KEY`,
 5. an active, verified Slack identity for the same organisation and workspace;
 6. an active organisation membership; and
 7. a backend-owned capability grant for the requested memory class.
+8. an active `PointsAdmin` record with the exact `committee` class for the
+   unified Roo Admin Brain entry points.
 
 Roo never sends a role or capability. The backend resolves both after it has
-verified the actor assertion. Legacy `PointsAdmin` and `UserStartupBinding`
-records are migration evidence only and cannot authorize private memory.
+verified the actor assertion. `PointsAdmin(role="committee")` is an additional
+eligibility restriction, never a substitute for verified identity,
+membership, capability, private context, and the active pilot manifest.
+`UserStartupBinding` remains migration evidence only.
 
 ## Configure credential encryption before deployment
 
@@ -57,7 +61,10 @@ has been recorded.
 5. Create organisation roles, grant only the required capabilities to each
    role, and assign one or more time-bounded roles to the membership. The
    `/auth/context` probe requires `view_general_memory`.
-6. Issue the Admin Roo principal:
+6. Confirm each permitted caller has an active `PointsAdmin` record whose
+   exact role is `committee`. `admin`, `partner`, and `portfolio_lead` do not
+   inherit Admin Brain access.
+7. Issue the internal Admin worker principal:
 
 ```bash
 python manage.py create_service_principal \
@@ -68,8 +75,22 @@ python manage.py create_service_principal \
 ```
 
 The credential is printed exactly once. Store it as `ORG_BRAIN_API_KEY` only in
-the Admin Roo secret store. Public Roo must never receive it. Admin Brain stays
-disabled until its later read-only retrieval implementation is ready.
+the internal Admin worker secret store. Public Roo must never receive it.
+
+Issue a distinct route-only principal for Public Roo:
+
+```bash
+python manage.py create_service_principal \
+  --name roo-public-admin-router \
+  --organization-domain mlai.au \
+  --scope org_memory.route \
+  --surface roo_gateway
+```
+
+Store that credential as `ORG_BRAIN_ROUTER_API_KEY` in Public Roo. It can call
+only `POST /api/v1/org-memory/routing/eligibility`; it cannot retrieve memory,
+traces, feedback, sources, reviews, or actions. Never reuse either principal
+for the other purpose.
 
 Rotate with an optional overlap window:
 
@@ -98,6 +119,12 @@ nonce durably so it cannot be reused across workers or restarts.
 `GET /api/v1/org-memory/auth/context` is a data-free deployment probe. It
 returns only the resolved identity context, effective capabilities, and a
 memory-class access matrix; it never returns organisational memory.
+
+`POST /api/v1/org-memory/routing/eligibility` is the route-only gateway probe.
+It returns only booleans and a policy version. Eligibility is the intersection
+of verified actor identity, active membership, capability, exact committee
+class, active pilot actor/context, and a DM or private-channel context. It does
+not reveal roles, source counts, document metadata, or memory content.
 
 ## Capability rules
 
