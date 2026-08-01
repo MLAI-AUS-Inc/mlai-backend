@@ -183,34 +183,6 @@ printf '%s' "$REDIS_URL" | ssh "$DEPLOY_SSH_TARGET" '
     mv "$tmp" .env
 '
 
-# The Xero OAuth scope list is pipeline-managed (repository variable
-# XERO_OAUTH_SCOPES) so scope upgrades — e.g. granting accounting.invoices +
-# accounting.attachments for the reconciliation agent's draft bills — survive
-# redeploys instead of living in hand-edited .env lines that the next deploy
-# races against. Empty/unset keeps whatever the droplet already has.
-if [ -n "${XERO_OAUTH_SCOPES:-}" ]; then
-    echo "🔧 Updating Xero OAuth scope list..."
-    printf '%s' "$XERO_OAUTH_SCOPES" | ssh "$DEPLOY_SSH_TARGET" '
-        set -euo pipefail
-        project_dir="/root/mlai-backend"
-        mkdir -p "$project_dir"
-        cd "$project_dir"
-        umask 077
-        scopes=$(cat)
-        case "$scopes" in
-            *offline_access*) ;;
-            *) echo "XERO_OAUTH_SCOPES payload must include offline_access" >&2; exit 1 ;;
-        esac
-        tmp=$(mktemp .env.xero-scopes.XXXXXX)
-        if [ -f .env ]; then
-            grep -v "^XERO_OAUTH_SCOPES=" .env > "$tmp" || true
-        fi
-        printf "XERO_OAUTH_SCOPES=%s\n" "$scopes" >> "$tmp"
-        chmod 600 "$tmp"
-        mv "$tmp" .env
-    '
-fi
-
 # Install the versioned connector keyring atomically before Django system
 # checks or migrations can write connector credentials with the active key.
 # Values are carried over SSH stdin and are never printed or placed in argv.
@@ -417,7 +389,11 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     upsert_env_value ROO_POINTS_TERMS_ACCEPTANCE_TEXT "I understand that Roo Points are not money, have no cash value, are not refundable except where required by law, and cannot be transferred or sold."
     # Preserve reporting access and the granular write scopes required by the
     # explicit payout approval workflow and tracking-option creation.
-    upsert_env_value XERO_OAUTH_SCOPES "offline_access accounting.invoices.read accounting.payments.read accounting.settings.read accounting.settings accounting.contacts.read accounting.reports.balancesheet.read accounting.reports.profitandloss.read accounting.banktransactions"
+    # Overridable via the XERO_OAUTH_SCOPES repository variable (interpolated
+    # below at heredoc construction). The default grants the reconciliation
+    # agent's write path: granular accounting.invoices + accounting.payments
+    # (draft bills / bill payments) and accounting.attachments (source PDFs).
+    upsert_env_value XERO_OAUTH_SCOPES "${XERO_OAUTH_SCOPES:-offline_access accounting.invoices accounting.payments accounting.settings.read accounting.settings accounting.contacts.read accounting.reports.balancesheet.read accounting.reports.profitandloss.read accounting.banktransactions accounting.attachments}"
     upsert_env_value RECONCILIATION_DEFAULT_DOMAIN "mlai.au"
     upsert_env_value RECONCILIATION_SCHEDULER_ENABLED "true"
     upsert_env_value NOTION_OAUTH_REDIRECT_URI "https://api.mlai.au/integrations/callback/notion"
