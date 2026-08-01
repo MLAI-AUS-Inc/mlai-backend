@@ -877,7 +877,7 @@ def schedule_source_extraction(*, source_version, target=None) -> dict:
     key = _run_key(source_version, target)
     if MemoryExtractionRun.objects.filter(idempotency_key=key).exists():
         return {"scheduled": 0, "existing": 1, "skipped": 0, "fingerprint": target.fingerprint}
-    _work, created = create_work_item(
+    work, created = create_work_item(
         organization=source_version.source.organization,
         provider=source_version.source.provider,
         task_type=MemoryWorkTaskType.EXTRACT,
@@ -899,6 +899,7 @@ def schedule_source_extraction(*, source_version, target=None) -> dict:
         "existing": int(not created),
         "skipped": 0,
         "fingerprint": target.fingerprint,
+        "work_item_id": str(work.pk),
     }
 
 

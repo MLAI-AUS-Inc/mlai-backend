@@ -1,6 +1,9 @@
 import hashlib
+import io
+import json
 from unittest.mock import patch
 
+from django.contrib.auth import get_user_model
 from django.core.management import call_command
 from django.test import TestCase, override_settings
 
@@ -15,11 +18,15 @@ from org_memory.extraction import (
     process_extraction_work,
     schedule_source_extraction,
 )
-from org_memory.extraction_health import extraction_health_report
+from org_memory.extraction_health import (
+    extraction_health_report,
+    reconcile_legacy_extraction_dead_letters,
+)
 from org_memory.kernel import capture_source_version
 from org_memory.models import (
     MemoryClaim,
     MemoryClaimStatus,
+    MemoryDeadLetter,
     MemoryEntity,
     MemoryEvidence,
     MemoryExtractionRun,
@@ -28,6 +35,8 @@ from org_memory.models import (
     MemoryReviewType,
     MemoryWorkItem,
     MemoryWorkStatus,
+    MemoryWorkTaskType,
+    OrganizationMembership,
 )
 from org_memory.runtime import claim_memory_work, execute_claimed_memory_work
 
@@ -383,6 +392,83 @@ class MemoryExtractionTests(TestCase):
         )
         healthy = extraction_health_report(organization=self.organization)
         self.assertTrue(healthy["ready"], healthy)
+
+    def test_legacy_dead_letter_reconciliation_schedules_current_target(self):
+        version = self.capture(
+            "Decision: The committee approved the pilot.",
+            external_id="meeting-dead-letter-recovery",
+        )
+        operator = get_user_model().objects.create_user(
+            email="recovery-operator@mlai.test"
+        )
+        OrganizationMembership.objects.create(
+            organization=self.organization,
+            user=operator,
+        )
+        legacy_payload = {
+            "source_version_id": str(version.pk),
+            "schema_version": "org-memory-schema-legacy-v1",
+        }
+        legacy_work = MemoryWorkItem.objects.create(
+            organization=self.organization,
+            provider="google_drive",
+            task_type=MemoryWorkTaskType.EXTRACT,
+            source=version.source,
+            source_version=version,
+            idempotency_key="legacy-extraction-failure",
+            payload=legacy_payload,
+            status=MemoryWorkStatus.DEAD,
+            attempts=1,
+            last_error="legacy strict schema failure",
+        )
+        dead_letter = MemoryDeadLetter.objects.create(
+            work_item=legacy_work,
+            organization=self.organization,
+            task_type=MemoryWorkTaskType.EXTRACT,
+            payload_snapshot=legacy_payload,
+            attempts=1,
+            last_error="legacy strict schema failure",
+        )
+
+        preview = reconcile_legacy_extraction_dead_letters(
+            organization=self.organization,
+            provider="google_drive",
+            superseded_schema_version="org-memory-schema-legacy-v1",
+        )
+        self.assertEqual(preview["candidates"], 1)
+        self.assertFalse(preview["apply"])
+        self.assertEqual(MemoryWorkItem.objects.count(), 1)
+
+        output = io.StringIO()
+        call_command(
+            "reconcile_org_memory_extraction_dead_letters",
+            organization_domain=self.organization.domain,
+            provider="google_drive",
+            superseded_schema_version="org-memory-schema-legacy-v1",
+            operator_email=operator.email,
+            apply=True,
+            stdout=output,
+        )
+        applied = json.loads(output.getvalue())
+        dead_letter.refresh_from_db()
+        target_work = MemoryWorkItem.objects.get(pk=dead_letter.requeued_work_item_id)
+
+        self.assertEqual(applied["scheduled"], 1)
+        self.assertEqual(applied["resolved"], 1)
+        self.assertIsNotNone(dead_letter.resolved_at)
+        self.assertEqual(dead_letter.resolved_by, operator)
+        self.assertEqual(
+            target_work.payload["schema_version"],
+            configured_extraction_target().schema_version,
+        )
+        repeated = reconcile_legacy_extraction_dead_letters(
+            organization=self.organization,
+            provider="google_drive",
+            superseded_schema_version="org-memory-schema-legacy-v1",
+            apply=True,
+            resolved_by=operator,
+        )
+        self.assertEqual(repeated["candidates"], 0)
 
 
 class MemoryExtractionEvalTests(TestCase):
