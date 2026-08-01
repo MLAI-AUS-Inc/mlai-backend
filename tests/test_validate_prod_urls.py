@@ -1,4 +1,5 @@
 from io import StringIO
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 import urllib.error
 
@@ -207,6 +208,18 @@ class ValidateProdUrlsTests(SimpleTestCase):
         self.assertIn(
             "COMMUNITY_CHAT_API_AUDIENCE must be exactly https://api.mlai.au in production.",
             errors,
+        )
+
+    def test_deploy_workflow_supplies_community_chat_production_contract(self):
+        workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/deploy.yml").read_text()
+
+        self.assertIn("COMMUNITY_CHAT_API_AUDIENCE: https://api.mlai.au", workflow)
+        self.assertIn("COMMUNITY_CHAT_FRONTEND_URL: https://chat.mlai.au", workflow)
+        self.assertIn("COMMUNITY_CHAT_RELAY_URL: wss://chat.mlai.au", workflow)
+        self.assertIn(
+            "COMMUNITY_CHAT_ALLOWED_ORIGINS: "
+            "https://chat.mlai.au,tauri://localhost,http://tauri.localhost,mlaichat://callback",
+            workflow,
         )
 
     def test_community_chat_production_origins_exclude_loopback(self):

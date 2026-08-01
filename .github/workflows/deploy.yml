@@ -76,6 +76,10 @@ jobs:
         ESAFETY_URL: https://mlai.au
         VIBE_RAISING_URL: https://mlai.au
         FOUNDER_TOOLS_URL: https://mlai.au
+        COMMUNITY_CHAT_API_AUDIENCE: https://api.mlai.au
+        COMMUNITY_CHAT_FRONTEND_URL: https://chat.mlai.au
+        COMMUNITY_CHAT_RELAY_URL: wss://chat.mlai.au
+        COMMUNITY_CHAT_ALLOWED_ORIGINS: https://chat.mlai.au,tauri://localhost,http://tauri.localhost,mlaichat://callback
         GOOGLE_OAUTH_REDIRECT_URI: https://api.mlai.au/integrations/callback/google
         GITHUB_OAUTH_REDIRECT_URI: https://api.mlai.au/integrations/callback/github
         STRIPE_OAUTH_REDIRECT_URI: https://api.mlai.au/integrations/callback/stripe
