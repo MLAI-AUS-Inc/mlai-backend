@@ -61,14 +61,79 @@ def approved_drive_manifest():
     return manifest
 
 
+def draft_drive_manifest():
+    manifest = copy.deepcopy(load_policy_manifest())
+    manifest["status"] = "draft"
+    manifest["last_reviewed_at"] = None
+    manifest["owners"] = {
+        "data": None,
+        "security": None,
+        "review": None,
+        "operations": None,
+        "privacy_legal": None,
+    }
+    manifest["global_rules"]["hard_delete_rules_approved"] = False
+    manifest["slos"]["approval_status"] = "draft"
+    manifest["slos"]["approved_by"] = None
+    manifest["slos"]["cost_limits"] = {
+        "daily_model_budget_aud": None,
+        "monthly_model_budget_aud": None,
+        "on_limit": "pause_new_model_work_and_alert",
+    }
+    drive = manifest["providers"]["google_drive"]
+    drive["production_enabled"] = False
+    drive["source_scope"]["selectors"] = []
+    drive["retention"] = {
+        "raw_evidence_days": None,
+        "derived_memory_days": None,
+        "query_audit_days": None,
+    }
+    drive["inventory"] = {
+        "status": "draft",
+        "approved_by": None,
+        "approved_at": None,
+        "privacy_approved_by": None,
+        "max_files": None,
+    }
+    drive["review_owner"] = None
+    drive["approval"] = {
+        "status": "draft",
+        "approved_by": None,
+        "approved_at": None,
+        "terms_reviewed_by": None,
+        "terms_reviewed_at": None,
+    }
+    return manifest
+
+
 class GovernanceManifestTests(SimpleTestCase):
-    def test_checked_in_manifest_is_structurally_valid_and_fail_closed(self):
+    def test_checked_in_manifest_approves_only_the_reviewed_drive_source(self):
         manifest = load_policy_manifest()
 
-        self.assertEqual(validate_policy_manifest(manifest), [])
+        self.assertEqual(
+            validate_policy_manifest(
+                manifest,
+                enabled_providers={"google_drive"},
+                production=True,
+            ),
+            [],
+        )
         self.assertEqual(set(manifest["providers"]), SUPPORTED_PROVIDERS)
-        self.assertTrue(
-            all(not policy["production_enabled"] for policy in manifest["providers"].values())
+        self.assertEqual(
+            {
+                provider
+                for provider, policy in manifest["providers"].items()
+                if policy["production_enabled"]
+            },
+            {"google_drive"},
+        )
+        self.assertEqual(
+            manifest["providers"]["google_drive"]["source_scope"]["selectors"],
+            [
+                "organization:16",
+                "connection:12",
+                "folder:1UBvYpQuZiug1QB3KDotTJtd5xltQdFKp",
+            ],
         )
 
     def test_enabled_provider_parser_accepts_commas_spaces_and_iterables(self):
@@ -80,7 +145,7 @@ class GovernanceManifestTests(SimpleTestCase):
 
     def test_draft_drive_policy_cannot_be_enabled_in_production(self):
         errors = validate_policy_manifest(
-            load_policy_manifest(),
+            draft_drive_manifest(),
             enabled_providers={"google_drive"},
             production=True,
         )
@@ -113,7 +178,7 @@ class GovernanceManifestTests(SimpleTestCase):
         with self.assertRaises(GovernancePolicyError) as context:
             assert_provider_ingestion_allowed(
                 "google_drive",
-                manifest=load_policy_manifest(),
+                manifest=draft_drive_manifest(),
                 production=True,
             )
 
@@ -156,14 +221,14 @@ class GovernanceManifestTests(SimpleTestCase):
                 "google_drive",
                 {"folder:synthetic-root"},
                 requested_max_files=100,
-                manifest=load_policy_manifest(),
+                manifest=draft_drive_manifest(),
             )
 
         self.assertIn("inventory.status is not 'approved'", str(context.exception))
         self.assertIn("Inventory selectors are not approved", str(context.exception))
 
     def test_drive_inventory_approval_is_separate_from_production_ingestion(self):
-        manifest = load_policy_manifest()
+        manifest = draft_drive_manifest()
         manifest["owners"]["data"] = "Data Owner"
         manifest["owners"]["security"] = "Security Owner"
         drive = manifest["providers"]["google_drive"]
@@ -206,22 +271,19 @@ class GovernanceManifestTests(SimpleTestCase):
 
 
 class GovernanceCommandTests(SimpleTestCase):
-    def test_command_accepts_checked_in_draft_when_no_provider_is_requested(self):
+    def test_command_accepts_checked_in_approved_drive_provider(self):
         out = StringIO()
-        with patch.dict(os.environ, {"ORG_MEMORY_ENABLED_PROVIDERS": ""}):
+        with patch.dict(os.environ, {"ORG_MEMORY_ENABLED_PROVIDERS": "google_drive"}):
             call_command(
                 "validate_org_memory_governance",
                 environment="production",
                 stdout=out,
             )
 
-        self.assertIn("requested providers: none", out.getvalue())
+        self.assertIn("requested providers: google_drive", out.getvalue())
 
-    def test_command_rejects_enabled_draft_provider_in_production(self):
-        with patch.dict(
-            os.environ,
-            {"ORG_MEMORY_ENABLED_PROVIDERS": "google_drive"},
-        ):
+    def test_command_rejects_unapproved_provider_in_production(self):
+        with patch.dict(os.environ, {"ORG_MEMORY_ENABLED_PROVIDERS": "slack"}):
             with self.assertRaises(CommandError):
                 call_command(
                     "validate_org_memory_governance",

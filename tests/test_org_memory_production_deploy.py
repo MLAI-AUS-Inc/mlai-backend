@@ -13,6 +13,7 @@ class OrgMemoryProductionDeployTests(SimpleTestCase):
         required_settings = {
             'ORG_MEMORY_QUERY_API_ENABLED "true"',
             'ORG_MEMORY_PILOT_ORGANIZATION_DOMAIN "mlai.au"',
+            'ORG_MEMORY_ENABLED_PROVIDERS "google_drive"',
             'ORG_MEMORY_PUBLICATION_ENABLED "false"',
             'ORG_MEMORY_ACTIONS_ENABLED "false"',
             'ORG_MEMORY_ACTION_LINEAR_EXECUTION_ENABLED "false"',
