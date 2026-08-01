@@ -8,6 +8,7 @@ XERO_PROFIT_AND_LOSS_REPORT_SCOPE = "accounting.reports.profitandloss.read"
 XERO_BALANCE_SHEET_REPORT_SCOPE = "accounting.reports.balancesheet.read"
 XERO_PAYMENT_WRITE_SCOPE = "accounting.payments"
 XERO_INVOICE_WRITE_SCOPE = "accounting.transactions"
+XERO_GRANULAR_INVOICE_WRITE_SCOPE = "accounting.invoices"
 XERO_ATTACHMENTS_SCOPE = "accounting.attachments"
 XERO_REQUIRED_OPERATIONAL_SCOPES = (
     "offline_access",
@@ -65,11 +66,15 @@ def xero_has_payment_write_scope(value: Any) -> bool:
 
 
 def xero_has_invoice_write_scope(value: Any) -> bool:
-    """Creating ACCPAY bills goes through the Invoices API, which needs the
-    full accounting.transactions scope (accounting.banktransactions is not
-    enough)."""
+    """Creating ACCPAY bills goes through the Invoices API: either the classic
+    accounting.transactions scope or Xero's granular accounting.invoices write
+    scope (this org connects with granular scopes — see XERO_OAUTH_SCOPES)."""
 
-    return XERO_INVOICE_WRITE_SCOPE in normalize_xero_scopes(value)
+    normalized = normalize_xero_scopes(value)
+    return (
+        XERO_INVOICE_WRITE_SCOPE in normalized
+        or XERO_GRANULAR_INVOICE_WRITE_SCOPE in normalized
+    )
 
 
 def xero_has_attachments_scope(value: Any) -> bool:
