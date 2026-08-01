@@ -167,6 +167,7 @@ jobs:
         python manage.py test \
           org_memory.tests.test_search_postgres \
           org_memory.tests.test_runtime_postgres \
+          org_memory.tests.test_drive_processing.DriveProcessingTests.test_unchanged_accessible_version_restores_policy_revoked_chunks \
           --verbosity 2
 
   deploy:

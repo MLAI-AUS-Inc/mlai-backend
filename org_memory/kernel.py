@@ -544,15 +544,10 @@ def restore_source_access(
 ) -> dict:
     """Restore an unchanged current version only when its captured ACL still matches."""
 
-    locked = (
-        MemorySource.objects.select_for_update()
-        .select_related(
-            "configuration",
-            "source_scope",
-            "current_version__acl_snapshot",
-        )
-        .get(pk=source.pk)
-    )
+    # Lock only the source row. Both current_version and source_scope are nullable;
+    # joining either into SELECT ... FOR UPDATE is rejected by PostgreSQL because
+    # Django emits an outer join for nullable relations.
+    locked = MemorySource.objects.select_for_update().get(pk=source.pk)
     if locked.lifecycle_state == MemorySourceLifecycle.TOMBSTONED:
         raise EvidenceKernelError("A tombstoned source cannot be silently reactivated.")
     current = locked.current_version
@@ -562,7 +557,9 @@ def restore_source_access(
     acl_payload = _normalized_acl(acl)
     if not acl_payload["is_accessible"]:
         raise EvidenceKernelError("Source access cannot be restored with an inaccessible ACL.")
-    snapshot = current.acl_snapshot
+    snapshot = MemoryAclSnapshot.objects.select_for_update().get(
+        source_version=current
+    )
     if snapshot.fingerprint != acl_payload["fingerprint"]:
         raise EvidenceKernelError(
             "Changed provider ACL evidence requires a new source version."
