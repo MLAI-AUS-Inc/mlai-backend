@@ -906,7 +906,10 @@ def _complete_delete_action(claim: ClaimedMemoryWork) -> dict:
 def _execute_reconciliation(claim: ClaimedMemoryWork, work_item: MemoryWorkItem) -> dict:
     event_type = str(work_item.payload.get("event_type") or "")
     summary = {"reconciled": True}
-    if event_type == MemoryOutboxEventType.SOURCE_VERSION_CAPTURED:
+    if event_type in {
+        MemoryOutboxEventType.SOURCE_VERSION_CAPTURED,
+        MemoryOutboxEventType.SOURCE_ACCESS_RESTORED,
+    }:
         if work_item.source_version and not work_item.source_version.is_current:
             if work_item.source_version.chunks.filter(active_for_retrieval=True).exists():
                 raise PermanentMemoryRuntimeError(
