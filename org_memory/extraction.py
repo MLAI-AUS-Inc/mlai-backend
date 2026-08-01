@@ -7,6 +7,7 @@ import unicodedata
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Optional, Protocol, Union
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from django.conf import settings
 from django.db import transaction
@@ -631,11 +632,34 @@ def _resolve_entity(candidate: EntityCandidate, *, source_version) -> MemoryEnti
     return entity
 
 
-def _claim_datetimes(candidate: ClaimCandidate) -> dict:
+def _source_datetime_timezone(source_version):
+    metadata = source_version.metadata or {}
+    meeting = metadata.get("meeting") if isinstance(metadata, dict) else {}
+    timezone_name = (
+        meeting.get("timezone_name")
+        if isinstance(meeting, dict)
+        else None
+    ) or (metadata.get("timezone_name") if isinstance(metadata, dict) else None)
+    if timezone_name:
+        try:
+            return ZoneInfo(str(timezone_name))
+        except ZoneInfoNotFoundError:
+            pass
+    return timezone.get_default_timezone()
+
+
+def _claim_datetimes(candidate: ClaimCandidate, *, source_version) -> dict:
     values = {}
+    source_timezone = _source_datetime_timezone(source_version)
     for field_name in ("observed_at", "event_start_at", "event_end_at", "valid_from", "valid_until"):
         raw = getattr(candidate, field_name)
-        values[field_name] = parse_datetime(raw) if raw else None
+        parsed = parse_datetime(raw) if raw else None
+        if parsed is not None and timezone.is_naive(parsed):
+            parsed = timezone.make_aware(
+                parsed,
+                source_timezone,
+            )
+        values[field_name] = parsed
     return values
 
 
@@ -954,7 +978,7 @@ def extract_source_version(*, source_version, provider: Optional[ExtractionProvi
             extractor_prompt_version=target.prompt_version,
             extractor_schema_version=target.schema_version,
             metadata={"candidate_classification": candidate.classification},
-            **_claim_datetimes(candidate),
+            **_claim_datetimes(candidate, source_version=source_version),
         )
         from .consolidation import default_stale_after
 

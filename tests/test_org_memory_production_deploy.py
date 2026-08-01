@@ -73,6 +73,10 @@ class OrgMemoryProductionDeployTests(SimpleTestCase):
         self.assertIn("--superseded-extractor-version org-memory-extractor-v2", deploy)
         self.assertIn("--superseded-extractor-version org-memory-extractor-v3", deploy)
         self.assertIn("--superseded-extractor-version org-memory-extractor-v4", deploy)
+        self.assertIn(
+            "reconcile_org_memory_naive_datetime_dead_letters",
+            deploy,
+        )
         self.assertIn("paused_runtime_services=(web memory-worker memory-scheduler)", deploy)
         self.assertIn('docker compose stop "\\${paused_runtime_services[@]}"', deploy)
         self.assertIn(
