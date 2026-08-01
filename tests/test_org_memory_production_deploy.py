@@ -1,9 +1,44 @@
+import contextlib
+import importlib.util
+import io
+import json
+import tempfile
 from pathlib import Path
 
 from django.test import SimpleTestCase
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _load_staging_skip_module():
+    spec = importlib.util.spec_from_file_location(
+        "org_memory_staging_skip",
+        ROOT / "scripts" / "org_memory_staging_skip.py",
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _blocked_staging_stdout(blockers):
+    return "\n".join(
+        (
+            "DEBUG: ESAFETY VIEWS MODULE LOADED",
+            "Initializing Firebase with project ID: mlai-main-website",
+            json.dumps(
+                {
+                    "applied": False,
+                    "readiness": {
+                        "blockers": blockers,
+                        "ready": not blockers,
+                        "warnings": ["selector_label_gate_not_met"],
+                    },
+                },
+                sort_keys=True,
+            ),
+        )
+    )
 
 
 class OrgMemoryProductionDeployTests(SimpleTestCase):
@@ -38,6 +73,52 @@ class OrgMemoryProductionDeployTests(SimpleTestCase):
             deploy.index("configure_firebase_storage_cors"),
         )
 
+    def test_admin_brain_staging_awaiting_evidence_skips_but_stays_fail_closed(self):
+        deploy = (ROOT / "deploy.sh").read_text()
+
+        # The staging attempt is guarded so a blocked readiness report can be
+        # inspected instead of tripping the ERR trap immediately.
+        staging_guard = 'if [ "\\$staging_applied" = "1" ]; then'
+        self.assertIn(staging_guard, deploy)
+        self.assertIn("scripts/org_memory_staging_skip.py", deploy)
+
+        # Activation and every post-binding verification run only after a
+        # successful staging apply.
+        skip_probe_index = deploy.index("scripts/org_memory_staging_skip.py")
+        self.assertGreater(deploy.index(staging_guard), deploy.index("stage_org_memory_pilot"))
+        for verified_only_after_staging in (
+            "activate_org_memory_pilot",
+            "check_org_memory_pilot_release_gate",
+            "report_org_memory_pilot_deployment",
+            "check_org_memory_pilot_access_matrix",
+        ):
+            self.assertGreater(
+                deploy.index(verified_only_after_staging),
+                deploy.index(staging_guard),
+            )
+            self.assertLess(
+                deploy.index(verified_only_after_staging),
+                skip_probe_index,
+            )
+
+        # The awaiting-evidence skip re-disables the query API before runtime
+        # services start, so retrieval stays fail-closed without a binding.
+        self.assertGreater(
+            deploy.rindex('upsert_env_value ORG_MEMORY_QUERY_API_ENABLED "false"'),
+            skip_probe_index,
+        )
+        self.assertIn(
+            "Admin Brain pilot staging skipped: the pilot has no retrievable evidence yet.",
+            deploy,
+        )
+
+        # Any other staging failure still aborts the deploy through the ERR
+        # trap so web is restored.
+        self.assertIn(
+            "Admin Brain production staging failed; aborting the deploy.",
+            deploy,
+        )
+
     def test_main_deploy_requires_approval_key_and_independent_operators(self):
         workflow = (ROOT / ".github" / "workflows" / "deploy.yml").read_text()
 
@@ -61,3 +142,84 @@ class OrgMemoryProductionDeployTests(SimpleTestCase):
             'if [ "$ORG_MEMORY_PRODUCTION_DEPLOY_ENABLED" = "true" ]; then',
             workflow,
         )
+
+
+class AdminBrainStagingSkipDecisionTests(SimpleTestCase):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.skip_module = _load_staging_skip_module()
+
+    def test_skips_when_only_blocker_is_missing_retrievable_evidence(self):
+        stdout_text = _blocked_staging_stdout(["retrievable_evidence_missing"])
+        self.assertTrue(self.skip_module.staging_skip_allowed(stdout_text))
+
+    def test_fails_when_any_non_tolerated_blocker_is_present(self):
+        stdout_text = _blocked_staging_stdout(
+            ["retrievable_evidence_missing", "connections_not_approved"]
+        )
+        self.assertFalse(self.skip_module.staging_skip_allowed(stdout_text))
+
+    def test_fails_when_readiness_report_is_absent(self):
+        for stdout_text in (
+            "",
+            "CommandError: Organization does not exist.",
+            "DEBUG: ESAFETY VIEWS MODULE LOADED\nnot-json {",
+        ):
+            with self.subTest(stdout_text=stdout_text):
+                self.assertFalse(
+                    self.skip_module.staging_skip_allowed(stdout_text)
+                )
+
+    def test_fails_on_successful_apply_output_shape(self):
+        # A post-readiness apply failure prints the deployment result shape
+        # (readiness_hash string, no readiness object) or nothing at all;
+        # neither may be treated as the awaiting-evidence state.
+        stdout_text = json.dumps(
+            {"applied": True, "readiness_hash": "ab" * 32, "state": "staged"}
+        )
+        self.assertFalse(self.skip_module.staging_skip_allowed(stdout_text))
+
+    def test_fails_on_empty_blocker_list(self):
+        stdout_text = _blocked_staging_stdout([])
+        self.assertFalse(self.skip_module.staging_skip_allowed(stdout_text))
+
+    def test_last_readiness_report_in_output_wins(self):
+        tolerated = _blocked_staging_stdout(["retrievable_evidence_missing"])
+        blocked = _blocked_staging_stdout(["pilot_actors_not_exact"])
+        self.assertFalse(
+            self.skip_module.staging_skip_allowed(tolerated + "\n" + blocked)
+        )
+        self.assertTrue(
+            self.skip_module.staging_skip_allowed(blocked + "\n" + tolerated)
+        )
+
+    def test_main_exit_codes(self):
+        quiet = contextlib.ExitStack()
+        quiet.enter_context(contextlib.redirect_stdout(io.StringIO()))
+        quiet.enter_context(contextlib.redirect_stderr(io.StringIO()))
+        self.addCleanup(quiet.close)
+        with tempfile.TemporaryDirectory() as tmp:
+            tolerated_path = Path(tmp) / "tolerated.txt"
+            tolerated_path.write_text(
+                _blocked_staging_stdout(["retrievable_evidence_missing"]),
+                encoding="utf-8",
+            )
+            blocked_path = Path(tmp) / "blocked.txt"
+            blocked_path.write_text(
+                _blocked_staging_stdout(["provider_governance_invalid"]),
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                self.skip_module.main(["prog", str(tolerated_path)]), 0
+            )
+            self.assertEqual(
+                self.skip_module.main(["prog", str(blocked_path)]), 1
+            )
+            self.assertEqual(
+                self.skip_module.main(
+                    ["prog", str(Path(tmp) / "missing.txt")]
+                ),
+                2,
+            )
+            self.assertEqual(self.skip_module.main(["prog"]), 2)
