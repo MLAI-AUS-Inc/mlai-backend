@@ -159,7 +159,10 @@ class CommunityBridgeDiscordClient(discord.Client):
         if delivery["target_platform"] == CommunityBridgePlatform.DISCORD:
             await self._deliver_to_discord(delivery)
             return
-        await self._deliver_to_slack(delivery)
+        if delivery["target_platform"] == CommunityBridgePlatform.SLACK:
+            await self._deliver_to_slack(delivery)
+            return
+        raise RuntimeError(f"No community bridge adapter for {delivery['target_platform']}")
 
     async def _deliver_to_discord(self, delivery: dict) -> None:
         target_channel = await self._get_channel_or_fetch(delivery["target_channel_id"])

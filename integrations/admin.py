@@ -28,19 +28,27 @@ class CommunityBridgeChannelAdmin(admin.ModelAdmin):
     list_display = (
         "slack_channel_id",
         "slack_channel_name",
-        "discord_channel_id",
-        "discord_channel_name",
+        "destination_platform",
+        "destination_channel_id",
+        "destination_channel_name",
         "enabled",
         "updated_at",
     )
     search_fields = (
         "slack_channel_id",
         "slack_channel_name",
-        "discord_channel_id",
-        "discord_channel_name",
-        "discord_guild_id",
+        "destination_channel_id",
+        "destination_channel_name",
+        "destination_workspace_id",
     )
-    list_filter = ("enabled", "sync_edits", "sync_deletes", "sync_replies", "updated_at")
+    list_filter = (
+        "destination_platform",
+        "enabled",
+        "sync_edits",
+        "sync_deletes",
+        "sync_replies",
+        "updated_at",
+    )
 
 
 @admin.register(CommunityBridgeReceipt)

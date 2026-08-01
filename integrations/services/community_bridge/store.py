@@ -21,6 +21,10 @@ from integrations.services.community_bridge.formatting import (
     normalize_slack_files,
     sanitize_slack_text,
 )
+from integrations.services.community_bridge.contracts import (
+    BridgeAttachment,
+    CanonicalBridgeEvent,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -77,8 +81,24 @@ def ingest_inbound_event(
         return {"status": "ignored", "reason": "missing_receipt_key"}
 
     normalized_channel_id = str(source_channel_id or "").strip()
-    target_platform = _target_platform(source_platform)
     channel = _get_enabled_channel(source_platform=source_platform, channel_id=normalized_channel_id)
+
+    if normalized_event:
+        try:
+            normalized_event = _canonicalize_event(
+                receipt_key=normalized_receipt_key,
+                source_platform=source_platform,
+                source_channel_id=normalized_channel_id,
+                normalized_event=normalized_event,
+            )
+        except (TypeError, ValueError) as exc:
+            logger.warning(
+                "community_bridge_invalid_canonical_event platform=%s receipt_key=%s error=%s",
+                source_platform,
+                normalized_receipt_key,
+                exc,
+            )
+            normalized_event = None
 
     try:
         with transaction.atomic():
@@ -109,6 +129,8 @@ def ingest_inbound_event(
 
     if not normalized_event:
         return _mark_receipt_ignored(receipt, reason="unsupported_or_ignored_event")
+
+    target_platform = _target_platform(channel=channel, source_platform=source_platform)
 
     delivery = CommunityBridgeDelivery.objects.create(
         channel=channel,
@@ -364,20 +386,56 @@ def _get_enabled_channel(*, source_platform: str, channel_id: str) -> Optional[C
     if source_platform == CommunityBridgePlatform.SLACK:
         filters["slack_channel_id"] = normalized_channel_id
     else:
-        filters["discord_channel_id"] = normalized_channel_id
+        filters["destination_platform"] = source_platform
+        filters["destination_channel_id"] = normalized_channel_id
     return CommunityBridgeChannel.objects.filter(**filters).first()
 
 
-def _target_platform(source_platform: str) -> str:
+def _target_platform(*, channel: CommunityBridgeChannel, source_platform: str) -> str:
     if source_platform == CommunityBridgePlatform.SLACK:
-        return CommunityBridgePlatform.DISCORD
-    return CommunityBridgePlatform.SLACK
+        return channel.destination_platform
+    if source_platform == channel.destination_platform:
+        return CommunityBridgePlatform.SLACK
+    raise ValueError("source platform does not match the mapped destination")
 
 
 def _channel_id_for_platform(*, channel: CommunityBridgeChannel, platform: str) -> str:
     if platform == CommunityBridgePlatform.SLACK:
         return channel.slack_channel_id
-    return channel.discord_channel_id
+    if platform == channel.destination_platform:
+        return channel.destination_channel_id
+    return ""
+
+
+def _canonicalize_event(
+    *,
+    receipt_key: str,
+    source_platform: str,
+    source_channel_id: str,
+    normalized_event: dict,
+) -> dict:
+    attachments = tuple(
+        BridgeAttachment(
+            title=str(item.get("title") or item.get("url") or "Attachment"),
+            url=str(item.get("url") or ""),
+        )
+        for item in (normalized_event.get("attachments") or [])
+        if isinstance(item, dict)
+    )
+    event = CanonicalBridgeEvent(
+        receipt_key=receipt_key,
+        source_platform=source_platform,
+        source_channel_id=source_channel_id,
+        source_message_id=str(normalized_event.get("source_message_id") or ""),
+        source_parent_message_id=str(normalized_event.get("source_parent_message_id") or ""),
+        source_author_id=str(normalized_event.get("source_author_id") or ""),
+        source_author_display_name=str(normalized_event.get("source_author_display_name") or ""),
+        delivery_type=str(normalized_event.get("delivery_type") or ""),
+        text=str(normalized_event.get("text") or ""),
+        attachments=attachments,
+        metadata=normalized_event.get("metadata") or {},
+    )
+    return event.normalized_payload()
 
 
 def _mark_receipt_ignored(receipt: CommunityBridgeReceipt, *, reason: str) -> dict:
@@ -413,6 +471,10 @@ def _serialize_delivery(delivery: CommunityBridgeDelivery) -> dict:
         "max_attempts": int(delivery.max_attempts or 0),
         "channel": {
             "slack_channel_id": delivery.channel.slack_channel_id,
+            "destination_platform": delivery.channel.destination_platform,
+            "destination_workspace_id": delivery.channel.destination_workspace_id,
+            "destination_channel_id": delivery.channel.destination_channel_id,
+            "destination_channel_name": delivery.channel.destination_channel_name,
             "discord_channel_id": delivery.channel.discord_channel_id,
             "slack_channel_name": delivery.channel.slack_channel_name,
             "discord_channel_name": delivery.channel.discord_channel_name,

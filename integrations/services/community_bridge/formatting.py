@@ -76,7 +76,11 @@ def build_mirrored_text(
     attachments: Optional[Iterable[dict]] = None,
 ) -> str:
     author_name = str(author_display_name or "Unknown user").strip() or "Unknown user"
-    source_label = "Slack" if source_platform == CommunityBridgePlatform.SLACK else "Discord"
+    source_label = {
+        CommunityBridgePlatform.SLACK: "Slack",
+        CommunityBridgePlatform.DISCORD: "Discord",
+        CommunityBridgePlatform.BUZZ: "MLAI Chat",
+    }.get(source_platform, "Community")
     normalized_body = _strip_trailing_whitespace(body)
     sections = [_format_author_line(destination_platform, author_name, source_label)]
     if normalized_body:

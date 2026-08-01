@@ -26,7 +26,11 @@ from integrations.models import (
     CommunityBridgeReceipt,
     CommunityBridgeReceiptStatus,
 )
-from integrations.services.community_bridge.store import resolve_message_link
+from integrations.services.community_bridge.store import (
+    ingest_inbound_event,
+    ingest_slack_event,
+    resolve_message_link,
+)
 from integrations.services.community_bridge.worker import CommunityBridgeDiscordClient
 
 
@@ -218,6 +222,27 @@ class CommunityBridgeSetupCommandTests(TestCase):
         self.assertTrue(channel.sync_deletes)
         self.assertTrue(channel.sync_replies)
 
+    def test_command_creates_generic_buzz_mapping(self):
+        out = StringIO()
+
+        call_command(
+            "upsert_community_bridge_channel",
+            slack_channel_id="C-MLAI-CHAT",
+            slack_channel_name="community",
+            destination_platform=CommunityBridgePlatform.BUZZ,
+            destination_workspace_id="chat.mlai.au",
+            destination_channel_id="nostr-channel-event-id",
+            destination_channel_name="community",
+            stdout=out,
+        )
+
+        payload = json.loads(out.getvalue())
+        channel = CommunityBridgeChannel.objects.get(slack_channel_id="C-MLAI-CHAT")
+        self.assertEqual(payload["destination_platform"], CommunityBridgePlatform.BUZZ)
+        self.assertEqual(channel.destination_workspace_id, "chat.mlai.au")
+        self.assertEqual(channel.destination_channel_id, "nostr-channel-event-id")
+        self.assertEqual(channel.discord_channel_id, "")
+
     def test_command_updates_existing_mapping(self):
         CommunityBridgeChannel.objects.create(
             slack_channel_id="C-SLACK-PILOT",
@@ -270,6 +295,78 @@ class CommunityBridgeSetupCommandTests(TestCase):
                 slack_channel_id="C-SLACK-TWO",
                 discord_url="https://discord.com/channels/1492063515987410957/1492063517191180340",
             )
+
+
+class GenericCommunityBridgeRoutingTests(TestCase):
+    def setUp(self):
+        self.channel = CommunityBridgeChannel.objects.create(
+            slack_channel_id="C-MLAI-CHAT",
+            slack_channel_name="community",
+            destination_platform=CommunityBridgePlatform.BUZZ,
+            destination_workspace_id="chat.mlai.au",
+            destination_channel_id="nostr-channel-event-id",
+            destination_channel_name="community",
+        )
+
+    def test_slack_event_routes_to_configured_buzz_destination(self):
+        result = ingest_slack_event(
+            {
+                "event_id": "EvToBuzz",
+                "event": {
+                    "type": "message",
+                    "channel_type": "channel",
+                    "channel": self.channel.slack_channel_id,
+                    "user": "U123",
+                    "ts": "1710000000.0001",
+                    "text": "Hello MLAI Chat",
+                },
+            }
+        )
+
+        delivery = CommunityBridgeDelivery.objects.get()
+        self.assertEqual(result["target_platform"], CommunityBridgePlatform.BUZZ)
+        self.assertEqual(delivery.target_channel_id, "nostr-channel-event-id")
+        self.assertEqual(delivery.payload["text"], "Hello MLAI Chat")
+
+    def test_buzz_event_routes_back_to_slack(self):
+        result = ingest_inbound_event(
+            source_platform=CommunityBridgePlatform.BUZZ,
+            receipt_key="nostr-event-id",
+            source_channel_id=self.channel.destination_channel_id,
+            event_type="message_create",
+            normalized_event={
+                "delivery_type": CommunityBridgeDeliveryType.CREATE,
+                "source_message_id": "nostr-event-id",
+                "source_parent_message_id": "",
+                "source_author_id": "a" * 64,
+                "source_author_display_name": "MLAI member",
+                "text": "Hello Slack",
+                "attachments": [],
+            },
+            raw_payload={"event_id": "nostr-event-id"},
+        )
+
+        delivery = CommunityBridgeDelivery.objects.get()
+        self.assertEqual(result["target_platform"], CommunityBridgePlatform.SLACK)
+        self.assertEqual(delivery.target_channel_id, "C-MLAI-CHAT")
+
+    def test_invalid_attachment_scheme_fails_closed(self):
+        result = ingest_inbound_event(
+            source_platform=CommunityBridgePlatform.BUZZ,
+            receipt_key="nostr-invalid-attachment",
+            source_channel_id=self.channel.destination_channel_id,
+            event_type="message_create",
+            normalized_event={
+                "delivery_type": CommunityBridgeDeliveryType.CREATE,
+                "source_message_id": "nostr-invalid-attachment",
+                "text": "unsafe attachment",
+                "attachments": [{"title": "secret", "url": "file:///tmp/secret"}],
+            },
+            raw_payload={},
+        )
+
+        self.assertEqual(result["status"], "ignored")
+        self.assertEqual(CommunityBridgeDelivery.objects.count(), 0)
 
 
 class CommunityBridgePayloadRetentionTests(TestCase):

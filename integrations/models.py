@@ -416,6 +416,18 @@ class CommunityBridgeChannel(models.Model):
         destination_label = self.destination_channel_name or self.destination_channel_id
         return f"{slack_label} -> {self.destination_platform}:{destination_label}"
 
+    def save(self, *args, **kwargs):
+        # Keep existing Discord-only callers working during the compatibility
+        # window while making the generic destination fields authoritative.
+        if self.destination_platform == CommunityBridgePlatform.DISCORD:
+            self.destination_workspace_id = self.destination_workspace_id or self.discord_guild_id
+            self.destination_channel_id = self.destination_channel_id or self.discord_channel_id
+            self.destination_channel_name = self.destination_channel_name or self.discord_channel_name
+            self.discord_guild_id = self.discord_guild_id or self.destination_workspace_id
+            self.discord_channel_id = self.discord_channel_id or self.destination_channel_id
+            self.discord_channel_name = self.discord_channel_name or self.destination_channel_name
+        return super().save(*args, **kwargs)
+
 
 class CommunityBridgeReceipt(models.Model):
     channel = models.ForeignKey(
