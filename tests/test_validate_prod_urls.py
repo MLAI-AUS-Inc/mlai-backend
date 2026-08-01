@@ -21,6 +21,15 @@ VALID_PROD_URL_SETTINGS = {
     "ESAFETY_URL": "https://mlai.au",
     "VIBE_RAISING_URL": "https://mlai.au",
     "FOUNDER_TOOLS_URL": "https://mlai.au",
+    "COMMUNITY_CHAT_API_AUDIENCE": "https://api.mlai.au",
+    "COMMUNITY_CHAT_FRONTEND_URL": "https://chat.mlai.au",
+    "COMMUNITY_CHAT_RELAY_URL": "wss://chat.mlai.au",
+    "COMMUNITY_CHAT_ALLOWED_ORIGINS": [
+        "https://chat.mlai.au",
+        "tauri://localhost",
+        "http://tauri.localhost",
+        "mlaichat://callback",
+    ],
     "GOOGLE_OAUTH_REDIRECT_URI": "https://api.mlai.au/integrations/callback/google",
     "GITHUB_OAUTH_REDIRECT_URI": "https://api.mlai.au/integrations/callback/github",
     "STRIPE_OAUTH_REDIRECT_URI": "https://api.mlai.au/integrations/callback/stripe",
@@ -127,6 +136,40 @@ class ValidateProdUrlsTests(SimpleTestCase):
         errors = self._validation_errors(ALLOWED_HOSTS=["api.mlai.au"])
 
         self.assertIn("ALLOWED_HOSTS is missing required host(s): 10.126.0.2.", errors)
+
+    def test_community_chat_production_endpoints_are_exact(self):
+        errors = self._validation_errors(
+            COMMUNITY_CHAT_FRONTEND_URL="https://chat-preview.mlai.au",
+            COMMUNITY_CHAT_RELAY_URL="wss://chat.mlai.au/relay",
+            COMMUNITY_CHAT_API_AUDIENCE="https://api.mlai.au/api/v1",
+        )
+
+        self.assertIn(
+            "COMMUNITY_CHAT_FRONTEND_URL must be exactly https://chat.mlai.au in production.",
+            errors,
+        )
+        self.assertIn(
+            "COMMUNITY_CHAT_RELAY_URL must be exactly wss://chat.mlai.au in production.",
+            errors,
+        )
+        self.assertIn(
+            "COMMUNITY_CHAT_API_AUDIENCE must be exactly https://api.mlai.au in production.",
+            errors,
+        )
+
+    def test_community_chat_production_origins_exclude_loopback(self):
+        errors = self._validation_errors(
+            COMMUNITY_CHAT_ALLOWED_ORIGINS=[
+                "https://chat.mlai.au",
+                "http://localhost:3001",
+            ]
+        )
+
+        self.assertIn(
+            "COMMUNITY_CHAT_ALLOWED_ORIGINS contains development origin(s): "
+            "http://localhost:3001.",
+            errors,
+        )
 
     def test_command_succeeds_for_valid_prod_urls(self):
         out = StringIO()

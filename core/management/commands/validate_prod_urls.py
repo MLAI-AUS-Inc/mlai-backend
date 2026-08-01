@@ -18,6 +18,8 @@ PUBLIC_URL_SETTINGS = (
     "ESAFETY_URL",
     "VIBE_RAISING_URL",
     "FOUNDER_TOOLS_URL",
+    "COMMUNITY_CHAT_API_AUDIENCE",
+    "COMMUNITY_CHAT_FRONTEND_URL",
 )
 
 OAUTH_REDIRECT_URI_SETTINGS = (
@@ -66,6 +68,18 @@ REQUIRED_CSRF_ORIGINS = {
 REQUIRED_ALLOWED_HOSTS = {
     "api.mlai.au",
     "10.126.0.2",
+}
+
+EXACT_COMMUNITY_CHAT_SETTINGS = {
+    "COMMUNITY_CHAT_API_AUDIENCE": "https://api.mlai.au",
+    "COMMUNITY_CHAT_FRONTEND_URL": "https://chat.mlai.au",
+    "COMMUNITY_CHAT_RELAY_URL": "wss://chat.mlai.au",
+}
+
+DEVELOPMENT_COMMUNITY_CHAT_ORIGINS = {
+    "http://localhost:3001",
+    "http://localhost:5173",
+    "http://127.0.0.1:4173",
 }
 
 
@@ -161,6 +175,25 @@ def _validate_required_values(
         errors.append(f"{setting_name} is missing required {value_label}(s): {', '.join(missing)}.")
 
 
+def _validate_community_chat_contract(errors: list[str]) -> None:
+    for setting_name, expected in EXACT_COMMUNITY_CHAT_SETTINGS.items():
+        actual = _as_clean_string(getattr(settings, setting_name, ""))
+        if actual != expected:
+            errors.append(f"{setting_name} must be exactly {expected} in production.")
+
+    allowed_origins = set(_as_list(getattr(settings, "COMMUNITY_CHAT_ALLOWED_ORIGINS", [])))
+    if "https://chat.mlai.au" not in allowed_origins:
+        errors.append(
+            "COMMUNITY_CHAT_ALLOWED_ORIGINS is missing required origin(s): https://chat.mlai.au."
+        )
+    development_origins = sorted(allowed_origins & DEVELOPMENT_COMMUNITY_CHAT_ORIGINS)
+    if development_origins:
+        errors.append(
+            "COMMUNITY_CHAT_ALLOWED_ORIGINS contains development origin(s): "
+            f"{', '.join(development_origins)}."
+        )
+
+
 def _service_api_key_with_source() -> tuple[str, str]:
     for setting_name in SERVICE_API_KEY_SETTINGS:
         value = _as_clean_string(getattr(settings, setting_name, ""))
@@ -186,6 +219,7 @@ def validate_prod_url_settings() -> list[str]:
     _validate_required_values("CORS_ALLOWED_ORIGINS", REQUIRED_CORS_ORIGINS, errors, value_label="origin")
     _validate_required_values("CSRF_TRUSTED_ORIGINS", REQUIRED_CSRF_ORIGINS, errors, value_label="origin")
     _validate_required_values("ALLOWED_HOSTS", REQUIRED_ALLOWED_HOSTS, errors, value_label="host")
+    _validate_community_chat_contract(errors)
 
     return errors
 
