@@ -65,7 +65,11 @@ from integrations.services.xero_reconciliation import (
     serialize_profile,
     xero_has_bank_transaction_scope,
 )
-from integrations.services.xero_scopes import xero_has_payment_write_scope
+from integrations.services.xero_scopes import (
+    xero_has_attachments_scope,
+    xero_has_invoice_write_scope,
+    xero_has_payment_write_scope,
+)
 from integrations.services.reconciliation_context import (
     approve_reconciliation_suggestion,
     build_reconciliation_enrichment_context,
@@ -1353,6 +1357,12 @@ class ReconciliationReadinessView(ReconciliationAdminView):
         payment_write_scope = bool(
             connection_active and xero_has_payment_write_scope(connection.scopes)
         )
+        invoice_write_scope = bool(
+            connection_active and xero_has_invoice_write_scope(connection.scopes)
+        )
+        attachments_scope = bool(
+            connection_active and xero_has_attachments_scope(connection.scopes)
+        )
         event_tracking_configured = bool(
             profile and profile.event_tracking_category_id
         )
@@ -1374,6 +1384,14 @@ class ReconciliationReadinessView(ReconciliationAdminView):
         if not payment_write_scope:
             warnings.append(
                 "Reconnect Xero with accounting.payments before paying existing bills."
+            )
+        if not invoice_write_scope:
+            warnings.append(
+                "Reconnect Xero with accounting.invoices before creating draft bills."
+            )
+        if not attachments_scope:
+            warnings.append(
+                "Reconnect Xero with accounting.attachments before attaching source documents."
             )
         if not event_tracking_configured:
             warnings.append("Configure the Xero Event Name tracking category.")
@@ -1444,6 +1462,8 @@ class ReconciliationReadinessView(ReconciliationAdminView):
                 "bank_account_configured": bank_account_configured,
                 "bank_transaction_scope": bank_transaction_scope,
                 "payment_write_scope": payment_write_scope,
+                "invoice_write_scope": invoice_write_scope,
+                "attachments_scope": attachments_scope,
                 "event_tracking_configured": event_tracking_configured,
                 "project_tracking_configured": project_tracking_configured,
             },

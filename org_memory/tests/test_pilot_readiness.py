@@ -23,12 +23,16 @@ from org_memory.models import (
     MemoryConnectionState,
     MemoryDailyReconciliationReport,
     MemoryDailyReconciliationStatus,
+    MemoryDeadLetter,
     MemoryPreviewStatus,
     MemoryProviderEnablement,
     MemoryScopeStatus,
     MemorySourcePolicy,
     MemorySourcePreview,
     MemorySourceScope,
+    MemoryWorkItem,
+    MemoryWorkStatus,
+    MemoryWorkTaskType,
     OrganizationCapability,
     OrganizationCapabilityGrant,
     OrganizationIdentity,
@@ -321,6 +325,19 @@ class PilotReadinessTests(TestCase):
         )
         self.assertIn("approval_slack_contexts_invalid", errors)
 
+        public_admin_scope = copy.deepcopy(valid)
+        public_admin_scope["allowed_slack_contexts"].append(
+            "public_channels:pilot_admins"
+        )
+        self.assertEqual(
+            validate_pilot_approval_manifest(
+                public_admin_scope,
+                organization_domain=self.organization.domain,
+                now=self.now,
+            ),
+            [],
+        )
+
     def test_complete_preflight_is_ready_without_enabling_query_api(self):
         with tempfile.TemporaryDirectory() as directory:
             _, governance_path = self.write_manifests(directory)
@@ -338,6 +355,83 @@ class PilotReadinessTests(TestCase):
         self.assertIn("selector_label_gate_not_met", report["warnings"])
         self.assertNotIn("UPILOT123", json.dumps(report))
         self.assertNotIn("Pilot status is green", json.dumps(report))
+
+    def test_fresh_completed_daily_report_remains_valid_while_next_report_runs(self):
+        MemoryDailyReconciliationReport.objects.create(
+            organization=self.organization,
+            report_date=self.now.date() + timedelta(days=1),
+            time_zone="UTC",
+            window_started_at=self.now,
+            status=MemoryDailyReconciliationStatus.RUNNING,
+            summary={"content_free": True},
+            alerts=[],
+            started_at=self.now,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            _, governance_path = self.write_manifests(directory)
+            report = build_pilot_readiness_report(
+                organization=self.organization,
+                approval_manifest=self.approval_manifest(),
+                governance_manifest_path=governance_path,
+                environment="staging",
+                now=self.now + timedelta(minutes=1),
+            )
+
+        self.assertNotIn("daily_reconciliation_not_healthy", report["blockers"])
+        daily_check = next(
+            check for check in report["checks"] if check["key"] == "daily_reconciliation"
+        )
+        self.assertEqual(daily_check["status"], "pass")
+        self.assertEqual(daily_check["metrics"]["latest_report_status"], "running")
+        self.assertTrue(daily_check["metrics"]["healthy_report_id"])
+
+    def test_resolved_dead_work_no_longer_blocks_runtime_readiness(self):
+        source = self.organization.memory_sources.get()
+        work = MemoryWorkItem.objects.create(
+            organization=self.organization,
+            provider="linear",
+            task_type=MemoryWorkTaskType.EXTRACT,
+            source=source,
+            source_version=source.current_version,
+            idempotency_key="resolved-dead-readiness",
+            status=MemoryWorkStatus.DEAD,
+            attempts=1,
+            last_error="superseded extraction failure",
+        )
+        dead_letter = MemoryDeadLetter.objects.create(
+            work_item=work,
+            organization=self.organization,
+            task_type=MemoryWorkTaskType.EXTRACT,
+            payload_snapshot={},
+            attempts=1,
+            last_error="superseded extraction failure",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            _, governance_path = self.write_manifests(directory)
+            blocked = build_pilot_readiness_report(
+                organization=self.organization,
+                approval_manifest=self.approval_manifest(),
+                governance_manifest_path=governance_path,
+                environment="staging",
+                now=self.now,
+            )
+            dead_letter.resolved_at = self.now
+            dead_letter.resolved_by = self.user
+            dead_letter.save(update_fields=("resolved_at", "resolved_by"))
+            recovered = build_pilot_readiness_report(
+                organization=self.organization,
+                approval_manifest=self.approval_manifest(),
+                governance_manifest_path=governance_path,
+                environment="staging",
+                now=self.now,
+            )
+
+        self.assertIn("runtime_queues_degraded", blocked["blockers"])
+        self.assertNotIn("runtime_queues_degraded", recovered["blockers"])
+        queue_check = next(
+            check for check in recovered["checks"] if check["key"] == "runtime_queues"
+        )
+        self.assertEqual(queue_check["metrics"]["dead_work"], 0)
 
     def test_live_mode_requires_query_api_and_optional_features_remain_off(self):
         with tempfile.TemporaryDirectory() as directory:

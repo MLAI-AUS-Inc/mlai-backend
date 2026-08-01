@@ -1,6 +1,6 @@
 import hashlib
 import os
-from unittest.mock import patch
+from unittest.mock import patch, sentinel
 
 from django.contrib.auth import get_user_model
 from django.test import TestCase
@@ -12,7 +12,11 @@ from organizations.models import Organization
 from org_memory.assertions import actor_identity_headers, build_actor_assertion
 from org_memory.connectors.base import ScopeDescriptor, ScopePage
 from org_memory.connectors.registry import connector_registry
-from org_memory.control_plane import SourceControlError, validate_action_for_execution
+from org_memory.control_plane import (
+    SourceControlError,
+    get_configuration,
+    validate_action_for_execution,
+)
 from org_memory.governance import SUPPORTED_PROVIDERS
 from org_memory.kernel import capture_source_version
 from org_memory.models import (
@@ -94,6 +98,21 @@ class SourceControlPlaneTests(TestCase):
             approved_at=timezone.now(),
         )
         self.request_number = 0
+
+    def test_get_configuration_locks_only_the_configuration_row(self):
+        with patch("org_memory.control_plane.MemoryConnectionConfiguration.objects") as manager:
+            queryset = manager.select_related.return_value
+            locked_queryset = queryset.select_for_update.return_value
+            locked_queryset.filter.return_value.first.return_value = sentinel.configuration
+
+            result = get_configuration(
+                "configuration-id",
+                self.organization,
+                for_update=True,
+            )
+
+        queryset.select_for_update.assert_called_once_with(of=("self",))
+        self.assertIs(result, sentinel.configuration)
 
     def _headers(self, *, idempotency_key=None):
         self.request_number += 1

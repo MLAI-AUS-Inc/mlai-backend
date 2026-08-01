@@ -493,3 +493,45 @@ class XeroBillIntakeApiTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["posting"]["xero_bank_transaction_id"], "bt-1")
         self.assertEqual(response.data["posting"]["id"], 7)
+
+
+class GranularScopeTests(TestCase):
+    """This org connects with Xero's granular scopes (see XERO_OAUTH_SCOPES):
+    accounting.invoices must satisfy the bill-creation gate just like the
+    classic accounting.transactions scope."""
+
+    def setUp(self):
+        self.organization = Organization.objects.create(name="MLAI", domain="mlai.au")
+        self.user = User.objects.create_user(email="granular@example.com", slack_id="UGRAN")
+        self.connection = ExternalServiceConnection.objects.create(
+            provider=ExternalServiceProvider.XERO,
+            user=self.user,
+            organization=self.organization,
+            access_token="access-token",
+            external_account_id="tenant-1",
+            scopes=[
+                "offline_access",
+                "accounting.invoices",
+                "accounting.banktransactions",
+                "accounting.payments",
+                "accounting.attachments",
+                "accounting.contacts.read",
+            ],
+        )
+        ReconciliationProfile.objects.create(
+            organization=self.organization,
+            xero_connection=self.connection,
+            xero_bank_account_id="bank-1",
+        )
+
+    def test_granular_invoice_scope_satisfies_bill_preview(self):
+        preview = build_reconciliation_bill_preview(self.organization, payload=_bill_payload())
+        self.assertTrue(preview["ready"])
+        self.assertEqual(preview["errors"], [])
+
+    def test_missing_granular_scope_still_reports_reconnect(self):
+        self.connection.scopes = ["accounting.banktransactions", "accounting.payments"]
+        self.connection.save(update_fields=["scopes"])
+        preview = build_reconciliation_bill_preview(self.organization, payload=_bill_payload())
+        self.assertFalse(preview["ready"])
+        self.assertTrue(any("accounting.transactions" in item for item in preview["errors"]))

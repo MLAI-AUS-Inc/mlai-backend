@@ -1,6 +1,7 @@
 import logging
-from urllib.parse import parse_qsl, urlencode, urlparse
-from django.contrib.auth import get_user_model, login as auth_login
+import re
+from urllib.parse import parse_qsl, unquote, urlencode, urlparse, urlsplit
+from django.contrib.auth import get_user_model, login as auth_login, logout as auth_logout
 from django.db import transaction
 from django.urls import reverse
 from django.utils import timezone
@@ -8,15 +9,17 @@ from rest_framework import permissions, status
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.views import APIView
-from rest_framework.decorators import api_view, permission_classes
-from rest_framework_simplejwt.tokens import RefreshToken
+from rest_framework.decorators import api_view, authentication_classes, permission_classes
+from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 from django.views.decorators.csrf import csrf_exempt
 
-from .serializers import MyTokenObtainPairSerializer
 from .auth_cookies import (
+    ACCESS_COOKIE,
     REFRESH_COOKIE,
+    clear_auth_cookie,
     clear_auth_cookies,
+    clear_django_session_cookies,
     cookie_kwargs,
     set_auth_cookies,
 )
@@ -26,8 +29,18 @@ from .email_utils import (
     send_magic_link_email,
     verify_magic_link,
 )
+from .refresh_sessions import (
+    RefreshRevocationUnavailable,
+    issue_refresh_token,
+    revoke_refresh_credential,
+)
 from .models import Hackathon
-from .serializers import MyTokenObtainPairSerializer, HackathonSerializer, UserSerializer
+from .serializers import (
+    HackathonSerializer,
+    MyTokenObtainPairSerializer,
+    RevocableTokenRefreshSerializer,
+    UserSerializer,
+)
 from rest_framework.generics import ListAPIView, RetrieveAPIView, RetrieveUpdateAPIView
 from .permissions import IsOwnerOrTeammateOrSuperuser, HasAPIKey, HasRooApiKey
 from .user_compat import DEFAULT_USER_ROLE, get_compat_user_role, user_has_team
@@ -39,6 +52,13 @@ ALLOWED_PERSONAS = {"hacker", "hustler", "hipster", "healer"}
 MEDHACK_TEAM_MIN_MEMBERS = 2
 MEDHACK_TEAM_MAX_MEMBERS = 6
 HEALTHHACK_ADMIN_ONLY_MESSAGE = "HealthHack has closed. Administrator access only."
+OPERATIONS_ADMIN_ONLY_MESSAGE = "MLAI Operations administrator access only."
+OPERATIONS_FRONTEND_ORIGIN = "https://ops.mlai.au"
+
+# Reject encoded slash and backslash variants, including repeatedly encoded
+# values such as ``%252f``. A browser or frontend router may decode these at a
+# later hop and reinterpret the result as a scheme-relative URL.
+ENCODED_PATH_SEPARATOR_RE = re.compile(r"%(?:25)*(?:2f|5c)", re.IGNORECASE)
 
 APP_CONTEXT_ALIASES = {
     "medhack": "hospital",
@@ -107,6 +127,25 @@ def _healthhack_admin_only_response():
     )
 
 
+def _is_operations_admin(user):
+    if user is None or not getattr(user, 'is_active', False):
+        return False
+
+    # Keep the operations-login entitlement identical to the flag returned by
+    # /auth/me/. The local import avoids coupling core module initialisation to
+    # the Roo app's model imports.
+    from roo.permissions import is_points_admin_user
+
+    return is_points_admin_user(user)
+
+
+def _operations_admin_only_response():
+    return Response(
+        {"detail": OPERATIONS_ADMIN_ONLY_MESSAGE},
+        status=status.HTTP_403_FORBIDDEN,
+    )
+
+
 def _normalize_next_path(next_path):
     if not next_path:
         return None
@@ -123,6 +162,69 @@ def _normalize_next_path(next_path):
         normalized = f'/{normalized}'
 
     return normalized
+
+
+def _normalize_operations_next_path(next_path):
+    """Return an operations-app path/query or ``None`` when it is unsafe.
+
+    The operations callback origin is fixed separately. This validator only
+    accepts an absolute-path reference beginning with exactly one slash, with
+    an optional query string. It intentionally rejects fragments, raw or
+    encoded backslashes, scheme-relative paths, controls, and encoded path
+    separators so downstream URL decoding cannot turn a relative target into
+    a cross-origin redirect.
+    """
+    if next_path is None:
+        return None
+
+    raw_value = str(next_path)
+    if not raw_value or raw_value != raw_value.strip():
+        return None
+    if not raw_value.startswith('/') or raw_value.startswith('//'):
+        return None
+    if '\\' in raw_value or ENCODED_PATH_SEPARATOR_RE.search(raw_value):
+        return None
+    if any(ord(character) < 32 or ord(character) == 127 for character in raw_value):
+        return None
+
+    decoded_value = raw_value
+    for _ in range(5):
+        parsed = urlsplit(decoded_value)
+        if (
+            parsed.scheme
+            or parsed.netloc
+            or parsed.fragment
+            or not parsed.path.startswith('/')
+            or parsed.path.startswith('//')
+            or '\\' in decoded_value
+            or any(ord(character) < 32 or ord(character) == 127 for character in decoded_value)
+        ):
+            return None
+
+        next_decoded_value = unquote(decoded_value)
+        if next_decoded_value == decoded_value:
+            break
+        decoded_value = next_decoded_value
+    else:
+        # Do not accept a value that still changes after several decoding
+        # passes. Legitimate route paths have no reason to be nested this way.
+        return None
+
+    return raw_value
+
+
+def _normalize_next_path_for_app(next_path, app):
+    if app == 'admin':
+        return _normalize_operations_next_path(next_path)
+    return _normalize_next_path(next_path)
+
+
+def _invalid_operations_next_path(next_path, normalized_next_path, app):
+    return app == 'admin' and next_path not in (None, '') and normalized_next_path is None
+
+
+def _invalid_next_path_response():
+    return Response({"error": "Invalid next path."}, status=status.HTTP_400_BAD_REQUEST)
 
 
 def _append_auth_query_params(magic_link, app, next_path=None):
@@ -166,7 +268,11 @@ def _frontend_base_url(app_context):
     if app_context == 'community-chat':
         return _origin_from_url(getattr(settings, 'COMMUNITY_CHAT_FRONTEND_URL', None), default_origin)
     if app_context == 'admin':
-        return _origin_from_url(getattr(settings, 'ADMIN_FRONTEND_URL', None), default_origin)
+        # ``admin`` is the stable legacy app-context identifier. Its browser
+        # destination is deliberately not configurable from request data or an
+        # environment variable: the operations application lives at this exact
+        # origin during the Plane domain transition.
+        return OPERATIONS_FRONTEND_ORIGIN
     return default_origin
 
 
@@ -185,6 +291,8 @@ class CheckUserView(APIView):
             return Response({"error": "Email is required."}, status=status.HTTP_400_BAD_REQUEST)
 
         user = User.objects.filter(email__iexact=email).first()
+        if app == 'admin' and not _is_operations_admin(user):
+            return _operations_admin_only_response()
         if _healthhack_admin_only_requested(data, app) and not (
             user and user.is_active and user.is_superuser
         ):
@@ -203,15 +311,21 @@ class SendMagicLinkView(APIView):
         data = request.data
         email = data.get('email')
         app = _normalize_app_context(data.get('app'), default='hospital')
-        next_path = _normalize_next_path(data.get('next'))
         if app is None:
             return _unsupported_app_response()
+        requested_next_path = data.get('next')
+        next_path = _normalize_next_path_for_app(requested_next_path, app)
+        if _invalid_operations_next_path(requested_next_path, next_path, app):
+            return _invalid_next_path_response()
         
         if not email:
             return Response({"error": "Email is required."}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
             user = User.objects.filter(email__iexact=email).first()
+
+            if app == 'admin' and not _is_operations_admin(user):
+                return _operations_admin_only_response()
 
             if not user:
                 # User does not exist, return specific response to frontend
@@ -235,6 +349,9 @@ class SendMagicLinkView(APIView):
             magic_link = generate_magic_link(user, base_url=base_url)
             magic_link = _append_auth_query_params(magic_link, app, next_path=next_path)
 
+            # A magic link is a bearer credential. Never emit the link or its
+            # signed token—or the destination email—into application logs.
+            logger.info("Generated magic link for user_id=%s app=%s", user.id, app)
             send_magic_link_email(user, magic_link, message_id="2")
             logger.info("Sent magic link to existing user_id=%s app=%s", user.id, app)
 
@@ -259,9 +376,13 @@ class CreateUserView(APIView):
         last_name = data.get('lastName') or data.get('last_name') or ''
         phone = data.get('phone')
         app = _normalize_app_context(data.get('app'), default='hospital')
-        next_path = _normalize_next_path(data.get('next'))
         if app is None:
             return _unsupported_app_response()
+        if app == 'admin':
+            # Operations access is provisioned out of band. Never let the
+            # public signup endpoint manufacture an operations identity.
+            return _operations_admin_only_response()
+        next_path = _normalize_next_path(data.get('next'))
 
         if not email:
             return Response({"error": "Email is required."}, status=status.HTTP_400_BAD_REQUEST)
@@ -354,9 +475,20 @@ class MagicLinkVerifyView(APIView):
                 app_param = _normalize_app_context(request.query_params.get('app'), default='hospital')
                 if app_param is None:
                     return _unsupported_app_response()
+                requested_next_path = request.query_params.get('next')
+                next_param = _normalize_next_path_for_app(requested_next_path, app_param)
+                if _invalid_operations_next_path(requested_next_path, next_param, app_param):
+                    return _invalid_next_path_response()
 
                 user = User.objects.get(email__iexact=email)
                 logger.info("Verified magic link for existing user_id=%s", user.id)
+
+                if app_param == 'admin' and not _is_operations_admin(user):
+                    logger.warning(
+                        "Rejected MLAI Operations login for non-admin user: %s",
+                        email,
+                    )
+                    return _operations_admin_only_response()
 
                 if app_param == 'hospital' and not (
                     user.is_active and user.is_superuser
@@ -379,14 +511,12 @@ class MagicLinkVerifyView(APIView):
                 )
 
                 # Generate JWT tokens
-                refresh = RefreshToken.for_user(user)
+                refresh = issue_refresh_token(user)
                 access_token = str(refresh.access_token)
                 refresh_token = str(refresh)
 
                 # Build the response payload
                 # Determine next_url based on app context
-                next_param = _normalize_next_path(request.query_params.get('next'))
-                
                 base_url = _frontend_base_url(app_param)
 
                 # Construct app-aware redirect path
@@ -470,6 +600,8 @@ class CookieTokenRefreshView(TokenRefreshView):
     the serializer also returns a new refresh token, which slides the long window
     forward — so an active user never has to request a new magic link.
     """
+
+    serializer_class = RevocableTokenRefreshSerializer
 
     def post(self, request, *args, **kwargs):
         refresh_token = request.COOKIES.get(REFRESH_COOKIE)
@@ -768,22 +900,72 @@ class UpdateProfileView(APIView):
 
 @csrf_exempt
 @api_view(['POST'])
-@permission_classes([IsAuthenticated])
+@authentication_classes([])
+@permission_classes([AllowAny])
 def logout_view(request):
+    """Revoke the refresh family and invalidate the Django/browser session.
+
+    Logout authenticates with the refresh cookie instead of the access token so
+    it remains usable after the short-lived access credential expires. Browser
+    state is cleared even for missing/invalid credentials, but only a confirmed
+    shared-cache revocation receives a success response.
+    """
+    raw_refresh_token = request.COOKIES.get(REFRESH_COOKIE)
+    preserve_refresh_for_retry = False
+
+    if not raw_refresh_token:
+        response = Response(
+            {'error': 'Valid refresh credential required.'},
+            status=status.HTTP_401_UNAUTHORIZED,
+        )
+    else:
+        try:
+            revoke_refresh_credential(raw_refresh_token)
+        except TokenError:
+            logger.info("Logout rejected an invalid or expired refresh credential")
+            response = Response(
+                {'error': 'Valid refresh credential required.'},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+        except RefreshRevocationUnavailable:
+            logger.exception("Logout could not persist refresh-session revocation")
+            preserve_refresh_for_retry = True
+            response = Response(
+                {'error': 'Logout revocation is temporarily unavailable.'},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        else:
+            response = Response(
+                {
+                    'message': 'Logged out successfully',
+                    'refresh_revoked': True,
+                },
+                status=status.HTTP_200_OK,
+            )
+
     try:
-        # Create response object
-        response = Response({'message': 'Logged out successfully'}, status=status.HTTP_200_OK)
+        # django.contrib.auth.logout flushes the server-side session row and
+        # rotates the request session key, rather than only deleting a cookie.
+        auth_logout(request._request)
+    except Exception:
+        logger.exception("Logout could not invalidate the Django session")
+        if not preserve_refresh_for_retry:
+            response = Response(
+                {'error': 'Logout session invalidation failed.'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
 
-        # Delete authentication cookies with the same attributes they were set with.
+    # A 503 means the refresh family may still be live in another browser or a
+    # copied token. Preserve only that refresh credential so this browser can
+    # retry revocation after Redis/Valkey recovers. Access and Django session
+    # state are still cleared immediately. Terminal 200/401 outcomes clear both
+    # JWT cookies.
+    if preserve_refresh_for_retry:
+        clear_auth_cookie(response, ACCESS_COOKIE)
+    else:
         clear_auth_cookies(response)
-
-        # Delete any session-related cookies
-        response.delete_cookie('sessionid', path='/')
-        response.delete_cookie('csrftoken', path='/')
-        
-        return response
-    except Exception as e:
-        return Response({'error': 'Logout failed'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    clear_django_session_cookies(response)
+    return response
 
 class HackathonListView(ListAPIView):
     queryset = Hackathon.objects.all()

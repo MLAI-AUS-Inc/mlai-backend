@@ -91,14 +91,20 @@ jobs:
         HEALTH_HACK_API_KEY: ci-health-hack-worker-key-32-characters-minimum
         ROO_SIM_PATIENT_KEY: ci-roo-sim-patient-key-32-characters-minimum
         ROO_API_KEY: ci-roo-diagnosis-record-key-32-characters-minimum
-        CORS_ALLOWED_ORIGINS: https://chat.mlai.au,https://mlai.au,https://www.mlai.au,https://victorai.win,https://www.victorai.win
-        CSRF_TRUSTED_ORIGINS: https://chat.mlai.au,https://mlai.au,https://www.mlai.au,https://api.mlai.au
+        # ops.mlai.au is the only credentialed operations origin. Plane's
+        # admin.mlai.au origin must remain untrusted by the MLAI API. MLAI Chat
+        # has its own separately required credentialed origin.
+        CORS_ALLOWED_ORIGINS: https://mlai.au,https://www.mlai.au,https://victorai.win,https://www.victorai.win,https://ops.mlai.au,https://chat.mlai.au
+        CSRF_TRUSTED_ORIGINS: https://mlai.au,https://www.mlai.au,https://api.mlai.au,https://ops.mlai.au,https://chat.mlai.au
       run: python manage.py validate_prod_urls
 
     - name: Run targeted Django tests
       run: |
         python manage.py test \
           roo.tests_api.TaskViewSetTests \
+          core.tests.test_auth_contract \
+          core.tests.test_auth_session \
+          core.tests.test_ops_domain_transition \
           core.tests.test_request_logging \
           org_memory.tests \
           tests.test_org_memory_governance \
@@ -177,7 +183,22 @@ jobs:
         python manage.py check_org_memory_search --require-vector
         python manage.py migrate --noinput
         python manage.py check_org_memory_search --require-vector --require-installed
-        python manage.py test org_memory.tests.test_search_postgres --verbosity 2
+        python manage.py test \
+          org_memory.tests.test_search_postgres \
+          org_memory.tests.test_runtime_postgres \
+          org_memory.tests.test_runtime.MemoryRuntimeTests.test_legacy_access_restored_dead_letters_get_version_pinned_replacements \
+          org_memory.tests.test_consolidation.MemoryConsolidationTests.test_consolidation_work_payload_is_identifier_only_and_idempotent \
+          org_memory.tests.test_runtime.MemoryRuntimeTests.test_legacy_consolidation_lock_dead_letters_are_requeued_once \
+          org_memory.tests.test_runtime.MemoryRuntimeTests.test_stopped_worker_work_is_recovered_and_attempt_is_refunded \
+          org_memory.tests.test_extraction.MemoryExtractionTests.test_legacy_dead_letter_reconciliation_schedules_current_target \
+          org_memory.tests.test_extraction.MemoryExtractionTests.test_dead_letter_reconciliation_can_target_superseded_extractor_revision \
+          org_memory.tests.test_extraction.MemoryExtractionTests.test_superseded_pending_extraction_work_is_cancelled_before_reprocessing \
+          org_memory.tests.test_extraction.MemoryExtractionTests.test_superseded_consolidation_work_is_cancelled_by_extraction_target \
+          org_memory.tests.test_extraction.MemoryExtractionTests.test_attributed_prompt_injection_discussion_keeps_transcript_extractable \
+          org_memory.tests.test_daily_reconciliation.DailyReconciliationTests.test_resolved_dead_letter_does_not_degrade_current_connection_health \
+          org_memory.tests.test_pilot_readiness.PilotReadinessTests.test_fresh_completed_daily_report_remains_valid_while_next_report_runs \
+          org_memory.tests.test_drive_processing.DriveProcessingTests.test_unchanged_accessible_version_restores_policy_revoked_chunks \
+          --verbosity 2
 
   deploy:
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
@@ -200,6 +221,7 @@ jobs:
         CONNECTOR_CREDENTIAL_KEYS: ${{ secrets.CONNECTOR_CREDENTIAL_KEYS }}
         CONNECTOR_CREDENTIAL_ACTIVE_KEY_ID: ${{ secrets.CONNECTOR_CREDENTIAL_ACTIVE_KEY_ID }}
         REDIS_URL: ${{ secrets.REDIS_URL }}
+        XERO_OAUTH_SCOPES: ${{ vars.XERO_OAUTH_SCOPES || '' }}
         ROO_SIM_PATIENT_KEY: ${{ secrets.ROO_SIM_PATIENT_KEY }}
         VICTOR_AI_ROO_SIGNING_SECRET: ${{ secrets.VICTOR_AI_ROO_SIGNING_SECRET }}
         ORG_MEMORY_PRODUCTION_DEPLOY_ENABLED: ${{ vars.ORG_MEMORY_PRODUCTION_DEPLOY_ENABLED || 'false' }}

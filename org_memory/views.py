@@ -104,7 +104,7 @@ class RooGatewayEligibilityView(APIView):
             and authorization.has_capability("view_general_memory")
         )
         is_committee = actor_is_active_committee_points_admin(actor)
-        private_context_allowed = actor_has_active_pilot_access(
+        approved_context_allowed = actor_has_active_pilot_access(
             actor,
             allowed_surfaces=("roo_gateway",),
         )
@@ -112,7 +112,7 @@ class RooGatewayEligibilityView(APIView):
             settings.ORG_MEMORY_QUERY_API_ENABLED
             and has_capability
             and is_committee
-            and private_context_allowed
+            and approved_context_allowed
         )
         record_service_principal_audit(
             "routing_eligibility_checked",
@@ -122,8 +122,8 @@ class RooGatewayEligibilityView(APIView):
             remote_address=request.META.get("REMOTE_ADDR") or None,
             metadata={
                 "eligible": eligible,
-                "private_context_allowed": private_context_allowed,
-                "policy_version": "roo-unified-routing-v1",
+                "approved_context_allowed": approved_context_allowed,
+                "policy_version": "roo-unified-routing-v2",
             },
         )
         return Response(
@@ -132,7 +132,11 @@ class RooGatewayEligibilityView(APIView):
                 "admin_brain_eligible": eligible,
                 # Do not expose which individual policy dimension denied the
                 # route; callers receive one aggregate decision only.
+                # Retained for wire compatibility with already-deployed Roo
+                # gateways. It represents the aggregate approved-context
+                # decision, which may now include explicitly approved public
+                # channels for pilot admins.
                 "private_context_allowed": eligible,
-                "policy_version": "roo-unified-routing-v1",
+                "policy_version": "roo-unified-routing-v2",
             }
         )

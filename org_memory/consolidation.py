@@ -585,7 +585,12 @@ def _cancel_claim_activation_review(claim: MemoryClaim, *, reason: str) -> None:
 @transaction.atomic
 def consolidate_claim(*, candidate: MemoryClaim, provider: Optional[ConsolidationProvider] = None, target=None) -> dict:
     target = target or configured_consolidation_target()
-    candidate = MemoryClaim.objects.select_for_update().select_related("organization", "subject_entity", "object_entity").get(pk=candidate.pk)
+    # Lock only the candidate row. Both entity relationships are nullable, so
+    # combining select_related() with an unqualified FOR UPDATE makes Postgres
+    # try to lock the nullable side of LEFT OUTER JOINs and reject the query.
+    # The related records are read-only during consolidation and can be loaded
+    # lazily without widening the lock.
+    candidate = MemoryClaim.objects.select_for_update().get(pk=candidate.pk)
     key = _consolidation_key(candidate, target)
     existing = MemoryConsolidationRun.objects.filter(idempotency_key=key).first()
     if existing:

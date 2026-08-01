@@ -264,7 +264,7 @@ class OrgMemoryActorBoundaryTests(TestCase):
                 "schema_version": "roo-admin-routing-eligibility-v1",
                 "admin_brain_eligible": True,
                 "private_context_allowed": True,
-                "policy_version": "roo-unified-routing-v1",
+                "policy_version": "roo-unified-routing-v2",
             },
         )
 

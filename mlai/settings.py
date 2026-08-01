@@ -265,8 +265,8 @@ CORS_ALLOWED_ORIGINS = _env_list(
         'http://localhost:5173',
         'https://mlai.au',
         'https://www.mlai.au',
-        'https://admin.mlai.au',
         'https://chat.mlai.au',
+        'https://ops.mlai.au',
     ],
 )
 CSRF_TRUSTED_ORIGINS = _env_list(
@@ -277,17 +277,19 @@ CSRF_TRUSTED_ORIGINS = _env_list(
         'http://localhost:5173',
         'https://mlai.au',
         'https://www.mlai.au',
-        'https://admin.mlai.au',
         'https://chat.mlai.au',
+        'https://ops.mlai.au',
     ],
 )
-# The standalone admin dashboard (admin.mlai.au) must always be an allowed,
-# credentialed origin, even if the env-var lists above are overridden in prod.
-for _admin_origin in ('https://admin.mlai.au',):
-    if _admin_origin not in CORS_ALLOWED_ORIGINS:
-        CORS_ALLOWED_ORIGINS.append(_admin_origin)
-    if _admin_origin not in CSRF_TRUSTED_ORIGINS:
-        CSRF_TRUSTED_ORIGINS.append(_admin_origin)
+# ops.mlai.au is the operations dashboard's sole credentialed origin. Plane at
+# admin.mlai.au must remain untrusted even if production env lists are replaced;
+# otherwise Plane-origin JavaScript could call the MLAI API with parent-domain
+# browser cookies without traversing the Plane gateway.
+for _operations_origin in ('https://ops.mlai.au',):
+    if _operations_origin not in CORS_ALLOWED_ORIGINS:
+        CORS_ALLOWED_ORIGINS.append(_operations_origin)
+    if _operations_origin not in CSRF_TRUSTED_ORIGINS:
+        CSRF_TRUSTED_ORIGINS.append(_operations_origin)
 CORS_ALLOW_CREDENTIALS = True
 CORS_ALLOW_HEADERS = (*default_headers, "x-request-id")
 CORS_EXPOSE_HEADERS = ["X-Request-ID"]
@@ -618,9 +620,10 @@ SIMPLE_JWT = {
     # Hand back a new refresh token on every refresh so the 90-day window slides forward with
     # use instead of expiring a fixed 90 days after the magic-link login.
     'ROTATE_REFRESH_TOKENS': True,
-    # Deliberately off: blacklisting needs the token_blacklist app (extra table + migration) and
-    # would break the common case of two tabs/SSR requests refreshing concurrently — the loser
-    # of that race would be logged out. Superseded refresh tokens simply age out on their own.
+    # Deliberately off: per-rotation SimpleJWT blacklisting needs the token_blacklist app (extra
+    # table + migration) and would break the common case of two tabs/SSR requests refreshing
+    # concurrently. Explicit logout instead revokes the stable rotation family in the production
+    # shared cache; ordinary superseded tokens remain usable only until that family is revoked.
     'BLACKLIST_AFTER_ROTATION': False,
     'AUTH_COOKIE': 'access_token',  # Cookie name for access token
     'AUTH_COOKIE_REFRESH': 'refresh_token',  # Cookie name for refresh token
@@ -740,9 +743,6 @@ WATT_THE_HACK_URL = os.getenv('WATT_THE_HACK_URL') or DEFAULT_FRONTEND_URL
 VIBE_RAISING_URL = os.getenv('VIBE_RAISING_URL') or DEFAULT_FRONTEND_URL
 FOUNDER_TOOLS_URL = os.getenv('FOUNDER_TOOLS_URL') or VIBE_RAISING_URL
 CONTENT_FACTORY_FRONTEND_URL = os.getenv('CONTENT_FACTORY_FRONTEND_URL') or DEFAULT_FRONTEND_URL
-ADMIN_FRONTEND_URL = os.getenv('ADMIN_FRONTEND_URL') or (
-    'http://localhost:3001' if IS_LOCAL_ENV else 'https://admin.mlai.au'
-)
 CONTENT_FACTORY_URL = os.getenv('CONTENT_FACTORY_URL') or (
     'http://localhost:8001' if IS_LOCAL_ENV else ''
 )
@@ -1292,15 +1292,15 @@ ORG_MEMORY_EXTRACTION_MODEL = os.environ.get(
 ).strip()
 ORG_MEMORY_EXTRACTOR_VERSION = os.environ.get(
     'ORG_MEMORY_EXTRACTOR_VERSION',
-    'org-memory-extractor-v1',
+    'org-memory-extractor-v5',
 ).strip()
 ORG_MEMORY_EXTRACTION_SCHEMA_VERSION = os.environ.get(
     'ORG_MEMORY_EXTRACTION_SCHEMA_VERSION',
-    'org-memory-extraction-schema-v1',
+    'org-memory-extraction-schema-v2',
 ).strip()
 ORG_MEMORY_EXTRACTION_PROMPT_VERSION = os.environ.get(
     'ORG_MEMORY_EXTRACTION_PROMPT_VERSION',
-    'org-memory-extraction-prompt-v1',
+    'org-memory-extraction-prompt-v2',
 ).strip()
 ORG_MEMORY_EXTRACTION_MAX_INPUT_CHARS = int(
     os.environ.get('ORG_MEMORY_EXTRACTION_MAX_INPUT_CHARS', '60000')
@@ -1380,7 +1380,7 @@ ORG_MEMORY_PUBLIC_RESULT_LIMIT = int(
 )
 ORG_MEMORY_SELECTOR_VERSION = os.environ.get(
     'ORG_MEMORY_SELECTOR_VERSION',
-    'org-memory-rules-selector-v1',
+    'org-memory-rules-selector-v2',
 ).strip()
 ORG_MEMORY_SELECTOR_EXPORT_ENABLED = _env_is_true(
     'ORG_MEMORY_SELECTOR_EXPORT_ENABLED',
@@ -1426,7 +1426,7 @@ ORG_MEMORY_ANSWERER_VERSION = os.environ.get(
 ).strip()
 ORG_MEMORY_ANSWER_SCHEMA_VERSION = os.environ.get(
     'ORG_MEMORY_ANSWER_SCHEMA_VERSION',
-    'org-memory-answer-schema-v1',
+    'org-memory-answer-schema-v2',
 ).strip()
 ORG_MEMORY_ANSWER_PROMPT_VERSION = os.environ.get(
     'ORG_MEMORY_ANSWER_PROMPT_VERSION',

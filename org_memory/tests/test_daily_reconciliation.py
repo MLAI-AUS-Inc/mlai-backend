@@ -29,11 +29,13 @@ from org_memory.models import (
     MemoryDailyCostLedger,
     MemoryDailyReconciliationReport,
     MemoryDailyReconciliationStatus,
+    MemoryDeadLetter,
     MemoryOutboxEvent,
     MemoryProviderEnablement,
     MemoryScopeStatus,
     MemorySourceActionRequest,
     MemorySourceScope,
+    MemoryWorkItem,
     MemoryWorkStatus,
     MemoryWorkTaskType,
 )
@@ -227,6 +229,56 @@ class DailyReconciliationTests(TestCase):
             "freshness_slo_missed",
             {row["code"] for row in result["reports"][0]["alerts"]},
         )
+
+    def test_resolved_dead_letter_does_not_degrade_current_connection_health(self):
+        now = timezone.now()
+        MemorySourceActionRequest.objects.create(
+            configuration=self.configuration,
+            action=MemoryActionType.SYNC,
+            status=MemoryActionStatus.COMPLETED,
+            idempotency_key="manual-current-window-resolved-dead-letter",
+            completed_at=now,
+            result_summary={"records": 0, "removals": 0},
+        )
+        self.configuration.last_successful_sync_at = now
+        self.configuration.next_scheduled_sync_at = now + timedelta(hours=2)
+        self.configuration.save(
+            update_fields=(
+                "last_successful_sync_at",
+                "next_scheduled_sync_at",
+                "updated_at",
+            )
+        )
+        work = MemoryWorkItem.objects.create(
+            organization=self.organization,
+            provider="linear",
+            task_type=MemoryWorkTaskType.EXTRACT,
+            configuration=self.configuration,
+            idempotency_key="resolved-historical-dead-work",
+            payload={},
+            status=MemoryWorkStatus.DEAD,
+            attempts=1,
+            max_attempts=1,
+            completed_at=now,
+            last_error="Historical repaired failure",
+        )
+        MemoryDeadLetter.objects.create(
+            work_item=work,
+            organization=self.organization,
+            task_type=MemoryWorkTaskType.EXTRACT,
+            payload_snapshot={},
+            attempts=1,
+            last_error="Historical repaired failure",
+            resolved_at=now,
+            resolved_by=self.user,
+        )
+
+        result = run_daily_reconciliation(now=now, force=True)
+        snapshot = self.configuration.daily_health_snapshots.get()
+
+        self.assertEqual(result["reports"][0]["status"], "completed")
+        self.assertEqual(snapshot.health_status, MemoryConnectionHealthStatus.HEALTHY)
+        self.assertEqual(snapshot.counts["work_dead"], 0)
 
     def test_active_connection_without_selected_scope_is_reported_as_error(self):
         self.scope.delete()

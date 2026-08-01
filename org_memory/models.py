@@ -404,6 +404,7 @@ class MemorySelectorShadowRunStatus(models.TextChoices):
 
 class MemoryOutboxEventType(models.TextChoices):
     SOURCE_VERSION_CAPTURED = "source_version.captured", "Source version captured"
+    SOURCE_ACCESS_RESTORED = "source.access_restored", "Source access restored"
     SOURCE_ACCESS_REVOKED = "source.access_revoked", "Source access revoked"
     SOURCE_TOMBSTONED = "source.tombstoned", "Source tombstoned"
 

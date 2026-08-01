@@ -16,6 +16,7 @@ from org_memory.drive_processing import (
     commit_drive_processing_page,
     prepare_drive_processing_record,
 )
+from org_memory.kernel import EvidenceKernelError, revoke_configuration_sources
 from org_memory.models import (
     DriveDocumentArtifact,
     DriveDocumentExtraction,
@@ -27,6 +28,9 @@ from org_memory.models import (
     MemoryActionType,
     MemoryChunk,
     MemoryConnectionConfiguration,
+    MemoryConnectionState,
+    MemoryOutboxEvent,
+    MemoryOutboxEventType,
     MemoryScopeStatus,
     MemorySource,
     MemorySourceActionRequest,
@@ -251,7 +255,7 @@ class DriveProcessingTests(TestCase):
         commit_drive_processing_page(self.configuration, records=[first_record], removals=[])
         old_chunk_ids = set(MemoryChunk.objects.values_list("id", flat=True))
 
-        with patch("org_memory.drive_processing.DRIVE_PARSER_VERSION", "drive-parser-v2"):
+        with patch("org_memory.drive_processing.DRIVE_PARSER_VERSION", "drive-parser-v3"):
             second_record, service = self._prepare(item, b"Sam: Improved parser output.")
             result = commit_drive_processing_page(
                 self.configuration,
@@ -266,7 +270,7 @@ class DriveProcessingTests(TestCase):
         self.assertEqual(DriveDocumentExtraction.objects.count(), 2)
         self.assertSetEqual(
             set(DriveDocumentExtraction.objects.values_list("parser_version", flat=True)),
-            {"drive-parser-v1", "drive-parser-v2"},
+            {"drive-parser-v2", "drive-parser-v3"},
         )
         self.assertFalse(
             MemoryChunk.objects.filter(id__in=old_chunk_ids, active_for_retrieval=True).exists()
@@ -380,6 +384,75 @@ class DriveProcessingTests(TestCase):
         source.refresh_from_db()
         self.assertEqual(source.lifecycle_state, MemorySourceLifecycle.ACTIVE)
         self.assertTrue(source.current_version.chunks.filter(active_for_retrieval=True).exists())
+
+    def test_unchanged_accessible_version_restores_policy_revoked_chunks(self):
+        item = self.item("policy-restored-1", version="1")
+        record, _service = self._prepare(
+            item,
+            b"Sam: The committee approved the organisational memory pilot.",
+        )
+        commit_drive_processing_page(self.configuration, records=[record], removals=[])
+        source = MemorySource.objects.get(external_id="policy-restored-1")
+        version_id = source.current_version_id
+        chunk_ids = set(source.current_version.chunks.values_list("pk", flat=True))
+
+        revoke_configuration_sources(
+            self.configuration,
+            reason="source_configuration_changed",
+        )
+        self.configuration.lifecycle_state = MemoryConnectionState.SCOPED
+        self.configuration.save(update_fields=("lifecycle_state", "updated_at"))
+        source.refresh_from_db()
+        self.assertEqual(source.lifecycle_state, MemorySourceLifecycle.ACCESS_REVOKED)
+        self.assertFalse(source.current_version.acl_snapshot.is_accessible)
+        self.assertFalse(source.current_version.chunks.filter(active_for_retrieval=True).exists())
+
+        no_download_service = ContentService({})
+        unchanged = prepare_drive_processing_record(
+            no_download_service,
+            self.configuration,
+            item,
+        )
+        with self.assertRaises(EvidenceKernelError):
+            commit_drive_processing_page(
+                self.configuration,
+                records=[unchanged],
+                removals=[],
+            )
+        source.refresh_from_db()
+        self.assertEqual(source.lifecycle_state, MemorySourceLifecycle.ACCESS_REVOKED)
+
+        self.configuration.lifecycle_state = MemoryConnectionState.ACTIVE
+        self.configuration.save(update_fields=("lifecycle_state", "updated_at"))
+        replay = commit_drive_processing_page(
+            self.configuration,
+            records=[unchanged],
+            removals=[],
+        )
+
+        source.refresh_from_db()
+        source.current_version.acl_snapshot.refresh_from_db()
+        self.assertEqual(replay.outcomes["unchanged"], 1)
+        self.assertEqual(no_download_service.file_resource.calls, [])
+        self.assertEqual(source.current_version_id, version_id)
+        self.assertEqual(source.lifecycle_state, MemorySourceLifecycle.ACTIVE)
+        self.assertIsNone(source.access_revoked_at)
+        self.assertTrue(source.current_version.acl_snapshot.is_accessible)
+        self.assertIsNone(source.current_version.acl_snapshot.revoked_at)
+        self.assertSetEqual(
+            set(source.current_version.chunks.values_list("pk", flat=True)),
+            chunk_ids,
+        )
+        self.assertTrue(
+            source.current_version.chunks.filter(active_for_retrieval=True).exists()
+        )
+        self.assertTrue(
+            MemoryOutboxEvent.objects.filter(
+                source=source,
+                source_version_id=version_id,
+                event_type=MemoryOutboxEventType.SOURCE_ACCESS_RESTORED,
+            ).exists()
+        )
 
     def test_audio_and_download_restrictions_create_visible_unsupported_work(self):
         audio = self.item("audio-1", name="Town Hall Recording.mp3")

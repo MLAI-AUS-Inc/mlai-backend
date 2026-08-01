@@ -535,6 +535,95 @@ def capture_source_version(
     return source, version, True
 
 
+@transaction.atomic
+def restore_source_access(
+    source: MemorySource,
+    *,
+    acl: Mapping,
+    reason: str = "provider_access_restored",
+) -> dict:
+    """Restore an unchanged current version only when its captured ACL still matches."""
+
+    # Lock only the source row. Both current_version and source_scope are nullable;
+    # joining either into SELECT ... FOR UPDATE is rejected by PostgreSQL because
+    # Django emits an outer join for nullable relations.
+    locked = MemorySource.objects.select_for_update().get(pk=source.pk)
+    if locked.lifecycle_state == MemorySourceLifecycle.TOMBSTONED:
+        raise EvidenceKernelError("A tombstoned source cannot be silently reactivated.")
+    current = locked.current_version
+    if current is None or not current.is_current:
+        raise EvidenceKernelError("Only a current source version can have access restored.")
+
+    acl_payload = _normalized_acl(acl)
+    if not acl_payload["is_accessible"]:
+        raise EvidenceKernelError("Source access cannot be restored with an inaccessible ACL.")
+    snapshot = MemoryAclSnapshot.objects.select_for_update().get(
+        source_version=current
+    )
+    if snapshot.fingerprint != acl_payload["fingerprint"]:
+        raise EvidenceKernelError(
+            "Changed provider ACL evidence requires a new source version."
+        )
+
+    now = timezone.now()
+    was_revoked = bool(
+        locked.access_revoked_at
+        or locked.lifecycle_state == MemorySourceLifecycle.ACCESS_REVOKED
+        or not snapshot.is_accessible
+    )
+    if not was_revoked:
+        return {"sources_restored": 0, "chunks_activated": 0}
+    if (
+        locked.configuration_id
+        and locked.configuration.lifecycle_state != MemoryConnectionState.ACTIVE
+    ):
+        raise EvidenceKernelError(
+            "Source access cannot be restored until its connection is active."
+        )
+    if (
+        locked.source_scope_id
+        and current.classification != locked.source_scope.default_classification
+    ):
+        raise EvidenceKernelError(
+            "Changed source classification requires a new source version."
+        )
+    if not snapshot.is_accessible or snapshot.revoked_at is not None:
+        snapshot.is_accessible = True
+        snapshot.revoked_at = None
+        snapshot.save(update_fields=("is_accessible", "revoked_at"))
+
+    locked.lifecycle_state = MemorySourceLifecycle.ACTIVE
+    locked.access_revoked_at = None
+    locked.last_seen_at = now
+    locked.save(
+        update_fields=(
+            "lifecycle_state",
+            "access_revoked_at",
+            "last_seen_at",
+            "updated_at",
+        )
+    )
+    chunks_activated = 0
+    if current.classification != MemoryClassification.NO_AGENT:
+        chunks_activated = current.chunks.filter(
+            active_for_retrieval=False
+        ).update(active_for_retrieval=True, updated_at=now)
+    _outbox_event(
+        source=locked,
+        source_version=current,
+        event_type=MemoryOutboxEventType.SOURCE_ACCESS_RESTORED,
+        payload={"reason": str(reason or "provider_access_restored")[:512]},
+    )
+    from .review_summaries import reconcile_derived_visibility_for_source
+
+    reconcile_derived_visibility_for_source(locked)
+    _refresh_current_state_projection(locked.organization)
+    return {
+        "sources_restored": int(was_revoked),
+        "chunks_activated": chunks_activated,
+    }
+
+
 def _revoke_locked_source(source: MemorySource, *, reason: str, now) -> dict:
     if source.lifecycle_state == MemorySourceLifecycle.TOMBSTONED:
         return {"sources_revoked": 0, "chunks_deactivated": 0}

@@ -47,7 +47,7 @@ class GroundedAnswerInvariantError(GroundedAnswerError):
 
 class GroundedAnswerOutput(StrictModel):
     answer: str = Field(min_length=1, max_length=6000)
-    cited_memory_ids: list[str] = Field(min_length=1, max_length=10)
+    cited_memory_ids: list[str] = Field(max_length=10)
     confidence: float = Field(ge=0, le=1)
     suggested_follow_up: Optional[str] = Field(max_length=1000)
 
@@ -223,11 +223,7 @@ def _citation_data(selection: MemorySelection, memory_ids) -> list[dict]:
         if item.memory_id not in requested:
             continue
         for citation in item.citations:
-            key = (
-                citation["source_id"],
-                citation["source_version_id"],
-                citation["evidence_id"],
-            )
+            key = citation["source_id"]
             if key in seen:
                 continue
             seen.add(key)
@@ -252,6 +248,7 @@ def _create_log(
     target,
     provider_result=None,
     confidence=None,
+    evidence_sufficiency=None,
     latency_ms=0,
     extra_warnings=(),
 ):
@@ -275,7 +272,11 @@ def _create_log(
         citation_data=citations,
         warnings=warnings,
         status=status,
-        evidence_sufficiency=selection.sufficiency,
+        evidence_sufficiency=(
+            selection.sufficiency
+            if evidence_sufficiency is None
+            else evidence_sufficiency
+        ),
         confidence=selection.confidence if confidence is None else confidence,
         selector_version=settings.ORG_MEMORY_SELECTOR_VERSION,
         embedding_model=selection.embedding_model,
@@ -395,6 +396,28 @@ def answer_memory_query(
             raise GroundedAnswerInvariantError(
                 "Grounded-answer output failed its strict schema."
             ) from exc
+        if output.answer.strip() == ABSTENTION_ANSWER:
+            log = _create_log(
+                organization=organization,
+                actor=actor,
+                query=query,
+                selection=selection,
+                answer=ABSTENTION_ANSWER,
+                citations=[],
+                status=MemoryQueryStatus.ABSTAINED,
+                target=target,
+                provider_result=provider_result,
+                confidence=0,
+                evidence_sufficiency=MemoryEvidenceSufficiency.INSUFFICIENT,
+                latency_ms=(time.monotonic() - started) * 1000,
+                extra_warnings=("answer_model_abstained",),
+            )
+            return log, selection, {
+                "answer": ABSTENTION_ANSWER,
+                "confidence": 0.0,
+                "citations": [],
+                "suggested_follow_up": output.suggested_follow_up,
+            }
         selected_ids = {item.memory_id for item in selection.selected}
         if not citations_within_selected(output.cited_memory_ids, selected_ids):
             raise GroundedAnswerInvariantError(

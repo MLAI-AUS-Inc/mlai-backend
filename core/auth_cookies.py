@@ -76,14 +76,39 @@ def set_auth_cookies(response, access_token=None, refresh_token=None):
     return response
 
 
+def clear_auth_cookie(response, key):
+    """Delete one auth cookie using the same attributes it was set with."""
+    if key not in (ACCESS_COOKIE, REFRESH_COOKIE):
+        raise ValueError(f'Unsupported auth cookie: {key}')
+    kwargs = cookie_kwargs()
+    response.delete_cookie(
+        key,
+        path=kwargs['path'],
+        domain=kwargs['domain'],
+        samesite=kwargs['samesite'],
+    )
+    return response
+
+
 def clear_auth_cookies(response):
     """Delete both auth cookies using the same attributes they were set with."""
-    kwargs = cookie_kwargs()
     for key in (ACCESS_COOKIE, REFRESH_COOKIE):
+        clear_auth_cookie(response, key)
+    return response
+
+
+def clear_django_session_cookies(response):
+    """Delete Django's session and CSRF cookies with their configured scope.
+
+    Production sessions use ``Domain=.mlai.au``. Deleting only a host-scoped
+    cookie leaves that parent-domain session alive, so logout must mirror the
+    configured name, path, domain and SameSite attributes for both cookies.
+    """
+    for prefix in ('SESSION', 'CSRF'):
         response.delete_cookie(
-            key,
-            path=kwargs['path'],
-            domain=kwargs['domain'],
-            samesite=kwargs['samesite'],
+            key=getattr(settings, f'{prefix}_COOKIE_NAME'),
+            path=getattr(settings, f'{prefix}_COOKIE_PATH'),
+            domain=getattr(settings, f'{prefix}_COOKIE_DOMAIN'),
+            samesite=getattr(settings, f'{prefix}_COOKIE_SAMESITE'),
         )
     return response

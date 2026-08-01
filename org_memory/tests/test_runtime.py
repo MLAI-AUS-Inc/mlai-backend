@@ -25,6 +25,7 @@ from org_memory.models import (
     MemoryChunkEmbedding,
     MemoryDeadLetter,
     MemoryOutboxEvent,
+    MemoryOutboxEventType,
     MemoryOutboxStatus,
     MemoryProviderEnablement,
     MemoryRuntimeLane,
@@ -38,8 +39,11 @@ from org_memory.models import (
     MemoryWorkerLease,
     MemoryWorkStatus,
     MemoryWorkTaskType,
+    OrganizationMembership,
 )
 from org_memory.runtime import (
+    LEGACY_ACCESS_RESTORED_ERROR,
+    LEGACY_CONSOLIDATION_OUTER_JOIN_LOCK_ERROR,
     claim_memory_work,
     dispatch_outbox_events,
     dispatch_pending_actions,
@@ -47,6 +51,9 @@ from org_memory.runtime import (
     heartbeat_memory_work,
     memory_queue_snapshot,
     recover_expired_leases,
+    reconcile_access_restored_dead_letters,
+    reconcile_consolidation_lock_dead_letters,
+    recover_stopped_worker_work,
     requeue_dead_letter,
     schedule_due_connections,
 )
@@ -173,11 +180,13 @@ class MemoryRuntimeTests(TestCase):
             "metadata": {"record_type": "linear_issue"},
         }
 
-    def _action(self, *, max_attempts=2):
+    def _action(self, *, max_attempts=2, action_type=MemoryActionType.SYNC):
         action = MemorySourceActionRequest.objects.create(
             configuration=self.configuration,
-            action=MemoryActionType.SYNC,
-            idempotency_key=f"manual-sync-{MemorySourceActionRequest.objects.count()}",
+            action=action_type,
+            idempotency_key=(
+                f"manual-{action_type}-{MemorySourceActionRequest.objects.count()}"
+            ),
         )
         result = dispatch_pending_actions(limit=10)
         self.assertEqual(result["dispatched"], 1)
@@ -222,6 +231,212 @@ class MemoryRuntimeTests(TestCase):
         version.refresh_from_db()
         self.assertTrue(version.chunks.get().active_for_retrieval)
         self.assertEqual(source.lifecycle_state, "active")
+
+    def test_access_restored_outbox_work_is_version_pinned(self):
+        source, version, _created = self._captured_source()
+        MemoryOutboxEvent.objects.all().delete()
+        MemoryOutboxEvent.objects.create(
+            organization=self.organization,
+            source=source,
+            source_version=version,
+            event_type=MemoryOutboxEventType.SOURCE_ACCESS_RESTORED,
+            idempotency_key=f"restored:{source.pk}:{version.pk}",
+        )
+
+        self.assertEqual(dispatch_outbox_events(limit=10)["published"], 1)
+        work = MemoryWorkItem.objects.get(task_type=MemoryWorkTaskType.RECONCILE)
+
+        self.assertEqual(work.source_version, version)
+        claim = claim_memory_work(worker_id="access-restored-worker")
+        self.assertEqual(execute_claimed_memory_work(claim)["status"], "completed")
+
+    def test_legacy_access_restored_dead_letters_get_version_pinned_replacements(self):
+        source, version, _created = self._captured_source()
+        MemoryOutboxEvent.objects.all().delete()
+        OrganizationMembership.objects.create(
+            organization=self.organization,
+            user=self.user,
+        )
+        payload = {
+            "event_type": MemoryOutboxEventType.SOURCE_ACCESS_RESTORED,
+            "outbox_event_id": "legacy-restored-event",
+        }
+        work = MemoryWorkItem.objects.create(
+            organization=self.organization,
+            provider="linear",
+            task_type=MemoryWorkTaskType.RECONCILE,
+            source=source,
+            configuration=self.configuration,
+            idempotency_key="legacy-versionless-access-restored",
+            payload=payload,
+            status=MemoryWorkStatus.DEAD,
+            attempts=5,
+            max_attempts=5,
+            last_error=LEGACY_ACCESS_RESTORED_ERROR,
+        )
+        dead_letter = MemoryDeadLetter.objects.create(
+            work_item=work,
+            organization=self.organization,
+            task_type=MemoryWorkTaskType.RECONCILE,
+            payload_snapshot=payload,
+            attempts=5,
+            last_error=LEGACY_ACCESS_RESTORED_ERROR,
+        )
+
+        preview = reconcile_access_restored_dead_letters(
+            organization=self.organization,
+            provider="linear",
+        )
+        self.assertEqual(preview["candidates"], 1)
+        self.assertEqual(MemoryWorkItem.objects.count(), 1)
+
+        applied = reconcile_access_restored_dead_letters(
+            organization=self.organization,
+            provider="linear",
+            apply=True,
+            resolved_by=self.user,
+        )
+        dead_letter.refresh_from_db()
+        replacement = MemoryWorkItem.objects.get(pk=dead_letter.requeued_work_item_id)
+
+        self.assertEqual(applied["scheduled"], 1)
+        self.assertEqual(applied["resolved"], 1)
+        self.assertEqual(replacement.source_version, version)
+        self.assertEqual(replacement.status, MemoryWorkStatus.PENDING)
+        self.assertIsNotNone(dead_letter.resolved_at)
+        self.assertEqual(
+            reconcile_access_restored_dead_letters(
+                organization=self.organization,
+                provider="linear",
+                apply=True,
+                resolved_by=self.user,
+            )["candidates"],
+            0,
+        )
+
+    def test_legacy_consolidation_lock_dead_letters_are_requeued_once(self):
+        source, version, _created = self._captured_source()
+        OrganizationMembership.objects.create(
+            organization=self.organization,
+            user=self.user,
+        )
+        payload = {
+            "claim_id": "0c939657-95ca-4a99-b07b-eff78e9b0be6",
+            "target_fingerprint": "legacy-consolidation-target",
+        }
+        work = MemoryWorkItem.objects.create(
+            organization=self.organization,
+            provider="linear",
+            task_type=MemoryWorkTaskType.CONSOLIDATE,
+            source=source,
+            source_version=version,
+            configuration=self.configuration,
+            idempotency_key="legacy-consolidation-lock",
+            payload=payload,
+            status=MemoryWorkStatus.DEAD,
+            attempts=5,
+            max_attempts=5,
+            last_error=LEGACY_CONSOLIDATION_OUTER_JOIN_LOCK_ERROR,
+        )
+        dead_letter = MemoryDeadLetter.objects.create(
+            work_item=work,
+            organization=self.organization,
+            task_type=MemoryWorkTaskType.CONSOLIDATE,
+            payload_snapshot=payload,
+            attempts=5,
+            last_error=LEGACY_CONSOLIDATION_OUTER_JOIN_LOCK_ERROR,
+        )
+        unrelated_work = MemoryWorkItem.objects.create(
+            organization=self.organization,
+            provider="linear",
+            task_type=MemoryWorkTaskType.CONSOLIDATE,
+            idempotency_key="unrelated-consolidation-failure",
+            payload=payload,
+            status=MemoryWorkStatus.DEAD,
+            attempts=5,
+            max_attempts=5,
+            last_error="Different consolidation error",
+        )
+        MemoryDeadLetter.objects.create(
+            work_item=unrelated_work,
+            organization=self.organization,
+            task_type=MemoryWorkTaskType.CONSOLIDATE,
+            payload_snapshot=payload,
+            attempts=5,
+            last_error="Different consolidation error",
+        )
+
+        preview = reconcile_consolidation_lock_dead_letters(
+            organization=self.organization,
+            provider="linear",
+        )
+        self.assertEqual(preview["candidates"], 1)
+
+        applied = reconcile_consolidation_lock_dead_letters(
+            organization=self.organization,
+            provider="linear",
+            apply=True,
+            resolved_by=self.user,
+        )
+        dead_letter.refresh_from_db()
+        replacement = MemoryWorkItem.objects.get(pk=dead_letter.requeued_work_item_id)
+
+        self.assertEqual(applied["scheduled"], 1)
+        self.assertEqual(applied["resolved"], 1)
+        self.assertEqual(replacement.task_type, MemoryWorkTaskType.CONSOLIDATE)
+        self.assertEqual(replacement.source_version, version)
+        self.assertEqual(replacement.payload, payload)
+        self.assertEqual(replacement.status, MemoryWorkStatus.PENDING)
+        self.assertEqual(
+            reconcile_consolidation_lock_dead_letters(
+                organization=self.organization,
+                provider="linear",
+                apply=True,
+                resolved_by=self.user,
+            )["candidates"],
+            0,
+        )
+        self.assertEqual(
+            MemoryDeadLetter.objects.filter(resolved_at__isnull=True).count(),
+            1,
+        )
+
+    def test_stopped_worker_work_is_recovered_and_attempt_is_refunded(self):
+        work = MemoryWorkItem.objects.create(
+            organization=self.organization,
+            provider="linear",
+            task_type=MemoryWorkTaskType.EXTRACT,
+            idempotency_key="deploy-interrupted-work",
+            payload={},
+            status=MemoryWorkStatus.PROCESSING,
+            attempts=1,
+            max_attempts=1,
+            locked_at=timezone.now(),
+        )
+        lease = MemoryWorkerLease.objects.create(
+            work_item=work,
+            worker_id="stopped-deploy-worker",
+            expires_at=timezone.now() + timedelta(minutes=2),
+        )
+
+        preview = recover_stopped_worker_work(organization=self.organization)
+        self.assertEqual(preview["candidates"], 1)
+
+        applied = recover_stopped_worker_work(
+            organization=self.organization,
+            apply=True,
+            resolved_by=self.user,
+        )
+        work.refresh_from_db()
+        lease.refresh_from_db()
+
+        self.assertEqual(applied["recovered"], 1)
+        self.assertEqual(applied["leases_released"], 1)
+        self.assertEqual(applied["attempts_refunded"], 1)
+        self.assertEqual(work.status, MemoryWorkStatus.PENDING)
+        self.assertEqual(work.attempts, 0)
+        self.assertIsNone(work.locked_at)
+        self.assertIsNotNone(lease.released_at)
 
     def test_expired_worker_lease_is_recovered_and_reclaimed(self):
         source, version, _created = self._captured_source()
@@ -325,6 +540,33 @@ class MemoryRuntimeTests(TestCase):
         self.assertEqual(source.current_version.version_key, "v2")
         first_work.refresh_from_db()
         self.assertEqual(first_work.status, MemoryWorkStatus.COMPLETED)
+
+    def test_reprocess_schedules_current_source_for_new_extraction_target(self):
+        source, _version, _created = self._captured_source()
+        MemoryOutboxEvent.objects.all().delete()
+        unchanged_record = self._record(
+            external_id=source.external_id,
+            text="Evidence for the queue.",
+        )
+        unchanged_record["acl"] = {
+            "is_accessible": True,
+            "principal_refs": ["team:runtime"],
+        }
+        self.connector.pages = [
+            SyncPage(
+                records=(unchanged_record,),
+                next_cursor="reprocessed",
+            )
+        ]
+        self._action(action_type=MemoryActionType.REPROCESS)
+
+        claimed = claim_memory_work(worker_id="worker-reprocess-extraction")
+        result = execute_claimed_memory_work(claimed)
+
+        self.assertEqual(result["status"], "completed", result)
+        self.assertEqual(result["reextraction"]["scheduled"], 1)
+        extraction_work = MemoryWorkItem.objects.get(task_type=MemoryWorkTaskType.EXTRACT)
+        self.assertEqual(extraction_work.source, source)
 
     def test_transient_failures_back_off_then_dead_letter_without_cursor_change(self):
         self.configuration.sync_cursor = "stable-cursor"

@@ -80,7 +80,8 @@ class RuntimeHardeningConfigTests(SimpleTestCase):
     def test_deploy_pauses_web_until_constraint_is_verified(self):
         deploy = (ROOT / "deploy.sh").read_text()
 
-        self.assertIn("docker compose stop web", deploy)
+        self.assertIn('paused_runtime_services=(web memory-worker memory-scheduler)', deploy)
+        self.assertIn('docker compose stop "\\${paused_runtime_services[@]}"', deploy)
         self.assertIn("unique_active_booking_per_user_date is missing", deploy)
         self.assertIn('runtime_services=(web scheduler memory-worker memory-scheduler)', deploy)
         self.assertIn('runtime_services+=(bridge-worker bridge-retention)', deploy)
@@ -92,7 +93,7 @@ class RuntimeHardeningConfigTests(SimpleTestCase):
         self.assertIn('docker compose stop bridge-worker || true', deploy)
         self.assertIn('docker compose rm -f bridge-worker || true', deploy)
         self.assertLess(
-            deploy.index("docker compose stop web"),
+            deploy.index('docker compose stop "\\${paused_runtime_services[@]}"'),
             deploy.index('docker compose up -d --force-recreate "\\${runtime_services[@]}"'),
         )
 

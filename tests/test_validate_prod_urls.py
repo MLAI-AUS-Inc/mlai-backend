@@ -44,15 +44,17 @@ VALID_PROD_URL_SETTINGS = {
     "CORS_ALLOWED_ORIGINS": [
         "https://chat.mlai.au",
         "https://mlai.au",
+        "https://ops.mlai.au",
         "https://www.mlai.au",
         "https://victorai.win",
         "https://www.victorai.win",
     ],
     "CSRF_TRUSTED_ORIGINS": [
+        "https://api.mlai.au",
         "https://chat.mlai.au",
         "https://mlai.au",
+        "https://ops.mlai.au",
         "https://www.mlai.au",
-        "https://api.mlai.au",
     ],
 }
 
@@ -115,10 +117,15 @@ class ValidateProdUrlsTests(SimpleTestCase):
         errors = self._validation_errors(
             CORS_ALLOWED_ORIGINS=[
                 "https://mlai.au",
+                "https://ops.mlai.au",
                 "https://victorai.win",
                 "https://www.victorai.win",
             ],
-            CSRF_TRUSTED_ORIGINS=["https://mlai.au", "https://www.mlai.au"],
+            CSRF_TRUSTED_ORIGINS=[
+                "https://mlai.au",
+                "https://ops.mlai.au",
+                "https://www.mlai.au",
+            ],
         )
 
         self.assertIn(
@@ -130,6 +137,51 @@ class ValidateProdUrlsTests(SimpleTestCase):
             "CSRF_TRUSTED_ORIGINS is missing required origin(s): "
             "https://api.mlai.au, https://chat.mlai.au.",
             errors,
+        )
+
+    def test_ops_origin_is_required_and_plane_origin_is_not(self):
+        errors = self._validation_errors(
+            CORS_ALLOWED_ORIGINS=[
+                "https://chat.mlai.au",
+                "https://mlai.au",
+                "https://www.mlai.au",
+                "https://victorai.win",
+                "https://www.victorai.win",
+            ],
+            CSRF_TRUSTED_ORIGINS=[
+                "https://api.mlai.au",
+                "https://chat.mlai.au",
+                "https://mlai.au",
+                "https://www.mlai.au",
+            ],
+        )
+
+        self.assertIn(
+            "CORS_ALLOWED_ORIGINS is missing required origin(s): https://ops.mlai.au.",
+            errors,
+        )
+        self.assertIn(
+            "CSRF_TRUSTED_ORIGINS is missing required origin(s): https://ops.mlai.au.",
+            errors,
+        )
+
+        forbidden_errors = self._validation_errors(
+            CORS_ALLOWED_ORIGINS=[
+                *VALID_PROD_URL_SETTINGS["CORS_ALLOWED_ORIGINS"],
+                "https://admin.mlai.au",
+            ],
+            CSRF_TRUSTED_ORIGINS=[
+                *VALID_PROD_URL_SETTINGS["CSRF_TRUSTED_ORIGINS"],
+                "https://admin.mlai.au",
+            ],
+        )
+        self.assertIn(
+            "CORS_ALLOWED_ORIGINS contains forbidden origin(s): https://admin.mlai.au.",
+            forbidden_errors,
+        )
+        self.assertIn(
+            "CSRF_TRUSTED_ORIGINS contains forbidden origin(s): https://admin.mlai.au.",
+            forbidden_errors,
         )
 
     def test_private_backend_ip_must_be_allowed_host(self):

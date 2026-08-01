@@ -311,7 +311,11 @@ def get_configuration(configuration_id, organization, *, for_update=False):
         "approved_preview",
     )
     if for_update:
-        queryset = queryset.select_for_update()
+        # Nullable select_related() joins must not be part of the lock target.
+        # PostgreSQL rejects FOR UPDATE on the nullable side of an outer join,
+        # so lock only the configuration row while still hydrating its related
+        # objects for the caller.
+        queryset = queryset.select_for_update(of=("self",))
     configuration = queryset.filter(pk=configuration_id, organization=organization).first()
     if configuration is None:
         raise SourceControlError("Memory connection was not found.", code="not_found")
