@@ -98,10 +98,12 @@ def _positive_setting(name: str, default: int) -> int:
     return value
 
 
-def _locked(queryset, *, skip_locked: bool = False):
+def _locked(queryset, *, skip_locked: bool = False, of_self: bool = False):
     options = {}
     if skip_locked and connection.features.has_select_for_update_skip_locked:
         options["skip_locked"] = True
+    if of_self and connection.features.has_select_for_update_of:
+        options["of"] = ("self",)
     return queryset.select_for_update(**options)
 
 
@@ -325,6 +327,7 @@ def claim_memory_work(
         _locked(
             MemoryWorkItem.objects.select_related("organization", "source_version"),
             skip_locked=True,
+            of_self=True,
         )
         .filter(
             executable_configuration,
@@ -611,18 +614,18 @@ def _validate_action_runtime(action: MemorySourceActionRequest):
 def _start_action(claim: ClaimedMemoryWork):
     configuration = _lock_claim_configuration(claim)
     lease = _lease_for_claim(claim)
-    work_item = _locked(
-        MemoryWorkItem.objects.select_related(
-            "configuration",
-            "action_request",
-            "sync_run",
-        )
-    ).get(pk=lease.work_item_id)
+    work_item = _locked(MemoryWorkItem.objects, of_self=True).get(
+        pk=lease.work_item_id
+    )
     if not work_item.action_request_id or not work_item.sync_run_id:
         raise PermanentMemoryRuntimeError("Action work is missing its durable sync run.")
     work_item.configuration = configuration
-    action = work_item.action_request
-    run = work_item.sync_run
+    action = _locked(MemorySourceActionRequest.objects).get(
+        pk=work_item.action_request_id
+    )
+    run = _locked(MemorySyncRun.objects).get(pk=work_item.sync_run_id)
+    work_item.action_request = action
+    work_item.sync_run = run
     _validate_action_runtime(action)
     now = timezone.now()
     if action.status == MemoryActionStatus.PENDING:
@@ -687,9 +690,9 @@ def _fetch_sync_page(work_item, action, run) -> SyncPage:
 def _commit_sync_page(claim: ClaimedMemoryWork, page: SyncPage) -> dict:
     configuration = _lock_claim_configuration(claim)
     lease = _lease_for_claim(claim)
-    work_item = _locked(
-        MemoryWorkItem.objects.select_related("configuration", "action_request", "sync_run")
-    ).get(pk=lease.work_item_id)
+    work_item = _locked(MemoryWorkItem.objects, of_self=True).get(
+        pk=lease.work_item_id
+    )
     work_item.configuration = configuration
     action = _locked(MemorySourceActionRequest.objects).get(
         pk=work_item.action_request_id
@@ -854,9 +857,9 @@ def _commit_sync_page(claim: ClaimedMemoryWork, page: SyncPage) -> dict:
 def _complete_delete_action(claim: ClaimedMemoryWork) -> dict:
     configuration = _lock_claim_configuration(claim)
     lease = _lease_for_claim(claim)
-    work_item = _locked(
-        MemoryWorkItem.objects.select_related("configuration", "action_request", "sync_run")
-    ).get(pk=lease.work_item_id)
+    work_item = _locked(MemoryWorkItem.objects, of_self=True).get(
+        pk=lease.work_item_id
+    )
     action = _locked(MemorySourceActionRequest.objects).get(pk=work_item.action_request_id)
     run = _locked(MemorySyncRun.objects).get(pk=work_item.sync_run_id)
     work_item.configuration = configuration
@@ -1177,6 +1180,7 @@ def dispatch_outbox_events(*, limit: int = 100) -> dict:
                         "source_version",
                     ),
                     skip_locked=True,
+                    of_self=True,
                 )
                 .filter(status=MemoryOutboxStatus.PENDING, available_at__lte=now)
                 .order_by("available_at", "created_at")
@@ -1251,7 +1255,11 @@ def dispatch_pending_actions(*, limit: int = 100) -> dict:
             ).filter(status=MemoryActionStatus.PENDING, work_items__isnull=True)
             if blocked_action_ids:
                 action_query = action_query.exclude(pk__in=blocked_action_ids)
-            action = _locked(action_query, skip_locked=True).order_by("requested_at").first()
+            action = _locked(
+                action_query,
+                skip_locked=True,
+                of_self=True,
+            ).order_by("requested_at").first()
             if action is None:
                 break
             configuration = _locked(
