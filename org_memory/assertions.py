@@ -36,7 +36,7 @@ THREAD_HEADER = "X-Slack-Thread-TS"
 EVENT_HEADER = "X-Slack-Event-ID"
 REQUEST_HEADER = "X-Request-ID"
 
-SURFACE_PATTERN = re.compile(r"^(public_roo|admin_roo)$")
+SURFACE_PATTERN = re.compile(r"^(public_roo|admin_roo|roo_gateway)$")
 TEAM_PATTERN = re.compile(r"^T[A-Z0-9]+$")
 USER_PATTERN = re.compile(r"^[UW][A-Z0-9]+$")
 CHANNEL_PATTERN = re.compile(r"^[CGD][A-Z0-9]+$")
@@ -280,15 +280,22 @@ def _claim_assertion(auth: ServicePrincipalAuthContext, payload: dict) -> None:
         raise ActorAssertionError("Actor assertion has already been used")
 
 
-def verify_and_resolve_actor_assertion(request, auth: ServicePrincipalAuthContext) -> VerifiedActorContext:
+def verify_and_resolve_actor_assertion(
+    request,
+    auth: ServicePrincipalAuthContext,
+    *,
+    required_surface: str = "admin_roo",
+) -> VerifiedActorContext:
     assertion = _header(request.headers, ASSERTION_HEADER)
     if not assertion:
         raise ActorAssertionError("Actor assertion is required")
     try:
         payload = _parse_and_verify_assertion(assertion, token=auth.token)
         _validate_payload(payload, request.headers, auth)
-        if str(payload["surface"]) != "admin_roo":
-            raise ActorAssertionError("Private organisational memory requires Admin Roo")
+        if str(payload["surface"]) != str(required_surface):
+            raise ActorAssertionError(
+                f"Actor assertion requires the {required_surface} surface"
+            )
 
         workspace = OrganizationSlackWorkspace.objects.select_related("organization").filter(
             slack_team_id=str(payload["slack_team_id"]),

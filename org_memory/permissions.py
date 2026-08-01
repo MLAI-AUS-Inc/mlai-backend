@@ -2,6 +2,7 @@ from rest_framework.permissions import BasePermission
 
 from .authorization import (
     OrganizationAuthorizationError,
+    actor_is_active_committee_points_admin,
     resolve_actor_authorization,
 )
 from .service_principals import ServicePrincipalAuthContext
@@ -45,5 +46,14 @@ class HasActiveOrgMemoryPilotAccess(BasePermission):
 
     def has_permission(self, request, view):
         return actor_has_active_pilot_access(
+            getattr(request, "org_memory_actor", None)
+        )
+
+
+class HasCommitteePointsAdminClass(BasePermission):
+    message = "The acting user is not authorised for Admin Roo."
+
+    def has_permission(self, request, view):
+        return actor_is_active_committee_points_admin(
             getattr(request, "org_memory_actor", None)
         )

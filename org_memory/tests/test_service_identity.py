@@ -1,6 +1,7 @@
 import json
 from datetime import timedelta
 from io import StringIO
+from unittest.mock import patch
 
 from cryptography.fernet import Fernet
 from django.contrib.auth import get_user_model
@@ -140,6 +141,12 @@ class OrgMemoryActorBoundaryTests(TestCase):
             organization=self.organization,
             user=self.user,
         )
+        self.points_admin = PointsAdmin.objects.create(
+            slack_user_id="UADMIN123",
+            user=self.user,
+            role="committee",
+            is_active=True,
+        )
         role = OrganizationRole.objects.create(
             organization=self.organization,
             slug="admin-roo-reader",
@@ -160,6 +167,15 @@ class OrgMemoryActorBoundaryTests(TestCase):
             allowed_surfaces=["admin_roo"],
         )
         self.credential, self.token = issue_service_principal_credential(self.principal)
+        self.gateway_principal = ServicePrincipal.objects.create(
+            name="roo-gateway-test",
+            organization=self.organization,
+            scopes=["org_memory.route"],
+            allowed_surfaces=["roo_gateway"],
+        )
+        self.gateway_credential, self.gateway_token = issue_service_principal_credential(
+            self.gateway_principal
+        )
 
     def _headers(
         self,
@@ -220,6 +236,74 @@ class OrgMemoryActorBoundaryTests(TestCase):
         self.assertFalse(response.data["memory_class_access"]["finance"])
         self.assertFalse(response.data["memory_class_access"]["no_agent"])
         self.assertEqual(ActorAssertionReceipt.objects.count(), 1)
+
+    @override_settings(ORG_MEMORY_QUERY_API_ENABLED=True)
+    @patch("org_memory.views.actor_has_active_pilot_access", return_value=True)
+    def test_gateway_eligibility_requires_exact_committee_points_admin(
+        self,
+        _pilot_access,
+    ):
+        endpoint = "/api/v1/org-memory/routing/eligibility"
+        allowed = self.client.post(
+            endpoint,
+            {},
+            format="json",
+            **self._headers(
+                token=self.gateway_token,
+                credential=self.gateway_credential,
+                surface="roo_gateway",
+                request_id="gateway-committee-allowed",
+                nonce="gateway_committee_allowed_nonce",
+            ),
+        )
+
+        self.assertEqual(allowed.status_code, 200, allowed.data)
+        self.assertEqual(
+            allowed.data,
+            {
+                "schema_version": "roo-admin-routing-eligibility-v1",
+                "admin_brain_eligible": True,
+                "private_context_allowed": True,
+                "policy_version": "roo-unified-routing-v1",
+            },
+        )
+
+        for index, role in enumerate(("admin", "portfolio_lead", "partner"), start=1):
+            self.points_admin.role = role
+            self.points_admin.save(update_fields=("role",))
+            denied = self.client.post(
+                endpoint,
+                {},
+                format="json",
+                **self._headers(
+                    token=self.gateway_token,
+                    credential=self.gateway_credential,
+                    surface="roo_gateway",
+                    request_id=f"gateway-role-denied-{index}",
+                    nonce=f"gateway_role_denied_nonce_{index}",
+                ),
+            )
+            self.assertEqual(denied.status_code, 200, denied.data)
+            self.assertFalse(denied.data["admin_brain_eligible"])
+
+    @override_settings(ORG_MEMORY_QUERY_API_ENABLED=True)
+    @patch("org_memory.views.actor_has_active_pilot_access", return_value=True)
+    def test_gateway_credential_cannot_enter_private_memory(
+        self,
+        _pilot_access,
+    ):
+        response = self.client.get(
+            self.endpoint,
+            **self._headers(
+                token=self.gateway_token,
+                credential=self.gateway_credential,
+                surface="roo_gateway",
+                request_id="gateway-private-memory-denied",
+                nonce="gateway_private_memory_denied_nonce",
+            ),
+        )
+
+        self.assertEqual(response.status_code, 401)
 
     def test_assertion_is_single_use_across_requests(self):
         headers = self._headers(nonce="fixed_replay_nonce_123456789")
@@ -329,11 +413,8 @@ class OrgMemoryActorBoundaryTests(TestCase):
         self.assertEqual(response.status_code, 403)
 
     def test_legacy_roles_and_forged_capability_headers_cannot_replace_membership(self):
-        PointsAdmin.objects.create(
-            slack_user_id="UADMIN123",
-            user=self.user,
-            role="admin",
-        )
+        self.points_admin.role = "admin"
+        self.points_admin.save(update_fields=("role",))
         UserStartupBinding.objects.create(
             organization=self.organization,
             user=self.user,

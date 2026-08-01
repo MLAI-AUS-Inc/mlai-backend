@@ -39,6 +39,7 @@ from org_memory.pilot_deployment import (
 )
 from org_memory.pilot_readiness import pilot_approval_manifest_hash
 from org_memory.service_principals import issue_service_principal_credential
+from roo.models import PointsAdmin
 
 
 @override_settings(
@@ -105,6 +106,12 @@ class PilotDeploymentTests(TestCase):
             external_tenant_id="TRUNTIME1",
             external_user_id="UPILOT1",
             verified_at=self.now,
+        )
+        PointsAdmin.objects.create(
+            slack_user_id="UPILOT1",
+            user=self.pilot_user,
+            role="committee",
+            is_active=True,
         )
         self.principal = ServicePrincipal.objects.create(
             name="runtime-pilot-admin-roo",

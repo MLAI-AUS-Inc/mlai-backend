@@ -47,6 +47,7 @@ from org_memory.models import (
 from org_memory.pilot_deployment import approval_allowlist_hashes
 from org_memory.retrieval import plan_memory_query, select_memory
 from org_memory.service_principals import issue_service_principal_credential
+from roo.models import PointsAdmin
 
 
 def digest(value):
@@ -508,6 +509,12 @@ class MemoryQueryApiTests(TestCase):
         self.membership = OrganizationMembership.objects.create(
             organization=self.organization,
             user=self.user,
+        )
+        PointsAdmin.objects.create(
+            slack_user_id="UQUERY123",
+            user=self.user,
+            role="committee",
+            is_active=True,
         )
         role = OrganizationRole.objects.create(
             organization=self.organization,

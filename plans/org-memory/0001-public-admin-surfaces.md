@@ -1,46 +1,60 @@
-# ADR 0001: Public Roo, Admin Roo, and published public knowledge
+# ADR 0001: One Roo identity with isolated Public and Admin runtimes
 
-- Status: Proposed; production approval required
-- Date: 20 July 2026
+- Status: Accepted
+- Date: 1 August 2026
 - Owners: Security, data, review, and operations owners are recorded in `org_memory/policies/provider_policies.json`
 
 ## Context
 
-MLAI already operates Roo as a community-facing Slack bot. The organisational brain will contain committee, executive, finance, email, and other source-restricted evidence. Treating the existing bot, the new administrative assistant, and a future public knowledge product as one security surface would make a prompt or routing mistake sufficient to expose private information.
+MLAI already operates Roo as a community-facing Slack bot. The organisational
+brain contains committee, executive, finance, email, and source-restricted
+evidence. Users should address one `@Roo`, while a routing error or compromised
+public process must not be sufficient to retrieve private memory.
 
 ## Decision
 
-1. The existing Slack app remains **Public Roo** and keeps its currently authorised behaviour.
-2. **Admin Roo** is a second Slack app and separately deployed service. It has separate Slack credentials, signing secret, hostname, backend service principal, allowed channels, and operational audit trail.
-3. Public Roo never receives an organisational-memory credential. The backend rejects Public Roo at every private-memory endpoint even when a caller supplies a valid administrator Slack ID.
-4. The shared Roo codebase will select one explicit, fail-closed surface: `public` or `admin`. Surface-specific skill allowlists are configuration, not model instructions.
-5. Admin Roo's first release is read-only and source-cited. It cannot send email, update systems, make payments, or create external commitments.
-6. **Published public knowledge** is a separate, optional corpus containing only records explicitly approved for publication. It is not a filtered view over private memory and is not required for Public Roo to continue operating.
-7. Admin Roo may retrieve private memory only for an authorised actor in an allowlisted private channel or direct conversation. Personal authorisation does not make a public Slack channel safe.
-8. The backend owns identity resolution, capabilities, source ACLs, retrieval filtering, evidence, claims, reviews, and audit. Roo cannot assert a role.
+1. The existing Slack app remains the only Slack identity and ingress.
+2. A Public Roo gateway handles Slack verification, normal public skills,
+   routing, and final Slack posting. It has no `org_memory.read` credential.
+3. An internal-only Admin worker has no Slack credentials or public HTTP
+   ingress. It alone holds the `org_memory.read` credential and exposes only
+   signed query and feedback dispatch endpoints on a private network.
+4. Public Roo holds a distinct `org_memory.route` / `roo_gateway` principal.
+   The backend eligibility endpoint is content-free and cannot retrieve memory.
+5. Admin eligibility requires all normal backend identity, membership,
+   capability, private-context, and active-pilot controls plus an active
+   `PointsAdmin` record with the exact `committee` class. No class inherits it.
+6. Intent selects the execution surface. Points, Content Factory, Linear, and
+   other normal tasks remain Public even for committee callers. Internal
+   organisational-memory questions route Admin only after eligibility passes.
+7. Requests combining private memory with a public action are split by a
+   clarification; no cross-surface chain runs from one prompt.
+8. The first Admin release is read-only, source-cited, and live. It has no
+   contextual shadow mode, autonomous action, or fallback search path.
+9. Published public knowledge remains a separately approved corpus rather
+   than a filtered view over private memory.
 
 ## Required invariants
 
-- Public Roo has no private-memory secret in its environment.
-- Public Roo cannot proxy an Admin Roo answer.
-- A public-channel request never starts private retrieval.
-- Source content is untrusted data and cannot grant access, change instructions, or invoke tools.
-- Organisation, actor, channel, classification, provider ACL, revocation, and temporal filters run before ranking or model use.
-- Errors do not reveal whether inaccessible evidence exists.
-- Admin and Public Roo can be disabled, rotated, deployed, and rolled back independently.
+- The Slack app credential exists only in Public Roo.
+- The memory credential exists only in the internal Admin worker.
+- The route-only principal cannot call private-memory endpoints.
+- Admin dispatch is HMAC-authenticated, short-lived, single-use, and bound to
+  Slack workspace, actor, channel, thread, event, request kind, and payload.
+- Admin results are posted only after their returned destination matches the
+  original verified Slack destination and requester.
+- Public-channel requests never start private retrieval.
+- Denials and failures do not fall back to another skill or reveal whether
+  inaccessible evidence exists.
+- Backend policy, not model output or Roo-supplied roles, makes the final
+  access decision.
 
 ## Consequences
 
-- MLAI operates two Slack apps and two deployments, but can retain one shared Roo codebase.
-- Admin pilot installation and channel access can be kept narrow without disrupting the public bot.
-- A later public knowledge product needs an explicit publication workflow and physically separate index/table.
-- Cross-surface and forged-actor cases are release-blocking evaluation fixtures from PR 0 onward.
-
-## Production approval checklist
-
-- [ ] Name the Admin Roo pilot users/roles.
-- [ ] Record allowlisted Slack DM/user and private channel IDs.
-- [ ] Name security, data, review, and operations owners.
-- [ ] Approve model/data processing terms, retention, deletion, and regions.
-- [ ] Create the Admin Roo Slack app in development/test configuration.
-- [ ] Approve this ADR and change its status to Accepted.
+- MLAI retains one user-facing `@Roo` and one shared codebase, while operating
+  two containers and two backend principals with different scopes.
+- The public gateway is trusted with Slack message text only after Slack
+  verification, but cannot use that text to retrieve memory directly.
+- The Admin worker and Public Roo can be disabled and their credentials rotated
+  independently. Disabling unified routing restores Public Roo without
+  interrupting ingestion or the memory backend.

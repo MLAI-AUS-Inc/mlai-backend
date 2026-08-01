@@ -145,3 +145,31 @@ def actor_may_view_memory_class(actor, memory_class: str, *, at=None) -> bool:
         return resolve_actor_authorization(actor, at=at).may_view_memory_class(memory_class)
     except OrganizationAuthorizationError:
         return False
+
+
+def actor_is_active_committee_points_admin(actor) -> bool:
+    """Require the exact active legacy class requested for unified Admin Roo.
+
+    PointsAdmin is never sufficient on its own: callers must first pass the
+    verified organisation identity, membership, capability, and pilot gates.
+    A linked PointsAdmin row that belongs to a different canonical user fails
+    closed; historical unlinked rows remain usable because the Slack ID itself
+    has already been verified against the organisation identity.
+    """
+
+    identity = getattr(actor, "identity", None)
+    user = getattr(actor, "user", None)
+    slack_user_id = str(getattr(actor, "slack_user_id", "") or "").strip()
+    if identity is None or user is None or not slack_user_id:
+        return False
+
+    from roo.models import PointsAdmin
+
+    points_admin = PointsAdmin.objects.filter(
+        slack_user_id=slack_user_id,
+        is_active=True,
+        role="committee",
+    ).first()
+    if points_admin is None:
+        return False
+    return points_admin.user_id in {None, user.pk}

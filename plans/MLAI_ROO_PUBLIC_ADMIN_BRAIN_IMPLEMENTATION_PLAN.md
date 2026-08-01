@@ -12,6 +12,16 @@ evaluation remain evidence-gated
 
 **Companion inputs:** `MLAI_ORGANISATIONAL_BRAIN_SPEC.md`, `MLAI_CODEX_PR_PLAN.md`, and the supplied research conclusion
 
+> **Architecture update — 1 August 2026:** the original sections below that
+> prescribe a second Slack app are superseded by
+> `plans/org-memory/0001-public-admin-surfaces.md`. MLAI now keeps the existing
+> `@Roo` as the only Slack identity and dynamically routes eligible read-only
+> memory requests to an internal Admin worker. The worker remains a separate
+> deployment and credential boundary, has no Slack ingress, and only exact
+> active `PointsAdmin(role="committee")` callers can pass the backend route
+> gate. All source-ingestion, evidence, memory, review, and daily-refresh work
+> in this plan remains unchanged.
+
 **Progress update (21 July 2026):** governance/inventory/evals, the Public/Admin
 Roo deployment boundary, scoped service identity, verified actor assertions,
 versioned connector-secret encryption, backend-owned organisation

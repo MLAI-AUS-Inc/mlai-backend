@@ -23,7 +23,9 @@ TOKEN_PATTERN = re.compile(
     rf"^{TOKEN_PREFIX}(?P<credential_id>[0-9a-f]{{32}})\.(?P<secret>[A-Za-z0-9_-]{{32,128}})$"
 )
 SCOPE_PATTERN = re.compile(r"^[a-z][a-z0-9_.:-]{1,127}$")
-VALID_SURFACES = frozenset({"public_roo", "admin_roo", "worker", "operator"})
+VALID_SURFACES = frozenset(
+    {"public_roo", "admin_roo", "roo_gateway", "worker", "operator"}
+)
 _DUMMY_SECRET_HASH = make_password("invalid-service-principal-secret")
 
 

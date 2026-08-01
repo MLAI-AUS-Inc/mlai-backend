@@ -29,6 +29,7 @@ from .models import (
 )
 from .permissions import (
     HasActiveOrgMemoryPilotAccess,
+    HasCommitteePointsAdminClass,
     HasOrgMemoryCapability,
     HasOrgMemoryServiceScope,
 )
@@ -40,6 +41,7 @@ class OrgMemoryQueryView(APIView):
     permission_classes = (
         HasOrgMemoryServiceScope,
         HasOrgMemoryCapability,
+        HasCommitteePointsAdminClass,
         HasActiveOrgMemoryPilotAccess,
     )
     required_service_scope = "org_memory.read"
