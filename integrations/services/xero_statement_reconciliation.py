@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from django.conf import settings
 from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
@@ -16,7 +17,11 @@ from django.utils import timezone
 from integrations.models import (
     ExternalFinancialRecord,
     ExternalServiceProvider,
+    ReconciliationDecision,
+    ReconciliationPartyIdentity,
     XeroStatementLineSnapshot,
+    XeroStatementPosting,
+    XeroStatementScan,
     XeroStatementSuggestion,
 )
 from startup_updates.models import (
@@ -26,9 +31,18 @@ from startup_updates.models import (
     LumaEventSelection,
     SlackMessageArtifact,
 )
+from integrations.services.reconciliation_rules import (
+    apply_verified_rule,
+    record_reconciliation_decision,
+    resolve_reconciliation_rule,
+    rule_evidence,
+    serialize_reconciliation_rule,
+    serialize_suggestion_approval,
+)
 
 
 ALLOWED_STATEMENT_EVIDENCE_PROVIDERS = {
+    "admin_rule",
     "gmail",
     "slack",
     "linear",
@@ -542,16 +556,72 @@ def _browser_field(raw: dict[str, Any], canonical: str, snapshot_alias: str) -> 
     return raw.get(snapshot_alias)
 
 
+def _browser_ui_mode(raw: dict[str, Any], *, visible_fields: dict[str, str]) -> str:
+    explicit = str(raw.get("ui_mode") or "").strip().lower()
+    allowed = {choice[0] for choice in XeroStatementLineSnapshot.UI_MODE_CHOICES}
+    if explicit:
+        if explicit not in allowed:
+            raise ValueError(f"Invalid Xero statement ui_mode: {explicit}")
+        return explicit
+    if raw.get("has_green_match") is True or raw.get("match_ready") is True:
+        return XeroStatementLineSnapshot.UI_GREEN_MATCH
+    # ``ready_in_xero`` is accepted only as a deliberate compatibility input.
+    # The historical ``has_ok`` browser flag is intentionally not used: Xero
+    # shows OK beside a populated Create form as well as a genuine Match.
+    if raw.get("ready_in_xero") is True:
+        return XeroStatementLineSnapshot.UI_GREEN_MATCH
+    if any(visible_fields.values()):
+        return XeroStatementLineSnapshot.UI_CREATE_PREFILLED
+    if raw.get("has_discussion") is True:
+        return XeroStatementLineSnapshot.UI_DISCUSS
+    return XeroStatementLineSnapshot.UI_BLANK_CREATE
+
+
 def import_xero_statement_lines(
-    *, organization, bank_account_id: str, lines: list[dict[str, Any]], currency: str = "AUD"
+    *,
+    organization,
+    bank_account_id: str,
+    lines: list[dict[str, Any]],
+    currency: str = "AUD",
+    expected_count: int | None = None,
+    complete_scan: bool = True,
+    source: str = "browser",
+    requested_by: str = "",
 ) -> list[XeroStatementLineSnapshot]:
     if not bank_account_id:
         raise ValueError("bank_account_id is required")
-    if not isinstance(lines, list) or not lines:
-        raise ValueError("lines must be a non-empty list")
+    if not isinstance(lines, list):
+        raise ValueError("lines must be a list")
+    if complete_scan and not lines and expected_count != 0:
+        raise ValueError(
+            "An empty complete Xero scan must explicitly declare expected_count=0"
+        )
+    if expected_count is not None:
+        try:
+            expected_count = int(expected_count)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("expected_count must be an integer") from exc
+        if expected_count < 0:
+            raise ValueError("expected_count cannot be negative")
+        if complete_scan and expected_count != len(lines):
+            raise ValueError(
+                f"Complete Xero scan expected {expected_count} rows but observed {len(lines)}"
+            )
     saved: list[XeroStatementLineSnapshot] = []
     seen_ids: set[str] = set()
     with transaction.atomic():
+        scan = XeroStatementScan.objects.create(
+            organization=organization,
+            bank_account_id=bank_account_id,
+            status=XeroStatementScan.STATUS_STARTED,
+            source=str(source or "browser")[:32],
+            requested_by=str(requested_by or "")[:100],
+            expected_count=expected_count,
+            observed_count=len(lines),
+            payload_hash=hashlib.sha256(
+                json.dumps(lines, sort_keys=True, separators=(",", ":"), default=str).encode()
+            ).hexdigest(),
+        )
         for raw in lines:
             if not isinstance(raw, dict):
                 raise ValueError("Each statement line must be an object")
@@ -582,8 +652,7 @@ def import_xero_statement_lines(
                 "amount": amount,
                 "currency": str(raw.get("currency") or currency or "AUD").strip().upper()[:12],
             }
-            defaults = {
-                **values,
+            visible_fields = {
                 "current_contact": str(_browser_field(raw, "contact", "current_contact") or "").strip()[:255],
                 "current_account": str(_browser_field(raw, "account", "current_account") or "").strip()[:255],
                 "current_description": str(
@@ -596,7 +665,21 @@ def import_xero_statement_lines(
                     _browser_field(raw, "project_name", "current_project_name") or ""
                 ).strip()[:255],
                 "current_tax_type": str(_browser_field(raw, "tax_type", "current_tax_type") or "").strip()[:255],
-                "ready_in_xero": bool(raw.get("has_ok")),
+            }
+            ui_mode = _browser_ui_mode(raw, visible_fields=visible_fields)
+            create_prefill_complete = all(
+                visible_fields[field]
+                for field in ("current_contact", "current_account", "current_description", "current_tax_type")
+            )
+            defaults = {
+                **values,
+                **visible_fields,
+                "queue_state": XeroStatementLineSnapshot.QUEUE_ACTIVE,
+                "ui_mode": ui_mode,
+                "create_prefill_complete": create_prefill_complete,
+                "matched_xero_transaction_id": str(raw.get("matched_xero_transaction_id") or "").strip()[:255],
+                "last_scan": scan,
+                "ready_in_xero": ui_mode == XeroStatementLineSnapshot.UI_GREEN_MATCH,
                 "active": True,
                 "source_hash": _line_source_hash(values),
             }
@@ -607,11 +690,62 @@ def import_xero_statement_lines(
                 defaults=defaults,
             )
             saved.append(snapshot)
-        XeroStatementLineSnapshot.objects.filter(
-            organization=organization,
-            bank_account_id=bank_account_id,
-            active=True,
-        ).exclude(statement_line_id__in=seen_ids).update(active=False, last_seen_at=timezone.now())
+        completed_at = timezone.now()
+        if complete_scan:
+            missing_lines = list(XeroStatementLineSnapshot.objects.filter(
+                organization=organization,
+                bank_account_id=bank_account_id,
+                active=True,
+            ).exclude(statement_line_id__in=seen_ids))
+            missing_line_ids = [line.id for line in missing_lines]
+            XeroStatementLineSnapshot.objects.filter(id__in=missing_line_ids).update(
+                active=False,
+                queue_state=XeroStatementLineSnapshot.QUEUE_RECONCILED,
+                last_seen_at=completed_at,
+            )
+            confirmed_postings = XeroStatementPosting.objects.filter(
+                statement_line_id__in=missing_line_ids,
+                status=XeroStatementPosting.STATUS_MATCH_READY,
+            ).select_related("statement_line", "suggestion")
+            for posting in confirmed_postings:
+                posting.status = XeroStatementPosting.STATUS_RECONCILED
+                posting.reconciled_at = completed_at
+                posting.reconciled_scan = scan
+                posting.save(update_fields=[
+                    "status", "reconciled_at", "reconciled_scan", "updated_at",
+                ])
+                record_reconciliation_decision(
+                    statement_line=posting.statement_line,
+                    suggestion=posting.suggestion,
+                    decision_type=ReconciliationDecision.TYPE_RECONCILED_CONFIRMED,
+                    run_id=posting.suggestion.run_id,
+                    actor_type=(
+                        ReconciliationDecision.ACTOR_ADMIN
+                        if requested_by
+                        else ReconciliationDecision.ACTOR_SYSTEM
+                    ),
+                    actor_id=str(requested_by or "")[:100],
+                    outcome={
+                        "posting_id": posting.id,
+                        "scan_id": scan.id,
+                        "confirmation_method": "absent_from_complete_statement_scan",
+                        "xero_bank_transaction_id": posting.xero_bank_transaction_id,
+                        "xero_payment_id": posting.xero_payment_id,
+                    },
+                    evidence=[{
+                        "source_provider": "xero_ui",
+                        "source_record_id": f"statement-scan:{scan.id}",
+                        "summary": "The match-ready bank line was absent from the next complete Xero queue scan.",
+                    }],
+                    discriminator=f"scan:{scan.id}:posting:{posting.id}",
+                )
+        scan.status = (
+            XeroStatementScan.STATUS_COMPLETE
+            if complete_scan
+            else XeroStatementScan.STATUS_INCOMPLETE
+        )
+        scan.completed_at = completed_at
+        scan.save(update_fields=["status", "completed_at"])
     return saved
 
 
@@ -663,6 +797,27 @@ def format_statement_browser_comment(*, description: str, review_note: str, conf
 
 
 def serialize_statement_suggestion(suggestion: XeroStatementSuggestion) -> dict[str, Any]:
+    applied_rule_decision = suggestion.reconciliation_decisions.filter(
+        decision_type=ReconciliationDecision.TYPE_RULE_APPLIED,
+        rule__isnull=False,
+    ).select_related("rule").order_by("-created_at").first()
+    rule_conflict = ReconciliationDecision.objects.filter(
+        statement_line=suggestion.statement_line,
+        run_id=suggestion.run_id,
+        decision_type=ReconciliationDecision.TYPE_RULE_CONFLICT,
+    ).order_by("-created_at").first()
+    if suggestion.matched_xero_bill_id:
+        routing_source = "exact_xero_bill"
+    elif applied_rule_decision:
+        routing_source = "verified_rule"
+    elif rule_conflict:
+        routing_source = "rule_conflict"
+    elif suggestion.model_name == "deterministic_verified_rule":
+        routing_source = "deterministic"
+    elif suggestion.model_name:
+        routing_source = "monthly_context_agent"
+    else:
+        routing_source = "manual_or_legacy"
     account_display = " - ".join(
         value for value in (suggestion.account_code, suggestion.account_name) if value
     )
@@ -681,6 +836,14 @@ def serialize_statement_suggestion(suggestion: XeroStatementSuggestion) -> dict[
         "project": {"source_type": "linear", "source_id": suggestion.project_source_id, "tracking_option_name": suggestion.project_tracking_option_name} if suggestion.project_source_id else None,
         "matched_xero_bill_id": suggestion.matched_xero_bill_id,
         "confidence": suggestion.confidence,
+        "confidence_breakdown": {
+            "identity": suggestion.identity_confidence,
+            "accounting": suggestion.accounting_confidence,
+            "allocation": suggestion.allocation_confidence,
+            "document": suggestion.document_confidence,
+        },
+        "execution_ready": suggestion.execution_ready,
+        "blocking_reasons": suggestion.blocking_reasons or [],
         "rationale": suggestion.rationale,
         "review_note": suggestion.review_note,
         "browser_comment": format_statement_browser_comment(
@@ -702,6 +865,14 @@ def serialize_statement_suggestion(suggestion: XeroStatementSuggestion) -> dict[
         "source_hash": suggestion.source_hash,
         "model_name": suggestion.model_name,
         "status": suggestion.status,
+        "applied_rule_id": applied_rule_decision.rule_id if applied_rule_decision else None,
+        "routing": {
+            "source": routing_source,
+            "verified_rule_id": applied_rule_decision.rule_id if applied_rule_decision else None,
+            "xero_bill_id": suggestion.matched_xero_bill_id or None,
+            "model_name": suggestion.model_name,
+        },
+        "approval": serialize_suggestion_approval(suggestion),
         "posting": serialize_statement_posting(suggestion.postings.order_by("-created_at").first()),
     }
 
@@ -733,6 +904,8 @@ def serialize_statement_posting(posting) -> dict[str, Any] | None:
         "xero_bill_id": posting.xero_bill_id,
         "automatic": posting.automatic,
         "posted_at": posting.posted_at.isoformat() if posting.posted_at else None,
+        "reconciled_at": posting.reconciled_at.isoformat() if posting.reconciled_at else None,
+        "reconciled_scan_id": posting.reconciled_scan_id,
         "last_error": posting.last_error,
     }
 
@@ -761,6 +934,12 @@ def serialize_statement_line(line: XeroStatementLineSnapshot) -> dict[str, Any]:
             "tax_type": line.current_tax_type,
         },
         "ready_in_xero": line.ready_in_xero,
+        "queue_state": line.queue_state,
+        "ui_mode": line.ui_mode,
+        "create_prefill_complete": line.create_prefill_complete,
+        "matched_xero_transaction_id": line.matched_xero_transaction_id,
+        "last_scan_id": line.last_scan_id,
+        "is_green_match": line.is_green_match,
         "latest_suggestion": serialize_statement_suggestion(latest) if latest else None,
     }
 
@@ -790,6 +969,105 @@ def _bill_candidates(organization, line: XeroStatementLineSnapshot) -> list[dict
     ]
 
 
+def _confirmed_reconciliation_examples(
+    *,
+    organization,
+    active_lines: list[XeroStatementLineSnapshot],
+) -> list[dict[str, Any]]:
+    """Return durable human-accepted accounting patterns for later runs.
+
+    Active green matches retain the previous behaviour. Completed API postings
+    and manually prefilled lines that disappear from a complete queue scan remain
+    available after they leave Xero's unreconciled list.
+    """
+
+    examples: list[dict[str, Any]] = []
+    seen_line_ids: set[int] = set()
+
+    def append_example(*, line, fields: dict[str, Any], outcome_source: str, confirmed_at=None):
+        required = ("contact_name", "account_code", "account_name", "description", "tax_type")
+        normalized = {key: str(value or "").strip() for key, value in fields.items()}
+        if not all(normalized.get(field) for field in required):
+            return
+        seen_line_ids.add(line.id)
+        examples.append({
+            "statement_line_id": line.statement_line_id,
+            "transaction_date": line.transaction_date.isoformat(),
+            "merchant_key": merchant_key(line.narration),
+            "narration": line.narration,
+            "direction": line.direction,
+            **normalized,
+            "outcome_source": outcome_source,
+            "confirmed_at": confirmed_at.isoformat() if confirmed_at else None,
+        })
+
+    for line in active_lines:
+        if not line.is_green_match:
+            continue
+        account_code, account_name = _account_parts(line.current_account)
+        append_example(
+            line=line,
+            fields={
+                "contact_name": line.current_contact,
+                "account_code": account_code,
+                "account_name": account_name,
+                "description": line.current_description,
+                "event_name": line.current_event_name,
+                "project_name": line.current_project_name,
+                "tax_type": line.current_tax_type,
+            },
+            outcome_source="active_green_match",
+            confirmed_at=line.last_seen_at,
+        )
+
+    confirmed_postings = XeroStatementPosting.objects.filter(
+        organization=organization,
+        status=XeroStatementPosting.STATUS_RECONCILED,
+        operation=XeroStatementPosting.OPERATION_BANK_TRANSACTION,
+    ).select_related("statement_line", "suggestion").order_by("reconciled_at", "id")
+    for posting in confirmed_postings:
+        suggestion = posting.suggestion
+        append_example(
+            line=posting.statement_line,
+            fields={
+                "contact_name": suggestion.contact_name,
+                "account_code": suggestion.account_code,
+                "account_name": suggestion.account_name,
+                "description": suggestion.description,
+                "event_name": suggestion.event_tracking_option_name,
+                "project_name": suggestion.project_tracking_option_name,
+                "tax_type": suggestion.tax_type,
+            },
+            outcome_source="confirmed_api_posting",
+            confirmed_at=posting.reconciled_at,
+        )
+
+    manual_lines = XeroStatementLineSnapshot.objects.filter(
+        organization=organization,
+        queue_state=XeroStatementLineSnapshot.QUEUE_RECONCILED,
+        create_prefill_complete=True,
+    ).order_by("last_seen_at", "id")
+    for line in manual_lines:
+        if line.id in seen_line_ids:
+            continue
+        account_code, account_name = _account_parts(line.current_account)
+        append_example(
+            line=line,
+            fields={
+                "contact_name": line.current_contact,
+                "account_code": account_code,
+                "account_name": account_name,
+                "description": line.current_description,
+                "event_name": line.current_event_name,
+                "project_name": line.current_project_name,
+                "tax_type": line.current_tax_type,
+            },
+            outcome_source="confirmed_manual_prefill",
+            confirmed_at=line.last_seen_at,
+        )
+    return examples
+
+
 def build_statement_reconciliation_context(
     *,
     organization,
@@ -804,29 +1082,65 @@ def build_statement_reconciliation_context(
             "transaction_date", "statement_line_id"
         )
     )
-    examples: list[dict[str, Any]] = []
+    verified_identities = {
+        (identity.bank_narration_key, identity.direction): identity
+        for identity in ReconciliationPartyIdentity.objects.filter(
+            organization=organization,
+            status=ReconciliationPartyIdentity.STATUS_VERIFIED,
+            active=True,
+        )
+    }
+    examples = _confirmed_reconciliation_examples(
+        organization=organization,
+        active_lines=lines,
+    )
     allowed_patterns: dict[str, list[dict[str, str]]] = {}
     candidates: list[dict[str, Any]] = []
+    for example in examples:
+        allowed_patterns.setdefault(example["merchant_key"], []).append({
+            "example_statement_line_id": example["statement_line_id"],
+            "contact_name": example["contact_name"],
+            "account_code": example["account_code"],
+            "account_name": example["account_name"],
+            "description": example["description"],
+            "event_name": example.get("event_name", ""),
+            "project_name": example.get("project_name", ""),
+            "tax_type": example["tax_type"],
+            "outcome_source": example["outcome_source"],
+        })
     for line in lines:
-        serialized = serialize_statement_line(line)
-        if line.ready_in_xero:
-            fields = serialized["current_xero_fields"]
-            example = {
-                "statement_line_id": line.statement_line_id,
-                "merchant_key": serialized["merchant_key"],
-                "narration": line.narration,
-                **fields,
-            }
-            examples.append(example)
-            allowed_patterns.setdefault(serialized["merchant_key"], []).append({
-                "example_statement_line_id": line.statement_line_id,
-                **fields,
-            })
-    for line in lines:
-        if line.ready_in_xero:
+        if line.is_green_match:
             continue
         serialized = serialize_statement_line(line)
-        serialized["matching_xero_bills"] = _bill_candidates(organization, line)
+        verified_rule, rule_conflicts = resolve_reconciliation_rule(line)
+        matching_bills = _bill_candidates(organization, line)
+        serialized["verified_rule"] = (
+            serialize_reconciliation_rule(verified_rule) if verified_rule else None
+        )
+        serialized["rule_conflicts"] = [
+            serialize_reconciliation_rule(rule) for rule in rule_conflicts
+        ]
+        identity = verified_identities.get((serialized["merchant_key"], line.direction))
+        serialized["verified_identity"] = {
+            "id": identity.id,
+            "canonical_name": identity.canonical_name,
+            "xero_contact_id": identity.xero_contact_id,
+            "xero_contact_name": identity.xero_contact_name,
+            "linear_user_id": identity.linear_user_id,
+            "linear_name": identity.linear_name,
+            "linear_email": identity.linear_email,
+            "confidence": identity.confidence,
+            "verified_by_slack_id": identity.verified_by_slack_id,
+        } if identity else None
+        serialized["matching_xero_bills"] = matching_bills
+        if matching_bills:
+            serialized["deferred_verified_rule"] = serialized["verified_rule"]
+            serialized["deferred_rule_conflicts"] = serialized["rule_conflicts"]
+            serialized["verified_rule"] = None
+            serialized["rule_conflicts"] = []
+        else:
+            serialized["deferred_verified_rule"] = None
+            serialized["deferred_rule_conflicts"] = []
         serialized["allowed_historical_patterns"] = allowed_patterns.get(serialized["merchant_key"], [])
         nearby_events, nearby_projects, entity_entries = _candidate_entity_catalogs(
             line=line,
@@ -881,6 +1195,7 @@ def build_statement_reconciliation_context(
         "prior_xero_examples": examples,
         "approved_accounting_options": list(approved_options.values()),
         "statement_policy": {
+            "verified_rules": "A statement_candidate.verified_rule is admin-authoritative. Copy every supplied accounting and tracking field exactly. If deferred_verified_rule or deferred_rule_conflicts is present, prefer the exact matching Xero bill instead. If rule_conflicts is non-empty, return needs_review and do not choose between the rules.",
             "create_bank_transaction": "Prefer an exact merchant_key pattern. Otherwise copy one complete account/tax tuple from approved_accounting_options when the evidence strongly supports it.",
             "pay_existing_bill": "Prefer paying a supplied matching_xero_bill over creating a Spend Money transaction. Never invent a bill ID.",
             "execution": "The backend rechecks confidence, current Xero state and idempotency before any API write.",
@@ -903,8 +1218,74 @@ def _catalogs(organization):
     return events, projects
 
 
+def _bounded_confidence(value: Any, *, fallback: float = 0.0) -> float:
+    try:
+        score = float(value if value is not None else fallback)
+    except (TypeError, ValueError):
+        score = fallback
+    return max(0.0, min(score, 1.0))
+
+
+def _statement_execution_assessment(
+    *,
+    item: dict[str, Any],
+    normalized_action: str,
+    overall_confidence: float,
+    has_tracking_assignment: bool,
+) -> tuple[dict[str, float], bool, list[str]]:
+    """Apply deterministic readiness gates to independent confidence scores."""
+
+    score_keys = (
+        "identity_confidence",
+        "accounting_confidence",
+        "allocation_confidence",
+        "document_confidence",
+    )
+    explicit_scores = any(key in item for key in score_keys)
+    scores = {
+        "identity": _bounded_confidence(item.get("identity_confidence"), fallback=overall_confidence),
+        "accounting": _bounded_confidence(item.get("accounting_confidence"), fallback=overall_confidence),
+        "allocation": _bounded_confidence(item.get("allocation_confidence"), fallback=overall_confidence),
+        "document": _bounded_confidence(item.get("document_confidence"), fallback=overall_confidence),
+    }
+    reasons: list[str] = []
+    if normalized_action == XeroStatementSuggestion.ACTION_NEEDS_REVIEW:
+        reasons.append("Suggestion action still requires review.")
+    elif not explicit_scores:
+        threshold_name = (
+            "XERO_STATEMENT_BILL_PAYMENT_MIN_CONFIDENCE"
+            if normalized_action == XeroStatementSuggestion.ACTION_PAY_EXISTING_BILL
+            else "XERO_STATEMENT_BANK_TRANSACTION_MIN_CONFIDENCE"
+        )
+        threshold_default = 0.98 if normalized_action == XeroStatementSuggestion.ACTION_PAY_EXISTING_BILL else 0.92
+        threshold = float(getattr(settings, threshold_name, threshold_default))
+        if overall_confidence < threshold:
+            reasons.append(f"Legacy overall confidence must be at least {threshold:.0%}.")
+    else:
+        identity_threshold = float(getattr(settings, "XERO_STATEMENT_IDENTITY_MIN_CONFIDENCE", 0.80))
+        accounting_threshold = float(getattr(settings, "XERO_STATEMENT_ACCOUNTING_MIN_CONFIDENCE", 0.90))
+        allocation_threshold = float(getattr(settings, "XERO_STATEMENT_ALLOCATION_MIN_CONFIDENCE", 0.75))
+        if scores["identity"] < identity_threshold:
+            reasons.append(f"Identity confidence must be at least {identity_threshold:.0%}.")
+        if normalized_action == XeroStatementSuggestion.ACTION_CREATE_BANK_TRANSACTION:
+            if scores["accounting"] < accounting_threshold:
+                reasons.append(f"Accounting confidence must be at least {accounting_threshold:.0%}.")
+            if has_tracking_assignment and scores["allocation"] < allocation_threshold:
+                reasons.append(f"Allocation confidence must be at least {allocation_threshold:.0%}.")
+        elif normalized_action == XeroStatementSuggestion.ACTION_PAY_EXISTING_BILL:
+            document_threshold = float(getattr(settings, "XERO_STATEMENT_BILL_DOCUMENT_MIN_CONFIDENCE", 0.95))
+            if scores["document"] < document_threshold:
+                reasons.append(f"Bill-document confidence must be at least {document_threshold:.0%}.")
+    return scores, not reasons, reasons
+
+
 def save_statement_suggestions(
-    *, organization, run_id: str, suggestions: list[dict[str, Any]], model_name: str = ""
+    *,
+    organization,
+    run_id: str,
+    suggestions: list[dict[str, Any]],
+    model_name: str = "",
+    decision_actor_type: str = ReconciliationDecision.ACTOR_AGENT,
 ) -> list[XeroStatementSuggestion]:
     if not isinstance(suggestions, list):
         raise ValueError("statement_suggestions must be a list")
@@ -929,6 +1310,41 @@ def save_statement_suggestions(
             candidate = context_by_id.get(line_id)
             if line is None or candidate is None:
                 raise ValueError(f"Unknown or already-ready statement line: {line_id}")
+            verified_rule, rule_conflicts = resolve_reconciliation_rule(line)
+            if candidate.get("matching_xero_bills"):
+                verified_rule = None
+                rule_conflicts = []
+            if rule_conflicts:
+                conflict_evidence = [
+                    evidence
+                    for rule in rule_conflicts
+                    for evidence in rule_evidence(rule)
+                ][:20]
+                record_reconciliation_decision(
+                    statement_line=line,
+                    decision_type=ReconciliationDecision.TYPE_RULE_CONFLICT,
+                    run_id=run_id,
+                    actor_type=ReconciliationDecision.ACTOR_SYSTEM,
+                    outcome={
+                        "rule_ids": [rule.id for rule in rule_conflicts],
+                        "reason": "Multiple equally specific verified rules disagree.",
+                    },
+                )
+                item = {
+                    **item,
+                    "proposed_action": XeroStatementSuggestion.ACTION_NEEDS_REVIEW,
+                    "account_code": "",
+                    "account_name": "",
+                    "tax_type": "",
+                    "matched_xero_bill_id": "",
+                    "event": None,
+                    "project": None,
+                    "description": "",
+                    "review_note": "Conflicting verified reconciliation rules need an admin decision.",
+                    "evidence": conflict_evidence,
+                }
+            if verified_rule:
+                item = apply_verified_rule(rule=verified_rule, line=line, item=item)
             action = str(item.get("proposed_action") or XeroStatementSuggestion.ACTION_NEEDS_REVIEW)
             if action not in {choice[0] for choice in XeroStatementSuggestion.ACTION_CHOICES}:
                 raise ValueError(f"Invalid proposed_action for {line_id}")
@@ -972,7 +1388,9 @@ def save_statement_suggestions(
                 }
                 proposed_accounting = proposed[1:]
                 if not all(proposed) or (
-                    proposed not in exact_allowed and proposed_accounting not in approved_accounting
+                    verified_rule is None
+                    and proposed not in exact_allowed
+                    and proposed_accounting not in approved_accounting
                 ):
                     raise ValueError(
                         f"Prefill fields for {line_id} are not backed by exact merchant history or an approved accounting option"
@@ -986,6 +1404,14 @@ def save_statement_suggestions(
                 allowed_bills = {str(bill["xero_bill_id"]) for bill in candidate.get("matching_xero_bills") or []}
                 if not matched_bill_id or matched_bill_id not in allowed_bills:
                     raise ValueError(f"Bill match for {line_id} is not in the supplied Xero candidates")
+
+            overall_confidence = _bounded_confidence(item.get("confidence"))
+            scores, execution_ready, blocking_reasons = _statement_execution_assessment(
+                item=item,
+                normalized_action=normalized_action,
+                overall_confidence=overall_confidence,
+                has_tracking_assignment=bool(event_id or project_id),
+            )
 
             XeroStatementSuggestion.objects.filter(
                 organization=organization,
@@ -1008,7 +1434,13 @@ def save_statement_suggestions(
                     "project_source_id": project_id,
                     "project_tracking_option_name": str(getattr(projects.get(project_id), "name", "") or getattr(projects.get(project_id), "project_name", "") or "")[:255],
                     "matched_xero_bill_id": matched_bill_id,
-                    "confidence": max(0.0, min(float(item.get("confidence") or 0.0), 1.0)),
+                    "confidence": overall_confidence,
+                    "identity_confidence": scores["identity"],
+                    "accounting_confidence": scores["accounting"],
+                    "allocation_confidence": scores["allocation"],
+                    "document_confidence": scores["document"],
+                    "execution_ready": execution_ready,
+                    "blocking_reasons": blocking_reasons,
                     "rationale": str(item.get("rationale") or "")[:4000],
                     "review_note": review_note,
                     "evidence": evidence,
@@ -1017,5 +1449,115 @@ def save_statement_suggestions(
                     "status": XeroStatementSuggestion.STATUS_PROPOSED,
                 },
             )
+            if verified_rule:
+                record_reconciliation_decision(
+                    statement_line=line,
+                    suggestion=suggestion,
+                    rule=verified_rule,
+                    decision_type=ReconciliationDecision.TYPE_RULE_APPLIED,
+                    run_id=run_id,
+                    actor_type=ReconciliationDecision.ACTOR_SYSTEM,
+                    outcome={
+                        "rule": serialize_reconciliation_rule(verified_rule),
+                        "execution_ready": execution_ready,
+                        "blocking_reasons": blocking_reasons,
+                    },
+                    evidence=rule_evidence(verified_rule),
+                )
+            record_reconciliation_decision(
+                statement_line=line,
+                suggestion=suggestion,
+                rule=verified_rule,
+                decision_type=ReconciliationDecision.TYPE_SUGGESTION_SAVED,
+                run_id=run_id,
+                actor_type=decision_actor_type,
+                outcome={
+                    "proposed_action": action,
+                    "execution_ready": execution_ready,
+                    "blocking_reasons": blocking_reasons,
+                },
+                evidence=evidence,
+            )
             saved.append(suggestion)
     return saved
+
+
+def prepare_verified_rule_suggestions(
+    *,
+    organization,
+    run_id: str,
+    statement_line_ids: list[str],
+) -> dict[str, Any]:
+    """Prepare deterministic suggestions and leave unresolved lines for Valley."""
+
+    requested_ids = list(dict.fromkeys(
+        str(item or "").strip()
+        for item in statement_line_ids
+        if str(item or "").strip()
+    ))
+    lines = list(
+        XeroStatementLineSnapshot.objects.filter(
+            organization=organization,
+            statement_line_id__in=requested_ids,
+            active=True,
+        ).order_by("transaction_date", "statement_line_id")
+    )
+    prepared_payloads: list[dict[str, Any]] = []
+    deterministic_line_ids: list[str] = []
+    conflict_line_ids: list[str] = []
+    deferred_bill_line_ids: list[str] = []
+    unresolved_line_ids: list[str] = []
+    for line in lines:
+        rule, conflicts = resolve_reconciliation_rule(line)
+        if (rule or conflicts) and _bill_candidates(organization, line):
+            deferred_bill_line_ids.append(line.statement_line_id)
+            unresolved_line_ids.append(line.statement_line_id)
+            continue
+        if rule:
+            deterministic_line_ids.append(line.statement_line_id)
+            prepared_payloads.append({
+                "statement_line_id": line.statement_line_id,
+                "proposed_action": XeroStatementSuggestion.ACTION_NEEDS_REVIEW,
+                "confidence": 0.99,
+                "identity_confidence": 1.0,
+                "accounting_confidence": 1.0,
+                "allocation_confidence": 1.0 if (
+                    rule.event_source_id or rule.project_source_id
+                ) else 0.0,
+                "document_confidence": 0.0,
+                "rationale": f"Applied verified reconciliation rule #{rule.id}.",
+            })
+            continue
+        if conflicts:
+            conflict_line_ids.append(line.statement_line_id)
+            prepared_payloads.append({
+                "statement_line_id": line.statement_line_id,
+                "proposed_action": XeroStatementSuggestion.ACTION_NEEDS_REVIEW,
+                "confidence": 0.0,
+                "identity_confidence": 0.0,
+                "accounting_confidence": 0.0,
+                "allocation_confidence": 0.0,
+                "document_confidence": 0.0,
+                "rationale": "Verified reconciliation rules conflict.",
+            })
+            continue
+        unresolved_line_ids.append(line.statement_line_id)
+
+    saved = (
+        save_statement_suggestions(
+            organization=organization,
+            run_id=run_id,
+            suggestions=prepared_payloads,
+            model_name="deterministic_verified_rule",
+            decision_actor_type=ReconciliationDecision.ACTOR_SYSTEM,
+        )
+        if prepared_payloads
+        else []
+    )
+    return {
+        "suggestions": saved,
+        "deterministic_line_ids": deterministic_line_ids,
+        "conflict_line_ids": conflict_line_ids,
+        "deferred_bill_line_ids": deferred_bill_line_ids,
+        "unresolved_line_ids": unresolved_line_ids,
+    }

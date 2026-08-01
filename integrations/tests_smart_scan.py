@@ -53,7 +53,7 @@ class SmartScanTests(TestCase):
                 "Authorization": "Bearer token",
                 "Accept": "application/vnd.github.v3+json",
             },
-            timeout=10
+            timeout=(3, 10)
         )
 
     @patch('integrations.services.github.get_latest_repo_sha')
@@ -416,7 +416,12 @@ class SmartScanTests(TestCase):
         factory = APIRequestFactory()
         view = GithubTokenIdentityView.as_view()
         request = factory.get(f'/api/v1/integrations/github/{self.user_id}/')
-        
+
+        # build_github_auth_url stores the OAuth state in request.session; factory
+        # requests skip middleware, so attach a session the way SessionMiddleware would.
+        from django.contrib.sessions.middleware import SessionMiddleware
+        SessionMiddleware(lambda req: None).process_request(request)
+
         with patch('core.permissions.HasRooApiKey.has_permission', return_value=True):
              response = view(request, slack_user_id=self.user_id)
 

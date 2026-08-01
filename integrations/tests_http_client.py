@@ -27,12 +27,15 @@ class HTTPClientTests(SimpleTestCase):
         self.assertEqual(kwargs["headers"]["Connection"], "close")
         self.assertTrue(response.closed)
 
-    def test_long_read_timeout_is_capped_to_worker_timeout_budget(self):
+    def test_long_read_timeout_is_capped_to_max_read_timeout(self):
         with patch("integrations.http_client.requests.request", return_value=_FakeResponse()) as mock_request:
             http_client.post("https://example.test/resource", timeout=3600)
 
         _, _, kwargs = mock_request.mock_calls[0]
-        self.assertEqual(kwargs["timeout"], (3, 30))
+        self.assertEqual(kwargs["timeout"], (3, http_client.MAX_READ_TIMEOUT_SECONDS))
+        # Ceiling raised from 30 to 90 for long-running Content Factory calls
+        # (PR #243); pin it so the next change is a conscious one.
+        self.assertEqual(http_client.MAX_READ_TIMEOUT_SECONDS, 90)
 
     def test_explicit_split_timeout_is_preserved(self):
         with patch("integrations.http_client.requests.request", return_value=_FakeResponse()) as mock_request:

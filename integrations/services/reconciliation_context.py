@@ -68,7 +68,9 @@ def serialize_suggestion(suggestion: ReconciliationSuggestion) -> dict[str, Any]
 
 def _linear_projects(organization) -> list[dict[str, Any]]:
     projects: dict[str, dict[str, Any]] = {}
-    for project in LinearProjectArtifact.objects.filter(organization=organization).order_by("name", "linear_project_id"):
+    for project in LinearProjectArtifact.objects.filter(organization=organization).prefetch_related(
+        "members"
+    ).order_by("name", "linear_project_id"):
         projects[project.linear_project_id] = {
             "source_type": "linear",
             "source_id": project.linear_project_id,
@@ -78,6 +80,17 @@ def _linear_projects(organization) -> list[dict[str, Any]]:
             "start_date": project.start_date.isoformat() if project.start_date else None,
             "target_date": project.target_date.isoformat() if project.target_date else None,
             "url": project.url,
+            "members": [
+                {
+                    "source_type": "linear_user",
+                    "source_id": member.linear_user_id,
+                    "name": member.name,
+                    "email": member.email,
+                    "membership_source": member.membership_source,
+                }
+                for member in project.members.all()
+                if member.active
+            ],
         }
     for selection in LinearProjectSelection.objects.filter(organization=organization).order_by(
         "project_name", "linear_project_id"
@@ -93,6 +106,7 @@ def _linear_projects(organization) -> list[dict[str, Any]]:
                 "start_date": None,
                 "target_date": None,
                 "url": "",
+                "members": [],
             },
         )
     return list(projects.values())

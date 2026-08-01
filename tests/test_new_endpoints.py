@@ -2171,7 +2171,7 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
                     "failedPreviewUrl": "https://preview.example/articles/",
                     "failureKind": "directory_slot_missing",
                     "failedPhase": "verify_directory_browser",
-                    "builderRunUrl": "https://github.com/MLAI-AUS-Inc/content-factory/actions/runs/21",
+                    "builderRunUrl": "https://github.com/drsamdonegan/content-factory/actions/runs/21",
                     "retryable": True,
                 },
                 "live_preview_url": "/api/runs/setup-run-preview-failed/live-preview",
@@ -2190,7 +2190,7 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         self.assertEqual(setup_run.current_step, "preview_failed")
         self.assertEqual(setup_run.error, "MLAI GitHub App cannot access MLAI-AUS-Inc/mlai-au.")
         self.assertEqual(setup_run.result["livePreview"]["status"], "failed")
-        self.assertEqual(setup_run.result["livePreview"]["builderRunUrl"], "https://github.com/MLAI-AUS-Inc/content-factory/actions/runs/21")
+        self.assertEqual(setup_run.result["livePreview"]["builderRunUrl"], "https://github.com/drsamdonegan/content-factory/actions/runs/21")
         self.assertEqual(setup_run.result["failed_preview_url"], "https://preview.example/articles/")
         self.assertEqual(setup_run.result["failure_kind"], "directory_slot_missing")
         self.assertEqual(setup_run.result["failed_step"], "verify_directory_browser")

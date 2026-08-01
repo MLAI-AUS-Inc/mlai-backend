@@ -344,7 +344,6 @@ def list_issue_labels(limit: int = 100) -> list[dict[str, Any]]:
           color
           archivedAt
           team { id key name }
-          group { id name }
         }
         pageInfo { hasNextPage endCursor }
       }
@@ -371,7 +370,7 @@ def list_issue_labels(limit: int = 100) -> list[dict[str, Any]]:
         except LinearMeetingGraphQLError as exc:
             message = str(exc).lower()
             if use_basic_query or not any(
-                field in message for field in ("archivedat", "group", "team", "color")
+                field in message for field in ("archivedat", "team", "color")
             ):
                 raise
             logger.warning("linear_meeting_actions_label_metadata_unavailable detail=%s", str(exc))
@@ -882,10 +881,13 @@ def _fetch_linear_project_sizing_detail(
         return (project if isinstance(project, dict) else {}), True
     except LinearMeetingGraphQLError as exc:
         message = str(exc).lower()
-        relation_error = any(
-            field in message
-            for field in ("relations", "inverserelations", "relatedissue", "issue")
-        ) and ("cannot query field" in message or "query too complex" in message)
+        relation_error = "query too complex" in message or (
+            any(
+                field in message
+                for field in ("relations", "inverserelations", "relatedissue", "issue")
+            )
+            and "cannot query field" in message
+        )
         if not relation_error:
             raise
         logger.warning("linear_sizing_relations_unavailable detail=%s", str(exc))

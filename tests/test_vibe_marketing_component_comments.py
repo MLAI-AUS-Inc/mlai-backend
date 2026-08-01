@@ -626,7 +626,7 @@ class VibeMarketingComponentCommentTests(TestCase):
                 "platformStatus": "ready",
                 "deploymentUrl": "https://abc.pages.dev",
                 "routeUrl": "https://run-123.mlai-previews.com/articles/generated?cfInspector=1&cfPreviewMode=platform_deployment",
-                "logsUrl": "https://github.com/MLAI-AUS-Inc/content-factory/actions/runs/123",
+                "logsUrl": "https://github.com/drsamdonegan/content-factory/actions/runs/123",
                 "commitSha": "abc123",
                 "branchName": "cf-review/article-run-comments",
             }
@@ -639,7 +639,7 @@ class VibeMarketingComponentCommentTests(TestCase):
         self.assertEqual(preview["previewMode"], "platform_deployment")
         self.assertEqual(preview["platformProvider"], "cloudflare")
         self.assertEqual(preview["platformStatus"], "ready")
-        self.assertEqual(preview["logsUrl"], "https://github.com/MLAI-AUS-Inc/content-factory/actions/runs/123")
+        self.assertEqual(preview["logsUrl"], "https://github.com/drsamdonegan/content-factory/actions/runs/123")
         self.assertEqual(preview["commitSha"], "abc123")
 
     def test_failed_platform_preview_payload_is_normalized(self):
@@ -655,7 +655,7 @@ class VibeMarketingComponentCommentTests(TestCase):
                     "errorCode": "platform_preview_dispatch_failed",
                     "retryable": True,
                     "failedPhase": "platform_deployment",
-                    "failedCommand": "MLAI-AUS-Inc/content-factory/preview-builder.yml@main",
+                    "failedCommand": "drsamdonegan/content-factory/preview-builder.yml@main",
                     "logExcerpt": "GitHub workflow dispatch returned 404.",
                 },
             }
@@ -1317,7 +1317,7 @@ class VibeMarketingComponentCommentTests(TestCase):
             "previewUrl": "",
             "error": "MLAI GitHub App cannot access MLAI-AUS-Inc/mlai-au.",
             "errorCode": "platform_preview_failed",
-            "builderRunUrl": "https://github.com/MLAI-AUS-Inc/content-factory/actions/runs/21",
+            "builderRunUrl": "https://github.com/drsamdonegan/content-factory/actions/runs/21",
             "retryable": True,
         }
 
@@ -1330,7 +1330,7 @@ class VibeMarketingComponentCommentTests(TestCase):
         self.assertEqual(setup_run.current_step, "preview_failed")
         self.assertEqual(setup_run.approval_state, ContentFactoryApprovalState.NOT_REQUIRED)
         self.assertEqual(setup_run.result["article_system_setup"]["status"], "preview_failed")
-        self.assertEqual(response.data["livePreview"]["builderRunUrl"], "https://github.com/MLAI-AUS-Inc/content-factory/actions/runs/21")
+        self.assertEqual(response.data["livePreview"]["builderRunUrl"], "https://github.com/drsamdonegan/content-factory/actions/runs/21")
 
     def test_live_preview_retry_forwards_org_github_token(self):
         config = OrganizationContentConfig.objects.get(organization=self.organization)

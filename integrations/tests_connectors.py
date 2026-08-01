@@ -177,12 +177,28 @@ def _xero_balance_sheet_report(*, total_bank: str) -> dict:
     BASIQ_CONSENT_UI_URL="https://consent.basiq.io/home",
 )
 class ConnectorEndpointTests(TestCase):
+    ROO_RUN_KEY = "ci-roo-financial-run-key-32-characters-minimum"
+
     def setUp(self):
         self.user = User.objects.create_user(email="founder@example.com", role="participant")
         self.client = Client()
         self.client.force_login(self.user)
         self.api_client = APIClient()
         self.api_client.force_authenticate(self.user)
+
+    def _start_financial_sync_run(self, payload):
+        return self.api_client.post("/api/v1/integrations/financial/sync", payload, format="json")
+
+    def _sync_financial_run_next_page(self, run_id):
+        # The financial sync endpoint only queues a run; the valley harness
+        # drives the actual sync through the Roo-key run-step endpoint.
+        with override_settings(ROO_API_KEY=self.ROO_RUN_KEY):
+            return self.api_client.post(
+                f"/api/v1/integrations/financial/runs/{run_id}/sync-next-page",
+                {},
+                format="json",
+                HTTP_X_API_KEY=self.ROO_RUN_KEY,
+            )
 
     def test_sources_status_returns_all_connector_sources(self):
         GoogleConnection.objects.create(
@@ -1160,8 +1176,10 @@ class ConnectorEndpointTests(TestCase):
         )
 
     def test_xero_sync_refreshes_token_and_upserts_revenue_records(self):
+        organization = Organization.objects.create(name="Acme", domain="acme.example")
         connection = ExternalServiceConnection.objects.create(
             user=self.user,
+            organization=organization,
             provider=ExternalServiceProvider.XERO,
             access_token="expired-xero-access",
             refresh_token="old-xero-refresh",
@@ -1170,6 +1188,12 @@ class ConnectorEndpointTests(TestCase):
             account_label="Demo Company",
             sync_cursor={"if_modified_since": "2026-04-01T00:00:00+00:00"},
         )
+
+        start_response = self._start_financial_sync_run({"providers": ["xero"]})
+        self.assertEqual(start_response.status_code, 201)
+        self.assertEqual(start_response.data["status"], ContentFactoryRunStatus.QUEUED)
+        self.assertFalse(start_response.data["reusedExistingRun"])
+        run_id = start_response.data["runId"]
 
         with patch(
             "integrations.services.external_connectors.requests.post",
@@ -1260,23 +1284,22 @@ class ConnectorEndpointTests(TestCase):
                 ),
             ],
         ) as mock_get:
-            response = self.api_client.post(
-                "/api/v1/integrations/financial/sync",
-                {"providers": ["xero"]},
-                format="json",
-            )
+            response = self._sync_financial_run_next_page(run_id)
 
-        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data["status"], "synced")
-        self.assertEqual(response.data["syncRuns"][0]["repeatingInvoicesSynced"], 1)
-        self.assertEqual(response.data["syncRuns"][0]["invoicesSynced"], 2)
-        self.assertEqual(response.data["syncRuns"][0]["paymentsSynced"], 1)
-        self.assertFalse(response.data["syncRuns"][0]["hasReportScope"])
-        self.assertFalse(response.data["syncRuns"][0]["needsReportReconnect"])
-        self.assertFalse(response.data["syncRuns"][0]["canRequestReportScopes"])
-        self.assertTrue(response.data["syncRuns"][0]["needsReportScopeConfiguration"])
-        self.assertEqual(response.data["syncRuns"][0]["metricsPublishedCount"], 0)
-        self.assertIn("report metrics are disabled", response.data["syncRuns"][0]["metricWarnings"][0])
+        self.assertEqual(response.data["run"]["status"], ContentFactoryRunStatus.RUNNING)
+        self.assertEqual(response.data["run"]["currentStep"], "revenue_calculation")
+        sync_run = response.data["syncResults"][0]
+        self.assertEqual(sync_run["repeatingInvoicesSynced"], 1)
+        self.assertEqual(sync_run["invoicesSynced"], 2)
+        self.assertEqual(sync_run["paymentsSynced"], 1)
+        self.assertFalse(sync_run["hasReportScope"])
+        self.assertFalse(sync_run["needsReportReconnect"])
+        self.assertFalse(sync_run["canRequestReportScopes"])
+        self.assertTrue(sync_run["needsReportScopeConfiguration"])
+        self.assertEqual(sync_run["metricsPublishedCount"], 0)
+        self.assertIn("report metrics are disabled", sync_run["metricWarnings"][0])
         connection.refresh_from_db()
         self.assertEqual(connection.access_token, "fresh-xero-access")
         self.assertEqual(connection.refresh_token, "new-xero-refresh")
@@ -1285,7 +1308,8 @@ class ConnectorEndpointTests(TestCase):
         self.assertEqual(ExternalFinancialRecord.objects.filter(connection=connection).count(), 4)
         for call in mock_get.call_args_list:
             self.assertEqual(call.kwargs["headers"]["Xero-Tenant-Id"], "tenant-123")
-            if 'Type=="ACCPAY"' not in str(call.kwargs.get("params", {}).get("where", "")):
+            params = call.kwargs.get("params") or {}
+            if 'Type=="ACCPAY"' not in str(params.get("where", "")):
                 self.assertEqual(call.kwargs["headers"]["If-Modified-Since"], "2026-04-01T00:00:00+00:00")
 
         repeating_record = ExternalFinancialRecord.objects.get(
@@ -1367,6 +1391,10 @@ class ConnectorEndpointTests(TestCase):
                 return _json_response(_xero_balance_sheet_report(total_bank="9000.00"))
             raise AssertionError(f"Unexpected Xero URL {url}")
 
+        start_response = self._start_financial_sync_run({"providers": ["xero"]})
+        self.assertEqual(start_response.status_code, 201)
+        run_id = start_response.data["runId"]
+
         with patch(
             "integrations.services.external_connectors.timezone.now",
             return_value=timezone.make_aware(datetime(2026, 4, 26, 12, 0, 0)),
@@ -1374,14 +1402,11 @@ class ConnectorEndpointTests(TestCase):
             "integrations.services.external_connectors.requests.get",
             side_effect=fake_get,
         ):
-            response = self.api_client.post(
-                "/api/v1/integrations/financial/sync",
-                {"providers": ["xero"]},
-                format="json",
-            )
+            response = self._sync_financial_run_next_page(run_id)
 
-        self.assertEqual(response.status_code, 202)
-        run = response.data["syncRuns"][0]
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["status"], "synced")
+        run = response.data["syncResults"][0]
         self.assertTrue(run["hasReportScope"])
         self.assertFalse(run["needsReportReconnect"])
         self.assertGreaterEqual(run["metricsPublishedCount"], 7)
@@ -1396,8 +1421,10 @@ class ConnectorEndpointTests(TestCase):
         )
 
     def test_xero_sync_refresh_failure_marks_connection_error(self):
+        organization = Organization.objects.create(name="Acme", domain="acme.example")
         connection = ExternalServiceConnection.objects.create(
             user=self.user,
+            organization=organization,
             provider=ExternalServiceProvider.XERO,
             access_token="expired-xero-access",
             refresh_token="old-xero-refresh",
@@ -1406,18 +1433,20 @@ class ConnectorEndpointTests(TestCase):
             account_label="Demo Company",
         )
 
+        start_response = self._start_financial_sync_run({"providers": ["xero"]})
+        self.assertEqual(start_response.status_code, 201)
+        run_id = start_response.data["runId"]
+
         with patch(
             "integrations.services.external_connectors.requests.post",
             return_value=_json_response({"error": "invalid_grant", "error_description": "Refresh token expired"}),
         ):
-            response = self.api_client.post(
-                "/api/v1/integrations/financial/sync",
-                {"providers": ["xero"]},
-                format="json",
-            )
+            response = self._sync_financial_run_next_page(run_id)
 
-        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data["status"], "error")
+        self.assertEqual(response.data["run"]["status"], ContentFactoryRunStatus.BLOCKED)
+        self.assertTrue(response.data["errors"])
         connection.refresh_from_db()
         self.assertEqual(connection.status, ExternalServiceConnectionStatus.ERROR)
         self.assertIn("Refresh token expired", connection.last_error)
@@ -1743,14 +1772,21 @@ class ConnectorEndpointTests(TestCase):
         self.assertEqual(connection.status, ExternalServiceConnectionStatus.SYNCING)
 
     def test_bank_feed_sync_fetches_accounts_and_posted_transactions_idempotently(self):
+        organization = Organization.objects.create(name="Acme", domain="acme.example")
         connection = ExternalServiceConnection.objects.create(
             user=self.user,
+            organization=organization,
             provider=ExternalServiceProvider.BANK_FEED,
             external_account_id="basiq-user-123",
             account_label="Basiq bank feed",
             provider_metadata={"job_ids": ["job-1"]},
             status=ExternalServiceConnectionStatus.SYNCING,
         )
+
+        first_start = self._start_financial_sync_run({"providers": ["bank_feed"]})
+        self.assertEqual(first_start.status_code, 201)
+        self.assertFalse(first_start.data["reusedExistingRun"])
+        run_id = first_start.data["runId"]
 
         with patch(
             "integrations.services.external_connectors.requests.post",
@@ -1802,13 +1838,9 @@ class ConnectorEndpointTests(TestCase):
                 ),
             ],
         ):
-            first_response = self.api_client.post(
-                "/api/v1/integrations/financial/sync",
-                {"providers": ["bank_feed"]},
-                format="json",
-            )
+            first_response = self._sync_financial_run_next_page(run_id)
 
-        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(first_response.status_code, 200)
         self.assertEqual(first_response.data["status"], "synced")
         connection.refresh_from_db()
         self.assertEqual(connection.status, ExternalServiceConnectionStatus.CONNECTED)
@@ -1826,6 +1858,11 @@ class ConnectorEndpointTests(TestCase):
         self.assertEqual(str(record.amount), "250.00")
         self.assertEqual(record.status, "posted")
 
+        second_start = self._start_financial_sync_run({"providers": ["bank_feed"]})
+        self.assertEqual(second_start.status_code, 200)
+        self.assertTrue(second_start.data["reusedExistingRun"])
+        self.assertEqual(second_start.data["runId"], run_id)
+
         with patch(
             "integrations.services.external_connectors.requests.post",
             return_value=_json_response({"access_token": "server-token"}),
@@ -1837,25 +1874,27 @@ class ConnectorEndpointTests(TestCase):
                 _json_response({"data": [record.raw_payload]}),
             ],
         ):
-            second_response = self.api_client.post(
-                "/api/v1/integrations/financial/sync",
-                {"providers": ["bank_feed"]},
-                format="json",
-            )
+            second_response = self._sync_financial_run_next_page(run_id)
 
-        self.assertEqual(second_response.status_code, 202)
+        self.assertEqual(second_response.status_code, 200)
         self.assertEqual(FinancialAccount.objects.filter(connection=connection).count(), 1)
         self.assertEqual(ExternalFinancialRecord.objects.filter(connection=connection).count(), 1)
 
     def test_bank_feed_sync_failed_job_marks_connection_error(self):
+        organization = Organization.objects.create(name="Acme", domain="acme.example")
         connection = ExternalServiceConnection.objects.create(
             user=self.user,
+            organization=organization,
             provider=ExternalServiceProvider.BANK_FEED,
             external_account_id="basiq-user-123",
             account_label="Basiq bank feed",
             provider_metadata={"job_ids": ["job-1"]},
             status=ExternalServiceConnectionStatus.SYNCING,
         )
+
+        start_response = self._start_financial_sync_run({"providers": ["bank_feed"]})
+        self.assertEqual(start_response.status_code, 201)
+        run_id = start_response.data["runId"]
 
         with patch(
             "integrations.services.external_connectors.requests.post",
@@ -1864,14 +1903,11 @@ class ConnectorEndpointTests(TestCase):
             "integrations.services.external_connectors.requests.get",
             return_value=_json_response({"id": "job-1", "status": "failed", "message": "Bank login failed"}),
         ):
-            response = self.api_client.post(
-                "/api/v1/integrations/financial/sync",
-                {"providers": ["bank_feed"]},
-                format="json",
-            )
+            response = self._sync_financial_run_next_page(run_id)
 
-        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data["status"], "error")
+        self.assertEqual(response.data["run"]["status"], ContentFactoryRunStatus.BLOCKED)
         connection.refresh_from_db()
         self.assertEqual(connection.status, ExternalServiceConnectionStatus.ERROR)
         self.assertIn("Bank login failed", connection.last_error)
@@ -1926,8 +1962,10 @@ class ConnectorEndpointTests(TestCase):
         self.assertEqual(transactions_response.data["transactions"][0]["merchantName"], "Customer Pty Ltd")
 
     def test_financial_sync_and_disconnect_connection(self):
+        organization = Organization.objects.create(name="Acme", domain="acme.example")
         connection = ExternalServiceConnection.objects.create(
             user=self.user,
+            organization=organization,
             provider=ExternalServiceProvider.STRIPE,
             access_token="stripe-access",
             refresh_token="stripe-refresh",
@@ -1937,8 +1975,22 @@ class ConnectorEndpointTests(TestCase):
 
         sync_response = self.api_client.post("/api/v1/integrations/financial/sync", {}, format="json")
 
-        self.assertEqual(sync_response.status_code, 202)
+        self.assertEqual(sync_response.status_code, 201)
+        run_id = sync_response.data["runId"]
+
+        with patch(
+            "integrations.services.finance.requests.get",
+            side_effect=[
+                _json_response({"data": [], "has_more": False}),
+                _json_response({"data": [], "has_more": False}),
+            ],
+        ):
+            page_response = self._sync_financial_run_next_page(run_id)
+
+        self.assertEqual(page_response.status_code, 200)
+        self.assertEqual(page_response.data["status"], "synced")
         connection.refresh_from_db()
+        self.assertEqual(connection.status, ExternalServiceConnectionStatus.CONNECTED)
         self.assertIsNotNone(connection.last_synced_at)
 
         delete_response = self.api_client.delete(f"/api/v1/integrations/financial/connections/{connection.id}")
@@ -2290,3 +2342,40 @@ class LinearProjectArtifactUpsertTests(TestCase):
         artifact.refresh_from_db()
         self.assertEqual(artifact.relevance_label, GmailRelevanceLabel.PENDING)
         self.assertEqual(artifact.extraction_status, ArtifactProcessingStatus.HYDRATED)
+
+    def test_syncs_direct_project_members_and_deactivates_removed_members(self):
+        from integrations.services.external_connectors import (
+            _sync_linear_project_members,
+            _upsert_linear_project_artifact,
+        )
+        from startup_updates.models import LinearProjectMemberArtifact
+
+        project = {"id": "proj-aaron", "name": "[Studio] Aaron AI"}
+        artifact = _upsert_linear_project_artifact(connection=self.connection, project=project)
+        count = _sync_linear_project_members(
+            connection=self.connection,
+            project_artifact=artifact,
+            project={
+                **project,
+                "members": {"nodes": [{
+                    "id": "usr-luiz",
+                    "name": "Luiz Flavio",
+                    "email": "hello@luiz-flavio.com",
+                    "active": True,
+                }]},
+            },
+        )
+
+        self.assertEqual(count, 1)
+        member = LinearProjectMemberArtifact.objects.get(linear_user_id="usr-luiz")
+        self.assertEqual(member.project, artifact)
+        self.assertEqual(member.membership_source, LinearProjectMemberArtifact.SOURCE_DIRECT)
+        self.assertTrue(member.active)
+
+        _sync_linear_project_members(
+            connection=self.connection,
+            project_artifact=artifact,
+            project={**project, "members": {"nodes": []}},
+        )
+        member.refresh_from_db()
+        self.assertFalse(member.active)

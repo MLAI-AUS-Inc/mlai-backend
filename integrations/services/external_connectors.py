@@ -34,6 +34,7 @@ from startup_updates.models import (
     GoogleAnalyticsPropertySelection,
     LinearIssueArtifact,
     LinearProjectArtifact,
+    LinearProjectMemberArtifact,
     LinearProjectSelection,
     LinearProjectUpdateArtifact,
     LumaEventSelection,
@@ -3140,6 +3141,9 @@ query LinearProjectDetail($id: String!, $issueFirst: Int!, $issueAfter: String, 
     status { name type }
     lead { id name email }
     teams(first: 10) { nodes { id key name } }
+    members(first: 50) {
+      nodes { id name displayName email active }
+    }
     projectUpdates(first: $updateFirst, after: $updateAfter) {
       nodes {
         id
@@ -3550,6 +3554,54 @@ def _upsert_linear_project_artifact(
     return artifact
 
 
+def _sync_linear_project_members(
+    *,
+    connection: ExternalServiceConnection,
+    project_artifact: Optional[LinearProjectArtifact],
+    project: dict[str, Any],
+) -> int:
+    """Persist direct project membership for reconciliation allocation evidence."""
+
+    if project_artifact is None or not connection.organization:
+        return 0
+    members_payload = project.get("members")
+    if not isinstance(members_payload, dict):
+        return 0
+    nodes = [item for item in members_payload.get("nodes") or [] if isinstance(item, dict)]
+    seen_ids: set[str] = set()
+    synced_at = timezone.now()
+    for member in nodes:
+        user_id = str(member.get("id") or "").strip()
+        if not user_id or user_id in seen_ids:
+            continue
+        seen_ids.add(user_id)
+        LinearProjectMemberArtifact.objects.update_or_create(
+            organization=connection.organization,
+            connection=connection,
+            project=project_artifact,
+            linear_user_id=user_id,
+            defaults={
+                "name": str(member.get("displayName") or member.get("name") or "").strip()[:255],
+                "email": str(member.get("email") or "").strip()[:255],
+                "membership_source": LinearProjectMemberArtifact.SOURCE_DIRECT,
+                "active": member.get("active") is not False,
+                "raw_payload": member,
+                "synced_at": synced_at,
+            },
+        )
+    stale = LinearProjectMemberArtifact.objects.filter(
+        organization=connection.organization,
+        connection=connection,
+        project=project_artifact,
+        membership_source=LinearProjectMemberArtifact.SOURCE_DIRECT,
+        active=True,
+    )
+    if seen_ids:
+        stale = stale.exclude(linear_user_id__in=seen_ids)
+    stale.update(active=False, synced_at=synced_at, updated_at=synced_at)
+    return len(seen_ids)
+
+
 def _upsert_linear_issue_artifact(
     *,
     connection: ExternalServiceConnection,
@@ -3689,6 +3741,8 @@ def sync_linear_connection_page(
             "issues_synced": 0,
             "updatesSynced": 0,
             "updates_synced": 0,
+            "membersSynced": 0,
+            "members_synced": 0,
             "projects": [],
             "has_more": False,
         }
@@ -3732,6 +3786,11 @@ def sync_linear_connection_page(
             selection_has_more = False
         else:
             project_artifact = _upsert_linear_project_artifact(connection=connection, project=project)
+            member_count = _sync_linear_project_members(
+                connection=connection,
+                project_artifact=project_artifact,
+                project=project,
+            )
             issues_payload = project.get("issues") if isinstance(project.get("issues"), dict) else {}
             updates_payload = project.get("projectUpdates") if isinstance(project.get("projectUpdates"), dict) else {}
             issue_nodes = [item for item in issues_payload.get("nodes") or [] if isinstance(item, dict)]
@@ -3785,6 +3844,8 @@ def sync_linear_connection_page(
                 "issues_synced": issue_count,
                 "updatesSynced": update_count,
                 "updates_synced": update_count,
+                "membersSynced": member_count,
+                "members_synced": member_count,
             }
 
         selection.sync_cursor = cursor_payload
@@ -3827,6 +3888,8 @@ def sync_linear_connection_page(
             "issues_synced": issue_count,
             "updatesSynced": update_count,
             "updates_synced": update_count,
+            "membersSynced": member_count if project is not None else 0,
+            "members_synced": member_count if project is not None else 0,
             "projects": [project_result],
             "has_more": has_more,
         }
@@ -3856,6 +3919,8 @@ def sync_linear_connection(
         "issues_synced": 0,
         "updatesSynced": 0,
         "updates_synced": 0,
+        "membersSynced": 0,
+        "members_synced": 0,
         "projects": [],
         "has_more": False,
     }
@@ -3871,6 +3936,8 @@ def sync_linear_connection(
         aggregate["issues_synced"] = aggregate["issuesSynced"]
         aggregate["updatesSynced"] += int(page.get("updatesSynced") or 0)
         aggregate["updates_synced"] = aggregate["updatesSynced"]
+        aggregate["membersSynced"] += int(page.get("membersSynced") or 0)
+        aggregate["members_synced"] = aggregate["membersSynced"]
         aggregate["projects"].extend(page.get("projects") or [])
         if not page.get("has_more"):
             aggregate["status"] = page.get("status") or "synced"
@@ -3909,6 +3976,15 @@ def _serialize_linear_project_artifact(project: LinearProjectArtifact) -> dict[s
         "issue_count": issue_count,
         "updateCount": update_count,
         "update_count": update_count,
+        "members": [
+            {
+                "linear_user_id": member.linear_user_id,
+                "name": member.name,
+                "email": member.email,
+                "membership_source": member.membership_source,
+            }
+            for member in project.members.filter(active=True).order_by("name", "linear_user_id")
+        ],
     }
 
 

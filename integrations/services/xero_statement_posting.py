@@ -16,6 +16,7 @@ from integrations import http_client
 from integrations.models import (
     ExternalFinancialRecord,
     ExternalServiceProvider,
+    ReconciliationDecision,
     ReconciliationProfile,
     XeroStatementLineSnapshot,
     XeroStatementPosting,
@@ -33,6 +34,7 @@ from integrations.services.xero_reconciliation import (
 )
 from integrations.services.xero_scopes import xero_has_payment_write_scope
 from integrations.services.xero_statement_reconciliation import normalize_statement_action
+from integrations.services.reconciliation_rules import record_reconciliation_decision
 
 
 def _stable_json(value: Any) -> str:
@@ -73,6 +75,56 @@ def _operation_for(suggestion: XeroStatementSuggestion) -> str:
     if action == XeroStatementSuggestion.ACTION_PAY_EXISTING_BILL:
         return XeroStatementPosting.OPERATION_BILL_PAYMENT
     return ""
+
+
+def _has_dimension_scores(suggestion: XeroStatementSuggestion) -> bool:
+    return any(
+        float(getattr(suggestion, field, 0.0) or 0.0) > 0.0
+        for field in (
+            "identity_confidence",
+            "accounting_confidence",
+            "allocation_confidence",
+            "document_confidence",
+        )
+    )
+
+
+def _dimension_errors(
+    suggestion: XeroStatementSuggestion,
+    *,
+    operation: str,
+) -> list[str]:
+    if not _has_dimension_scores(suggestion):
+        threshold = float(
+            getattr(
+                settings,
+                "XERO_STATEMENT_BILL_PAYMENT_MIN_CONFIDENCE"
+                if operation == XeroStatementPosting.OPERATION_BILL_PAYMENT
+                else "XERO_STATEMENT_BANK_TRANSACTION_MIN_CONFIDENCE",
+                0.98 if operation == XeroStatementPosting.OPERATION_BILL_PAYMENT else 0.92,
+            )
+        )
+        if suggestion.confidence < threshold:
+            return [f"Legacy overall confidence must be at least {threshold:.0%}."]
+        return []
+
+    errors: list[str] = []
+    identity_threshold = float(getattr(settings, "XERO_STATEMENT_IDENTITY_MIN_CONFIDENCE", 0.80))
+    if suggestion.identity_confidence < identity_threshold:
+        errors.append(f"Identity confidence must be at least {identity_threshold:.0%}.")
+    if operation == XeroStatementPosting.OPERATION_BANK_TRANSACTION:
+        accounting_threshold = float(getattr(settings, "XERO_STATEMENT_ACCOUNTING_MIN_CONFIDENCE", 0.90))
+        if suggestion.accounting_confidence < accounting_threshold:
+            errors.append(f"Accounting confidence must be at least {accounting_threshold:.0%}.")
+        if suggestion.event_source_id or suggestion.project_source_id:
+            allocation_threshold = float(getattr(settings, "XERO_STATEMENT_ALLOCATION_MIN_CONFIDENCE", 0.75))
+            if suggestion.allocation_confidence < allocation_threshold:
+                errors.append(f"Allocation confidence must be at least {allocation_threshold:.0%}.")
+    elif operation == XeroStatementPosting.OPERATION_BILL_PAYMENT:
+        document_threshold = float(getattr(settings, "XERO_STATEMENT_BILL_DOCUMENT_MIN_CONFIDENCE", 0.95))
+        if suggestion.document_confidence < document_threshold:
+            errors.append(f"Bill-document confidence must be at least {document_threshold:.0%}.")
+    return errors
 
 
 def _tracking_preview(profile: ReconciliationProfile, suggestion: XeroStatementSuggestion) -> list[dict[str, str]]:
@@ -153,15 +205,19 @@ def build_statement_posting_preview(suggestion: XeroStatementSuggestion) -> dict
         errors.append("Reconciliation is disabled for this organisation.")
     if connection is None:
         errors.append("A Xero connection must be selected.")
+    terminal_posting_statuses = (
+        XeroStatementPosting.STATUS_MATCH_READY,
+        XeroStatementPosting.STATUS_RECONCILED,
+    )
     if suggestion.status != XeroStatementSuggestion.STATUS_PROPOSED:
         already_posted = suggestion.postings.filter(
-            status=XeroStatementPosting.STATUS_MATCH_READY
+            status__in=terminal_posting_statuses
         ).exists()
         if not already_posted:
             errors.append("Only a proposed statement suggestion can be posted.")
     if not line.active:
         errors.append("The statement line is no longer in the active Xero queue.")
-    if line.ready_in_xero:
+    if line.is_green_match:
         errors.append("The statement line is already ready or matched in Xero.")
     if suggestion.source_hash != line.source_hash:
         errors.append("The statement line changed after this suggestion was generated.")
@@ -171,11 +227,25 @@ def build_statement_posting_preview(suggestion: XeroStatementSuggestion) -> dict
         errors.append("Configure the Xero bank account before posting.")
     elif line.bank_account_id != profile.xero_bank_account_id:
         errors.append("The statement line belongs to a different Xero bank account.")
+    if operation == XeroStatementPosting.OPERATION_BANK_TRANSACTION:
+        semantic_local_duplicate = XeroStatementPosting.objects.filter(
+            organization=suggestion.organization,
+            operation=XeroStatementPosting.OPERATION_BANK_TRANSACTION,
+            status__in=terminal_posting_statuses,
+            statement_line__bank_account_id=line.bank_account_id,
+            statement_line__direction=line.direction,
+            statement_line__transaction_date=line.transaction_date,
+            statement_line__amount=line.amount,
+            suggestion__contact_name__iexact=suggestion.contact_name,
+        ).exclude(statement_line=line).first()
+        if semantic_local_duplicate:
+            errors.append(
+                "A different statement line already created the same Xero transaction "
+                f"(posting {semantic_local_duplicate.id}); review for a duplicate import."
+            )
 
     if operation == XeroStatementPosting.OPERATION_BANK_TRANSACTION:
-        threshold = float(getattr(settings, "XERO_STATEMENT_BANK_TRANSACTION_MIN_CONFIDENCE", 0.92))
-        if suggestion.confidence < threshold:
-            errors.append(f"Bank transaction confidence must be at least {threshold:.0%}.")
+        errors.extend(_dimension_errors(suggestion, operation=operation))
         if connection and not xero_has_bank_transaction_scope(connection.scopes):
             errors.append("Reconnect Xero with accounting.banktransactions before posting.")
         if not all([
@@ -193,9 +263,7 @@ def build_statement_posting_preview(suggestion: XeroStatementSuggestion) -> dict
         if suggestion.project_tracking_option_name and not profile.project_tracking_category_id:
             errors.append("Configure the Project Name tracking category ID.")
     elif operation == XeroStatementPosting.OPERATION_BILL_PAYMENT:
-        threshold = float(getattr(settings, "XERO_STATEMENT_BILL_PAYMENT_MIN_CONFIDENCE", 0.98))
-        if suggestion.confidence < threshold:
-            errors.append(f"Bill payment confidence must be at least {threshold:.0%}.")
+        errors.extend(_dimension_errors(suggestion, operation=operation))
         if connection and not xero_has_payment_write_scope(connection.scopes):
             errors.append("Reconnect Xero with accounting.payments before paying bills.")
         if line.direction != XeroStatementLineSnapshot.DIRECTION_DEBIT:
@@ -233,7 +301,7 @@ def build_statement_posting_preview(suggestion: XeroStatementSuggestion) -> dict
         )
         if posting_is_active:
             errors.append("This statement suggestion is already being posted.")
-        elif posting.status != XeroStatementPosting.STATUS_MATCH_READY:
+        elif posting.status not in terminal_posting_statuses:
             posting.suggestion = suggestion
             posting.operation = operation
             posting.status = XeroStatementPosting.STATUS_READY if not errors else XeroStatementPosting.STATUS_PREVIEWED
@@ -246,13 +314,30 @@ def build_statement_posting_preview(suggestion: XeroStatementSuggestion) -> dict
                 "suggestion", "operation", "status", "payload_hash", "idempotency_key", "preview_payload",
                 "warnings", "last_error", "updated_at",
             ])
-    return {
+    legacy_threshold = None
+    if operation and not _has_dimension_scores(suggestion):
+        legacy_threshold = float(
+            getattr(
+                settings,
+                "XERO_STATEMENT_BILL_PAYMENT_MIN_CONFIDENCE"
+                if operation == XeroStatementPosting.OPERATION_BILL_PAYMENT
+                else "XERO_STATEMENT_BANK_TRANSACTION_MIN_CONFIDENCE",
+                0.98 if operation == XeroStatementPosting.OPERATION_BILL_PAYMENT else 0.92,
+            )
+        )
+    result = {
         "ready": not errors,
         "errors": errors,
         "warnings": warnings,
         "operation": operation or None,
         "confidence": suggestion.confidence,
-        "minimum_confidence": threshold if operation else None,
+        "minimum_confidence": legacy_threshold,
+        "confidence_breakdown": {
+            "identity": suggestion.identity_confidence,
+            "accounting": suggestion.accounting_confidence,
+            "allocation": suggestion.allocation_confidence,
+            "document": suggestion.document_confidence,
+        },
         "statement_line_id": line.statement_line_id,
         "xero_payload": payload,
         "payload_hash": payload_hash,
@@ -260,6 +345,25 @@ def build_statement_posting_preview(suggestion: XeroStatementSuggestion) -> dict
         "human_reconciliation_required": True,
         "note": "The API creates the matching Xero transaction; a human still clicks Match/OK on the bank statement line.",
     }
+    record_reconciliation_decision(
+        statement_line=line,
+        suggestion=suggestion,
+        decision_type=(
+            ReconciliationDecision.TYPE_PREVIEW_READY
+            if result["ready"]
+            else ReconciliationDecision.TYPE_PREVIEW_BLOCKED
+        ),
+        run_id=suggestion.run_id,
+        actor_type=ReconciliationDecision.ACTOR_SYSTEM,
+        outcome={
+            "ready": result["ready"],
+            "operation": result["operation"],
+            "errors": result["errors"],
+            "payload_hash": payload_hash,
+        },
+        evidence=suggestion.evidence or [],
+    )
+    return result
 
 
 def _resolve_contact_id(connection, contact_name: str) -> str:
@@ -405,6 +509,55 @@ def _existing_by_reference(connection, *, resource: str, reference: str) -> dict
     return rows[0] if isinstance(rows, list) and rows else None
 
 
+def _semantic_bank_transaction_candidates(
+    connection,
+    *,
+    posting: XeroStatementPosting,
+) -> list[dict[str, Any]]:
+    """Find same-bank/date/direction/amount/contact rows without trusting a reference.
+
+    These are treated as a duplicate guard, not automatically adopted: two real
+    same-day transactions can share these fields, so only the stable MLAI
+    reference is sufficient for idempotent recovery.
+    """
+
+    line = posting.statement_line
+    expected_type = "SPEND" if line.direction == XeroStatementLineSnapshot.DIRECTION_DEBIT else "RECEIVE"
+    transaction_date = line.transaction_date
+    where = (
+        f'Type=="{expected_type}"&&'
+        f'Date==DateTime({transaction_date.year},{transaction_date.month},{transaction_date.day})&&'
+        f"Total=={line.amount:.2f}"
+    )
+    response = http_client.get(
+        f"{XERO_API_URL}/BankTransactions",
+        headers=_xero_headers(connection),
+        params={"where": where},
+        timeout=(3, 30),
+    )
+    response.raise_for_status()
+    rows = response.json().get("BankTransactions", [])
+    expected_bank_id = str(posting.preview_payload["BankAccount"]["AccountID"])
+    expected_contact = posting.suggestion.contact_name.strip().casefold()
+    matches = []
+    for row in rows if isinstance(rows, list) else []:
+        bank = row.get("BankAccount") if isinstance(row.get("BankAccount"), dict) else {}
+        contact = row.get("Contact") if isinstance(row.get("Contact"), dict) else {}
+        if str(row.get("Type") or "").upper() != expected_type:
+            continue
+        if str(bank.get("AccountID") or "") != expected_bank_id:
+            continue
+        if _as_money(row.get("Total")) != line.amount:
+            continue
+        if str(contact.get("Name") or "").strip().casefold() != expected_contact:
+            continue
+        currency = str(row.get("CurrencyCode") or "").strip().upper()
+        if currency and line.currency and currency != line.currency.upper():
+            continue
+        matches.append(row)
+    return matches
+
+
 def _validate_existing_bank_transaction(row: dict[str, Any], posting: XeroStatementPosting) -> None:
     expected_type = "SPEND" if posting.statement_line.direction == XeroStatementLineSnapshot.DIRECTION_DEBIT else "RECEIVE"
     bank = row.get("BankAccount") if isinstance(row.get("BankAccount"), dict) else {}
@@ -449,7 +602,10 @@ def execute_statement_posting(
         posting = XeroStatementPosting.objects.select_for_update().select_related(
             "suggestion", "statement_line"
         ).get(pk=posting_id)
-        if posting.status == XeroStatementPosting.STATUS_MATCH_READY:
+        if posting.status in {
+            XeroStatementPosting.STATUS_MATCH_READY,
+            XeroStatementPosting.STATUS_RECONCILED,
+        }:
             return posting
         if posting.status == XeroStatementPosting.STATUS_POSTING:
             raise ReconciliationValidationError("This statement suggestion is already being posted.")
@@ -472,6 +628,32 @@ def execute_statement_posting(
             )
             if existing:
                 _validate_existing_bank_transaction(existing, posting)
+            else:
+                semantic_matches = _semantic_bank_transaction_candidates(
+                    connection,
+                    posting=posting,
+                )
+                if semantic_matches:
+                    record_reconciliation_decision(
+                        statement_line=posting.statement_line,
+                        suggestion=suggestion,
+                        decision_type=ReconciliationDecision.TYPE_PREVIEW_BLOCKED,
+                        run_id=suggestion.run_id,
+                        actor_type=ReconciliationDecision.ACTOR_SYSTEM,
+                        outcome={
+                            "reason": "semantic_duplicate",
+                            "xero_bank_transaction_ids": [
+                                str(row.get("BankTransactionID") or "")
+                                for row in semantic_matches
+                            ],
+                        },
+                        evidence=suggestion.evidence or [],
+                        discriminator="semantic_duplicate",
+                    )
+                    raise XeroPostingError(
+                        "Xero already contains a bank transaction with the same bank account, "
+                        "direction, date, amount and contact. Review it before creating another."
+                    )
             row = existing or {}
             if not row:
                 payload["Contact"] = {
@@ -549,5 +731,24 @@ def execute_statement_posting(
             status=XeroStatementSuggestion.STATUS_APPLIED,
             applied_at=now,
             updated_at=now,
+        )
+        record_reconciliation_decision(
+            statement_line=posting.statement_line,
+            suggestion=posting.suggestion,
+            decision_type=(
+                ReconciliationDecision.TYPE_DUPLICATE_RECOVERED
+                if existing
+                else ReconciliationDecision.TYPE_EXECUTED
+            ),
+            run_id=posting.suggestion.run_id,
+            actor_type=ReconciliationDecision.ACTOR_ADMIN,
+            actor_id=requested_by_slack_id,
+            outcome={
+                "operation": posting.operation,
+                "xero_bank_transaction_id": xero_bank_transaction_id,
+                "xero_payment_id": xero_payment_id,
+                "xero_bill_id": xero_bill_id,
+            },
+            evidence=posting.suggestion.evidence or [],
         )
     return posting
