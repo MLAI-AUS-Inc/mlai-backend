@@ -193,7 +193,13 @@ def _connection_counts(configuration, action) -> dict:
         ).count(),
         "work_pending": work.filter(status=MemoryWorkStatus.PENDING).count(),
         "work_processing": work.filter(status=MemoryWorkStatus.PROCESSING).count(),
-        "work_dead": work.filter(status=MemoryWorkStatus.DEAD).count(),
+        # Historical dead rows are immutable audit evidence. Once their dead
+        # letter has been explicitly reconciled they must not keep the current
+        # connection health report permanently degraded.
+        "work_dead": work.filter(
+            status=MemoryWorkStatus.DEAD,
+            dead_letter__resolved_at__isnull=True,
+        ).count(),
     }
     run = getattr(action, "sync_run", None) if action is not None else None
     if run is not None:

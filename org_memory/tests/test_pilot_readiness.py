@@ -356,6 +356,35 @@ class PilotReadinessTests(TestCase):
         self.assertNotIn("UPILOT123", json.dumps(report))
         self.assertNotIn("Pilot status is green", json.dumps(report))
 
+    def test_fresh_completed_daily_report_remains_valid_while_next_report_runs(self):
+        MemoryDailyReconciliationReport.objects.create(
+            organization=self.organization,
+            report_date=self.now.date() + timedelta(days=1),
+            time_zone="UTC",
+            window_started_at=self.now,
+            status=MemoryDailyReconciliationStatus.RUNNING,
+            summary={"content_free": True},
+            alerts=[],
+            started_at=self.now,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            _, governance_path = self.write_manifests(directory)
+            report = build_pilot_readiness_report(
+                organization=self.organization,
+                approval_manifest=self.approval_manifest(),
+                governance_manifest_path=governance_path,
+                environment="staging",
+                now=self.now + timedelta(minutes=1),
+            )
+
+        self.assertNotIn("daily_reconciliation_not_healthy", report["blockers"])
+        daily_check = next(
+            check for check in report["checks"] if check["key"] == "daily_reconciliation"
+        )
+        self.assertEqual(daily_check["status"], "pass")
+        self.assertEqual(daily_check["metrics"]["latest_report_status"], "running")
+        self.assertTrue(daily_check["metrics"]["healthy_report_id"])
+
     def test_resolved_dead_work_no_longer_blocks_runtime_readiness(self):
         source = self.organization.memory_sources.get()
         work = MemoryWorkItem.objects.create(

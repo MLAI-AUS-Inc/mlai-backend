@@ -9,6 +9,7 @@ from .extraction import ExtractionTarget, configured_extraction_target
 from .extraction import schedule_source_extraction
 from .models import (
     MemoryClaimStatus,
+    MemoryClaim,
     MemoryDeadLetter,
     MemoryExtractionRun,
     MemoryExtractionStatus,
@@ -180,6 +181,106 @@ def cancel_superseded_extraction_work(
         return report
     now = timezone.now()
     work_ids = [row.pk for row in rows]
+    report["leases_released"] = MemoryWorkerLease.objects.filter(
+        work_item_id__in=work_ids,
+        released_at__isnull=True,
+    ).update(released_at=now)
+    from .cost_control import release_cost_reservations
+
+    report["cost_reservations_released"] = release_cost_reservations(
+        work_ids,
+        now=now,
+    )
+    report["cancelled"] = MemoryWorkItem.objects.filter(
+        pk__in=work_ids,
+        status__in=(
+            MemoryWorkStatus.PENDING,
+            MemoryWorkStatus.FAILED,
+            MemoryWorkStatus.PROCESSING,
+        ),
+    ).update(
+        status=MemoryWorkStatus.CANCELLED,
+        completed_at=now,
+        locked_at=None,
+        last_error="superseded_extraction_target",
+        updated_at=now,
+    )
+    return report
+
+
+@transaction.atomic
+def cancel_superseded_consolidation_work(
+    *,
+    organization,
+    provider: str,
+    apply: bool = False,
+    resolved_by=None,
+    limit: int = 1000,
+    target: Optional[ExtractionTarget] = None,
+) -> dict:
+    """Cancel consolidation jobs produced by superseded extraction targets."""
+
+    target = target or configured_extraction_target()
+    if apply and resolved_by is None:
+        raise ValueError("An operator is required when applying reconciliation.")
+    work_items = MemoryWorkItem.objects.filter(
+        organization=organization,
+        provider=provider,
+        task_type=MemoryWorkTaskType.CONSOLIDATE,
+        action_request__isnull=True,
+        status__in=(
+            MemoryWorkStatus.PENDING,
+            MemoryWorkStatus.FAILED,
+            MemoryWorkStatus.PROCESSING,
+        ),
+    ).order_by("created_at", "pk")
+    if apply:
+        work_items = work_items.select_for_update()
+    rows = list(work_items[:limit])
+    claim_ids = {
+        str((row.payload or {}).get("claim_id") or "")
+        for row in rows
+        if (row.payload or {}).get("claim_id")
+    }
+    claims = {
+        str(claim.pk): claim
+        for claim in MemoryClaim.objects.filter(pk__in=claim_ids).select_related(
+            "extraction_run"
+        )
+    }
+    superseded_rows = []
+    for row in rows:
+        claim = claims.get(str((row.payload or {}).get("claim_id") or ""))
+        run = claim.extraction_run if claim is not None else None
+        if run is None:
+            continue
+        if (
+            run.model,
+            run.extractor_version,
+            run.schema_version,
+            run.prompt_version,
+        ) != (
+            target.model,
+            target.extractor_version,
+            target.schema_version,
+            target.prompt_version,
+        ):
+            superseded_rows.append(row)
+    report = {
+        "schema_version": "org-memory-superseded-consolidation-work-cancellation-v1",
+        "organization_domain": organization.domain,
+        "provider": provider,
+        "apply": bool(apply),
+        "candidates": len(superseded_rows),
+        "cancelled": 0,
+        "leases_released": 0,
+        "cost_reservations_released": 0,
+        "target_fingerprint": target.fingerprint,
+    }
+    if not apply or not superseded_rows:
+        return report
+    now = timezone.now()
+    work_ids = [row.pk for row in superseded_rows]
     report["leases_released"] = MemoryWorkerLease.objects.filter(
         work_item_id__in=work_ids,
         released_at__isnull=True,
