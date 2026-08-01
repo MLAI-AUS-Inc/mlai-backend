@@ -1209,7 +1209,6 @@ class BoostPostAdmissionView(APIView):
         'channel_id',
         'root_message_ts',
         'poster_slack_id',
-        'social_post_url',
     )
 
     @staticmethod
@@ -1242,6 +1241,9 @@ class BoostPostAdmissionView(APIView):
                 },
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        values['social_post_url'] = str(
+            request.data.get('social_post_url') or ''
+        ).strip()[:2048]
         root_text = str(request.data.get('root_text') or '')[:10000]
 
         try:

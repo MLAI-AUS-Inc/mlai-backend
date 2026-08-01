@@ -11,7 +11,6 @@ import re
 from collections import OrderedDict
 from datetime import date, datetime, timedelta
 from typing import Optional, Tuple
-from urllib.parse import urlsplit
 import requests
 from django.conf import settings
 from django.db import connection, transaction, IntegrityError, models
@@ -1314,14 +1313,6 @@ class BoostPostAdmissionService:
 
     BASE_COST_POINTS = 8
     DISCOUNT_COST_POINTS = 4
-    SUPPORTED_SOCIAL_HOSTS = (
-        'linkedin.com',
-        'lnkd.in',
-        'x.com',
-        'twitter.com',
-        'instagram.com',
-        'facebook.com',
-    )
 
     @classmethod
     def _validate_payload(
@@ -1332,7 +1323,6 @@ class BoostPostAdmissionService:
         channel_id: str,
         root_message_ts: str,
         poster_slack_id: str,
-        social_post_url: str,
     ) -> None:
         if not re.fullmatch(r'T[A-Z0-9]+', workspace_id):
             raise InvalidBoostPostError('workspace_id is invalid')
@@ -1345,20 +1335,6 @@ class BoostPostAdmissionService:
         expected_key = f'boost-post:{workspace_id}:{channel_id}:{root_message_ts}'
         if submission_key != expected_key:
             raise InvalidBoostPostError('submission_key does not match the Slack root')
-        if len(social_post_url) > 2048:
-            raise InvalidBoostPostError('social_post_url is too long')
-        try:
-            parsed_url = urlsplit(social_post_url)
-            host = (parsed_url.hostname or '').lower().rstrip('.')
-        except ValueError as exc:
-            raise InvalidBoostPostError('social_post_url is invalid') from exc
-        if parsed_url.scheme.lower() not in {'http', 'https'}:
-            raise InvalidBoostPostError('social_post_url must use http or https')
-        if not any(
-            host == allowed or host.endswith(f'.{allowed}')
-            for allowed in cls.SUPPORTED_SOCIAL_HOSTS
-        ):
-            raise InvalidBoostPostError('A supported social post URL is required')
 
     @staticmethod
     def _payload_matches(
@@ -1389,13 +1365,15 @@ class BoostPostAdmissionService:
         root_text: str,
         social_post_url: str,
     ) -> tuple[BoostPostAdmission, bool]:
+        # Campaign content is not an admission rule. Keep the first URL only as
+        # optional metadata while points balance remains the sole business gate.
+        social_post_url = str(social_post_url or '').strip()[:2048]
         cls._validate_payload(
             submission_key=submission_key,
             workspace_id=workspace_id,
             channel_id=channel_id,
             root_message_ts=root_message_ts,
             poster_slack_id=poster_slack_id,
-            social_post_url=social_post_url,
         )
 
         admission, created = BoostPostAdmission.objects.select_for_update().get_or_create(
