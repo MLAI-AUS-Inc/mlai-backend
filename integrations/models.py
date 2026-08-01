@@ -6,6 +6,7 @@ from .fields import EncryptedTextField
 class CommunityBridgePlatform(models.TextChoices):
     SLACK = "slack", "Slack"
     DISCORD = "discord", "Discord"
+    BUZZ = "buzz", "MLAI Chat"
 
 
 class CommunityBridgeDeliveryType(models.TextChoices):
@@ -377,8 +378,19 @@ from startup_updates.models import (
 class CommunityBridgeChannel(models.Model):
     slack_channel_id = models.CharField(max_length=100, unique=True, db_index=True)
     slack_channel_name = models.CharField(max_length=255, blank=True, default="")
+    destination_platform = models.CharField(
+        max_length=20,
+        choices=CommunityBridgePlatform.choices,
+        default=CommunityBridgePlatform.DISCORD,
+        db_index=True,
+    )
+    destination_workspace_id = models.CharField(max_length=100, blank=True, default="")
+    destination_channel_id = models.CharField(max_length=100, blank=True, default="", db_index=True)
+    destination_channel_name = models.CharField(max_length=255, blank=True, default="")
+    # Legacy Discord columns remain during the compatibility window. Runtime
+    # routing uses the generic destination fields added above.
     discord_guild_id = models.CharField(max_length=100, blank=True, default="")
-    discord_channel_id = models.CharField(max_length=100, unique=True, db_index=True)
+    discord_channel_id = models.CharField(max_length=100, blank=True, default="", db_index=True)
     discord_channel_name = models.CharField(max_length=255, blank=True, default="")
     enabled = models.BooleanField(default=True, db_index=True)
     sync_edits = models.BooleanField(default=True)
@@ -391,11 +403,18 @@ class CommunityBridgeChannel(models.Model):
     class Meta:
         db_table = "community_bridge_channel"
         ordering = ["slack_channel_id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=("destination_platform", "destination_channel_id"),
+                condition=~models.Q(destination_channel_id=""),
+                name="bridge_destination_platform_channel_unique",
+            ),
+        ]
 
     def __str__(self):
         slack_label = self.slack_channel_name or self.slack_channel_id
-        discord_label = self.discord_channel_name or self.discord_channel_id
-        return f"{slack_label} -> {discord_label}"
+        destination_label = self.destination_channel_name or self.destination_channel_id
+        return f"{slack_label} -> {self.destination_platform}:{destination_label}"
 
 
 class CommunityBridgeReceipt(models.Model):
