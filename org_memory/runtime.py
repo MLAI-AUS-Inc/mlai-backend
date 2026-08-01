@@ -1576,6 +1576,75 @@ def requeue_dead_letter(dead_letter_id, *, resolved_by=None) -> MemoryWorkItem:
     return requeued
 
 
+def stopped_worker_processing_work(*, organization):
+    """Return in-flight work whose worker has been stopped by the deploy."""
+
+    return MemoryWorkItem.objects.filter(
+        organization=organization,
+        status=MemoryWorkStatus.PROCESSING,
+        leases__released_at__isnull=True,
+    )
+
+
+@transaction.atomic
+def recover_stopped_worker_work(
+    *,
+    organization,
+    apply: bool = False,
+    resolved_by=None,
+    limit: int = 1000,
+) -> dict:
+    """Return deploy-interrupted work to pending after workers are fully stopped."""
+
+    if apply and resolved_by is None:
+        raise ValueError("An operator is required when applying recovery.")
+    work_items = stopped_worker_processing_work(
+        organization=organization,
+    ).order_by("locked_at", "pk")
+    if apply:
+        work_items = _locked(work_items, of_self=True)
+    rows = list(work_items[:limit])
+    report = {
+        "schema_version": "org-memory-stopped-worker-recovery-v1",
+        "organization_domain": organization.domain,
+        "apply": bool(apply),
+        "candidates": len(rows),
+        "recovered": 0,
+        "leases_released": 0,
+        "attempts_refunded": 0,
+    }
+    if not apply:
+        return report
+    now = timezone.now()
+    for work_item in rows:
+        report["leases_released"] += work_item.leases.filter(
+            released_at__isnull=True,
+        ).update(released_at=now)
+        if work_item.status != MemoryWorkStatus.PROCESSING:
+            continue
+        if work_item.attempts:
+            work_item.attempts -= 1
+            report["attempts_refunded"] += 1
+        work_item.status = MemoryWorkStatus.PENDING
+        work_item.available_at = now
+        work_item.locked_at = None
+        work_item.completed_at = None
+        work_item.last_error = "Worker stopped for reviewed deployment; work was recovered."
+        work_item.save(
+            update_fields=(
+                "status",
+                "attempts",
+                "available_at",
+                "locked_at",
+                "completed_at",
+                "last_error",
+                "updated_at",
+            )
+        )
+        report["recovered"] += 1
+    return report
+
+
 LEGACY_ACCESS_RESTORED_ERROR = "'NoneType' object has no attribute 'chunks'"
 LEGACY_CONSOLIDATION_OUTER_JOIN_LOCK_ERROR = (
     "FOR UPDATE cannot be applied to the nullable side of an outer join"

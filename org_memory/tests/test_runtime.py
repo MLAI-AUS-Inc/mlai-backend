@@ -53,6 +53,7 @@ from org_memory.runtime import (
     recover_expired_leases,
     reconcile_access_restored_dead_letters,
     reconcile_consolidation_lock_dead_letters,
+    recover_stopped_worker_work,
     requeue_dead_letter,
     schedule_due_connections,
 )
@@ -399,6 +400,43 @@ class MemoryRuntimeTests(TestCase):
             MemoryDeadLetter.objects.filter(resolved_at__isnull=True).count(),
             1,
         )
+
+    def test_stopped_worker_work_is_recovered_and_attempt_is_refunded(self):
+        work = MemoryWorkItem.objects.create(
+            organization=self.organization,
+            provider="linear",
+            task_type=MemoryWorkTaskType.EXTRACT,
+            idempotency_key="deploy-interrupted-work",
+            payload={},
+            status=MemoryWorkStatus.PROCESSING,
+            attempts=1,
+            max_attempts=1,
+            locked_at=timezone.now(),
+        )
+        lease = MemoryWorkerLease.objects.create(
+            work_item=work,
+            worker_id="stopped-deploy-worker",
+            expires_at=timezone.now() + timedelta(minutes=2),
+        )
+
+        preview = recover_stopped_worker_work(organization=self.organization)
+        self.assertEqual(preview["candidates"], 1)
+
+        applied = recover_stopped_worker_work(
+            organization=self.organization,
+            apply=True,
+            resolved_by=self.user,
+        )
+        work.refresh_from_db()
+        lease.refresh_from_db()
+
+        self.assertEqual(applied["recovered"], 1)
+        self.assertEqual(applied["leases_released"], 1)
+        self.assertEqual(applied["attempts_refunded"], 1)
+        self.assertEqual(work.status, MemoryWorkStatus.PENDING)
+        self.assertEqual(work.attempts, 0)
+        self.assertIsNone(work.locked_at)
+        self.assertIsNotNone(lease.released_at)
 
     def test_expired_worker_lease_is_recovered_and_reclaimed(self):
         source, version, _created = self._captured_source()

@@ -72,6 +72,10 @@ NEGATIVE_JUDGEMENT_PATTERNS = (
     re.compile(r"\b(?:lazy|dishonest|incompetent|unreliable|toxic|difficult person|bad attitude)\b", re.I),
 )
 EVIDENCE_TOKEN_RE = re.compile(r"\w+(?:['’]\w+)*", re.UNICODE)
+ATTRIBUTED_TRANSCRIPT_PREFIX_RE = re.compile(
+    r"^\s*(?:[-*]\s*)?[^:\n]{1,120}:\s*\Z"
+)
+QUOTED_PROMPT_INJECTION_FLAG = "quoted_prompt_injection"
 
 
 class ExtractionError(RuntimeError):
@@ -353,10 +357,43 @@ def configured_extraction_target(**overrides) -> ExtractionTarget:
     return target
 
 
-def scan_source_safety(text: str) -> list[str]:
+def _all_prompt_injection_matches_are_attributed(text: str) -> bool:
+    matches = [
+        match
+        for pattern in PROMPT_INJECTION_PATTERNS
+        for match in pattern.finditer(text)
+    ]
+    if not matches:
+        return False
+    for match in matches:
+        line_start = text.rfind("\n", 0, match.start()) + 1
+        prefix = text[line_start : match.start()]
+        if not ATTRIBUTED_TRANSCRIPT_PREFIX_RE.fullmatch(prefix):
+            return False
+    return True
+
+
+def scan_source_safety(
+    text: str,
+    *,
+    allow_attributed_transcript_discussion: bool = False,
+) -> list[str]:
     flags = []
-    if any(pattern.search(text) for pattern in PROMPT_INJECTION_PATTERNS):
-        flags.append("prompt_injection")
+    prompt_injection_detected = any(
+        pattern.search(text) for pattern in PROMPT_INJECTION_PATTERNS
+    )
+    if prompt_injection_detected:
+        if (
+            allow_attributed_transcript_discussion
+            and _all_prompt_injection_matches_are_attributed(text)
+        ):
+            # Meeting transcripts can legitimately discuss attacks. Extraction
+            # has no tools, receives only this source, emits a strict schema,
+            # and must ground every claim in an exact source span. Preserve an
+            # audit flag while allowing the rest of the transcript to proceed.
+            flags.append(QUOTED_PROMPT_INJECTION_FLAG)
+        else:
+            flags.append("prompt_injection")
     if any(pattern.search(text) for pattern in SECRET_PATTERNS):
         flags.append("possible_secret")
     return flags
@@ -698,13 +735,21 @@ def extract_source_version(*, source_version, provider: Optional[ExtractionProvi
         raise ExtractionInvariantError("Source version has no eligible chunks.")
     source_data = _source_data(source_version, chunks, target=target)
     source_text = "\n".join(item["text"] for item in source_data["chunks"])
-    source_flags = scan_source_safety(source_text)
-    if source_flags:
+    source_flags = scan_source_safety(
+        source_text,
+        allow_attributed_transcript_discussion=(
+            source_version.source.source_type == "meeting_transcript"
+        ),
+    )
+    blocking_source_flags = [
+        flag for flag in source_flags if flag != QUOTED_PROMPT_INJECTION_FLAG
+    ]
+    if blocking_source_flags:
         run = _persist_quarantine(
             source_version=source_version,
             target=target,
             source_data=source_data,
-            flags=source_flags,
+            flags=blocking_source_flags,
             reason="Untrusted source content triggered a fail-closed safety rule.",
         )
         return {"extraction_run_id": str(run.pk), "status": run.status, "claims_created": 0, "created": True}
@@ -741,7 +786,7 @@ def extract_source_version(*, source_version, provider: Optional[ExtractionProvi
             source_version=source_version,
             target=target,
             source_data=source_data,
-            flags=["invalid_schema"],
+            flags=["invalid_schema", *source_flags],
             reason="Extraction output failed the strict schema.",
             provider_result=provider_result,
         )
@@ -787,7 +832,7 @@ def extract_source_version(*, source_version, provider: Optional[ExtractionProvi
             source_version=source_version,
             target=target,
             source_data=source_data,
-            flags=["unsafe_candidate"],
+            flags=["unsafe_candidate", *source_flags],
             reason="; ".join(dict.fromkeys(candidate_errors))[:512],
             provider_result=provider_result,
         )
@@ -813,7 +858,14 @@ def extract_source_version(*, source_version, provider: Optional[ExtractionProvi
         prompt_input_hash=digest_json(source_data),
         candidate_payload_hash=digest_json(provider_result.payload),
         source_summary=payload.source_summary,
-        safety_flags=["partial_candidate_rejection"] if candidate_errors else [],
+        safety_flags=sorted(
+            set(
+                [
+                    *source_flags,
+                    *(["partial_candidate_rejection"] if candidate_errors else []),
+                ]
+            )
+        ),
         no_memory_reason=(
             (
                 f"Dropped {len(candidate_errors)} invalid candidate(s): "

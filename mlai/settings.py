@@ -1173,7 +1173,7 @@ ORG_MEMORY_EXTRACTION_MODEL = os.environ.get(
 ).strip()
 ORG_MEMORY_EXTRACTOR_VERSION = os.environ.get(
     'ORG_MEMORY_EXTRACTOR_VERSION',
-    'org-memory-extractor-v3',
+    'org-memory-extractor-v4',
 ).strip()
 ORG_MEMORY_EXTRACTION_SCHEMA_VERSION = os.environ.get(
     'ORG_MEMORY_EXTRACTION_SCHEMA_VERSION',
