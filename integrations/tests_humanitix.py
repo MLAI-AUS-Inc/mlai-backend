@@ -214,6 +214,49 @@ class HumanitixOperationsApiTests(APITestCase):
         )
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
+    @patch("core.permissions.HasRooApiKey.has_permission", return_value=True)
+    @patch(
+        "integrations.api_views_reconciliation."
+        "post_humanitix_xero_bank_transaction"
+    )
+    def test_payout_post_requires_and_forwards_reviewed_payload_hash(
+        self, post_payout, _permission
+    ):
+        payout = HumanitixPayout.objects.create(
+            organization=self.organization,
+            connection=self.connection,
+            payout_reference="HP-HASHED",
+            currency="AUD",
+            payout_amount="10.00",
+        )
+        url = reverse(
+            "reconciliation_humanitix_payout_post",
+            kwargs={"payout_reference": payout.payout_reference},
+        )
+        base = {
+            "slack_user_id": "UADMIN",
+            "domain": "mlai.au",
+            "confirm": True,
+        }
+
+        missing_hash = self.client.post(url, base, format="json")
+        self.assertEqual(missing_hash.status_code, status.HTTP_400_BAD_REQUEST)
+        post_payout.assert_not_called()
+
+        post_payout.return_value = payout
+        reviewed_hash = "a" * 64
+        response = self.client.post(
+            url,
+            {**base, "payload_hash": reviewed_hash},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            post_payout.call_args.kwargs["expected_payload_hash"],
+            reviewed_hash,
+        )
+
 
 class FakeResponse:
     def __init__(self, payload, *, status_code=200, headers=None):
@@ -521,6 +564,7 @@ Total $115.00 ($3.00) ($2.00) $110.00
         preview = build_humanitix_xero_preview(payout)
 
         self.assertTrue(preview["ready"], preview["errors"])
+        self.assertEqual(len(preview["payload_hash"]), 64)
         self.assertEqual(preview["line_total"], "2343.80")
         self.assertEqual(
             [line["UnitAmount"] for line in preview["xero_payload"]["LineItems"]],
@@ -531,6 +575,32 @@ Total $115.00 ($3.00) ($2.00) $110.00
             preview["xero_payload"]["LineItems"][0]["Tracking"][0]["Option"],
             "Pitch Night: MedHack",
         )
+
+    @patch(
+        "integrations.services.humanitix_payouts.fetch_xero_bank_transactions"
+    )
+    @patch("integrations.services.humanitix_payouts.http_client.put")
+    def test_post_rejects_a_stale_reviewed_payload_hash_before_xero_access(
+        self, mock_put, mock_fetch
+    ):
+        payout = self._import_tied_payout()
+        reviewed = build_humanitix_xero_preview(payout)
+        profile = ReconciliationProfile.objects.get(organization=self.organization)
+        profile.revenue_account_code = "999"
+        profile.save(update_fields=["revenue_account_code", "updated_at"])
+
+        with self.assertRaisesRegex(
+            ReconciliationValidationError,
+            "preview changed after review",
+        ):
+            post_humanitix_xero_bank_transaction(
+                payout,
+                approved_by_slack_id="UADMIN",
+                expected_payload_hash=reviewed["payload_hash"],
+            )
+
+        mock_fetch.assert_not_called()
+        mock_put.assert_not_called()
         mapping = ReconciliationMapping.objects.get(
             source_type=ReconciliationMapping.SOURCE_HUMANITIX_EVENT,
             source_id="event-medhack",

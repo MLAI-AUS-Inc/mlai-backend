@@ -3211,6 +3211,15 @@ class HumanitixPayoutPostView(ReconciliationAdminView):
                 {"error": "confirm must be true to post to Xero"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        payload_hash = str(request.data.get("payload_hash") or "").strip().lower()
+        if (
+            len(payload_hash) != 64
+            or any(character not in "0123456789abcdef" for character in payload_hash)
+        ):
+            return Response(
+                {"error": "payload_hash from the reviewed preview is required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         record = HumanitixPayout.objects.filter(
             organization=organization,
             payout_reference=payout_reference,
@@ -3224,6 +3233,7 @@ class HumanitixPayoutPostView(ReconciliationAdminView):
             posted = post_humanitix_xero_bank_transaction(
                 record,
                 approved_by_slack_id=slack_user_id,
+                expected_payload_hash=payload_hash,
             )
         except ReconciliationValidationError as exc:
             return Response(
