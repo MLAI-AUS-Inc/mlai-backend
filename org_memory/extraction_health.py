@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from django.db import transaction
+from django.db import connection, transaction
 from django.utils import timezone
 
 from .extraction import ExtractionTarget, configured_extraction_target
@@ -154,7 +154,12 @@ def reconcile_legacy_extraction_dead_letters(
         superseded_schema_version=superseded_schema_version,
     ).order_by("dead_at", "pk")
     if apply:
-        dead_letters = dead_letters.select_for_update()
+        lock_options = {}
+        if connection.features.has_select_for_update_of:
+            lock_options["of"] = ("self",)
+        # This queryset also follows nullable relationships. On PostgreSQL,
+        # constrain the row lock to the dead-letter evidence table itself.
+        dead_letters = dead_letters.select_for_update(**lock_options)
     rows = list(dead_letters[:limit])
     report = {
         "schema_version": "org-memory-extraction-dead-letter-reconciliation-v1",
