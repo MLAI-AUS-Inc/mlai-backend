@@ -14,6 +14,9 @@ from .models import (
     MemoryExtractionStatus,
     MemorySourceLifecycle,
     MemorySourceVersion,
+    MemoryWorkItem,
+    MemoryWorkerLease,
+    MemoryWorkStatus,
     MemoryWorkTaskType,
 )
 
@@ -109,6 +112,99 @@ def extraction_health_report(
             "queryable_claims": queryable_claims,
         },
     }
+
+
+def superseded_extraction_work_items(
+    *,
+    organization,
+    provider: str,
+    target: Optional[ExtractionTarget] = None,
+):
+    """Return queued/in-flight extraction work that is not for the current target."""
+
+    target = target or configured_extraction_target()
+    return MemoryWorkItem.objects.filter(
+        organization=organization,
+        provider=provider,
+        task_type=MemoryWorkTaskType.EXTRACT,
+        action_request__isnull=True,
+        status__in=(
+            MemoryWorkStatus.PENDING,
+            MemoryWorkStatus.FAILED,
+            MemoryWorkStatus.PROCESSING,
+        ),
+    ).exclude(
+        payload__model=target.model,
+        payload__extractor_version=target.extractor_version,
+        payload__schema_version=target.schema_version,
+        payload__prompt_version=target.prompt_version,
+        payload__target_fingerprint=target.fingerprint,
+    )
+
+
+@transaction.atomic
+def cancel_superseded_extraction_work(
+    *,
+    organization,
+    provider: str,
+    apply: bool = False,
+    resolved_by=None,
+    limit: int = 1000,
+    target: Optional[ExtractionTarget] = None,
+) -> dict:
+    """Cancel bounded stale-target work before scheduling the reviewed target."""
+
+    target = target or configured_extraction_target()
+    if apply and resolved_by is None:
+        raise ValueError("An operator is required when applying reconciliation.")
+    work_items = superseded_extraction_work_items(
+        organization=organization,
+        provider=provider,
+        target=target,
+    ).order_by("created_at", "pk")
+    if apply:
+        work_items = work_items.select_for_update()
+    rows = list(work_items[:limit])
+    report = {
+        "schema_version": "org-memory-superseded-extraction-work-cancellation-v1",
+        "organization_domain": organization.domain,
+        "provider": provider,
+        "apply": bool(apply),
+        "candidates": len(rows),
+        "cancelled": 0,
+        "leases_released": 0,
+        "cost_reservations_released": 0,
+        "target_fingerprint": target.fingerprint,
+    }
+    if not apply or not rows:
+        return report
+    now = timezone.now()
+    work_ids = [row.pk for row in rows]
+    report["leases_released"] = MemoryWorkerLease.objects.filter(
+        work_item_id__in=work_ids,
+        released_at__isnull=True,
+    ).update(released_at=now)
+    from .cost_control import release_cost_reservations
+
+    report["cost_reservations_released"] = release_cost_reservations(
+        work_ids,
+        now=now,
+    )
+    report["cancelled"] = MemoryWorkItem.objects.filter(
+        pk__in=work_ids,
+        status__in=(
+            MemoryWorkStatus.PENDING,
+            MemoryWorkStatus.FAILED,
+            MemoryWorkStatus.PROCESSING,
+        ),
+    ).update(
+        status=MemoryWorkStatus.CANCELLED,
+        completed_at=now,
+        locked_at=None,
+        last_error="superseded_extraction_target",
+        updated_at=now,
+    )
+    return report
 
 
 def superseded_extraction_dead_letters(
