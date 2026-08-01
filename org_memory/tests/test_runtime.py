@@ -173,11 +173,13 @@ class MemoryRuntimeTests(TestCase):
             "metadata": {"record_type": "linear_issue"},
         }
 
-    def _action(self, *, max_attempts=2):
+    def _action(self, *, max_attempts=2, action_type=MemoryActionType.SYNC):
         action = MemorySourceActionRequest.objects.create(
             configuration=self.configuration,
-            action=MemoryActionType.SYNC,
-            idempotency_key=f"manual-sync-{MemorySourceActionRequest.objects.count()}",
+            action=action_type,
+            idempotency_key=(
+                f"manual-{action_type}-{MemorySourceActionRequest.objects.count()}"
+            ),
         )
         result = dispatch_pending_actions(limit=10)
         self.assertEqual(result["dispatched"], 1)
@@ -325,6 +327,33 @@ class MemoryRuntimeTests(TestCase):
         self.assertEqual(source.current_version.version_key, "v2")
         first_work.refresh_from_db()
         self.assertEqual(first_work.status, MemoryWorkStatus.COMPLETED)
+
+    def test_reprocess_schedules_current_source_for_new_extraction_target(self):
+        source, _version, _created = self._captured_source()
+        MemoryOutboxEvent.objects.all().delete()
+        unchanged_record = self._record(
+            external_id=source.external_id,
+            text="Evidence for the queue.",
+        )
+        unchanged_record["acl"] = {
+            "is_accessible": True,
+            "principal_refs": ["team:runtime"],
+        }
+        self.connector.pages = [
+            SyncPage(
+                records=(unchanged_record,),
+                next_cursor="reprocessed",
+            )
+        ]
+        self._action(action_type=MemoryActionType.REPROCESS)
+
+        claimed = claim_memory_work(worker_id="worker-reprocess-extraction")
+        result = execute_claimed_memory_work(claimed)
+
+        self.assertEqual(result["status"], "completed", result)
+        self.assertEqual(result["reextraction"]["scheduled"], 1)
+        extraction_work = MemoryWorkItem.objects.get(task_type=MemoryWorkTaskType.EXTRACT)
+        self.assertEqual(extraction_work.source, source)
 
     def test_transient_failures_back_off_then_dead_letter_without_cursor_change(self):
         self.configuration.sync_cursor = "stable-cursor"

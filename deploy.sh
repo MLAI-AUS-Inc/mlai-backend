@@ -421,6 +421,11 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
         upsert_env_value ORG_MEMORY_QUERY_API_ENABLED "false"
     fi
     upsert_env_value ORG_MEMORY_PILOT_ORGANIZATION_DOMAIN "mlai.au"
+    # Version pins are deployment-managed so semantic reprocessing cannot be
+    # accidentally suppressed by a stale value in the host's long-lived .env.
+    upsert_env_value ORG_MEMORY_EXTRACTION_SCHEMA_VERSION "org-memory-extraction-schema-v2"
+    upsert_env_value ORG_MEMORY_SELECTOR_VERSION "org-memory-rules-selector-v2"
+    upsert_env_value ORG_MEMORY_ANSWER_SCHEMA_VERSION "org-memory-answer-schema-v2"
     # Google Drive is the first reviewed production ingestion provider. Its
     # checked-in manifest, per-organisation approval, and per-source approval
     # remain independent fail-closed gates beneath this deployment allowlist.

@@ -171,3 +171,20 @@ class DriveParserTests(SimpleTestCase):
         self.assertEqual(original["identity_key"], copied["identity_key"])
         self.assertEqual(original["occurred_at"][:10], "2026-07-02")
         self.assertEqual(original["participants"], ["Sam"])
+
+    def test_meeting_datetime_preserves_time_from_title(self):
+        metadata = infer_meeting_metadata(
+            filename="MLAI Committee Meeting – 2026/07/20 18:30 AEST – Notes by Gemini",
+            text="The committee approved the plan.",
+        )
+
+        self.assertEqual(metadata["occurred_at"], "2026-07-20T18:30:00+10:00")
+        self.assertEqual(
+            metadata["identity_basis"]["date_basis"],
+            "filename_or_heading_datetime",
+        )
+        daylight = infer_meeting_metadata(
+            filename="MLAI Committee Meeting – 2026/12/14 18:30 AEDT – Notes by Gemini",
+            text="The committee approved the summer plan.",
+        )
+        self.assertEqual(daylight["occurred_at"], "2026-12-14T18:30:00+11:00")

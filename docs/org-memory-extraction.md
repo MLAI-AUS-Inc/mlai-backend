@@ -26,6 +26,9 @@ Prompt-injection or credential-like source content is quarantined before a model
 schemas, invented citations, prohibited inferences, and proposal/decision confusion are also
 quarantined with no claims created.
 
+A quarantined or rejected extraction fails its queue work item and creates a dead letter. It
+cannot be reported as completed merely because the failure was persisted for review.
+
 ## Data records
 
 - `MemoryExtractionRun`: immutable outcome, prompt/schema/model/code versions, hashes, usage, and
@@ -44,7 +47,7 @@ quarantined with no claims created.
 ```text
 ORG_MEMORY_EXTRACTION_MODEL=gpt-5.6-luna
 ORG_MEMORY_EXTRACTOR_VERSION=org-memory-extractor-v1
-ORG_MEMORY_EXTRACTION_SCHEMA_VERSION=org-memory-extraction-schema-v1
+ORG_MEMORY_EXTRACTION_SCHEMA_VERSION=org-memory-extraction-schema-v2
 ORG_MEMORY_EXTRACTION_PROMPT_VERSION=org-memory-extraction-prompt-v1
 ORG_MEMORY_EXTRACTION_MAX_INPUT_CHARS=60000
 ORG_MEMORY_EXTRACTION_MAX_OUTPUT_TOKENS=6000
@@ -53,6 +56,41 @@ ORG_MEMORY_EXTRACTION_REASONING_EFFORT=none
 
 Changing any model or contract version changes the extraction fingerprint and permits intentional
 re-extraction. Code and prompt changes must bump their corresponding versions.
+
+## Reprocessing and production health
+
+Preview the current authorised corpus without scheduling work:
+
+```bash
+python manage.py schedule_org_memory_reextraction \
+  --organization-domain mlai.au \
+  --provider google_drive
+```
+
+Schedule one idempotent extraction job per current source version for the configured v2 target:
+
+```bash
+python manage.py schedule_org_memory_reextraction \
+  --organization-domain mlai.au \
+  --provider google_drive \
+  --apply
+```
+
+For Drive sources, also use the reviewed connection `reprocess` action. Drive parser v2 reparses
+the title date and time, creates a new immutable source version where required, and schedules the
+new extraction target even when provider content is unchanged.
+
+After the worker has drained extraction and consolidation work, run the content-free gate:
+
+```bash
+python manage.py check_org_memory_extraction_health \
+  --organization-domain mlai.au \
+  --provider google_drive
+```
+
+The gate fails on incomplete target coverage, quarantined or rejected runs, zero extracted claims,
+or zero queryable claims. The last condition deliberately remains blocked until required claim
+reviews are approved; source ingestion approval is not the same as approving a decision claim.
 
 ## Offline acceptance suite
 

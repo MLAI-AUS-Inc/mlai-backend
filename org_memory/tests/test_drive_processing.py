@@ -255,7 +255,7 @@ class DriveProcessingTests(TestCase):
         commit_drive_processing_page(self.configuration, records=[first_record], removals=[])
         old_chunk_ids = set(MemoryChunk.objects.values_list("id", flat=True))
 
-        with patch("org_memory.drive_processing.DRIVE_PARSER_VERSION", "drive-parser-v2"):
+        with patch("org_memory.drive_processing.DRIVE_PARSER_VERSION", "drive-parser-v3"):
             second_record, service = self._prepare(item, b"Sam: Improved parser output.")
             result = commit_drive_processing_page(
                 self.configuration,
@@ -270,7 +270,7 @@ class DriveProcessingTests(TestCase):
         self.assertEqual(DriveDocumentExtraction.objects.count(), 2)
         self.assertSetEqual(
             set(DriveDocumentExtraction.objects.values_list("parser_version", flat=True)),
-            {"drive-parser-v1", "drive-parser-v2"},
+            {"drive-parser-v2", "drive-parser-v3"},
         )
         self.assertFalse(
             MemoryChunk.objects.filter(id__in=old_chunk_ids, active_for_retrieval=True).exists()

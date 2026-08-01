@@ -235,14 +235,14 @@ class OrgMemoryAnswerView(OrgMemoryQueryView):
                 "intent": selection.plan.to_dict(),
                 "answer": answer["answer"],
                 "confidence": answer["confidence"],
-                "evidence_sufficiency": selection.sufficiency,
+                "evidence_sufficiency": query_log.evidence_sufficiency,
                 "freshness": {
                     "as_of": (selection.plan.as_of or query_log.created_at).isoformat(),
                     "latest_evidence_at": answer.get("latest_evidence_at"),
                     "contains_stale_memory": "stale_memory" in selection.warnings,
                 },
                 "citations": answer["citations"],
-                "warnings": list(selection.warnings),
+                "warnings": list(query_log.warnings),
                 "suggested_follow_up": answer.get("suggested_follow_up"),
             }
         )

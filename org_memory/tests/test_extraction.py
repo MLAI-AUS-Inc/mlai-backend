@@ -5,6 +5,7 @@ from django.core.management import call_command
 from django.test import TestCase, override_settings
 
 from organizations.models import Organization
+from org_memory.consolidation import transition_claim
 from org_memory.evals import evaluate_seed_suite
 from org_memory.extraction import (
     ProviderResult,
@@ -14,6 +15,7 @@ from org_memory.extraction import (
     process_extraction_work,
     schedule_source_extraction,
 )
+from org_memory.extraction_health import extraction_health_report
 from org_memory.kernel import capture_source_version
 from org_memory.models import (
     MemoryClaim,
@@ -116,6 +118,28 @@ class MemoryExtractionTests(TestCase):
                     assert_closed(value)
 
         assert_closed(schema)
+
+    def test_strict_schema_advertises_every_controlled_vocabulary(self):
+        schema = extraction_json_schema()
+        definitions = schema["$defs"]
+
+        self.assertIn("decision", definitions["ClaimCandidate"]["properties"]["kind"]["enum"])
+        self.assertIn(
+            "system_fact",
+            definitions["ClaimCandidate"]["properties"]["epistemic_type"]["enum"],
+        )
+        self.assertIn(
+            "supports",
+            definitions["EvidenceCandidate"]["properties"]["evidence_role"]["enum"],
+        )
+        self.assertIn(
+            "committee",
+            definitions["ClaimCandidate"]["properties"]["classification"]["enum"],
+        )
+        self.assertIn(
+            "project",
+            definitions["EntityCandidate"]["properties"]["entity_type"]["enum"],
+        )
 
     def test_persists_candidate_claim_with_exact_evidence_and_review(self):
         text = "The committee agreed that Sonia will own sponsor outreach from here."
@@ -281,6 +305,40 @@ class MemoryExtractionTests(TestCase):
         self.assertEqual(work.status, MemoryWorkStatus.COMPLETED)
         self.assertEqual(MemoryExtractionRun.objects.get().status, MemoryExtractionStatus.NO_MEMORY)
 
+    def test_runtime_marks_quarantined_extraction_work_dead(self):
+        version = self.capture(
+            "The committee discussed the programme.",
+            external_id="meeting-invalid-schema-runtime",
+        )
+        provider = FakeProvider(
+            {
+                "source_summary": "A programme was discussed.",
+                "entities": [
+                    {
+                        "entity_type": "program",
+                        "canonical_name": "Programme",
+                        "description": None,
+                        "external_refs": [],
+                    }
+                ],
+                "claims": [],
+                "no_memory_reason": None,
+            }
+        )
+        schedule_source_extraction(source_version=version)
+        claimed = claim_memory_work(worker_id="quarantined-extraction-worker")
+
+        with patch("org_memory.extraction.OpenAIExtractionProvider", return_value=provider):
+            result = execute_claimed_memory_work(claimed)
+
+        work = MemoryWorkItem.objects.get(task_type="extract")
+        self.assertEqual(result["status"], "dead")
+        self.assertEqual(work.status, MemoryWorkStatus.DEAD)
+        self.assertEqual(
+            MemoryExtractionRun.objects.get().status,
+            MemoryExtractionStatus.QUARANTINED,
+        )
+
     def test_same_person_name_without_external_id_is_not_cross_source_merged(self):
         entities = [{"entity_type": "person", "canonical_name": "Alex", "description": None, "external_refs": []}]
         for index in (1, 2):
@@ -303,6 +361,28 @@ class MemoryExtractionTests(TestCase):
             )
             extract_source_version(source_version=version, provider=provider)
         self.assertEqual(MemoryEntity.objects.filter(canonical_name="Alex").count(), 2)
+
+    def test_extraction_health_blocks_quarantine_and_unreviewed_claims(self):
+        text = "Decision: The committee approved the pilot."
+        version = self.capture(text, external_id="meeting-health")
+        provider = FakeProvider(empty_payload())
+
+        before = extraction_health_report(organization=self.organization)
+        self.assertIn("extraction_coverage_incomplete", before["blockers"])
+
+        extract_source_version(source_version=version, provider=provider)
+        pending_review = extraction_health_report(organization=self.organization)
+        self.assertEqual(pending_review["metrics"]["extracted_claims"], 1)
+        self.assertIn("queryable_claims_missing", pending_review["blockers"])
+
+        claim = MemoryClaim.objects.get()
+        transition_claim(
+            claim=claim,
+            to_status=MemoryClaimStatus.ACTIVE,
+            reason="health_test_review",
+        )
+        healthy = extraction_health_report(organization=self.organization)
+        self.assertTrue(healthy["ready"], healthy)
 
 
 class MemoryExtractionEvalTests(TestCase):
