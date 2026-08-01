@@ -3673,6 +3673,52 @@ class ReconciliationWorkflowApiTests(APITestCase):
         )
         self.assertEqual(profile_response.status_code, status.HTTP_200_OK)
         self.assertFalse(profile_response.data["profile"]["xero_write_scope"])
+        self.assertFalse(
+            profile_response.data["profile"][
+                "humanitix_profitability_included"
+            ]
+        )
+
+        unconfirmed_policy = self.client.put(
+            reverse("reconciliation_profile"),
+            {
+                "slack_user_id": "UADMIN",
+                "domain": "mlai.au",
+                "humanitix_profitability_included": True,
+            },
+            format="json",
+        )
+        self.assertEqual(
+            unconfirmed_policy.status_code,
+            status.HTTP_400_BAD_REQUEST,
+        )
+        confirmed_policy = self.client.put(
+            reverse("reconciliation_profile"),
+            {
+                "slack_user_id": "UADMIN",
+                "domain": "mlai.au",
+                "humanitix_profitability_included": True,
+                "confirm": True,
+            },
+            format="json",
+        )
+        self.assertEqual(confirmed_policy.status_code, status.HTTP_200_OK)
+        self.assertTrue(
+            confirmed_policy.data["profile"][
+                "humanitix_profitability_included"
+            ]
+        )
+        self.assertEqual(
+            confirmed_policy.data["profile"][
+                "profitability_policy_verified_by_slack_id"
+            ],
+            "UADMIN",
+        )
+        self.assertIsNotNone(
+            confirmed_policy.data["profile"][
+                "profitability_policy_verified_at"
+            ]
+        )
 
         mapping_response = self.client.put(
             reverse("reconciliation_mappings"),

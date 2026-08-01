@@ -131,6 +131,15 @@ def serialize_profile(profile: ReconciliationProfile) -> dict[str, Any]:
         "project_tracking_category_name": profile.project_tracking_category_name,
         "standalone_fee_project_option_id": profile.standalone_fee_project_option_id,
         "standalone_fee_project_option_name": profile.standalone_fee_project_option_name,
+        "humanitix_profitability_included": profile.humanitix_profitability_included,
+        "profitability_policy_verified_by_slack_id": (
+            profile.profitability_policy_verified_by_slack_id
+        ),
+        "profitability_policy_verified_at": (
+            profile.profitability_policy_verified_at.isoformat()
+            if profile.profitability_policy_verified_at
+            else None
+        ),
         "enabled": profile.enabled,
         # Keep the original field for clients already using the payout flow.
         "xero_write_scope": bool(profile.xero_connection and xero_has_bank_transaction_scope(scopes)),

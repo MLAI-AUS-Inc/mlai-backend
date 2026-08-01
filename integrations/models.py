@@ -599,6 +599,13 @@ class ReconciliationProfile(models.Model):
     project_tracking_category_name = models.CharField(max_length=255, default="Project Name")
     standalone_fee_project_option_id = models.CharField(max_length=255, blank=True, default="")
     standalone_fee_project_option_name = models.CharField(max_length=255, blank=True, default="")
+    humanitix_profitability_included = models.BooleanField(default=False)
+    profitability_policy_verified_by_slack_id = models.CharField(
+        max_length=100,
+        blank=True,
+        default="",
+    )
+    profitability_policy_verified_at = models.DateTimeField(null=True, blank=True)
     enabled = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

@@ -58,6 +58,9 @@ from integrations.services.humanitix_payouts import (
     post_humanitix_xero_bank_transaction,
     serialize_humanitix_payout,
 )
+from integrations.services.reconciliation_reporting import (
+    build_reconciliation_profitability_report,
+)
 from integrations.services.reconciliation import (
     ReconciliationReportService,
     StripeAPIError,
@@ -529,6 +532,7 @@ class ReconciliationProfileView(ReconciliationAdminView):
         "project_tracking_category_name",
         "standalone_fee_project_option_id",
         "standalone_fee_project_option_name",
+        "humanitix_profitability_included",
         "enabled",
     }
 
@@ -545,7 +549,7 @@ class ReconciliationProfileView(ReconciliationAdminView):
         return Response({"profile": serialize_profile(profile)})
 
     def put(self, request):
-        _, organization, error = self.context(request, from_body=True)
+        slack_user_id, organization, error = self.context(request, from_body=True)
         if error:
             return error
         profile, _ = ReconciliationProfile.objects.get_or_create(organization=organization)
@@ -562,6 +566,31 @@ class ReconciliationProfileView(ReconciliationAdminView):
         for field in self.EDITABLE_FIELDS:
             if field in request.data:
                 setattr(profile, field, request.data[field])
+        if "humanitix_profitability_included" in request.data:
+            if request.data.get("confirm") is not True:
+                return Response(
+                    {
+                        "error": (
+                            "confirm must be true to change Humanitix "
+                            "profitability policy"
+                        )
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if not isinstance(
+                request.data.get("humanitix_profitability_included"),
+                bool,
+            ):
+                return Response(
+                    {
+                        "error": (
+                            "humanitix_profitability_included must be a boolean"
+                        )
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            profile.profitability_policy_verified_by_slack_id = slack_user_id
+            profile.profitability_policy_verified_at = datetime.now(timezone.utc)
         if profile.line_amount_types not in {"Inclusive", "Exclusive", "NoTax"}:
             return Response({"error": "line_amount_types must be Inclusive, Exclusive, or NoTax"}, status=status.HTTP_400_BAD_REQUEST)
         profile.save()
@@ -2752,6 +2781,64 @@ class ReconciliationPayoutListView(ReconciliationAdminView):
             return error
         records = StripePayoutReconciliation.objects.filter(organization=organization).order_by("-arrival_date", "-id")[:250]
         return Response({"payouts": [serialize_payout(record) for record in records]})
+
+
+class ReconciliationProfitabilityReportView(ReconciliationAdminView):
+    """Read-only, period-bounded event/project cashflow report."""
+
+    MAX_PERIOD_DAYS = 1095
+
+    def get(self, request):
+        _, organization, error = self.context(request)
+        if error:
+            return error
+        parsed = {}
+        for field_name in ("since", "until"):
+            raw_value = str(request.query_params.get(field_name) or "").strip()
+            if not raw_value:
+                return Response(
+                    {"error": f"{field_name} is required and must use YYYY-MM-DD"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            try:
+                parsed[field_name] = date.fromisoformat(raw_value)
+            except ValueError:
+                return Response(
+                    {"error": f"{field_name} must use YYYY-MM-DD"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        if parsed["since"] > parsed["until"]:
+            return Response(
+                {"error": "since must be on or before until"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if (parsed["until"] - parsed["since"]).days > self.MAX_PERIOD_DAYS:
+            return Response(
+                {"error": f"report period must be {self.MAX_PERIOD_DAYS} days or fewer"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            report = build_reconciliation_profitability_report(
+                organization=organization,
+                period_start=parsed["since"],
+                period_end=parsed["until"],
+            )
+        except ReconciliationProfile.DoesNotExist:
+            return Response(
+                {"error": "Reconciliation profile is not configured."},
+                status=status.HTTP_409_CONFLICT,
+            )
+        except ReconciliationValidationError as exc:
+            return Response(
+                {"error": str(exc), "errors": exc.errors},
+                status=status.HTTP_409_CONFLICT,
+            )
+        except requests.RequestException:
+            return Response(
+                {"error": "Unable to read Xero data for the profitability report."},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+        return Response(report)
 
 
 class ReconciliationPayoutCorrectionPreviewView(ReconciliationAdminView):
