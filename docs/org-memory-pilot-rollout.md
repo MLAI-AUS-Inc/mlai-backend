@@ -77,6 +77,14 @@ enforcement commit:
 - `ORG_MEMORY_PRODUCTION_STAGE_OPERATOR_EMAIL`;
 - `ORG_MEMORY_PRODUCTION_ACTIVATION_OPERATOR_EMAIL`.
 
+Keep the GitHub repository variable `ORG_MEMORY_PRODUCTION_DEPLOY_ENABLED`
+unset or `false` until the production preflight, approval manifest, dedicated
+key, and two independent operators are ready. In that fail-closed state,
+ordinary backend releases continue while the organisational-memory query API,
+staging, and activation remain disabled. Set the variable to `true` only for a
+reviewed production activation; the deployment then requires every secret
+listed above.
+
 The two operator accounts must be distinct, active MLAI organisation members
 with `manage_sources`, independent of the approved pilot actors. The deploy
 stores the approval and operator records mode-0600 outside the checkout and
