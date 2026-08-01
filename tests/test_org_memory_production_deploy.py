@@ -61,6 +61,8 @@ class OrgMemoryProductionDeployTests(SimpleTestCase):
         self.assertIn("stage_org_memory_pilot", deploy)
         self.assertIn("reconcile_org_memory_access_restored_dead_letters", deploy)
         self.assertIn("reconcile_org_memory_extraction_dead_letters", deploy)
+        self.assertIn("request_org_memory_reprocess", deploy)
+        self.assertIn("committee-drive-parser-v2-extraction-v2", deploy)
         self.assertIn("activate_org_memory_pilot", deploy)
         self.assertIn("--environment production", deploy)
         self.assertIn("--require-active", deploy)
@@ -81,6 +83,10 @@ class OrgMemoryProductionDeployTests(SimpleTestCase):
         self.assertLess(
             deploy.index("reconcile_org_memory_extraction_dead_letters"),
             deploy.index("stage_org_memory_pilot"),
+        )
+        self.assertGreater(
+            deploy.index("request_org_memory_reprocess"),
+            deploy.index("check_org_memory_pilot_access_matrix"),
         )
 
     def test_admin_brain_staging_awaiting_evidence_skips_but_stays_fail_closed(self):
