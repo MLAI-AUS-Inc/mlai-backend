@@ -1173,7 +1173,7 @@ ORG_MEMORY_EXTRACTION_MODEL = os.environ.get(
 ).strip()
 ORG_MEMORY_EXTRACTOR_VERSION = os.environ.get(
     'ORG_MEMORY_EXTRACTOR_VERSION',
-    'org-memory-extractor-v1',
+    'org-memory-extractor-v2',
 ).strip()
 ORG_MEMORY_EXTRACTION_SCHEMA_VERSION = os.environ.get(
     'ORG_MEMORY_EXTRACTION_SCHEMA_VERSION',
@@ -1181,7 +1181,7 @@ ORG_MEMORY_EXTRACTION_SCHEMA_VERSION = os.environ.get(
 ).strip()
 ORG_MEMORY_EXTRACTION_PROMPT_VERSION = os.environ.get(
     'ORG_MEMORY_EXTRACTION_PROMPT_VERSION',
-    'org-memory-extraction-prompt-v1',
+    'org-memory-extraction-prompt-v2',
 ).strip()
 ORG_MEMORY_EXTRACTION_MAX_INPUT_CHARS = int(
     os.environ.get('ORG_MEMORY_EXTRACTION_MAX_INPUT_CHARS', '60000')

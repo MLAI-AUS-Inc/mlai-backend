@@ -48,6 +48,9 @@ class OrgMemoryProductionDeployTests(SimpleTestCase):
         required_settings = {
             'ORG_MEMORY_QUERY_API_ENABLED "true"',
             'ORG_MEMORY_PILOT_ORGANIZATION_DOMAIN "mlai.au"',
+            'ORG_MEMORY_EXTRACTOR_VERSION "org-memory-extractor-v2"',
+            'ORG_MEMORY_EXTRACTION_SCHEMA_VERSION "org-memory-extraction-schema-v2"',
+            'ORG_MEMORY_EXTRACTION_PROMPT_VERSION "org-memory-extraction-prompt-v2"',
             'ORG_MEMORY_ENABLED_PROVIDERS "google_drive"',
             'ORG_MEMORY_PUBLICATION_ENABLED "false"',
             'ORG_MEMORY_ACTIONS_ENABLED "false"',
@@ -61,6 +64,9 @@ class OrgMemoryProductionDeployTests(SimpleTestCase):
         self.assertIn("stage_org_memory_pilot", deploy)
         self.assertIn("reconcile_org_memory_access_restored_dead_letters", deploy)
         self.assertIn("reconcile_org_memory_extraction_dead_letters", deploy)
+        self.assertIn("--superseded-extractor-version org-memory-extractor-v1", deploy)
+        self.assertIn("--superseded-prompt-version org-memory-extraction-prompt-v1", deploy)
+        self.assertIn("schedule_org_memory_reextraction", deploy)
         self.assertIn("request_org_memory_reprocess", deploy)
         self.assertIn("committee-drive-parser-v2-extraction-v2", deploy)
         self.assertIn("activate_org_memory_pilot", deploy)
@@ -82,6 +88,10 @@ class OrgMemoryProductionDeployTests(SimpleTestCase):
         )
         self.assertLess(
             deploy.index("reconcile_org_memory_extraction_dead_letters"),
+            deploy.index("stage_org_memory_pilot"),
+        )
+        self.assertLess(
+            deploy.index("schedule_org_memory_reextraction"),
             deploy.index("stage_org_memory_pilot"),
         )
         self.assertGreater(

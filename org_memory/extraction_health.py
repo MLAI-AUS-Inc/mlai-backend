@@ -111,21 +111,35 @@ def extraction_health_report(
     }
 
 
-def legacy_extraction_dead_letters(
+def superseded_extraction_dead_letters(
     *,
     organization,
     provider: str,
-    superseded_schema_version: str,
+    superseded_schema_version: Optional[str] = None,
+    superseded_extractor_version: Optional[str] = None,
+    superseded_prompt_version: Optional[str] = None,
 ):
+    filters = {
+        "organization": organization,
+        "resolved_at__isnull": True,
+        "task_type": MemoryWorkTaskType.EXTRACT,
+        "work_item__provider": provider,
+        "work_item__action_request__isnull": True,
+        "work_item__source_version__isnull": False,
+    }
+    if superseded_schema_version:
+        filters["payload_snapshot__schema_version"] = superseded_schema_version
+    if superseded_extractor_version:
+        filters["payload_snapshot__extractor_version"] = superseded_extractor_version
+    if superseded_prompt_version:
+        filters["payload_snapshot__prompt_version"] = superseded_prompt_version
     return MemoryDeadLetter.objects.filter(
-        organization=organization,
-        resolved_at__isnull=True,
-        task_type=MemoryWorkTaskType.EXTRACT,
-        work_item__provider=provider,
-        work_item__action_request__isnull=True,
-        work_item__source_version__isnull=False,
-        payload_snapshot__schema_version=superseded_schema_version,
+        **filters,
     ).select_related("work_item", "work_item__source_version")
+
+
+# Backwards-compatible name for callers that still reconcile by schema alone.
+legacy_extraction_dead_letters = superseded_extraction_dead_letters
 
 
 @transaction.atomic
@@ -133,7 +147,9 @@ def reconcile_legacy_extraction_dead_letters(
     *,
     organization,
     provider: str,
-    superseded_schema_version: str,
+    superseded_schema_version: Optional[str] = None,
+    superseded_extractor_version: Optional[str] = None,
+    superseded_prompt_version: Optional[str] = None,
     apply: bool = False,
     resolved_by=None,
     limit: int = 1000,
@@ -142,16 +158,31 @@ def reconcile_legacy_extraction_dead_letters(
     """Supersede bounded legacy extraction failures with the current target."""
 
     target = target or configured_extraction_target()
-    if superseded_schema_version == target.schema_version:
+    superseded_target = {
+        "schema_version": str(superseded_schema_version or "").strip(),
+        "extractor_version": str(superseded_extractor_version or "").strip(),
+        "prompt_version": str(superseded_prompt_version or "").strip(),
+    }
+    superseded_target = {key: value for key, value in superseded_target.items() if value}
+    if not superseded_target:
+        raise ValueError("At least one superseded extraction target version is required.")
+    current_target = {
+        "schema_version": target.schema_version,
+        "extractor_version": target.extractor_version,
+        "prompt_version": target.prompt_version,
+    }
+    if all(current_target[key] == value for key, value in superseded_target.items()):
         raise ValueError(
-            "The superseded schema version must differ from the current target."
+            "The superseded extraction target must differ from the current target."
         )
     if apply and resolved_by is None:
         raise ValueError("An operator is required when applying reconciliation.")
-    dead_letters = legacy_extraction_dead_letters(
+    dead_letters = superseded_extraction_dead_letters(
         organization=organization,
         provider=provider,
         superseded_schema_version=superseded_schema_version,
+        superseded_extractor_version=superseded_extractor_version,
+        superseded_prompt_version=superseded_prompt_version,
     ).order_by("dead_at", "pk")
     if apply:
         lock_options = {}
@@ -166,8 +197,8 @@ def reconcile_legacy_extraction_dead_letters(
         "organization_domain": organization.domain,
         "provider": provider,
         "apply": bool(apply),
-        "superseded_schema_version": superseded_schema_version,
-        "target_schema_version": target.schema_version,
+        "superseded_target": superseded_target,
+        "target": current_target,
         "target_fingerprint": target.fingerprint,
         "candidates": len(rows),
         "scheduled": 0,
