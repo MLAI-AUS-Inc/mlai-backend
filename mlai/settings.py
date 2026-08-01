@@ -206,6 +206,7 @@ INSTALLED_APPS = [
     'startup_updates',
     'content_factory',
     'content_analytics',
+    'community_chat',
     'founder_tools',
     'data_access',
     'core',
@@ -438,8 +439,39 @@ REST_FRAMEWORK = {
         'watt_unity_ticket_redeem': os.getenv('WATT_UNITY_TICKET_REDEEM_RATE', '60/minute'),
         'public_knowledge': os.getenv('ORG_MEMORY_PUBLIC_RATE', '60/minute'),
         'org_memory_actions': os.getenv('ORG_MEMORY_ACTION_RATE', '30/minute'),
+        'community_chat_session': os.getenv('COMMUNITY_CHAT_SESSION_RATE', '120/minute'),
+        'community_chat_challenge': os.getenv('COMMUNITY_CHAT_CHALLENGE_RATE', '20/minute'),
+        'community_chat_invite': os.getenv('COMMUNITY_CHAT_INVITE_RATE', '10/minute'),
+        'community_chat_confirm': os.getenv('COMMUNITY_CHAT_CONFIRM_RATE', '30/minute'),
+        'community_chat_revoke': os.getenv('COMMUNITY_CHAT_REVOKE_RATE', '10/minute'),
     }
 }
+
+# MLAI Chat device bootstrap. The adapter URL is private service-to-service;
+# only the public relay/client URLs are returned to browsers.
+COMMUNITY_CHAT_RELAY_URL = os.getenv('COMMUNITY_CHAT_RELAY_URL', 'wss://chat.mlai.au')
+COMMUNITY_CHAT_API_AUDIENCE = os.getenv('COMMUNITY_CHAT_API_AUDIENCE', 'https://api.mlai.au')
+COMMUNITY_CHAT_ADAPTER_URL = os.getenv(
+    'COMMUNITY_CHAT_ADAPTER_URL', 'http://127.0.0.1:3100'
+).rstrip('/')
+COMMUNITY_CHAT_ADAPTER_TOKEN = os.getenv('COMMUNITY_CHAT_ADAPTER_TOKEN', '')
+COMMUNITY_CHAT_ADAPTER_TIMEOUT_SECONDS = float(
+    os.getenv('COMMUNITY_CHAT_ADAPTER_TIMEOUT_SECONDS', '5')
+)
+COMMUNITY_CHAT_CHALLENGE_TTL_SECONDS = int(
+    os.getenv('COMMUNITY_CHAT_CHALLENGE_TTL_SECONDS', '300')
+)
+COMMUNITY_CHAT_ALLOWED_ORIGINS = _env_list(
+    'COMMUNITY_CHAT_ALLOWED_ORIGINS',
+    [
+        'https://chat.mlai.au',
+        'http://localhost:5173',
+        'http://127.0.0.1:4173',
+        'tauri://localhost',
+        'http://tauri.localhost',
+        'mlaichat://callback',
+    ],
+)
 
 HEALTH_HACK_ACTIVE_CASE_ID = int(os.getenv('HEALTH_HACK_ACTIVE_CASE_ID', '1'))
 HEALTH_HACK_AI_BODY_MAX_BYTES = int(os.getenv('HEALTH_HACK_AI_BODY_MAX_BYTES', str(16 * 1024)))
