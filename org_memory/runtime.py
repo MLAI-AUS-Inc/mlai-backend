@@ -1216,7 +1216,11 @@ def _outbox_task(event: MemoryOutboxEvent):
         source=event.source,
         source_version=(
             event.source_version
-            if event.event_type == MemoryOutboxEventType.SOURCE_VERSION_CAPTURED
+            if event.event_type
+            in {
+                MemoryOutboxEventType.SOURCE_VERSION_CAPTURED,
+                MemoryOutboxEventType.SOURCE_ACCESS_RESTORED,
+            }
             else None
         ),
         configuration=event.source.configuration,
@@ -1570,3 +1574,97 @@ def requeue_dead_letter(dead_letter_id, *, resolved_by=None) -> MemoryWorkItem:
         update_fields=("resolved_at", "resolved_by", "requeued_work_item")
     )
     return requeued
+
+
+LEGACY_ACCESS_RESTORED_ERROR = "'NoneType' object has no attribute 'chunks'"
+
+
+def legacy_access_restored_dead_letters(*, organization, provider: str):
+    """Return only the outbox work affected by the missing-version producer bug."""
+
+    return MemoryDeadLetter.objects.filter(
+        organization=organization,
+        resolved_at__isnull=True,
+        task_type=MemoryWorkTaskType.RECONCILE,
+        work_item__provider=provider,
+        work_item__action_request__isnull=True,
+        work_item__source__isnull=False,
+        work_item__source_version__isnull=True,
+        payload_snapshot__event_type=MemoryOutboxEventType.SOURCE_ACCESS_RESTORED,
+        last_error=LEGACY_ACCESS_RESTORED_ERROR,
+    ).select_related(
+        "work_item",
+        "work_item__source",
+        "work_item__source__current_version",
+        "work_item__configuration",
+    )
+
+
+@transaction.atomic
+def reconcile_access_restored_dead_letters(
+    *,
+    organization,
+    provider: str,
+    apply: bool = False,
+    resolved_by=None,
+    limit: int = 1000,
+) -> dict:
+    """Schedule version-pinned replacements for the bounded legacy failure."""
+
+    if apply and resolved_by is None:
+        raise ValueError("An operator is required when applying reconciliation.")
+    dead_letters = legacy_access_restored_dead_letters(
+        organization=organization,
+        provider=provider,
+    ).order_by("dead_at", "pk")
+    if apply:
+        dead_letters = dead_letters.select_for_update()
+    rows = list(dead_letters[:limit])
+    report = {
+        "schema_version": "org-memory-access-restored-dead-letter-reconciliation-v1",
+        "organization_domain": organization.domain,
+        "provider": provider,
+        "apply": bool(apply),
+        "candidates": len(rows),
+        "scheduled": 0,
+        "existing": 0,
+        "skipped": 0,
+        "resolved": 0,
+    }
+    if not apply:
+        return report
+    resolved_at = timezone.now()
+    for dead_letter in rows:
+        original = dead_letter.work_item
+        source = original.source
+        current = source.current_version if source else None
+        if (
+            source is None
+            or source.lifecycle_state != MemorySourceLifecycle.ACTIVE
+            or current is None
+            or not current.is_current
+            or not current.chunks.filter(active_for_retrieval=True).exists()
+        ):
+            report["skipped"] += 1
+            continue
+        replacement, created = create_work_item(
+            organization=organization,
+            provider=provider,
+            task_type=MemoryWorkTaskType.RECONCILE,
+            idempotency_key=f"dead-letter:{dead_letter.pk}:access-restored-v2",
+            source=source,
+            source_version=current,
+            configuration=original.configuration,
+            payload=original.payload,
+            max_attempts=original.max_attempts,
+        )
+        report["scheduled"] += int(created)
+        report["existing"] += int(not created)
+        dead_letter.resolved_at = resolved_at
+        dead_letter.resolved_by = resolved_by
+        dead_letter.requeued_work_item = replacement
+        dead_letter.save(
+            update_fields=("resolved_at", "resolved_by", "requeued_work_item")
+        )
+        report["resolved"] += 1
+    return report

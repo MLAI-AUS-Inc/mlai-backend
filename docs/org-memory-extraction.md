@@ -90,6 +90,13 @@ idempotently and resolves only matching legacy extraction dead letters. The orig
 and immutable dead-letter evidence remain available for audit. Resolved historical work no longer
 degrades runtime readiness; skipped or unrelated failures remain unresolved and fail closed.
 
+Legacy `source.access_restored` reconciliation work emitted without a source version has a
+separate bounded recovery. Preview it with
+`reconcile_org_memory_access_restored_dead_letters --organization-domain <domain> --provider
+<provider>`. Applying it with an organisation-member operator schedules a version-pinned
+replacement only when the source and current retrievable version are still active. It matches the
+specific historical event and error signature; non-matching or unsafe rows stay unresolved.
+
 For Drive sources, also use the reviewed connection `reprocess` action. Drive parser v2 reparses
 the title date and time, creates a new immutable source version where required, and schedules the
 new extraction target even when provider content is unchanged.

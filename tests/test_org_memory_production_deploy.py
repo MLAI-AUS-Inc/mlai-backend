@@ -59,6 +59,7 @@ class OrgMemoryProductionDeployTests(SimpleTestCase):
             self.assertIn(f"upsert_env_value {setting}", deploy)
 
         self.assertIn("stage_org_memory_pilot", deploy)
+        self.assertIn("reconcile_org_memory_access_restored_dead_letters", deploy)
         self.assertIn("reconcile_org_memory_extraction_dead_letters", deploy)
         self.assertIn("activate_org_memory_pilot", deploy)
         self.assertIn("--environment production", deploy)
@@ -72,6 +73,10 @@ class OrgMemoryProductionDeployTests(SimpleTestCase):
         self.assertGreater(
             deploy.index("activate_org_memory_pilot"),
             deploy.index("configure_firebase_storage_cors"),
+        )
+        self.assertLess(
+            deploy.index("reconcile_org_memory_access_restored_dead_letters"),
+            deploy.index("stage_org_memory_pilot"),
         )
         self.assertLess(
             deploy.index("reconcile_org_memory_extraction_dead_letters"),
