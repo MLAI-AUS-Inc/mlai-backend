@@ -530,6 +530,20 @@ class XeroReconciliationWorkflowTests(TestCase):
                         }],
                     }],
                 },
+                {
+                    "BankTransactionID": "humanitix-payout-transfer",
+                    "Type": "RECEIVE",
+                    "Status": "AUTHORISED",
+                    "DateString": "2026-05-05",
+                    "LineItems": [{
+                        "UnitAmount": 500.00,
+                        "Quantity": 1,
+                        "Tracking": [{
+                            "Name": "Event Name",
+                            "Option": "Luma Night",
+                        }],
+                    }],
+                },
             ],
             payout_previews=[{
                 "existing_transactions": [{
@@ -539,6 +553,7 @@ class XeroReconciliationWorkflowTests(TestCase):
             profile=self.profile,
             period_start=date(2026, 1, 1),
             period_end=date(2026, 6, 30),
+            excluded_transfer_transaction_ids={"humanitix-payout-transfer"},
         )
         row = validation["rows"][0]
         self.assertEqual(row["xero_other_income_cents"], 10000)
@@ -553,6 +568,17 @@ class XeroReconciliationWorkflowTests(TestCase):
         self.assertEqual(validation["negative_count"], 1)
         self.assertEqual(validation["period_start"], "2026-01-01")
         self.assertEqual(validation["period_end"], "2026-06-30")
+        self.assertEqual(
+            {
+                item["bank_transaction_id"]
+                for item in validation["excluded_payout_transfer_lines"]
+            },
+            {"stripe-payout", "humanitix-payout-transfer"},
+        )
+        self.assertEqual(
+            {item["bank_transaction_id"] for item in row["xero_lines"]},
+            {"sponsor-income", "event-cost"},
+        )
         self.assertEqual(
             validation["unmatched_xero_tracking"][0]["event_name"],
             "Costs Only Event",

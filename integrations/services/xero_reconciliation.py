@@ -912,6 +912,7 @@ def build_event_cashflow_validation(
     profile: ReconciliationProfile,
     period_start: date | None = None,
     period_end: date | None = None,
+    excluded_transfer_transaction_ids: set[str] | None = None,
 ) -> dict[str, Any]:
     """Estimate event/project cashflow without double-counting Stripe payouts.
 
@@ -926,8 +927,14 @@ def build_event_cashflow_validation(
         for transaction in preview.get("existing_transactions") or []
         if str(transaction.get("bank_transaction_id") or "").strip()
     }
+    excluded_transfer_transaction_ids = {
+        str(value or "").strip()
+        for value in (excluded_transfer_transaction_ids or set())
+        if str(value or "").strip()
+    }
     stripe_lines: list[dict[str, Any]] = []
     tracked_lines: list[dict[str, Any]] = []
+    excluded_transfer_lines: list[dict[str, Any]] = []
     for transaction in bank_transactions:
         transaction_id = str(transaction.get("BankTransactionID") or "").strip()
         status = str(transaction.get("Status") or "").strip().upper()
@@ -958,29 +965,34 @@ def build_event_cashflow_validation(
                 category_id=profile.project_tracking_category_id,
                 category_name=profile.project_tracking_category_name,
             )
-            if not (event_name or project_name):
-                continue
             raw_cents = _xero_line_cents(line)
             if not raw_cents:
                 continue
+            source_line = {
+                "line_id": f"{transaction_id}:{index}",
+                "bank_transaction_id": transaction_id,
+                "date": _xero_transaction_date(transaction),
+                "transaction_type": transaction_type,
+                "event_name": event_name,
+                "project_name": project_name,
+                "account_code": str(line.get("AccountCode") or "").strip(),
+                "raw_cents": raw_cents,
+            }
+            if transaction_id in excluded_transfer_transaction_ids:
+                excluded_transfer_lines.append(source_line)
+                continue
+            if not (event_name or project_name):
+                continue
             if transaction_id in stripe_transaction_ids:
                 stripe_lines.append(
-                    {
-                        "event_name": event_name,
-                        "project_name": project_name,
-                        "account_code": str(line.get("AccountCode") or "").strip(),
-                        "raw_cents": raw_cents,
-                    }
+                    source_line
                 )
+                excluded_transfer_lines.append(source_line)
                 continue
             cents = abs(raw_cents)
             tracked_lines.append(
                 {
-                    "line_id": f"{transaction_id}:{index}",
-                    "bank_transaction_id": transaction_id,
-                    "date": _xero_transaction_date(transaction),
-                    "event_name": event_name,
-                    "project_name": project_name,
+                    **source_line,
                     "signed_cents": cents if transaction_type == "RECEIVE" else -cents,
                 }
             )
@@ -1117,6 +1129,7 @@ def build_event_cashflow_validation(
                 "profitability_status": status,
                 "validation_flags": flags,
                 "matched_xero_line_count": len(matching_lines),
+                "xero_lines": matching_lines,
             }
         )
 
@@ -1137,6 +1150,7 @@ def build_event_cashflow_validation(
                 "xero_cost_cents": 0,
                 "matched_xero_line_count": 0,
                 "validation_flag": "xero_tracking_without_stripe_revenue",
+                "xero_lines": [],
             },
         )
         signed_cents = int(line["signed_cents"])
@@ -1145,6 +1159,7 @@ def build_event_cashflow_validation(
         else:
             row["xero_cost_cents"] -= signed_cents
         row["matched_xero_line_count"] += 1
+        row["xero_lines"].append(line)
 
     status_counts = Counter(row["profitability_status"] for row in rows)
     return {
@@ -1169,6 +1184,7 @@ def build_event_cashflow_validation(
             if row["xero_stripe_coding_status"] != "correct"
         ),
         "rows": rows,
+        "excluded_payout_transfer_lines": excluded_transfer_lines,
         "unmatched_xero_tracking": sorted(
             unmatched.values(),
             key=lambda item: (
