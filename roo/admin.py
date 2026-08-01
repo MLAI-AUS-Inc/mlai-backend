@@ -1,7 +1,7 @@
 from django.contrib import admin
 from django.utils.html import format_html
 from .models import (
-    PointsAdmin, Minter, Task, Ledger, PointsAccount, PointsPurchase,
+    PointsAdmin, Minter, Task, Ledger, PointsAccount, PointsPurchase, BoostPostAdmission,
     TaskSubmission, CoworkingBooking, CoworkingDayCapacity,
     RewardsCatalog, RewardRedemption, TaskTemplate, QuestProgress,
 )
@@ -128,7 +128,7 @@ class LedgerAdmin(admin.ModelAdmin):
                        'reference_id', 'description', 'created_by_slack_id', 
                        'idempotency_key', 'created_at')
     ordering = ('-created_at',)
-    
+
     def delta_display(self, obj):
         if obj.delta > 0:
             return format_html('<span style="color: green;">+{}</span>', obj.delta)
@@ -146,6 +146,29 @@ class LedgerAdmin(admin.ModelAdmin):
     
     def has_delete_permission(self, request, obj=None):
         return False  # Ledger is append-only
+
+
+@admin.register(BoostPostAdmission)
+class BoostPostAdmissionAdmin(admin.ModelAdmin):
+    list_display = (
+        'id',
+        'poster_slack_id',
+        'status',
+        'charged_points',
+        'discount_applied',
+        'new_balance',
+        'created_at',
+    )
+    list_filter = ('status', 'discount_applied', 'created_at')
+    search_fields = (
+        'submission_key',
+        'poster_slack_id',
+        'channel_id',
+        'root_message_ts',
+        'social_post_url',
+    )
+    readonly_fields = [field.name for field in BoostPostAdmission._meta.fields]
+    ordering = ('-created_at',)
 
 
 @admin.register(CoworkingDayCapacity)
