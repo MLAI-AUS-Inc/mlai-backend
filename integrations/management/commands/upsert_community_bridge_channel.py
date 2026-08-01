@@ -18,6 +18,7 @@ class Command(BaseCommand):
     def add_arguments(self, parser):
         parser.add_argument("--slack-channel-id", required=True)
         parser.add_argument("--slack-channel-name", default="")
+        parser.add_argument("--slack-workspace-id", default="")
         parser.add_argument(
             "--destination-platform",
             choices=(CommunityBridgePlatform.DISCORD, CommunityBridgePlatform.BUZZ),
@@ -38,7 +39,10 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         slack_channel_id = self._require_non_empty(options["slack_channel_id"], "--slack-channel-id")
         slack_channel_name = str(options["slack_channel_name"] or "").strip()
+        slack_workspace_id = str(options["slack_workspace_id"] or "").strip()
         destination = self._resolve_destination(options)
+        if destination["platform"] == CommunityBridgePlatform.BUZZ and not slack_workspace_id:
+            raise CommandError("--slack-workspace-id is required for MLAI Chat mappings.")
 
         conflict = (
             CommunityBridgeChannel.objects.filter(
@@ -58,6 +62,7 @@ class Command(BaseCommand):
         channel, created = CommunityBridgeChannel.objects.update_or_create(
             slack_channel_id=slack_channel_id,
             defaults={
+                "slack_workspace_id": slack_workspace_id,
                 "slack_channel_name": slack_channel_name,
                 "destination_platform": destination["platform"],
                 "destination_workspace_id": destination["workspace_id"],
@@ -83,6 +88,7 @@ class Command(BaseCommand):
             json.dumps(
                 {
                     "status": "created" if created else "updated",
+                    "slack_workspace_id": channel.slack_workspace_id,
                     "slack_channel_id": channel.slack_channel_id,
                     "slack_channel_name": channel.slack_channel_name,
                     "destination_platform": channel.destination_platform,

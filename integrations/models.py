@@ -1,4 +1,5 @@
 from django.conf import settings
+from django.core.validators import RegexValidator
 from django.db import models
 from .fields import EncryptedTextField
 
@@ -29,6 +30,11 @@ class CommunityBridgeReceiptStatus(models.TextChoices):
     IGNORED = "ignored", "Ignored"
     DUPLICATE = "duplicate", "Duplicate"
     FAILED = "failed", "Failed"
+
+
+class CommunityBridgeIdentityVerificationMethod(models.TextChoices):
+    OPERATOR_ATTESTED = "operator_attested", "Operator attested"
+    ACCOUNT_CHALLENGE = "account_challenge", "Account and key challenge"
 
 
 class ExternalServiceProvider(models.TextChoices):
@@ -376,6 +382,7 @@ from startup_updates.models import (
 
 
 class CommunityBridgeChannel(models.Model):
+    slack_workspace_id = models.CharField(max_length=100, blank=True, default="", db_index=True)
     slack_channel_id = models.CharField(max_length=100, unique=True, db_index=True)
     slack_channel_name = models.CharField(max_length=255, blank=True, default="")
     destination_platform = models.CharField(
@@ -427,6 +434,63 @@ class CommunityBridgeChannel(models.Model):
             self.discord_channel_id = self.discord_channel_id or self.destination_channel_id
             self.discord_channel_name = self.discord_channel_name or self.destination_channel_name
         return super().save(*args, **kwargs)
+
+
+class CommunityBridgeIdentityLink(models.Model):
+    slack_workspace_id = models.CharField(max_length=100)
+    slack_user_id = models.CharField(max_length=100)
+    buzz_pubkey = models.CharField(
+        max_length=64,
+        validators=[
+            RegexValidator(
+                regex=r"^[0-9a-f]{64}$",
+                message="buzz_pubkey must be a lowercase 64-character hex public key",
+            )
+        ],
+    )
+    display_name = models.CharField(max_length=255)
+    verification_method = models.CharField(
+        max_length=32,
+        choices=CommunityBridgeIdentityVerificationMethod.choices,
+    )
+    verification_reference = models.CharField(max_length=255)
+    verified_at = models.DateTimeField()
+    revoked_at = models.DateTimeField(null=True, blank=True)
+    revocation_reason = models.CharField(max_length=255, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "community_bridge_identity_link"
+        ordering = ["slack_workspace_id", "slack_user_id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["slack_workspace_id", "slack_user_id"],
+                name="bridge_identity_workspace_slack_unique",
+            ),
+            models.UniqueConstraint(
+                fields=["slack_workspace_id", "buzz_pubkey"],
+                name="bridge_identity_workspace_buzz_unique",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=["slack_workspace_id", "revoked_at"],
+                name="bridge_identity_active_idx",
+            )
+        ]
+
+    def save(self, *args, **kwargs):
+        self.slack_workspace_id = str(self.slack_workspace_id or "").strip()
+        self.slack_user_id = str(self.slack_user_id or "").strip()
+        self.buzz_pubkey = str(self.buzz_pubkey or "").strip().lower()
+        self.display_name = str(self.display_name or "").strip()
+        self.verification_reference = str(self.verification_reference or "").strip()
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.slack_workspace_id}:{self.slack_user_id} -> {self.buzz_pubkey[:12]}"
 
 
 class CommunityBridgeReceipt(models.Model):

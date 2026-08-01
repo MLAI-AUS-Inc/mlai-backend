@@ -14,6 +14,10 @@ from integrations.services.community_bridge.formatting import (
     normalize_discord_attachments,
     sanitize_discord_text,
 )
+from integrations.services.community_bridge.identity import (
+    verified_identity_for_buzz,
+    verified_identity_for_slack,
+)
 from integrations.services.community_bridge.slack import SlackBridgeClient
 from integrations.services.community_bridge.store import (
     claim_ready_deliveries,
@@ -177,6 +181,7 @@ class CommunityBridgeDiscordClient(discord.Client):
         author_display_name = await self._resolve_author_display_name(
             payload,
             source_platform=delivery["source_platform"],
+            channel=delivery.get("channel"),
         )
         content = build_mirrored_text(
             destination_platform=CommunityBridgePlatform.DISCORD,
@@ -251,6 +256,7 @@ class CommunityBridgeDiscordClient(discord.Client):
         author_display_name = await self._resolve_author_display_name(
             payload,
             source_platform=delivery["source_platform"],
+            channel=delivery.get("channel"),
         )
         text = build_mirrored_text(
             destination_platform=CommunityBridgePlatform.SLACK,
@@ -328,11 +334,27 @@ class CommunityBridgeDiscordClient(discord.Client):
     async def _deliver_to_buzz(self, delivery: dict) -> None:
         payload = dict(delivery["payload"] or {})
         operation = delivery["delivery_type"]
+        channel = dict(delivery.get("channel") or {})
+        slack_workspace_id = str(channel.get("slack_workspace_id") or "").strip()
+        source_author_id = str(payload.get("source_author_id") or "").strip()
+        identity = await asyncio.to_thread(
+            verified_identity_for_slack,
+            slack_workspace_id=slack_workspace_id,
+            slack_user_id=source_author_id,
+        )
+        provenance = {
+            "source_workspace_id": slack_workspace_id,
+            "source_channel_id": delivery["source_channel_id"],
+            "source_message_id": delivery["source_message_id"],
+            "source_author_id": source_author_id,
+            "linked_pubkey": str((identity or {}).get("buzz_pubkey") or ""),
+        }
         text = ""
         if operation != CommunityBridgeDeliveryType.DELETE:
             author_display_name = await self._resolve_author_display_name(
                 payload,
                 source_platform=delivery["source_platform"],
+                channel=channel,
             )
             text = build_mirrored_text(
                 destination_platform=CommunityBridgePlatform.BUZZ,
@@ -352,6 +374,7 @@ class CommunityBridgeDiscordClient(discord.Client):
                 channel_id=delivery["target_channel_id"],
                 text=text,
                 parent_message_id=parent_message_id,
+                **provenance,
             )
             await asyncio.to_thread(
                 complete_create_delivery,
@@ -382,6 +405,7 @@ class CommunityBridgeDiscordClient(discord.Client):
             channel_id=link["destination_channel_id"],
             text=text,
             target_message_id=link["destination_message_id"],
+            **provenance,
         )
         if operation == CommunityBridgeDeliveryType.DELETE:
             await asyncio.to_thread(
@@ -420,15 +444,28 @@ class CommunityBridgeDiscordClient(discord.Client):
         except Exception:
             return None
 
-    async def _resolve_author_display_name(self, payload: dict, *, source_platform: str) -> str:
+    async def _resolve_author_display_name(
+        self,
+        payload: dict,
+        *,
+        source_platform: str,
+        channel: Optional[dict] = None,
+    ) -> str:
         display_name = str(payload.get("source_author_display_name") or "").strip()
         if display_name:
             return display_name
+        user_id = str(payload.get("source_author_id") or "").strip()
+        if source_platform == CommunityBridgePlatform.BUZZ and user_id:
+            identity = await asyncio.to_thread(
+                verified_identity_for_buzz,
+                slack_workspace_id=str((channel or {}).get("slack_workspace_id") or ""),
+                buzz_pubkey=user_id,
+            )
+            if identity:
+                return str(identity.get("display_name") or user_id)
         if source_platform == CommunityBridgePlatform.SLACK:
-            user_id = str(payload.get("source_author_id") or "").strip()
             if user_id:
                 return await asyncio.to_thread(SlackBridgeClient.get_user_display_name, user_id)
-        user_id = str(payload.get("source_author_id") or "").strip()
         return user_id or "Unknown user"
 
     def _should_process_message(self, message: discord.Message) -> bool:

@@ -21,6 +21,8 @@ from integrations.models import (
     CommunityBridgeDelivery,
     CommunityBridgeDeliveryStatus,
     CommunityBridgeDeliveryType,
+    CommunityBridgeIdentityLink,
+    CommunityBridgeIdentityVerificationMethod,
     CommunityBridgeMessageLink,
     CommunityBridgePlatform,
     CommunityBridgeReceipt,
@@ -272,6 +274,7 @@ class CommunityBridgeSetupCommandTests(TestCase):
             "upsert_community_bridge_channel",
             slack_channel_id="C-MLAI-CHAT",
             slack_channel_name="community",
+            slack_workspace_id="T-MLAI",
             destination_platform=CommunityBridgePlatform.BUZZ,
             destination_workspace_id="chat.mlai.au",
             destination_channel_id="nostr-channel-event-id",
@@ -282,9 +285,22 @@ class CommunityBridgeSetupCommandTests(TestCase):
         payload = json.loads(out.getvalue())
         channel = CommunityBridgeChannel.objects.get(slack_channel_id="C-MLAI-CHAT")
         self.assertEqual(payload["destination_platform"], CommunityBridgePlatform.BUZZ)
+        self.assertEqual(channel.slack_workspace_id, "T-MLAI")
         self.assertEqual(channel.destination_workspace_id, "chat.mlai.au")
         self.assertEqual(channel.destination_channel_id, "nostr-channel-event-id")
         self.assertEqual(channel.discord_channel_id, "")
+
+    def test_command_requires_workspace_for_buzz_mapping(self):
+        with self.assertRaisesMessage(
+            CommandError,
+            "--slack-workspace-id is required for MLAI Chat mappings.",
+        ):
+            call_command(
+                "upsert_community_bridge_channel",
+                slack_channel_id="C-MLAI-CHAT",
+                destination_platform=CommunityBridgePlatform.BUZZ,
+                destination_channel_id="nostr-channel-event-id",
+            )
 
     def test_command_updates_existing_mapping(self):
         CommunityBridgeChannel.objects.create(
@@ -343,6 +359,7 @@ class CommunityBridgeSetupCommandTests(TestCase):
 class GenericCommunityBridgeRoutingTests(TestCase):
     def setUp(self):
         self.channel = CommunityBridgeChannel.objects.create(
+            slack_workspace_id="T-MLAI",
             slack_channel_id="C-MLAI-CHAT",
             slack_channel_name="community",
             destination_platform=CommunityBridgePlatform.BUZZ,
@@ -418,6 +435,7 @@ class BuzzCommunityBridgeEventViewTests(TestCase):
         self.client = APIClient()
         self.url = reverse("community_bridge_buzz_events")
         self.channel = CommunityBridgeChannel.objects.create(
+            slack_workspace_id="T-MLAI",
             slack_channel_id="C-MLAI-CHAT",
             slack_channel_name="community",
             destination_platform=CommunityBridgePlatform.BUZZ,
@@ -518,6 +536,11 @@ class BuzzBridgeClientTests(TestCase):
             operation="create",
             channel_id="922c3b22-8002-4c3c-a37b-ce406a5e606e",
             text="Alice (Slack)\nHello",
+            source_workspace_id="T-MLAI",
+            source_channel_id="C-MLAI-CHAT",
+            source_message_id="1710000000.1000",
+            source_author_id="U123",
+            linked_pubkey="9" * 64,
         )
 
         self.assertEqual(result["message_id"], "a" * 64)
@@ -526,6 +549,8 @@ class BuzzBridgeClientTests(TestCase):
         self.assertEqual(call.kwargs["headers"]["Authorization"], "Bearer " + "a" * 40)
         self.assertEqual(call.kwargs["json"]["delivery_id"], "42")
         self.assertEqual(call.kwargs["json"]["created_at"], 1785568000)
+        self.assertEqual(call.kwargs["json"]["source_workspace_id"], "T-MLAI")
+        self.assertEqual(call.kwargs["json"]["linked_pubkey"], "9" * 64)
         self.assertEqual(call.kwargs["timeout"], 12)
 
     @patch("integrations.services.community_bridge.buzz.requests.post")
@@ -551,6 +576,7 @@ class BuzzBridgeClientTests(TestCase):
 class BuzzCommunityBridgeWorkerTests(TransactionTestCase):
     def setUp(self):
         self.channel = CommunityBridgeChannel.objects.create(
+            slack_workspace_id="T-MLAI",
             slack_channel_id="C-MLAI-CHAT",
             slack_channel_name="community",
             destination_platform=CommunityBridgePlatform.BUZZ,
@@ -559,6 +585,15 @@ class BuzzCommunityBridgeWorkerTests(TransactionTestCase):
             destination_channel_name="community",
         )
         self.client = CommunityBridgeDiscordClient()
+        self.identity = CommunityBridgeIdentityLink.objects.create(
+            slack_workspace_id="T-MLAI",
+            slack_user_id="U123",
+            buzz_pubkey="9" * 64,
+            display_name="Alice",
+            verification_method=CommunityBridgeIdentityVerificationMethod.OPERATOR_ATTESTED,
+            verification_reference="ops-proof-123",
+            verified_at=timezone.now(),
+        )
 
     def tearDown(self):
         asyncio.run(self.client.close())
@@ -615,6 +650,11 @@ class BuzzCommunityBridgeWorkerTests(TransactionTestCase):
         self.assertIn("Alice (Slack)", kwargs["text"])
         self.assertIn("https://files.example/guide", kwargs["text"])
         self.assertGreater(kwargs["created_at"], 0)
+        self.assertEqual(kwargs["source_workspace_id"], "T-MLAI")
+        self.assertEqual(kwargs["source_channel_id"], self.channel.slack_channel_id)
+        self.assertEqual(kwargs["source_message_id"], "1710000000.2000")
+        self.assertEqual(kwargs["source_author_id"], "U123")
+        self.assertEqual(kwargs["linked_pubkey"], "9" * 64)
         link = resolve_message_link(
             source_platform=CommunityBridgePlatform.SLACK,
             source_channel_id=self.channel.slack_channel_id,
@@ -682,6 +722,86 @@ class BuzzCommunityBridgeWorkerTests(TransactionTestCase):
         self.assertEqual(mock_deliver.call_args.kwargs["text"], "")
         self.assertEqual(mock_deliver.call_args.kwargs["target_message_id"], original_event_id)
         self.assertIsNotNone(link.destination_deleted_at)
+
+    @patch("integrations.services.community_bridge.worker.SlackBridgeClient.post_message")
+    def test_verified_buzz_identity_is_used_for_slack_attribution(self, mock_post):
+        mock_post.return_value = {
+            "channel": self.channel.slack_channel_id,
+            "message_id": "1710000000.9000",
+        }
+        delivery = CommunityBridgeDelivery.objects.create(
+            channel=self.channel,
+            target_platform=CommunityBridgePlatform.SLACK,
+            source_platform=CommunityBridgePlatform.BUZZ,
+            delivery_type=CommunityBridgeDeliveryType.CREATE,
+            source_event_key="buzz-create-linked",
+            source_channel_id=self.channel.destination_channel_id,
+            source_message_id="8" * 64,
+            target_channel_id=self.channel.slack_channel_id,
+            payload={
+                "source_author_id": "9" * 64,
+                "source_author_display_name": "",
+                "text": "Hello from MLAI Chat",
+                "attachments": [],
+            },
+            available_at=timezone.now(),
+        )
+
+        asyncio.run(self.client.process_pending_deliveries_once(limit=5))
+
+        delivery.refresh_from_db()
+        self.assertEqual(delivery.status, CommunityBridgeDeliveryStatus.COMPLETED)
+        self.assertIn("Alice (MLAI Chat)", mock_post.call_args.kwargs["text"])
+
+
+class CommunityBridgeIdentityCommandTests(TestCase):
+    def _verify(self, **overrides):
+        options = {
+            "slack_workspace_id": "T-MLAI",
+            "slack_user_id": "U123",
+            "buzz_pubkey": "a" * 64,
+            "display_name": "Alice",
+            "verification_method": CommunityBridgeIdentityVerificationMethod.OPERATOR_ATTESTED,
+            "verification_reference": "ticket-123-and-signed-challenge-456",
+            "confirm_dual_control": True,
+            "stdout": StringIO(),
+        }
+        options.update(overrides)
+        call_command("verify_community_bridge_identity", **options)
+        return options["stdout"]
+
+    def test_verification_requires_explicit_dual_control_confirmation(self):
+        with self.assertRaisesMessage(CommandError, "--confirm-dual-control is required"):
+            self._verify(confirm_dual_control=False)
+
+    def test_verify_and_revoke_identity_link(self):
+        out = self._verify()
+        link = CommunityBridgeIdentityLink.objects.get()
+
+        self.assertEqual(json.loads(out.getvalue())["status"], "created")
+        self.assertEqual(link.slack_workspace_id, "T-MLAI")
+        self.assertEqual(link.slack_user_id, "U123")
+        self.assertEqual(link.buzz_pubkey, "a" * 64)
+        self.assertIsNone(link.revoked_at)
+
+        revoke_out = StringIO()
+        call_command(
+            "revoke_community_bridge_identity",
+            slack_workspace_id="T-MLAI",
+            slack_user_id="U123",
+            reason="user requested unlink",
+            stdout=revoke_out,
+        )
+        link.refresh_from_db()
+        self.assertEqual(json.loads(revoke_out.getvalue())["status"], "revoked")
+        self.assertIsNotNone(link.revoked_at)
+        self.assertEqual(link.revocation_reason, "user requested unlink")
+
+    def test_public_key_cannot_link_to_two_users_in_one_workspace(self):
+        self._verify()
+
+        with self.assertRaisesMessage(CommandError, "already linked to another Slack user"):
+            self._verify(slack_user_id="U456")
 
 
 class CommunityBridgePayloadRetentionTests(TestCase):

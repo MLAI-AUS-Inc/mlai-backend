@@ -2,6 +2,7 @@ from django.contrib import admin
 from .models import (
     CommunityBridgeChannel,
     CommunityBridgeDelivery,
+    CommunityBridgeIdentityLink,
     CommunityBridgeMessageLink,
     CommunityBridgeReceipt,
     ExternalFinancialRecord,
@@ -35,6 +36,7 @@ class CommunityBridgeChannelAdmin(admin.ModelAdmin):
         "updated_at",
     )
     search_fields = (
+        "slack_workspace_id",
         "slack_channel_id",
         "slack_channel_name",
         "destination_channel_id",
@@ -49,6 +51,28 @@ class CommunityBridgeChannelAdmin(admin.ModelAdmin):
         "sync_replies",
         "updated_at",
     )
+
+
+@admin.register(CommunityBridgeIdentityLink)
+class CommunityBridgeIdentityLinkAdmin(admin.ModelAdmin):
+    list_display = (
+        "slack_workspace_id",
+        "slack_user_id",
+        "display_name",
+        "buzz_pubkey",
+        "verification_method",
+        "verified_at",
+        "revoked_at",
+    )
+    search_fields = (
+        "slack_workspace_id",
+        "slack_user_id",
+        "display_name",
+        "buzz_pubkey",
+        "verification_reference",
+    )
+    list_filter = ("verification_method", "verified_at", "revoked_at")
+    readonly_fields = ("created_at", "updated_at", "verified_at")
 
 
 @admin.register(CommunityBridgeReceipt)

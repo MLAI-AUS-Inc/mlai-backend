@@ -55,6 +55,11 @@ class BuzzBridgeClient:
         text: str,
         target_message_id: str = "",
         parent_message_id: str = "",
+        source_workspace_id: str = "",
+        source_channel_id: str = "",
+        source_message_id: str = "",
+        source_author_id: str = "",
+        linked_pubkey: str = "",
     ) -> dict:
         adapter_url = cls._validated_adapter_url()
         api_token = cls._api_token()
@@ -68,6 +73,11 @@ class BuzzBridgeClient:
             "text": str(text or ""),
             "target_message_id": str(target_message_id or "") or None,
             "parent_message_id": str(parent_message_id or "") or None,
+            "source_workspace_id": str(source_workspace_id or ""),
+            "source_channel_id": str(source_channel_id or ""),
+            "source_message_id": str(source_message_id or ""),
+            "source_author_id": str(source_author_id or ""),
+            "linked_pubkey": str(linked_pubkey or "") or None,
         }
         timeout = max(1, min(int(getattr(settings, "BUZZ_BRIDGE_ADAPTER_TIMEOUT_SECONDS", 15)), 60))
         try:

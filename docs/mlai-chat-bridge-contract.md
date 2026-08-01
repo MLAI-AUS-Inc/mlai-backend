@@ -92,10 +92,45 @@ Create each public-channel mapping with:
 
 ```sh
 python manage.py upsert_community_bridge_channel \
+  --slack-workspace-id T0123456789 \
   --slack-channel-id C0123456789 \
   --slack-channel-name community \
   --destination-platform buzz \
   --destination-workspace-id chat.mlai.au \
   --destination-channel-id 922c3b22-8002-4c3c-a37b-ce406a5e606e \
   --destination-channel-name community
+```
+
+## Verified identity links
+
+Identity links are optional presentation metadata. A bridged Slack message is
+still signed by the dedicated bridge key, never by the linked human. The stable
+key is `(Slack workspace ID, Slack user ID) ↔ Nostr public key`; display names
+are mutable labels only.
+
+Before creating a link, an operator must independently verify control of the
+Slack account and the Nostr key—for example, an authenticated MLAI/Slack
+account check plus a fresh signed Nostr challenge. Put only the non-secret audit
+or ticket reference in the command; never put the challenge secret, private
+key, token, or email address there.
+
+```sh
+python manage.py verify_community_bridge_identity \
+  --slack-workspace-id T0123456789 \
+  --slack-user-id U0123456789 \
+  --buzz-pubkey 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
+  --display-name "Example Member" \
+  --verification-method operator_attested \
+  --verification-reference MLAI-1234 \
+  --confirm-dual-control
+```
+
+Revoke immediately when either account is disconnected, compromised, or
+reassigned:
+
+```sh
+python manage.py revoke_community_bridge_identity \
+  --slack-workspace-id T0123456789 \
+  --slack-user-id U0123456789 \
+  --reason "account disconnected"
 ```

@@ -478,6 +478,7 @@ def _serialize_delivery(delivery: CommunityBridgeDelivery) -> dict:
         "attempts": int(delivery.attempts or 0),
         "max_attempts": int(delivery.max_attempts or 0),
         "channel": {
+            "slack_workspace_id": delivery.channel.slack_workspace_id,
             "slack_channel_id": delivery.channel.slack_channel_id,
             "destination_platform": delivery.channel.destination_platform,
             "destination_workspace_id": delivery.channel.destination_workspace_id,
