@@ -43,6 +43,7 @@ from .models import (
     MemoryRuntimeLaneScope,
     MemoryScopeStatus,
     MemorySource,
+    MemorySourceLifecycle,
     MemorySourceActionRequest,
     MemorySourceAuditEvent,
     MemorySyncRun,
@@ -686,6 +687,44 @@ def _fetch_sync_page(work_item, action, run) -> SyncPage:
     return page
 
 
+def _record_external_ids(provider: str, records) -> set[str]:
+    external_ids = set()
+    for record in records:
+        if not isinstance(record, Mapping):
+            continue
+        if provider == "google_drive":
+            artifact = record.get("artifact")
+            raw = artifact.get("id") if isinstance(artifact, Mapping) else None
+        else:
+            raw = record.get("external_id")
+        if raw is not None and str(raw).strip():
+            external_ids.add(str(raw).strip())
+    return external_ids
+
+
+def _schedule_reprocessed_extractions(configuration, records) -> dict:
+    from .extraction import schedule_source_extraction
+
+    external_ids = _record_external_ids(configuration.provider, records)
+    summary = {"scheduled": 0, "existing": 0, "skipped": 0}
+    if not external_ids:
+        return summary
+    sources = MemorySource.objects.filter(
+        organization=configuration.organization,
+        configuration=configuration,
+        provider=configuration.provider,
+        external_id__in=external_ids,
+        lifecycle_state=MemorySourceLifecycle.ACTIVE,
+        access_revoked_at__isnull=True,
+        current_version__isnull=False,
+    ).select_related("current_version")
+    for source in sources:
+        result = schedule_source_extraction(source_version=source.current_version)
+        for key in summary:
+            summary[key] += int(result.get(key) or 0)
+    return summary
+
+
 @transaction.atomic
 def _commit_sync_page(claim: ClaimedMemoryWork, page: SyncPage) -> dict:
     configuration = _lock_claim_configuration(claim)
@@ -723,6 +762,13 @@ def _commit_sync_page(claim: ClaimedMemoryWork, page: SyncPage) -> dict:
             records_processed += 1
         for removal in page.removals:
             removals_processed += _apply_removal(configuration, removal)
+
+    reextraction = {"scheduled": 0, "existing": 0, "skipped": 0}
+    if action.action == MemoryActionType.REPROCESS:
+        reextraction = _schedule_reprocessed_extractions(
+            configuration,
+            page.records,
+        )
 
     now = timezone.now()
     if page.next_cursor is not None:
@@ -848,6 +894,7 @@ def _commit_sync_page(claim: ClaimedMemoryWork, page: SyncPage) -> dict:
         "status": "continued" if continuation else "completed",
         "records": records_processed,
         "removals": removals_processed,
+        "reextraction": reextraction,
         "metadata_versions_created": metadata_versions_created,
         "continuation_work_item_id": str(continuation.pk) if continuation else None,
     }
@@ -1014,6 +1061,16 @@ def _execute_extraction(claim: ClaimedMemoryWork, work_item: MemoryWorkItem) -> 
         summary = process_extraction_work(work_item)
     except (ExtractionConfigurationError, ExtractionInvariantError) as exc:
         raise PermanentMemoryRuntimeError(str(exc)) from exc
+    from .models import MemoryExtractionStatus
+
+    if summary.get("extraction_status") in {
+        MemoryExtractionStatus.QUARANTINED,
+        MemoryExtractionStatus.REJECTED,
+    }:
+        raise PermanentMemoryRuntimeError(
+            "Organisational-memory extraction was quarantined or rejected; "
+            "the source requires review before the work can be considered complete."
+        )
     if summary.get("claims_created"):
         from .consolidation import schedule_extraction_consolidation
         from .models import MemoryExtractionRun

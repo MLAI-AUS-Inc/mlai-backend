@@ -260,7 +260,24 @@ class OpenAIExtractionProvider:
 
 
 def extraction_json_schema() -> dict:
-    return ExtractionPayload.model_json_schema()
+    schema = ExtractionPayload.model_json_schema()
+    controlled_values = {
+        ("EntityCandidate", "entity_type"): MemoryEntityType.values,
+        ("EvidenceCandidate", "evidence_role"): MemoryEvidenceRole.values,
+        ("ClaimCandidate", "kind"): MemoryClaimKind.values,
+        ("ClaimCandidate", "epistemic_type"): MemoryEpistemicType.values,
+        ("ClaimCandidate", "classification"): MemoryClassification.values,
+    }
+    definitions = schema.get("$defs", {})
+    for (definition_name, field_name), values in controlled_values.items():
+        try:
+            field_schema = definitions[definition_name]["properties"][field_name]
+        except KeyError as exc:  # pragma: no cover - protects future Pydantic upgrades
+            raise ExtractionConfigurationError(
+                f"Extraction schema is missing {definition_name}.{field_name}."
+            ) from exc
+        field_schema["enum"] = list(values)
+    return schema
 
 
 def digest_json(value) -> str:

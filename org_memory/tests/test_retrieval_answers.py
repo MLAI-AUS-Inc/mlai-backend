@@ -151,8 +151,10 @@ class MemoryRetrievalAndAnswerTests(TestCase):
         kind=MemoryClaimKind.PROJECT_STATUS,
         predicate="has_status",
         organization=None,
+        observed_at=None,
     ):
         organization = organization or self.organization
+        observed_at = observed_at or self.observed_at
         _source, version, _created = capture_source_version(
             organization=organization,
             provider="linear",
@@ -170,7 +172,7 @@ class MemoryRetrievalAndAnswerTests(TestCase):
             chunks=[{"ordinal": 0, "text": statement}],
             title=f"Linear {external_id}",
             canonical_url=f"https://linear.example/{external_id}",
-            occurred_at=self.observed_at,
+            occurred_at=observed_at,
         )
         payload = {
             "source_summary": statement,
@@ -191,10 +193,10 @@ class MemoryRetrievalAndAnswerTests(TestCase):
                     "object_entity": None,
                     "object_value": object_value,
                     "statement": statement,
-                    "observed_at": self.observed_at.isoformat(),
+                    "observed_at": observed_at.isoformat(),
                     "event_start_at": None,
                     "event_end_at": None,
-                    "valid_from": self.observed_at.isoformat(),
+                    "valid_from": observed_at.isoformat(),
                     "valid_until": None,
                     "confidence": 0.9,
                     "importance": 0.8,
@@ -251,6 +253,20 @@ class MemoryRetrievalAndAnswerTests(TestCase):
         self.assertEqual(open_loops.mode, MemoryQueryMode.OPEN_LOOPS)
         self.assertIn(MemoryClaimKind.TASK, open_loops.kinds)
         self.assertEqual(historical.mode, MemoryQueryMode.HISTORICAL_AS_OF)
+
+    def test_query_planner_recognises_counted_recent_decisions(self):
+        plan = plan_memory_query(
+            organization=self.organization,
+            authorization=self.authorization,
+            query="Summarise the five most recent decisions and explain what changed.",
+        )
+
+        self.assertEqual(plan.mode, MemoryQueryMode.TIMELINE)
+        self.assertIn(MemoryClaimKind.DECISION, plan.kinds)
+        self.assertIn(MemoryClaimKind.TASK, plan.kinds)
+        self.assertEqual(plan.required_kind, MemoryClaimKind.DECISION)
+        self.assertEqual(plan.requested_count, 5)
+        self.assertTrue(plan.recency_priority)
 
     def test_retrieval_seed_suite(self):
         result = evaluate_retrieval_seed_suite()
@@ -348,6 +364,122 @@ class MemoryRetrievalAndAnswerTests(TestCase):
         self.assertEqual(query_log.input_tokens, 200)
         self.assertNotIn("Pilot status is green.", json.dumps(query_log.candidate_trace))
 
+    def test_model_abstention_overrides_selector_confidence_and_citations(self):
+        self.make_claim(
+            external_id="PILOT-ABSTENTION",
+            statement="Pilot status is green.",
+            object_value="green",
+        )
+        provider = FakeAnswerProvider(answer=ABSTENTION_ANSWER)
+
+        query_log, selection, answer = answer_memory_query(
+            organization=self.organization,
+            authorization=self.authorization,
+            actor=self.actor,
+            query="What is the current Pilot status?",
+            provider=provider,
+        )
+
+        self.assertNotEqual(selection.sufficiency, MemoryEvidenceSufficiency.INSUFFICIENT)
+        self.assertEqual(query_log.status, MemoryQueryStatus.ABSTAINED)
+        self.assertEqual(
+            query_log.evidence_sufficiency,
+            MemoryEvidenceSufficiency.INSUFFICIENT,
+        )
+        self.assertEqual(query_log.confidence, 0)
+        self.assertEqual(query_log.citation_data, [])
+        self.assertEqual(answer["citations"], [])
+
+    def test_recent_decision_query_is_ordered_by_evidence_time(self):
+        older = self.make_claim(
+            external_id="DECISION-OLDER",
+            statement="The committee decided to keep the old venue.",
+            object_value="old venue",
+            kind=MemoryClaimKind.DECISION,
+            predicate="selected_venue",
+            observed_at=datetime(2026, 6, 1, 9, tzinfo=datetime_timezone.utc),
+        )
+        newer = self.make_claim(
+            external_id="DECISION-NEWER",
+            statement="The committee decided to use the new venue.",
+            object_value="new venue",
+            kind=MemoryClaimKind.DECISION,
+            predicate="selected_venue",
+            observed_at=datetime(2026, 7, 1, 9, tzinfo=datetime_timezone.utc),
+        )
+
+        selection = select_memory(
+            organization=self.organization,
+            authorization=self.authorization,
+            query="Summarise the two most recent decisions.",
+        )
+
+        self.assertIn(MemoryClaimKind.DECISION, selection.plan.kinds)
+        self.assertEqual(selection.plan.required_kind, MemoryClaimKind.DECISION)
+        self.assertEqual(selection.sufficiency, MemoryEvidenceSufficiency.SUFFICIENT)
+        self.assertEqual(selection.selected[0].candidate.claim.pk, newer.pk)
+        self.assertEqual(selection.selected[1].candidate.claim.pk, older.pk)
+
+    def test_decision_timeline_includes_a_superseded_decision(self):
+        older = self.make_claim(
+            external_id="DECISION-SUPERSEDED",
+            statement="The committee decided to keep the old venue.",
+            object_value="old venue",
+            kind=MemoryClaimKind.DECISION,
+            predicate="selected_venue",
+            observed_at=datetime(2026, 6, 1, 9, tzinfo=datetime_timezone.utc),
+        )
+        newer = self.make_claim(
+            external_id="DECISION-CURRENT",
+            statement="The committee decided to use the new venue instead.",
+            object_value="new venue",
+            kind=MemoryClaimKind.DECISION,
+            predicate="selected_venue",
+            observed_at=datetime(2026, 7, 1, 9, tzinfo=datetime_timezone.utc),
+        )
+        transition_claim(
+            claim=older,
+            to_status=MemoryClaimStatus.SUPERSEDED,
+            reason="replaced_by_later_committee_decision",
+            actor=self.user,
+            effective_at=datetime(2026, 7, 1, 9, tzinfo=datetime_timezone.utc),
+        )
+        refresh_current_state(self.organization)
+
+        selection = select_memory(
+            organization=self.organization,
+            authorization=self.authorization,
+            query="Summarise the two most recent decisions and explain what changed.",
+        )
+
+        selected_claim_ids = [item.candidate.claim.pk for item in selection.selected]
+        self.assertEqual(selected_claim_ids[:2], [newer.pk, older.pk])
+        self.assertEqual(selection.sufficiency, MemoryEvidenceSufficiency.SUFFICIENT)
+
+    def test_decision_query_does_not_treat_unreviewed_raw_chunks_as_decisions(self):
+        capture_source_version(
+            organization=self.organization,
+            provider="google_drive",
+            external_account_id="drive-retrieval",
+            source_type="meeting_transcript",
+            external_id="RAW-DECISIONS",
+            version_key="v1",
+            content_hash=digest("The committee approved the plan."),
+            classification="internal",
+            acl={"is_accessible": True, "principal_refs": ["group:committee"]},
+            chunks=[{"ordinal": 0, "text": "The committee approved the plan."}],
+            title="Committee notes",
+        )
+
+        selection = select_memory(
+            organization=self.organization,
+            authorization=self.authorization,
+            query="What were the five most recent decisions?",
+        )
+
+        self.assertEqual(selection.candidates, ())
+        self.assertEqual(selection.sufficiency, MemoryEvidenceSufficiency.INSUFFICIENT)
+
     def test_answer_cannot_cite_memory_outside_selected_bundle(self):
         self.make_claim(
             external_id="PILOT-CITATION",
@@ -415,6 +547,38 @@ class MemoryRetrievalAndAnswerTests(TestCase):
 
         self.assertEqual(len(selection.candidates), 2)
         self.assertEqual(len(selection.selected), 1)
+
+    def test_query_log_deduplicates_citations_by_source_document(self):
+        _source, version, _created = capture_source_version(
+            organization=self.organization,
+            provider="google_drive",
+            external_account_id="drive-retrieval",
+            source_type="document",
+            external_id="DOC-MULTI-CHUNK",
+            version_key="v1",
+            content_hash=digest("alpha handbook beta pathway"),
+            classification="internal",
+            acl={"is_accessible": True, "principal_refs": ["group:committee"]},
+            chunks=[
+                {"ordinal": 0, "text": "Alpha committee handbook context."},
+                {"ordinal": 1, "text": "Beta volunteer pathway context."},
+            ],
+            title="Committee handbook",
+        )
+
+        query_log, selection = search_memory_query(
+            organization=self.organization,
+            authorization=self.authorization,
+            actor=self.actor,
+            query="alpha committee handbook beta volunteer pathway",
+        )
+
+        self.assertEqual(len(selection.selected), 2)
+        self.assertEqual(len(query_log.citation_data), 1)
+        self.assertEqual(
+            query_log.citation_data[0]["source_version_id"],
+            str(version.pk),
+        )
 
     def test_explicit_time_filter_cannot_be_bypassed_by_raw_chunk_lane(self):
         claim = self.make_claim(
@@ -676,6 +840,37 @@ class MemoryQueryApiTests(TestCase):
         self.assertEqual(response.status_code, 200, response.data)
         self.assertEqual(response.data["memories"][0]["claim_id"], str(claim.pk))
         self.assertEqual(MemoryQueryLog.objects.get().status, MemoryQueryStatus.SEARCH_ONLY)
+
+    def test_answer_api_reports_model_abstention_as_insufficient(self):
+        self.make_claim(
+            external_id="API-ABSTENTION",
+            statement="Pilot status is green.",
+            object_value="green",
+        )
+        provider = FakeAnswerProvider(answer=ABSTENTION_ANSWER)
+        with patch(
+            "org_memory.answering.OpenAIGroundedAnswerProvider",
+            return_value=provider,
+        ):
+            response = self.client.post(
+                "/api/v1/org-memory/answer",
+                {
+                    "query": "What is the current Pilot status?",
+                    "max_context_tokens": 6000,
+                },
+                format="json",
+                **self.headers(),
+            )
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data["answer"], ABSTENTION_ANSWER)
+        self.assertEqual(
+            response.data["evidence_sufficiency"],
+            MemoryEvidenceSufficiency.INSUFFICIENT,
+        )
+        self.assertEqual(response.data["confidence"], 0)
+        self.assertEqual(response.data["citations"], [])
+        self.assertIn("answer_model_abstained", response.data["warnings"])
 
     def test_revoked_source_cannot_be_recovered_from_old_query_trace(self):
         claim = self.make_claim(
