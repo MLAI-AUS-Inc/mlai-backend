@@ -22,6 +22,11 @@ from .models import (
 )
 
 
+NAIVE_DATETIME_IMMUTABILITY_ERROR = (
+    "['Immutable evidence fields cannot be edited in place: observed_at']"
+)
+
+
 def eligible_source_versions(*, organization, provider: Optional[str] = None):
     versions = MemorySourceVersion.objects.filter(
         source__organization=organization,
@@ -337,6 +342,74 @@ def superseded_extraction_dead_letters(
 
 # Backwards-compatible name for callers that still reconcile by schema alone.
 legacy_extraction_dead_letters = superseded_extraction_dead_letters
+
+
+def naive_datetime_extraction_dead_letters(
+    *,
+    organization,
+    provider: str,
+    target: Optional[ExtractionTarget] = None,
+):
+    """Return current-target failures caused by legacy naive claim datetimes."""
+
+    target = target or configured_extraction_target()
+    return MemoryDeadLetter.objects.filter(
+        organization=organization,
+        resolved_at__isnull=True,
+        task_type=MemoryWorkTaskType.EXTRACT,
+        last_error=NAIVE_DATETIME_IMMUTABILITY_ERROR,
+        work_item__provider=provider,
+        work_item__action_request__isnull=True,
+        work_item__source_version__isnull=False,
+        payload_snapshot__model=target.model,
+        payload_snapshot__extractor_version=target.extractor_version,
+        payload_snapshot__schema_version=target.schema_version,
+        payload_snapshot__prompt_version=target.prompt_version,
+        payload_snapshot__target_fingerprint=target.fingerprint,
+    ).select_related("work_item", "work_item__source_version")
+
+
+@transaction.atomic
+def reconcile_naive_datetime_extraction_dead_letters(
+    *,
+    organization,
+    provider: str,
+    apply: bool = False,
+    resolved_by=None,
+    limit: int = 1000,
+    target: Optional[ExtractionTarget] = None,
+) -> dict:
+    """Requeue bounded, current-target failures fixed by datetime normalization."""
+
+    target = target or configured_extraction_target()
+    if apply and resolved_by is None:
+        raise ValueError("An operator is required when applying reconciliation.")
+    rows = list(
+        naive_datetime_extraction_dead_letters(
+            organization=organization,
+            provider=provider,
+            target=target,
+        ).order_by("dead_at", "pk")[:limit]
+    )
+    report = {
+        "schema_version": "org-memory-naive-datetime-dead-letter-reconciliation-v1",
+        "organization_domain": organization.domain,
+        "provider": provider,
+        "apply": bool(apply),
+        "target_fingerprint": target.fingerprint,
+        "candidates": len(rows),
+        "resolved": 0,
+        "requeued": 0,
+    }
+    if not apply:
+        return report
+    from .runtime import requeue_dead_letter
+
+    for dead_letter in rows:
+        requeue_dead_letter(dead_letter.pk, resolved_by=resolved_by)
+        report["resolved"] += 1
+        report["requeued"] += 1
+    return report
 
 
 @transaction.atomic

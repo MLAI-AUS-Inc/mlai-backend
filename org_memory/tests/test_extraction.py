@@ -19,9 +19,11 @@ from org_memory.extraction import (
     schedule_source_extraction,
 )
 from org_memory.extraction_health import (
+    NAIVE_DATETIME_IMMUTABILITY_ERROR,
     cancel_superseded_consolidation_work,
     cancel_superseded_extraction_work,
     extraction_health_report,
+    reconcile_naive_datetime_extraction_dead_letters,
     reconcile_legacy_extraction_dead_letters,
 )
 from org_memory.kernel import capture_source_version
@@ -88,7 +90,14 @@ class MemoryExtractionTests(TestCase):
             domain="extraction.mlai.test",
         )
 
-    def capture(self, text, *, external_id="meeting-1", classification="committee"):
+    def capture(
+        self,
+        text,
+        *,
+        external_id="meeting-1",
+        classification="committee",
+        metadata=None,
+    ):
         _source, version, _created = capture_source_version(
             organization=self.organization,
             provider="google_drive",
@@ -111,6 +120,7 @@ class MemoryExtractionTests(TestCase):
                 }
             ],
             title="Committee meeting",
+            metadata=metadata,
         )
         return version
 
@@ -215,6 +225,57 @@ class MemoryExtractionTests(TestCase):
         )
         self.assertEqual(MemoryEntity.objects.count(), 2)
         self.assertNotIn(text, MemoryWorkItem.objects.values_list("payload", flat=True))
+
+    def test_normalizes_naive_claim_datetime_using_meeting_timezone(self):
+        text = "2026-06-22 Action: Publish the committee update."
+        version = self.capture(
+            text,
+            external_id="meeting-naive-datetime",
+            metadata={"meeting": {"timezone_name": "Australia/Sydney"}},
+        )
+        provider = FakeProvider(
+            {
+                "source_summary": "The committee assigned an update action.",
+                "entities": [],
+                "claims": [
+                    {
+                        "kind": "task",
+                        "epistemic_type": "decision",
+                        "subject": None,
+                        "predicate": "publish",
+                        "object_entity": None,
+                        "object_value": "committee update",
+                        "statement": "Publish the committee update.",
+                        "observed_at": "2026-06-22T18:30:00",
+                        "event_start_at": None,
+                        "event_end_at": None,
+                        "valid_from": None,
+                        "valid_until": None,
+                        "confidence": 0.9,
+                        "importance": 0.8,
+                        "classification": "committee",
+                        "review_required": True,
+                        "sensitivity_flags": [],
+                        "evidence": [
+                            {
+                                "chunk_id": str(version.chunks.get().pk),
+                                "quote": text,
+                                "evidence_role": "supports",
+                                "evidence_confidence": 1.0,
+                            }
+                        ],
+                    }
+                ],
+                "no_memory_reason": None,
+            }
+        )
+
+        result = extract_source_version(source_version=version, provider=provider)
+
+        self.assertEqual(result["status"], MemoryExtractionStatus.EXTRACTED)
+        claim = MemoryClaim.objects.get()
+        self.assertEqual(claim.observed_at.isoformat(), "2026-06-22T08:30:00+00:00")
+        self.assertIsNotNone(claim.stale_after)
 
     def test_repairs_one_unambiguous_near_verbatim_quote_to_exact_source_text(self):
         text = "The Committee approved the programme — with a public launch on Monday."
@@ -829,6 +890,76 @@ class MemoryExtractionTests(TestCase):
             resolved_by=operator,
         )
         self.assertEqual(repeated["candidates"], 0)
+
+    def test_naive_datetime_dead_letter_reconciliation_requeues_current_target(self):
+        version = self.capture(
+            "2026-06-22 Action: Publish the committee update.",
+            external_id="meeting-naive-datetime-recovery",
+        )
+        operator = get_user_model().objects.create_user(
+            email="datetime-recovery-operator@mlai.test"
+        )
+        OrganizationMembership.objects.create(
+            organization=self.organization,
+            user=operator,
+        )
+        target = configured_extraction_target()
+        payload = {
+            "source_version_id": str(version.pk),
+            "model": target.model,
+            "schema_version": target.schema_version,
+            "extractor_version": target.extractor_version,
+            "prompt_version": target.prompt_version,
+            "target_fingerprint": target.fingerprint,
+        }
+        work = MemoryWorkItem.objects.create(
+            organization=self.organization,
+            provider="google_drive",
+            task_type=MemoryWorkTaskType.EXTRACT,
+            source=version.source,
+            source_version=version,
+            idempotency_key="naive-datetime-extraction-failure",
+            payload=payload,
+            status=MemoryWorkStatus.DEAD,
+            attempts=5,
+            max_attempts=5,
+            last_error=NAIVE_DATETIME_IMMUTABILITY_ERROR,
+        )
+        dead_letter = MemoryDeadLetter.objects.create(
+            work_item=work,
+            organization=self.organization,
+            task_type=MemoryWorkTaskType.EXTRACT,
+            payload_snapshot=payload,
+            attempts=5,
+            last_error=NAIVE_DATETIME_IMMUTABILITY_ERROR,
+        )
+
+        preview = reconcile_naive_datetime_extraction_dead_letters(
+            organization=self.organization,
+            provider="google_drive",
+        )
+        self.assertEqual(preview["candidates"], 1)
+        self.assertFalse(preview["apply"])
+
+        output = io.StringIO()
+        call_command(
+            "reconcile_org_memory_naive_datetime_dead_letters",
+            organization_domain=self.organization.domain,
+            provider="google_drive",
+            operator_email=operator.email,
+            apply=True,
+            stdout=output,
+        )
+        applied = json.loads(output.getvalue())
+        dead_letter.refresh_from_db()
+        requeued = MemoryWorkItem.objects.get(pk=dead_letter.requeued_work_item_id)
+
+        self.assertEqual(applied["resolved"], 1)
+        self.assertEqual(applied["requeued"], 1)
+        self.assertIsNotNone(dead_letter.resolved_at)
+        self.assertEqual(dead_letter.resolved_by, operator)
+        self.assertEqual(requeued.status, MemoryWorkStatus.PENDING)
+        self.assertEqual(requeued.payload, payload)
 
     def test_dead_letter_reconciliation_can_target_superseded_extractor_revision(self):
         version = self.capture(
