@@ -455,7 +455,7 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
 
     runtime_services=(web scheduler memory-worker memory-scheduler)
     if env_has_value SLACK_BRIDGE_BOT_TOKEN && env_has_value DISCORD_BRIDGE_BOT_TOKEN; then
-        runtime_services+=(bridge-worker)
+        runtime_services+=(bridge-worker bridge-retention)
         bridge_worker_enabled=1
     else
         bridge_worker_enabled=0

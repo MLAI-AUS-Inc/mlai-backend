@@ -163,6 +163,36 @@ services:
           - mlai-backend-bridge-worker
     restart: unless-stopped
 
+  bridge-retention:
+    build: .
+    command: >-
+      sh -ec '
+        until python manage.py migrate --check --noinput; do
+          echo "Waiting for migrations to complete...";
+          sleep 5;
+        done;
+        while true; do
+          if ! python manage.py purge_community_bridge_payloads; then
+            echo "Community bridge payload purge failed; the next bounded poll will retry" >&2;
+          fi;
+          sleep "$${COMMUNITY_BRIDGE_PURGE_POLL_SECONDS}";
+        done
+      '
+    environment:
+      APP_ENV: ${APP_ENV:-production}
+      COMMUNITY_BRIDGE_PURGE_POLL_SECONDS: ${COMMUNITY_BRIDGE_PURGE_POLL_SECONDS:-86400}
+    env_file:
+      - .env
+    depends_on:
+      - db
+    networks:
+      default:
+      mlai-shared:
+        aliases:
+          - mlai-backend-bridge-retention
+    restart: unless-stopped
+    stop_grace_period: 30s
+
   db:
     image: pgvector/pgvector:0.8.2-pg15-bookworm
     volumes:

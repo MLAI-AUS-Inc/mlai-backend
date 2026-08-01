@@ -37,7 +37,7 @@ def verify_magic_link(token, max_age=3600):
     try:
         data = signer.unsign_object(token, max_age=max_age)
         email = data.get('email')
-        logger.info(f"Magic link token verified successfully for email {email}")
+        logger.info("Magic link token verified successfully")
         return data
     except SignatureExpired:
         logger.warning("Magic link token has expired.")
@@ -84,11 +84,11 @@ def send_magic_link_email_to_address(
 
     try:
         response = client.send_email(request_body)
-        logger.info(f"Magic link email sent to {email} using message_id {message_id}: {response}")
+        logger.info("Magic link email sent using message_id=%s", message_id)
         return response
-    except Exception as e:
-        logger.error(f"Error sending email to {email}: {e}")
-        raise e
+    except Exception as exc:
+        logger.error("Magic link email delivery failed error_type=%s", exc.__class__.__name__)
+        raise
 
 
 def send_magic_link_email(user, magic_link, message_id="2"):

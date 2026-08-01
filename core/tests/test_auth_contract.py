@@ -243,6 +243,26 @@ class AuthContractTests(TestCase):
         mock_send.assert_called_once()
 
     @patch('core.views.send_magic_link_email')
+    @patch(
+        'core.views.generate_magic_link',
+        return_value='https://mlai.au/verify-email?token=super-secret-magic-token',
+    )
+    def test_send_magic_link_never_logs_token_or_email(self, _mock_generate, _mock_send):
+        user = User.objects.create_user(email='private-login@example.com', role='participant')
+
+        with self.assertLogs('core.views', level='INFO') as captured:
+            response = self.client.post(
+                '/api/v1/auth/send-magic-link/',
+                {'email': user.email, 'app': 'founder-tools'},
+                format='json',
+            )
+
+        logs = '\n'.join(captured.output)
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn('super-secret-magic-token', logs)
+        self.assertNotIn(user.email, logs)
+
+    @patch('core.views.send_magic_link_email')
     @patch('core.views.generate_magic_link')
     def test_healthhack_admin_login_does_not_email_non_superuser(self, mock_generate, mock_send):
         User.objects.create_user(email='closed-link@example.com', role='participant')

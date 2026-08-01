@@ -48,6 +48,7 @@ DOCKER_ONLY_SERVICE_HOSTS = {
 }
 
 REQUIRED_CORS_ORIGINS = {
+    "https://chat.mlai.au",
     "https://mlai.au",
     "https://www.mlai.au",
     # victorai.win registration form posts to /api/v1/victor-ai/ cross-origin.
@@ -57,6 +58,7 @@ REQUIRED_CORS_ORIGINS = {
 
 REQUIRED_CSRF_ORIGINS = {
     "https://api.mlai.au",
+    "https://chat.mlai.au",
     "https://mlai.au",
     "https://www.mlai.au",
 }

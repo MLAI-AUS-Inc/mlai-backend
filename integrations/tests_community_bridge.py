@@ -3,6 +3,7 @@ import hashlib
 import hmac
 import json
 import time
+from datetime import timedelta
 from io import StringIO
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -269,6 +270,41 @@ class CommunityBridgeSetupCommandTests(TestCase):
                 slack_channel_id="C-SLACK-TWO",
                 discord_url="https://discord.com/channels/1492063515987410957/1492063517191180340",
             )
+
+
+class CommunityBridgePayloadRetentionTests(TestCase):
+    def _receipt(self, *, key: str, age_days: int, payload: dict):
+        receipt = CommunityBridgeReceipt.objects.create(
+            platform=CommunityBridgePlatform.SLACK,
+            receipt_key=key,
+            payload=payload,
+        )
+        CommunityBridgeReceipt.objects.filter(id=receipt.id).update(
+            created_at=timezone.now() - timedelta(days=age_days)
+        )
+        receipt.refresh_from_db()
+        return receipt
+
+    def test_purge_clears_only_expired_raw_payloads(self):
+        expired = self._receipt(key="expired", age_days=31, payload={"event": {"text": "secret"}})
+        current = self._receipt(key="current", age_days=29, payload={"event": {"text": "keep"}})
+
+        out = StringIO()
+        call_command("purge_community_bridge_payloads", days=30, batch_size=1, stdout=out)
+
+        expired.refresh_from_db()
+        current.refresh_from_db()
+        self.assertEqual(expired.payload, {})
+        self.assertEqual(current.payload, {"event": {"text": "keep"}})
+        self.assertIn("Cleared 1 community bridge payload", out.getvalue())
+
+    def test_dry_run_does_not_clear_payloads(self):
+        expired = self._receipt(key="dry-run", age_days=31, payload={"token": "sensitive"})
+
+        call_command("purge_community_bridge_payloads", days=30, dry_run=True, stdout=StringIO())
+
+        expired.refresh_from_db()
+        self.assertEqual(expired.payload, {"token": "sensitive"})
 
 
 @override_settings(

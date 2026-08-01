@@ -256,8 +256,28 @@ TEMPLATES = [
 
 WSGI_APPLICATION = 'mlai.wsgi.application'
 
-CORS_ALLOWED_ORIGINS = os.getenv('CORS_ALLOWED_ORIGINS', 'http://localhost:3000,http://localhost:5173,https://mlai.au,https://www.mlai.au,https://admin.mlai.au').split(',')
-CSRF_TRUSTED_ORIGINS = os.getenv('CSRF_TRUSTED_ORIGINS', 'http://localhost:3000,http://localhost:5173,https://mlai.au,https://www.mlai.au,https://admin.mlai.au').split(',')
+CORS_ALLOWED_ORIGINS = _env_list(
+    'CORS_ALLOWED_ORIGINS',
+    [
+        'http://localhost:3000',
+        'http://localhost:5173',
+        'https://mlai.au',
+        'https://www.mlai.au',
+        'https://admin.mlai.au',
+        'https://chat.mlai.au',
+    ],
+)
+CSRF_TRUSTED_ORIGINS = _env_list(
+    'CSRF_TRUSTED_ORIGINS',
+    [
+        'http://localhost:3000',
+        'http://localhost:5173',
+        'https://mlai.au',
+        'https://www.mlai.au',
+        'https://admin.mlai.au',
+        'https://chat.mlai.au',
+    ],
+)
 # The standalone admin dashboard (admin.mlai.au) must always be an allowed,
 # credentialed origin, even if the env-var lists above are overridden in prod.
 for _admin_origin in ('https://admin.mlai.au',):
@@ -268,6 +288,25 @@ for _admin_origin in ('https://admin.mlai.au',):
 CORS_ALLOW_CREDENTIALS = True
 CORS_ALLOW_HEADERS = (*default_headers, "x-request-id")
 CORS_EXPOSE_HEADERS = ["X-Request-ID"]
+
+# Bound request buffering before application-specific parsers run. Larger
+# uploads use the dedicated streaming/media paths rather than unbounded Django
+# request bodies.
+DATA_UPLOAD_MAX_MEMORY_SIZE = int(os.getenv('DATA_UPLOAD_MAX_MEMORY_SIZE', str(10 * 1024 * 1024)))
+FILE_UPLOAD_MAX_MEMORY_SIZE = int(os.getenv('FILE_UPLOAD_MAX_MEMORY_SIZE', str(5 * 1024 * 1024)))
+DATA_UPLOAD_MAX_NUMBER_FIELDS = int(os.getenv('DATA_UPLOAD_MAX_NUMBER_FIELDS', '2000'))
+
+# Safe cookie/header defaults apply in every environment. settings_prod.py may
+# tighten deployment-specific transport behavior after these values are loaded.
+SESSION_COOKIE_SECURE = not DEBUG
+SESSION_COOKIE_HTTPONLY = True
+SESSION_COOKIE_SAMESITE = 'Lax'
+CSRF_COOKIE_SECURE = not DEBUG
+CSRF_COOKIE_HTTPONLY = False  # browser clients read the token for the CSRF header
+CSRF_COOKIE_SAMESITE = 'Lax'
+SECURE_CONTENT_TYPE_NOSNIFF = True
+SECURE_REFERRER_POLICY = 'same-origin'
+X_FRAME_OPTIONS = 'DENY'
 
 
 WATT_THE_HACK_REGISTERED_TEAMS = {}
@@ -582,6 +621,12 @@ LOGGING = {
 SECURE_HSTS_SECONDS = 31536000
 SECURE_HSTS_INCLUDE_SUBDOMAINS = True
 SECURE_HSTS_PRELOAD = True
+
+# Raw provider webhook bodies are useful for bounded replay/forensics only.
+# The purge_community_bridge_payloads command clears them after this window.
+COMMUNITY_BRIDGE_RAW_PAYLOAD_RETENTION_DAYS = int(
+    os.getenv('COMMUNITY_BRIDGE_RAW_PAYLOAD_RETENTION_DAYS', '30')
+)
 
 
 

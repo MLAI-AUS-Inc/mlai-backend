@@ -230,9 +230,8 @@ class SendMagicLinkView(APIView):
             magic_link = generate_magic_link(user, base_url=base_url)
             magic_link = _append_auth_query_params(magic_link, app, next_path=next_path)
 
-            logger.info(f"Generated magic link for {email}: {magic_link}")
             send_magic_link_email(user, magic_link, message_id="2")
-            logger.info(f"Sent magic link to existing user: {email} for app {app}")
+            logger.info("Sent magic link to existing user_id=%s app=%s", user.id, app)
 
             return Response(
                 {"user_exists": True, "magic_link_sent": True, "message": "Magic link sent to your email."},
@@ -282,7 +281,7 @@ class CreateUserView(APIView):
                 user.is_active = False # Require verification
                 user.save()
                 
-                logger.info(f"Created new user: {email}")
+                logger.info("Created new user_id=%s", user.id)
 
             # Generate magic link and send email OUTSIDE the transaction
             # so if email fails, user is still created.
@@ -294,11 +293,15 @@ class CreateUserView(APIView):
             magic_link_sent = False
             try:
                 send_magic_link_email(user, magic_link, message_id="2")
-                logger.info(f"Sent magic link to new user: {email} for app {app}")
+                logger.info("Sent magic link to new user_id=%s app=%s", user.id, app)
                 message = "Account created. Check your email for the magic link to sign in."
                 magic_link_sent = True
             except Exception as e:
-                logger.error(f"Failed to send magic link to {email}: {e}")
+                logger.error(
+                    "Failed to send magic link for user_id=%s error_type=%s",
+                    user.id,
+                    e.__class__.__name__,
+                )
                 # The magic link is intentionally NOT returned to the client; the user
                 # must use the link emailed to them. Surface a failure so the frontend
                 # can prompt a resend.
@@ -348,21 +351,21 @@ class MagicLinkVerifyView(APIView):
                     return _unsupported_app_response()
 
                 user = User.objects.get(email__iexact=email)
-                logger.info("Verified magic link for existing user: %s", email)
+                logger.info("Verified magic link for existing user_id=%s", user.id)
 
                 if app_param == 'hospital' and not (
                     user.is_active and user.is_superuser
                 ):
                     logger.warning(
-                        "Rejected closed HealthHack login for non-admin user: %s",
-                        email,
+                        "Rejected closed HealthHack login for non-admin user_id=%s",
+                        user.id,
                     )
                     return _healthhack_admin_only_response()
 
                 if not user.is_active:
                     user.is_active = True
                     user.save()
-                    logger.info(f"Activated user account for {email}")
+                    logger.info("Activated user account user_id=%s", user.id)
 
                 auth_login(
                     request._request,
@@ -427,11 +430,11 @@ class MagicLinkVerifyView(APIView):
                     refresh_token=refresh_token,
                 )
 
-                logger.info(f"Set cookies for {email}: kwargs={cookie_kwargs()}")
+                logger.info("Set authentication cookies for user_id=%s", user.id)
                 return response
 
             except User.DoesNotExist:
-                logger.error(f"User with email {email} does not exist.")
+                logger.warning("Magic link referenced a user that no longer exists")
                 return Response({"error": "User does not exist."}, status=status.HTTP_400_BAD_REQUEST)
         else:
             logger.warning("Invalid or expired magic link token.")
