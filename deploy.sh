@@ -642,6 +642,13 @@ PY
                 web "\$@" </dev/null
         }
 
+        echo "🧹 Reconciling versionless source-access-restored dead letters..."
+        compose_run_web python manage.py reconcile_org_memory_access_restored_dead_letters \
+            --organization-domain mlai.au \
+            --provider google_drive \
+            --operator-email "\$stage_operator" \
+            --apply
+
         echo "🧹 Reconciling superseded Admin Brain extraction dead letters..."
         compose_run_web python manage.py reconcile_org_memory_extraction_dead_letters \
             --organization-domain mlai.au \
