@@ -308,6 +308,10 @@ class BuildDriveServiceTests(SimpleTestCase):
         self.assertIs(service, expected_service)
         build.assert_called_once()
         self.assertEqual(build.call_args.args[:2], ("drive", "v3"))
+        credentials = build.call_args.kwargs["credentials"]
+        self.assertEqual(credentials.expiry, datetime(2099, 1, 1))
+        self.assertIsNone(credentials.expiry.tzinfo)
+        self.assertTrue(credentials.valid)
         self.assertFalse(connection.save.called)
 
     def test_connection_without_read_only_scope_is_rejected(self):

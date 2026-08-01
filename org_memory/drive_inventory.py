@@ -673,6 +673,16 @@ def build_drive_service(connection):
     from google.oauth2.credentials import Credentials
     from googleapiclient.discovery import build
 
+    expires_at = connection.token_expires_at
+    # google-auth compares credential expiry with its own naive UTC clock.
+    # Django returns aware datetimes when USE_TZ is enabled, so normalize only
+    # at the library boundary and keep the persisted model value timezone-aware.
+    credential_expiry = expires_at
+    if credential_expiry and timezone.is_aware(credential_expiry):
+        credential_expiry = credential_expiry.astimezone(datetime_timezone.utc).replace(
+            tzinfo=None
+        )
+
     credentials = Credentials(
         token=access_token,
         refresh_token=str(connection.refresh_token or "").strip() or None,
@@ -680,10 +690,9 @@ def build_drive_service(connection):
         client_id=str(getattr(settings, "GOOGLE_OAUTH_CLIENT_ID", "") or "").strip() or None,
         client_secret=str(getattr(settings, "GOOGLE_OAUTH_CLIENT_SECRET", "") or "").strip() or None,
         scopes=sorted(scopes),
-        expiry=connection.token_expires_at,
+        expiry=credential_expiry,
     )
 
-    expires_at = connection.token_expires_at
     refresh_required = bool(expires_at and expires_at <= timezone.now() + timedelta(minutes=2))
     if refresh_required:
         if not credentials.refresh_token or not credentials.client_id or not credentials.client_secret:
@@ -693,7 +702,13 @@ def build_drive_service(connection):
         except Exception as exc:
             raise DriveInventoryError(f"Google Drive access-token refresh failed: {exc}") from exc
         connection.access_token = credentials.token or ""
-        connection.token_expires_at = credentials.expiry
+        refreshed_expiry = credentials.expiry
+        if refreshed_expiry and timezone.is_naive(refreshed_expiry):
+            refreshed_expiry = timezone.make_aware(
+                refreshed_expiry,
+                datetime_timezone.utc,
+            )
+        connection.token_expires_at = refreshed_expiry
         connection.last_error = ""
         connection.save(update_fields=["access_token", "token_expires_at", "last_error", "updated_at"])
 
