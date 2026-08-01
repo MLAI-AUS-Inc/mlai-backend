@@ -642,6 +642,14 @@ PY
                 web "\$@" </dev/null
         }
 
+        echo "🧹 Reconciling superseded Admin Brain extraction dead letters..."
+        compose_run_web python manage.py reconcile_org_memory_extraction_dead_letters \
+            --organization-domain mlai.au \
+            --provider google_drive \
+            --superseded-schema-version org-memory-extraction-schema-v1 \
+            --operator-email "\$stage_operator" \
+            --apply
+
         echo "🔐 Applying the reviewed Admin Brain production binding..."
         stage_stdout=\$(mktemp)
         if compose_run_web_with_approval python manage.py stage_org_memory_pilot \

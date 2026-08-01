@@ -718,6 +718,7 @@ def build_pilot_readiness_report(
     queue_metrics = {
         "dead_work": organization.memory_work_items.filter(
             status=MemoryWorkStatus.DEAD,
+            dead_letter__resolved_at__isnull=True,
         ).count(),
         "unresolved_dead_letters": organization.memory_dead_letters.filter(
             resolved_at__isnull=True,

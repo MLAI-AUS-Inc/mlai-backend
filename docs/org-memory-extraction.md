@@ -76,6 +76,20 @@ python manage.py schedule_org_memory_reextraction \
   --apply
 ```
 
+If a superseded extraction contract left dead letters, preview the bounded recovery first:
+
+```bash
+python manage.py reconcile_org_memory_extraction_dead_letters \
+  --organization-domain mlai.au \
+  --provider google_drive \
+  --superseded-schema-version org-memory-extraction-schema-v1
+```
+
+Applying the same command with `--operator-email <member> --apply` schedules the current target
+idempotently and resolves only matching legacy extraction dead letters. The original failed work
+and immutable dead-letter evidence remain available for audit. Resolved historical work no longer
+degrades runtime readiness; skipped or unrelated failures remain unresolved and fail closed.
+
 For Drive sources, also use the reviewed connection `reprocess` action. Drive parser v2 reparses
 the title date and time, creates a new immutable source version where required, and schedules the
 new extraction target even when provider content is unchanged.
