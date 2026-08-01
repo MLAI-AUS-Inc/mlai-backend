@@ -104,6 +104,9 @@ from integrations.services.reconciliation_outcomes import (
     build_reconciliation_outcome_summary,
     get_learning_candidate,
 )
+from integrations.services.reconciliation_knowledge import (
+    build_reconciliation_knowledge_export,
+)
 
 
 MAX_WINDOW_DAYS = 92
@@ -314,6 +317,16 @@ class ReconciliationAdminView(APIView):
             return None, None, response
         organization, response = _organization_or_response(request, from_body=from_body)
         return slack_user_id, organization, response
+
+
+class ReconciliationKnowledgeExportView(ReconciliationAdminView):
+    """Admin-only, read-only and sanitized agent knowledge snapshot."""
+
+    def get(self, request):
+        _, organization, error = self.context(request)
+        if error:
+            return error
+        return Response(build_reconciliation_knowledge_export(organization=organization))
 
 
 class ReconciliationReportView(APIView):

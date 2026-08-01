@@ -29,6 +29,7 @@ urlpatterns = [
     path('reconciliation/rules/<int:rule_id>', api_views_reconciliation.ReconciliationRuleDetailView.as_view(), name='reconciliation_rule_detail'),
     path('reconciliation/decisions', api_views_reconciliation.ReconciliationDecisionListView.as_view(), name='reconciliation_decisions'),
     path('reconciliation/outcomes', api_views_reconciliation.ReconciliationOutcomeView.as_view(), name='reconciliation_outcomes'),
+    path('reconciliation/knowledge-export', api_views_reconciliation.ReconciliationKnowledgeExportView.as_view(), name='reconciliation_knowledge_export'),
     path('reconciliation/learning-candidates/<str:candidate_id>', api_views_reconciliation.ReconciliationLearningCandidateView.as_view(), name='reconciliation_learning_candidate'),
     path('reconciliation/readiness', api_views_reconciliation.ReconciliationReadinessView.as_view(), name='reconciliation_readiness'),
     path('reconciliation/agent-runs', api_views_reconciliation.ReconciliationAgentRunView.as_view(), name='reconciliation_agent_runs'),
