@@ -7,9 +7,11 @@ race conditions and duplicate transactions.
 """
 import calendar
 import logging
+import re
 from collections import OrderedDict
 from datetime import date, datetime, timedelta
 from typing import Optional, Tuple
+from urllib.parse import urlsplit
 import requests
 from django.conf import settings
 from django.db import connection, transaction, IntegrityError, models
@@ -17,7 +19,7 @@ from django.db.models import Count
 from django.utils import timezone
 
 from .models import (
-    PointsAccount, Ledger, Task, TaskAssignment, TaskSubmission, TaskActivity,
+    PointsAccount, Ledger, BoostPostAdmission, Task, TaskAssignment, TaskSubmission, TaskActivity,
     CoworkingBooking, CoworkingDayCapacity,
     RewardsCatalog, RewardRedemption, PointsAdmin, PointsPurchase
 )
@@ -1297,6 +1299,208 @@ class CoworkingService:
             }
         )
         return day_capacity
+
+
+class InvalidBoostPostError(ValueError):
+    """The submitted Slack root is not a valid boostable social post."""
+
+
+class BoostPostPayloadConflictError(ValueError):
+    """An idempotency key was reused for a different Slack root payload."""
+
+
+class BoostPostAdmissionService:
+    """Atomically price and debit direct Slack boost-channel root posts."""
+
+    BASE_COST_POINTS = 8
+    DISCOUNT_COST_POINTS = 4
+    SUPPORTED_SOCIAL_HOSTS = (
+        'linkedin.com',
+        'lnkd.in',
+        'x.com',
+        'twitter.com',
+        'instagram.com',
+        'facebook.com',
+    )
+
+    @classmethod
+    def _validate_payload(
+        cls,
+        *,
+        submission_key: str,
+        workspace_id: str,
+        channel_id: str,
+        root_message_ts: str,
+        poster_slack_id: str,
+        social_post_url: str,
+    ) -> None:
+        if not re.fullmatch(r'T[A-Z0-9]+', workspace_id):
+            raise InvalidBoostPostError('workspace_id is invalid')
+        if not re.fullmatch(r'C[A-Z0-9]+', channel_id):
+            raise InvalidBoostPostError('channel_id is invalid')
+        if not re.fullmatch(r'\d{8,}\.\d+', root_message_ts):
+            raise InvalidBoostPostError('root_message_ts is invalid')
+        if not re.fullmatch(r'U[A-Z0-9]+', poster_slack_id):
+            raise InvalidBoostPostError('poster_slack_id is invalid')
+        expected_key = f'boost-post:{workspace_id}:{channel_id}:{root_message_ts}'
+        if submission_key != expected_key:
+            raise InvalidBoostPostError('submission_key does not match the Slack root')
+        if len(social_post_url) > 2048:
+            raise InvalidBoostPostError('social_post_url is too long')
+        try:
+            parsed_url = urlsplit(social_post_url)
+            host = (parsed_url.hostname or '').lower().rstrip('.')
+        except ValueError as exc:
+            raise InvalidBoostPostError('social_post_url is invalid') from exc
+        if parsed_url.scheme.lower() not in {'http', 'https'}:
+            raise InvalidBoostPostError('social_post_url must use http or https')
+        if not any(
+            host == allowed or host.endswith(f'.{allowed}')
+            for allowed in cls.SUPPORTED_SOCIAL_HOSTS
+        ):
+            raise InvalidBoostPostError('A supported social post URL is required')
+
+    @staticmethod
+    def _payload_matches(
+        admission: BoostPostAdmission,
+        *,
+        workspace_id: str,
+        channel_id: str,
+        root_message_ts: str,
+        poster_slack_id: str,
+    ) -> bool:
+        return (
+            admission.workspace_id == workspace_id
+            and admission.channel_id == channel_id
+            and admission.root_message_ts == root_message_ts
+            and admission.poster_slack_id == poster_slack_id
+        )
+
+    @classmethod
+    @transaction.atomic
+    def admit(
+        cls,
+        *,
+        submission_key: str,
+        workspace_id: str,
+        channel_id: str,
+        root_message_ts: str,
+        poster_slack_id: str,
+        root_text: str,
+        social_post_url: str,
+    ) -> tuple[BoostPostAdmission, bool]:
+        cls._validate_payload(
+            submission_key=submission_key,
+            workspace_id=workspace_id,
+            channel_id=channel_id,
+            root_message_ts=root_message_ts,
+            poster_slack_id=poster_slack_id,
+            social_post_url=social_post_url,
+        )
+
+        admission, created = BoostPostAdmission.objects.select_for_update().get_or_create(
+            submission_key=submission_key,
+            defaults={
+                'workspace_id': workspace_id,
+                'channel_id': channel_id,
+                'root_message_ts': root_message_ts,
+                'poster_slack_id': poster_slack_id,
+                'root_text': root_text,
+                'social_post_url': social_post_url,
+                'status': 'processing',
+                'base_cost_points': cls.BASE_COST_POINTS,
+            },
+        )
+        if not cls._payload_matches(
+            admission,
+            workspace_id=workspace_id,
+            channel_id=channel_id,
+            root_message_ts=root_message_ts,
+            poster_slack_id=poster_slack_id,
+        ):
+            raise BoostPostPayloadConflictError(
+                'submission_key is already bound to a different Slack root'
+            )
+        if admission.status != 'processing':
+            return admission, False
+
+        user = PointsService.get_user_by_slack_id(poster_slack_id)
+        if user is None:
+            admission.status = 'member_unlinked'
+            admission.rejection_message = 'Slack member is not linked to a Roo Points account'
+            admission.save(update_fields=['status', 'rejection_message', 'updated_at'])
+            return admission, created
+
+        discount_applied = CoworkingService._has_ready_monthly_update(
+            user,
+            timezone.localdate(),
+        )
+        charged_points = (
+            cls.DISCOUNT_COST_POINTS if discount_applied else cls.BASE_COST_POINTS
+        )
+        account = PointsAccount.objects.select_for_update().filter(user=user).first()
+        if account is None:
+            account = PointsAccount.objects.create(user=user)
+            account = PointsAccount.objects.select_for_update().get(user=user)
+        balance_before = account.balance
+        if balance_before < charged_points:
+            admission.user = user
+            admission.status = 'insufficient_points'
+            admission.charged_points = charged_points
+            admission.discount_applied = discount_applied
+            admission.balance_before = balance_before
+            admission.new_balance = balance_before
+            admission.rejection_message = (
+                f'Insufficient Roo Points: {balance_before} available, '
+                f'{charged_points} required'
+            )
+            admission.save(
+                update_fields=[
+                    'user',
+                    'status',
+                    'charged_points',
+                    'discount_applied',
+                    'balance_before',
+                    'new_balance',
+                    'rejection_message',
+                    'updated_at',
+                ]
+            )
+            return admission, created
+
+        ledger, _ = PointsService.spend(
+            user=user,
+            delta=charged_points,
+            source='TOOLS',
+            description='Boost My Startup post approval',
+            created_by_slack_id='ROO',
+            idempotency_key=f'boost_post:{submission_key}',
+            reference_type='BOOST_POST',
+            reference_id=submission_key,
+        )
+        account.refresh_from_db(fields=['balance'])
+        admission.user = user
+        admission.status = 'approved'
+        admission.charged_points = charged_points
+        admission.discount_applied = discount_applied
+        admission.balance_before = balance_before
+        admission.new_balance = account.balance
+        admission.ledger_entry = ledger
+        admission.rejection_message = ''
+        admission.save(
+            update_fields=[
+                'user',
+                'status',
+                'charged_points',
+                'discount_applied',
+                'balance_before',
+                'new_balance',
+                'ledger_entry',
+                'rejection_message',
+                'updated_at',
+            ]
+        )
+        return admission, created
 
 
 class StartupUpdateRewardService:

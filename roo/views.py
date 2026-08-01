@@ -21,13 +21,14 @@ from datetime import date, timedelta
 from typing import Optional, Tuple
 
 from .models import (
-    PointsAdmin, Minter, Task, Ledger, PointsAccount,
+    PointsAdmin, Minter, Task, Ledger, PointsAccount, BoostPostAdmission,
     TaskAssignment, TaskSubmission, CoworkingBooking, CoworkingDayCapacity,
     RewardsCatalog, RewardRedemption, TaskTemplate, PointsRequest, PointsPurchase
 )
 
 from .services import (
     PointsService, PointsPurchaseService, CoworkingService, CoworkingBatchBookingError,
+    BoostPostAdmissionService, BoostPostPayloadConflictError, InvalidBoostPostError,
     TaskService, RewardsService,
 )
 from .permissions import (
@@ -1195,6 +1196,99 @@ class CurrentUserBalanceView(APIView):
                 'expired_or_reversed_points': balance_data['expired_or_reversed_points'],
             },
             status=status.HTTP_200_OK,
+        )
+
+
+class BoostPostAdmissionView(APIView):
+    """Price and atomically debit one direct #boost-my-startup root post."""
+
+    permission_classes = [HasStrictRooApiKey]
+    REQUIRED_FIELDS = (
+        'submission_key',
+        'workspace_id',
+        'channel_id',
+        'root_message_ts',
+        'poster_slack_id',
+        'social_post_url',
+    )
+
+    @staticmethod
+    def _response(admission: BoostPostAdmission) -> dict:
+        return {
+            'admission_id': admission.id,
+            'status': admission.status,
+            'submission_key': admission.submission_key,
+            'base_cost_points': admission.base_cost_points,
+            'charged_points': admission.charged_points,
+            'discount_applied': admission.discount_applied,
+            'balance_before': admission.balance_before,
+            'new_balance': admission.new_balance,
+            'ledger_entry_id': admission.ledger_entry_id,
+            'message': admission.rejection_message,
+        }
+
+    def post(self, request):
+        values = {
+            key: str(request.data.get(key) or '').strip()
+            for key in self.REQUIRED_FIELDS
+        }
+        missing = [key for key, value in values.items() if not value]
+        if missing:
+            return Response(
+                {
+                    'status': 'invalid_post',
+                    'code': 'invalid_post',
+                    'message': 'Missing required fields: ' + ', '.join(missing),
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        root_text = str(request.data.get('root_text') or '')[:10000]
+
+        try:
+            admission, created = BoostPostAdmissionService.admit(
+                **values,
+                root_text=root_text,
+            )
+        except InvalidBoostPostError as exc:
+            return Response(
+                {
+                    'status': 'invalid_post',
+                    'code': 'invalid_post',
+                    'message': str(exc),
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        except BoostPostPayloadConflictError as exc:
+            return Response(
+                {
+                    'status': 'invalid_post',
+                    'code': 'idempotency_conflict',
+                    'message': str(exc),
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        data = self._response(admission)
+        data['idempotent_replay'] = not created
+        if admission.status == 'approved':
+            return Response(
+                data,
+                status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
+            )
+        if admission.status == 'insufficient_points':
+            data['code'] = 'insufficient_points'
+            return Response(data, status=status.HTTP_402_PAYMENT_REQUIRED)
+        if admission.status == 'member_unlinked':
+            data['code'] = 'member_unlinked'
+            return Response(data, status=status.HTTP_404_NOT_FOUND)
+        logger.error('Boost post admission %s remained processing', admission.id)
+        return Response(
+            {
+                **data,
+                'code': 'admission_incomplete',
+                'message': 'Boost post admission did not reach a terminal state',
+            },
+            status=status.HTTP_503_SERVICE_UNAVAILABLE,
         )
 
 

@@ -518,6 +518,67 @@ class Ledger(models.Model):
         super().save(*args, **kwargs)
 
 
+class BoostPostAdmission(models.Model):
+    """Durable, idempotent charge decision for one Slack boost root post."""
+
+    STATUS_CHOICES = (
+        ('processing', 'Processing'),
+        ('approved', 'Approved'),
+        ('insufficient_points', 'Insufficient points'),
+        ('member_unlinked', 'Member unlinked'),
+        ('invalid_post', 'Invalid post'),
+    )
+
+    submission_key = models.CharField(max_length=255, unique=True)
+    workspace_id = models.CharField(max_length=50)
+    channel_id = models.CharField(max_length=50)
+    root_message_ts = models.CharField(max_length=50)
+    poster_slack_id = models.CharField(max_length=50, db_index=True)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='boost_post_admissions',
+    )
+    root_text = models.TextField(blank=True, default='')
+    social_post_url = models.URLField(max_length=2048)
+    status = models.CharField(max_length=32, choices=STATUS_CHOICES, db_index=True)
+    base_cost_points = models.PositiveIntegerField(default=8)
+    charged_points = models.PositiveIntegerField(null=True, blank=True)
+    discount_applied = models.BooleanField(default=False)
+    balance_before = models.IntegerField(null=True, blank=True)
+    new_balance = models.IntegerField(null=True, blank=True)
+    rejection_message = models.TextField(blank=True, default='')
+    ledger_entry = models.OneToOneField(
+        Ledger,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name='boost_post_admission',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['channel_id', 'root_message_ts'],
+                name='uniq_boost_post_slack_root',
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=['poster_slack_id', 'created_at'],
+                name='roo_boost_poster_created_idx',
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.poster_slack_id} {self.channel_id}:{self.root_message_ts} ({self.status})"
+
+
 class CoworkingDayCapacity(models.Model):
     """
     Capacity override for specific dates.
