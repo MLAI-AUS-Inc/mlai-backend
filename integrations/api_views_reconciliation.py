@@ -27,6 +27,7 @@ from integrations.models import (
     ExternalFinancialRecord,
     ExternalServiceConnection,
     ExternalServiceProvider,
+    HumanitixEvent,
     HumanitixPayout,
     ReconciliationMapping,
     ReconciliationDecision,
@@ -208,6 +209,7 @@ def _reconciliation_request_fingerprint(
             "account_name",
             "tax_type",
             "description_template",
+            "event_source_type",
             "event_source_id",
             "event_tracking_option_name",
             "project_source_id",
@@ -897,14 +899,28 @@ def _save_reconciliation_rule(*, organization, slack_user_id: str, payload, rule
         raise ValueError("Verified rules currently support create_bank_transaction only")
 
     event_source_id = str(payload.get("event_source_id", getattr(rule, "event_source_id", "")) or "").strip()
+    event_source_type = str(
+        payload.get("event_source_type", getattr(rule, "event_source_type", "luma"))
+        or "luma"
+    ).strip()
     event_name = ""
     if event_source_id:
-        event = LumaEventSelection.objects.filter(
-            organization=organization,
-            event_id=event_source_id,
-        ).first()
+        if event_source_type == "luma":
+            event = LumaEventSelection.objects.filter(
+                organization=organization,
+                event_id=event_source_id,
+            ).first()
+        elif event_source_type == "humanitix":
+            event = HumanitixEvent.objects.filter(
+                organization=organization,
+                external_event_id=event_source_id,
+            ).first()
+        else:
+            raise ValueError("event_source_type must be luma or humanitix")
         if event is None:
-            raise ValueError("event_source_id is not a known Luma event")
+            raise ValueError(
+                f"event_source_id is not a known {event_source_type} event"
+            )
         event_name = event.event_name
     project_source_id = str(payload.get("project_source_id", getattr(rule, "project_source_id", "")) or "").strip()
     project_name = ""
@@ -975,6 +991,7 @@ def _save_reconciliation_rule(*, organization, slack_user_id: str, payload, rule
         "effective_to": effective_to,
         "proposed_action": action,
         "description_template": description_template,
+        "event_source_type": event_source_type if event_source_id else "",
         "event_source_id": event_source_id,
         "event_tracking_option_name": event_name,
         "project_source_id": project_source_id,
@@ -1265,6 +1282,9 @@ class ReconciliationLearningCandidateView(ReconciliationAdminView):
                     "account_name": suggested["account_name"],
                     "tax_type": suggested["tax_type"],
                     "description_template": suggested["description_template"],
+                    "event_source_type": suggested.get("event_source_type") or (
+                        "luma" if suggested["event_source_id"] else ""
+                    ),
                     "event_source_id": suggested["event_source_id"],
                     "project_source_id": suggested["project_source_id"],
                     "priority": 100,

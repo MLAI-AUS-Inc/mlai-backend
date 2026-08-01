@@ -210,6 +210,7 @@ def _rule_records(*, organization, fetched_at: str) -> list[dict[str, Any]]:
             "account_name": rule.account_name,
             "tax_type": rule.tax_type,
             "description_template": rule.description_template,
+            "event_source_type": rule.event_source_type,
             "event_source_id": rule.event_source_id,
             "event_tracking_option_name": rule.event_tracking_option_name,
             "project_source_id": rule.project_source_id,

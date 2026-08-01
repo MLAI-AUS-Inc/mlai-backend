@@ -17,6 +17,7 @@ from django.utils import timezone
 from integrations.models import (
     ExternalFinancialRecord,
     ExternalServiceProvider,
+    HumanitixEvent,
     ReconciliationDecision,
     ReconciliationPartyIdentity,
     XeroStatementLineSnapshot,
@@ -45,6 +46,7 @@ ALLOWED_STATEMENT_EVIDENCE_PROVIDERS = {
     "admin_rule",
     "document",
     "gmail",
+    "humanitix",
     "slack",
     "linear",
     "luma",
@@ -338,12 +340,13 @@ def _candidate_entity_catalogs(
     *,
     line: XeroStatementLineSnapshot,
     luma_events: list[dict[str, Any]],
+    humanitix_events: list[dict[str, Any]],
     linear_projects: list[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     nearby_events: list[dict[str, Any]] = []
     entity_entries: list[dict[str, Any]] = []
     nearby_event_aliases: set[str] = set()
-    for event in luma_events:
+    for event in [*luma_events, *humanitix_events]:
         event_date = _catalog_date(event.get("start_at"))
         if event_date is None:
             continue
@@ -355,7 +358,7 @@ def _candidate_entity_catalogs(
             continue
         nearby_event_aliases.update(aliases)
         serialized = {
-            "source_type": "luma",
+            "source_type": str(event.get("source_type") or "luma"),
             "source_id": str(event.get("source_id") or ""),
             "name": str(event.get("name") or ""),
             "start_at": event.get("start_at"),
@@ -397,6 +400,8 @@ def _candidate_entity_catalogs(
             "status": project.get("status"),
             "start_date": project.get("start_date"),
             "target_date": project.get("target_date"),
+            "dimension_hint": project.get("dimension_hint"),
+            "members": list(project.get("members") or []),
             "date_delta_days": date_delta,
         }
         nearby_projects.append(serialized)
@@ -833,7 +838,11 @@ def serialize_statement_suggestion(suggestion: XeroStatementSuggestion) -> dict[
         "account_name": suggestion.account_name,
         "tax_type": suggestion.tax_type,
         "description": suggestion.description,
-        "event": {"source_type": "luma", "source_id": suggestion.event_source_id, "tracking_option_name": suggestion.event_tracking_option_name} if suggestion.event_source_id else None,
+        "event": {
+            "source_type": suggestion.event_source_type or "luma",
+            "source_id": suggestion.event_source_id,
+            "tracking_option_name": suggestion.event_tracking_option_name,
+        } if suggestion.event_source_id else None,
         "project": {"source_type": "linear", "source_id": suggestion.project_source_id, "tracking_option_name": suggestion.project_tracking_option_name} if suggestion.project_source_id else None,
         "matched_xero_bill_id": suggestion.matched_xero_bill_id,
         "confidence": suggestion.confidence,
@@ -1074,9 +1083,11 @@ def build_statement_reconciliation_context(
     organization,
     include_external_evidence: bool = True,
     luma_events: list[dict[str, Any]] | None = None,
+    humanitix_events: list[dict[str, Any]] | None = None,
     linear_projects: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     luma_events = luma_events or []
+    humanitix_events = humanitix_events or []
     linear_projects = linear_projects or []
     lines = list(
         XeroStatementLineSnapshot.objects.filter(organization=organization, active=True).order_by(
@@ -1146,6 +1157,7 @@ def build_statement_reconciliation_context(
         nearby_events, nearby_projects, entity_entries = _candidate_entity_catalogs(
             line=line,
             luma_events=luma_events,
+            humanitix_events=humanitix_events,
             linear_projects=linear_projects,
         )
         serialized["nearby_events"] = nearby_events
@@ -1207,9 +1219,13 @@ def build_statement_reconciliation_context(
 
 def _catalogs(organization):
     events = {
-        item.event_id: item
+        ("luma", item.event_id): item
         for item in LumaEventSelection.objects.filter(organization=organization)
     }
+    events.update({
+        ("humanitix", item.external_event_id): item
+        for item in HumanitixEvent.objects.filter(organization=organization)
+    })
     projects = {
         item.linear_project_id: item
         for item in LinearProjectArtifact.objects.filter(organization=organization)
@@ -1351,8 +1367,14 @@ def save_statement_suggestions(
                 raise ValueError(f"Invalid proposed_action for {line_id}")
             event_payload = item.get("event") if isinstance(item.get("event"), dict) else {}
             event_id = str(event_payload.get("source_id") or "").strip()
-            if event_id and event_id not in events:
-                raise ValueError(f"Unknown Luma event for {line_id}: {event_id}")
+            event_source_type = str(event_payload.get("source_type") or "luma").strip()
+            if event_source_type not in {"luma", "humanitix"}:
+                raise ValueError(f"Unknown event source for {line_id}: {event_source_type}")
+            event_key = (event_source_type, event_id)
+            if event_id and event_key not in events:
+                raise ValueError(
+                    f"Unknown {event_source_type} event for {line_id}: {event_id}"
+                )
             project_payload = item.get("project") if isinstance(item.get("project"), dict) else {}
             project_id = str(project_payload.get("source_id") or "").strip()
             if project_id and project_id not in projects:
@@ -1430,8 +1452,11 @@ def save_statement_suggestions(
                     "account_name": account_name,
                     "tax_type": tax_type,
                     "description": description,
+                    "event_source_type": event_source_type if event_id else "",
                     "event_source_id": event_id,
-                    "event_tracking_option_name": str(getattr(events.get(event_id), "event_name", "") or "")[:255],
+                    "event_tracking_option_name": str(
+                        getattr(events.get(event_key), "event_name", "") or ""
+                    )[:255],
                     "project_source_id": project_id,
                     "project_tracking_option_name": str(getattr(projects.get(project_id), "name", "") or getattr(projects.get(project_id), "project_name", "") or "")[:255],
                     "matched_xero_bill_id": matched_bill_id,

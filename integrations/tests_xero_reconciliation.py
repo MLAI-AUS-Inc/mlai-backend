@@ -14,6 +14,7 @@ from integrations.models import (
     ExternalServiceConnection,
     ExternalServiceProvider,
     GoogleConnection,
+    HumanitixEvent,
     ReconciliationMapping,
     ReconciliationDecision,
     ReconciliationPartyIdentity,
@@ -1369,6 +1370,109 @@ class XeroReconciliationWorkflowTests(TestCase):
             "email": "hello@luiz-flavio.com",
             "membership_source": "direct",
         }])
+
+    def test_humanitix_event_keeps_its_source_provenance_in_statement_and_payout_suggestions(self):
+        humanitix_connection = ExternalServiceConnection.objects.create(
+            provider=ExternalServiceProvider.HUMANITIX,
+            user=self.user,
+            organization=self.organization,
+            access_token="humanitix-token",
+            external_account_id="humanitix-main",
+        )
+        HumanitixEvent.objects.create(
+            organization=self.organization,
+            connection=humanitix_connection,
+            external_event_id="htx-historical-1",
+            event_name="Historical Demo Day",
+            start_at=datetime(2026, 7, 20, 18, 0, tzinfo=timezone.utc),
+        )
+        line = import_xero_statement_lines(
+            organization=self.organization,
+            bank_account_id="bank-1",
+            lines=[{
+                "statement_line_id": "humanitix-taxi-1",
+                "date": "19 Jul 2026",
+                "narration": "TAXI FIXTURE",
+                "direction": "debit",
+                "amount": "24.00",
+            }],
+        )[0]
+
+        context = build_reconciliation_enrichment_context(organization=self.organization)
+        candidate = next(
+            item for item in context["statement_candidates"]
+            if item["statement_line_id"] == line.statement_line_id
+        )
+        humanitix_event = next(
+            item for item in candidate["nearby_events"]
+            if item["source_id"] == "htx-historical-1"
+        )
+        self.assertEqual(humanitix_event["source_type"], "humanitix")
+
+        statement = save_statement_suggestions(
+            organization=self.organization,
+            run_id="humanitix-statement-run",
+            suggestions=[{
+                "statement_line_id": line.statement_line_id,
+                "proposed_action": "needs_review",
+                "description": "Taxi near Historical Demo Day.",
+                "event": {
+                    "source_type": "humanitix",
+                    "source_id": "htx-historical-1",
+                },
+                "allocation_confidence": 0.8,
+                "evidence": [{
+                    "source_provider": "humanitix",
+                    "source_record_id": "htx-historical-1",
+                }],
+            }],
+        )[0]
+        self.assertEqual(statement.event_source_type, "humanitix")
+        self.assertEqual(
+            serialize_statement_suggestion(statement)["event"],
+            {
+                "source_type": "humanitix",
+                "source_id": "htx-historical-1",
+                "tracking_option_name": "Historical Demo Day",
+            },
+        )
+
+        payout = StripePayoutReconciliation.objects.create(
+            organization=self.organization,
+            payout_id="po_humanitix_stripe",
+            source_hash="h" * 64,
+            amount_cents=1000,
+            currency="AUD",
+            report_payload={
+                "revenue_groups": [{
+                    "source_type": "humanitix_event",
+                    "source_id": "htx-historical-1",
+                    "source_label": "Historical Demo Day",
+                    "gross_cents": 1000,
+                    "stripe_fee_cents": 0,
+                }],
+            },
+        )
+        suggestion = save_reconciliation_suggestions(
+            organization=self.organization,
+            run_id="humanitix-payout-run",
+            suggestions=[{
+                "payout_id": payout.payout_id,
+                "source_type": "humanitix_event",
+                "source_id": "htx-historical-1",
+                "event": {
+                    "source_type": "humanitix",
+                    "source_id": "htx-historical-1",
+                },
+                "confidence": 0.9,
+                "evidence": [{
+                    "source_provider": "humanitix",
+                    "source_record_id": "htx-historical-1",
+                }],
+            }],
+        )[0]
+        self.assertEqual(suggestion.event_source_type, "humanitix")
+        self.assertEqual(suggestion.event_tracking_option_name, "Historical Demo Day")
 
     def test_verified_party_identity_is_supplied_to_statement_agent(self):
         line = import_xero_statement_lines(
