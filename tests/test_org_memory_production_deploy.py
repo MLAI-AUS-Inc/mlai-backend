@@ -7,7 +7,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class OrgMemoryProductionDeployTests(SimpleTestCase):
-    def test_admin_brain_deploy_is_direct_production_and_non_shadow(self):
+    def test_admin_brain_deploy_is_explicit_direct_production_and_non_shadow(self):
         deploy = (ROOT / "deploy.sh").read_text()
 
         required_settings = {
@@ -28,6 +28,9 @@ class OrgMemoryProductionDeployTests(SimpleTestCase):
         self.assertIn("--require-active", deploy)
         self.assertIn("check_org_memory_pilot_access_matrix", deploy)
         self.assertIn("compose_run_web_with_approval", deploy)
+        self.assertIn('ORG_MEMORY_PRODUCTION_DEPLOY_ENABLED="${ORG_MEMORY_PRODUCTION_DEPLOY_ENABLED:-false}"', deploy)
+        self.assertIn('upsert_env_value ORG_MEMORY_QUERY_API_ENABLED "false"', deploy)
+        self.assertIn('if [ "\\$org_memory_production_deploy_enabled" = "true" ]; then', deploy)
         self.assertNotIn("--environment staging", deploy)
         self.assertGreater(
             deploy.index("activate_org_memory_pilot"),
@@ -47,5 +50,13 @@ class OrgMemoryProductionDeployTests(SimpleTestCase):
             self.assertIn(f"secrets.{secret_name}", workflow)
         self.assertIn(
             "Admin Brain production staging and activation operators must be distinct",
+            workflow,
+        )
+        self.assertIn(
+            "ORG_MEMORY_PRODUCTION_DEPLOY_ENABLED: ${{ vars.ORG_MEMORY_PRODUCTION_DEPLOY_ENABLED || 'false' }}",
+            workflow,
+        )
+        self.assertIn(
+            'if [ "$ORG_MEMORY_PRODUCTION_DEPLOY_ENABLED" = "true" ]; then',
             workflow,
         )
