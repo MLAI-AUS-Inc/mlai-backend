@@ -164,7 +164,10 @@ jobs:
         python manage.py check_org_memory_search --require-vector
         python manage.py migrate --noinput
         python manage.py check_org_memory_search --require-vector --require-installed
-        python manage.py test org_memory.tests.test_search_postgres --verbosity 2
+        python manage.py test \
+          org_memory.tests.test_search_postgres \
+          org_memory.tests.test_runtime_postgres \
+          --verbosity 2
 
   deploy:
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
