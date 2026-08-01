@@ -2832,6 +2832,14 @@ class HumanitixPayoutListView(ReconciliationAdminView):
             .prefetch_related("lines")
             .order_by("-payout_date", "-id")[:500]
         )
+        return Response(
+            {
+                "payouts": [
+                    serialize_humanitix_payout(record)
+                    for record in records
+                ]
+            }
+        )
 
 
 def _humanitix_connection(organization):
@@ -3045,14 +3053,6 @@ class HumanitixReceiptImportView(ReconciliationAdminView):
             "previews": previews,
             "posted_to_xero": False,
         })
-        return Response(
-            {
-                "payouts": [
-                    serialize_humanitix_payout(record)
-                    for record in records
-                ]
-            }
-        )
 
 
 class HumanitixPayoutCorrectionPreviewView(ReconciliationAdminView):

@@ -215,6 +215,24 @@ class HumanitixOperationsApiTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
     @patch("core.permissions.HasRooApiKey.has_permission", return_value=True)
+    def test_payout_list_returns_serialized_records(self, _permission):
+        HumanitixPayout.objects.create(
+            organization=self.organization,
+            connection=self.connection,
+            payout_reference="HP-LISTED",
+            currency="AUD",
+            payout_amount="10.00",
+        )
+
+        response = self.client.get(
+            reverse("reconciliation_humanitix_payouts"),
+            {"slack_user_id": "UADMIN", "domain": "mlai.au"},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["payouts"][0]["payout_reference"], "HP-LISTED")
+
+    @patch("core.permissions.HasRooApiKey.has_permission", return_value=True)
     @patch(
         "integrations.api_views_reconciliation."
         "post_humanitix_xero_bank_transaction"
