@@ -399,7 +399,7 @@ class ReconciliationReportView(APIView):
         return Response(
             {
                 "payout_count": len(records),
-                "payouts": [serialize_payout(record) for record in records],
+                "payouts": [serialize_payout(record, include_payload=True) for record in records],
                 "requested_by": slack_user_id,
             },
             status=status.HTTP_200_OK,
@@ -2885,11 +2885,24 @@ class ReconciliationPayoutPostView(ReconciliationAdminView):
             return error
         if request.data.get("confirm") is not True:
             return Response({"error": "confirm must be true to post to Xero"}, status=status.HTTP_400_BAD_REQUEST)
+        payload_hash = str(request.data.get("payload_hash") or "").strip().lower()
+        if (
+            len(payload_hash) != 64
+            or any(character not in "0123456789abcdef" for character in payload_hash)
+        ):
+            return Response(
+                {"error": "payload_hash from the reviewed preview is required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         record = StripePayoutReconciliation.objects.filter(organization=organization, payout_id=payout_id).first()
         if record is None:
             return Response({"error": "Payout was not found"}, status=status.HTTP_404_NOT_FOUND)
         try:
-            posted = post_xero_bank_transaction(record, approved_by_slack_id=slack_user_id)
+            posted = post_xero_bank_transaction(
+                record,
+                approved_by_slack_id=slack_user_id,
+                expected_payload_hash=payload_hash,
+            )
         except ReconciliationValidationError as exc:
             return Response({"error": str(exc), "errors": exc.errors}, status=status.HTTP_409_CONFLICT)
         except XeroPostingError as exc:

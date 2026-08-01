@@ -139,7 +139,14 @@ class StripeAttributionTests(SimpleTestCase):
                 self.assertEqual(params["payment[payment_intent]"], "pi_invoice")
                 return {"data": [{"id": "ip_1", "invoice": "in_1"}], "has_more": False}
             if path == "/v1/invoices/in_1":
-                return {"id": "in_1", "lines": {"data": [{"description": "MLAI Studio Pro"}]}}
+                return {
+                    "id": "in_1",
+                    "subscription": "sub_1",
+                    "lines": {"data": [{
+                        "description": "MLAI Studio Pro",
+                        "price": {"product": "prod_studio"},
+                    }]},
+                }
             if path == "/v1/payment_intents/pi_luma":
                 return {"id": "pi_luma", "description": "Luma Night", "metadata": {"event_api_id": "evt_2"}}
             raise AssertionError(path)
@@ -156,8 +163,76 @@ class StripeAttributionTests(SimpleTestCase):
         payout = report["payouts"][0]
         self.assertEqual(payout["revenue_groups"][0]["source_type"], "stripe_invoice")
         self.assertEqual(payout["revenue_groups"][0]["source_id"], "in_1")
+        self.assertEqual(payout["revenue_groups"][0]["stripe_invoice_ids"], ["in_1"])
+        self.assertEqual(
+            payout["revenue_groups"][0]["stripe_invoice_payment_ids"],
+            ["ip_1"],
+        )
+        self.assertEqual(
+            payout["revenue_groups"][0]["stripe_payment_intent_ids"],
+            ["pi_invoice"],
+        )
+        self.assertEqual(
+            payout["revenue_groups"][0]["stripe_product_ids"],
+            ["prod_studio"],
+        )
+        self.assertEqual(
+            payout["revenue_groups"][0]["stripe_subscription_ids"],
+            ["sub_1"],
+        )
         self.assertEqual(payout["refunds"][0]["source_id"], "evt_2")
+        self.assertEqual(payout["refunds"][0]["stripe_payment_intent_id"], "pi_luma")
         self.assertFalse(any("Tie-out mismatch" in warning for warning in payout["warnings"]))
+
+    def test_product_metadata_preserves_immutable_product_lineage(self):
+        def handler(path, params):
+            if path == "/v1/payouts":
+                return {
+                    "data": [{
+                        "id": "po_product",
+                        "amount": 9700,
+                        "currency": "aud",
+                        "arrival_date": 1_780_600_000,
+                        "status": "paid",
+                    }],
+                    "has_more": False,
+                }
+            if path == "/v1/balance_transactions":
+                return {
+                    "data": [{
+                        "id": "bt_product",
+                        "type": "payment",
+                        "amount": 10000,
+                        "fee": 300,
+                        "net": 9700,
+                        "currency": "aud",
+                        "source": {
+                            "id": "py_product",
+                            "description": "Studio subscription",
+                            "metadata": {
+                                "product_id": "prod_studio",
+                                "subscription_id": "sub_studio",
+                            },
+                        },
+                    }],
+                    "has_more": False,
+                }
+            raise AssertionError(path)
+
+        report = ReconciliationReportService(
+            stripe_api_key="rk_test",
+            base_url="https://stripe.test",
+            session=FakeSession(handler),
+        ).build_report(
+            since=datetime(2026, 6, 1, tzinfo=timezone.utc),
+            until=datetime(2026, 7, 1, tzinfo=timezone.utc),
+            include_workbook=False,
+        )
+        group = report["payouts"][0]["revenue_groups"][0]
+        self.assertEqual(group["source_type"], "stripe_product")
+        self.assertEqual(group["source_id"], "prod_studio")
+        self.assertEqual(group["stripe_product_ids"], ["prod_studio"])
+        self.assertEqual(group["stripe_subscription_ids"], ["sub_studio"])
 
 
 class XeroReconciliationWorkflowTests(TestCase):
@@ -631,15 +706,15 @@ class XeroReconciliationWorkflowTests(TestCase):
                 post_xero_bank_transaction(record, approved_by_slack_id="UFIN")
         put_mock.assert_not_called()
 
-    def test_standalone_fee_requires_project_tracking(self):
+    def test_standalone_fee_allows_blank_or_verified_project_tracking(self):
         report = deepcopy(self.report)
         payout = report["payouts"][0]
         payout["deposit_cents"] = 9100
         payout["standalone_fee_cents"] = 100
         record = persist_report(organization=self.organization, report=report, stripe_account_id="acct_main")[0]
         preview = build_xero_preview(record)
-        self.assertFalse(preview["ready"])
-        self.assertTrue(any("standalone Stripe fees" in error for error in preview["errors"]))
+        self.assertTrue(preview["ready"])
+        self.assertEqual(preview["xero_payload"]["LineItems"][2].get("Tracking"), None)
 
         self.profile.standalone_fee_project_option_name = "Stripe General"
         self.profile.save(update_fields=["standalone_fee_project_option_name", "updated_at"])
@@ -647,6 +722,50 @@ class XeroReconciliationWorkflowTests(TestCase):
         self.assertTrue(preview["ready"])
         self.assertEqual(preview["line_total_cents"], 9100)
         self.assertEqual(preview["xero_payload"]["LineItems"][2]["Tracking"][0]["Option"], "Stripe General")
+
+    def test_correction_preview_ignores_deleted_transaction_and_allows_replacement(self):
+        record = persist_report(
+            organization=self.organization,
+            report=self.report,
+            stripe_account_id="acct_main",
+        )[0]
+        preview = build_xero_correction_preview(
+            record,
+            bank_transactions=[{
+                "BankTransactionID": "deleted-legacy-1",
+                "Type": "RECEIVE",
+                "Reference": "po_ledger",
+                "DateString": "2026-07-10",
+                "Total": 92.00,
+                "Status": "DELETED",
+                "BankAccount": {"AccountID": "bank-1"},
+                "LineItems": [],
+            }],
+        )
+        self.assertEqual(preview["classification"], "missing_xero_transaction")
+        self.assertTrue(preview["automatic_action_allowed"])
+        self.assertEqual(
+            preview["ignored_inactive_transactions"][0]["bank_transaction_id"],
+            "deleted-legacy-1",
+        )
+
+    def test_payout_preview_hash_rejects_stale_post(self):
+        record = persist_report(
+            organization=self.organization,
+            report=self.report,
+            stripe_account_id="acct_main",
+        )[0]
+        preview = build_xero_preview(record)
+        self.assertEqual(len(preview["payload_hash"]), 64)
+        with self.assertRaisesMessage(
+            ReconciliationValidationError,
+            "preview changed after review",
+        ):
+            post_xero_bank_transaction(
+                record,
+                approved_by_slack_id="UFIN",
+                expected_payload_hash="f" * 64,
+            )
 
     def test_monthly_context_suggestion_adds_linear_project_and_review_note(self):
         record = persist_report(organization=self.organization, report=self.report, stripe_account_id="acct_main")[0]
@@ -3262,6 +3381,13 @@ class ReconciliationWorkflowApiTests(APITestCase):
             format="json",
         )
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        missing_hash = self.client.post(
+            reverse("reconciliation_payout_post", kwargs={"payout_id": "po_api"}),
+            {"slack_user_id": "UADMIN", "domain": "mlai.au", "confirm": True},
+            format="json",
+        )
+        self.assertEqual(missing_hash.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("payload_hash", missing_hash.data["error"])
 
     @patch("core.permissions.HasRooApiKey.has_permission", return_value=True)
     @patch("integrations.api_views_reconciliation.build_xero_correction_batch")
