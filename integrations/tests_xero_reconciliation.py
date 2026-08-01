@@ -92,6 +92,18 @@ class StripeAttributionTests(SimpleTestCase):
         )
         self.assertEqual(comment, "Uber trip. Confidence: 92%.")
 
+    def test_browser_comment_skips_generic_text_and_appends_confidence_once(self):
+        comment = format_statement_browser_comment(
+            description="Unreconciled bank statement line. Confidence: 20%.",
+            review_note="Likely for Demo Night because the venue appears on the receipt.",
+            confidence=0.81,
+        )
+        self.assertEqual(
+            comment,
+            "Likely for Demo Night because the venue appears on the receipt. Confidence: 81%.",
+        )
+        self.assertEqual(comment.count("Confidence:"), 1)
+
     def test_malformed_api_version_env_is_repaired(self):
         service = ReconciliationReportService(
             stripe_api_key="rk_test",

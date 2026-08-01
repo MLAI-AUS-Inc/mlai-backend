@@ -836,21 +836,37 @@ _COMMENT_META_RE = re.compile(
     r"\b(?:human approval required|human must click ok|no account/tax change proposed)\b[.;:]?",
     re.IGNORECASE,
 )
+_COMMENT_CONFIDENCE_RE = re.compile(
+    r"(?:\bconfidence\s*:\s*\d{1,3}%\.?|\b\d{1,3}%\s+confidence\b[.;:]?)",
+    re.IGNORECASE,
+)
+_COMMENT_GENERIC_RE = re.compile(
+    r"^(?:unreconciled bank statement line|needs? review|review required|unknown payment)$",
+    re.IGNORECASE,
+)
 
 
 def format_statement_browser_comment(*, description: str, review_note: str, confidence: float) -> str:
     """Return the short, conversational comment shown in Xero Discuss."""
 
-    summary = str(description or "").strip() or str(review_note or "").strip()
-    summary = _COMMENT_PREFIX_RE.sub("", summary)
-    summary = _COMMENT_META_RE.sub("", summary)
-    summary = re.sub(r"\s+", " ", summary).strip(" -;:.")
-    summary = re.split(r"(?<=[.!?])\s+", summary, maxsplit=1)[0].strip()
+    summary = ""
+    for raw in (description, review_note):
+        cleaned = _COMMENT_PREFIX_RE.sub("", str(raw or "").strip())
+        cleaned = _COMMENT_META_RE.sub("", cleaned)
+        cleaned = _COMMENT_CONFIDENCE_RE.sub("", cleaned)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip(" -;:.")
+        for sentence in re.split(r"(?<=[.!?])\s+", cleaned):
+            candidate = sentence.strip(" -;:.")
+            if candidate and not _COMMENT_GENERIC_RE.fullmatch(candidate):
+                summary = candidate
+                break
+        if summary:
+            break
     if not summary:
         summary = "Not enough context to identify this payment"
     if len(summary) > 220:
         summary = f"{summary[:217].rstrip()}…"
-    if summary and summary[0].islower():
+    if summary[0].islower():
         summary = f"{summary[0].upper()}{summary[1:]}"
     percentage = int(round(max(0.0, min(float(confidence or 0.0), 1.0)) * 100))
     return f"{summary}. Confidence: {percentage}%."
