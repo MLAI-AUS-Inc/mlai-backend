@@ -20,7 +20,12 @@ from .drive_parsing import (
     normalized_content,
     parse_drive_document,
 )
-from .kernel import capture_source_version, revoke_source_access, tombstone_source
+from .kernel import (
+    capture_source_version,
+    restore_source_access,
+    revoke_source_access,
+    tombstone_source,
+)
 from .models import (
     DriveArtifactState,
     DriveDocumentArtifact,
@@ -494,6 +499,43 @@ def _capture_processing_source(
     return source, source_version
 
 
+def _restore_unchanged_extraction_access(
+    configuration,
+    artifact,
+    item,
+    extraction,
+):
+    if extraction.status != DriveExtractionStatus.EXTRACTED:
+        return
+    source_version = extraction.source_version
+    if source_version is None:
+        raise DriveProcessingError(
+            "An extracted Drive record must reference its captured source version."
+        )
+    source = source_version.source
+    if (
+        source.configuration_id != configuration.pk
+        or source.current_version_id != source_version.pk
+    ):
+        raise DriveProcessingError(
+            "An unchanged Drive extraction must reference the current configured source."
+        )
+    root_id = str((item.get("selected_root_ids") or [""])[0])
+    if not configuration.source_scopes.filter(
+        external_id=root_id,
+        selected=True,
+        status="selected",
+    ).exists():
+        raise DriveProcessingError(
+            "An unchanged Drive record no longer belongs to a selected scope."
+        )
+    restore_source_access(
+        source,
+        acl=_source_acl(configuration, artifact, item),
+        reason="drive_unchanged_source_still_accessible",
+    )
+
+
 def _process_record(configuration, record: Mapping) -> tuple[bool, str]:
     item = record.get("artifact") if isinstance(record.get("artifact"), Mapping) else None
     processing = record.get("processing") if isinstance(record.get("processing"), Mapping) else None
@@ -503,12 +545,41 @@ def _process_record(configuration, record: Mapping) -> tuple[bool, str]:
     if processing.get("status") == "unchanged":
         if version_created:
             raise DriveProcessingError("An unchanged Drive record unexpectedly created a metadata version.")
+        extraction = (
+            DriveDocumentExtraction.objects.select_related(
+                "source_version__source__current_version__acl_snapshot"
+            )
+            .filter(
+                pk=processing.get("existing_extraction_id"),
+                artifact_version=artifact.current_version,
+                parser_version=str(
+                    processing.get("parser_version") or DRIVE_PARSER_VERSION
+                )[:64],
+            )
+            .first()
+        )
+        if extraction is None:
+            raise DriveProcessingError(
+                "An unchanged Drive record must reference its existing extraction."
+            )
+        _restore_unchanged_extraction_access(
+            configuration,
+            artifact,
+            item,
+            extraction,
+        )
         return version_created, "unchanged"
     existing = artifact.current_version.extractions.filter(
         parser_version=str(processing.get("parser_version") or DRIVE_PARSER_VERSION)[:64],
     ).first()
     if existing:
         _update_artifact_processing(artifact, existing)
+        _restore_unchanged_extraction_access(
+            configuration,
+            artifact,
+            item,
+            existing,
+        )
         return version_created, "unchanged"
     status = str(processing.get("status") or "")
     if status in {DriveExtractionStatus.UNSUPPORTED, DriveExtractionStatus.FAILED}:
