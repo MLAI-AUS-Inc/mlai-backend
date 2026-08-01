@@ -73,7 +73,7 @@ NEGATIVE_JUDGEMENT_PATTERNS = (
 )
 EVIDENCE_TOKEN_RE = re.compile(r"\w+(?:['’]\w+)*", re.UNICODE)
 ATTRIBUTED_TRANSCRIPT_PREFIX_RE = re.compile(
-    r"^\s*(?:[-*]\s*)?[^:\n]{1,120}:\s*\Z"
+    r"^\s*(?:[-*]\s*)?[^:\n]{1,120}:\s*"
 )
 QUOTED_PROMPT_INJECTION_FLAG = "quoted_prompt_injection"
 
@@ -368,7 +368,7 @@ def _all_prompt_injection_matches_are_attributed(text: str) -> bool:
     for match in matches:
         line_start = text.rfind("\n", 0, match.start()) + 1
         prefix = text[line_start : match.start()]
-        if not ATTRIBUTED_TRANSCRIPT_PREFIX_RE.fullmatch(prefix):
+        if not ATTRIBUTED_TRANSCRIPT_PREFIX_RE.match(prefix):
             return False
     return True
 
