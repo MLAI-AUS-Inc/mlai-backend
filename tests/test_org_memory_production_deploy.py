@@ -63,6 +63,7 @@ class OrgMemoryProductionDeployTests(SimpleTestCase):
 
         self.assertIn("stage_org_memory_pilot", deploy)
         self.assertIn("reconcile_org_memory_access_restored_dead_letters", deploy)
+        self.assertIn("reconcile_org_memory_consolidation_lock_dead_letters", deploy)
         self.assertIn("reconcile_org_memory_extraction_dead_letters", deploy)
         self.assertIn("--superseded-extractor-version org-memory-extractor-v1", deploy)
         self.assertIn("--superseded-prompt-version org-memory-extraction-prompt-v1", deploy)
@@ -91,6 +92,10 @@ class OrgMemoryProductionDeployTests(SimpleTestCase):
         )
         self.assertLess(
             deploy.index("reconcile_org_memory_access_restored_dead_letters"),
+            deploy.index("stage_org_memory_pilot"),
+        )
+        self.assertLess(
+            deploy.index("reconcile_org_memory_consolidation_lock_dead_letters"),
             deploy.index("stage_org_memory_pilot"),
         )
         self.assertLess(

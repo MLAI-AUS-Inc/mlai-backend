@@ -652,6 +652,13 @@ PY
             --operator-email "\$stage_operator" \
             --apply
 
+        echo "🧹 Reconciling consolidation jobs affected by the outer-join lock bug..."
+        compose_run_web python manage.py reconcile_org_memory_consolidation_lock_dead_letters \
+            --organization-domain mlai.au \
+            --provider google_drive \
+            --operator-email "\$stage_operator" \
+            --apply
+
         echo "🧹 Reconciling superseded Admin Brain extraction dead letters..."
         compose_run_web python manage.py reconcile_org_memory_extraction_dead_letters \
             --organization-domain mlai.au \
