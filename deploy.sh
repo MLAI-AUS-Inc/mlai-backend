@@ -183,6 +183,34 @@ printf '%s' "$REDIS_URL" | ssh "$DEPLOY_SSH_TARGET" '
     mv "$tmp" .env
 '
 
+# The Xero OAuth scope list is pipeline-managed (repository variable
+# XERO_OAUTH_SCOPES) so scope upgrades — e.g. granting accounting.invoices +
+# accounting.attachments for the reconciliation agent's draft bills — survive
+# redeploys instead of living in hand-edited .env lines that the next deploy
+# races against. Empty/unset keeps whatever the droplet already has.
+if [ -n "${XERO_OAUTH_SCOPES:-}" ]; then
+    echo "🔧 Updating Xero OAuth scope list..."
+    printf '%s' "$XERO_OAUTH_SCOPES" | ssh "$DEPLOY_SSH_TARGET" '
+        set -euo pipefail
+        project_dir="/root/mlai-backend"
+        mkdir -p "$project_dir"
+        cd "$project_dir"
+        umask 077
+        scopes=$(cat)
+        case "$scopes" in
+            *offline_access*) ;;
+            *) echo "XERO_OAUTH_SCOPES payload must include offline_access" >&2; exit 1 ;;
+        esac
+        tmp=$(mktemp .env.xero-scopes.XXXXXX)
+        if [ -f .env ]; then
+            grep -v "^XERO_OAUTH_SCOPES=" .env > "$tmp" || true
+        fi
+        printf "XERO_OAUTH_SCOPES=%s\n" "$scopes" >> "$tmp"
+        chmod 600 "$tmp"
+        mv "$tmp" .env
+    '
+fi
+
 # Install the versioned connector keyring atomically before Django system
 # checks or migrations can write connector credentials with the active key.
 # Values are carried over SSH stdin and are never printed or placed in argv.
