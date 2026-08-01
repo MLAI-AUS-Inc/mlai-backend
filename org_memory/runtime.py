@@ -1618,7 +1618,10 @@ def reconcile_access_restored_dead_letters(
         provider=provider,
     ).order_by("dead_at", "pk")
     if apply:
-        dead_letters = dead_letters.select_for_update()
+        # The recovery queryset follows nullable source/version/configuration
+        # relationships for inspection. PostgreSQL cannot lock the nullable
+        # side of those outer joins, so lock only the evidence rows we mutate.
+        dead_letters = _locked(dead_letters, of_self=True)
     rows = list(dead_letters[:limit])
     report = {
         "schema_version": "org-memory-access-restored-dead-letter-reconciliation-v1",
