@@ -86,7 +86,14 @@ class SlackBridgeClient:
             return normalized_user_id
 
     @classmethod
-    def post_message(cls, *, channel_id: str, text: str, thread_ts: str = "") -> dict:
+    def post_message(
+        cls,
+        *,
+        channel_id: str,
+        text: str,
+        thread_ts: str = "",
+        client_msg_id: str = "",
+    ) -> dict:
         client = cls.get_client()
         payload = {
             "channel": channel_id,
@@ -96,6 +103,8 @@ class SlackBridgeClient:
         }
         if thread_ts:
             payload["thread_ts"] = thread_ts
+        if client_msg_id:
+            payload["client_msg_id"] = client_msg_id
         response = client.chat_postMessage(**payload)
         return {
             "channel": str(response.get("channel") or channel_id),
@@ -115,3 +124,19 @@ class SlackBridgeClient:
     @classmethod
     def delete_message(cls, *, channel_id: str, message_id: str) -> None:
         cls.get_client().chat_delete(channel=channel_id, ts=message_id)
+
+    @classmethod
+    def add_reaction(cls, *, channel_id: str, message_id: str, reaction: str) -> None:
+        cls.get_client().reactions_add(
+            channel=channel_id,
+            timestamp=message_id,
+            name=reaction,
+        )
+
+    @classmethod
+    def remove_reaction(cls, *, channel_id: str, message_id: str, reaction: str) -> None:
+        cls.get_client().reactions_remove(
+            channel=channel_id,
+            timestamp=message_id,
+            name=reaction,
+        )

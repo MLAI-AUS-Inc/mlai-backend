@@ -1,4 +1,5 @@
 import html
+import hashlib
 import re
 from typing import Iterable, Optional
 
@@ -14,6 +15,46 @@ DISCORD_USER_MENTION_RE = re.compile(r"<@!?\d+>")
 DISCORD_CHANNEL_MENTION_RE = re.compile(r"<#\d+>")
 DISCORD_ROLE_MENTION_RE = re.compile(r"<@&\d+>")
 DISCORD_EMOJI_RE = re.compile(r"<a?:([A-Za-z0-9_]+):\d+>")
+
+# Deliberately small, reversible MVP set. Unsupported/custom reactions fail
+# closed instead of silently changing meaning between Slack and MLAI Chat.
+SLACK_REACTION_TO_EMOJI = {
+    "+1": "👍",
+    "thumbsup": "👍",
+    "heart": "❤️",
+    "tada": "🎉",
+    "eyes": "👀",
+    "rocket": "🚀",
+    "white_check_mark": "✅",
+}
+EMOJI_TO_SLACK_REACTION = {
+    "👍": "thumbsup",
+    "❤️": "heart",
+    "❤": "heart",
+    "🎉": "tada",
+    "👀": "eyes",
+    "🚀": "rocket",
+    "✅": "white_check_mark",
+}
+
+
+def slack_reaction_to_emoji(value: str) -> str:
+    return SLACK_REACTION_TO_EMOJI.get(str(value or "").strip().lower(), "")
+
+
+def emoji_to_slack_reaction(value: str) -> str:
+    return EMOJI_TO_SLACK_REACTION.get(str(value or "").strip(), "")
+
+
+def reaction_object_id(*, message_id: str, reaction: str, author_id: str) -> str:
+    material = "\0".join(
+        [
+            str(message_id or "").strip(),
+            str(reaction or "").strip(),
+            str(author_id or "").strip(),
+        ]
+    ).encode("utf-8")
+    return "reaction:" + hashlib.sha256(material).hexdigest()
 
 
 def sanitize_slack_text(value: str) -> str:

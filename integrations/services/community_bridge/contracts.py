@@ -9,7 +9,9 @@ from typing import Any, Mapping, Protocol, Sequence
 
 
 BRIDGE_PLATFORMS = frozenset({"slack", "discord", "buzz"})
-DELIVERY_TYPES = frozenset({"create", "edit", "delete"})
+DELIVERY_TYPES = frozenset(
+    {"create", "edit", "delete", "reaction_add", "reaction_remove"}
+)
 
 
 def _required_text(value: object, field_name: str, maximum: int) -> str:

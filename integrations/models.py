@@ -14,6 +14,8 @@ class CommunityBridgeDeliveryType(models.TextChoices):
     CREATE = "create", "Create"
     EDIT = "edit", "Edit"
     DELETE = "delete", "Delete"
+    REACTION_ADD = "reaction_add", "Reaction add"
+    REACTION_REMOVE = "reaction_remove", "Reaction remove"
 
 
 class CommunityBridgeDeliveryStatus(models.TextChoices):

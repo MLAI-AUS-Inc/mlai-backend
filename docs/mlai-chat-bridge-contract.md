@@ -7,8 +7,9 @@ MLAI Chat is another client surface, not a one-time data migration.
 ## MVP scope
 
 - Operators explicitly map a public Slack channel to one MLAI Chat channel.
-- New messages, replies, edits, and deletes are mirrored after the mapping is
-  enabled. Historical backfill is out of scope.
+- New messages, replies, edits, deletes, and the approved reaction set (`👍`,
+  `❤️`, `🎉`, `👀`, `🚀`, `✅`) are mirrored after the mapping is enabled.
+  Historical backfill and custom emoji are out of scope.
 - Direct messages, private channels, huddles, workflow payloads, ephemeral
   messages, and Slack Connect channels fail closed unless separately approved.
 - Attachments are represented as safe provider-hosted links. The bridge does
@@ -22,7 +23,8 @@ Every verified provider event is normalized to:
 
 - receipt key and source platform;
 - source channel, message, optional parent, and author identifiers;
-- one delivery operation: `create`, `edit`, or `delete`;
+- one delivery operation: `create`, `edit`, `delete`, `reaction_add`, or
+  `reaction_remove`;
 - sanitized text and HTTP(S) attachment links; and
 - non-secret adapter metadata.
 
@@ -36,6 +38,10 @@ content.
 - A durable outbox is claimed transactionally and retried with bounded backoff.
 - Message links map source IDs to destination IDs so replies, edits, and deletes
   address the correct provider object.
+- Slack sends use a deterministic `client_msg_id` derived from the durable
+  delivery row. Reaction objects use a stable hash of the immutable source
+  message, reaction name, and source author so removal targets the exact mapped
+  reaction rather than the parent message.
 - Delivery is at least once; adapters must be idempotent for a claimed outbox
   row. Ordering is best effort within one mapped channel.
 - Exhausted deliveries enter a dead state for operator inspection and replay.
@@ -67,15 +73,22 @@ tokens, or private keys.
 Use a dedicated Slack app and bridge bot, installed only into the explicitly
 mapped public channels. Configure the Events API request URL as
 `https://api.mlai.au/api/v1/integrations/bridge/slack/events`, subscribe to the
-bot event `message.channels`, and grant only `channels:history`,
-`channels:read`, `chat:write`, `files:read`, and `users:read`. Record the bot
-user ID as `SLACK_BRIDGE_BOT_USER_ID` so its create, edit, and delete events are
-discarded for loop prevention.
+bot events `message.channels`, `reaction_added`, and `reaction_removed`, and
+grant only `channels:history`, `channels:read`, `chat:write`, `files:read`,
+`reactions:read`, `reactions:write`, and `users:read`. Record the bot user ID as
+`SLACK_BRIDGE_BOT_USER_ID` so its messages and reactions are discarded for loop
+prevention.
 
 Direct messages, private channels, and payloads marked as shared/external are
 ignored in normalization. Operators must also confirm that every mapped channel
 is not a Slack Connect channel before enabling it. Rotate the Slack signing
 secret, adapter token, callback secret, and bridge Nostr key independently.
+
+The bridge Nostr public key is intentionally non-secret. Configure that same
+lowercase 64-character value as `MLAI_BRIDGE_PUBKEY` in browser, desktop, and
+mobile release jobs. Clients trust provenance tags only when the Nostr event is
+signed by this key. Never expose the corresponding private key or any Slack
+credential to a member client.
 
 ## Required backend settings
 
@@ -99,6 +112,24 @@ python manage.py upsert_community_bridge_channel \
   --destination-workspace-id chat.mlai.au \
   --destination-channel-id 922c3b22-8002-4c3c-a37b-ce406a5e606e \
   --destination-channel-name community
+```
+
+After investigating an exhausted delivery, replay it without changing its
+idempotency identity:
+
+```sh
+python manage.py requeue_community_bridge_delivery 1234 --confirm
+```
+
+Run the live staging matrix and capture durable, content-free evidence with
+[`mlai-chat-bridge-staging.md`](mlai-chat-bridge-staging.md). The final database
+check is:
+
+```sh
+python manage.py verify_community_bridge_staging \
+  --slack-channel-id C0123456789 \
+  --slack-message-id 1785550000.000100 \
+  --buzz-event-id 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 ```
 
 ## Verified identity links

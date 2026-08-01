@@ -18,8 +18,11 @@ from integrations.models import (
     CommunityBridgeReceiptStatus,
 )
 from integrations.services.community_bridge.formatting import (
+    emoji_to_slack_reaction,
     normalize_slack_files,
+    reaction_object_id,
     sanitize_slack_text,
+    slack_reaction_to_emoji,
 )
 from integrations.services.community_bridge.contracts import (
     BridgeAttachment,
@@ -130,7 +133,38 @@ def ingest_inbound_event(
     if not normalized_event:
         return _mark_receipt_ignored(receipt, reason="unsupported_or_ignored_event")
 
+    if (
+        normalized_event["delivery_type"] == CommunityBridgeDeliveryType.EDIT
+        and not channel.sync_edits
+    ):
+        return _mark_receipt_ignored(receipt, reason="edit_sync_disabled")
+    if (
+        normalized_event["delivery_type"] == CommunityBridgeDeliveryType.DELETE
+        and not channel.sync_deletes
+    ):
+        return _mark_receipt_ignored(receipt, reason="delete_sync_disabled")
+    if (
+        normalized_event["delivery_type"]
+        not in {
+            CommunityBridgeDeliveryType.REACTION_ADD,
+            CommunityBridgeDeliveryType.REACTION_REMOVE,
+        }
+        and normalized_event.get("source_parent_message_id")
+        and not channel.sync_replies
+    ):
+        return _mark_receipt_ignored(receipt, reason="reply_sync_disabled")
+
     target_platform = _target_platform(channel=channel, source_platform=source_platform)
+    if (
+        normalized_event["delivery_type"]
+        in {
+            CommunityBridgeDeliveryType.REACTION_ADD,
+            CommunityBridgeDeliveryType.REACTION_REMOVE,
+        }
+        and CommunityBridgePlatform.BUZZ
+        not in {source_platform, target_platform}
+    ):
+        return _mark_receipt_ignored(receipt, reason="reaction_sync_unsupported")
 
     delivery = CommunityBridgeDelivery.objects.create(
         channel=channel,
@@ -208,6 +242,42 @@ def resolve_message_link(
         "destination_parent_message_id": link.destination_parent_message_id,
         "source_payload": link.source_payload or {},
         "destination_payload": link.destination_payload or {},
+    }
+
+
+def resolve_mapped_message(
+    *,
+    source_platform: str,
+    source_channel_id: str,
+    source_message_id: str,
+    destination_platform: str,
+) -> Optional[dict]:
+    """Resolve a target whether the current object began here or was mirrored here."""
+
+    direct = resolve_message_link(
+        source_platform=source_platform,
+        source_channel_id=source_channel_id,
+        source_message_id=source_message_id,
+        destination_platform=destination_platform,
+    )
+    if direct:
+        return direct
+
+    reverse = CommunityBridgeMessageLink.objects.filter(
+        source_platform=destination_platform,
+        destination_platform=source_platform,
+        destination_channel_id=str(source_channel_id or "").strip(),
+        destination_message_id=str(source_message_id or "").strip(),
+    ).first()
+    if not reverse:
+        return None
+    return {
+        "id": reverse.id,
+        "destination_channel_id": reverse.source_channel_id,
+        "destination_message_id": reverse.source_message_id,
+        "destination_parent_message_id": reverse.source_parent_message_id,
+        "source_payload": reverse.destination_payload or {},
+        "destination_payload": reverse.source_payload or {},
     }
 
 
@@ -304,7 +374,10 @@ def reset_stale_processing_deliveries(max_age_seconds: int = 300) -> int:
 
 def _normalize_slack_event(payload: dict) -> Optional[dict]:
     event = dict(payload.get("event") or {})
-    if str(event.get("type") or "").strip() != "message":
+    event_type = str(event.get("type") or "").strip()
+    if event_type in {"reaction_added", "reaction_removed"}:
+        return _normalize_slack_reaction(event, event_type=event_type)
+    if event_type != "message":
         return None
     if str(event.get("channel_type") or "").strip() != "channel":
         return None
@@ -385,6 +458,49 @@ def _normalize_slack_event(payload: dict) -> Optional[dict]:
     return None
 
 
+def _normalize_slack_reaction(event: dict, *, event_type: str) -> Optional[dict]:
+    item = dict(event.get("item") or {})
+    channel_id = str(item.get("channel") or "").strip()
+    target_message_id = str(item.get("ts") or "").strip()
+    author_id = str(event.get("user") or "").strip()
+    slack_reaction = str(event.get("reaction") or "").strip().lower()
+    bridge_bot_user_id = str(
+        getattr(settings, "SLACK_BRIDGE_BOT_USER_ID", "") or ""
+    ).strip()
+    emoji = slack_reaction_to_emoji(slack_reaction)
+    if (
+        str(item.get("type") or "").strip() != "message"
+        or not channel_id
+        or not target_message_id
+        or not author_id
+        or author_id == bridge_bot_user_id
+        or not emoji
+    ):
+        return None
+    return {
+        "delivery_type": (
+            CommunityBridgeDeliveryType.REACTION_ADD
+            if event_type == "reaction_added"
+            else CommunityBridgeDeliveryType.REACTION_REMOVE
+        ),
+        "source_channel_id": channel_id,
+        "source_message_id": reaction_object_id(
+            message_id=target_message_id,
+            reaction=slack_reaction,
+            author_id=author_id,
+        ),
+        "source_parent_message_id": target_message_id,
+        "source_author_id": author_id,
+        "source_author_display_name": "",
+        "text": emoji,
+        "attachments": [],
+        "metadata": {
+            "slack_message_id": target_message_id,
+            "slack_reaction": slack_reaction,
+        },
+    }
+
+
 def _get_enabled_channel(*, source_platform: str, channel_id: str) -> Optional[CommunityBridgeChannel]:
     normalized_channel_id = str(channel_id or "").strip()
     if not normalized_channel_id:
@@ -421,6 +537,12 @@ def _canonicalize_event(
     source_channel_id: str,
     normalized_event: dict,
 ) -> dict:
+    delivery_type = str(normalized_event.get("delivery_type") or "")
+    if delivery_type in {
+        CommunityBridgeDeliveryType.REACTION_ADD,
+        CommunityBridgeDeliveryType.REACTION_REMOVE,
+    } and not emoji_to_slack_reaction(str(normalized_event.get("text") or "")):
+        raise ValueError("reaction is not in the approved bridge set")
     attachments = tuple(
         BridgeAttachment(
             title=str(item.get("title") or item.get("url") or "Attachment"),
@@ -437,7 +559,7 @@ def _canonicalize_event(
         source_parent_message_id=str(normalized_event.get("source_parent_message_id") or ""),
         source_author_id=str(normalized_event.get("source_author_id") or ""),
         source_author_display_name=str(normalized_event.get("source_author_display_name") or ""),
-        delivery_type=str(normalized_event.get("delivery_type") or ""),
+        delivery_type=delivery_type,
         text=str(normalized_event.get("text") or ""),
         attachments=attachments,
         metadata=normalized_event.get("metadata") or {},

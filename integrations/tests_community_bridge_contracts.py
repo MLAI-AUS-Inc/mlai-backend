@@ -50,6 +50,30 @@ class CanonicalBridgeEventTests(SimpleTestCase):
         )
         self.assertEqual(event.source_platform, "buzz")
 
+    def test_reaction_operations_preserve_the_owned_reaction_object(self):
+        added = CanonicalBridgeEvent(
+            receipt_key="reaction-add",
+            source_platform="slack",
+            source_channel_id="C123",
+            source_message_id="reaction:abc",
+            source_parent_message_id="1710000000.0001",
+            source_author_id="U123",
+            delivery_type="reaction_add",
+            text="👍",
+        )
+        removed = CanonicalBridgeEvent(
+            receipt_key="reaction-remove",
+            source_platform="slack",
+            source_channel_id="C123",
+            source_message_id=added.source_message_id,
+            source_parent_message_id=added.source_parent_message_id,
+            source_author_id="U123",
+            delivery_type="reaction_remove",
+            text="👍",
+        )
+        self.assertEqual(added.normalized_payload()["source_parent_message_id"], "1710000000.0001")
+        self.assertEqual(removed.normalized_payload()["source_message_id"], "reaction:abc")
+
     def test_delete_event_rejects_retained_content(self):
         with self.assertRaisesMessage(ValueError, "delete events must not retain message content"):
             CanonicalBridgeEvent(
@@ -80,4 +104,3 @@ class BridgeDeliveryResultTests(SimpleTestCase):
     def test_destination_identifiers_are_required(self):
         with self.assertRaisesMessage(ValueError, "destination_message_id is required"):
             BridgeDeliveryResult(destination_channel_id="channel", destination_message_id="")
-

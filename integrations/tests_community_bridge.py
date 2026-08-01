@@ -31,6 +31,7 @@ from integrations.models import (
 from integrations.services.community_bridge.store import (
     ingest_inbound_event,
     ingest_slack_event,
+    resolve_mapped_message,
     resolve_message_link,
 )
 from integrations.services.community_bridge.buzz import (
@@ -181,6 +182,94 @@ class SlackCommunityBridgeEventViewTests(TestCase):
         self.assertEqual(CommunityBridgeReceipt.objects.filter(receipt_key="EvBridgeDuplicate").count(), 1)
         self.assertEqual(CommunityBridgeDelivery.objects.count(), 1)
 
+    def test_approved_reaction_add_and_remove_share_one_owned_object(self):
+        self.channel.destination_platform = CommunityBridgePlatform.BUZZ
+        self.channel.destination_workspace_id = "mlai-community"
+        self.channel.destination_channel_id = "a" * 32
+        self.channel.save(
+            update_fields=[
+                "destination_platform",
+                "destination_workspace_id",
+                "destination_channel_id",
+            ]
+        )
+        base_event = {
+            "type": "reaction_added",
+            "user": "U12345",
+            "reaction": "thumbsup",
+            "item": {
+                "type": "message",
+                "channel": self.channel.slack_channel_id,
+                "ts": "1710000000.2000",
+            },
+        }
+        added = self._post(
+            {"type": "event_callback", "event_id": "EvReactionAdd", "event": base_event}
+        )
+        removed = self._post(
+            {
+                "type": "event_callback",
+                "event_id": "EvReactionRemove",
+                "event": {**base_event, "type": "reaction_removed"},
+            }
+        )
+
+        self.assertEqual(added.data["status"], "enqueued")
+        self.assertEqual(removed.data["status"], "enqueued")
+        deliveries = list(CommunityBridgeDelivery.objects.order_by("id"))
+        self.assertEqual(deliveries[0].delivery_type, CommunityBridgeDeliveryType.REACTION_ADD)
+        self.assertEqual(deliveries[1].delivery_type, CommunityBridgeDeliveryType.REACTION_REMOVE)
+        self.assertEqual(deliveries[0].source_message_id, deliveries[1].source_message_id)
+        self.assertEqual(deliveries[0].source_parent_message_id, "1710000000.2000")
+        self.assertEqual(deliveries[0].payload["text"], "👍")
+
+    def test_reaction_for_legacy_discord_mapping_fails_closed(self):
+        response = self._post(
+            {
+                "type": "event_callback",
+                "event_id": "EvReactionDiscord",
+                "event": {
+                    "type": "reaction_added",
+                    "user": "U12345",
+                    "reaction": "thumbsup",
+                    "item": {
+                        "type": "message",
+                        "channel": self.channel.slack_channel_id,
+                        "ts": "1710000000.2000",
+                    },
+                },
+            }
+        )
+
+        self.assertEqual(response.data["status"], "ignored")
+        receipt = CommunityBridgeReceipt.objects.get(receipt_key="EvReactionDiscord")
+        self.assertEqual(receipt.error_text, "reaction_sync_unsupported")
+        self.assertEqual(CommunityBridgeDelivery.objects.count(), 0)
+
+    def test_unapproved_or_bridge_bot_reaction_is_ignored(self):
+        for event_id, user, reaction in [
+            ("EvReactionCustom", "U12345", "party_parrot"),
+            ("EvReactionEcho", "UBRIDGEBOT", "thumbsup"),
+        ]:
+            response = self._post(
+                {
+                    "type": "event_callback",
+                    "event_id": event_id,
+                    "event": {
+                        "type": "reaction_added",
+                        "user": user,
+                        "reaction": reaction,
+                        "item": {
+                            "type": "message",
+                            "channel": self.channel.slack_channel_id,
+                            "ts": "1710000000.2000",
+                        },
+                    },
+                }
+            )
+            self.assertEqual(response.data["status"], "ignored")
+        self.assertEqual(CommunityBridgeDelivery.objects.count(), 0)
+
     def test_bridge_bot_messages_are_ignored(self):
         response = self._post(
             {
@@ -239,6 +328,58 @@ class SlackCommunityBridgeEventViewTests(TestCase):
 
         self.assertEqual(bot_delete.data["status"], "ignored")
         self.assertEqual(shared_message.data["status"], "ignored")
+        self.assertEqual(CommunityBridgeDelivery.objects.count(), 0)
+
+    def test_mapping_capability_flags_fail_closed(self):
+        self.channel.sync_edits = False
+        self.channel.sync_deletes = False
+        self.channel.sync_replies = False
+        self.channel.save(update_fields=["sync_edits", "sync_deletes", "sync_replies"])
+        payloads = [
+            {
+                "type": "message",
+                "subtype": "message_changed",
+                "channel_type": "channel",
+                "channel": self.channel.slack_channel_id,
+                "message": {"ts": "1710000000.6000", "user": "U123", "text": "edited"},
+            },
+            {
+                "type": "message",
+                "subtype": "message_deleted",
+                "channel_type": "channel",
+                "channel": self.channel.slack_channel_id,
+                "deleted_ts": "1710000000.6000",
+                "previous_message": {"ts": "1710000000.6000", "user": "U123"},
+            },
+            {
+                "type": "message",
+                "channel_type": "channel",
+                "channel": self.channel.slack_channel_id,
+                "user": "U123",
+                "ts": "1710000000.6001",
+                "thread_ts": "1710000000.6000",
+                "text": "reply",
+            },
+        ]
+        reasons = []
+        for index, event in enumerate(payloads):
+            response = self._post(
+                {
+                    "type": "event_callback",
+                    "event_id": f"EvCapability{index}",
+                    "event": event,
+                }
+            )
+            self.assertEqual(response.data["status"], "ignored")
+            reasons.append(
+                CommunityBridgeReceipt.objects.get(
+                    receipt_key=f"EvCapability{index}"
+                ).error_text
+            )
+        self.assertEqual(
+            reasons,
+            ["edit_sync_disabled", "delete_sync_disabled", "reply_sync_disabled"],
+        )
         self.assertEqual(CommunityBridgeDelivery.objects.count(), 0)
 
 
@@ -410,6 +551,34 @@ class GenericCommunityBridgeRoutingTests(TestCase):
         self.assertEqual(result["target_platform"], CommunityBridgePlatform.SLACK)
         self.assertEqual(delivery.target_channel_id, "C-MLAI-CHAT")
 
+    def test_mapped_parent_resolves_in_both_directions(self):
+        link = CommunityBridgeMessageLink.objects.create(
+            channel=self.channel,
+            source_platform=CommunityBridgePlatform.SLACK,
+            source_channel_id=self.channel.slack_channel_id,
+            source_message_id="1710000000.0001",
+            destination_platform=CommunityBridgePlatform.BUZZ,
+            destination_channel_id=self.channel.destination_channel_id,
+            destination_message_id="a" * 64,
+        )
+
+        direct = resolve_mapped_message(
+            source_platform=CommunityBridgePlatform.SLACK,
+            source_channel_id=self.channel.slack_channel_id,
+            source_message_id=link.source_message_id,
+            destination_platform=CommunityBridgePlatform.BUZZ,
+        )
+        reverse = resolve_mapped_message(
+            source_platform=CommunityBridgePlatform.BUZZ,
+            source_channel_id=self.channel.destination_channel_id,
+            source_message_id=link.destination_message_id,
+            destination_platform=CommunityBridgePlatform.SLACK,
+        )
+
+        self.assertEqual(direct["destination_message_id"], "a" * 64)
+        self.assertEqual(reverse["destination_message_id"], "1710000000.0001")
+        self.assertEqual(reverse["destination_channel_id"], self.channel.slack_channel_id)
+
     def test_invalid_attachment_scheme_fails_closed(self):
         result = ingest_inbound_event(
             source_platform=CommunityBridgePlatform.BUZZ,
@@ -564,6 +733,154 @@ class BuzzBridgeClientTests(TestCase):
                 operation="create",
                 channel_id="922c3b22-8002-4c3c-a37b-ce406a5e606e",
                 text="hello",
+            )
+
+
+class CommunityBridgeDeadLetterReplayTests(TestCase):
+    def setUp(self):
+        self.channel = CommunityBridgeChannel.objects.create(
+            slack_workspace_id="TMLAI",
+            slack_channel_id="CMLAICHAT",
+            destination_platform=CommunityBridgePlatform.BUZZ,
+            destination_workspace_id="chat.mlai.au",
+            destination_channel_id="922c3b22-8002-4c3c-a37b-ce406a5e606e",
+        )
+        self.delivery = CommunityBridgeDelivery.objects.create(
+            channel=self.channel,
+            target_platform=CommunityBridgePlatform.BUZZ,
+            source_platform=CommunityBridgePlatform.SLACK,
+            delivery_type=CommunityBridgeDeliveryType.CREATE,
+            status=CommunityBridgeDeliveryStatus.DEAD,
+            source_event_key="EvDead",
+            source_channel_id=self.channel.slack_channel_id,
+            source_message_id="1710000000.9000",
+            target_channel_id=self.channel.destination_channel_id,
+            attempts=5,
+            last_error="transient provider failure",
+            available_at=timezone.now(),
+        )
+
+    def test_requeue_preserves_delivery_id_and_resets_retry_state(self):
+        original_id = self.delivery.id
+        call_command(
+            "requeue_community_bridge_delivery",
+            str(original_id),
+            confirm=True,
+        )
+        self.delivery.refresh_from_db()
+        self.assertEqual(self.delivery.id, original_id)
+        self.assertEqual(self.delivery.status, CommunityBridgeDeliveryStatus.PENDING)
+        self.assertEqual(self.delivery.attempts, 0)
+        self.assertEqual(self.delivery.last_error, "")
+
+    def test_requeue_requires_confirmation_and_dead_status(self):
+        with self.assertRaisesMessage(CommandError, "--confirm is required"):
+            call_command("requeue_community_bridge_delivery", str(self.delivery.id))
+        self.delivery.status = CommunityBridgeDeliveryStatus.FAILED
+        self.delivery.save(update_fields=["status"])
+        with self.assertRaisesMessage(CommandError, "only a dead"):
+            call_command(
+                "requeue_community_bridge_delivery",
+                str(self.delivery.id),
+                confirm=True,
+            )
+
+
+class CommunityBridgeStagingVerificationTests(TestCase):
+    def setUp(self):
+        self.channel = CommunityBridgeChannel.objects.create(
+            slack_workspace_id="TMLAI",
+            slack_channel_id="CMLAICHAT",
+            destination_platform=CommunityBridgePlatform.BUZZ,
+            destination_workspace_id="chat.mlai.au",
+            destination_channel_id="a" * 32,
+        )
+        for source_platform, source_id, destination_platform, destination_id in (
+            (
+                CommunityBridgePlatform.SLACK,
+                "1710000000.9000",
+                CommunityBridgePlatform.BUZZ,
+                "b" * 64,
+            ),
+            (
+                CommunityBridgePlatform.BUZZ,
+                "c" * 64,
+                CommunityBridgePlatform.SLACK,
+                "1710000001.9000",
+            ),
+        ):
+            CommunityBridgeMessageLink.objects.create(
+                channel=self.channel,
+                source_platform=source_platform,
+                source_channel_id=(
+                    self.channel.slack_channel_id
+                    if source_platform == CommunityBridgePlatform.SLACK
+                    else self.channel.destination_channel_id
+                ),
+                source_message_id=source_id,
+                destination_platform=destination_platform,
+                destination_channel_id=(
+                    self.channel.destination_channel_id
+                    if destination_platform == CommunityBridgePlatform.BUZZ
+                    else self.channel.slack_channel_id
+                ),
+                destination_message_id=destination_id,
+            )
+            CommunityBridgeDelivery.objects.create(
+                channel=self.channel,
+                target_platform=destination_platform,
+                source_platform=source_platform,
+                delivery_type=CommunityBridgeDeliveryType.CREATE,
+                status=CommunityBridgeDeliveryStatus.COMPLETED,
+                source_event_key=f"stage:{source_id}",
+                source_channel_id=(
+                    self.channel.slack_channel_id
+                    if source_platform == CommunityBridgePlatform.SLACK
+                    else self.channel.destination_channel_id
+                ),
+                source_message_id=source_id,
+                target_channel_id=(
+                    self.channel.destination_channel_id
+                    if destination_platform == CommunityBridgePlatform.BUZZ
+                    else self.channel.slack_channel_id
+                ),
+                available_at=timezone.now(),
+                completed_at=timezone.now(),
+            )
+
+    def test_verifier_reports_durable_bidirectional_evidence(self):
+        output = StringIO()
+        call_command(
+            "verify_community_bridge_staging",
+            slack_channel_id=self.channel.slack_channel_id,
+            slack_message_id="1710000000.9000",
+            buzz_event_id="c" * 64,
+            stdout=output,
+        )
+        result = json.loads(output.getvalue())
+        self.assertEqual(result["status"], "passed")
+        self.assertEqual(len(result["evidence"]), 2)
+        self.assertEqual(result["dead_delivery_count"], 0)
+
+    def test_verifier_fails_when_mapping_has_a_dead_delivery(self):
+        CommunityBridgeDelivery.objects.create(
+            channel=self.channel,
+            target_platform=CommunityBridgePlatform.BUZZ,
+            source_platform=CommunityBridgePlatform.SLACK,
+            delivery_type=CommunityBridgeDeliveryType.EDIT,
+            status=CommunityBridgeDeliveryStatus.DEAD,
+            source_event_key="stage:dead",
+            source_channel_id=self.channel.slack_channel_id,
+            source_message_id="different-message",
+            target_channel_id=self.channel.destination_channel_id,
+            available_at=timezone.now(),
+        )
+        with self.assertRaisesMessage(CommandError, "dead delivery"):
+            call_command(
+                "verify_community_bridge_staging",
+                slack_channel_id=self.channel.slack_channel_id,
+                slack_message_id="1710000000.9000",
+                buzz_event_id="c" * 64,
             )
 
 
@@ -723,6 +1040,131 @@ class BuzzCommunityBridgeWorkerTests(TransactionTestCase):
         self.assertEqual(mock_deliver.call_args.kwargs["target_message_id"], original_event_id)
         self.assertIsNotNone(link.destination_deleted_at)
 
+    @patch("integrations.services.community_bridge.worker.BuzzBridgeClient.deliver")
+    def test_slack_reaction_add_and_remove_target_their_mapped_objects(self, mock_deliver):
+        original_event_id = "7" * 64
+        reaction_event_id = "8" * 64
+        source_reaction_id = "reaction:" + "a" * 64
+        CommunityBridgeMessageLink.objects.create(
+            channel=self.channel,
+            source_platform=CommunityBridgePlatform.SLACK,
+            source_channel_id=self.channel.slack_channel_id,
+            source_message_id="1710000000.7000",
+            destination_platform=CommunityBridgePlatform.BUZZ,
+            destination_channel_id=self.channel.destination_channel_id,
+            destination_message_id=original_event_id,
+        )
+        added = self._delivery(
+            delivery_type=CommunityBridgeDeliveryType.REACTION_ADD,
+            message_id=source_reaction_id,
+            parent_id="1710000000.7000",
+        )
+        added.payload = {
+            "source_author_id": "U123",
+            "text": "👍",
+            "metadata": {
+                "slack_message_id": "1710000000.7000",
+                "slack_reaction": "thumbsup",
+            },
+        }
+        added.save(update_fields=["payload"])
+        mock_deliver.return_value = {
+            "channel_id": self.channel.destination_channel_id,
+            "message_id": reaction_event_id,
+            "parent_message_id": original_event_id,
+        }
+
+        asyncio.run(self.client.process_pending_deliveries_once(limit=5))
+        add_kwargs = mock_deliver.call_args.kwargs
+        self.assertEqual(add_kwargs["operation"], CommunityBridgeDeliveryType.REACTION_ADD)
+        self.assertEqual(add_kwargs["target_message_id"], original_event_id)
+        self.assertEqual(add_kwargs["source_message_id"], "1710000000.7000")
+        self.assertEqual(add_kwargs["text"], "👍")
+
+        removed = self._delivery(
+            delivery_type=CommunityBridgeDeliveryType.REACTION_REMOVE,
+            message_id=source_reaction_id,
+            parent_id="1710000000.7000",
+        )
+        removed.payload = {"source_author_id": "U123", "text": "👍"}
+        removed.save(update_fields=["payload"])
+        mock_deliver.return_value = {
+            "channel_id": self.channel.destination_channel_id,
+            "message_id": "9" * 64,
+            "parent_message_id": "",
+        }
+
+        asyncio.run(self.client.process_pending_deliveries_once(limit=5))
+        remove_kwargs = mock_deliver.call_args.kwargs
+        self.assertEqual(remove_kwargs["operation"], CommunityBridgeDeliveryType.REACTION_REMOVE)
+        self.assertEqual(remove_kwargs["target_message_id"], reaction_event_id)
+        link = CommunityBridgeMessageLink.objects.get(source_message_id=source_reaction_id)
+        self.assertIsNotNone(link.destination_deleted_at)
+
+    @patch("integrations.services.community_bridge.worker.SlackBridgeClient.remove_reaction")
+    @patch("integrations.services.community_bridge.worker.SlackBridgeClient.add_reaction")
+    def test_buzz_reaction_round_trip_uses_slack_reaction_api(
+        self,
+        mock_add_reaction,
+        mock_remove_reaction,
+    ):
+        original_event_id = "a" * 64
+        reaction_event_id = "b" * 64
+        slack_message_id = "1710000000.8000"
+        CommunityBridgeMessageLink.objects.create(
+            channel=self.channel,
+            source_platform=CommunityBridgePlatform.BUZZ,
+            source_channel_id=self.channel.destination_channel_id,
+            source_message_id=original_event_id,
+            destination_platform=CommunityBridgePlatform.SLACK,
+            destination_channel_id=self.channel.slack_channel_id,
+            destination_message_id=slack_message_id,
+        )
+        added = CommunityBridgeDelivery.objects.create(
+            channel=self.channel,
+            target_platform=CommunityBridgePlatform.SLACK,
+            source_platform=CommunityBridgePlatform.BUZZ,
+            delivery_type=CommunityBridgeDeliveryType.REACTION_ADD,
+            source_event_key="buzz-reaction-add",
+            source_channel_id=self.channel.destination_channel_id,
+            source_message_id=reaction_event_id,
+            source_parent_message_id=original_event_id,
+            target_channel_id=self.channel.slack_channel_id,
+            payload={"source_author_id": "c" * 64, "text": "👍", "attachments": []},
+            available_at=timezone.now(),
+        )
+
+        asyncio.run(self.client.process_pending_deliveries_once(limit=5))
+        added.refresh_from_db()
+        self.assertEqual(added.status, CommunityBridgeDeliveryStatus.COMPLETED)
+        mock_add_reaction.assert_called_once_with(
+            channel_id=self.channel.slack_channel_id,
+            message_id=slack_message_id,
+            reaction="thumbsup",
+        )
+
+        removed = CommunityBridgeDelivery.objects.create(
+            channel=self.channel,
+            target_platform=CommunityBridgePlatform.SLACK,
+            source_platform=CommunityBridgePlatform.BUZZ,
+            delivery_type=CommunityBridgeDeliveryType.REACTION_REMOVE,
+            source_event_key="buzz-reaction-remove",
+            source_channel_id=self.channel.destination_channel_id,
+            source_message_id=reaction_event_id,
+            source_parent_message_id=original_event_id,
+            target_channel_id=self.channel.slack_channel_id,
+            payload={"source_author_id": "c" * 64, "text": "👍", "attachments": []},
+            available_at=timezone.now(),
+        )
+        asyncio.run(self.client.process_pending_deliveries_once(limit=5))
+        removed.refresh_from_db()
+        self.assertEqual(removed.status, CommunityBridgeDeliveryStatus.COMPLETED)
+        mock_remove_reaction.assert_called_once_with(
+            channel_id=self.channel.slack_channel_id,
+            message_id=slack_message_id,
+            reaction="thumbsup",
+        )
+
     @patch("integrations.services.community_bridge.worker.SlackBridgeClient.post_message")
     def test_verified_buzz_identity_is_used_for_slack_attribution(self, mock_post):
         mock_post.return_value = {
@@ -752,6 +1194,10 @@ class BuzzCommunityBridgeWorkerTests(TransactionTestCase):
         delivery.refresh_from_db()
         self.assertEqual(delivery.status, CommunityBridgeDeliveryStatus.COMPLETED)
         self.assertIn("Alice (MLAI Chat)", mock_post.call_args.kwargs["text"])
+        self.assertRegex(
+            mock_post.call_args.kwargs["client_msg_id"],
+            r"^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+        )
 
 
 class CommunityBridgeIdentityCommandTests(TestCase):
