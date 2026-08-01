@@ -690,6 +690,15 @@ PY
             compose_run_web_with_approval python manage.py check_org_memory_pilot_access_matrix \
                 --organization-domain mlai.au \
                 --approval-manifest "\$approval_manifest_container"
+
+            echo "🔄 Requesting the reviewed Drive parser-v2/extraction-v2 reprocess..."
+            compose_run_web python manage.py request_org_memory_reprocess \
+                --organization-domain mlai.au \
+                --provider google_drive \
+                --configuration-id cd4483b5-d6c1-48f6-8268-2b0acd824e12 \
+                --idempotency-key committee-drive-parser-v2-extraction-v2 \
+                --operator-email "\$activation_operator" \
+                --apply
         elif python3 scripts/org_memory_staging_skip.py "\$stage_stdout"; then
             # Evidence ingestion and restoration run in the memory worker,
             # which only receives new code when a deploy completes. While the
