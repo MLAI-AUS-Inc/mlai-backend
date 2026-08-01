@@ -2555,6 +2555,20 @@ class ReconciliationStatementSafeBatchView(ReconciliationAdminView):
             max_count = max(1, min(int(request.data.get("max_count") or 50), 100))
         except (TypeError, ValueError):
             return Response({"error": "max_count must be an integer"}, status=status.HTTP_400_BAD_REQUEST)
+        raw_exclusions = request.data.get("exclude_statement_line_ids") or []
+        if not isinstance(raw_exclusions, list):
+            return Response(
+                {"error": "exclude_statement_line_ids must be a list"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        excluded_statement_line_ids = {
+            str(value).strip() for value in raw_exclusions if str(value).strip()
+        }
+        if len(excluded_statement_line_ids) > 100:
+            return Response(
+                {"error": "exclude_statement_line_ids may contain at most 100 values"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         suggestions = XeroStatementSuggestion.objects.filter(
             organization=organization,
             status=XeroStatementSuggestion.STATUS_PROPOSED,
@@ -2567,6 +2581,10 @@ class ReconciliationStatementSafeBatchView(ReconciliationAdminView):
         ).select_related("statement_line").order_by(
             "statement_line_id", "-created_at"
         )
+        if excluded_statement_line_ids:
+            suggestions = suggestions.exclude(
+                statement_line__statement_line_id__in=excluded_statement_line_ids
+            )
         latest = []
         seen_lines = set()
         for suggestion in suggestions:
@@ -2618,6 +2636,7 @@ class ReconciliationStatementSafeBatchView(ReconciliationAdminView):
                 })
         return Response({
             "dry_run": dry_run,
+            "excluded_statement_line_ids": sorted(excluded_statement_line_ids),
             "candidate_count": len(results),
             "ready_count": sum(1 for item in results if item.get("ready")),
             "posted_count": sum(1 for item in results if item.get("posted")),

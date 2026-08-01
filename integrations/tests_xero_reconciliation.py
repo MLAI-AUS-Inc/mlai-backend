@@ -3827,6 +3827,20 @@ class ReconciliationWorkflowApiTests(APITestCase):
         self.assertEqual(batch.data["ready_count"], 1)
         self.assertEqual(batch.data["posted_count"], 0)
 
+        excluded = self.client.post(
+            reverse("reconciliation_statement_safe_batch"),
+            {
+                "slack_user_id": "UADMIN",
+                "domain": "mlai.au",
+                "dry_run": True,
+                "exclude_statement_line_ids": [line.statement_line_id],
+            },
+            format="json",
+        )
+        self.assertEqual(excluded.status_code, status.HTTP_200_OK)
+        self.assertEqual(excluded.data["excluded_statement_line_ids"], [line.statement_line_id])
+        self.assertEqual(excluded.data["candidate_count"], 0)
+
     @patch("core.permissions.HasRooApiKey.has_permission", return_value=True)
     def test_valley_context_submission_and_human_approval_contract(self, _permission):
         ContentFactoryRun.objects.create(
