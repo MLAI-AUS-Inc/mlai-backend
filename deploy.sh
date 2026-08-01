@@ -366,8 +366,10 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     upsert_env_value DEBUG "False"
     upsert_env_value VICTOR_AI_ROO_ENABLED "true"
     upsert_env_value ALLOWED_HOSTS "api.mlai.au,209.38.85.60,10.126.0.2,localhost,127.0.0.1,esafety.localhost"
-    upsert_env_value CORS_ALLOWED_ORIGINS "https://mlai.au,https://www.mlai.au,https://victorai.win,https://www.victorai.win"
-    upsert_env_value CSRF_TRUSTED_ORIGINS "https://mlai.au,https://www.mlai.au,https://api.mlai.au"
+    # Plane owns admin.mlai.au after cutover, so it must not be trusted as a
+    # credentialed browser origin for the MLAI API. Rollback routes to ops.
+    upsert_env_value CORS_ALLOWED_ORIGINS "https://mlai.au,https://www.mlai.au,https://victorai.win,https://www.victorai.win,https://ops.mlai.au"
+    upsert_env_value CSRF_TRUSTED_ORIGINS "https://mlai.au,https://www.mlai.au,https://api.mlai.au,https://ops.mlai.au"
     upsert_env_value DEFAULT_BACKEND_URL "https://api.mlai.au"
     upsert_env_value DEFAULT_FRONTEND_URL "https://mlai.au"
     upsert_env_value MEDHACK_URL "https://mlai.au"
