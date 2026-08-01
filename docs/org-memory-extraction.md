@@ -48,7 +48,7 @@ cannot be reported as completed merely because the failure was persisted for rev
 
 ```text
 ORG_MEMORY_EXTRACTION_MODEL=gpt-5.6-luna
-ORG_MEMORY_EXTRACTOR_VERSION=org-memory-extractor-v2
+ORG_MEMORY_EXTRACTOR_VERSION=org-memory-extractor-v3
 ORG_MEMORY_EXTRACTION_SCHEMA_VERSION=org-memory-extraction-schema-v2
 ORG_MEMORY_EXTRACTION_PROMPT_VERSION=org-memory-extraction-prompt-v2
 ORG_MEMORY_EXTRACTION_MAX_INPUT_CHARS=60000
@@ -69,7 +69,7 @@ python manage.py schedule_org_memory_reextraction \
   --provider google_drive
 ```
 
-Schedule one idempotent extraction job per current source version for the configured v2 target:
+Schedule one idempotent extraction job per current source version for the configured target:
 
 ```bash
 python manage.py schedule_org_memory_reextraction \
