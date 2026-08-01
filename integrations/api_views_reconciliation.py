@@ -84,6 +84,11 @@ from integrations.services.xero_statement_posting import (
     build_statement_posting_preview,
     execute_statement_posting,
 )
+from integrations.services.xero_bill_intake import (
+    attach_reconciliation_document,
+    build_reconciliation_bill_preview,
+    create_reconciliation_bill,
+)
 from integrations.services.reconciliation_rules import (
     latest_admin_reconciliation_decision,
     record_reconciliation_decision,
@@ -2305,6 +2310,20 @@ class ReconciliationStatementScanView(ReconciliationAdminView):
         }, status=status.HTTP_201_CREATED)
 
 
+def _serialize_posting_reference(posting) -> dict:
+    """The Xero identifiers a caller needs to follow up on an executed posting
+    (e.g. attach the source document to the created transaction)."""
+
+    return {
+        "id": posting.id,
+        "operation": posting.operation,
+        "status": posting.status,
+        "xero_bank_transaction_id": posting.xero_bank_transaction_id,
+        "xero_payment_id": posting.xero_payment_id,
+        "xero_bill_id": posting.xero_bill_id,
+    }
+
+
 class ReconciliationStatementSuggestionPreviewView(ReconciliationAdminView):
     def get(self, request, suggestion_id: int):
         _, organization, error = self.context(request)
@@ -2347,7 +2366,11 @@ class ReconciliationStatementSuggestionExecuteView(ReconciliationAdminView):
         except XeroPostingError as exc:
             return Response({"error": str(exc)}, status=status.HTTP_502_BAD_GATEWAY)
         suggestion.refresh_from_db()
-        return Response({"suggestion": serialize_statement_suggestion(suggestion), "posting_id": posting.id})
+        return Response({
+            "suggestion": serialize_statement_suggestion(suggestion),
+            "posting_id": posting.id,
+            "posting": _serialize_posting_reference(posting),
+        })
 
 
 class ReconciliationStatementSafeBatchView(ReconciliationAdminView):
@@ -2403,7 +2426,12 @@ class ReconciliationStatementSafeBatchView(ReconciliationAdminView):
                         requested_by_slack_id=slack_user_id,
                         automatic=request.data.get("automatic") is True,
                     )
-                    result.update({"posted": True, "posting_id": posting.id, "status": posting.status})
+                    result.update({
+                        "posted": True,
+                        "posting_id": posting.id,
+                        "status": posting.status,
+                        "posting": _serialize_posting_reference(posting),
+                    })
                 results.append(result)
             except ReconciliationValidationError as exc:
                 results.append({
@@ -2427,6 +2455,62 @@ class ReconciliationStatementSafeBatchView(ReconciliationAdminView):
             "posted_count": sum(1 for item in results if item.get("posted")),
             "results": results,
         })
+
+
+class ReconciliationDraftBillView(ReconciliationAdminView):
+    """Create an ACCPAY bill from an extracted supplier invoice so the bank
+    statement line green-matches the bill on the reconcile screen."""
+
+    def post(self, request):
+        slack_user_id, organization, error = self.context(request, from_body=True)
+        if error:
+            return error
+        dry_run = request.data.get("dry_run") is True
+        if not dry_run and request.data.get("confirm") is not True:
+            return Response({"error": "confirm must be true to write to Xero"}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            if dry_run:
+                preview = build_reconciliation_bill_preview(organization, payload=request.data)
+                return Response({"dry_run": True, **preview})
+            result = create_reconciliation_bill(
+                organization,
+                payload=request.data,
+                requested_by_slack_id=slack_user_id,
+            )
+        except ReconciliationValidationError as exc:
+            return Response({"error": str(exc), "errors": exc.errors}, status=status.HTTP_409_CONFLICT)
+        except XeroPostingError as exc:
+            return Response({"error": str(exc)}, status=status.HTTP_502_BAD_GATEWAY)
+        return Response(
+            result,
+            status=status.HTTP_201_CREATED if result.get("created") else status.HTTP_200_OK,
+        )
+
+
+class ReconciliationXeroAttachmentView(ReconciliationAdminView):
+    """Attach the source document (invoice PDF) to a Xero invoice or bank
+    transaction — the audit trail behind every agent-created transaction."""
+
+    def post(self, request):
+        slack_user_id, organization, error = self.context(request, from_body=True)
+        if error:
+            return error
+        if request.data.get("confirm") is not True:
+            return Response({"error": "confirm must be true to write to Xero"}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            result = attach_reconciliation_document(
+                organization,
+                payload=request.data,
+                requested_by_slack_id=slack_user_id,
+            )
+        except ReconciliationValidationError as exc:
+            return Response({"error": str(exc), "errors": exc.errors}, status=status.HTTP_409_CONFLICT)
+        except XeroPostingError as exc:
+            return Response({"error": str(exc)}, status=status.HTTP_502_BAD_GATEWAY)
+        return Response(
+            result,
+            status=status.HTTP_201_CREATED if result.get("created") else status.HTTP_200_OK,
+        )
 
 
 class ReconciliationSuggestionDecisionView(ReconciliationAdminView):

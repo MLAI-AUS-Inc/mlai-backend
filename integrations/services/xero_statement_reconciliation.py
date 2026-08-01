@@ -43,6 +43,7 @@ from integrations.services.reconciliation_rules import (
 
 ALLOWED_STATEMENT_EVIDENCE_PROVIDERS = {
     "admin_rule",
+    "document",
     "gmail",
     "slack",
     "linear",
