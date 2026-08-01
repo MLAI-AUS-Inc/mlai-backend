@@ -423,7 +423,7 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     upsert_env_value ORG_MEMORY_PILOT_ORGANIZATION_DOMAIN "mlai.au"
     # Version pins are deployment-managed so semantic reprocessing cannot be
     # accidentally suppressed by a stale value in the host's long-lived .env.
-    upsert_env_value ORG_MEMORY_EXTRACTOR_VERSION "org-memory-extractor-v4"
+    upsert_env_value ORG_MEMORY_EXTRACTOR_VERSION "org-memory-extractor-v5"
     upsert_env_value ORG_MEMORY_EXTRACTION_SCHEMA_VERSION "org-memory-extraction-schema-v2"
     upsert_env_value ORG_MEMORY_EXTRACTION_PROMPT_VERSION "org-memory-extraction-prompt-v2"
     upsert_env_value ORG_MEMORY_SELECTOR_VERSION "org-memory-rules-selector-v2"
@@ -717,7 +717,17 @@ PY
             --operator-email "\$stage_operator" \
             --apply
 
-        echo "🧠 Scheduling the reviewed extractor-v4 target for current Drive evidence..."
+        echo "🧹 Reconciling extractor-v4 attributed-transcript dead letters..."
+        compose_run_web python manage.py reconcile_org_memory_extraction_dead_letters \
+            --organization-domain mlai.au \
+            --provider google_drive \
+            --superseded-schema-version org-memory-extraction-schema-v2 \
+            --superseded-extractor-version org-memory-extractor-v4 \
+            --superseded-prompt-version org-memory-extraction-prompt-v2 \
+            --operator-email "\$stage_operator" \
+            --apply
+
+        echo "🧠 Scheduling the reviewed extractor-v5 target for current Drive evidence..."
         compose_run_web python manage.py schedule_org_memory_reextraction \
             --organization-domain mlai.au \
             --provider google_drive \

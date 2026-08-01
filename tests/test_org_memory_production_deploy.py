@@ -48,7 +48,7 @@ class OrgMemoryProductionDeployTests(SimpleTestCase):
         required_settings = {
             'ORG_MEMORY_QUERY_API_ENABLED "true"',
             'ORG_MEMORY_PILOT_ORGANIZATION_DOMAIN "mlai.au"',
-            'ORG_MEMORY_EXTRACTOR_VERSION "org-memory-extractor-v4"',
+            'ORG_MEMORY_EXTRACTOR_VERSION "org-memory-extractor-v5"',
             'ORG_MEMORY_EXTRACTION_SCHEMA_VERSION "org-memory-extraction-schema-v2"',
             'ORG_MEMORY_EXTRACTION_PROMPT_VERSION "org-memory-extraction-prompt-v2"',
             'ORG_MEMORY_ENABLED_PROVIDERS "google_drive"',
@@ -72,6 +72,7 @@ class OrgMemoryProductionDeployTests(SimpleTestCase):
         self.assertIn("--superseded-prompt-version org-memory-extraction-prompt-v1", deploy)
         self.assertIn("--superseded-extractor-version org-memory-extractor-v2", deploy)
         self.assertIn("--superseded-extractor-version org-memory-extractor-v3", deploy)
+        self.assertIn("--superseded-extractor-version org-memory-extractor-v4", deploy)
         self.assertIn("paused_runtime_services=(web memory-worker memory-scheduler)", deploy)
         self.assertIn('docker compose stop "\\${paused_runtime_services[@]}"', deploy)
         self.assertIn(
