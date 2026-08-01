@@ -1026,6 +1026,10 @@ class XeroStatementScan(models.Model):
     expected_count = models.PositiveIntegerField(null=True, blank=True)
     observed_count = models.PositiveIntegerField(default=0)
     payload_hash = models.CharField(max_length=64, blank=True, default="")
+    # PII-minimised evidence from the read-only browser capture: source scan
+    # timestamps, page counts/coverage, and completeness blockers. Line values
+    # remain in XeroStatementLineSnapshot and credentials are never accepted.
+    capture_metadata = models.JSONField(default=dict, blank=True)
     error = models.TextField(blank=True, default="")
     started_at = models.DateTimeField(auto_now_add=True)
     completed_at = models.DateTimeField(null=True, blank=True)

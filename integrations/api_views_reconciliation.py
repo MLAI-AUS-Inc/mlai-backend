@@ -2399,6 +2399,7 @@ class ReconciliationStatementScanView(ReconciliationAdminView):
                 complete_scan=complete,
                 source="browser",
                 requested_by=slack_user_id,
+                capture_metadata=request.data.get("capture_metadata"),
             )
         except ValueError as exc:
             return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
@@ -2419,6 +2420,7 @@ class ReconciliationStatementScanView(ReconciliationAdminView):
                 "observed_count": scan.observed_count,
                 "confirmed_reconciled_count": scan.confirmed_postings.count(),
                 "completed_at": scan.completed_at.isoformat() if scan.completed_at else None,
+                "capture_metadata": scan.capture_metadata,
             } if scan else None,
             "statement_lines": [serialize_statement_line(line) for line in saved],
         }, status=status.HTTP_201_CREATED)

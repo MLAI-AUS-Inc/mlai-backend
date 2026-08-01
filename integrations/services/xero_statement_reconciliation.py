@@ -583,6 +583,58 @@ def _browser_ui_mode(raw: dict[str, Any], *, visible_fields: dict[str, str]) -> 
     return XeroStatementLineSnapshot.UI_BLANK_CREATE
 
 
+def _sanitize_capture_metadata(raw: dict[str, Any] | None) -> dict[str, Any]:
+    """Keep bounded completeness evidence and reject credential-shaped data."""
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ValueError("capture_metadata must be an object")
+    forbidden = {
+        "token", "access_token", "refresh_token", "authorization", "cookie",
+        "api_key", "secret", "lines", "narration", "reference",
+    }
+    if forbidden.intersection(str(key).lower() for key in raw):
+        raise ValueError("capture_metadata contains a forbidden sensitive field")
+    pages = raw.get("pages") or []
+    if not isinstance(pages, list) or len(pages) > 500:
+        raise ValueError("capture_metadata pages must be a bounded list")
+    safe_pages = []
+    for page in pages:
+        if not isinstance(page, dict):
+            raise ValueError("capture_metadata page evidence must be an object")
+        if not isinstance(page.get("has_previous"), bool) or not isinstance(page.get("has_next"), bool):
+            raise ValueError("capture_metadata pagination flags must be booleans")
+        try:
+            safe_page = {
+                "page_number": int(page.get("page_number")),
+                "page_count": int(page.get("page_count")),
+                "observed_count": int(page.get("observed_count")),
+                "has_previous": page["has_previous"],
+                "has_next": page["has_next"],
+            }
+        except (TypeError, ValueError) as exc:
+            raise ValueError("capture_metadata page counts must be integers") from exc
+        if (
+            safe_page["page_number"] < 1
+            or safe_page["page_count"] < 1
+            or safe_page["observed_count"] < 0
+        ):
+            raise ValueError("capture_metadata page counts are out of range")
+        safe_pages.append(safe_page)
+    blockers = raw.get("blocking_reasons") or []
+    if not isinstance(blockers, list) or len(blockers) > 20:
+        raise ValueError("capture_metadata blocking_reasons must be a bounded list")
+    return {
+        "schema_version": 1,
+        "scan_id": str(raw.get("scan_id") or "")[:128],
+        "source_started_at": str(raw.get("source_started_at") or "")[:64],
+        "source_completed_at": str(raw.get("source_completed_at") or "")[:64],
+        "pages": safe_pages,
+        "derived_complete": raw.get("derived_complete") is True,
+        "blocking_reasons": [str(reason)[:500] for reason in blockers],
+    }
+
+
 def import_xero_statement_lines(
     *,
     organization,
@@ -593,6 +645,7 @@ def import_xero_statement_lines(
     complete_scan: bool = True,
     source: str = "browser",
     requested_by: str = "",
+    capture_metadata: dict[str, Any] | None = None,
 ) -> list[XeroStatementLineSnapshot]:
     if not bank_account_id:
         raise ValueError("bank_account_id is required")
@@ -627,6 +680,7 @@ def import_xero_statement_lines(
             payload_hash=hashlib.sha256(
                 json.dumps(lines, sort_keys=True, separators=(",", ":"), default=str).encode()
             ).hexdigest(),
+            capture_metadata=_sanitize_capture_metadata(capture_metadata),
         )
         for raw in lines:
             if not isinstance(raw, dict):

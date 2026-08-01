@@ -2247,6 +2247,21 @@ class ReconciliationWorkflowApiTests(APITestCase):
                 "bank_account_id": "bank-1",
                 "expected_count": 1,
                 "complete": True,
+                "capture_metadata": {
+                    "schema_version": 1,
+                    "scan_id": "scan-redacted-api-001",
+                    "source_started_at": "2026-07-18T01:00:00Z",
+                    "source_completed_at": "2026-07-18T01:01:00Z",
+                    "pages": [{
+                        "page_number": 1,
+                        "page_count": 1,
+                        "observed_count": 1,
+                        "has_previous": False,
+                        "has_next": False,
+                    }],
+                    "derived_complete": True,
+                    "blocking_reasons": [],
+                },
                 "lines": [{
                     "statement_line_id": "api-prefilled-luiz",
                     "date": "30 Jun 2026",
@@ -2267,9 +2282,25 @@ class ReconciliationWorkflowApiTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertEqual(response.data["scan"]["status"], XeroStatementScan.STATUS_COMPLETE)
         self.assertEqual(
+            response.data["scan"]["capture_metadata"]["scan_id"],
+            "scan-redacted-api-001",
+        )
+        self.assertTrue(response.data["scan"]["capture_metadata"]["derived_complete"])
+        self.assertEqual(
             response.data["statement_lines"][0]["ui_mode"],
             XeroStatementLineSnapshot.UI_CREATE_PREFILLED,
         )
+
+    def test_statement_scan_capture_metadata_rejects_credentials(self):
+        with self.assertRaisesMessage(ValueError, "forbidden sensitive field"):
+            import_xero_statement_lines(
+                organization=self.organization,
+                bank_account_id="bank-1",
+                lines=[],
+                expected_count=None,
+                complete_scan=False,
+                capture_metadata={"refresh_token": "must-never-be-stored"},
+            )
 
     @patch("core.permissions.HasRooApiKey.has_permission", return_value=True)
     def test_admin_can_verify_bank_to_xero_party_identity(self, _permission):
