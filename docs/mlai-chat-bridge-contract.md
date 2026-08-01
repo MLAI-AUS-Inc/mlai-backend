@@ -132,6 +132,10 @@ python manage.py verify_community_bridge_staging \
   --buzz-event-id 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 ```
 
+The deployment, production-settings, backup/restore, security-review, and
+rollback gates are in
+[`mlai-chat-release-runbook.md`](mlai-chat-release-runbook.md).
+
 ## Verified identity links
 
 Identity links are optional presentation metadata. A bridged Slack message is
