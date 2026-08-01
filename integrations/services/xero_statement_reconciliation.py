@@ -1032,6 +1032,7 @@ def _bill_candidates(organization, line: XeroStatementLineSnapshot) -> list[dict
         provider=ExternalServiceProvider.XERO,
         record_type=ExternalFinancialRecord.RECORD_XERO_BILL,
         amount=line.amount,
+        currency=line.currency,
         transaction_date__gte=line.transaction_date - timedelta(days=92),
         transaction_date__lte=line.transaction_date + timedelta(days=31),
     ).exclude(status__in=["DELETED", "VOIDED", "PAID"])
@@ -1214,6 +1215,29 @@ def build_statement_reconciliation_context(
             "confidence": identity.confidence,
             "verified_by_slack_id": identity.verified_by_slack_id,
         } if identity else None
+        line_merchant_key = serialized["merchant_key"]
+        verified_contact_names = {
+            str(value or "").strip().casefold()
+            for value in (
+                getattr(identity, "canonical_name", ""),
+                getattr(identity, "xero_contact_name", ""),
+            )
+            if str(value or "").strip()
+        }
+        for bill in matching_bills:
+            bill_contact = str(bill.get("contact_name") or "").strip()
+            bill_merchant_key = merchant_key(bill_contact)
+            narration_match = bool(
+                bill_merchant_key
+                and (
+                    bill_merchant_key == line_merchant_key
+                    or f" {bill_merchant_key} " in f" {line_merchant_key} "
+                )
+            )
+            identity_match = bill_contact.casefold() in verified_contact_names
+            bill["merchant_key_match"] = narration_match
+            bill["verified_identity_match"] = identity_match
+            bill["exact_outstanding_match"] = bool(narration_match or identity_match)
         serialized["matching_xero_bills"] = matching_bills
         if matching_bills:
             serialized["deferred_verified_rule"] = serialized["verified_rule"]

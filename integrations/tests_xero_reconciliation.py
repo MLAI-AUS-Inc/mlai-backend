@@ -921,6 +921,9 @@ class XeroReconciliationWorkflowTests(TestCase):
             "ready-uber",
         )
         self.assertEqual(candidates["blank-bill"]["matching_xero_bills"][0]["xero_bill_id"], "bill-print-locker")
+        self.assertTrue(
+            candidates["blank-bill"]["matching_xero_bills"][0]["exact_outstanding_match"]
+        )
 
         saved = save_statement_suggestions(
             organization=self.organization,
