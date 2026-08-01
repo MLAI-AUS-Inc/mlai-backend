@@ -1577,6 +1577,9 @@ def requeue_dead_letter(dead_letter_id, *, resolved_by=None) -> MemoryWorkItem:
 
 
 LEGACY_ACCESS_RESTORED_ERROR = "'NoneType' object has no attribute 'chunks'"
+LEGACY_CONSOLIDATION_OUTER_JOIN_LOCK_ERROR = (
+    "FOR UPDATE cannot be applied to the nullable side of an outer join"
+)
 
 
 def legacy_access_restored_dead_letters(*, organization, provider: str):
@@ -1598,6 +1601,82 @@ def legacy_access_restored_dead_letters(*, organization, provider: str):
         "work_item__source__current_version",
         "work_item__configuration",
     )
+
+
+def legacy_consolidation_lock_dead_letters(*, organization, provider: str):
+    """Return only consolidation work affected by the nullable-join lock bug."""
+
+    return MemoryDeadLetter.objects.filter(
+        organization=organization,
+        resolved_at__isnull=True,
+        task_type=MemoryWorkTaskType.CONSOLIDATE,
+        work_item__provider=provider,
+        work_item__action_request__isnull=True,
+        last_error=LEGACY_CONSOLIDATION_OUTER_JOIN_LOCK_ERROR,
+    ).select_related(
+        "work_item",
+        "work_item__source",
+        "work_item__source_version",
+        "work_item__configuration",
+    )
+
+
+@transaction.atomic
+def reconcile_consolidation_lock_dead_letters(
+    *,
+    organization,
+    provider: str,
+    apply: bool = False,
+    resolved_by=None,
+    limit: int = 1000,
+) -> dict:
+    """Requeue only work that hit the fixed consolidation lock failure."""
+
+    if apply and resolved_by is None:
+        raise ValueError("An operator is required when applying reconciliation.")
+    dead_letters = legacy_consolidation_lock_dead_letters(
+        organization=organization,
+        provider=provider,
+    ).order_by("dead_at", "pk")
+    if apply:
+        dead_letters = _locked(dead_letters, of_self=True)
+    rows = list(dead_letters[:limit])
+    report = {
+        "schema_version": "org-memory-consolidation-lock-dead-letter-reconciliation-v1",
+        "organization_domain": organization.domain,
+        "provider": provider,
+        "apply": bool(apply),
+        "candidates": len(rows),
+        "scheduled": 0,
+        "existing": 0,
+        "resolved": 0,
+    }
+    if not apply:
+        return report
+    resolved_at = timezone.now()
+    for dead_letter in rows:
+        original = dead_letter.work_item
+        replacement, created = create_work_item(
+            organization=organization,
+            provider=provider,
+            task_type=MemoryWorkTaskType.CONSOLIDATE,
+            idempotency_key=f"dead-letter:{dead_letter.pk}:consolidation-lock-v1",
+            source=original.source,
+            source_version=original.source_version,
+            configuration=original.configuration,
+            payload=original.payload,
+            max_attempts=original.max_attempts,
+        )
+        report["scheduled"] += int(created)
+        report["existing"] += int(not created)
+        dead_letter.resolved_at = resolved_at
+        dead_letter.resolved_by = resolved_by
+        dead_letter.requeued_work_item = replacement
+        dead_letter.save(
+            update_fields=("resolved_at", "resolved_by", "requeued_work_item")
+        )
+        report["resolved"] += 1
+    return report
 
 
 @transaction.atomic

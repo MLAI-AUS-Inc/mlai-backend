@@ -19,6 +19,7 @@ from org_memory.extraction import (
     schedule_source_extraction,
 )
 from org_memory.extraction_health import (
+    cancel_superseded_extraction_work,
     extraction_health_report,
     reconcile_legacy_extraction_dead_letters,
 )
@@ -472,6 +473,57 @@ class MemoryExtractionTests(TestCase):
         self.assertEqual(claim.kind, "decision")
         self.assertEqual(claim.epistemic_type, "decision")
         self.assertEqual(claim.evidence.get().quote, text)
+
+    def test_superseded_pending_extraction_work_is_cancelled_before_reprocessing(self):
+        version = self.capture(
+            "Decision: The committee approved the pilot.",
+            external_id="meeting-superseded-work",
+        )
+        current_target = configured_extraction_target()
+        current_result = schedule_source_extraction(
+            source_version=version,
+            target=current_target,
+        )
+        current_work = MemoryWorkItem.objects.get(pk=current_result["work_item_id"])
+        superseded_work = MemoryWorkItem.objects.create(
+            organization=self.organization,
+            provider="google_drive",
+            task_type=MemoryWorkTaskType.EXTRACT,
+            source=version.source,
+            source_version=version,
+            idempotency_key="superseded-extraction-work",
+            payload={
+                **current_work.payload,
+                "extractor_version": "superseded-extractor-v1",
+                "target_fingerprint": "superseded-fingerprint",
+            },
+            status=MemoryWorkStatus.PENDING,
+        )
+        operator = get_user_model().objects.create_user(
+            email="extraction-operator@mlai.test",
+            password="test-password",
+        )
+
+        preview = cancel_superseded_extraction_work(
+            organization=self.organization,
+            provider="google_drive",
+            target=current_target,
+        )
+        self.assertEqual(preview["candidates"], 1)
+
+        applied = cancel_superseded_extraction_work(
+            organization=self.organization,
+            provider="google_drive",
+            target=current_target,
+            apply=True,
+            resolved_by=operator,
+        )
+        superseded_work.refresh_from_db()
+        current_work.refresh_from_db()
+
+        self.assertEqual(applied["cancelled"], 1)
+        self.assertEqual(superseded_work.status, MemoryWorkStatus.CANCELLED)
+        self.assertEqual(current_work.status, MemoryWorkStatus.PENDING)
 
     def test_runtime_executes_scheduled_extraction_handler(self):
         version = self.capture("Thanks everyone.", external_id="meeting-runtime")

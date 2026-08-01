@@ -43,6 +43,7 @@ from org_memory.models import (
 )
 from org_memory.runtime import (
     LEGACY_ACCESS_RESTORED_ERROR,
+    LEGACY_CONSOLIDATION_OUTER_JOIN_LOCK_ERROR,
     claim_memory_work,
     dispatch_outbox_events,
     dispatch_pending_actions,
@@ -51,6 +52,7 @@ from org_memory.runtime import (
     memory_queue_snapshot,
     recover_expired_leases,
     reconcile_access_restored_dead_letters,
+    reconcile_consolidation_lock_dead_letters,
     requeue_dead_letter,
     schedule_due_connections,
 )
@@ -309,6 +311,93 @@ class MemoryRuntimeTests(TestCase):
                 resolved_by=self.user,
             )["candidates"],
             0,
+        )
+
+    def test_legacy_consolidation_lock_dead_letters_are_requeued_once(self):
+        source, version, _created = self._captured_source()
+        OrganizationMembership.objects.create(
+            organization=self.organization,
+            user=self.user,
+        )
+        payload = {
+            "claim_id": "0c939657-95ca-4a99-b07b-eff78e9b0be6",
+            "target_fingerprint": "legacy-consolidation-target",
+        }
+        work = MemoryWorkItem.objects.create(
+            organization=self.organization,
+            provider="linear",
+            task_type=MemoryWorkTaskType.CONSOLIDATE,
+            source=source,
+            source_version=version,
+            configuration=self.configuration,
+            idempotency_key="legacy-consolidation-lock",
+            payload=payload,
+            status=MemoryWorkStatus.DEAD,
+            attempts=5,
+            max_attempts=5,
+            last_error=LEGACY_CONSOLIDATION_OUTER_JOIN_LOCK_ERROR,
+        )
+        dead_letter = MemoryDeadLetter.objects.create(
+            work_item=work,
+            organization=self.organization,
+            task_type=MemoryWorkTaskType.CONSOLIDATE,
+            payload_snapshot=payload,
+            attempts=5,
+            last_error=LEGACY_CONSOLIDATION_OUTER_JOIN_LOCK_ERROR,
+        )
+        unrelated_work = MemoryWorkItem.objects.create(
+            organization=self.organization,
+            provider="linear",
+            task_type=MemoryWorkTaskType.CONSOLIDATE,
+            idempotency_key="unrelated-consolidation-failure",
+            payload=payload,
+            status=MemoryWorkStatus.DEAD,
+            attempts=5,
+            max_attempts=5,
+            last_error="Different consolidation error",
+        )
+        MemoryDeadLetter.objects.create(
+            work_item=unrelated_work,
+            organization=self.organization,
+            task_type=MemoryWorkTaskType.CONSOLIDATE,
+            payload_snapshot=payload,
+            attempts=5,
+            last_error="Different consolidation error",
+        )
+
+        preview = reconcile_consolidation_lock_dead_letters(
+            organization=self.organization,
+            provider="linear",
+        )
+        self.assertEqual(preview["candidates"], 1)
+
+        applied = reconcile_consolidation_lock_dead_letters(
+            organization=self.organization,
+            provider="linear",
+            apply=True,
+            resolved_by=self.user,
+        )
+        dead_letter.refresh_from_db()
+        replacement = MemoryWorkItem.objects.get(pk=dead_letter.requeued_work_item_id)
+
+        self.assertEqual(applied["scheduled"], 1)
+        self.assertEqual(applied["resolved"], 1)
+        self.assertEqual(replacement.task_type, MemoryWorkTaskType.CONSOLIDATE)
+        self.assertEqual(replacement.source_version, version)
+        self.assertEqual(replacement.payload, payload)
+        self.assertEqual(replacement.status, MemoryWorkStatus.PENDING)
+        self.assertEqual(
+            reconcile_consolidation_lock_dead_letters(
+                organization=self.organization,
+                provider="linear",
+                apply=True,
+                resolved_by=self.user,
+            )["candidates"],
+            0,
+        )
+        self.assertEqual(
+            MemoryDeadLetter.objects.filter(resolved_at__isnull=True).count(),
+            1,
         )
 
     def test_expired_worker_lease_is_recovered_and_reclaimed(self):
