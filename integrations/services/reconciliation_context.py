@@ -16,6 +16,7 @@ from integrations.models import (
     StripePayoutReconciliation,
 )
 from integrations.services.xero_statement_reconciliation import build_statement_reconciliation_context
+from integrations.services.reconciliation_catalogs import build_reconciliation_catalog_status
 from startup_updates.models import LinearProjectArtifact, LinearProjectSelection, LumaEventSelection
 
 
@@ -313,6 +314,9 @@ def build_reconciliation_enrichment_context(*, organization, run_id: str = "") -
         "luma_events": luma_events,
         "humanitix_events": humanitix_events,
         "linear_projects": linear_projects,
+        "catalog_status": build_reconciliation_catalog_status(
+            organization=organization
+        ),
         **statement_context,
     }
 

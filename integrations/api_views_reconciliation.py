@@ -108,6 +108,9 @@ from integrations.services.reconciliation_outcomes import (
 from integrations.services.reconciliation_knowledge import (
     build_reconciliation_knowledge_export,
 )
+from integrations.services.reconciliation_catalogs import (
+    build_reconciliation_catalog_status,
+)
 
 
 MAX_WINDOW_DAYS = 92
@@ -241,6 +244,7 @@ def _reconciliation_request_fingerprint(
         .select_related("xero_connection")
         .first()
     )
+    catalog_status = build_reconciliation_catalog_status(organization=organization)
     return _stable_reconciliation_hash({
         "organization_id": organization.id,
         "statement_scan_id": scan.id,
@@ -249,6 +253,7 @@ def _reconciliation_request_fingerprint(
         "requested_statement_line_ids": sorted(requested_line_ids),
         "verified_rule_revisions": rule_revisions,
         "outstanding_xero_bill_revisions": bill_revisions,
+        "catalog_source_hashes": catalog_status["source_hashes"],
         "profile_revision": (
             {
                 **serialize_profile(profile),
@@ -621,6 +626,13 @@ class ReconciliationEnrichmentContextView(APIView):
         if error:
             return error
         context = build_reconciliation_enrichment_context(organization=organization, run_id=run_id)
+        request_payload = run.run_request if isinstance(run.run_request, dict) else {}
+        expected_catalog_hashes = request_payload.get("catalog_source_hashes") or {}
+        context["catalog_status"] = build_reconciliation_catalog_status(
+            organization=organization,
+            expected_source_hashes=expected_catalog_hashes,
+        )
+        memory_run = run
         if run.workflow == RECONCILIATION_AGENT_WORKFLOW:
             selected_line_ids = {
                 str(item or "").strip()
@@ -632,8 +644,24 @@ class ReconciliationEnrichmentContextView(APIView):
                     item for item in context.get("statement_candidates") or []
                     if str(item.get("statement_line_id") or "") in selected_line_ids
                 ]
-            context["agent_instruction"] = str((run.run_request or {}).get("instruction") or "")
-            context["base_monthly_run_id"] = str((run.run_request or {}).get("base_monthly_run_id") or "")
+            context["agent_instruction"] = str(request_payload.get("instruction") or "")
+            context["base_monthly_run_id"] = str(request_payload.get("base_monthly_run_id") or "")
+            if context["base_monthly_run_id"]:
+                memory_run = ContentFactoryRun.objects.filter(
+                    organization=organization,
+                    workflow="startup_monthly_update",
+                    run_id=context["base_monthly_run_id"],
+                ).first() or run
+        memory_payload = (
+            memory_run.run_request if isinstance(memory_run.run_request, dict) else {}
+        )
+        startup_memory = memory_payload.get("startup_memory") or {}
+        context["startup_memory"] = startup_memory
+        context["startup_memory_provenance"] = {
+            "source": "content_factory_run_request",
+            "source_run_id": memory_run.run_id,
+            "present": bool(startup_memory),
+        }
         return Response(context)
 
     def post(self, request):
@@ -1369,7 +1397,26 @@ class ReconciliationReadinessView(ReconciliationAdminView):
         monthly_run = _latest_monthly_context_run(organization)
         if monthly_run is None:
             warnings.append(
-                "Run a monthly update first so unresolved lines can use Gmail, Slack, Linear, Luma and Stripe context."
+                "Run a monthly update first so unresolved lines can use Gmail, Slack, Linear, "
+                "Luma, Humanitix, Stripe and startup-memory context."
+            )
+        latest_agent_run = ContentFactoryRun.objects.filter(
+            organization=organization,
+            workflow=RECONCILIATION_AGENT_WORKFLOW,
+        ).order_by("-updated_at", "-id").first()
+        agent_request = (
+            latest_agent_run.run_request
+            if latest_agent_run and isinstance(latest_agent_run.run_request, dict)
+            else {}
+        )
+        catalog_status = build_reconciliation_catalog_status(
+            organization=organization,
+            expected_source_hashes=agent_request.get("catalog_source_hashes") or {},
+        )
+        if catalog_status["drift_detected"]:
+            warnings.append(
+                "Entity catalogs changed after the latest reconciliation run started; "
+                "start a fresh run before approval or learning promotion."
             )
 
         profile = (
@@ -1501,6 +1548,7 @@ class ReconciliationReadinessView(ReconciliationAdminView):
                 "project_tracking_configured": project_tracking_configured,
             },
             "active_verified_rule_count": active_rule_count,
+            "catalog_status": catalog_status,
             "blockers": blockers,
             "warnings": warnings,
             "recommended_next_action": recommended_next_action,
@@ -1582,6 +1630,9 @@ class ReconciliationAgentRunView(ReconciliationAdminView):
             requested_line_ids=requested_line_ids,
         )
         run_id = f"xero-reconciliation-{request_fingerprint[:40]}"
+        catalog_status = build_reconciliation_catalog_status(
+            organization=organization
+        )
         existing_run = ContentFactoryRun.objects.filter(
             organization=organization,
             workflow=RECONCILIATION_AGENT_WORKFLOW,
@@ -1636,8 +1687,18 @@ class ReconciliationAgentRunView(ReconciliationAdminView):
                     "deferred_bill_statement_line_ids": prepared["deferred_bill_line_ids"],
                     "statement_scan_id": latest_scan.id,
                     "base_monthly_run_id": base_monthly_run.run_id if base_monthly_run else "",
+                    "catalog_source_hashes": catalog_status["source_hashes"],
                     "dry_run": True,
-                    "input_sources": ["gmail", "slack", "linear", "luma", "stripe", "xero"],
+                    "input_sources": [
+                        "gmail",
+                        "slack",
+                        "linear",
+                        "luma",
+                        "humanitix",
+                        "stripe",
+                        "xero",
+                        "startup_memory",
+                    ],
                 }
                 run.result = {"deterministic_reconciliation": deterministic_summary}
                 if not agent_line_ids:

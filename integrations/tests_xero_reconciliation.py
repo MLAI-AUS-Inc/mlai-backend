@@ -54,6 +54,9 @@ from integrations.services.reconciliation_context import (
     build_reconciliation_enrichment_context,
     save_reconciliation_suggestions,
 )
+from integrations.services.reconciliation_catalogs import (
+    build_reconciliation_catalog_status,
+)
 from integrations.services.xero_statement_reconciliation import (
     build_statement_reconciliation_context,
     format_statement_browser_comment,
@@ -2074,6 +2077,45 @@ class ReconciliationWorkflowApiTests(APITestCase):
         )
 
     @patch("core.permissions.HasRooApiKey.has_permission", return_value=True)
+    def test_reconciliation_readiness_reports_catalog_drift(self, _permission):
+        initial = build_reconciliation_catalog_status(organization=self.organization)
+        ContentFactoryRun.objects.create(
+            run_id="catalog-drift-run",
+            workflow="xero_reconciliation_agent",
+            domain=self.organization.domain,
+            organization=self.organization,
+            run_request={"catalog_source_hashes": initial["source_hashes"]},
+        )
+        connection = ExternalServiceConnection.objects.create(
+            provider=ExternalServiceProvider.LINEAR,
+            user=self.user,
+            organization=self.organization,
+            access_token="linear-catalog-token",
+            external_account_id="linear-catalog-drift",
+        )
+        LinearProjectArtifact.objects.create(
+            connection=connection,
+            organization=self.organization,
+            linear_project_id="catalog-project-new",
+            name="New project after run start",
+        )
+
+        response = self.client.get(
+            reverse("reconciliation_readiness"),
+            {"slack_user_id": "UADMIN", "domain": "mlai.au"},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data["catalog_status"]["drift_detected"])
+        self.assertEqual(
+            response.data["catalog_status"]["changed_catalogs"],
+            ["linear_projects"],
+        )
+        self.assertTrue(
+            any("Entity catalogs changed" in item for item in response.data["warnings"])
+        )
+
+    @patch("core.permissions.HasRooApiKey.has_permission", return_value=True)
     def test_reconciliation_readiness_confirms_fresh_context_and_xero_scopes(self, _permission):
         connection = ExternalServiceConnection.objects.create(
             provider=ExternalServiceProvider.XERO,
@@ -2538,6 +2580,12 @@ class ReconciliationWorkflowApiTests(APITestCase):
         self.assertEqual(run.workflow, "xero_reconciliation_agent")
         self.assertEqual(run.step_order, ["reconciliation_enrichment"])
         self.assertTrue(run.run_request["dry_run"])
+        self.assertEqual(
+            set(run.run_request["catalog_source_hashes"]),
+            {"luma_events", "humanitix_events", "linear_projects"},
+        )
+        self.assertIn("startup_memory", run.run_request["input_sources"])
+        self.assertIn("humanitix", run.run_request["input_sources"])
         self.assertEqual(run.run_request["statement_line_ids"], [line.statement_line_id])
         self.assertEqual(
             run.run_request["requested_statement_line_ids"],
@@ -3357,6 +3405,10 @@ class ReconciliationWorkflowApiTests(APITestCase):
         )
         self.assertTrue(candidate["candidate_id"])
         self.assertTrue(candidate["candidate_version"])
+        self.assertEqual(
+            set(candidate["catalog_source_hashes"]),
+            {"luma_events", "humanitix_events", "linear_projects"},
+        )
         self.assertFalse(outcomes.data["automatic_rule_creation"])
 
         candidate_url = reverse(
@@ -3386,6 +3438,31 @@ class ReconciliationWorkflowApiTests(APITestCase):
         )
         self.assertEqual(stale.status_code, status.HTTP_409_CONFLICT)
         self.assertIn("changed after preview", stale.data["error"])
+
+        LinearProjectArtifact.objects.create(
+            connection=linear_connection,
+            organization=self.organization,
+            linear_project_id="unrelated-catalog-drift",
+            name="Unrelated catalog addition",
+        )
+        catalog_stale = self.client.post(
+            candidate_url,
+            {
+                "slack_user_id": "UADMIN",
+                "domain": "mlai.au",
+                "decision": "promote",
+                "candidate_version": candidate["candidate_version"],
+                "confirm": True,
+            },
+            format="json",
+        )
+        self.assertEqual(catalog_stale.status_code, status.HTTP_409_CONFLICT)
+        self.assertIn("changed after preview", catalog_stale.data["error"])
+        refreshed = self.client.get(
+            candidate_url,
+            {"slack_user_id": "UADMIN", "domain": "mlai.au"},
+        )
+        candidate = refreshed.data["candidate"]
 
         rejected = self.client.post(
             candidate_url,
@@ -3641,6 +3718,14 @@ class ReconciliationWorkflowApiTests(APITestCase):
             workflow="startup_monthly_update",
             domain=self.organization.domain,
             organization=self.organization,
+            run_request={
+                "startup_memory": {
+                    "facts": [{
+                        "id": "memory-fixture-1",
+                        "summary": "Fixture company relationship.",
+                    }]
+                }
+            },
         )
         luma_connection = ExternalServiceConnection.objects.create(
             provider=ExternalServiceProvider.LUMA,
@@ -3700,6 +3785,20 @@ class ReconciliationWorkflowApiTests(APITestCase):
         projects = {item["source_id"]: item for item in context_response.data["linear_projects"]}
         self.assertEqual(projects["lin_agent"]["dimension_hint"], "event_mirror")
         self.assertEqual(projects["lin_agent_project"]["dimension_hint"], "project")
+        self.assertEqual(
+            context_response.data["startup_memory"]["facts"][0]["id"],
+            "memory-fixture-1",
+        )
+        self.assertEqual(
+            context_response.data["startup_memory_provenance"],
+            {
+                "source": "content_factory_run_request",
+                "source_run_id": "monthly-agent",
+                "present": True,
+            },
+        )
+        self.assertEqual(context_response.data["catalog_status"]["counts"]["luma_events"], 1)
+        self.assertFalse(context_response.data["catalog_status"]["drift_detected"])
 
         submission_response = self.client.post(
             reverse("reconciliation_enrichment_context"),
