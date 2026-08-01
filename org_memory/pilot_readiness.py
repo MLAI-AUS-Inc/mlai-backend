@@ -52,6 +52,7 @@ from .scheduling import provider_freshness_slo_seconds
 
 PILOT_APPROVAL_SCHEMA_VERSION = 1
 READINESS_SCHEMA_VERSION = "org-memory-pilot-readiness-v1"
+PUBLIC_PILOT_ADMIN_CONTEXT = "public_channels:pilot_admins"
 _PILOT_MANIFEST_FIELDS = frozenset(
     (
         "schema_version",
@@ -80,7 +81,8 @@ _REQUIRED_CONTROLS = frozenset(
 )
 _ADMIN_REF_RE = re.compile(r"^slack:[UW][A-Z0-9]{1,63}$")
 _CONTEXT_RE = re.compile(
-    r"^(?:dm:[UW][A-Z0-9]{1,63}|channel:G[A-Z0-9]{1,63})$"
+    r"^(?:dm:[UW][A-Z0-9]{1,63}|channel:G[A-Z0-9]{1,63}|"
+    r"public_channels:pilot_admins)$"
 )
 _EXPLICIT_SELECTOR_LABELS = (
     MemoryFeedbackType.RELEVANT,

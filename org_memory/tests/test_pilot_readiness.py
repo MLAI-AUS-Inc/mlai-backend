@@ -321,6 +321,19 @@ class PilotReadinessTests(TestCase):
         )
         self.assertIn("approval_slack_contexts_invalid", errors)
 
+        public_admin_scope = copy.deepcopy(valid)
+        public_admin_scope["allowed_slack_contexts"].append(
+            "public_channels:pilot_admins"
+        )
+        self.assertEqual(
+            validate_pilot_approval_manifest(
+                public_admin_scope,
+                organization_domain=self.organization.domain,
+                now=self.now,
+            ),
+            [],
+        )
+
     def test_complete_preflight_is_ready_without_enabling_query_api(self):
         with tempfile.TemporaryDirectory() as directory:
             _, governance_path = self.write_manifests(directory)

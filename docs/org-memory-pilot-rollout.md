@@ -27,6 +27,9 @@ The manifest requires:
 
 - one to three exact pilot administrators as `slack:U...` references;
 - exact allowed `dm:U...`/`dm:W...` and private `channel:G...` contexts;
+- optionally, the exact `public_channels:pilot_admins` capability when the
+  approvers accept that Admin Roo answers requested by pilot admins will be
+  visible to everyone in the public Slack channel;
 - the approved provider list;
 - every exact selected source scope as `scope_type:external_id`;
 - distinct data, security, review, and operations approvers;
@@ -171,9 +174,11 @@ python manage.py check_org_memory_pilot_access_matrix \
 
 The access-matrix gate is non-mutating. It binds the active deployment back to
 the exact restricted approval, then evaluates the runtime permission function
-without querying memory or Slack. Every approved actor/private-channel pair
-and every approved actor-bound DM must pass. Representative unapproved actors,
-unapproved private and public channels, and the Public Roo surface must fail.
+without querying memory or Slack. Every approved actor/private-channel pair,
+every approved actor-bound DM, and (when present) the actor-bound public-channel
+capability must pass. Representative unapproved actors, unapproved private
+contexts, and the Public Roo surface must fail. Public channels must also fail
+unless the manifest contains `public_channels:pilot_admins`.
 Its JSON output contains only aggregate expected/pass counts and content-free
 blocker codes; it never emits actor or channel identifiers.
 
@@ -199,11 +204,12 @@ never sends a query body.
 The deploy fails and restores the prior web service if any approval,
 connection, evidence, evaluation, reconciliation, principal, actor, private
 context, active-binding, or non-shadow invariant fails. An active row grants
-access only when the signed Admin Roo assertion contains
-an approved Slack actor and an exact approved private channel, or a DM for that
-same approved actor. The ordinary membership, capability, service-principal,
-source, classification, and ACL checks still apply. Public Roo and public
-Slack contexts continue to fail at independent boundaries.
+access only when the signed Admin Roo assertion contains an approved Slack
+actor and an exact approved private channel, a DM for that same approved actor,
+or an approved pilot admin in a public channel when the manifest contains
+`public_channels:pilot_admins`. The ordinary membership, committee-role,
+capability, service-principal, source, classification, and ACL checks still
+apply. The Public Roo surface remains denied independently.
 
 ## 3. Evidence collection
 
