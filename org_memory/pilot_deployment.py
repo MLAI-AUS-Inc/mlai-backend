@@ -26,6 +26,7 @@ from .models import (
     OrganizationRoleAssignment,
 )
 from .pilot_readiness import (
+    PUBLIC_PILOT_ADMIN_CONTEXT,
     pilot_approval_manifest_hash,
     validate_pilot_approval_manifest,
 )
@@ -569,6 +570,10 @@ def actor_has_active_pilot_access(
     context_refs = [f"channel:{actor.slack_channel_id}"]
     if str(actor.slack_channel_id or "").startswith("D"):
         context_refs.append(f"dm:{actor.slack_user_id}")
+    elif str(actor.slack_channel_id or "").startswith("C"):
+        # This capability is deliberately actor-scoped: the actor digest above
+        # must match before a public-channel context can ever be considered.
+        context_refs.append(PUBLIC_PILOT_ADMIN_CONTEXT)
     return any(
         _digest_allowed(
             hash_pilot_reference(
@@ -993,11 +998,18 @@ def pilot_access_matrix_report(
         for reference in approval_manifest["allowed_slack_contexts"]
         if reference.startswith("dm:")
     ]
+    public_channels_for_pilot_admins = (
+        PUBLIC_PILOT_ADMIN_CONTEXT
+        in approval_manifest["allowed_slack_contexts"]
+    )
     report["metrics"].update(
         {
             "approved_actor_count": len(actor_ids),
             "approved_private_channel_count": len(private_channel_ids),
             "approved_dm_count": len(dm_actor_ids),
+            "approved_public_channel_admin_scope": int(
+                public_channels_for_pilot_admins
+            ),
         }
     )
 
@@ -1019,6 +1031,11 @@ def pilot_access_matrix_report(
         access(actor_id, "DPILOTACCESSCHECK")
         for actor_id in dm_actor_ids
     )
+    if public_channels_for_pilot_admins:
+        allowed_results.extend(
+            access(actor_id, "CPILOTACCESSCHECK")
+            for actor_id in actor_ids
+        )
 
     synthetic_actor_id = "UPILOTACCESSDENY"
     while synthetic_actor_id in actor_ids:
@@ -1036,10 +1053,15 @@ def pilot_access_matrix_report(
         access(actor_id, synthetic_private_channel_id)
         for actor_id in actor_ids
     )
-    denied_results.extend(
-        access(actor_id, synthetic_public_channel_id)
-        for actor_id in actor_ids
-    )
+    if public_channels_for_pilot_admins:
+        denied_results.append(
+            access(synthetic_actor_id, synthetic_public_channel_id)
+        )
+    else:
+        denied_results.extend(
+            access(actor_id, synthetic_public_channel_id)
+            for actor_id in actor_ids
+        )
     denied_results.extend(
         access(synthetic_actor_id, "DPILOTACCESSDENY")
         for _actor_id in dm_actor_ids
@@ -1047,10 +1069,16 @@ def pilot_access_matrix_report(
     approved_context = (
         private_channel_ids[0]
         if private_channel_ids
-        else "DPILOTACCESSCHECK"
+        else (
+            "DPILOTACCESSCHECK"
+            if dm_actor_ids
+            else "CPILOTACCESSCHECK"
+        )
     )
     approved_actor = (
-        actor_ids[0] if private_channel_ids else dm_actor_ids[0]
+        actor_ids[0]
+        if private_channel_ids or public_channels_for_pilot_admins
+        else dm_actor_ids[0]
     )
     denied_results.append(
         access(

@@ -159,7 +159,9 @@ class PilotEvidenceTests(TestCase):
                 organization=self.organization,
                 requester_user=self.pilot_user,
                 requester_slack_id="UPILOT123",
-                channel_id="GPRIVATE123",
+                channel_id=(
+                    "CPUBLIC123" if index == 0 else "GPRIVATE123"
+                ),
                 request_id=f"pilot-request-{index}",
                 query="Private pilot question that must never appear in a report.",
                 query_hash=hashlib.sha256(str(index).encode()).hexdigest(),
@@ -215,7 +217,10 @@ class PilotEvidenceTests(TestCase):
                 "operations": "Operations Owner",
             },
             "pilot_admin_refs": ["slack:UPILOT123"],
-            "allowed_slack_contexts": ["channel:GPRIVATE123"],
+            "allowed_slack_contexts": [
+                "channel:GPRIVATE123",
+                "public_channels:pilot_admins",
+            ],
             "approved_providers": ["linear"],
             "approved_source_scopes": {"linear": ["project:pilot-project"]},
             "controls": {
