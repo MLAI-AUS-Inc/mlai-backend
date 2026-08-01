@@ -1,6 +1,7 @@
 from rest_framework import serializers
-from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
+from rest_framework_simplejwt.serializers import TokenObtainPairSerializer, TokenRefreshSerializer
 from django.contrib.auth import get_user_model
+from .refresh_sessions import add_refresh_session_claim, ensure_refresh_session_active
 from .user_compat import get_compat_user_role
 
 User = get_user_model()
@@ -9,8 +10,18 @@ class MyTokenObtainPairSerializer(TokenObtainPairSerializer):
     @classmethod
     def get_token(cls, user):
         token = super().get_token(user)
+        add_refresh_session_claim(token)
         token['role'] = get_compat_user_role(user)
         return token
+
+
+class RevocableTokenRefreshSerializer(TokenRefreshSerializer):
+    """Reject every rotated token in a family after explicit logout."""
+
+    def validate(self, attrs):
+        refresh = self.token_class(attrs['refresh'])
+        ensure_refresh_session_active(refresh)
+        return super().validate(attrs)
 
 class RegisterSerializer(serializers.ModelSerializer):
     class Meta:

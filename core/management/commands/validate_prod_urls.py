@@ -49,6 +49,7 @@ DOCKER_ONLY_SERVICE_HOSTS = {
 
 REQUIRED_CORS_ORIGINS = {
     "https://mlai.au",
+    "https://ops.mlai.au",
     "https://www.mlai.au",
     # victorai.win registration form posts to /api/v1/victor-ai/ cross-origin.
     "https://victorai.win",
@@ -58,12 +59,20 @@ REQUIRED_CORS_ORIGINS = {
 REQUIRED_CSRF_ORIGINS = {
     "https://api.mlai.au",
     "https://mlai.au",
+    "https://ops.mlai.au",
     "https://www.mlai.au",
 }
 
 REQUIRED_ALLOWED_HOSTS = {
     "api.mlai.au",
     "10.126.0.2",
+}
+
+FORBIDDEN_CREDENTIAL_ORIGINS = {
+    # Plane receives parent-domain cookies at the browser boundary. It must not
+    # gain direct credentialed browser authority to api.mlai.au outside the
+    # cookie-filtering gateway.
+    "https://admin.mlai.au",
 }
 
 
@@ -159,6 +168,19 @@ def _validate_required_values(
         errors.append(f"{setting_name} is missing required {value_label}(s): {', '.join(missing)}.")
 
 
+def _validate_forbidden_values(
+    setting_name: str,
+    forbidden_values: set[str],
+    errors: list[str],
+    *,
+    value_label: str,
+) -> None:
+    configured = set(_as_list(getattr(settings, setting_name, [])))
+    present = sorted(forbidden_values & configured)
+    if present:
+        errors.append(f"{setting_name} contains forbidden {value_label}(s): {', '.join(present)}.")
+
+
 def _service_api_key_with_source() -> tuple[str, str]:
     for setting_name in SERVICE_API_KEY_SETTINGS:
         value = _as_clean_string(getattr(settings, setting_name, ""))
@@ -184,6 +206,18 @@ def validate_prod_url_settings() -> list[str]:
     _validate_required_values("CORS_ALLOWED_ORIGINS", REQUIRED_CORS_ORIGINS, errors, value_label="origin")
     _validate_required_values("CSRF_TRUSTED_ORIGINS", REQUIRED_CSRF_ORIGINS, errors, value_label="origin")
     _validate_required_values("ALLOWED_HOSTS", REQUIRED_ALLOWED_HOSTS, errors, value_label="host")
+    _validate_forbidden_values(
+        "CORS_ALLOWED_ORIGINS",
+        FORBIDDEN_CREDENTIAL_ORIGINS,
+        errors,
+        value_label="origin",
+    )
+    _validate_forbidden_values(
+        "CSRF_TRUSTED_ORIGINS",
+        FORBIDDEN_CREDENTIAL_ORIGINS,
+        errors,
+        value_label="origin",
+    )
 
     return errors
 

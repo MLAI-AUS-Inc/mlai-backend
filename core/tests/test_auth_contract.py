@@ -6,6 +6,7 @@ from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
 
 from hospital.models import Team as HospitalTeam
+from roo.models import PointsAdmin
 
 User = get_user_model()
 
@@ -429,27 +430,268 @@ class AuthContractTests(TestCase):
         self.assertNotIn('_auth_user_id', self.client.session)
         mock_verify.assert_called_once_with('test-token')
 
-    @override_settings(ADMIN_FRONTEND_URL='https://admin.mlai.au')
     @patch('core.views.verify_magic_link', return_value={'kind': 'user', 'email': 'admin-verify@example.com'})
-    def test_verify_magic_link_admin_app_returns_to_admin_frontend(self, mock_verify):
+    def test_verify_magic_link_admin_app_returns_to_fixed_operations_frontend(self, mock_verify):
         user = User.objects.create_user(
             email='admin-verify@example.com',
             first_name='Ada',
             last_name='Admin',
         )
-        user.is_active = False
-        user.save(update_fields=['is_active'])
+        user.is_superuser = True
+        user.save(update_fields=['is_superuser'])
 
         response = self.client.get(
-            '/api/v1/auth/verify-magic-link/?token=test-token&app=admin'
+            '/api/v1/auth/verify-magic-link/',
+            {
+                'token': 'test-token',
+                'app': 'admin',
+                'next': '/updates/42?mode=review',
+                'origin': 'https://attacker.example',
+            },
         )
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data['user']['id'], user.id)
-        self.assertEqual(response.data['redirect'], '/')
-        self.assertEqual(response.data['next_url'], 'https://admin.mlai.au/')
+        self.assertEqual(response.data['redirect'], '/updates/42?mode=review')
+        self.assertEqual(response.data['next_url'], 'https://ops.mlai.au/updates/42?mode=review')
         self.assertIn('access_token', response.cookies)
         self.assertIn('refresh_token', response.cookies)
+
+    @patch('core.views.send_magic_link_email')
+    @patch(
+        'core.views.generate_magic_link',
+        return_value='https://ops.mlai.au/verify-email?token=ops-token',
+    )
+    def test_send_magic_link_admin_app_uses_fixed_operations_origin(self, mock_generate, mock_send):
+        user = User.objects.create_user(email='ops-admin@example.com')
+        user.is_superuser = True
+        user.save(update_fields=['is_superuser'])
+
+        with self.assertLogs('core.views', level='INFO') as captured_logs:
+            response = self.client.post(
+                '/api/v1/auth/send-magic-link/',
+                {
+                    'email': user.email,
+                    'app': 'admin',
+                    'next': '/review?queue=monthly',
+                    'origin': 'https://attacker.example',
+                    'redirect_uri': 'https://attacker.example/callback',
+                },
+                format='json',
+            )
+
+        self.assertEqual(response.status_code, 200)
+        mock_generate.assert_called_once_with(user, base_url='https://ops.mlai.au')
+        emailed_link = mock_send.call_args.args[1]
+        parsed_link = urlparse(emailed_link)
+        self.assertEqual(f'{parsed_link.scheme}://{parsed_link.netloc}', 'https://ops.mlai.au')
+        self.assertEqual(
+            parse_qs(parsed_link.query),
+            {
+                'token': ['ops-token'],
+                'app': ['admin'],
+                'next': ['/review?queue=monthly'],
+            },
+        )
+        emitted_logs = '\n'.join(captured_logs.output)
+        self.assertNotIn('ops-token', emitted_logs)
+        self.assertNotIn('/verify-email?', emitted_logs)
+
+    @patch('core.views.send_magic_link_email')
+    @patch('core.views.generate_magic_link')
+    def test_send_magic_link_admin_rejects_open_redirect_targets(self, mock_generate, mock_send):
+        user = User.objects.create_user(email='ops-open-redirect@example.com')
+        user.is_superuser = True
+        user.save(update_fields=['is_superuser'])
+
+        for target in (
+            'https://attacker.example/path',
+            '//attacker.example/path',
+            r'\\attacker.example\path',
+            r'/\attacker.example/path',
+            'updates/42',
+            '/updates#https://attacker.example',
+        ):
+            with self.subTest(target=target):
+                response = self.client.post(
+                    '/api/v1/auth/send-magic-link/',
+                    {'email': user.email, 'app': 'admin', 'next': target},
+                    format='json',
+                )
+                self.assertEqual(response.status_code, 400)
+                self.assertEqual(response.data['error'], 'Invalid next path.')
+
+        mock_generate.assert_not_called()
+        mock_send.assert_not_called()
+
+    @patch('core.views.send_magic_link_email')
+    @patch('core.views.generate_magic_link')
+    def test_send_magic_link_admin_rejects_encoded_path_separators(self, mock_generate, mock_send):
+        user = User.objects.create_user(email='ops-encoded-separator@example.com')
+        user.is_superuser = True
+        user.save(update_fields=['is_superuser'])
+
+        for target in (
+            '/%2f%2fattacker.example/path',
+            '/%5c%5cattacker.example/path',
+            '/%252f%252fattacker.example/path',
+            '/updates/%2F42',
+        ):
+            with self.subTest(target=target):
+                response = self.client.post(
+                    '/api/v1/auth/send-magic-link/',
+                    {'email': user.email, 'app': 'admin', 'next': target},
+                    format='json',
+                )
+                self.assertEqual(response.status_code, 400)
+
+        mock_generate.assert_not_called()
+        mock_send.assert_not_called()
+
+    @patch('core.views.send_magic_link_email')
+    @patch('core.views.generate_magic_link')
+    def test_send_magic_link_admin_rejects_non_admin_user(self, mock_generate, mock_send):
+        user = User.objects.create_user(email='not-ops-admin@example.com')
+
+        response = self.client.post(
+            '/api/v1/auth/send-magic-link/',
+            {'email': user.email, 'app': 'admin', 'next': '/'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.data['detail'], 'MLAI Operations administrator access only.')
+        mock_generate.assert_not_called()
+        mock_send.assert_not_called()
+
+    @patch('core.views.send_magic_link_email')
+    @patch(
+        'core.views.generate_magic_link',
+        return_value='https://ops.mlai.au/verify-email?token=points-admin-token',
+    )
+    def test_send_magic_link_admin_accepts_linked_points_admin(self, mock_generate, mock_send):
+        user = User.objects.create_user(email='points-ops-admin@example.com')
+        PointsAdmin.objects.create(
+            user=user,
+            slack_user_id='UOPSADMIN',
+            role='admin',
+            is_active=True,
+        )
+
+        response = self.client.post(
+            '/api/v1/auth/send-magic-link/',
+            {'email': user.email, 'app': 'admin', 'next': '/'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 200)
+        mock_generate.assert_called_once_with(user, base_url='https://ops.mlai.au')
+        mock_send.assert_called_once()
+
+    @patch('core.views.send_magic_link_email')
+    @patch('core.views.generate_magic_link')
+    def test_send_magic_link_admin_rejects_inactive_superuser(self, mock_generate, mock_send):
+        user = User.objects.create_user(email='inactive-ops-superuser@example.com')
+        user.is_superuser = True
+        user.is_active = False
+        user.save(update_fields=['is_active', 'is_superuser'])
+
+        response = self.client.post(
+            '/api/v1/auth/send-magic-link/',
+            {'email': user.email, 'app': 'admin', 'next': '/'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 403)
+        mock_generate.assert_not_called()
+        mock_send.assert_not_called()
+
+    @patch(
+        'core.views.verify_magic_link',
+        return_value={'kind': 'user', 'email': 'inactive-points-ops-admin@example.com'},
+    )
+    def test_verify_magic_link_admin_rejects_inactive_points_admin_without_reactivation(
+        self,
+        mock_verify,
+    ):
+        user = User.objects.create_user(email='inactive-points-ops-admin@example.com')
+        user.is_active = False
+        user.save(update_fields=['is_active'])
+        PointsAdmin.objects.create(
+            user=user,
+            slack_user_id='UINACTIVEOPS',
+            role='admin',
+            is_active=True,
+        )
+
+        response = self.client.get(
+            '/api/v1/auth/verify-magic-link/',
+            {'token': 'test-token', 'app': 'admin', 'next': '/'},
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertNotIn('access_token', response.cookies)
+        self.assertNotIn('refresh_token', response.cookies)
+        self.assertNotIn('sessionid', response.cookies)
+        user.refresh_from_db()
+        self.assertFalse(user.is_active)
+
+    @patch('core.views.verify_magic_link', return_value={'kind': 'user', 'email': 'not-ops-verify@example.com'})
+    def test_verify_magic_link_admin_rejects_non_admin_user(self, mock_verify):
+        user = User.objects.create_user(email='not-ops-verify@example.com')
+        user.is_active = False
+        user.save(update_fields=['is_active'])
+
+        response = self.client.get(
+            '/api/v1/auth/verify-magic-link/',
+            {'token': 'test-token', 'app': 'admin', 'next': '/'},
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertNotIn('access_token', response.cookies)
+        self.assertNotIn('refresh_token', response.cookies)
+        self.assertNotIn('sessionid', response.cookies)
+        self.assertNotIn('_auth_user_id', self.client.session)
+        user.refresh_from_db()
+        self.assertFalse(user.is_active)
+
+    @patch('core.views.verify_magic_link', return_value={'kind': 'user', 'email': 'ops-invalid-next@example.com'})
+    def test_verify_magic_link_admin_rejects_invalid_next_before_login(self, mock_verify):
+        user = User.objects.create_user(email='ops-invalid-next@example.com')
+        user.is_superuser = True
+        user.is_active = False
+        user.save(update_fields=['is_active', 'is_superuser'])
+
+        response = self.client.get(
+            '/api/v1/auth/verify-magic-link/',
+            {'token': 'test-token', 'app': 'admin', 'next': '/%252f%252fattacker.example'},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertNotIn('access_token', response.cookies)
+        self.assertNotIn('refresh_token', response.cookies)
+        self.assertNotIn('sessionid', response.cookies)
+        self.assertNotIn('_auth_user_id', self.client.session)
+        user.refresh_from_db()
+        self.assertFalse(user.is_active)
+
+    @patch('core.views.send_magic_link_email')
+    @patch('core.views.generate_magic_link')
+    def test_create_user_rejects_admin_app_context(self, mock_generate, mock_send):
+        response = self.client.post(
+            '/api/v1/auth/create-user/',
+            {
+                'email': 'self-provisioned-ops-admin@example.com',
+                'firstName': 'Untrusted',
+                'app': 'admin',
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertFalse(User.objects.filter(email='self-provisioned-ops-admin@example.com').exists())
+        mock_generate.assert_not_called()
+        mock_send.assert_not_called()
 
     @patch('core.views.verify_magic_link', return_value={'kind': 'user', 'email': 'vibe-verify@example.com'})
     def test_verify_magic_link_defaults_to_founder_tools_for_vibe_raising_alias(self, mock_verify):
