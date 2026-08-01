@@ -99,6 +99,41 @@ class XeroBillIntakeServiceTests(TestCase):
         self.assertTrue(any("Downgraded to DRAFT" in item for item in preview["warnings"]))
         self.assertEqual(preview["xero_payload"]["Status"], "DRAFT")
 
+    def test_preview_preserves_extracted_lines_and_financial_metadata(self):
+        preview = build_reconciliation_bill_preview(
+            self.organization,
+            payload=_bill_payload(
+                total="110.00",
+                subtotal="100.00",
+                tax_amount="10.00",
+                amount_due="110.00",
+                line_amounts=[
+                    {
+                        "description": "Venue hire",
+                        "quantity": "2",
+                        "unit_amount": "50.00",
+                        "amount": "100.00",
+                        "account_code": "412",
+                        "tax_type": "INPUT",
+                    },
+                    {
+                        "description": "Booking fee",
+                        "amount": "10.00",
+                        "account_code": "412",
+                        "tax_type": "INPUT",
+                    },
+                ],
+                source={"document_id": 7, "source_sha256": "a" * 64},
+            ),
+        )
+
+        self.assertTrue(preview["ready"])
+        self.assertEqual(preview["xero_payload"]["LineItems"][0]["Quantity"], 2.0)
+        self.assertEqual(preview["xero_payload"]["LineItems"][0]["UnitAmount"], 50.0)
+        self.assertEqual(preview["document_metadata"]["subtotal"], "100.00")
+        self.assertEqual(preview["document_metadata"]["tax_amount"], "10.00")
+        self.assertEqual(preview["document_metadata"]["source"]["source_sha256"], "a" * 64)
+
     def test_preview_strips_control_characters_from_invoice_number(self):
         preview = build_reconciliation_bill_preview(
             self.organization,
@@ -237,7 +272,19 @@ class XeroBillIntakeServiceTests(TestCase):
         )
         with patch(
             "integrations.services.xero_bill_intake.http_client.get",
-            side_effect=[_response({"Invoices": []}), _response({"Contacts": []})],
+            side_effect=[
+                _response({"Invoices": []}),
+                _response({"Contacts": []}),
+                _response({"Accounts": [{"Code": "405", "Status": "ACTIVE"}]}),
+                _response({
+                    "TaxRates": [{
+                        "Name": "GST on Expenses",
+                        "TaxType": "INPUT",
+                        "Status": "ACTIVE",
+                        "CanApplyToExpenses": True,
+                    }]
+                }),
+            ],
         ), patch(
             "integrations.services.xero_bill_intake.http_client.put",
             return_value=_response({"Invoices": [created_row]}),
@@ -255,6 +302,33 @@ class XeroBillIntakeServiceTests(TestCase):
         self.assertEqual(record.amount, Decimal("1137.50"))
         self.assertEqual(record.direction, "debit")
         self.assertEqual(record.merchant_name, "Aaron AI")
+        self.assertEqual(
+            record.raw_payload["_mlai_document_metadata"]["total"],
+            "1137.50",
+        )
+
+    def test_authorised_bill_requires_current_xero_account_and_tax(self):
+        payload = _bill_payload(
+            status="AUTHORISED",
+            account_code="missing",
+            tax_type="INPUT",
+        )
+        with patch(
+            "integrations.services.xero_bill_intake.http_client.get",
+            side_effect=[
+                _response({"Invoices": []}),
+                _response({"Contacts": []}),
+                _response({"Accounts": []}),
+                _response({"TaxRates": []}),
+            ],
+        ), patch("integrations.services.xero_bill_intake.http_client.put") as put_mock:
+            with self.assertRaisesMessage(XeroPostingError, "one active account"):
+                create_reconciliation_bill(
+                    self.organization,
+                    payload=payload,
+                    requested_by_slack_id="UADMIN",
+                )
+        put_mock.assert_not_called()
 
     def test_attach_document_puts_raw_content(self):
         content = base64.b64encode(b"%PDF-1.4 fake").decode()
@@ -274,6 +348,8 @@ class XeroBillIntakeServiceTests(TestCase):
                     "xero_id": "11111111-2222-3333-4444-555555555555",
                     "filename": "invoice.pdf",
                     "content_base64": content,
+                    "size_bytes": 13,
+                    "content_sha256": "932d2676c1e461ba50d559bba416fbc6af8da1f74309ae81370c615223d0e349",
                     "confirm": True,
                 },
                 requested_by_slack_id="UADMIN",
@@ -284,12 +360,21 @@ class XeroBillIntakeServiceTests(TestCase):
         self.assertIn("/Invoices/11111111-2222-3333-4444-555555555555/Attachments/invoice.pdf", url)
         self.assertEqual(put_mock.call_args.kwargs["data"], b"%PDF-1.4 fake")
         self.assertEqual(put_mock.call_args.kwargs["headers"]["Content-Type"], "application/pdf")
+        self.assertTrue(
+            put_mock.call_args.kwargs["headers"]["Idempotency-Key"].startswith(
+                "mlai-attachment-"
+            )
+        )
+        self.assertEqual(
+            result["attachment"]["content_sha256"],
+            "932d2676c1e461ba50d559bba416fbc6af8da1f74309ae81370c615223d0e349",
+        )
 
     def test_attach_document_idempotent_by_filename(self):
         with patch(
             "integrations.services.xero_bill_intake.http_client.get",
             return_value=_response({
-                "Attachments": [{"AttachmentID": "att-1", "FileName": "Invoice.PDF", "ContentLength": 10}]
+                "Attachments": [{"AttachmentID": "att-1", "FileName": "Invoice.PDF", "ContentLength": 1}]
             }),
         ), patch("integrations.services.xero_bill_intake.http_client.put") as put_mock:
             result = attach_reconciliation_document(
@@ -299,10 +384,41 @@ class XeroBillIntakeServiceTests(TestCase):
                     "xero_id": "11111111-2222-3333-4444-555555555555",
                     "filename": "invoice.pdf",
                     "content_base64": base64.b64encode(b"x").decode(),
+                    "size_bytes": 1,
+                    "content_sha256": "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881",
                 },
                 requested_by_slack_id="UADMIN",
             )
         self.assertFalse(result["created"])
+        put_mock.assert_not_called()
+
+    def test_attach_document_blocks_same_filename_with_different_size(self):
+        with patch(
+            "integrations.services.xero_bill_intake.http_client.get",
+            return_value=_response({
+                "Attachments": [{
+                    "AttachmentID": "att-existing",
+                    "FileName": "invoice.pdf",
+                    "ContentLength": 99,
+                }]
+            }),
+        ), patch("integrations.services.xero_bill_intake.http_client.put") as put_mock:
+            with self.assertRaisesMessage(
+                ReconciliationValidationError,
+                "different content",
+            ):
+                attach_reconciliation_document(
+                    self.organization,
+                    payload={
+                        "xero_entity_type": "invoice",
+                        "xero_id": "11111111-2222-3333-4444-555555555555",
+                        "filename": "invoice.pdf",
+                        "content_base64": base64.b64encode(b"x").decode(),
+                        "size_bytes": 1,
+                        "content_sha256": "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881",
+                    },
+                    requested_by_slack_id="UADMIN",
+                )
         put_mock.assert_not_called()
 
     @override_settings(XERO_ATTACHMENT_MAX_BYTES=8)
@@ -316,6 +432,8 @@ class XeroBillIntakeServiceTests(TestCase):
                     "xero_id": "not-a-guid!",
                     "filename": "invoice",
                     "content_base64": oversized,
+                    "size_bytes": 9,
+                    "content_sha256": "15e2b0d3c33891ebb0f1ef609ec419420c20e320ce94c65fbc8c3312448eb225",
                 },
                 requested_by_slack_id="UADMIN",
             )
@@ -336,6 +454,8 @@ class XeroBillIntakeServiceTests(TestCase):
                     "xero_id": "11111111-2222-3333-4444-555555555555",
                     "filename": "invoice.pdf",
                     "content_base64": base64.b64encode(b"x").decode(),
+                    "size_bytes": 1,
+                    "content_sha256": "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881",
                 },
                 requested_by_slack_id="UADMIN",
             )
@@ -438,6 +558,8 @@ class XeroBillIntakeApiTests(APITestCase):
                     "xero_id": "11111111-2222-3333-4444-555555555555",
                     "filename": "invoice.pdf",
                     "content_base64": base64.b64encode(b"%PDF").decode(),
+                    "size_bytes": 4,
+                    "content_sha256": "315d429b7714cedb6ad04ac31240145257692630457f3c88253c5beceac76027",
                 },
                 format="json",
             )
