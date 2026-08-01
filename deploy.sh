@@ -454,12 +454,16 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     unset health_hack_key roo_sim_key roo_api_key victor_ai_roo_secret
 
     runtime_services=(web scheduler memory-worker memory-scheduler)
-    if env_has_value SLACK_BRIDGE_BOT_TOKEN && env_has_value DISCORD_BRIDGE_BOT_TOKEN; then
+    if env_has_value SLACK_BRIDGE_BOT_TOKEN \
+        && { env_has_value DISCORD_BRIDGE_BOT_TOKEN \
+            || { env_has_value BUZZ_BRIDGE_ADAPTER_URL \
+                && env_has_value BUZZ_BRIDGE_ADAPTER_TOKEN \
+                && env_has_value BUZZ_BRIDGE_CALLBACK_SECRET; }; }; then
         runtime_services+=(bridge-worker bridge-retention)
         bridge_worker_enabled=1
     else
         bridge_worker_enabled=0
-        echo "ℹ️ Skipping bridge-worker startup because bridge tokens are not fully configured."
+        echo "ℹ️ Skipping bridge-worker startup because Slack plus a destination adapter are not fully configured."
     fi
 
     # The Umami data plane (ops/content-analytics) is a separate Compose

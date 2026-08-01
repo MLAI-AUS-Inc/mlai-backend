@@ -843,9 +843,46 @@ VALLEY_HARNESS_API_KEY = os.getenv('VALLEY_HARNESS_API_KEY', '')
 SLACK_BRIDGE_BOT_TOKEN = os.getenv('SLACK_BRIDGE_BOT_TOKEN', '')
 SLACK_BRIDGE_SIGNING_SECRET = os.getenv('SLACK_BRIDGE_SIGNING_SECRET', '')
 SLACK_BRIDGE_BOT_USER_ID = os.getenv('SLACK_BRIDGE_BOT_USER_ID', '')
+BUZZ_BRIDGE_ADAPTER_URL = os.getenv('BUZZ_BRIDGE_ADAPTER_URL', '')
+BUZZ_BRIDGE_ADAPTER_TOKEN = os.getenv('BUZZ_BRIDGE_ADAPTER_TOKEN', '')
+BUZZ_BRIDGE_ADAPTER_TIMEOUT_SECONDS = int(
+    os.getenv('BUZZ_BRIDGE_ADAPTER_TIMEOUT_SECONDS', '15')
+)
+BUZZ_BRIDGE_CALLBACK_SECRET = os.getenv('BUZZ_BRIDGE_CALLBACK_SECRET', '')
+BUZZ_BRIDGE_CALLBACK_MAX_AGE_SECONDS = int(
+    os.getenv('BUZZ_BRIDGE_CALLBACK_MAX_AGE_SECONDS', '300')
+)
+COMMUNITY_BRIDGE_WORKER_POLL_SECONDS = float(
+    os.getenv('COMMUNITY_BRIDGE_WORKER_POLL_SECONDS', '1')
+)
 DISCORD_BRIDGE_BOT_TOKEN = os.getenv('DISCORD_BRIDGE_BOT_TOKEN', '')
 DISCORD_BRIDGE_APPLICATION_ID = os.getenv('DISCORD_BRIDGE_APPLICATION_ID', '')
 DISCORD_BRIDGE_PUBLIC_KEY = os.getenv('DISCORD_BRIDGE_PUBLIC_KEY', '')
+
+_BUZZ_BRIDGE_SETTINGS = {
+    'BUZZ_BRIDGE_ADAPTER_URL': BUZZ_BRIDGE_ADAPTER_URL,
+    'BUZZ_BRIDGE_ADAPTER_TOKEN': BUZZ_BRIDGE_ADAPTER_TOKEN,
+    'BUZZ_BRIDGE_CALLBACK_SECRET': BUZZ_BRIDGE_CALLBACK_SECRET,
+}
+if IS_PRODUCTION_ENV and any(_BUZZ_BRIDGE_SETTINGS.values()):
+    missing_buzz_bridge_settings = [
+        name for name, value in _BUZZ_BRIDGE_SETTINGS.items() if not value
+    ]
+    if missing_buzz_bridge_settings:
+        raise ImproperlyConfigured(
+            'MLAI Chat bridge configuration is incomplete: '
+            + ', '.join(missing_buzz_bridge_settings)
+        )
+    short_buzz_bridge_secrets = [
+        name
+        for name in ('BUZZ_BRIDGE_ADAPTER_TOKEN', 'BUZZ_BRIDGE_CALLBACK_SECRET')
+        if len(_BUZZ_BRIDGE_SETTINGS[name]) < 32
+    ]
+    if short_buzz_bridge_secrets:
+        raise ImproperlyConfigured(
+            'MLAI Chat bridge secrets must contain at least 32 characters: '
+            + ', '.join(short_buzz_bridge_secrets)
+        )
 
 # Google OAuth Settings
 GOOGLE_OAUTH_CLIENT_ID = os.environ.get("GOOGLE_OAUTH_CLIENT_ID")

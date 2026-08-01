@@ -8,6 +8,7 @@ from django.conf import settings
 from slack_sdk.errors import SlackApiError
 
 from integrations.models import CommunityBridgeDeliveryType, CommunityBridgePlatform
+from integrations.services.community_bridge.buzz import BuzzBridgeClient
 from integrations.services.community_bridge.formatting import (
     build_mirrored_text,
     normalize_discord_attachments,
@@ -152,7 +153,7 @@ class CommunityBridgeDiscordClient(discord.Client):
                     mark_delivery_retry,
                     delivery_id=delivery["id"],
                     error_text=f"{exc.__class__.__name__}: {exc}",
-                    permanent=False,
+                    permanent=bool(getattr(exc, "permanent", False)),
                 )
 
     async def _process_delivery(self, delivery: dict) -> None:
@@ -161,6 +162,9 @@ class CommunityBridgeDiscordClient(discord.Client):
             return
         if delivery["target_platform"] == CommunityBridgePlatform.SLACK:
             await self._deliver_to_slack(delivery)
+            return
+        if delivery["target_platform"] == CommunityBridgePlatform.BUZZ:
+            await self._deliver_to_buzz(delivery)
             return
         raise RuntimeError(f"No community bridge adapter for {delivery['target_platform']}")
 
@@ -321,6 +325,74 @@ class CommunityBridgeDiscordClient(discord.Client):
             await asyncio.to_thread(complete_delivery, delivery_id=delivery["id"])
             return
 
+    async def _deliver_to_buzz(self, delivery: dict) -> None:
+        payload = dict(delivery["payload"] or {})
+        operation = delivery["delivery_type"]
+        text = ""
+        if operation != CommunityBridgeDeliveryType.DELETE:
+            author_display_name = await self._resolve_author_display_name(
+                payload,
+                source_platform=delivery["source_platform"],
+            )
+            text = build_mirrored_text(
+                destination_platform=CommunityBridgePlatform.BUZZ,
+                source_platform=delivery["source_platform"],
+                author_display_name=author_display_name,
+                body=str(payload.get("text") or ""),
+                attachments=payload.get("attachments") or [],
+            )
+
+        if operation == CommunityBridgeDeliveryType.CREATE:
+            parent_message_id = await self._resolve_parent_destination_message(delivery)
+            response = await asyncio.to_thread(
+                BuzzBridgeClient.deliver,
+                delivery_id=str(delivery["id"]),
+                created_at=int(delivery["created_at"]),
+                operation=operation,
+                channel_id=delivery["target_channel_id"],
+                text=text,
+                parent_message_id=parent_message_id,
+            )
+            await asyncio.to_thread(
+                complete_create_delivery,
+                delivery_id=delivery["id"],
+                destination_message_id=response["message_id"],
+                destination_channel_id=response["channel_id"],
+                destination_parent_message_id=parent_message_id,
+                destination_payload=response,
+            )
+            return
+
+        link = await asyncio.to_thread(
+            resolve_message_link,
+            source_platform=delivery["source_platform"],
+            source_channel_id=delivery["source_channel_id"],
+            source_message_id=delivery["source_message_id"],
+            destination_platform=CommunityBridgePlatform.BUZZ,
+        )
+        if not link:
+            await asyncio.to_thread(complete_delivery, delivery_id=delivery["id"])
+            return
+
+        await asyncio.to_thread(
+            BuzzBridgeClient.deliver,
+            delivery_id=str(delivery["id"]),
+            created_at=int(delivery["created_at"]),
+            operation=operation,
+            channel_id=link["destination_channel_id"],
+            text=text,
+            target_message_id=link["destination_message_id"],
+        )
+        if operation == CommunityBridgeDeliveryType.DELETE:
+            await asyncio.to_thread(
+                mark_link_deleted,
+                source_platform=delivery["source_platform"],
+                source_channel_id=delivery["source_channel_id"],
+                source_message_id=delivery["source_message_id"],
+                destination_platform=CommunityBridgePlatform.BUZZ,
+            )
+        await asyncio.to_thread(complete_delivery, delivery_id=delivery["id"])
+
     async def _resolve_parent_destination_message(self, delivery: dict) -> str:
         source_parent_message_id = str(delivery.get("source_parent_message_id") or "").strip()
         if not source_parent_message_id:
@@ -377,10 +449,25 @@ class CommunityBridgeDiscordClient(discord.Client):
 
 
 def run_bridge_worker() -> None:
-    token = str(getattr(settings, "DISCORD_BRIDGE_BOT_TOKEN", "") or "").strip()
-    if not token:
-        raise RuntimeError("DISCORD_BRIDGE_BOT_TOKEN is required")
     if not str(getattr(settings, "SLACK_BRIDGE_BOT_TOKEN", "") or "").strip():
         raise RuntimeError("SLACK_BRIDGE_BOT_TOKEN is required")
+    token = str(getattr(settings, "DISCORD_BRIDGE_BOT_TOKEN", "") or "").strip()
     client = CommunityBridgeDiscordClient()
-    client.run(token, log_handler=None)
+    if token:
+        client.run(token, log_handler=None)
+        return
+    if not BuzzBridgeClient.is_configured():
+        raise RuntimeError("configure either Discord or the MLAI Chat bridge adapter")
+    asyncio.run(_run_headless_delivery_worker(client))
+
+
+async def _run_headless_delivery_worker(client: CommunityBridgeDiscordClient) -> None:
+    await asyncio.to_thread(reset_stale_processing_deliveries)
+    poll_seconds = max(
+        0.25,
+        min(float(getattr(settings, "COMMUNITY_BRIDGE_WORKER_POLL_SECONDS", 1.0)), 60.0),
+    )
+    logger.info("community_bridge_headless_worker_ready target=mlai_chat")
+    while True:
+        await client.process_pending_deliveries_once(limit=10)
+        await asyncio.sleep(poll_seconds)

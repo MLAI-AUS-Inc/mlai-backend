@@ -40,6 +40,14 @@ content.
   row. Ordering is best effort within one mapped channel.
 - Exhausted deliveries enter a dead state for operator inspection and replay.
 
+The backend reaches the Rust sidecar only through its private
+`POST /v1/deliveries` endpoint with `BUZZ_BRIDGE_ADAPTER_TOKEN`. The sidecar
+posts relay events to
+`/api/v1/integrations/bridge/buzz/events`; it signs the exact raw body and Unix
+timestamp with `BUZZ_BRIDGE_CALLBACK_SECRET`. The API rejects bodies over 256
+KiB, invalid signatures, and callbacks outside the five-minute replay window
+before parsing the JSON.
+
 ## Loop prevention
 
 - Slack events authored by the configured bridge bot are ignored.
@@ -54,3 +62,40 @@ records. The bridge never impersonates a human or holds a human chat private
 key. Logs contain provider IDs and outcomes, not message bodies, invite codes,
 tokens, or private keys.
 
+## Slack application setup
+
+Use a dedicated Slack app and bridge bot, installed only into the explicitly
+mapped public channels. Configure the Events API request URL as
+`https://api.mlai.au/api/v1/integrations/bridge/slack/events`, subscribe to the
+bot event `message.channels`, and grant only `channels:history`,
+`channels:read`, `chat:write`, `files:read`, and `users:read`. Record the bot
+user ID as `SLACK_BRIDGE_BOT_USER_ID` so its create, edit, and delete events are
+discarded for loop prevention.
+
+Direct messages, private channels, and payloads marked as shared/external are
+ignored in normalization. Operators must also confirm that every mapped channel
+is not a Slack Connect channel before enabling it. Rotate the Slack signing
+secret, adapter token, callback secret, and bridge Nostr key independently.
+
+## Required backend settings
+
+```dotenv
+SLACK_BRIDGE_BOT_TOKEN=xoxb-...
+SLACK_BRIDGE_SIGNING_SECRET=...
+SLACK_BRIDGE_BOT_USER_ID=U...
+BUZZ_BRIDGE_ADAPTER_URL=http://buzz-bridge-adapter:8090
+BUZZ_BRIDGE_ADAPTER_TOKEN=...
+BUZZ_BRIDGE_CALLBACK_SECRET=...
+```
+
+Create each public-channel mapping with:
+
+```sh
+python manage.py upsert_community_bridge_channel \
+  --slack-channel-id C0123456789 \
+  --slack-channel-name community \
+  --destination-platform buzz \
+  --destination-workspace-id chat.mlai.au \
+  --destination-channel-id 922c3b22-8002-4c3c-a37b-ce406a5e606e \
+  --destination-channel-name community
+```

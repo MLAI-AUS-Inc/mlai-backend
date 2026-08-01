@@ -4,7 +4,7 @@ from integrations.services.community_bridge.worker import run_bridge_worker
 
 
 class Command(BaseCommand):
-    help = "Run the Slack-Discord community bridge worker."
+    help = "Run the Slack community bridge delivery worker."
 
     def handle(self, *args, **options):
         try:

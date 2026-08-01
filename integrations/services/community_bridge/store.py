@@ -310,6 +310,8 @@ def _normalize_slack_event(payload: dict) -> Optional[dict]:
         return None
     if bool(event.get("hidden")):
         return None
+    if bool(event.get("is_ext_shared_channel")) or bool(event.get("is_shared")):
+        return None
 
     subtype = str(event.get("subtype") or "").strip()
     bridge_bot_user_id = str(getattr(settings, "SLACK_BRIDGE_BOT_USER_ID", "") or "").strip()
@@ -358,7 +360,12 @@ def _normalize_slack_event(payload: dict) -> Optional[dict]:
     if subtype == "message_deleted":
         previous = dict(event.get("previous_message") or {})
         source_message_id = str(event.get("deleted_ts") or previous.get("ts") or "").strip()
-        if not source_message_id:
+        user_id = str(previous.get("user") or "").strip()
+        if (
+            not source_message_id
+            or previous.get("bot_id")
+            or user_id == bridge_bot_user_id
+        ):
             return None
         source_parent_message_id = _normalize_parent_message_id(
             thread_ts=str(previous.get("thread_ts") or "").strip(),
@@ -369,7 +376,7 @@ def _normalize_slack_event(payload: dict) -> Optional[dict]:
             "source_channel_id": str(event.get("channel") or "").strip(),
             "source_message_id": source_message_id,
             "source_parent_message_id": source_parent_message_id,
-            "source_author_id": str(previous.get("user") or "").strip(),
+            "source_author_id": user_id,
             "source_author_display_name": "",
             "text": "",
             "attachments": [],
@@ -457,6 +464,7 @@ def _normalize_parent_message_id(*, thread_ts: str, source_message_id: str) -> s
 def _serialize_delivery(delivery: CommunityBridgeDelivery) -> dict:
     return {
         "id": delivery.id,
+        "created_at": int(delivery.created_at.timestamp()),
         "channel_id": delivery.channel_id,
         "target_platform": delivery.target_platform,
         "source_platform": delivery.source_platform,

@@ -263,4 +263,5 @@ urlpatterns = [
 
     # Community bridge
     path('bridge/slack/events', api_views_bridge.SlackCommunityBridgeEventView.as_view(), name='community_bridge_slack_events'),
+    path('bridge/buzz/events', api_views_bridge.BuzzCommunityBridgeEventView.as_view(), name='community_bridge_buzz_events'),
 ]
