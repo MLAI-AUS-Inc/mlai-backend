@@ -423,7 +423,7 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     upsert_env_value ORG_MEMORY_PILOT_ORGANIZATION_DOMAIN "mlai.au"
     # Version pins are deployment-managed so semantic reprocessing cannot be
     # accidentally suppressed by a stale value in the host's long-lived .env.
-    upsert_env_value ORG_MEMORY_EXTRACTOR_VERSION "org-memory-extractor-v2"
+    upsert_env_value ORG_MEMORY_EXTRACTOR_VERSION "org-memory-extractor-v3"
     upsert_env_value ORG_MEMORY_EXTRACTION_SCHEMA_VERSION "org-memory-extraction-schema-v2"
     upsert_env_value ORG_MEMORY_EXTRACTION_PROMPT_VERSION "org-memory-extraction-prompt-v2"
     upsert_env_value ORG_MEMORY_SELECTOR_VERSION "org-memory-rules-selector-v2"
@@ -561,14 +561,15 @@ print('yes' if recorder.migration_qs.filter(app='\${app_label}', name='\${migrat
     echo "🗺️ Migration plan..."
     compose_run_web python manage.py migrate --plan
 
-    restore_web_on_error() {
-        echo "⚠️ Deployment failed after web traffic was paused; restoring existing web service."
-        docker compose up -d web || true
+    paused_runtime_services=(web memory-worker memory-scheduler)
+    restore_runtime_on_error() {
+        echo "⚠️ Deployment failed after runtime services were paused; restoring them with the reviewed image."
+        docker compose up -d --force-recreate "\${paused_runtime_services[@]}" || true
     }
 
-    echo "⏸️ Pausing web traffic before DB migrations..."
-    docker compose stop web || true
-    trap restore_web_on_error ERR
+    echo "⏸️ Pausing web and organisational-memory workers before DB migrations..."
+    docker compose stop "\${paused_runtime_services[@]}" || true
+    trap restore_runtime_on_error ERR
 
     echo "🗄️ Running migrations..."
     compose_run_web python manage.py migrate --noinput
@@ -669,7 +670,17 @@ PY
             --operator-email "\$stage_operator" \
             --apply
 
-        echo "🧠 Scheduling the reviewed extractor-v2 target for current Drive evidence..."
+        echo "🧹 Reconciling extractor-v2 jobs claimed during the previous deploy handoff..."
+        compose_run_web python manage.py reconcile_org_memory_extraction_dead_letters \
+            --organization-domain mlai.au \
+            --provider google_drive \
+            --superseded-schema-version org-memory-extraction-schema-v2 \
+            --superseded-extractor-version org-memory-extractor-v2 \
+            --superseded-prompt-version org-memory-extraction-prompt-v2 \
+            --operator-email "\$stage_operator" \
+            --apply
+
+        echo "🧠 Scheduling the reviewed extractor-v3 target for current Drive evidence..."
         compose_run_web python manage.py schedule_org_memory_reextraction \
             --organization-domain mlai.au \
             --provider google_drive \
