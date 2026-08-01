@@ -54,6 +54,26 @@ urlpatterns = [
         name='reconciliation_humanitix_payouts',
     ),
     path(
+        'reconciliation/humanitix/status',
+        api_views_reconciliation.HumanitixStatusView.as_view(),
+        name='reconciliation_humanitix_status',
+    ),
+    path(
+        'reconciliation/humanitix/sync',
+        api_views_reconciliation.HumanitixSyncView.as_view(),
+        name='reconciliation_humanitix_sync',
+    ),
+    path(
+        'reconciliation/humanitix/events',
+        api_views_reconciliation.HumanitixEventAggregateView.as_view(),
+        name='reconciliation_humanitix_events',
+    ),
+    path(
+        'reconciliation/humanitix/receipts/import',
+        api_views_reconciliation.HumanitixReceiptImportView.as_view(),
+        name='reconciliation_humanitix_receipt_import',
+    ),
+    path(
         'reconciliation/humanitix/payouts/correction-preview',
         api_views_reconciliation.HumanitixPayoutCorrectionPreviewView.as_view(),
         name='reconciliation_humanitix_payout_correction_preview',

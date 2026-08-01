@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import io
 import zipfile
 from datetime import date, datetime, timezone
@@ -11,6 +12,9 @@ from urllib.parse import urlparse
 from django.contrib.auth import get_user_model
 from django.core.management import call_command
 from django.test import TestCase
+from django.urls import reverse
+from rest_framework import status
+from rest_framework.test import APITestCase
 
 from integrations.models import (
     ExternalServiceConnection,
@@ -40,9 +44,175 @@ from integrations.services.humanitix_payouts import (
 )
 from integrations.services.xero_reconciliation import ReconciliationValidationError
 from organizations.models import Organization
+from roo.models import PointsAdmin
 
 
 User = get_user_model()
+
+
+class HumanitixOperationsApiTests(APITestCase):
+    def setUp(self):
+        self.organization = Organization.objects.create(name="MLAI", domain="mlai.au")
+        self.user = User.objects.create_user(email="humanitix@example.com")
+        PointsAdmin.objects.create(
+            slack_user_id="UADMIN", role="admin", is_active=True
+        )
+        self.connection = ExternalServiceConnection.objects.create(
+            user=self.user,
+            organization=self.organization,
+            provider=ExternalServiceProvider.HUMANITIX,
+            access_token="humanitix-secret-never-return",
+            external_account_id="humanitix-account",
+            status="connected",
+            sync_cursor={
+                "humanitix_complete": True,
+                "humanitix_full_backfill": True,
+                "humanitix_events_synced": 1,
+                "humanitix_orders_synced": 3,
+                "humanitix_tickets_synced": 4,
+            },
+        )
+        event = HumanitixEvent.objects.create(
+            organization=self.organization,
+            connection=self.connection,
+            external_event_id="event-api-1",
+            event_name="Pitch Night",
+            currency="AUD",
+            source_hash="a" * 64,
+        )
+        HumanitixEventFinancialSummary.objects.create(
+            event=event,
+            order_count=3,
+            paid_order_count=2,
+            ticket_count=4,
+            gross_sales="120.00",
+            net_sales="110.00",
+            refunds="10.00",
+            gateway_breakdown={
+                "stripe": {
+                    "classification": "stripe",
+                    "orders": 1,
+                    "gross_sales": "50.00",
+                },
+                "bpoint": {
+                    "classification": "humanitix_native",
+                    "orders": 1,
+                    "gross_sales": "70.00",
+                },
+                "cash": {
+                    "classification": "offline",
+                    "orders": 1,
+                    "gross_sales": "0.00",
+                },
+            },
+        )
+
+    @patch("core.permissions.HasRooApiKey.has_permission", return_value=True)
+    def test_status_and_events_are_pii_free_and_never_return_api_key(self, _permission):
+        query = {"slack_user_id": "UADMIN", "domain": "mlai.au"}
+        status_response = self.client.get(
+            reverse("reconciliation_humanitix_status"), query
+        )
+        events_response = self.client.get(
+            reverse("reconciliation_humanitix_events"), query
+        )
+
+        self.assertEqual(status_response.status_code, status.HTTP_200_OK)
+        self.assertTrue(status_response.data["connected"])
+        self.assertTrue(status_response.data["complete"])
+        self.assertNotIn("humanitix-secret-never-return", str(status_response.data))
+        self.assertEqual(events_response.status_code, status.HTTP_200_OK)
+        self.assertFalse(events_response.data["pii_included"])
+        self.assertEqual(events_response.data["events"][0]["order_count"], 3)
+        self.assertEqual(
+            events_response.data["gateway_policy"]["stripe"],
+            "excluded_from_humanitix_payouts",
+        )
+
+    @patch("core.permissions.HasRooApiKey.has_permission", return_value=True)
+    @patch("integrations.api_views_reconciliation.sync_humanitix_connection")
+    def test_sync_requires_confirmation_and_exposes_full_or_incremental_mode(
+        self, sync, _permission
+    ):
+        url = reverse("reconciliation_humanitix_sync")
+        base = {"slack_user_id": "UADMIN", "domain": "mlai.au"}
+        unconfirmed = self.client.post(url, base, format="json")
+        self.assertEqual(unconfirmed.status_code, status.HTTP_400_BAD_REQUEST)
+
+        sync.return_value = {
+            "status": "synced",
+            "events_synced": 1,
+            "orders_synced": 3,
+            "tickets_synced": 4,
+            "full_backfill": False,
+            "complete": True,
+        }
+        response = self.client.post(
+            url,
+            {
+                **base,
+                "confirm": True,
+                "full_backfill": False,
+                "include_tickets": True,
+                "max_events": 25,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertFalse(response.data["full_backfill"])
+        sync.assert_called_once_with(
+            self.connection,
+            full_backfill=False,
+            include_tickets=True,
+            max_events=25,
+        )
+
+    @patch("core.permissions.HasRooApiKey.has_permission", return_value=True)
+    @patch(
+        "integrations.api_views_reconciliation."
+        "import_humanitix_payout_receipt_bundle"
+    )
+    def test_receipt_bundle_requires_confirmation_and_passes_expected_manifest(
+        self, import_bundle, _permission
+    ):
+        url = reverse("reconciliation_humanitix_receipt_import")
+        base = {
+            "slack_user_id": "UADMIN",
+            "domain": "mlai.au",
+            "kind": "zip",
+            "content_base64": base64.b64encode(b"fixture zip").decode(),
+            "expected_references": ["HP-1", "HP-2"],
+        }
+        self.assertEqual(
+            self.client.post(url, base, format="json").status_code,
+            status.HTTP_400_BAD_REQUEST,
+        )
+        import_bundle.return_value = []
+
+        response = self.client.post(
+            url, {**base, "confirm": True}, format="json"
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertFalse(response.data["posted_to_xero"])
+        self.assertEqual(
+            import_bundle.call_args.kwargs["expected_references"],
+            ["HP-1", "HP-2"],
+        )
+
+    @patch("core.permissions.HasRooApiKey.has_permission", return_value=True)
+    def test_global_csv_import_requires_confirmation(self, _permission):
+        response = self.client.post(
+            reverse("reconciliation_humanitix_payout_import"),
+            {
+                "slack_user_id": "UADMIN",
+                "domain": "mlai.au",
+                "csv_content": "Payout Reference,Payout Amount\nHP-1,10.00\n",
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
 
 class FakeResponse:

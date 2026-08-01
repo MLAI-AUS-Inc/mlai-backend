@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import json
 import uuid
@@ -28,6 +30,7 @@ from integrations.models import (
     ExternalServiceConnection,
     ExternalServiceProvider,
     HumanitixEvent,
+    HumanitixEventFinancialSummary,
     HumanitixPayout,
     ReconciliationMapping,
     ReconciliationDecision,
@@ -40,10 +43,17 @@ from integrations.models import (
     XeroStatementScan,
     XeroStatementSuggestion,
 )
+from integrations.services.humanitix import (
+    HumanitixAPIError,
+    HumanitixConfigurationError,
+    sync_humanitix_connection,
+)
 from integrations.services.humanitix_payouts import (
     HumanitixPayoutImportError,
     build_humanitix_xero_correction_batch,
     build_humanitix_xero_preview,
+    import_humanitix_payout_receipt_bundle,
+    import_humanitix_payout_receipt_pdf,
     import_payout_csv,
     post_humanitix_xero_bank_transaction,
     serialize_humanitix_payout,
@@ -2822,6 +2832,219 @@ class HumanitixPayoutListView(ReconciliationAdminView):
             .prefetch_related("lines")
             .order_by("-payout_date", "-id")[:500]
         )
+
+
+def _humanitix_connection(organization):
+    return (
+        ExternalServiceConnection.objects.filter(
+            organization=organization,
+            provider=ExternalServiceProvider.HUMANITIX,
+        )
+        .exclude(status="disconnected")
+        .order_by("-updated_at", "-id")
+        .first()
+    )
+
+
+def _humanitix_event_summary(event: HumanitixEvent) -> dict[str, Any]:
+    try:
+        summary = event.financial_summary
+    except HumanitixEventFinancialSummary.DoesNotExist:
+        summary = None
+    return {
+        "event_id": event.external_event_id,
+        "event_name": event.event_name,
+        "start_at": event.start_at.isoformat() if event.start_at else None,
+        "end_at": event.end_at.isoformat() if event.end_at else None,
+        "currency": event.currency,
+        "published": event.published,
+        "archived": event.archived,
+        "source_hash": event.source_hash,
+        "last_synced_at": event.last_synced_at.isoformat() if event.last_synced_at else None,
+        "order_count": summary.order_count if summary else 0,
+        "paid_order_count": summary.paid_order_count if summary else 0,
+        "free_order_count": summary.free_order_count if summary else 0,
+        "ticket_count": summary.ticket_count if summary else 0,
+        "gross_sales": str(summary.gross_sales if summary else "0.00"),
+        "net_sales": str(summary.net_sales if summary else "0.00"),
+        "refunds": str(summary.refunds if summary else "0.00"),
+        "discounts": str(summary.discounts if summary else "0.00"),
+        "donations": str(summary.donations if summary else "0.00"),
+        "humanitix_fees": str(summary.humanitix_fees if summary else "0.00"),
+        "absorbed_fees": str(summary.absorbed_fees if summary else "0.00"),
+        "taxes": str(summary.taxes if summary else "0.00"),
+        "gateway_breakdown": summary.gateway_breakdown if summary else {},
+        "ticket_type_breakdown": summary.ticket_type_breakdown if summary else {},
+    }
+
+
+class HumanitixStatusView(ReconciliationAdminView):
+    """Connection and PII-free sync readiness without returning the API key."""
+
+    def get(self, request):
+        _, organization, error = self.context(request)
+        if error:
+            return error
+        connection = _humanitix_connection(organization)
+        if connection is None:
+            return Response({
+                "connected": False,
+                "status": "disconnected",
+                "events_count": 0,
+                "payouts_count": 0,
+                "complete": False,
+            })
+        cursor = dict(connection.sync_cursor or {})
+        return Response({
+            "connected": bool(connection.access_token),
+            "connection_id": connection.id,
+            "status": connection.status,
+            "last_synced_at": (
+                connection.last_synced_at.isoformat()
+                if connection.last_synced_at
+                else None
+            ),
+            "complete": cursor.get("humanitix_complete") is True,
+            "full_backfill": cursor.get("humanitix_full_backfill") is True,
+            "events_synced": int(cursor.get("humanitix_events_synced") or 0),
+            "orders_synced": int(cursor.get("humanitix_orders_synced") or 0),
+            "tickets_synced": int(cursor.get("humanitix_tickets_synced") or 0),
+            "events_count": HumanitixEvent.objects.filter(
+                organization=organization
+            ).count(),
+            "payouts_count": HumanitixPayout.objects.filter(
+                organization=organization
+            ).count(),
+            "last_error": connection.last_error,
+            "api_key_present": bool(connection.access_token),
+        })
+
+
+class HumanitixSyncView(ReconciliationAdminView):
+    def post(self, request):
+        _, organization, error = self.context(request, from_body=True)
+        if error:
+            return error
+        if request.data.get("confirm") is not True:
+            return Response(
+                {"error": "confirm must be true to sync Humanitix"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        connection = _humanitix_connection(organization)
+        if connection is None:
+            return Response(
+                {"error": "Humanitix is not connected for this organisation."},
+                status=status.HTTP_409_CONFLICT,
+            )
+        max_events = request.data.get("max_events")
+        try:
+            max_events = None if max_events in (None, "") else max(1, min(int(max_events), 500))
+        except (TypeError, ValueError):
+            return Response(
+                {"error": "max_events must be an integer"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            result = sync_humanitix_connection(
+                connection,
+                full_backfill=request.data.get("full_backfill") is True,
+                include_tickets=request.data.get("include_tickets") is not False,
+                max_events=max_events,
+            )
+        except (HumanitixAPIError, HumanitixConfigurationError) as exc:
+            return Response({"error": str(exc)}, status=status.HTTP_502_BAD_GATEWAY)
+        return Response(result)
+
+
+class HumanitixEventAggregateView(ReconciliationAdminView):
+    def get(self, request):
+        _, organization, error = self.context(request)
+        if error:
+            return error
+        records = HumanitixEvent.objects.filter(
+            organization=organization
+        ).select_related("financial_summary").order_by("-start_at", "event_name")[:500]
+        events = [_humanitix_event_summary(event) for event in records]
+        return Response({
+            "events": events,
+            "pii_included": False,
+            "gateway_policy": {
+                "stripe": "excluded_from_humanitix_payouts",
+                "offline": "excluded_from_platform_payouts",
+                "humanitix_native": "eligible_for_humanitix_payouts",
+                "unknown": "review_required",
+            },
+        })
+
+
+class HumanitixReceiptImportView(ReconciliationAdminView):
+    def post(self, request):
+        _, organization, error = self.context(request, from_body=True)
+        if error:
+            return error
+        if request.data.get("confirm") is not True:
+            return Response(
+                {"error": "confirm must be true to import payout receipts"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        connection = _humanitix_connection(organization)
+        if connection is None:
+            return Response(
+                {"error": "Humanitix is not connected for this organisation."},
+                status=status.HTTP_409_CONFLICT,
+            )
+        try:
+            content = base64.b64decode(
+                str(request.data.get("content_base64") or ""), validate=True
+            )
+        except (binascii.Error, ValueError):
+            content = b""
+        if not content:
+            return Response(
+                {"error": "content_base64 must contain a PDF or ZIP bundle"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        kind = str(request.data.get("kind") or "").strip().lower()
+        try:
+            if kind == "pdf":
+                payouts = [import_humanitix_payout_receipt_pdf(
+                    organization=organization,
+                    connection=connection,
+                    source=content,
+                )]
+            elif kind == "zip":
+                expected = (
+                    request.data.get("expected_references")
+                    if "expected_references" in request.data
+                    else None
+                )
+                if expected is not None and not isinstance(expected, list):
+                    return Response(
+                        {"error": "expected_references must be a list"},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                payouts = import_humanitix_payout_receipt_bundle(
+                    organization=organization,
+                    connection=connection,
+                    source=content,
+                    expected_references=expected,
+                )
+            else:
+                return Response(
+                    {"error": "kind must be pdf or zip"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            previews = [build_humanitix_xero_preview(payout) for payout in payouts]
+        except HumanitixPayoutImportError as exc:
+            return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({
+            "payouts": [
+                serialize_humanitix_payout(payout, include_payload=True)
+                for payout in payouts
+            ],
+            "previews": previews,
+            "posted_to_xero": False,
+        })
         return Response(
             {
                 "payouts": [
@@ -2889,6 +3112,11 @@ class HumanitixPayoutImportView(ReconciliationAdminView):
         _, organization, error = self.context(request, from_body=True)
         if error:
             return error
+        if request.data.get("confirm") is not True:
+            return Response(
+                {"error": "confirm must be true to import Humanitix payouts"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         connection = (
             ExternalServiceConnection.objects.filter(
                 organization=organization,
