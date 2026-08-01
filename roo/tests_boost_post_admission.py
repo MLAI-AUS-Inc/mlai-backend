@@ -124,14 +124,29 @@ class BoostPostAdmissionAPITests(APITestCase):
         self.assertEqual(response.data['code'], 'member_unlinked')
         self.assertEqual(BoostPostAdmission.objects.get().status, 'member_unlinked')
 
-    def test_invalid_social_url_is_rejected(self):
+    def test_any_website_link_is_eligible(self):
         self.payload['social_post_url'] = 'https://example.com/not-a-social-post'
 
         response = self.client.post(self.url, self.payload, format='json')
 
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertEqual(response.data['code'], 'invalid_post')
-        self.assertFalse(BoostPostAdmission.objects.exists())
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['status'], 'approved')
+        self.assertEqual(response.data['charged_points'], 8)
+        self.assertEqual(
+            BoostPostAdmission.objects.get().social_post_url,
+            'https://example.com/not-a-social-post',
+        )
+
+    def test_post_without_a_link_is_still_eligible(self):
+        self.payload.pop('social_post_url')
+        self.payload['root_text'] = 'Please help boost my startup update'
+
+        response = self.client.post(self.url, self.payload, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['status'], 'approved')
+        self.assertEqual(response.data['charged_points'], 8)
+        self.assertEqual(BoostPostAdmission.objects.get().social_post_url, '')
 
     def test_idempotency_key_cannot_be_rebound_to_another_member(self):
         first = self.client.post(self.url, self.payload, format='json')
