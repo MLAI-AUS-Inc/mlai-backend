@@ -114,6 +114,9 @@ jobs:
           tests.test_content_factory_status_contract \
           content_factory.tests_admin_metrics \
           integrations.tests_community_bridge \
+          integrations.tests_community_bridge_contracts \
+          core.tests.test_auth_contract \
+          tests.test_runtime_hardening \
           integrations.tests_fields \
           integrations.tests_github_installation_reconciliation \
           integrations.tests_github_app_probe \
