@@ -572,6 +572,24 @@ def fetch_xero_bank_transactions(
     )
 
 
+def fetch_xero_accounts(
+    profile: ReconciliationProfile,
+) -> list[dict[str, Any]]:
+    """Fetch the current Xero chart of accounts without changing accounting data."""
+    connection = profile.xero_connection
+    if connection is None:
+        raise ReconciliationValidationError("A Xero connection must be selected.")
+    response = http_client.get(
+        f"{XERO_API_URL}/Accounts",
+        headers=_xero_headers(connection),
+        timeout=(3, 30),
+    )
+    response.raise_for_status()
+    payload = response.json()
+    rows = payload.get("Accounts") if isinstance(payload, dict) else []
+    return [item for item in rows or [] if isinstance(item, dict)]
+
+
 def _matching_xero_transactions(
     record: StripePayoutReconciliation,
     profile: ReconciliationProfile,
@@ -922,6 +940,7 @@ def build_event_cashflow_validation(
     period_start: date | None = None,
     period_end: date | None = None,
     excluded_transfer_transaction_ids: set[str] | None = None,
+    account_names_by_code: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Estimate event/project cashflow without double-counting Stripe payouts.
 
@@ -940,6 +959,11 @@ def build_event_cashflow_validation(
         str(value or "").strip()
         for value in (excluded_transfer_transaction_ids or set())
         if str(value or "").strip()
+    }
+    account_names_by_code = {
+        str(code or "").strip().casefold(): str(name or "").strip()
+        for code, name in (account_names_by_code or {}).items()
+        if str(code or "").strip()
     }
     stripe_lines: list[dict[str, Any]] = []
     tracked_lines: list[dict[str, Any]] = []
@@ -977,6 +1001,7 @@ def build_event_cashflow_validation(
             raw_cents = _xero_line_cents(line)
             if not raw_cents:
                 continue
+            account_code = str(line.get("AccountCode") or "").strip()
             source_line = {
                 "line_id": f"{transaction_id}:{index}",
                 "bank_transaction_id": transaction_id,
@@ -984,7 +1009,18 @@ def build_event_cashflow_validation(
                 "transaction_type": transaction_type,
                 "event_name": event_name,
                 "project_name": project_name,
-                "account_code": str(line.get("AccountCode") or "").strip(),
+                "account_code": account_code,
+                "account_name": account_names_by_code.get(
+                    account_code.casefold(),
+                    "",
+                ),
+                "description": str(line.get("Description") or "").strip(),
+                "reference": str(transaction.get("Reference") or "").strip(),
+                "contact_name": str(
+                    (transaction.get("Contact") or {}).get("Name")
+                    if isinstance(transaction.get("Contact"), dict)
+                    else ""
+                ).strip(),
                 "raw_cents": raw_cents,
             }
             if transaction_id in excluded_transfer_transaction_ids:

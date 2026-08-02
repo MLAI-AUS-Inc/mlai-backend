@@ -59,6 +59,7 @@ from integrations.services.humanitix_payouts import (
     serialize_humanitix_payout,
 )
 from integrations.services.reconciliation_reporting import (
+    build_reconciliation_event_finance_audit,
     build_reconciliation_profitability_report,
 )
 from integrations.services.reconciliation import (
@@ -2839,6 +2840,64 @@ class ReconciliationProfitabilityReportView(ReconciliationAdminView):
                 status=status.HTTP_502_BAD_GATEWAY,
             )
         return Response(report)
+
+
+class ReconciliationEventFinanceAuditView(ReconciliationAdminView):
+    """Read-only audit of expected revenue and cost evidence for recent events."""
+
+    MAX_PERIOD_DAYS = 730
+
+    def get(self, request):
+        _, organization, error = self.context(request)
+        if error:
+            return error
+        parsed = {}
+        for field_name in ("since", "until"):
+            raw_value = str(request.query_params.get(field_name) or "").strip()
+            if not raw_value:
+                return Response(
+                    {"error": f"{field_name} is required and must use YYYY-MM-DD"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            try:
+                parsed[field_name] = date.fromisoformat(raw_value)
+            except ValueError:
+                return Response(
+                    {"error": f"{field_name} must use YYYY-MM-DD"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        if parsed["since"] > parsed["until"]:
+            return Response(
+                {"error": "since must be on or before until"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if (parsed["until"] - parsed["since"]).days > self.MAX_PERIOD_DAYS:
+            return Response(
+                {"error": f"audit period must be {self.MAX_PERIOD_DAYS} days or fewer"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            audit = build_reconciliation_event_finance_audit(
+                organization=organization,
+                period_start=parsed["since"],
+                period_end=parsed["until"],
+            )
+        except ReconciliationProfile.DoesNotExist:
+            return Response(
+                {"error": "Reconciliation profile is not configured."},
+                status=status.HTTP_409_CONFLICT,
+            )
+        except ReconciliationValidationError as exc:
+            return Response(
+                {"error": str(exc), "errors": exc.errors},
+                status=status.HTTP_409_CONFLICT,
+            )
+        except requests.RequestException:
+            return Response(
+                {"error": "Unable to read Xero data for the event finance audit."},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+        return Response(audit)
 
 
 class ReconciliationPayoutCorrectionPreviewView(ReconciliationAdminView):

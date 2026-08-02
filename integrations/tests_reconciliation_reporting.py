@@ -16,22 +16,33 @@ from integrations.models import (
     HumanitixEventFinancialSummary,
     ReconciliationMapping,
     ReconciliationProfile,
+    StripePayoutReconciliation,
 )
 from integrations.services.reconciliation_reporting import (
+    build_reconciliation_event_finance_audit,
     build_reconciliation_profitability_report,
 )
 from organizations.models import Organization
 from roo.models import PointsAdmin
+from startup_updates.models import LumaEventSelection
 
 
 User = get_user_model()
 
 
-def _tracked_line(*, amount: float, category: str, option: str) -> dict:
+def _tracked_line(
+    *,
+    amount: float,
+    category: str,
+    option: str,
+    account_code: str | None = None,
+    description: str = "",
+) -> dict:
     return {
         "UnitAmount": amount,
         "Quantity": 1,
-        "AccountCode": "200" if amount >= 0 else "400",
+        "AccountCode": account_code or ("200" if amount >= 0 else "400"),
+        "Description": description,
         "Tracking": [{"Name": category, "Option": option}],
     }
 
@@ -235,6 +246,183 @@ class ReconciliationProfitabilityReportTests(TestCase):
         )
 
 
+class ReconciliationEventFinanceAuditTests(TestCase):
+    def setUp(self):
+        self.organization = Organization.objects.create(
+            name="Fixture",
+            domain="fixture.test",
+        )
+        self.user = User.objects.create_user(email="audit@example.test")
+        self.xero = ExternalServiceConnection.objects.create(
+            user=self.user,
+            organization=self.organization,
+            provider=ExternalServiceProvider.XERO,
+            external_account_id="tenant-audit",
+            access_token="secret-never-returned",
+            scopes=["accounting.banktransactions"],
+        )
+        ReconciliationProfile.objects.create(
+            organization=self.organization,
+            xero_connection=self.xero,
+            event_tracking_category_name="Event Name",
+            project_tracking_category_name="Project Name",
+            fee_account_code="511",
+        )
+
+    def test_audits_catalog_and_xero_only_events_against_expected_categories(self):
+        luma = ExternalServiceConnection.objects.create(
+            user=self.user,
+            organization=self.organization,
+            provider=ExternalServiceProvider.LUMA,
+            external_account_id="luma-audit",
+            access_token="luma-secret-never-returned",
+        )
+        complete_event = LumaEventSelection.objects.create(
+            connection=luma,
+            user=self.user,
+            organization=self.organization,
+            event_id="evt-complete",
+            event_name="Provider Gala",
+            start_at=datetime(2026, 7, 10, tzinfo=timezone.utc),
+            selected=True,
+        )
+        LumaEventSelection.objects.create(
+            connection=luma,
+            user=self.user,
+            organization=self.organization,
+            event_id="evt-empty",
+            event_name="No Ledger Activity",
+            start_at=datetime(2026, 7, 20, tzinfo=timezone.utc),
+            selected=True,
+        )
+        ReconciliationMapping.objects.create(
+            organization=self.organization,
+            source_type=ReconciliationMapping.SOURCE_LUMA_EVENT,
+            source_id=complete_event.event_id,
+            event_tracking_option_name="Mapped Gala",
+            active=True,
+        )
+        StripePayoutReconciliation.objects.create(
+            organization=self.organization,
+            payout_id="po-audit",
+            arrival_date=date(2026, 7, 15),
+            amount_cents=9_500,
+            report_payload={
+                "revenue_groups": [
+                    {
+                        "source_type": "luma_event",
+                        "source_id": complete_event.event_id,
+                        "source_label": complete_event.event_name,
+                        "ticket_count": 2,
+                        "gross_cents": 10_000,
+                        "stripe_fee_cents": 500,
+                    }
+                ]
+            },
+        )
+        transactions = [
+            {
+                "BankTransactionID": "sponsor-1",
+                "Type": "RECEIVE",
+                "Status": "AUTHORISED",
+                "DateString": "2026-07-11",
+                "Reference": "Sponsor agreement 42",
+                "Contact": {"Name": "Fixture Sponsor"},
+                "LineItems": [
+                    _tracked_line(
+                        amount=500,
+                        category="Event Name",
+                        option="Mapped Gala",
+                        account_code="201",
+                        description="Gold sponsorship",
+                    )
+                ],
+            },
+            {
+                "BankTransactionID": "event-costs-1",
+                "Type": "SPEND",
+                "Status": "AUTHORISED",
+                "DateString": "2026-07-12",
+                "LineItems": [
+                    _tracked_line(
+                        amount=120,
+                        category="Event Name",
+                        option="Mapped Gala",
+                        account_code="401",
+                        description="Venue catering",
+                    ),
+                    _tracked_line(
+                        amount=300,
+                        category="Event Name",
+                        option="Mapped Gala",
+                        account_code="405",
+                        description="Event producer",
+                    ),
+                ],
+            },
+            {
+                "BankTransactionID": "xero-only-ticket",
+                "Type": "RECEIVE",
+                "Status": "AUTHORISED",
+                "DateString": "2026-07-13",
+                "LineItems": [
+                    _tracked_line(
+                        amount=80,
+                        category="Event Name",
+                        option="Xero Only Event",
+                        account_code="202",
+                    )
+                ],
+            },
+        ]
+        accounts = [
+            {"Code": "201", "Name": "Sponsorships & Grants", "Type": "REVENUE", "Status": "ACTIVE"},
+            {"Code": "202", "Name": "Ticket Sales", "Type": "REVENUE", "Status": "ACTIVE"},
+            {"Code": "401", "Name": "Catering / Food & Beverages", "Type": "EXPENSE", "Status": "ACTIVE"},
+            {"Code": "405", "Name": "Contractor Expenses", "Type": "EXPENSE", "Status": "ACTIVE"},
+        ]
+
+        audit = build_reconciliation_event_finance_audit(
+            organization=self.organization,
+            period_start=date(2026, 7, 1),
+            period_end=date(2026, 7, 31),
+            bank_transactions=transactions,
+            accounts=accounts,
+        )
+
+        by_name = {event["event_name"]: event for event in audit["events"]}
+        self.assertEqual(set(by_name), {"Mapped Gala", "No Ledger Activity", "Xero Only Event"})
+        gala = by_name["Mapped Gala"]
+        self.assertEqual(gala["completeness_status"], "complete")
+        self.assertEqual(gala["categories"]["ticket_sales"]["status"], "present")
+        self.assertEqual(gala["categories"]["sponsorship_revenue"]["status"], "present")
+        self.assertEqual(gala["categories"]["catering_cost"]["status"], "present")
+        contractor = gala["categories"]["contractor_cost"]
+        self.assertEqual(contractor["status"], "present")
+        self.assertEqual(contractor["evidence"][0]["account_name"], "Contractor Expenses")
+        self.assertEqual(
+            gala["categories"]["sponsorship_revenue"]["evidence"][0]["contact_name"],
+            "Fixture Sponsor",
+        )
+        self.assertEqual(
+            by_name["No Ledger Activity"]["missing_categories"],
+            [
+                "ticket_sales",
+                "sponsorship_revenue",
+                "catering_cost",
+                "contractor_cost",
+            ],
+        )
+        self.assertEqual(
+            by_name["Xero Only Event"]["present_categories"],
+            ["ticket_sales"],
+        )
+        self.assertEqual(audit["summary"]["event_count"], 3)
+        self.assertEqual(audit["summary"]["complete_count"], 1)
+        self.assertFalse(audit["xero_writes"])
+        self.assertEqual(audit["account_resolution_warnings"], [])
+
+
 class ReconciliationProfitabilityReportApiTests(APITestCase):
     def setUp(self):
         self.organization = Organization.objects.create(name="Fixture", domain="fixture.test")
@@ -283,4 +471,40 @@ class ReconciliationProfitabilityReportApiTests(APITestCase):
         self.assertEqual(
             build_report.call_args.kwargs["period_end"],
             date(2026, 7, 31),
+        )
+
+    @patch("core.permissions.HasRooApiKey.has_permission", return_value=True)
+    @patch(
+        "integrations.api_views_reconciliation."
+        "build_reconciliation_event_finance_audit"
+    )
+    def test_event_finance_audit_is_bounded_and_read_only(
+        self, build_audit, _permission
+    ):
+        url = reverse("reconciliation_event_finance_audit")
+        base = {"slack_user_id": "UADMIN", "domain": "fixture.test"}
+        self.assertEqual(
+            self.client.get(url, base).status_code,
+            status.HTTP_400_BAD_REQUEST,
+        )
+        build_audit.return_value = {
+            "schema_version": 1,
+            "audit_version": "reconciliation-event-finance-audit-v1",
+            "period_start": "2026-02-01",
+            "period_end": "2026-08-01",
+            "events": [],
+            "summary": {"event_count": 0},
+            "xero_writes": False,
+        }
+
+        response = self.client.get(
+            url,
+            {**base, "since": "2026-02-01", "until": "2026-08-01"},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertFalse(response.data["xero_writes"])
+        self.assertEqual(
+            build_audit.call_args.kwargs["period_start"],
+            date(2026, 2, 1),
         )
