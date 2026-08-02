@@ -226,6 +226,66 @@ class MemoryExtractionTests(TestCase):
         self.assertEqual(MemoryEntity.objects.count(), 2)
         self.assertNotIn(text, MemoryWorkItem.objects.values_list("payload", flat=True))
 
+    def test_malformed_entity_is_rejected_without_dropping_grounded_claim(self):
+        text = "The committee decided that the reporting project remains stalled."
+        version = self.capture(text, external_id="meeting-malformed-entity")
+        provider = FakeProvider(
+            {
+                "source_summary": "The reporting project remains stalled.",
+                "entities": [
+                    {
+                        "entity_type": "project",
+                        "canonical_name": "R",
+                        "description": "Project reported as stalled.",
+                        "external_refs": [],
+                    }
+                ],
+                "claims": [
+                    {
+                        "kind": "decision",
+                        "epistemic_type": "decision",
+                        "subject": "R",
+                        "predicate": "has_status",
+                        "object_entity": None,
+                        "object_value": "stalled",
+                        "statement": "The reporting project remains stalled.",
+                        "observed_at": None,
+                        "event_start_at": None,
+                        "event_end_at": None,
+                        "valid_from": None,
+                        "valid_until": None,
+                        "confidence": 0.9,
+                        "importance": 0.8,
+                        "classification": "committee",
+                        "review_required": True,
+                        "sensitivity_flags": [],
+                        "evidence": [
+                            {
+                                "chunk_id": str(version.chunks.get().pk),
+                                "quote": text,
+                                "evidence_role": "supports",
+                                "evidence_confidence": 1.0,
+                            }
+                        ],
+                    }
+                ],
+                "no_memory_reason": None,
+            }
+        )
+
+        result = extract_source_version(source_version=version, provider=provider)
+
+        self.assertEqual(result["status"], MemoryExtractionStatus.EXTRACTED)
+        self.assertEqual(result["claims_created"], 1)
+        self.assertEqual(result["entities_rejected"], 1)
+        self.assertFalse(MemoryEntity.objects.filter(canonical_name="R").exists())
+        claim = MemoryClaim.objects.get()
+        self.assertIsNone(claim.subject_entity_id)
+        self.assertEqual(claim.object_value, "stalled")
+        run = MemoryExtractionRun.objects.get()
+        self.assertIn("malformed_entity_rejection", run.safety_flags)
+        self.assertIn("single-character entity names", run.no_memory_reason)
+
     def test_normalizes_naive_claim_datetime_using_meeting_timezone(self):
         text = "2026-06-22 Action: Publish the committee update."
         version = self.capture(

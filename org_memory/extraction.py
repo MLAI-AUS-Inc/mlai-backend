@@ -300,6 +300,16 @@ def normalize_name(value: str) -> str:
     return " ".join(normalized.split())
 
 
+def _entity_name_rejection_reason(value: str) -> Optional[str]:
+    normalized = normalize_name(value)
+    alphanumeric = "".join(character for character in normalized if character.isalnum())
+    if not alphanumeric:
+        return "entity name contains no letters or numbers"
+    if len(alphanumeric) < 2:
+        return "single-character entity names are not durable identifiers"
+    return None
+
+
 def _normalized_evidence_token(value: str) -> str:
     return unicodedata.normalize("NFKC", value).casefold().replace("’", "'")
 
@@ -812,8 +822,18 @@ def extract_source_version(*, source_version, provider: Optional[ExtractionProvi
     chunks_by_id = {str(chunk.pk): chunk for chunk in chunks}
     declared_entities = {}
     ambiguous_entity_names = set()
+    rejected_entity_names = {}
+    entity_errors = []
     for entity_candidate in payload.entities:
         normalized_entity_name = normalize_name(entity_candidate.canonical_name)
+        rejection_reason = _entity_name_rejection_reason(entity_candidate.canonical_name)
+        if rejection_reason:
+            rejected_entity_names[normalized_entity_name] = rejection_reason
+            entity_errors.append(
+                f"Rejected malformed entity {entity_candidate.canonical_name!r}: "
+                f"{rejection_reason}."
+            )
+            continue
         existing_entity_candidate = declared_entities.get(normalized_entity_name)
         if existing_entity_candidate and existing_entity_candidate != entity_candidate:
             ambiguous_entity_names.add(normalized_entity_name)
@@ -830,14 +850,18 @@ def extract_source_version(*, source_version, provider: Optional[ExtractionProvi
                 chunks_by_id=chunks_by_id,
                 source_version=source_version,
             )
-            for entity_name in (
-                grounded_candidate.subject,
-                grounded_candidate.object_entity,
-            ):
-                if entity_name and normalize_name(entity_name) not in declared_entities:
+            sanitized_fields = {}
+            for field_name in ("subject", "object_entity"):
+                entity_name = getattr(grounded_candidate, field_name)
+                normalized_entity_name = normalize_name(entity_name) if entity_name else ""
+                if normalized_entity_name in rejected_entity_names:
+                    sanitized_fields[field_name] = None
+                elif entity_name and normalized_entity_name not in declared_entities:
                     raise ExtractionInvariantError(
                         f"Claim references undeclared or ambiguous entity: {entity_name}"
                     )
+            if sanitized_fields:
+                grounded_candidate = grounded_candidate.model_copy(update=sanitized_fields)
         except ExtractionInvariantError as exc:
             candidate_errors.append(str(exc))
             continue
@@ -862,6 +886,7 @@ def extract_source_version(*, source_version, provider: Optional[ExtractionProvi
 
     status = MemoryExtractionStatus.EXTRACTED if candidates else MemoryExtractionStatus.NO_MEMORY
     no_memory_reason = (payload.no_memory_reason or "")[:512] if not candidates else ""
+    diagnostic_errors = [*entity_errors, *candidate_errors]
     run = MemoryExtractionRun.objects.create(
         organization=source_version.source.organization,
         source_version=source_version,
@@ -878,29 +903,30 @@ def extract_source_version(*, source_version, provider: Optional[ExtractionProvi
             set(
                 [
                     *source_flags,
+                    *(["malformed_entity_rejection"] if entity_errors else []),
                     *(["partial_candidate_rejection"] if candidate_errors else []),
                 ]
             )
         ),
         no_memory_reason=(
             (
-                f"Dropped {len(candidate_errors)} invalid candidate(s): "
-                + "; ".join(dict.fromkeys(candidate_errors))
+                f"Dropped invalid extraction output: "
+                + "; ".join(dict.fromkeys(diagnostic_errors))
             )[:512]
-            if candidate_errors
+            if diagnostic_errors
             else no_memory_reason
         ),
         provider_response_id=provider_result.response_id,
         usage=provider_result.usage or {},
     )
-    if candidate_errors:
+    if diagnostic_errors:
         open_review_item(
             organization=source_version.source.organization,
             target=run,
             review_type=MemoryReviewType.SENSITIVITY,
             reason=(
-                "The extractor excluded invalid candidates while preserving independently "
-                "grounded candidates: " + "; ".join(dict.fromkeys(candidate_errors))
+                "The extractor excluded malformed output while preserving independently "
+                "grounded candidates: " + "; ".join(dict.fromkeys(diagnostic_errors))
             )[:10000],
             severity=MemoryReviewSeverity.HIGH,
             idempotency_key=f"extract-partial-rejection:{run.pk}",
@@ -911,6 +937,7 @@ def extract_source_version(*, source_version, provider: Optional[ExtractionProvi
             "status": run.status,
             "claims_created": 0,
             "candidates_rejected": len(candidate_errors),
+            "entities_rejected": len(entity_errors),
             "created": True,
         }
 
@@ -1047,6 +1074,7 @@ def extract_source_version(*, source_version, provider: Optional[ExtractionProvi
         "status": run.status,
         "claims_created": claims_created,
         "candidates_rejected": len(candidate_errors),
+        "entities_rejected": len(entity_errors),
         "created": True,
     }
 
