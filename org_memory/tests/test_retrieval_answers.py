@@ -324,6 +324,11 @@ class MemoryRetrievalAndAnswerTests(TestCase):
             authorization=self.authorization,
             query="What changed on the project?",
         )
+        possessive_plan = plan_memory_query(
+            organization=self.organization,
+            authorization=self.authorization,
+            query="What changed in Project Atlas's roadmap?",
+        )
 
         self.assertNotIn(str(one_letter.pk), broad_plan.entity_ids)
         self.assertEqual(explicit_plan.entity_ids, (str(pilot.pk),))
@@ -332,6 +337,7 @@ class MemoryRetrievalAndAnswerTests(TestCase):
         self.assertEqual(alias_plan.ranking_entity_ids, (str(pilot.pk),))
         self.assertEqual(identifier_plan.entity_ids, (str(one_letter.pk),))
         self.assertNotIn(str(generic.pk), generic_plan.entity_ids)
+        self.assertEqual(possessive_plan.entity_ids, (str(pilot.pk),))
 
         pilot.metadata = {"retrieval_quarantined": True}
         pilot.save(update_fields=("metadata", "updated_at"))

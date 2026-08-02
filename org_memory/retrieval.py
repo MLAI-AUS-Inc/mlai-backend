@@ -217,7 +217,13 @@ def query_terms(value: str) -> tuple[str, ...]:
 
 
 def _entity_name_tokens(value: str) -> tuple[str, ...]:
-    return tuple(token.casefold() for token in _WORD_RE.findall(str(value or "")))
+    tokens = []
+    for token in _WORD_RE.findall(str(value or "")):
+        normalized = token.casefold()
+        if normalized.endswith("'s") and len(normalized) > 2:
+            normalized = normalized[:-2]
+        tokens.append(normalized)
+    return tuple(tokens)
 
 
 def _contains_entity_phrase(
