@@ -5,6 +5,8 @@ from .models import (
     CommunityChatChallenge,
     CommunityChatDevice,
     CommunityChatDeviceAuthRequest,
+    CommunityChatEmailCodeChallenge,
+    CommunityChatEmailCodeDelivery,
     CommunityChatInviteAudit,
 )
 
@@ -55,3 +57,33 @@ class CommunityChatDeviceAuthRequestAdmin(admin.ModelAdmin):
 class CommunityChatBootstrapTokenAdmin(admin.ModelAdmin):
     list_display = ("id", "user_id", "public_key", "expires_at", "revoked_at")
     readonly_fields = tuple(field.name for field in CommunityChatBootstrapToken._meta.fields)
+
+
+@admin.register(CommunityChatEmailCodeChallenge)
+class CommunityChatEmailCodeChallengeAdmin(admin.ModelAdmin):
+    list_display = (
+        "id",
+        "user_id",
+        "client_id",
+        "platform",
+        "attempt_count",
+        "expires_at",
+        "consumed_at",
+        "invalidated_at",
+    )
+    list_filter = ("client_id", "platform")
+    readonly_fields = tuple(field.name for field in CommunityChatEmailCodeChallenge._meta.fields)
+
+
+@admin.register(CommunityChatEmailCodeDelivery)
+class CommunityChatEmailCodeDeliveryAdmin(admin.ModelAdmin):
+    list_display = (
+        "id",
+        "challenge_id",
+        "status",
+        "attempts",
+        "available_at",
+        "sent_at",
+    )
+    list_filter = ("status",)
+    readonly_fields = tuple(field.name for field in CommunityChatEmailCodeDelivery._meta.fields)

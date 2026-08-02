@@ -11,6 +11,14 @@ class DeviceBindingStatus(models.TextChoices):
     REVOKED = "revoked", "Revoked"
 
 
+class EmailCodeDeliveryStatus(models.TextChoices):
+    PENDING = "pending", "Pending"
+    SENDING = "sending", "Sending"
+    SENT = "sent", "Sent"
+    FAILED = "failed", "Failed"
+    CANCELLED = "cancelled", "Cancelled"
+
+
 class CommunityChatDevice(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user = models.ForeignKey(
@@ -165,3 +173,87 @@ class CommunityChatBootstrapToken(models.Model):
             models.Index(fields=("user", "public_key"), name="chat_bootstrap_user_key_idx"),
             models.Index(fields=("expires_at",), name="chat_bootstrap_expiry_idx"),
         ]
+
+
+class CommunityChatEmailCodeChallenge(models.Model):
+    """One-use email proof bound to one registered Chat installation.
+
+    ``user`` is deliberately nullable. Unknown and ineligible email addresses
+    receive the same API response and a non-deliverable challenge so account
+    existence is not exposed through the public request contract.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        blank=True,
+        null=True,
+        related_name="community_chat_email_code_challenges",
+    )
+    email_digest = models.CharField(max_length=64)
+    code_digest = models.CharField(max_length=64)
+    client_id = models.CharField(max_length=64)
+    installation_id = models.UUIDField()
+    origin = models.CharField(max_length=255)
+    platform = models.CharField(max_length=32)
+    device_name = models.CharField(max_length=120, blank=True)
+    public_key = models.CharField(max_length=64)
+    expires_at = models.DateTimeField()
+    attempt_count = models.PositiveSmallIntegerField(default=0)
+    max_attempts = models.PositiveSmallIntegerField(default=5)
+    consumed_at = models.DateTimeField(blank=True, null=True)
+    invalidated_at = models.DateTimeField(blank=True, null=True)
+    requested_ip_digest = models.CharField(max_length=64, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ("-created_at",)
+        indexes = [
+            models.Index(
+                fields=("email_digest", "client_id", "installation_id", "created_at"),
+                name="chat_email_code_lookup_idx",
+            ),
+            models.Index(fields=("expires_at",), name="chat_email_code_expiry_idx"),
+            models.Index(fields=("user", "created_at"), name="chat_email_code_user_idx"),
+        ]
+
+    def __str__(self):
+        return f"{self.id}:{self.client_id}"
+
+
+class CommunityChatEmailCodeDelivery(models.Model):
+    """Durable Customer.io outbox row containing an encrypted login code."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    challenge = models.OneToOneField(
+        CommunityChatEmailCodeChallenge,
+        on_delete=models.CASCADE,
+        related_name="email_delivery",
+    )
+    encrypted_code = models.TextField()
+    status = models.CharField(
+        max_length=16,
+        choices=EmailCodeDeliveryStatus.choices,
+        default=EmailCodeDeliveryStatus.PENDING,
+    )
+    attempts = models.PositiveSmallIntegerField(default=0)
+    available_at = models.DateTimeField(auto_now_add=True)
+    claimed_at = models.DateTimeField(blank=True, null=True)
+    sent_at = models.DateTimeField(blank=True, null=True)
+    provider_delivery_id = models.CharField(max_length=255, blank=True)
+    last_error_code = models.CharField(max_length=120, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ("created_at",)
+        indexes = [
+            models.Index(
+                fields=("status", "available_at", "created_at"),
+                name="chat_email_delivery_idx",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.challenge_id}:{self.status}"
