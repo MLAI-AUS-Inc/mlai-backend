@@ -192,10 +192,16 @@ class PilotDeploymentTests(TestCase):
             now=self.now + timedelta(minutes=1),
         )
 
-    def actor(self, *, user="UPILOT1", channel="GPRIVATE1"):
+    def actor(
+        self,
+        *,
+        user="UPILOT1",
+        channel="GPRIVATE1",
+        surface="admin_roo",
+    ):
         return SimpleNamespace(
             organization=self.organization,
-            surface="admin_roo",
+            surface=surface,
             slack_user_id=user,
             slack_channel_id=channel,
         )
@@ -368,6 +374,39 @@ class PilotDeploymentTests(TestCase):
             ORG_MEMORY_PILOT_ALLOWLIST_HMAC_KEY="rotated-pilot-secret-value-123456",
         ):
             self.assertFalse(actor_has_active_pilot_access(self.actor()))
+
+    def test_runtime_public_channel_access_requires_actor_bound_manifest_scope(self):
+        self.approval["allowed_slack_contexts"].append(
+            "public_channels:pilot_admins"
+        )
+        self.stage()
+        self.activate()
+
+        self.assertTrue(
+            actor_has_active_pilot_access(
+                self.actor(channel="CPUBLIC1"),
+                now=self.now,
+            )
+        )
+        self.assertTrue(
+            actor_has_active_pilot_access(
+                self.actor(channel="CPUBLIC1", surface="roo_gateway"),
+                now=self.now,
+                allowed_surfaces=("roo_gateway",),
+            )
+        )
+        self.assertFalse(
+            actor_has_active_pilot_access(
+                self.actor(user="UOTHER1", channel="CPUBLIC1"),
+                now=self.now,
+            )
+        )
+        self.assertFalse(
+            actor_has_active_pilot_access(
+                self.actor(channel="CPUBLIC1", surface="public_roo"),
+                now=self.now,
+            )
+        )
 
     def test_suspension_is_immediate_and_covers_staged_and_active(self):
         self.stage()
@@ -740,6 +779,7 @@ class PilotDeploymentTests(TestCase):
                 "approved_actor_count": 1,
                 "approved_private_channel_count": 1,
                 "approved_dm_count": 1,
+                "approved_public_channel_admin_scope": 0,
                 "expected_allow_cases": 2,
                 "allowed_cases": 2,
                 "expected_deny_cases": 5,
@@ -762,6 +802,34 @@ class PilotDeploymentTests(TestCase):
         self.assertEqual(
             mismatched["blockers"],
             ["active_pilot_binding_mismatch"],
+        )
+
+    def test_access_matrix_proves_actor_bound_public_channel_scope(self):
+        self.approval["allowed_slack_contexts"].append(
+            "public_channels:pilot_admins"
+        )
+        self.stage()
+        self.activate()
+
+        report = pilot_access_matrix_report(
+            organization=self.organization,
+            approval_manifest=self.approval,
+            now=self.now + timedelta(minutes=2),
+        )
+
+        self.assertTrue(report["ready"])
+        self.assertEqual(
+            report["metrics"],
+            {
+                "approved_actor_count": 1,
+                "approved_private_channel_count": 1,
+                "approved_dm_count": 1,
+                "approved_public_channel_admin_scope": 1,
+                "expected_allow_cases": 3,
+                "allowed_cases": 3,
+                "expected_deny_cases": 5,
+                "denied_cases": 5,
+            },
         )
 
     def test_access_matrix_blocks_disabled_query_and_malformed_approval(self):

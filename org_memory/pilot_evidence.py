@@ -34,7 +34,10 @@ from .models import (
     OrganizationMembership,
     OrganizationRoleAssignment,
 )
-from .pilot_readiness import validate_pilot_approval_manifest
+from .pilot_readiness import (
+    PUBLIC_PILOT_ADMIN_CONTEXT,
+    validate_pilot_approval_manifest,
+)
 
 
 PILOT_AUDIT_BATCH_SCHEMA_VERSION = 1
@@ -601,6 +604,11 @@ def _query_is_in_approved_context(query, approval_manifest) -> bool:
         return False
     channel_context = f"channel:{query.channel_id}"
     if channel_context in contexts:
+        return True
+    if (
+        str(query.channel_id or "").startswith("C")
+        and PUBLIC_PILOT_ADMIN_CONTEXT in contexts
+    ):
         return True
     return bool(
         str(query.channel_id or "").startswith("D")

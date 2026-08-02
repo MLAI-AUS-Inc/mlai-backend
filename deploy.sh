@@ -417,7 +417,11 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     upsert_env_value ROO_POINTS_TERMS_ACCEPTANCE_TEXT "I understand that Roo Points are not money, have no cash value, are not refundable except where required by law, and cannot be transferred or sold."
     # Preserve reporting access and the granular write scopes required by the
     # explicit payout approval workflow and tracking-option creation.
-    upsert_env_value XERO_OAUTH_SCOPES "offline_access accounting.invoices.read accounting.payments.read accounting.settings.read accounting.settings accounting.contacts.read accounting.reports.balancesheet.read accounting.reports.profitandloss.read accounting.banktransactions"
+    # Overridable via the XERO_OAUTH_SCOPES repository variable (interpolated
+    # below at heredoc construction). The default grants the reconciliation
+    # agent's write path: granular accounting.invoices + accounting.payments
+    # (draft bills / bill payments) and accounting.attachments (source PDFs).
+    upsert_env_value XERO_OAUTH_SCOPES "${XERO_OAUTH_SCOPES:-offline_access accounting.invoices accounting.payments accounting.settings.read accounting.settings accounting.contacts.read accounting.reports.balancesheet.read accounting.reports.profitandloss.read accounting.banktransactions accounting.attachments}"
     upsert_env_value RECONCILIATION_DEFAULT_DOMAIN "mlai.au"
     upsert_env_value RECONCILIATION_SCHEDULER_ENABLED "true"
     upsert_env_value NOTION_OAUTH_REDIRECT_URI "https://api.mlai.au/integrations/callback/notion"
@@ -436,13 +440,22 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     upsert_env_value HEALTH_HACK_AI_MAX_COMPLETION_TOKENS "2000"
     # Admin Brain retrieval remains fail-closed unless the separately governed
     # production rollout is explicitly enabled. Every mutation path remains
-    # hard-disabled in either state.
+    # hard-disabled in either state. Even when enabled, the query API is
+    # switched back off below if the staging readiness gate reports that the
+    # pilot is still awaiting its first retrievable evidence.
     if [ "\$org_memory_production_deploy_enabled" = "true" ]; then
         upsert_env_value ORG_MEMORY_QUERY_API_ENABLED "true"
     else
         upsert_env_value ORG_MEMORY_QUERY_API_ENABLED "false"
     fi
     upsert_env_value ORG_MEMORY_PILOT_ORGANIZATION_DOMAIN "mlai.au"
+    # Version pins are deployment-managed so semantic reprocessing cannot be
+    # accidentally suppressed by a stale value in the host's long-lived .env.
+    upsert_env_value ORG_MEMORY_EXTRACTOR_VERSION "org-memory-extractor-v5"
+    upsert_env_value ORG_MEMORY_EXTRACTION_SCHEMA_VERSION "org-memory-extraction-schema-v2"
+    upsert_env_value ORG_MEMORY_EXTRACTION_PROMPT_VERSION "org-memory-extraction-prompt-v2"
+    upsert_env_value ORG_MEMORY_SELECTOR_VERSION "org-memory-rules-selector-v2"
+    upsert_env_value ORG_MEMORY_ANSWER_SCHEMA_VERSION "org-memory-answer-schema-v2"
     # Google Drive is the first reviewed production ingestion provider. Its
     # checked-in manifest, per-organisation approval, and per-source approval
     # remain independent fail-closed gates beneath this deployment allowlist.
@@ -576,14 +589,15 @@ print('yes' if recorder.migration_qs.filter(app='\${app_label}', name='\${migrat
     echo "🗺️ Migration plan..."
     compose_run_web python manage.py migrate --plan
 
-    restore_web_on_error() {
-        echo "⚠️ Deployment failed after web traffic was paused; restoring existing web service."
-        docker compose up -d web || true
+    paused_runtime_services=(web memory-worker memory-scheduler)
+    restore_runtime_on_error() {
+        echo "⚠️ Deployment failed after runtime services were paused; restoring them with the reviewed image."
+        docker compose up -d --force-recreate "\${paused_runtime_services[@]}" || true
     }
 
-    echo "⏸️ Pausing web traffic before DB migrations..."
-    docker compose stop web || true
-    trap restore_web_on_error ERR
+    echo "⏸️ Pausing web and organisational-memory workers before DB migrations..."
+    docker compose stop "\${paused_runtime_services[@]}" || true
+    trap restore_runtime_on_error ERR
 
     echo "🗄️ Running migrations..."
     compose_run_web python manage.py migrate --noinput
@@ -659,33 +673,171 @@ PY
                 web "\$@" </dev/null
         }
 
+        echo "🧹 Recovering work interrupted by the stopped deployment worker..."
+        compose_run_web python manage.py recover_org_memory_stopped_worker_work \
+            --organization-domain mlai.au \
+            --operator-email "\$stage_operator" \
+            --apply
+
+        echo "🧹 Reconciling versionless source-access-restored dead letters..."
+        compose_run_web python manage.py reconcile_org_memory_access_restored_dead_letters \
+            --organization-domain mlai.au \
+            --provider google_drive \
+            --operator-email "\$stage_operator" \
+            --apply
+
+        echo "🧹 Reconciling consolidation jobs affected by the outer-join lock bug..."
+        compose_run_web python manage.py reconcile_org_memory_consolidation_lock_dead_letters \
+            --organization-domain mlai.au \
+            --provider google_drive \
+            --operator-email "\$stage_operator" \
+            --apply
+
+        echo "🧹 Reconciling timezone-less claim datetime extraction dead letters..."
+        compose_run_web python manage.py reconcile_org_memory_naive_datetime_dead_letters \
+            --organization-domain mlai.au \
+            --provider google_drive \
+            --operator-email "\$stage_operator" \
+            --apply
+
+        echo "🧹 Cancelling queued extraction work for superseded targets..."
+        compose_run_web python manage.py cancel_org_memory_superseded_extraction_work \
+            --organization-domain mlai.au \
+            --provider google_drive \
+            --operator-email "\$stage_operator" \
+            --apply
+
+        echo "🧹 Cancelling queued consolidation work from superseded extraction targets..."
+        compose_run_web python manage.py cancel_org_memory_superseded_consolidation_work \
+            --organization-domain mlai.au \
+            --provider google_drive \
+            --operator-email "\$stage_operator" \
+            --apply
+
+        echo "🧹 Reconciling superseded Admin Brain extraction dead letters..."
+        compose_run_web python manage.py reconcile_org_memory_extraction_dead_letters \
+            --organization-domain mlai.au \
+            --provider google_drive \
+            --superseded-schema-version org-memory-extraction-schema-v1 \
+            --operator-email "\$stage_operator" \
+            --apply
+
+        echo "🧹 Reconciling superseded quote-grounding extraction dead letters..."
+        compose_run_web python manage.py reconcile_org_memory_extraction_dead_letters \
+            --organization-domain mlai.au \
+            --provider google_drive \
+            --superseded-schema-version org-memory-extraction-schema-v2 \
+            --superseded-extractor-version org-memory-extractor-v1 \
+            --superseded-prompt-version org-memory-extraction-prompt-v1 \
+            --operator-email "\$stage_operator" \
+            --apply
+
+        echo "🧹 Reconciling extractor-v2 jobs claimed during the previous deploy handoff..."
+        compose_run_web python manage.py reconcile_org_memory_extraction_dead_letters \
+            --organization-domain mlai.au \
+            --provider google_drive \
+            --superseded-schema-version org-memory-extraction-schema-v2 \
+            --superseded-extractor-version org-memory-extractor-v2 \
+            --superseded-prompt-version org-memory-extraction-prompt-v2 \
+            --operator-email "\$stage_operator" \
+            --apply
+
+        echo "🧹 Reconciling extractor-v3 transcript-safety dead letters..."
+        compose_run_web python manage.py reconcile_org_memory_extraction_dead_letters \
+            --organization-domain mlai.au \
+            --provider google_drive \
+            --superseded-schema-version org-memory-extraction-schema-v2 \
+            --superseded-extractor-version org-memory-extractor-v3 \
+            --superseded-prompt-version org-memory-extraction-prompt-v2 \
+            --operator-email "\$stage_operator" \
+            --apply
+
+        echo "🧹 Reconciling extractor-v4 attributed-transcript dead letters..."
+        compose_run_web python manage.py reconcile_org_memory_extraction_dead_letters \
+            --organization-domain mlai.au \
+            --provider google_drive \
+            --superseded-schema-version org-memory-extraction-schema-v2 \
+            --superseded-extractor-version org-memory-extractor-v4 \
+            --superseded-prompt-version org-memory-extraction-prompt-v2 \
+            --operator-email "\$stage_operator" \
+            --apply
+
+        echo "🧠 Scheduling the reviewed extractor-v5 target for current Drive evidence..."
+        compose_run_web python manage.py schedule_org_memory_reextraction \
+            --organization-domain mlai.au \
+            --provider google_drive \
+            --limit 1000 \
+            --apply
+
+        echo "🩺 Refreshing daily memory health after bounded recovery..."
+        compose_run_web python manage.py refresh_org_memory_daily_reconciliation \
+            --organization-domain mlai.au \
+            --operator-email "\$stage_operator" \
+            --apply
+
         echo "🔐 Applying the reviewed Admin Brain production binding..."
-        compose_run_web_with_approval python manage.py stage_org_memory_pilot \
+        stage_stdout=\$(mktemp)
+        if compose_run_web_with_approval python manage.py stage_org_memory_pilot \
             --organization-domain mlai.au \
             --approval-manifest "\$approval_manifest_container" \
             --operator-email "\$stage_operator" \
             --idempotency-key "\$stage_idempotency_key" \
             --environment production \
-            --apply
-        compose_run_web_with_approval python manage.py activate_org_memory_pilot \
-            --organization-domain mlai.au \
-            --approval-manifest "\$approval_manifest_container" \
-            --operator-email "\$activation_operator" \
-            --idempotency-key "\$activation_idempotency_key" \
-            --environment production \
-            --apply
-        unset stage_operator activation_operator approval_hash approval_hash_short
+            --apply > "\$stage_stdout"; then
+            staging_applied=1
+        else
+            staging_applied=0
+        fi
+        cat "\$stage_stdout"
+        if [ "\$staging_applied" = "1" ]; then
+            compose_run_web_with_approval python manage.py activate_org_memory_pilot \
+                --organization-domain mlai.au \
+                --approval-manifest "\$approval_manifest_container" \
+                --operator-email "\$activation_operator" \
+                --idempotency-key "\$activation_idempotency_key" \
+                --environment production \
+                --apply
 
-        echo "🔐 Verifying enforced, active, non-shadow Admin Brain production..."
-        compose_run_web python manage.py check_org_memory_pilot_release_gate \
-            --organization-domain mlai.au \
-            --require-active
-        compose_run_web python manage.py report_org_memory_pilot_deployment \
-            --organization-domain mlai.au \
-            --fail-if-ineffective
-        compose_run_web_with_approval python manage.py check_org_memory_pilot_access_matrix \
-            --organization-domain mlai.au \
-            --approval-manifest "\$approval_manifest_container"
+            echo "🔐 Verifying enforced, active, non-shadow Admin Brain production..."
+            compose_run_web python manage.py check_org_memory_pilot_release_gate \
+                --organization-domain mlai.au \
+                --require-active
+            compose_run_web python manage.py report_org_memory_pilot_deployment \
+                --organization-domain mlai.au \
+                --fail-if-ineffective
+            compose_run_web_with_approval python manage.py check_org_memory_pilot_access_matrix \
+                --organization-domain mlai.au \
+                --approval-manifest "\$approval_manifest_container"
+
+            echo "🔄 Requesting the reviewed Drive parser-v2/extraction-v2 reprocess..."
+            compose_run_web python manage.py request_org_memory_reprocess \
+                --organization-domain mlai.au \
+                --provider google_drive \
+                --configuration-id cd4483b5-d6c1-48f6-8268-2b0acd824e12 \
+                --idempotency-key committee-drive-parser-v2-extraction-v2 \
+                --operator-email "\$activation_operator" \
+                --apply
+        elif python3 scripts/org_memory_staging_skip.py "\$stage_stdout"; then
+            # Evidence ingestion and restoration run in the memory worker,
+            # which only receives new code when a deploy completes. While the
+            # pilot's only readiness blocker is missing retrievable evidence,
+            # skip the binding instead of hard-failing so the deploy is not
+            # deadlocked against the very ingestion it ships. Retrieval stays
+            # fail-closed on two independent layers: no staged or active
+            # deployment binding exists, and the query API flag is switched
+            # back off before the runtime services start.
+            echo "⚠️ Admin Brain pilot staging skipped: the pilot has no retrievable evidence yet."
+            echo "⚠️ Keeping the Admin Brain query API disabled; retrieval remains fail-closed."
+            echo "⚠️ The next deploy after ingestion restores evidence will stage and activate the binding."
+            upsert_env_value ORG_MEMORY_QUERY_API_ENABLED "false"
+        else
+            echo "❌ Admin Brain production staging failed; aborting the deploy."
+            rm -f "\$stage_stdout"
+            # Fail via a command (not exit) so the ERR trap restores web.
+            false
+        fi
+        rm -f "\$stage_stdout"
+        unset stage_operator activation_operator approval_hash approval_hash_short
     else
         echo "ℹ️ Skipping Admin Brain production staging and activation; query API remains disabled."
     fi

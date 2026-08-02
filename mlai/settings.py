@@ -1173,15 +1173,15 @@ ORG_MEMORY_EXTRACTION_MODEL = os.environ.get(
 ).strip()
 ORG_MEMORY_EXTRACTOR_VERSION = os.environ.get(
     'ORG_MEMORY_EXTRACTOR_VERSION',
-    'org-memory-extractor-v1',
+    'org-memory-extractor-v5',
 ).strip()
 ORG_MEMORY_EXTRACTION_SCHEMA_VERSION = os.environ.get(
     'ORG_MEMORY_EXTRACTION_SCHEMA_VERSION',
-    'org-memory-extraction-schema-v1',
+    'org-memory-extraction-schema-v2',
 ).strip()
 ORG_MEMORY_EXTRACTION_PROMPT_VERSION = os.environ.get(
     'ORG_MEMORY_EXTRACTION_PROMPT_VERSION',
-    'org-memory-extraction-prompt-v1',
+    'org-memory-extraction-prompt-v2',
 ).strip()
 ORG_MEMORY_EXTRACTION_MAX_INPUT_CHARS = int(
     os.environ.get('ORG_MEMORY_EXTRACTION_MAX_INPUT_CHARS', '60000')
@@ -1261,7 +1261,7 @@ ORG_MEMORY_PUBLIC_RESULT_LIMIT = int(
 )
 ORG_MEMORY_SELECTOR_VERSION = os.environ.get(
     'ORG_MEMORY_SELECTOR_VERSION',
-    'org-memory-rules-selector-v1',
+    'org-memory-rules-selector-v2',
 ).strip()
 ORG_MEMORY_SELECTOR_EXPORT_ENABLED = _env_is_true(
     'ORG_MEMORY_SELECTOR_EXPORT_ENABLED',
@@ -1307,7 +1307,7 @@ ORG_MEMORY_ANSWERER_VERSION = os.environ.get(
 ).strip()
 ORG_MEMORY_ANSWER_SCHEMA_VERSION = os.environ.get(
     'ORG_MEMORY_ANSWER_SCHEMA_VERSION',
-    'org-memory-answer-schema-v1',
+    'org-memory-answer-schema-v2',
 ).strip()
 ORG_MEMORY_ANSWER_PROMPT_VERSION = os.environ.get(
     'ORG_MEMORY_ANSWER_PROMPT_VERSION',

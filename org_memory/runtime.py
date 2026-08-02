@@ -43,6 +43,7 @@ from .models import (
     MemoryRuntimeLaneScope,
     MemoryScopeStatus,
     MemorySource,
+    MemorySourceLifecycle,
     MemorySourceActionRequest,
     MemorySourceAuditEvent,
     MemorySyncRun,
@@ -686,6 +687,44 @@ def _fetch_sync_page(work_item, action, run) -> SyncPage:
     return page
 
 
+def _record_external_ids(provider: str, records) -> set[str]:
+    external_ids = set()
+    for record in records:
+        if not isinstance(record, Mapping):
+            continue
+        if provider == "google_drive":
+            artifact = record.get("artifact")
+            raw = artifact.get("id") if isinstance(artifact, Mapping) else None
+        else:
+            raw = record.get("external_id")
+        if raw is not None and str(raw).strip():
+            external_ids.add(str(raw).strip())
+    return external_ids
+
+
+def _schedule_reprocessed_extractions(configuration, records) -> dict:
+    from .extraction import schedule_source_extraction
+
+    external_ids = _record_external_ids(configuration.provider, records)
+    summary = {"scheduled": 0, "existing": 0, "skipped": 0}
+    if not external_ids:
+        return summary
+    sources = MemorySource.objects.filter(
+        organization=configuration.organization,
+        configuration=configuration,
+        provider=configuration.provider,
+        external_id__in=external_ids,
+        lifecycle_state=MemorySourceLifecycle.ACTIVE,
+        access_revoked_at__isnull=True,
+        current_version__isnull=False,
+    ).select_related("current_version")
+    for source in sources:
+        result = schedule_source_extraction(source_version=source.current_version)
+        for key in summary:
+            summary[key] += int(result.get(key) or 0)
+    return summary
+
+
 @transaction.atomic
 def _commit_sync_page(claim: ClaimedMemoryWork, page: SyncPage) -> dict:
     configuration = _lock_claim_configuration(claim)
@@ -723,6 +762,13 @@ def _commit_sync_page(claim: ClaimedMemoryWork, page: SyncPage) -> dict:
             records_processed += 1
         for removal in page.removals:
             removals_processed += _apply_removal(configuration, removal)
+
+    reextraction = {"scheduled": 0, "existing": 0, "skipped": 0}
+    if action.action == MemoryActionType.REPROCESS:
+        reextraction = _schedule_reprocessed_extractions(
+            configuration,
+            page.records,
+        )
 
     now = timezone.now()
     if page.next_cursor is not None:
@@ -848,6 +894,7 @@ def _commit_sync_page(claim: ClaimedMemoryWork, page: SyncPage) -> dict:
         "status": "continued" if continuation else "completed",
         "records": records_processed,
         "removals": removals_processed,
+        "reextraction": reextraction,
         "metadata_versions_created": metadata_versions_created,
         "continuation_work_item_id": str(continuation.pk) if continuation else None,
     }
@@ -906,7 +953,10 @@ def _complete_delete_action(claim: ClaimedMemoryWork) -> dict:
 def _execute_reconciliation(claim: ClaimedMemoryWork, work_item: MemoryWorkItem) -> dict:
     event_type = str(work_item.payload.get("event_type") or "")
     summary = {"reconciled": True}
-    if event_type == MemoryOutboxEventType.SOURCE_VERSION_CAPTURED:
+    if event_type in {
+        MemoryOutboxEventType.SOURCE_VERSION_CAPTURED,
+        MemoryOutboxEventType.SOURCE_ACCESS_RESTORED,
+    }:
         if work_item.source_version and not work_item.source_version.is_current:
             if work_item.source_version.chunks.filter(active_for_retrieval=True).exists():
                 raise PermanentMemoryRuntimeError(
@@ -1011,6 +1061,16 @@ def _execute_extraction(claim: ClaimedMemoryWork, work_item: MemoryWorkItem) -> 
         summary = process_extraction_work(work_item)
     except (ExtractionConfigurationError, ExtractionInvariantError) as exc:
         raise PermanentMemoryRuntimeError(str(exc)) from exc
+    from .models import MemoryExtractionStatus
+
+    if summary.get("extraction_status") in {
+        MemoryExtractionStatus.QUARANTINED,
+        MemoryExtractionStatus.REJECTED,
+    }:
+        raise PermanentMemoryRuntimeError(
+            "Organisational-memory extraction was quarantined or rejected; "
+            "the source requires review before the work can be considered complete."
+        )
     if summary.get("claims_created"):
         from .consolidation import schedule_extraction_consolidation
         from .models import MemoryExtractionRun
@@ -1156,7 +1216,11 @@ def _outbox_task(event: MemoryOutboxEvent):
         source=event.source,
         source_version=(
             event.source_version
-            if event.event_type == MemoryOutboxEventType.SOURCE_VERSION_CAPTURED
+            if event.event_type
+            in {
+                MemoryOutboxEventType.SOURCE_VERSION_CAPTURED,
+                MemoryOutboxEventType.SOURCE_ACCESS_RESTORED,
+            }
             else None
         ),
         configuration=event.source.configuration,
@@ -1510,3 +1574,248 @@ def requeue_dead_letter(dead_letter_id, *, resolved_by=None) -> MemoryWorkItem:
         update_fields=("resolved_at", "resolved_by", "requeued_work_item")
     )
     return requeued
+
+
+def stopped_worker_processing_work(*, organization):
+    """Return in-flight work whose worker has been stopped by the deploy."""
+
+    return MemoryWorkItem.objects.filter(
+        organization=organization,
+        status=MemoryWorkStatus.PROCESSING,
+        leases__released_at__isnull=True,
+    )
+
+
+@transaction.atomic
+def recover_stopped_worker_work(
+    *,
+    organization,
+    apply: bool = False,
+    resolved_by=None,
+    limit: int = 1000,
+) -> dict:
+    """Return deploy-interrupted work to pending after workers are fully stopped."""
+
+    if apply and resolved_by is None:
+        raise ValueError("An operator is required when applying recovery.")
+    work_items = stopped_worker_processing_work(
+        organization=organization,
+    ).order_by("locked_at", "pk")
+    if apply:
+        work_items = _locked(work_items, of_self=True)
+    rows = list(work_items[:limit])
+    report = {
+        "schema_version": "org-memory-stopped-worker-recovery-v1",
+        "organization_domain": organization.domain,
+        "apply": bool(apply),
+        "candidates": len(rows),
+        "recovered": 0,
+        "leases_released": 0,
+        "attempts_refunded": 0,
+    }
+    if not apply:
+        return report
+    now = timezone.now()
+    for work_item in rows:
+        report["leases_released"] += work_item.leases.filter(
+            released_at__isnull=True,
+        ).update(released_at=now)
+        if work_item.status != MemoryWorkStatus.PROCESSING:
+            continue
+        if work_item.attempts:
+            work_item.attempts -= 1
+            report["attempts_refunded"] += 1
+        work_item.status = MemoryWorkStatus.PENDING
+        work_item.available_at = now
+        work_item.locked_at = None
+        work_item.completed_at = None
+        work_item.last_error = "Worker stopped for reviewed deployment; work was recovered."
+        work_item.save(
+            update_fields=(
+                "status",
+                "attempts",
+                "available_at",
+                "locked_at",
+                "completed_at",
+                "last_error",
+                "updated_at",
+            )
+        )
+        report["recovered"] += 1
+    return report
+
+
+LEGACY_ACCESS_RESTORED_ERROR = "'NoneType' object has no attribute 'chunks'"
+LEGACY_CONSOLIDATION_OUTER_JOIN_LOCK_ERROR = (
+    "FOR UPDATE cannot be applied to the nullable side of an outer join"
+)
+
+
+def legacy_access_restored_dead_letters(*, organization, provider: str):
+    """Return only the outbox work affected by the missing-version producer bug."""
+
+    return MemoryDeadLetter.objects.filter(
+        organization=organization,
+        resolved_at__isnull=True,
+        task_type=MemoryWorkTaskType.RECONCILE,
+        work_item__provider=provider,
+        work_item__action_request__isnull=True,
+        work_item__source__isnull=False,
+        work_item__source_version__isnull=True,
+        payload_snapshot__event_type=MemoryOutboxEventType.SOURCE_ACCESS_RESTORED,
+        last_error=LEGACY_ACCESS_RESTORED_ERROR,
+    ).select_related(
+        "work_item",
+        "work_item__source",
+        "work_item__source__current_version",
+        "work_item__configuration",
+    )
+
+
+def legacy_consolidation_lock_dead_letters(*, organization, provider: str):
+    """Return only consolidation work affected by the nullable-join lock bug."""
+
+    return MemoryDeadLetter.objects.filter(
+        organization=organization,
+        resolved_at__isnull=True,
+        task_type=MemoryWorkTaskType.CONSOLIDATE,
+        work_item__provider=provider,
+        work_item__action_request__isnull=True,
+        last_error=LEGACY_CONSOLIDATION_OUTER_JOIN_LOCK_ERROR,
+    ).select_related(
+        "work_item",
+        "work_item__source",
+        "work_item__source_version",
+        "work_item__configuration",
+    )
+
+
+@transaction.atomic
+def reconcile_consolidation_lock_dead_letters(
+    *,
+    organization,
+    provider: str,
+    apply: bool = False,
+    resolved_by=None,
+    limit: int = 1000,
+) -> dict:
+    """Requeue only work that hit the fixed consolidation lock failure."""
+
+    if apply and resolved_by is None:
+        raise ValueError("An operator is required when applying reconciliation.")
+    dead_letters = legacy_consolidation_lock_dead_letters(
+        organization=organization,
+        provider=provider,
+    ).order_by("dead_at", "pk")
+    if apply:
+        dead_letters = _locked(dead_letters, of_self=True)
+    rows = list(dead_letters[:limit])
+    report = {
+        "schema_version": "org-memory-consolidation-lock-dead-letter-reconciliation-v1",
+        "organization_domain": organization.domain,
+        "provider": provider,
+        "apply": bool(apply),
+        "candidates": len(rows),
+        "scheduled": 0,
+        "existing": 0,
+        "resolved": 0,
+    }
+    if not apply:
+        return report
+    resolved_at = timezone.now()
+    for dead_letter in rows:
+        original = dead_letter.work_item
+        replacement, created = create_work_item(
+            organization=organization,
+            provider=provider,
+            task_type=MemoryWorkTaskType.CONSOLIDATE,
+            idempotency_key=f"dead-letter:{dead_letter.pk}:consolidation-lock-v1",
+            source=original.source,
+            source_version=original.source_version,
+            configuration=original.configuration,
+            payload=original.payload,
+            max_attempts=original.max_attempts,
+        )
+        report["scheduled"] += int(created)
+        report["existing"] += int(not created)
+        dead_letter.resolved_at = resolved_at
+        dead_letter.resolved_by = resolved_by
+        dead_letter.requeued_work_item = replacement
+        dead_letter.save(
+            update_fields=("resolved_at", "resolved_by", "requeued_work_item")
+        )
+        report["resolved"] += 1
+    return report
+
+
+@transaction.atomic
+def reconcile_access_restored_dead_letters(
+    *,
+    organization,
+    provider: str,
+    apply: bool = False,
+    resolved_by=None,
+    limit: int = 1000,
+) -> dict:
+    """Schedule version-pinned replacements for the bounded legacy failure."""
+
+    if apply and resolved_by is None:
+        raise ValueError("An operator is required when applying reconciliation.")
+    dead_letters = legacy_access_restored_dead_letters(
+        organization=organization,
+        provider=provider,
+    ).order_by("dead_at", "pk")
+    if apply:
+        # The recovery queryset follows nullable source/version/configuration
+        # relationships for inspection. PostgreSQL cannot lock the nullable
+        # side of those outer joins, so lock only the evidence rows we mutate.
+        dead_letters = _locked(dead_letters, of_self=True)
+    rows = list(dead_letters[:limit])
+    report = {
+        "schema_version": "org-memory-access-restored-dead-letter-reconciliation-v1",
+        "organization_domain": organization.domain,
+        "provider": provider,
+        "apply": bool(apply),
+        "candidates": len(rows),
+        "scheduled": 0,
+        "existing": 0,
+        "skipped": 0,
+        "resolved": 0,
+    }
+    if not apply:
+        return report
+    resolved_at = timezone.now()
+    for dead_letter in rows:
+        original = dead_letter.work_item
+        source = original.source
+        current = source.current_version if source else None
+        if (
+            source is None
+            or source.lifecycle_state != MemorySourceLifecycle.ACTIVE
+            or current is None
+            or not current.is_current
+            or not current.chunks.filter(active_for_retrieval=True).exists()
+        ):
+            report["skipped"] += 1
+            continue
+        replacement, created = create_work_item(
+            organization=organization,
+            provider=provider,
+            task_type=MemoryWorkTaskType.RECONCILE,
+            idempotency_key=f"dead-letter:{dead_letter.pk}:access-restored-v2",
+            source=source,
+            source_version=current,
+            configuration=original.configuration,
+            payload=original.payload,
+            max_attempts=original.max_attempts,
+        )
+        report["scheduled"] += int(created)
+        report["existing"] += int(not created)
+        dead_letter.resolved_at = resolved_at
+        dead_letter.resolved_by = resolved_by
+        dead_letter.requeued_work_item = replacement
+        dead_letter.save(
+            update_fields=("resolved_at", "resolved_by", "requeued_work_item")
+        )
+        report["resolved"] += 1
+    return report

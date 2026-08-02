@@ -30,6 +30,27 @@ from .search import MemorySearchResult, search_memory_chunks
 
 RRF_K = 60
 _WORD_RE = re.compile(r"[\w'-]+", re.UNICODE)
+_EMAIL_RE = re.compile(r"\b[^\s@]+@[^\s@]+\.[^\s@]+\b")
+_DECISION_RE = re.compile(r"\b(?:decision|decisions|decided)\b", re.I)
+_RECENCY_RE = re.compile(r"\b(?:most recent|latest|recent)\b", re.I)
+_COUNTED_MEMORY_RE = re.compile(
+    r"\b(?P<count>\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten)\s+"
+    r"(?:(?:most\s+recent|latest|recent)\s+)?"
+    r"(?:decisions?|commitments?|tasks?|actions?|items?)\b",
+    re.I,
+)
+_NUMBER_WORDS = {
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
+}
 _SECRET_PATTERNS = (
     re.compile(r"(?i)\b(api[_-]?key|secret|password|token)\s*[:=]\s*[^\s,;]+"),
     re.compile(r"\bmlai_sp_[A-Za-z0-9._-]+"),
@@ -80,6 +101,9 @@ class QueryPlan:
     time_end: object
     include_archive: bool
     detail: str
+    requested_count: Optional[int]
+    recency_priority: bool
+    required_kind: Optional[str]
 
     def to_dict(self) -> dict:
         return {
@@ -96,6 +120,9 @@ class QueryPlan:
             },
             "include_archive": self.include_archive,
             "detail": self.detail,
+            "requested_count": self.requested_count,
+            "recency_priority": self.recency_priority,
+            "required_kind": self.required_kind,
         }
 
 
@@ -234,7 +261,14 @@ def _mode_for_query(query: str, *, as_of=None, time_start=None, time_end=None) -
     return MemoryQueryMode.CURRENT_STATE
 
 
-def _kinds_for_mode(mode: str) -> tuple[str, ...]:
+def _kinds_for_mode(mode: str, *, query: str = "") -> tuple[str, ...]:
+    if _DECISION_RE.search(query):
+        return (
+            MemoryClaimKind.DECISION,
+            MemoryClaimKind.COMMITMENT,
+            MemoryClaimKind.TASK,
+            MemoryClaimKind.OPEN_LOOP,
+        )
     if mode == MemoryQueryMode.OPEN_LOOPS:
         return (
             MemoryClaimKind.TASK,
@@ -253,6 +287,15 @@ def _kinds_for_mode(mode: str) -> tuple[str, ...]:
             MemoryClaimKind.DECISION,
         )
     return ()
+
+
+def _requested_count(query: str) -> Optional[int]:
+    match = _COUNTED_MEMORY_RE.search(str(query or ""))
+    if not match:
+        return None
+    raw = match.group("count").casefold()
+    value = int(raw) if raw.isdigit() else _NUMBER_WORDS[raw]
+    return min(max(value, 1), 10)
 
 
 def plan_memory_query(
@@ -300,12 +343,17 @@ def plan_memory_query(
         mode=mode,
         entity_ids=tuple(str(entity.pk) for entity in entity_rows[:10]),
         entity_names=tuple(entity.canonical_name for entity in entity_rows[:10]),
-        kinds=_kinds_for_mode(mode),
+        kinds=_kinds_for_mode(mode, query=query),
         as_of=as_of,
         time_start=time_start,
         time_end=time_end,
         include_archive=mode in {MemoryQueryMode.HISTORICAL_AS_OF, MemoryQueryMode.TIMELINE},
         detail="standard",
+        requested_count=_requested_count(query),
+        recency_priority=bool(_RECENCY_RE.search(query)),
+        required_kind=(
+            MemoryClaimKind.DECISION if _DECISION_RE.search(query) else None
+        ),
     )
 
 
@@ -320,12 +368,33 @@ def eligible_evidence_queryset():
 
 
 def _claim_queryset(*, organization, plan: QueryPlan, classifications):
-    as_of = plan.as_of or timezone.now()
-    claims = eligible_claims_as_of(
-        organization=organization,
-        as_of=as_of,
-        historical=plan.include_archive,
-    ).filter(classification__in=classifications)
+    if plan.mode == MemoryQueryMode.TIMELINE:
+        claims = (
+            MemoryClaim.objects.filter(
+                organization=organization,
+                status__in=(
+                    MemoryClaimStatus.ACTIVE,
+                    MemoryClaimStatus.STALE,
+                    MemoryClaimStatus.SUPERSEDED,
+                    MemoryClaimStatus.CONTRADICTED,
+                ),
+                classification__in=classifications,
+                evidence__source__lifecycle_state=MemorySourceLifecycle.ACTIVE,
+                evidence__source__access_revoked_at__isnull=True,
+                evidence__source_version__acl_snapshot__is_accessible=True,
+                evidence__source_version__acl_snapshot__revoked_at__isnull=True,
+                evidence__source_version__tombstoned_at__isnull=True,
+            )
+            .exclude(classification=MemoryClassification.NO_AGENT)
+            .distinct()
+        )
+    else:
+        as_of = plan.as_of or timezone.now()
+        claims = eligible_claims_as_of(
+            organization=organization,
+            as_of=as_of,
+            historical=plan.include_archive,
+        ).filter(classification__in=classifications)
     if plan.entity_ids:
         claims = claims.filter(
             Q(subject_entity_id__in=plan.entity_ids)
@@ -428,7 +497,40 @@ def _candidate_citations(candidate: MemoryCandidate) -> tuple[dict, ...]:
     )
 
 
-def _pack_candidate(candidate: MemoryCandidate) -> PackedMemory:
+def _relevant_chunk_excerpt(text: str, terms: Iterable[str], *, limit: int = 1600) -> str:
+    text = str(text or "")
+    if len(text) <= limit:
+        return text
+    terms = tuple(terms)
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return text[:limit]
+    scored = []
+    for index, line in enumerate(lines):
+        normalized = line.casefold()
+        term_matches = sum(term in normalized for term in terms)
+        email_count = len(_EMAIL_RE.findall(line))
+        content_words = len(_WORD_RE.findall(line))
+        score = term_matches * 4 + min(content_words, 80) / 80 - email_count * 3
+        scored.append((score, content_words, -index, index))
+    _score, _words, _position, best_index = max(scored)
+    selected_indices = {best_index}
+    used = len(lines[best_index])
+    distance = 1
+    while used < limit and (best_index - distance >= 0 or best_index + distance < len(lines)):
+        for candidate_index in (best_index - distance, best_index + distance):
+            if candidate_index < 0 or candidate_index >= len(lines):
+                continue
+            line = lines[candidate_index]
+            if used + len(line) + 1 > limit:
+                continue
+            selected_indices.add(candidate_index)
+            used += len(line) + 1
+        distance += 1
+    return "\n".join(lines[index] for index in sorted(selected_indices))[:limit]
+
+
+def _pack_candidate(candidate: MemoryCandidate, *, terms: Iterable[str] = ()) -> PackedMemory:
     citations = _candidate_citations(candidate)
     if candidate.claim:
         claim = candidate.claim
@@ -455,7 +557,7 @@ def _pack_candidate(candidate: MemoryCandidate) -> PackedMemory:
             "memory_id": candidate.key,
             "type": "source_excerpt",
             "chunk_id": str(chunk.pk),
-            "text": chunk.text[:1600],
+            "text": _relevant_chunk_excerpt(chunk.text, terms),
             "occurred_at": (
                 chunk.occurred_at or chunk.source_version.occurred_at
             ).isoformat()
@@ -481,6 +583,25 @@ def _sufficiency(candidates: list[MemoryCandidate], plan: QueryPlan) -> tuple[st
     exact = bool(top.features.get("entity_match") or top.features.get("structured_match"))
     semantic = top.lane_ranks.get("vector") is not None
     grounded = bool(_candidate_citations(top))
+    if plan.requested_count:
+        grounded_matches = sum(
+            bool(_candidate_citations(candidate))
+            and (
+                plan.required_kind is None
+                or (
+                    candidate.claim is not None
+                    and candidate.claim.kind == plan.required_kind
+                )
+            )
+            for candidate in candidates
+        )
+        if grounded_matches < plan.requested_count:
+            if grounded_matches:
+                return (
+                    MemoryEvidenceSufficiency.PARTIAL,
+                    min(0.5, grounded_matches / plan.requested_count),
+                )
+            return MemoryEvidenceSufficiency.INSUFFICIENT, 0.0
     if grounded and (relevance >= 0.34 or exact or semantic):
         confidence = min(
             0.98,
@@ -550,7 +671,12 @@ def select_memory(
         ).values_list("claim_id", flat=True)
     )
     structured_ids = []
-    for claim in claims.filter(pk__in=current_ids).order_by(
+    structured_claims = (
+        claims
+        if plan.mode == MemoryQueryMode.TIMELINE
+        else claims.filter(pk__in=current_ids)
+    )
+    for claim in structured_claims.order_by(
         "-source_authority", "-confidence", "-observed_at", "-recorded_at"
     )[: max(candidate_limit * 5, 100)]:
         entity_match = bool(
@@ -677,6 +803,13 @@ def select_memory(
             status_adjustment += 0.01
         if claim and claim.status == MemoryClaimStatus.STALE:
             status_adjustment -= 0.015
+        boilerplate = bool(
+            chunk
+            and chunk.ordinal == 0
+            and len(_EMAIL_RE.findall(chunk.text[:4000])) >= 4
+        )
+        if boilerplate:
+            status_adjustment -= 0.04
         adjusted = (
             base_score
             + lexical * 0.05
@@ -701,10 +834,32 @@ def select_memory(
                     "source_authority": round(authority, 4),
                     "claim_confidence": round(confidence, 4),
                     "status": claim.status if claim else "source_excerpt",
+                    "boilerplate": boilerplate,
                 },
             )
         )
-    candidates.sort(key=lambda item: (-item.score, item.key))
+    if plan.recency_priority:
+        def recency_timestamp(item):
+            if item.claim:
+                value = (
+                    item.claim.observed_at
+                    or item.claim.valid_from
+                    or item.claim.recorded_at
+                )
+            else:
+                value = (
+                    item.chunk.occurred_at
+                    or item.chunk.source_version.occurred_at
+                    or item.chunk.source_version.source_updated_at
+                    or item.chunk.source_version.captured_at
+                )
+            return value.timestamp() if value else 0
+
+        candidates.sort(
+            key=lambda item: (-recency_timestamp(item), -item.score, item.key)
+        )
+    else:
+        candidates.sort(key=lambda item: (-item.score, item.key))
     candidates = candidates[:result_limit]
     sufficiency, confidence = _sufficiency(candidates, plan)
 
@@ -717,7 +872,7 @@ def select_memory(
         normalized_text = " ".join(raw_text.casefold().split())
         if normalized_text in seen_text:
             continue
-        packed = _pack_candidate(candidate)
+        packed = _pack_candidate(candidate, terms=terms)
         if selected and used_tokens + packed.estimated_tokens > budget:
             continue
         selected.append(packed)

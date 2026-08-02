@@ -167,6 +167,18 @@ jobs:
         python manage.py test \
           org_memory.tests.test_search_postgres \
           org_memory.tests.test_runtime_postgres \
+          org_memory.tests.test_runtime.MemoryRuntimeTests.test_legacy_access_restored_dead_letters_get_version_pinned_replacements \
+          org_memory.tests.test_consolidation.MemoryConsolidationTests.test_consolidation_work_payload_is_identifier_only_and_idempotent \
+          org_memory.tests.test_runtime.MemoryRuntimeTests.test_legacy_consolidation_lock_dead_letters_are_requeued_once \
+          org_memory.tests.test_runtime.MemoryRuntimeTests.test_stopped_worker_work_is_recovered_and_attempt_is_refunded \
+          org_memory.tests.test_extraction.MemoryExtractionTests.test_legacy_dead_letter_reconciliation_schedules_current_target \
+          org_memory.tests.test_extraction.MemoryExtractionTests.test_dead_letter_reconciliation_can_target_superseded_extractor_revision \
+          org_memory.tests.test_extraction.MemoryExtractionTests.test_superseded_pending_extraction_work_is_cancelled_before_reprocessing \
+          org_memory.tests.test_extraction.MemoryExtractionTests.test_superseded_consolidation_work_is_cancelled_by_extraction_target \
+          org_memory.tests.test_extraction.MemoryExtractionTests.test_attributed_prompt_injection_discussion_keeps_transcript_extractable \
+          org_memory.tests.test_daily_reconciliation.DailyReconciliationTests.test_resolved_dead_letter_does_not_degrade_current_connection_health \
+          org_memory.tests.test_pilot_readiness.PilotReadinessTests.test_fresh_completed_daily_report_remains_valid_while_next_report_runs \
+          org_memory.tests.test_drive_processing.DriveProcessingTests.test_unchanged_accessible_version_restores_policy_revoked_chunks \
           --verbosity 2
 
   deploy:

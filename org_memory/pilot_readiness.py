@@ -52,6 +52,7 @@ from .scheduling import provider_freshness_slo_seconds
 
 PILOT_APPROVAL_SCHEMA_VERSION = 1
 READINESS_SCHEMA_VERSION = "org-memory-pilot-readiness-v1"
+PUBLIC_PILOT_ADMIN_CONTEXT = "public_channels:pilot_admins"
 _PILOT_MANIFEST_FIELDS = frozenset(
     (
         "schema_version",
@@ -80,7 +81,8 @@ _REQUIRED_CONTROLS = frozenset(
 )
 _ADMIN_REF_RE = re.compile(r"^slack:[UW][A-Z0-9]{1,63}$")
 _CONTEXT_RE = re.compile(
-    r"^(?:dm:[UW][A-Z0-9]{1,63}|channel:G[A-Z0-9]{1,63})$"
+    r"^(?:dm:[UW][A-Z0-9]{1,63}|channel:G[A-Z0-9]{1,63}|"
+    r"public_channels:pilot_admins)$"
 )
 _EXPLICIT_SELECTOR_LABELS = (
     MemoryFeedbackType.RELEVANT,
@@ -716,6 +718,7 @@ def build_pilot_readiness_report(
     queue_metrics = {
         "dead_work": organization.memory_work_items.filter(
             status=MemoryWorkStatus.DEAD,
+            dead_letter__resolved_at__isnull=True,
         ).count(),
         "unresolved_dead_letters": organization.memory_dead_letters.filter(
             resolved_at__isnull=True,
@@ -739,31 +742,42 @@ def build_pilot_readiness_report(
         )
     )
 
-    latest_report = (
+    recent_reports = list(
         organization.memory_daily_reconciliation_reports.prefetch_related(
             "connection_snapshots"
         )
         .order_by("-report_date", "-started_at")
-        .first()
+        [:8]
     )
+    latest_report = recent_reports[0] if recent_reports else None
     report_age_seconds = None
     healthy_snapshot_count = 0
     report_ready = False
-    if latest_report is not None:
-        report_time = latest_report.completed_at or latest_report.updated_at
-        report_age_seconds = max(int((now - report_time).total_seconds()), 0)
-        snapshots = list(latest_report.connection_snapshots.all())
-        healthy_snapshot_count = sum(
+    healthy_report = None
+    for candidate_report in recent_reports:
+        report_time = candidate_report.completed_at or candidate_report.updated_at
+        candidate_age_seconds = max(int((now - report_time).total_seconds()), 0)
+        snapshots = list(candidate_report.connection_snapshots.all())
+        candidate_healthy_count = sum(
             snapshot.health_status == MemoryConnectionHealthStatus.HEALTHY
             for snapshot in snapshots
         )
-        report_ready = bool(
-            latest_report.status == MemoryDailyReconciliationStatus.COMPLETED
-            and report_age_seconds <= int(timedelta(hours=36).total_seconds())
+        candidate_ready = bool(
+            candidate_report.status == MemoryDailyReconciliationStatus.COMPLETED
+            and candidate_age_seconds <= int(timedelta(hours=36).total_seconds())
             and len(snapshots) == len(active_configurations)
-            and healthy_snapshot_count == len(active_configurations)
-            and not latest_report.alerts
+            and candidate_healthy_count == len(active_configurations)
+            and not candidate_report.alerts
         )
+        if candidate_ready:
+            healthy_report = candidate_report
+            report_age_seconds = candidate_age_seconds
+            healthy_snapshot_count = candidate_healthy_count
+            report_ready = True
+            break
+        if candidate_report == latest_report:
+            report_age_seconds = candidate_age_seconds
+            healthy_snapshot_count = candidate_healthy_count
     checks.append(
         _check(
             "daily_reconciliation",
@@ -777,6 +791,12 @@ def build_pilot_readiness_report(
                 "report_present": latest_report is not None,
                 "report_age_seconds": report_age_seconds,
                 "healthy_connections": healthy_snapshot_count,
+                "latest_report_status": (
+                    latest_report.status if latest_report is not None else "missing"
+                ),
+                "healthy_report_id": (
+                    str(healthy_report.pk) if healthy_report is not None else ""
+                ),
             },
         )
     )

@@ -4,7 +4,12 @@ import hashlib
 import io
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, time as datetime_time
+from datetime import (
+    datetime,
+    time as datetime_time,
+    timedelta,
+    timezone as datetime_timezone,
+)
 from pathlib import PurePath
 from typing import Iterable, Mapping, Optional
 from zoneinfo import ZoneInfo
@@ -23,7 +28,7 @@ from .drive_inventory import (
 from .models import DriveExtractionStatus, DriveWorkClassification
 
 
-DRIVE_PARSER_VERSION = "drive-parser-v1"
+DRIVE_PARSER_VERSION = "drive-parser-v2"
 GOOGLE_DOC_EXPORT_MIME_TYPE = MARKDOWN_MIME_TYPE
 
 TIMESTAMP_PATTERN = re.compile(
@@ -42,6 +47,11 @@ DATE_PATTERNS = (
         r"Nov(?:ember)?|Dec(?:ember)?)\s+(?P<year>20\d{2})(?!\d)",
         re.IGNORECASE,
     ),
+)
+TIME_PATTERN = re.compile(
+    r"(?<!\d)(?P<hour>[01]?\d|2[0-3]):(?P<minute>[0-5]\d)"
+    r"(?::(?P<second>[0-5]\d))?\s*(?P<timezone>AEST|AEDT)?\b",
+    re.IGNORECASE,
 )
 MONTHS = {
     "jan": 1,
@@ -513,25 +523,52 @@ def infer_meeting_metadata(
     timezone_name: str = "Australia/Sydney",
 ) -> dict:
     title = normalized_title(filename)
-    search_value = f"{filename}\n{text[:4000]}"
+    search_values = (str(filename or ""), str(text or "")[:4000])
     occurred_at = None
     date_basis = "unknown"
-    for pattern in DATE_PATTERNS:
-        match = pattern.search(search_value)
-        if not match:
-            continue
-        values = match.groupdict()
-        month = values.get("month") or MONTHS[values["month_name"][:3].lower()]
-        try:
-            occurred_at = datetime.combine(
-                datetime(int(values["year"]), int(month), int(values["day"])).date(),
-                datetime_time.min,
-                tzinfo=ZoneInfo(timezone_name),
+    for search_value in search_values:
+        for pattern in DATE_PATTERNS:
+            match = pattern.search(search_value)
+            if not match:
+                continue
+            values = match.groupdict()
+            month = values.get("month") or MONTHS[values["month_name"][:3].lower()]
+            nearby = search_value[match.end() : match.end() + 80]
+            time_match = TIME_PATTERN.search(nearby)
+            meeting_time = datetime_time.min
+            if time_match:
+                meeting_time = datetime_time(
+                    int(time_match.group("hour")),
+                    int(time_match.group("minute")),
+                    int(time_match.group("second") or 0),
+                )
+            explicit_timezone = (
+                str(time_match.group("timezone") or "").upper()
+                if time_match
+                else ""
             )
-        except ValueError:
-            occurred_at = None
+            tzinfo = ZoneInfo(timezone_name)
+            if explicit_timezone in {"AEST", "AEDT"}:
+                tzinfo = datetime_timezone(
+                    timedelta(hours=10 if explicit_timezone == "AEST" else 11),
+                    name=explicit_timezone,
+                )
+            try:
+                occurred_at = datetime.combine(
+                    datetime(int(values["year"]), int(month), int(values["day"])).date(),
+                    meeting_time,
+                    tzinfo=tzinfo,
+                )
+            except ValueError:
+                occurred_at = None
+            if occurred_at:
+                date_basis = (
+                    "filename_or_heading_datetime"
+                    if time_match
+                    else "filename_or_heading"
+                )
+                break
         if occurred_at:
-            date_basis = "filename_or_heading"
             break
     speakers = []
     for line in text.splitlines():
