@@ -21,6 +21,16 @@ def _load_staging_skip_module():
     return module
 
 
+def _load_production_approval_module():
+    spec = importlib.util.spec_from_file_location(
+        "resolve_org_memory_production_approval",
+        ROOT / "scripts" / "resolve_org_memory_production_approval.py",
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def _blocked_staging_stdout(blockers):
     return "\n".join(
         (
@@ -84,6 +94,7 @@ class OrgMemoryProductionDeployTests(SimpleTestCase):
             deploy,
         )
         self.assertIn("schedule_org_memory_reextraction", deploy)
+        self.assertIn("reconcile_org_memory_auto_activation", deploy)
         self.assertIn("refresh_org_memory_daily_reconciliation", deploy)
         self.assertIn("request_org_memory_reprocess", deploy)
         self.assertIn("committee-drive-parser-v2-extraction-v2", deploy)
@@ -130,6 +141,10 @@ class OrgMemoryProductionDeployTests(SimpleTestCase):
         )
         self.assertLess(
             deploy.index("schedule_org_memory_reextraction"),
+            deploy.index("stage_org_memory_pilot"),
+        )
+        self.assertLess(
+            deploy.index("reconcile_org_memory_auto_activation"),
             deploy.index("stage_org_memory_pilot"),
         )
         self.assertLess(
@@ -205,6 +220,14 @@ class OrgMemoryProductionDeployTests(SimpleTestCase):
         self.assertIn(
             "ORG_MEMORY_PRODUCTION_DEPLOY_ENABLED: ${{ vars.ORG_MEMORY_PRODUCTION_DEPLOY_ENABLED || 'false' }}",
             workflow,
+        )
+        self.assertIn(
+            "ORG_MEMORY_PRODUCTION_PUBLIC_CHANNEL_ADMIN_SCOPE_APPROVED: ${{ vars.ORG_MEMORY_PRODUCTION_PUBLIC_CHANNEL_ADMIN_SCOPE_APPROVED || 'false' }}",
+            workflow,
+        )
+        self.assertIn(
+            "scripts/resolve_org_memory_production_approval.py",
+            (ROOT / "deploy.sh").read_text(),
         )
         self.assertIn(
             'if [ "$ORG_MEMORY_PRODUCTION_DEPLOY_ENABLED" = "true" ]; then',
@@ -291,3 +314,45 @@ class AdminBrainStagingSkipDecisionTests(SimpleTestCase):
                 2,
             )
             self.assertEqual(self.skip_module.main(["prog"]), 2)
+
+
+class AdminBrainProductionApprovalResolutionTests(SimpleTestCase):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.resolver = _load_production_approval_module()
+
+    def manifest(self):
+        return {
+            "organization_domain": "mlai.au",
+            "allowed_slack_contexts": ["dm:U090FV0GTT4"],
+        }
+
+    def test_public_admin_scope_is_added_once_without_changing_other_approval(self):
+        original = self.manifest()
+
+        resolved = self.resolver.effective_manifest(
+            original,
+            approve_public_admin_scope=True,
+        )
+        repeated = self.resolver.effective_manifest(
+            resolved,
+            approve_public_admin_scope=True,
+        )
+
+        self.assertEqual(original["allowed_slack_contexts"], ["dm:U090FV0GTT4"])
+        self.assertEqual(
+            resolved["allowed_slack_contexts"],
+            ["dm:U090FV0GTT4", "public_channels:pilot_admins"],
+        )
+        self.assertEqual(repeated, resolved)
+
+    def test_disabled_overlay_preserves_exact_manifest(self):
+        original = self.manifest()
+        self.assertEqual(
+            self.resolver.effective_manifest(
+                original,
+                approve_public_admin_scope=False,
+            ),
+            original,
+        )

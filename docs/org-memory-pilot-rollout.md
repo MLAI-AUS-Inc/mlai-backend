@@ -88,6 +88,21 @@ staging, and activation remain disabled. Set the variable to `true` only for a
 reviewed production activation; the deployment then requires every secret
 listed above.
 
+Public-channel access for approved pilot administrators has a second, explicit
+repository-variable approval gate:
+
+```dotenv
+ORG_MEMORY_PRODUCTION_PUBLIC_CHANNEL_ADMIN_SCOPE_APPROVED=true
+```
+
+When true, deployment adds only the static
+`public_channels:pilot_admins` capability to the protected manifest read from
+the secret store. The resolver is idempotent, never prints the manifest, and
+cannot add actors, providers, source scopes, or named Slack channels. When the
+variable is absent or false, the protected manifest is passed through exactly
+and public channels remain denied. Changing this variable produces a new
+approval hash, staged binding, independent activation, and access-matrix proof.
+
 The two operator accounts must be distinct, active MLAI organisation members
 with `manage_sources`, independent of the approved pilot actors. The deploy
 stores the approval and operator records mode-0600 outside the checkout and
@@ -181,6 +196,42 @@ contexts, and the Public Roo surface must fail. Public channels must also fail
 unless the manifest contains `public_channels:pilot_admins`.
 Its JSON output contains only aggregate expected/pass counts and content-free
 blocker codes; it never emits actor or channel identifiers.
+
+## Strong-grounding automatic activation
+
+Automatic activation remains opt-in per reviewed `MemorySourcePolicy`. The
+current `strong-grounding-v1` evaluator accepts only the exact reviewed rule
+shape with `default: review`, explicit decision cues, and the bounded
+task/project-update permission. Unknown rule keys fail closed.
+
+A claim may bypass an individual activation review only when all of these
+remain true at extraction and again at consolidation:
+
+- the claim and exact supporting evidence come from the accessible current
+  version of an active source;
+- the source policy is active, human-reviewed, committee-classified, and has
+  authority of at least 0.8;
+- the current configured extraction model and every versioned extraction
+  target match, with no blocking or unknown extraction safety flags (only the
+  audited `partial_candidate_rejection` and attributed-transcript discussion
+  flags are non-blocking because the affected candidates are already removed);
+- claim and evidence confidence are each at least 0.9, every quote is at least
+  20 characters, and its hash, offsets, chunk, source version, and active
+  retrieval state all match;
+- the kind is explicitly allowed by the source policy and is limited to a
+  decision, task, or project status with its required epistemic type;
+- decisions contain an affirmative cue such as agreed, approved, authorised,
+  established, elected, or will, and contain no proposal, tentative, deferred,
+  negated, or pending-approval cue;
+- volatile task/project claims are not already stale and no validity interval
+  has expired.
+
+Only a consolidation operation of `NEW` can activate automatically.
+Refinements, supersessions, contradictions, sensitive material, old extractor
+revisions, weak evidence, and every unrecognised case stay in human review.
+Existing eligible `NEW` reviews can be previewed and idempotently reconciled
+with `reconcile_org_memory_auto_activation`; its audit records resolve the
+review as policy-applied rather than falsely marking it human-approved.
 
 After deploying the isolated Admin Roo service, run its credential-bound
 signed-request gate:
