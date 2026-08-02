@@ -12,6 +12,7 @@ from rest_framework.test import APIClient
 from organizations.models import Organization
 from org_memory.answering import (
     ABSTENTION_ANSWER,
+    ANSWER_PROMPT,
     AnswerProviderResult,
     GroundedAnswerProviderError,
     answer_memory_query,
@@ -254,6 +255,12 @@ class MemoryRetrievalAndAnswerTests(TestCase):
         self.assertEqual(open_loops.mode, MemoryQueryMode.OPEN_LOOPS)
         self.assertIn(MemoryClaimKind.TASK, open_loops.kinds)
         self.assertEqual(historical.mode, MemoryQueryMode.HISTORICAL_AS_OF)
+
+    def test_answer_prompt_preserves_grounding_when_optional_details_are_absent(self):
+        self.assertIn("Use the authorised sources metadata", ANSWER_PROMPT)
+        self.assertIn("not mentioned in the selected evidence", ANSWER_PROMPT)
+        self.assertIn("not abstain solely", ANSWER_PROMPT)
+        self.assertIn("cite every item", ANSWER_PROMPT)
 
     def test_query_planner_recognises_counted_recent_decisions(self):
         plan = plan_memory_query(
