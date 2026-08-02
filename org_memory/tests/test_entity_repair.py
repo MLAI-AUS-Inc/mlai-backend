@@ -3,6 +3,7 @@ import json
 
 from django.contrib.auth import get_user_model
 from django.core.management import call_command
+from django.core.management.base import CommandError
 from django.test import TestCase
 
 from organizations.models import Organization
@@ -82,3 +83,25 @@ class MalformedEntityRepairTests(TestCase):
             self.entity.metadata,
             {"resolution": "deterministic_scoped_key"},
         )
+
+    def test_apply_requires_manage_sources_capability(self):
+        unauthorized = get_user_model().objects.create_user(
+            email="unauthorized-entity-repair@mlai.test"
+        )
+        OrganizationMembership.objects.create(
+            organization=self.organization,
+            user=unauthorized,
+        )
+
+        with self.assertRaisesMessage(
+            CommandError,
+            "Operator lacks an active manage_sources capability.",
+        ):
+            self.command(
+                apply=True,
+                reason="One-character extraction artifact.",
+                operator_email=unauthorized.email,
+            )
+
+        self.entity.refresh_from_db()
+        self.assertNotIn("retrieval_quarantined", self.entity.metadata)

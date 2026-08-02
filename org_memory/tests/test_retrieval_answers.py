@@ -313,6 +313,16 @@ class MemoryRetrievalAndAnswerTests(TestCase):
         self.assertEqual(alias_plan.entity_ids, ())
         self.assertEqual(alias_plan.ranking_entity_ids, (str(pilot.pk),))
 
+        pilot.metadata = {"retrieval_quarantined": True}
+        pilot.save(update_fields=("metadata", "updated_at"))
+        quarantined_plan = plan_memory_query(
+            organization=self.organization,
+            authorization=self.authorization,
+            query="What changed on Project Atlas?",
+        )
+        self.assertEqual(quarantined_plan.entity_ids, ())
+        self.assertEqual(quarantined_plan.ranking_entity_ids, ())
+
     def test_retrieval_seed_suite(self):
         result = evaluate_retrieval_seed_suite()
         self.assertTrue(result["ok"], result["errors"])
@@ -360,6 +370,38 @@ class MemoryRetrievalAndAnswerTests(TestCase):
                 for item in selection.selected
             )
         )
+
+    def test_ranking_only_alias_cannot_bypass_authorized_classifications(self):
+        visible = self.make_claim(
+            external_id="ALIAS-VISIBLE",
+            statement="Pilot status is ready for launch.",
+            object_value="ready for launch",
+        )
+        finance = self.make_claim(
+            external_id="ALIAS-FINANCE",
+            statement="Pilot finance status includes confidential acquisition diligence.",
+            object_value="confidential acquisition diligence",
+            classification="finance",
+        )
+        entity = visible.subject_entity
+        entity.aliases = [*entity.aliases, "Greenlight"]
+        entity.save(update_fields=("aliases", "updated_at"))
+
+        selection = select_memory(
+            organization=self.organization,
+            authorization=self.authorization,
+            query="What changed with Greenlight?",
+        )
+
+        self.assertEqual(selection.plan.entity_ids, ())
+        self.assertEqual(selection.plan.ranking_entity_ids, (str(entity.pk),))
+        selected_claim_ids = {
+            item.candidate.claim.pk
+            for item in selection.selected
+            if item.candidate.claim is not None
+        }
+        self.assertIn(visible.pk, selected_claim_ids)
+        self.assertNotIn(finance.pk, selected_claim_ids)
 
     def test_irrelevant_query_abstains_without_calling_answer_provider(self):
         self.make_claim(
@@ -464,6 +506,66 @@ class MemoryRetrievalAndAnswerTests(TestCase):
         self.assertEqual(selection.sufficiency, MemoryEvidenceSufficiency.SUFFICIENT)
         self.assertEqual(selection.selected[0].candidate.claim.pk, newer.pk)
         self.assertEqual(selection.selected[1].candidate.claim.pk, older.pk)
+
+    def test_exact_committee_prompt_ignores_spurious_r_and_calls_answerer(self):
+        MemoryEntity.objects.create(
+            organization=self.organization,
+            entity_type="project",
+            canonical_name="R",
+            normalized_name="r",
+            resolved_key="spurious-project-r",
+            description="Project reported as stalled.",
+            classification="committee",
+        )
+        decisions = []
+        for index in range(5):
+            observed_at = datetime(
+                2026, 8, 1, 9, tzinfo=datetime_timezone.utc
+            ) - timedelta(days=index)
+            decisions.append(
+                self.make_claim(
+                    external_id=f"COMMITTEE-DECISION-{index}",
+                    statement=f"The committee decided grounded item {index}.",
+                    object_value=f"grounded item {index}",
+                    classification="committee",
+                    kind=MemoryClaimKind.DECISION,
+                    predicate=f"approved_item_{index}",
+                    observed_at=observed_at,
+                )
+            )
+        query = (
+            "Using our committee meeting notes and transcripts, summarise the five most "
+            "recent decisions made by the committee. For each decision, include the meeting "
+            "date, what was decided, any owner or follow-up action mentioned, and the source "
+            "document title. If later meetings changed an earlier decision, prioritise the "
+            "latest information and explain what changed. Only use evidence you can cite from "
+            "committee sources."
+        )
+        provider = FakeAnswerProvider(answer="Five grounded committee decisions.")
+
+        query_log, selection, answer = answer_memory_query(
+            organization=self.organization,
+            authorization=self.authorization,
+            actor=self.actor,
+            query=query,
+            provider=provider,
+        )
+
+        self.assertEqual(selection.plan.entity_ids, ())
+        self.assertEqual(selection.plan.ranking_entity_ids, ())
+        self.assertEqual(selection.sufficiency, MemoryEvidenceSufficiency.SUFFICIENT)
+        self.assertGreaterEqual(len(selection.selected_claim_ids), 5)
+        self.assertEqual(
+            selection.selected_claim_ids[:5],
+            [str(claim.pk) for claim in decisions],
+        )
+        self.assertEqual(provider.calls, 1)
+        self.assertGreaterEqual(len(provider.evidence_bundle["memories"]), 5)
+        self.assertEqual(query_log.status, MemoryQueryStatus.ANSWERED)
+        self.assertEqual(query_log.query_plan["entities"], [])
+        self.assertTrue(query_log.candidate_trace)
+        self.assertGreater(query_log.input_tokens, 0)
+        self.assertTrue(answer["citations"])
 
     def test_decision_timeline_includes_a_superseded_decision(self):
         older = self.make_claim(
