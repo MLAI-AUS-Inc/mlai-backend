@@ -204,3 +204,65 @@ class CommunityChatPasswordAuthTests(APITestCase):
         self.assertIsNotNone(token.revoked_at)
         replay = client.get(reverse('community_chat_session'))
         self.assertEqual(replay.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    @patch('community_chat.views.revoke_relay_membership')
+    def test_password_reauthentication_can_revoke_only_its_bound_device(self, mock_revoke):
+        device = CommunityChatDevice.objects.create(
+            user=self.user,
+            public_key=self.public_key,
+            installation_id=self.installation_id,
+            client_id='mlai-chat-web',
+            platform='web',
+            status='verified',
+            verified_at=timezone.now(),
+        )
+        login = self.login()
+        raw_token = login.data['bootstrap_token']
+        client = APIClient()
+        client.credentials(HTTP_AUTHORIZATION=f'Bearer {raw_token}')
+        mock_revoke.return_value = ('revoked', uuid.uuid4())
+
+        response = client.delete(
+            reverse('community_chat_device', args=(self.public_key,)),
+            {'reason': 'removed_by_user'},
+            format='json',
+            HTTP_ORIGIN=ORIGIN,
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        device.refresh_from_db()
+        self.assertEqual(device.status, 'revoked')
+        self.assertEqual(device.revocation_reason, 'removed_by_user')
+        token = CommunityChatBootstrapToken.objects.get(
+            token_hash=hashlib.sha256(raw_token.encode('utf-8')).hexdigest(),
+        )
+        self.assertIsNotNone(token.revoked_at)
+
+        replay = client.get(reverse('community_chat_session'))
+        self.assertEqual(replay.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    @patch('community_chat.views.revoke_relay_membership')
+    def test_password_reauthentication_cannot_revoke_another_device(self, mock_revoke):
+        other_key = public_key(32)
+        CommunityChatDevice.objects.create(
+            user=self.user,
+            public_key=other_key,
+            installation_id=uuid.uuid4(),
+            status='verified',
+            verified_at=timezone.now(),
+        )
+        login = self.login()
+        client = APIClient()
+        client.credentials(
+            HTTP_AUTHORIZATION=f"Bearer {login.data['bootstrap_token']}"
+        )
+
+        response = client.delete(
+            reverse('community_chat_device', args=(other_key,)),
+            {'reason': 'removed_by_user'},
+            format='json',
+            HTTP_ORIGIN=ORIGIN,
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        mock_revoke.assert_not_called()

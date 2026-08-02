@@ -728,4 +728,8 @@ class DeviceView(APIView):
                 "updated_at",
             )
         )
+        bootstrap_token = getattr(request, "community_chat_bootstrap_token", None)
+        if bootstrap_token is not None and bootstrap_token.revoked_at is None:
+            bootstrap_token.revoked_at = now
+            bootstrap_token.save(update_fields=("revoked_at",))
         return Response({"status": "revoked", "relay_status": relay_status})
