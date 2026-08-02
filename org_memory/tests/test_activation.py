@@ -1,6 +1,7 @@
 import hashlib
 import io
 import json
+from datetime import timedelta
 
 from django.contrib.auth import get_user_model
 from django.core.management import call_command
@@ -9,7 +10,7 @@ from django.utils import timezone
 
 from organizations.models import Organization
 from org_memory.activation import evaluate_claim_auto_activation
-from org_memory.consolidation import consolidate_claim
+from org_memory.consolidation import consolidate_claim, mark_stale_claims
 from org_memory.extraction import ProviderResult, extract_source_version
 from org_memory.kernel import capture_source_version
 from org_memory.models import (
@@ -20,6 +21,7 @@ from org_memory.models import (
     MemoryExtractionRun,
     MemoryReviewItem,
     MemoryReviewStatus,
+    MemoryReviewType,
     MemorySourcePolicy,
     OrganizationCapability,
     OrganizationCapabilityGrant,
@@ -177,6 +179,7 @@ class StrongGroundingActivationTests(TestCase):
         claim.refresh_from_db()
         run = MemoryConsolidationRun.objects.get(pk=result["consolidation_run_id"])
         self.assertEqual(claim.status, MemoryClaimStatus.ACTIVE)
+        self.assertIsNone(claim.stale_after)
         self.assertEqual(run.status, MemoryConsolidationStatus.APPLIED)
         self.assertEqual(
             claim.state_events.latest("created_at").reason,
@@ -252,6 +255,48 @@ class StrongGroundingActivationTests(TestCase):
         self.assertEqual(
             review.resolution["activation_policy_version"],
             "strong-grounding-v1",
+        )
+
+    def test_reconciliation_restores_only_legacy_stale_auto_activated_decision(self):
+        claim = self.extract_decision(
+            source_text="The committee approved the 2026 operating plan.",
+            statement="The committee approved the 2026 operating plan.",
+        )
+        consolidate_claim(candidate=claim)
+        legacy_stale_after = timezone.now() - timedelta(days=1)
+        claim.stale_after = legacy_stale_after
+        claim.save(update_fields=("stale_after", "updated_at"))
+
+        stale_result = mark_stale_claims(organization=self.organization)
+        claim.refresh_from_db()
+        self.assertEqual(stale_result["marked_stale"], 1)
+        self.assertEqual(claim.status, MemoryClaimStatus.STALE)
+
+        output = io.StringIO()
+        call_command(
+            "reconcile_org_memory_auto_activation",
+            organization_domain=self.organization.domain,
+            provider="google_drive",
+            operator_email=self.operator.email,
+            apply=True,
+            stdout=output,
+        )
+        result = json.loads(output.getvalue())
+        claim.refresh_from_db()
+        stale_review = MemoryReviewItem.objects.get(
+            review_type=MemoryReviewType.STALE,
+            target_object_id=str(claim.pk),
+        )
+
+        self.assertEqual(result["durable_stale_candidates"], 1)
+        self.assertEqual(result["durable_stale_eligible"], 1)
+        self.assertEqual(result["durable_stale_restored"], 1)
+        self.assertEqual(claim.status, MemoryClaimStatus.ACTIVE)
+        self.assertIsNone(claim.stale_after)
+        self.assertEqual(stale_review.status, MemoryReviewStatus.RESOLVED)
+        self.assertEqual(
+            claim.state_events.latest("created_at").reason,
+            "auto_activation_durable_staleness_repair_v1",
         )
 
     def test_unknown_policy_keys_fail_closed(self):
