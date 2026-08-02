@@ -368,7 +368,9 @@ def plan_memory_query(
             organization=organization,
             merged_into__isnull=True,
             classification__in=allowed,
-        ).only("pk", "canonical_name", "normalized_name", "aliases"):
+        ).only("pk", "canonical_name", "normalized_name", "aliases", "metadata"):
+            if (entity.metadata or {}).get("retrieval_quarantined") is True:
+                continue
             if _entity_matches_query(entity, query_tokens):
                 entity_rows.append(entity)
             elif _entity_alias_matches_query(entity, query_tokens):
