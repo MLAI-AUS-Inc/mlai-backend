@@ -12,6 +12,7 @@ from rest_framework.test import APIClient
 from organizations.models import Organization
 from org_memory.answering import (
     ABSTENTION_ANSWER,
+    ANSWER_PROMPT,
     AnswerProviderResult,
     GroundedAnswerProviderError,
     answer_memory_query,
@@ -255,6 +256,12 @@ class MemoryRetrievalAndAnswerTests(TestCase):
         self.assertIn(MemoryClaimKind.TASK, open_loops.kinds)
         self.assertEqual(historical.mode, MemoryQueryMode.HISTORICAL_AS_OF)
 
+    def test_answer_prompt_preserves_grounding_when_optional_details_are_absent(self):
+        self.assertIn("Use the authorised sources metadata", ANSWER_PROMPT)
+        self.assertIn("not mentioned in the selected evidence", ANSWER_PROMPT)
+        self.assertIn("not abstain solely", ANSWER_PROMPT)
+        self.assertIn("cite every item", ANSWER_PROMPT)
+
     def test_query_planner_recognises_counted_recent_decisions(self):
         plan = plan_memory_query(
             organization=self.organization,
@@ -469,7 +476,19 @@ class MemoryRetrievalAndAnswerTests(TestCase):
 
         self.assertEqual(provider.calls, 1)
         self.assertEqual(len(provider.evidence_bundle["memories"]), 1)
-        self.assertEqual(provider.evidence_bundle["memories"][0]["claim_id"], str(claim.pk))
+        packed_memory = provider.evidence_bundle["memories"][0]
+        self.assertEqual(packed_memory["claim_id"], str(claim.pk))
+        self.assertEqual(
+            packed_memory["sources"],
+            [
+                {
+                    "citation_id": str(claim.evidence.get().pk),
+                    "provider": "linear",
+                    "source_title": "Linear PILOT-GREEN",
+                    "occurred_at": self.observed_at.isoformat(),
+                }
+            ],
+        )
         self.assertEqual(answer["answer"], "The pilot status is green.")
         self.assertEqual(answer["citations"][0]["provider"], "linear")
         self.assertEqual(answer["citations"][0]["source_url"], "https://linear.example/PILOT-GREEN")
@@ -587,6 +606,13 @@ class MemoryRetrievalAndAnswerTests(TestCase):
         )
         self.assertEqual(provider.calls, 1)
         self.assertGreaterEqual(len(provider.evidence_bundle["memories"]), 5)
+        self.assertEqual(
+            [
+                memory["sources"][0]["source_title"]
+                for memory in provider.evidence_bundle["memories"][:5]
+            ],
+            [f"Linear COMMITTEE-DECISION-{index}" for index in range(5)],
+        )
         self.assertEqual(query_log.status, MemoryQueryStatus.ANSWERED)
         self.assertEqual(query_log.query_plan["entities"], [])
         self.assertTrue(query_log.candidate_trace)

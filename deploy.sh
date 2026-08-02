@@ -477,6 +477,7 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     upsert_env_value ORG_MEMORY_EXTRACTION_PROMPT_VERSION "org-memory-extraction-prompt-v2"
     upsert_env_value ORG_MEMORY_SELECTOR_VERSION "org-memory-rules-selector-v2"
     upsert_env_value ORG_MEMORY_ANSWER_SCHEMA_VERSION "org-memory-answer-schema-v2"
+    upsert_env_value ORG_MEMORY_ANSWER_PROMPT_VERSION "org-memory-answer-prompt-v2"
     # Google Drive is the first reviewed production ingestion provider. Its
     # checked-in manifest, per-organisation approval, and per-source approval
     # remain independent fail-closed gates beneath this deployment allowlist.

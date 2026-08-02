@@ -1311,7 +1311,7 @@ ORG_MEMORY_ANSWER_SCHEMA_VERSION = os.environ.get(
 ).strip()
 ORG_MEMORY_ANSWER_PROMPT_VERSION = os.environ.get(
     'ORG_MEMORY_ANSWER_PROMPT_VERSION',
-    'org-memory-answer-prompt-v1',
+    'org-memory-answer-prompt-v2',
 ).strip()
 ORG_MEMORY_ANSWER_MAX_OUTPUT_TOKENS = int(
     os.environ.get('ORG_MEMORY_ANSWER_MAX_OUTPUT_TOKENS', '1600')
