@@ -17,6 +17,7 @@ from django.utils import timezone
 from integrations.models import (
     ExternalFinancialRecord,
     ExternalServiceProvider,
+    HumanitixEvent,
     ReconciliationDecision,
     ReconciliationPartyIdentity,
     XeroStatementLineSnapshot,
@@ -45,6 +46,7 @@ ALLOWED_STATEMENT_EVIDENCE_PROVIDERS = {
     "admin_rule",
     "document",
     "gmail",
+    "humanitix",
     "slack",
     "linear",
     "luma",
@@ -338,12 +340,13 @@ def _candidate_entity_catalogs(
     *,
     line: XeroStatementLineSnapshot,
     luma_events: list[dict[str, Any]],
+    humanitix_events: list[dict[str, Any]],
     linear_projects: list[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     nearby_events: list[dict[str, Any]] = []
     entity_entries: list[dict[str, Any]] = []
     nearby_event_aliases: set[str] = set()
-    for event in luma_events:
+    for event in [*luma_events, *humanitix_events]:
         event_date = _catalog_date(event.get("start_at"))
         if event_date is None:
             continue
@@ -355,7 +358,7 @@ def _candidate_entity_catalogs(
             continue
         nearby_event_aliases.update(aliases)
         serialized = {
-            "source_type": "luma",
+            "source_type": str(event.get("source_type") or "luma"),
             "source_id": str(event.get("source_id") or ""),
             "name": str(event.get("name") or ""),
             "start_at": event.get("start_at"),
@@ -397,6 +400,8 @@ def _candidate_entity_catalogs(
             "status": project.get("status"),
             "start_date": project.get("start_date"),
             "target_date": project.get("target_date"),
+            "dimension_hint": project.get("dimension_hint"),
+            "members": list(project.get("members") or []),
             "date_delta_days": date_delta,
         }
         nearby_projects.append(serialized)
@@ -578,6 +583,58 @@ def _browser_ui_mode(raw: dict[str, Any], *, visible_fields: dict[str, str]) -> 
     return XeroStatementLineSnapshot.UI_BLANK_CREATE
 
 
+def _sanitize_capture_metadata(raw: dict[str, Any] | None) -> dict[str, Any]:
+    """Keep bounded completeness evidence and reject credential-shaped data."""
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ValueError("capture_metadata must be an object")
+    forbidden = {
+        "token", "access_token", "refresh_token", "authorization", "cookie",
+        "api_key", "secret", "lines", "narration", "reference",
+    }
+    if forbidden.intersection(str(key).lower() for key in raw):
+        raise ValueError("capture_metadata contains a forbidden sensitive field")
+    pages = raw.get("pages") or []
+    if not isinstance(pages, list) or len(pages) > 500:
+        raise ValueError("capture_metadata pages must be a bounded list")
+    safe_pages = []
+    for page in pages:
+        if not isinstance(page, dict):
+            raise ValueError("capture_metadata page evidence must be an object")
+        if not isinstance(page.get("has_previous"), bool) or not isinstance(page.get("has_next"), bool):
+            raise ValueError("capture_metadata pagination flags must be booleans")
+        try:
+            safe_page = {
+                "page_number": int(page.get("page_number")),
+                "page_count": int(page.get("page_count")),
+                "observed_count": int(page.get("observed_count")),
+                "has_previous": page["has_previous"],
+                "has_next": page["has_next"],
+            }
+        except (TypeError, ValueError) as exc:
+            raise ValueError("capture_metadata page counts must be integers") from exc
+        if (
+            safe_page["page_number"] < 1
+            or safe_page["page_count"] < 1
+            or safe_page["observed_count"] < 0
+        ):
+            raise ValueError("capture_metadata page counts are out of range")
+        safe_pages.append(safe_page)
+    blockers = raw.get("blocking_reasons") or []
+    if not isinstance(blockers, list) or len(blockers) > 20:
+        raise ValueError("capture_metadata blocking_reasons must be a bounded list")
+    return {
+        "schema_version": 1,
+        "scan_id": str(raw.get("scan_id") or "")[:128],
+        "source_started_at": str(raw.get("source_started_at") or "")[:64],
+        "source_completed_at": str(raw.get("source_completed_at") or "")[:64],
+        "pages": safe_pages,
+        "derived_complete": raw.get("derived_complete") is True,
+        "blocking_reasons": [str(reason)[:500] for reason in blockers],
+    }
+
+
 def import_xero_statement_lines(
     *,
     organization,
@@ -588,6 +645,7 @@ def import_xero_statement_lines(
     complete_scan: bool = True,
     source: str = "browser",
     requested_by: str = "",
+    capture_metadata: dict[str, Any] | None = None,
 ) -> list[XeroStatementLineSnapshot]:
     if not bank_account_id:
         raise ValueError("bank_account_id is required")
@@ -622,6 +680,7 @@ def import_xero_statement_lines(
             payload_hash=hashlib.sha256(
                 json.dumps(lines, sort_keys=True, separators=(",", ":"), default=str).encode()
             ).hexdigest(),
+            capture_metadata=_sanitize_capture_metadata(capture_metadata),
         )
         for raw in lines:
             if not isinstance(raw, dict):
@@ -777,21 +836,37 @@ _COMMENT_META_RE = re.compile(
     r"\b(?:human approval required|human must click ok|no account/tax change proposed)\b[.;:]?",
     re.IGNORECASE,
 )
+_COMMENT_CONFIDENCE_RE = re.compile(
+    r"(?:\bconfidence\s*:\s*\d{1,3}%\.?|\b\d{1,3}%\s+confidence\b[.;:]?)",
+    re.IGNORECASE,
+)
+_COMMENT_GENERIC_RE = re.compile(
+    r"^(?:unreconciled bank statement line|needs? review|review required|unknown payment)$",
+    re.IGNORECASE,
+)
 
 
 def format_statement_browser_comment(*, description: str, review_note: str, confidence: float) -> str:
     """Return the short, conversational comment shown in Xero Discuss."""
 
-    summary = str(description or "").strip() or str(review_note or "").strip()
-    summary = _COMMENT_PREFIX_RE.sub("", summary)
-    summary = _COMMENT_META_RE.sub("", summary)
-    summary = re.sub(r"\s+", " ", summary).strip(" -;:.")
-    summary = re.split(r"(?<=[.!?])\s+", summary, maxsplit=1)[0].strip()
+    summary = ""
+    for raw in (description, review_note):
+        cleaned = _COMMENT_PREFIX_RE.sub("", str(raw or "").strip())
+        cleaned = _COMMENT_META_RE.sub("", cleaned)
+        cleaned = _COMMENT_CONFIDENCE_RE.sub("", cleaned)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip(" -;:.")
+        for sentence in re.split(r"(?<=[.!?])\s+", cleaned):
+            candidate = sentence.strip(" -;:.")
+            if candidate and not _COMMENT_GENERIC_RE.fullmatch(candidate):
+                summary = candidate
+                break
+        if summary:
+            break
     if not summary:
         summary = "Not enough context to identify this payment"
     if len(summary) > 220:
         summary = f"{summary[:217].rstrip()}…"
-    if summary and summary[0].islower():
+    if summary[0].islower():
         summary = f"{summary[0].upper()}{summary[1:]}"
     percentage = int(round(max(0.0, min(float(confidence or 0.0), 1.0)) * 100))
     return f"{summary}. Confidence: {percentage}%."
@@ -833,7 +908,11 @@ def serialize_statement_suggestion(suggestion: XeroStatementSuggestion) -> dict[
         "account_name": suggestion.account_name,
         "tax_type": suggestion.tax_type,
         "description": suggestion.description,
-        "event": {"source_type": "luma", "source_id": suggestion.event_source_id, "tracking_option_name": suggestion.event_tracking_option_name} if suggestion.event_source_id else None,
+        "event": {
+            "source_type": suggestion.event_source_type or "luma",
+            "source_id": suggestion.event_source_id,
+            "tracking_option_name": suggestion.event_tracking_option_name,
+        } if suggestion.event_source_id else None,
         "project": {"source_type": "linear", "source_id": suggestion.project_source_id, "tracking_option_name": suggestion.project_tracking_option_name} if suggestion.project_source_id else None,
         "matched_xero_bill_id": suggestion.matched_xero_bill_id,
         "confidence": suggestion.confidence,
@@ -953,6 +1032,7 @@ def _bill_candidates(organization, line: XeroStatementLineSnapshot) -> list[dict
         provider=ExternalServiceProvider.XERO,
         record_type=ExternalFinancialRecord.RECORD_XERO_BILL,
         amount=line.amount,
+        currency=line.currency,
         transaction_date__gte=line.transaction_date - timedelta(days=92),
         transaction_date__lte=line.transaction_date + timedelta(days=31),
     ).exclude(status__in=["DELETED", "VOIDED", "PAID"])
@@ -1074,9 +1154,11 @@ def build_statement_reconciliation_context(
     organization,
     include_external_evidence: bool = True,
     luma_events: list[dict[str, Any]] | None = None,
+    humanitix_events: list[dict[str, Any]] | None = None,
     linear_projects: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     luma_events = luma_events or []
+    humanitix_events = humanitix_events or []
     linear_projects = linear_projects or []
     lines = list(
         XeroStatementLineSnapshot.objects.filter(organization=organization, active=True).order_by(
@@ -1133,6 +1215,29 @@ def build_statement_reconciliation_context(
             "confidence": identity.confidence,
             "verified_by_slack_id": identity.verified_by_slack_id,
         } if identity else None
+        line_merchant_key = serialized["merchant_key"]
+        verified_contact_names = {
+            str(value or "").strip().casefold()
+            for value in (
+                getattr(identity, "canonical_name", ""),
+                getattr(identity, "xero_contact_name", ""),
+            )
+            if str(value or "").strip()
+        }
+        for bill in matching_bills:
+            bill_contact = str(bill.get("contact_name") or "").strip()
+            bill_merchant_key = merchant_key(bill_contact)
+            narration_match = bool(
+                bill_merchant_key
+                and (
+                    bill_merchant_key == line_merchant_key
+                    or f" {bill_merchant_key} " in f" {line_merchant_key} "
+                )
+            )
+            identity_match = bill_contact.casefold() in verified_contact_names
+            bill["merchant_key_match"] = narration_match
+            bill["verified_identity_match"] = identity_match
+            bill["exact_outstanding_match"] = bool(narration_match or identity_match)
         serialized["matching_xero_bills"] = matching_bills
         if matching_bills:
             serialized["deferred_verified_rule"] = serialized["verified_rule"]
@@ -1146,6 +1251,7 @@ def build_statement_reconciliation_context(
         nearby_events, nearby_projects, entity_entries = _candidate_entity_catalogs(
             line=line,
             luma_events=luma_events,
+            humanitix_events=humanitix_events,
             linear_projects=linear_projects,
         )
         serialized["nearby_events"] = nearby_events
@@ -1207,9 +1313,13 @@ def build_statement_reconciliation_context(
 
 def _catalogs(organization):
     events = {
-        item.event_id: item
+        ("luma", item.event_id): item
         for item in LumaEventSelection.objects.filter(organization=organization)
     }
+    events.update({
+        ("humanitix", item.external_event_id): item
+        for item in HumanitixEvent.objects.filter(organization=organization)
+    })
     projects = {
         item.linear_project_id: item
         for item in LinearProjectArtifact.objects.filter(organization=organization)
@@ -1351,8 +1461,14 @@ def save_statement_suggestions(
                 raise ValueError(f"Invalid proposed_action for {line_id}")
             event_payload = item.get("event") if isinstance(item.get("event"), dict) else {}
             event_id = str(event_payload.get("source_id") or "").strip()
-            if event_id and event_id not in events:
-                raise ValueError(f"Unknown Luma event for {line_id}: {event_id}")
+            event_source_type = str(event_payload.get("source_type") or "luma").strip()
+            if event_source_type not in {"luma", "humanitix"}:
+                raise ValueError(f"Unknown event source for {line_id}: {event_source_type}")
+            event_key = (event_source_type, event_id)
+            if event_id and event_key not in events:
+                raise ValueError(
+                    f"Unknown {event_source_type} event for {line_id}: {event_id}"
+                )
             project_payload = item.get("project") if isinstance(item.get("project"), dict) else {}
             project_id = str(project_payload.get("source_id") or "").strip()
             if project_id and project_id not in projects:
@@ -1430,8 +1546,11 @@ def save_statement_suggestions(
                     "account_name": account_name,
                     "tax_type": tax_type,
                     "description": description,
+                    "event_source_type": event_source_type if event_id else "",
                     "event_source_id": event_id,
-                    "event_tracking_option_name": str(getattr(events.get(event_id), "event_name", "") or "")[:255],
+                    "event_tracking_option_name": str(
+                        getattr(events.get(event_key), "event_name", "") or ""
+                    )[:255],
                     "project_source_id": project_id,
                     "project_tracking_option_name": str(getattr(projects.get(project_id), "name", "") or getattr(projects.get(project_id), "project_name", "") or "")[:255],
                     "matched_xero_bill_id": matched_bill_id,

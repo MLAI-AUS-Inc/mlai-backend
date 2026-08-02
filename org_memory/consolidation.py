@@ -13,6 +13,7 @@ from django.db.models import Q
 from django.utils import timezone
 from pydantic import Field, ValidationError as PydanticValidationError, field_validator
 
+from .activation import evaluate_claim_auto_activation
 from .extraction import StrictModel, digest_json
 from .kernel import create_work_item, open_review_item
 from .models import (
@@ -643,10 +644,23 @@ def consolidate_claim(*, candidate: MemoryClaim, provider: Optional[Consolidatio
             "A candidate cannot supersede a claim that has not established state."
         )
 
+    auto_activation = (
+        evaluate_claim_auto_activation(candidate)
+        if decision.operation == MemoryConsolidationOperation.NEW
+        and not candidate.review_required
+        else None
+    )
+    auto_activation_eligible = bool(
+        auto_activation and auto_activation.eligible
+    )
     review_required = decision.operation in {
+        MemoryConsolidationOperation.REFINES,
         MemoryConsolidationOperation.SUPERSEDES,
         MemoryConsolidationOperation.CONTRADICTS,
-    } or (decision.operation in {MemoryConsolidationOperation.NEW, MemoryConsolidationOperation.REFINES} and candidate.review_required)
+    } or (
+        decision.operation == MemoryConsolidationOperation.NEW
+        and not auto_activation_eligible
+    )
     status = MemoryConsolidationStatus.REVIEW_REQUIRED if review_required else MemoryConsolidationStatus.APPLIED
     if decision.operation == MemoryConsolidationOperation.IGNORE:
         status = MemoryConsolidationStatus.IGNORED
@@ -690,10 +704,13 @@ def consolidate_claim(*, candidate: MemoryClaim, provider: Optional[Consolidatio
         _cancel_claim_activation_review(candidate, reason=f"consolidated_{decision.operation}")
     elif decision.operation == MemoryConsolidationOperation.REFINES:
         _link(candidate, matched, MemoryClaimRelation.REFINES, decision.confidence)
-        if not review_required:
-            transition_claim(claim=candidate, to_status=MemoryClaimStatus.ACTIVE, reason="consolidation_refines")
     elif decision.operation == MemoryConsolidationOperation.NEW and not review_required:
-        transition_claim(claim=candidate, to_status=MemoryClaimStatus.ACTIVE, reason="consolidation_new")
+        transition_claim(
+            claim=candidate,
+            to_status=MemoryClaimStatus.ACTIVE,
+            reason="auto_activation_strong_grounding_v1",
+            metadata={"auto_activation": auto_activation.audit_metadata()},
+        )
     elif decision.operation == MemoryConsolidationOperation.CONTRADICTS:
         _link(candidate, matched, MemoryClaimRelation.CONTRADICTS, decision.confidence)
     elif decision.operation == MemoryConsolidationOperation.IGNORE:
@@ -748,6 +765,174 @@ def approve_consolidation(*, run: MemoryConsolidationRun, actor, winner_claim=No
     run.save(update_fields=("status", "applied_at"))
     refresh_current_state(run.organization)
     return run
+
+
+@transaction.atomic
+def apply_strong_grounding_auto_activation(
+    *,
+    run: MemoryConsolidationRun,
+    operator,
+    refresh: bool = True,
+) -> MemoryConsolidationRun:
+    """Apply one existing NEW review after re-proving every auto-activation invariant."""
+
+    # Lock each mutable row directly. Joining nullable matched/review relations
+    # under an unqualified FOR UPDATE makes PostgreSQL reject the query because
+    # it cannot lock the nullable side of an outer join.
+    run = MemoryConsolidationRun.objects.select_for_update().get(pk=run.pk)
+    candidate = MemoryClaim.objects.select_for_update().get(
+        pk=run.candidate_claim_id
+    )
+    if operator is None:
+        raise ConsolidationInvariantError("Automatic activation requires an operator audit identity.")
+    if (
+        run.status != MemoryConsolidationStatus.REVIEW_REQUIRED
+        or run.operation != MemoryConsolidationOperation.NEW
+        or run.matched_claim_id is not None
+        or candidate.status != MemoryClaimStatus.CANDIDATE
+    ):
+        raise ConsolidationInvariantError(
+            "Only an unresolved NEW candidate can use automatic activation."
+        )
+    review = (
+        MemoryReviewItem.objects.select_for_update()
+        .filter(pk=run.review_item_id)
+        .first()
+    )
+    if (
+        review is None
+        or review.review_type != MemoryReviewType.CLAIM_ACTIVATION
+        or review.status not in {MemoryReviewStatus.OPEN, MemoryReviewStatus.IN_REVIEW}
+    ):
+        raise ConsolidationInvariantError(
+            "Automatic activation requires the open claim-activation review."
+        )
+    activation = evaluate_claim_auto_activation(candidate)
+    if not activation.eligible:
+        raise ConsolidationInvariantError(
+            "Candidate does not satisfy the strong-grounding activation policy."
+        )
+
+    candidate.review_required = False
+    candidate_update_fields = ["review_required", "updated_at"]
+    if candidate.kind in NON_EXPIRING_KINDS and candidate.stale_after is not None:
+        candidate.stale_after = None
+        candidate_update_fields.append("stale_after")
+    candidate.save(update_fields=tuple(candidate_update_fields))
+    review.status = MemoryReviewStatus.RESOLVED
+    review.resolved_by = operator
+    review.resolved_at = timezone.now()
+    review.resolution = {
+        "reason": "strong_grounding_auto_activation",
+        **activation.audit_metadata(),
+    }
+    review.save(
+        update_fields=(
+            "status",
+            "resolved_by",
+            "resolved_at",
+            "resolution",
+            "updated_at",
+        )
+    )
+    transition_claim(
+        claim=candidate,
+        to_status=MemoryClaimStatus.ACTIVE,
+        reason="auto_activation_strong_grounding_v1",
+        review_item=review,
+        metadata={"auto_activation": activation.audit_metadata()},
+    )
+    run.status = MemoryConsolidationStatus.APPLIED
+    run.applied_at = timezone.now()
+    run.save(update_fields=("status", "applied_at"))
+    if refresh:
+        refresh_current_state(run.organization)
+    return run
+
+
+@transaction.atomic
+def restore_strong_grounding_durable_claim(
+    *,
+    claim: MemoryClaim,
+    operator,
+    refresh: bool = True,
+) -> MemoryClaim:
+    """Restore a durable claim made stale only by the legacy policy window."""
+
+    claim = MemoryClaim.objects.select_for_update().get(pk=claim.pk)
+    if operator is None:
+        raise ConsolidationInvariantError(
+            "Durable claim restoration requires an operator audit identity."
+        )
+    if (
+        claim.kind not in NON_EXPIRING_KINDS
+        or claim.status != MemoryClaimStatus.STALE
+        or claim.review_required
+        or claim.stale_after is None
+    ):
+        raise ConsolidationInvariantError(
+            "Only an auto-activated durable claim with legacy staleness can be restored."
+        )
+    if not claim.state_events.filter(
+        reason="auto_activation_strong_grounding_v1"
+    ).exists():
+        raise ConsolidationInvariantError(
+            "Durable claim restoration requires the original auto-activation audit event."
+        )
+    activation = evaluate_claim_auto_activation(claim)
+    if not activation.eligible:
+        raise ConsolidationInvariantError(
+            "Durable claim no longer satisfies the strong-grounding activation policy."
+        )
+
+    previous_stale_after = claim.stale_after
+    claim.stale_after = None
+    claim.save(update_fields=("stale_after", "updated_at"))
+
+    stale_reviews = list(
+        MemoryReviewItem.objects.select_for_update().filter(
+            organization=claim.organization,
+            review_type=MemoryReviewType.STALE,
+            status__in=(MemoryReviewStatus.OPEN, MemoryReviewStatus.IN_REVIEW),
+            target_object_id=str(claim.pk),
+            idempotency_key__startswith=f"stale-claim:{claim.pk}:",
+        )
+    )
+    resolved_at = timezone.now()
+    for review in stale_reviews:
+        review.status = MemoryReviewStatus.RESOLVED
+        review.resolved_by = operator
+        review.resolved_at = resolved_at
+        review.resolution = {
+            "reason": "legacy_policy_window_removed_from_durable_claim",
+            "previous_stale_after": previous_stale_after.isoformat(),
+            **activation.audit_metadata(),
+        }
+        review.save(
+            update_fields=(
+                "status",
+                "resolved_by",
+                "resolved_at",
+                "resolution",
+                "updated_at",
+            )
+        )
+
+    transition_claim(
+        claim=claim,
+        to_status=MemoryClaimStatus.ACTIVE,
+        reason="auto_activation_durable_staleness_repair_v1",
+        actor=operator,
+        review_item=stale_reviews[-1] if stale_reviews else None,
+        metadata={
+            "auto_activation": activation.audit_metadata(),
+            "previous_stale_after": previous_stale_after.isoformat(),
+            "resolved_stale_reviews": len(stale_reviews),
+        },
+    )
+    if refresh:
+        refresh_current_state(claim.organization)
+    return claim
 
 
 @transaction.atomic

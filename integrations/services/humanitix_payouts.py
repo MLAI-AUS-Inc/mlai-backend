@@ -1051,6 +1051,15 @@ def build_humanitix_xero_preview(payout: HumanitixPayout) -> dict[str, Any]:
         "payout_reference": payout.payout_reference,
         "expected_total": str(payout.payout_amount),
         "line_total": str(line_total),
+        "payload_hash": hashlib.sha256(
+            json.dumps(
+                payload,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+                default=str,
+            ).encode("utf-8")
+        ).hexdigest(),
         "xero_payload": payload,
         "human_reconciliation_required": True,
         "note": (
@@ -1380,6 +1389,7 @@ def post_humanitix_xero_bank_transaction(
     payout: HumanitixPayout,
     *,
     approved_by_slack_id: str,
+    expected_payload_hash: str = "",
     bank_transactions: list[dict[str, Any]] | None = None,
 ) -> HumanitixPayout:
     """Create one idempotent Xero Receive Money transaction for a reviewed payout.
@@ -1396,6 +1406,11 @@ def post_humanitix_xero_bank_transaction(
         raise ReconciliationValidationError(
             "Humanitix payout is not ready to post.",
             errors=preview["errors"],
+        )
+    if expected_payload_hash and preview["payload_hash"] != expected_payload_hash:
+        raise ReconciliationValidationError(
+            "Humanitix payout preview changed after review; fetch and approve a new preview.",
+            errors=["The reviewed Humanitix payout payload hash is stale."],
         )
     profile = ReconciliationProfile.objects.select_related("xero_connection").get(
         organization=current.organization

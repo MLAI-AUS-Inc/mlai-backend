@@ -29,6 +29,7 @@ urlpatterns = [
     path('reconciliation/rules/<int:rule_id>', api_views_reconciliation.ReconciliationRuleDetailView.as_view(), name='reconciliation_rule_detail'),
     path('reconciliation/decisions', api_views_reconciliation.ReconciliationDecisionListView.as_view(), name='reconciliation_decisions'),
     path('reconciliation/outcomes', api_views_reconciliation.ReconciliationOutcomeView.as_view(), name='reconciliation_outcomes'),
+    path('reconciliation/knowledge-export', api_views_reconciliation.ReconciliationKnowledgeExportView.as_view(), name='reconciliation_knowledge_export'),
     path('reconciliation/learning-candidates/<str:candidate_id>', api_views_reconciliation.ReconciliationLearningCandidateView.as_view(), name='reconciliation_learning_candidate'),
     path('reconciliation/readiness', api_views_reconciliation.ReconciliationReadinessView.as_view(), name='reconciliation_readiness'),
     path('reconciliation/agent-runs', api_views_reconciliation.ReconciliationAgentRunView.as_view(), name='reconciliation_agent_runs'),
@@ -44,6 +45,11 @@ urlpatterns = [
     path('reconciliation/xero-attachments', api_views_reconciliation.ReconciliationXeroAttachmentView.as_view(), name='reconciliation_xero_attachments'),
     path('reconciliation/suggestions/<int:suggestion_id>/decision', api_views_reconciliation.ReconciliationSuggestionDecisionView.as_view(), name='reconciliation_suggestion_decision'),
     path('reconciliation/payouts', api_views_reconciliation.ReconciliationPayoutListView.as_view(), name='reconciliation_payouts'),
+    path(
+        'reconciliation/cashflow-report',
+        api_views_reconciliation.ReconciliationProfitabilityReportView.as_view(),
+        name='reconciliation_cashflow_report',
+    ),
     path('reconciliation/payouts/correction-preview', api_views_reconciliation.ReconciliationPayoutCorrectionPreviewView.as_view(), name='reconciliation_payout_correction_preview'),
     path('reconciliation/payouts/<str:payout_id>/preview', api_views_reconciliation.ReconciliationPayoutPreviewView.as_view(), name='reconciliation_payout_preview'),
     path('reconciliation/payouts/<str:payout_id>/post', api_views_reconciliation.ReconciliationPayoutPostView.as_view(), name='reconciliation_payout_post'),
@@ -51,6 +57,26 @@ urlpatterns = [
         'reconciliation/humanitix/payouts',
         api_views_reconciliation.HumanitixPayoutListView.as_view(),
         name='reconciliation_humanitix_payouts',
+    ),
+    path(
+        'reconciliation/humanitix/status',
+        api_views_reconciliation.HumanitixStatusView.as_view(),
+        name='reconciliation_humanitix_status',
+    ),
+    path(
+        'reconciliation/humanitix/sync',
+        api_views_reconciliation.HumanitixSyncView.as_view(),
+        name='reconciliation_humanitix_sync',
+    ),
+    path(
+        'reconciliation/humanitix/events',
+        api_views_reconciliation.HumanitixEventAggregateView.as_view(),
+        name='reconciliation_humanitix_events',
+    ),
+    path(
+        'reconciliation/humanitix/receipts/import',
+        api_views_reconciliation.HumanitixReceiptImportView.as_view(),
+        name='reconciliation_humanitix_receipt_import',
     ),
     path(
         'reconciliation/humanitix/payouts/correction-preview',

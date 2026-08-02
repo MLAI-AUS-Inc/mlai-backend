@@ -12,6 +12,7 @@ PROJECT_DIR="/root/mlai-backend"
 APP_RELEASE="${APP_RELEASE:-$(git rev-parse --short=12 HEAD 2>/dev/null || date +%Y%m%d%H%M)}"
 APP_RELEASE_SHORT="${APP_RELEASE:0:12}"
 ORG_MEMORY_PRODUCTION_DEPLOY_ENABLED="${ORG_MEMORY_PRODUCTION_DEPLOY_ENABLED:-false}"
+ORG_MEMORY_PRODUCTION_PUBLIC_CHANNEL_ADMIN_SCOPE_APPROVED="${ORG_MEMORY_PRODUCTION_PUBLIC_CHANNEL_ADMIN_SCOPE_APPROVED:-false}"
 
 case "$ORG_MEMORY_PRODUCTION_DEPLOY_ENABLED" in
     true|TRUE|True|1|yes|YES|Yes|on|ON|On) ORG_MEMORY_PRODUCTION_DEPLOY_ENABLED=true ;;
@@ -22,6 +23,16 @@ case "$ORG_MEMORY_PRODUCTION_DEPLOY_ENABLED" in
         ;;
 esac
 export ORG_MEMORY_PRODUCTION_DEPLOY_ENABLED
+
+case "$ORG_MEMORY_PRODUCTION_PUBLIC_CHANNEL_ADMIN_SCOPE_APPROVED" in
+    true|TRUE|True|1|yes|YES|Yes|on|ON|On) ORG_MEMORY_PRODUCTION_PUBLIC_CHANNEL_ADMIN_SCOPE_APPROVED=true ;;
+    false|FALSE|False|0|no|NO|No|off|OFF|Off|"") ORG_MEMORY_PRODUCTION_PUBLIC_CHANNEL_ADMIN_SCOPE_APPROVED=false ;;
+    *)
+        echo "❌ ORG_MEMORY_PRODUCTION_PUBLIC_CHANNEL_ADMIN_SCOPE_APPROVED must be true or false."
+        exit 1
+        ;;
+esac
+export ORG_MEMORY_PRODUCTION_PUBLIC_CHANNEL_ADMIN_SCOPE_APPROVED
 
 if [ -z "${REDIS_URL:-}" ]; then
     echo "❌ REDIS_URL must be supplied by the deployment secret store."
@@ -93,6 +104,16 @@ if [ "$ORG_MEMORY_PRODUCTION_DEPLOY_ENABLED" = "true" ]; then
         echo "❌ Admin Brain production staging and activation operators must be distinct."
         exit 1
     fi
+    approval_resolver_args=()
+    if [ "$ORG_MEMORY_PRODUCTION_PUBLIC_CHANNEL_ADMIN_SCOPE_APPROVED" = "true" ]; then
+        approval_resolver_args+=(--approve-public-admin-scope)
+    fi
+    ORG_MEMORY_PRODUCTION_APPROVAL_MANIFEST="$(
+        printf '%s' "$ORG_MEMORY_PRODUCTION_APPROVAL_MANIFEST" \
+            | python3 scripts/resolve_org_memory_production_approval.py "${approval_resolver_args[@]}"
+    )"
+    export ORG_MEMORY_PRODUCTION_APPROVAL_MANIFEST
+    unset approval_resolver_args
     python3 - <<'PY'
 import json
 import os
@@ -182,6 +203,34 @@ printf '%s' "$REDIS_URL" | ssh "$DEPLOY_SSH_TARGET" '
     chmod 600 "$tmp"
     mv "$tmp" .env
 '
+
+# The Xero OAuth scope list is pipeline-managed (repository variable
+# XERO_OAUTH_SCOPES) so scope upgrades — e.g. granting accounting.invoices +
+# accounting.attachments for the reconciliation agent's draft bills — survive
+# redeploys instead of living in hand-edited .env lines that the next deploy
+# races against. Empty/unset keeps whatever the droplet already has.
+if [ -n "${XERO_OAUTH_SCOPES:-}" ]; then
+    echo "🔧 Updating Xero OAuth scope list..."
+    printf '%s' "$XERO_OAUTH_SCOPES" | ssh "$DEPLOY_SSH_TARGET" '
+        set -euo pipefail
+        project_dir="/root/mlai-backend"
+        mkdir -p "$project_dir"
+        cd "$project_dir"
+        umask 077
+        scopes=$(cat)
+        case "$scopes" in
+            *offline_access*) ;;
+            *) echo "XERO_OAUTH_SCOPES payload must include offline_access" >&2; exit 1 ;;
+        esac
+        tmp=$(mktemp .env.xero-scopes.XXXXXX)
+        if [ -f .env ]; then
+            grep -v "^XERO_OAUTH_SCOPES=" .env > "$tmp" || true
+        fi
+        printf "XERO_OAUTH_SCOPES=%s\n" "$scopes" >> "$tmp"
+        chmod 600 "$tmp"
+        mv "$tmp" .env
+    '
+fi
 
 # Install the versioned connector keyring atomically before Django system
 # checks or migrations can write connector credentials with the active key.
@@ -748,6 +797,14 @@ PY
             --organization-domain mlai.au \
             --provider google_drive \
             --limit 1000 \
+            --apply
+
+        echo "✅ Applying the reviewed strong-grounding activation policy..."
+        compose_run_web python manage.py reconcile_org_memory_auto_activation \
+            --organization-domain mlai.au \
+            --provider google_drive \
+            --operator-email "\$activation_operator" \
+            --limit 5000 \
             --apply
 
         echo "🩺 Refreshing daily memory health after bounded recovery..."

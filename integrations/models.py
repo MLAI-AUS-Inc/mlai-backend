@@ -710,6 +710,13 @@ class ReconciliationProfile(models.Model):
     project_tracking_category_name = models.CharField(max_length=255, default="Project Name")
     standalone_fee_project_option_id = models.CharField(max_length=255, blank=True, default="")
     standalone_fee_project_option_name = models.CharField(max_length=255, blank=True, default="")
+    humanitix_profitability_included = models.BooleanField(default=False)
+    profitability_policy_verified_by_slack_id = models.CharField(
+        max_length=100,
+        blank=True,
+        default="",
+    )
+    profitability_policy_verified_at = models.DateTimeField(null=True, blank=True)
     enabled = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -1137,6 +1144,10 @@ class XeroStatementScan(models.Model):
     expected_count = models.PositiveIntegerField(null=True, blank=True)
     observed_count = models.PositiveIntegerField(default=0)
     payload_hash = models.CharField(max_length=64, blank=True, default="")
+    # PII-minimised evidence from the read-only browser capture: source scan
+    # timestamps, page counts/coverage, and completeness blockers. Line values
+    # remain in XeroStatementLineSnapshot and credentials are never accepted.
+    capture_metadata = models.JSONField(default=dict, blank=True)
     error = models.TextField(blank=True, default="")
     started_at = models.DateTimeField(auto_now_add=True)
     completed_at = models.DateTimeField(null=True, blank=True)
@@ -1253,6 +1264,7 @@ class ReconciliationRule(models.Model):
     account_name = models.CharField(max_length=255)
     tax_type = models.CharField(max_length=255)
     description_template = models.TextField()
+    event_source_type = models.CharField(max_length=32, blank=True, default="")
     event_source_id = models.CharField(max_length=255, blank=True, default="")
     event_tracking_option_name = models.CharField(max_length=255, blank=True, default="")
     project_source_id = models.CharField(max_length=255, blank=True, default="")
@@ -1439,6 +1451,7 @@ class XeroStatementSuggestion(models.Model):
     account_name = models.CharField(max_length=255, blank=True, default="")
     tax_type = models.CharField(max_length=255, blank=True, default="")
     description = models.TextField(blank=True, default="")
+    event_source_type = models.CharField(max_length=32, blank=True, default="")
     event_source_id = models.CharField(max_length=255, blank=True, default="")
     event_tracking_option_name = models.CharField(max_length=255, blank=True, default="")
     project_source_id = models.CharField(max_length=255, blank=True, default="")

@@ -89,7 +89,7 @@ def serialize_reconciliation_rule(rule: ReconciliationRule) -> dict[str, Any]:
         "tax_type": rule.tax_type,
         "description_template": rule.description_template,
         "event": {
-            "source_type": "luma",
+            "source_type": rule.event_source_type or "luma",
             "source_id": rule.event_source_id,
             "tracking_option_name": rule.event_tracking_option_name,
         } if rule.event_source_id else None,
@@ -157,6 +157,7 @@ def _rule_accounting_fingerprint(rule: ReconciliationRule) -> tuple[str, ...]:
         rule.account_name.casefold(),
         rule.tax_type.casefold(),
         rule.description_template,
+        rule.event_source_type,
         rule.event_source_id,
         rule.project_source_id,
     )
@@ -256,7 +257,10 @@ def apply_verified_rule(
         "account_name": rule.account_name,
         "tax_type": rule.tax_type,
         "description": render_rule_description(rule, line),
-        "event": {"source_type": "luma", "source_id": rule.event_source_id} if rule.event_source_id else None,
+        "event": {
+            "source_type": rule.event_source_type or "luma",
+            "source_id": rule.event_source_id,
+        } if rule.event_source_id else None,
         "project": {"source_type": "linear", "source_id": rule.project_source_id} if rule.project_source_id else None,
         "identity_confidence": 1.0,
         "accounting_confidence": 1.0,

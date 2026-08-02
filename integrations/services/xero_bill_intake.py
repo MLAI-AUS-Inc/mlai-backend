@@ -102,13 +102,34 @@ def _parse_line_items(payload: dict[str, Any], *, contact_name: str, invoice_num
                 errors.append(f"line_amounts[{index}] must be an object.")
                 continue
             amount = _money(raw.get("amount"))
+            quantity = _money(raw.get("quantity")) if str(raw.get("quantity") or "").strip() else None
+            unit_amount = _money(raw.get("unit_amount")) if str(raw.get("unit_amount") or "").strip() else None
+            if amount is None and quantity is not None and unit_amount is not None:
+                amount = (quantity * unit_amount).quantize(Decimal("0.01"))
             if amount is None or amount <= 0:
                 errors.append(f"line_amounts[{index}].amount must be a positive amount.")
+                continue
+            if quantity is not None and quantity <= 0:
+                errors.append(f"line_amounts[{index}].quantity must be positive when provided.")
+                continue
+            if unit_amount is not None and unit_amount <= 0:
+                errors.append(f"line_amounts[{index}].unit_amount must be positive when provided.")
+                continue
+            if (
+                quantity is not None
+                and unit_amount is not None
+                and (quantity * unit_amount).quantize(Decimal("0.01")) != amount
+            ):
+                errors.append(
+                    f"line_amounts[{index}] quantity × unit_amount does not equal amount."
+                )
                 continue
             lines.append({
                 "description": _clean_text(raw.get("description"), limit=4000)
                 or f"{contact_name} invoice {invoice_number}",
                 "amount": amount,
+                "quantity": quantity,
+                "unit_amount": unit_amount,
                 "account_code": _clean_text(raw.get("account_code"), limit=64),
                 "tax_type": _clean_text(raw.get("tax_type"), limit=255),
             })
@@ -121,6 +142,8 @@ def _parse_line_items(payload: dict[str, Any], *, contact_name: str, invoice_num
             "description": _clean_text(payload.get("description"), limit=4000)
             or f"{contact_name} invoice {invoice_number}",
             "amount": total,
+            "quantity": None,
+            "unit_amount": None,
             "account_code": _clean_text(payload.get("account_code"), limit=64),
             "tax_type": _clean_text(payload.get("tax_type"), limit=255),
         })
@@ -193,14 +216,30 @@ def build_reconciliation_bill_preview(organization, *, payload: dict[str, Any]) 
     for line in lines:
         item: dict[str, Any] = {
             "Description": line["description"],
-            "Quantity": 1,
-            "UnitAmount": float(line["amount"]),
+            "Quantity": float(
+                line["quantity"]
+                if line["quantity"] is not None and line["unit_amount"] is not None
+                else Decimal("1")
+            ),
+            "UnitAmount": float(
+                line["unit_amount"]
+                if line["quantity"] is not None and line["unit_amount"] is not None
+                else line["amount"]
+            ),
         }
         if line["account_code"]:
             item["AccountCode"] = line["account_code"]
         if line["tax_type"]:
             item["TaxType"] = line["tax_type"]
         line_items.append(item)
+
+    document_metadata = {
+        "subtotal": str(payload.get("subtotal") or ""),
+        "tax_amount": str(payload.get("tax_amount") or ""),
+        "total": str(payload.get("total") or line_total),
+        "amount_due": str(payload.get("amount_due") or ""),
+        "source": payload.get("source") if isinstance(payload.get("source"), dict) else {},
+    }
 
     xero_payload: dict[str, Any] = {
         "Type": "ACCPAY",
@@ -226,6 +265,7 @@ def build_reconciliation_bill_preview(organization, *, payload: dict[str, Any]) 
         "contact_name": contact_name,
         "invoice_number": invoice_number,
         "total": str(line_total),
+        "document_metadata": document_metadata,
         "xero_payload": xero_payload,
     }
 
@@ -296,7 +336,12 @@ def _contact_payload(connection, contact_name: str) -> dict[str, str]:
     return {"Name": contact_name}
 
 
-def _mirror_authorised_bill(connection, row: dict[str, Any]) -> None:
+def _mirror_authorised_bill(
+    connection,
+    row: dict[str, Any],
+    *,
+    document_metadata: dict[str, Any] | None = None,
+) -> None:
     """Upsert the local bill mirror so _exact_outstanding_bills sees a bill we just
     created without waiting for the next connector sync (mirrors the field mapping
     in external_connectors._upsert_xero_invoices)."""
@@ -327,9 +372,63 @@ def _mirror_authorised_bill(connection, row: dict[str, Any]) -> None:
             "merchant_name": str(contact.get("Name") or ""),
             "category": "bill",
             "class_name": "ACCPAY",
-            "raw_payload": row,
+            "raw_payload": {
+                **row,
+                "_mlai_document_metadata": document_metadata or {},
+            },
         },
     )
+
+
+def _validate_authorised_lines(connection, xero_payload: dict[str, Any]) -> None:
+    """Resolve every account/tax tuple against current Xero metadata before PUT."""
+
+    lines = xero_payload.get("LineItems") if isinstance(xero_payload.get("LineItems"), list) else []
+    account_response = http_client.get(
+        f"{XERO_API_URL}/Accounts",
+        headers=_xero_headers(connection),
+        timeout=(3, 30),
+    )
+    account_response.raise_for_status()
+    accounts = account_response.json().get("Accounts", []) or []
+    tax_response = http_client.get(
+        f"{XERO_API_URL}/TaxRates",
+        headers=_xero_headers(connection),
+        timeout=(3, 30),
+    )
+    tax_response.raise_for_status()
+    tax_rates = tax_response.json().get("TaxRates", []) or []
+    for index, line in enumerate(lines):
+        code = str(line.get("AccountCode") or "").strip()
+        account_matches = [
+            row
+            for row in accounts
+            if str(row.get("Code") or "").strip().casefold() == code.casefold()
+            and str(row.get("Status") or "ACTIVE").upper() == "ACTIVE"
+        ]
+        if len(account_matches) != 1:
+            raise XeroPostingError(
+                f"Xero does not contain one active account with code {code} for bill line {index + 1}."
+            )
+        requested_tax = str(line.get("TaxType") or "").strip()
+        tax_matches = [
+            row
+            for row in tax_rates
+            if (
+                str(row.get("TaxType") or "").strip().casefold()
+                == requested_tax.casefold()
+                or str(row.get("Name") or "").strip().casefold()
+                == requested_tax.casefold()
+            )
+            and str(row.get("Status") or "ACTIVE").upper() == "ACTIVE"
+            and row.get("CanApplyToExpenses") is not False
+            and row.get("TaxType")
+        ]
+        if len(tax_matches) != 1:
+            raise XeroPostingError(
+                f"Xero does not contain one active expense tax rate {requested_tax} for bill line {index + 1}."
+            )
+        line["TaxType"] = str(tax_matches[0]["TaxType"])
 
 
 def create_reconciliation_bill(
@@ -360,16 +459,23 @@ def create_reconciliation_bill(
                 f"Xero already has bill {invoice_number} for {contact_name} with total "
                 f"{existing_total}, not {requested_total}. Review it before creating another."
             )
-        _mirror_authorised_bill(connection, existing)
+        _mirror_authorised_bill(
+            connection,
+            existing,
+            document_metadata=preview["document_metadata"],
+        )
         return {
             "created": False,
             "bill": _serialize_bill_row(existing),
             "warnings": preview["warnings"],
+            "document_metadata": preview["document_metadata"],
             "requested_by": requested_by_slack_id,
         }
 
     xero_payload = dict(preview["xero_payload"])
     xero_payload["Contact"] = _contact_payload(connection, contact_name)
+    if xero_payload["Status"] == BILL_STATUS_AUTHORISED:
+        _validate_authorised_lines(connection, xero_payload)
     headers = _xero_headers(connection)
     idempotency_seed = f"{organization.id}|{contact_name.casefold()}|{invoice_number.casefold()}"
     headers["Idempotency-Key"] = (
@@ -385,11 +491,16 @@ def create_reconciliation_bill(
     row = _first_xero_row(response.json(), "Invoices")
     if not str(row.get("InvoiceID") or "").strip():
         raise XeroPostingError("Xero did not return an InvoiceID.")
-    _mirror_authorised_bill(connection, row)
+    _mirror_authorised_bill(
+        connection,
+        row,
+        document_metadata=preview["document_metadata"],
+    )
     return {
         "created": True,
         "bill": _serialize_bill_row(row),
         "warnings": preview["warnings"],
+        "document_metadata": preview["document_metadata"],
         "requested_by": requested_by_slack_id,
     }
 
@@ -427,6 +538,20 @@ def attach_reconciliation_document(
         raw = b""
     if not raw:
         errors.append("content_base64 must be non-empty base64 content.")
+    try:
+        declared_size = int(payload.get("size_bytes"))
+    except (TypeError, ValueError):
+        declared_size = 0
+    if declared_size <= 0:
+        errors.append("size_bytes must be a positive integer.")
+    elif raw and declared_size != len(raw):
+        errors.append("size_bytes does not match the decoded attachment content.")
+    declared_hash = str(payload.get("content_sha256") or "").strip().lower()
+    actual_hash = hashlib.sha256(raw).hexdigest() if raw else ""
+    if not re.fullmatch(r"[0-9a-f]{64}", declared_hash):
+        errors.append("content_sha256 must be a lowercase SHA-256 value.")
+    elif actual_hash and declared_hash != actual_hash:
+        errors.append("content_sha256 does not match the decoded attachment content.")
     max_bytes = int(getattr(settings, "XERO_ATTACHMENT_MAX_BYTES", 10 * 1024 * 1024))
     if raw and len(raw) > max_bytes:
         errors.append(f"Attachment exceeds the {max_bytes // (1024 * 1024)} MB limit.")
@@ -443,12 +568,22 @@ def attach_reconciliation_document(
     listing.raise_for_status()
     for row in listing.json().get("Attachments", []) or []:
         if str(row.get("FileName") or "").casefold() == filename.casefold():
+            existing_size = int(row.get("ContentLength") or 0)
+            if existing_size and existing_size != len(raw):
+                raise ReconciliationValidationError(
+                    "Xero already has an attachment with this filename but different content.",
+                    errors=[
+                        f"Existing size is {existing_size} bytes; requested size is {len(raw)} bytes."
+                    ],
+                )
             return {
                 "created": False,
                 "attachment": {
                     "attachment_id": str(row.get("AttachmentID") or ""),
                     "filename": str(row.get("FileName") or filename),
-                    "size": int(row.get("ContentLength") or 0),
+                    "size": existing_size or len(raw),
+                    "content_type": str(row.get("MimeType") or content_type),
+                    "content_sha256": declared_hash,
                     "entity_type": entity_type,
                     "xero_id": xero_id,
                 },
@@ -457,6 +592,10 @@ def attach_reconciliation_document(
 
     headers = _xero_headers(connection)
     headers["Content-Type"] = content_type
+    idempotency_seed = f"{organization.id}|{entity_type}|{xero_id}|{filename.casefold()}|{declared_hash}"
+    headers["Idempotency-Key"] = (
+        f"mlai-attachment-{hashlib.sha256(idempotency_seed.encode('utf-8')).hexdigest()[:32]}"
+    )
     response = http_client.put(
         f"{XERO_API_URL}/{resource}/{xero_id}/Attachments/{quote(filename, safe='')}",
         headers=headers,
@@ -472,6 +611,8 @@ def attach_reconciliation_document(
             "attachment_id": str(row.get("AttachmentID") or ""),
             "filename": str(row.get("FileName") or filename),
             "size": int(row.get("ContentLength") or len(raw)),
+            "content_type": str(row.get("MimeType") or content_type),
+            "content_sha256": declared_hash,
             "entity_type": entity_type,
             "xero_id": xero_id,
         },
