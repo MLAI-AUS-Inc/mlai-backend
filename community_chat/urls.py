@@ -8,11 +8,13 @@ from .views import (
     DeviceAuthStartView,
     DeviceView,
     InviteView,
+    PasswordAuthView,
     SessionView,
 )
 
 
 urlpatterns = [
+    path("auth/password/", PasswordAuthView.as_view(), name="community_chat_password_auth"),
     path("auth/device/start/", DeviceAuthStartView.as_view(), name="community_chat_auth_start"),
     path(
         "auth/device/authorize/",

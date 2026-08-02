@@ -75,3 +75,18 @@ def enforce_password_change_limits(request):
         limit=20,
         window_seconds=3600,
     )
+
+
+def enforce_chat_password_login_limits(request, email, public_key):
+    for dimension, value, limit in (
+        ('email', email, 10),
+        ('public-key', public_key, 20),
+        ('ip', client_ip(request), 50),
+    ):
+        _enforce_limit(
+            action='community-chat-password-login',
+            dimension=dimension,
+            value=value,
+            limit=limit,
+            window_seconds=600,
+        )

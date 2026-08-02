@@ -2,9 +2,11 @@ import hashlib
 import base64
 import re
 import secrets
+import uuid
 from datetime import datetime, timedelta, timezone as datetime_timezone
 
 from django.conf import settings
+from django.contrib.auth.models import update_last_login
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 from rest_framework import status
@@ -41,6 +43,13 @@ from .nostr import (
     verify_device_proof,
 )
 from .throttles import CommunityChatScopedThrottle, enforce_bootstrap_limits
+from core.auth_throttles import enforce_chat_password_login_limits
+from core.password_auth import authenticate_account, normalize_account_email
+from .serializers import (
+    CommunityChatPasswordLoginSerializer,
+    own_chat_profile,
+    public_chat_profile,
+)
 
 
 BOOTSTRAP_ACTION = "community-chat:enrol-device"
@@ -69,6 +78,9 @@ def _request_origin(request):
     allowed = {str(item).strip().rstrip("/") for item in settings.COMMUNITY_CHAT_ALLOWED_ORIGINS}
     if not origin or origin not in allowed:
         raise PermissionDenied("Request origin is not approved for community chat.")
+    token_origin = getattr(request, "community_chat_origin", None)
+    if token_origin and token_origin != "legacy" and not secrets.compare_digest(token_origin, origin):
+        raise PermissionDenied("Request origin does not match this authorization.")
     return origin
 
 
@@ -85,6 +97,45 @@ def _require_token_key(request, public_key):
         raise PermissionDenied("This authorization is bound to a different device key.")
 
 
+def _password_auth_origin(request, client_id):
+    origin = str(request.headers.get("Origin") or "").strip().rstrip("/")
+    allowed = {str(item).strip().rstrip("/") for item in settings.COMMUNITY_CHAT_ALLOWED_ORIGINS}
+    if origin and origin not in allowed:
+        raise PermissionDenied("Request origin is not approved for community chat.")
+    if client_id == "mlai-chat-web":
+        if not origin or not origin.startswith(("https://", "http://")):
+            raise PermissionDenied("The web client requires an approved browser origin.")
+    elif client_id == "mlai-chat-desktop":
+        if not origin or origin.startswith("mlaichat://"):
+            raise PermissionDenied("The desktop client requires an approved application origin.")
+    else:
+        if origin and origin != "mlaichat://callback":
+            raise PermissionDenied("Mobile password authentication has an invalid origin.")
+        origin = origin or "mlaichat://callback"
+    return origin
+
+
+def _token_enrollment_context(request):
+    installation_id = getattr(request, "community_chat_installation_id", None)
+    client_id = getattr(request, "community_chat_client_id", None)
+    if installation_id and client_id:
+        return installation_id, client_id
+    try:
+        installation_id = uuid.UUID(str(request.data.get("installation_id") or uuid.uuid4()))
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise ValidationError({"installation_id": "Invalid installation identifier."}) from exc
+    return installation_id, str(request.data.get("client_id") or "legacy")[:64]
+
+
+def _require_token_challenge_context(request, challenge):
+    token_installation = getattr(request, "community_chat_installation_id", None)
+    token_client = getattr(request, "community_chat_client_id", None)
+    if token_installation and token_installation != challenge.installation_id:
+        raise PermissionDenied("This authorization is bound to a different installation.")
+    if token_client and not secrets.compare_digest(token_client, challenge.client_id):
+        raise PermissionDenied("This authorization is bound to a different client.")
+
+
 def _pkce_challenge(verifier):
     return base64.urlsafe_b64encode(
         hashlib.sha256(verifier.encode("utf-8")).digest()
@@ -95,11 +146,92 @@ def _device_payload(device):
     return {
         "id": str(device.id),
         "public_key": device.public_key,
+        "installation_id": str(device.installation_id),
+        "client_id": device.client_id,
+        "platform": device.platform,
+        "name": device.name,
         "status": device.status,
         "verified_at": device.verified_at,
         "last_verified_membership_at": device.last_verified_membership_at,
+        "last_seen_at": device.last_seen_at,
         "created_at": device.created_at,
     }
+
+
+class PasswordAuthView(APIView):
+    """Authenticate one existing MLAI account and mint one device bootstrap."""
+
+    authentication_classes = []
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        if not settings.COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED:
+            return Response({"error": "password_auth_disabled"}, status=status.HTTP_404_NOT_FOUND)
+        serializer = CommunityChatPasswordLoginSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        device_data = data["device"]
+        origin = _password_auth_origin(request, data["client_id"])
+        email = normalize_account_email(data["email"])
+        enforce_chat_password_login_limits(request, email, device_data["public_key"])
+        user = authenticate_account(request._request, email, data["password"])
+        if user is None:
+            return Response(
+                {"error": "invalid_credentials"},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+
+        public_key = device_data["public_key"]
+        installation_id = device_data["installation_id"]
+        active_key = CommunityChatDevice.objects.filter(
+            public_key=public_key,
+            status__in=(DeviceBindingStatus.PENDING, DeviceBindingStatus.VERIFIED),
+        ).first()
+        if active_key and active_key.user_id != user.id:
+            return Response({"error": "public_key_already_bound"}, status=status.HTTP_409_CONFLICT)
+        active_installation = CommunityChatDevice.objects.filter(
+            installation_id=installation_id,
+            status__in=(DeviceBindingStatus.PENDING, DeviceBindingStatus.VERIFIED),
+        ).first()
+        if active_installation and (
+            active_installation.user_id != user.id
+            or active_installation.public_key != public_key
+        ):
+            return Response({"error": "installation_already_bound"}, status=status.HTTP_409_CONFLICT)
+
+        now = timezone.now()
+        raw_token = f"{TOKEN_PREFIX}{secrets.token_urlsafe(48)}"
+        with transaction.atomic():
+            CommunityChatBootstrapToken.objects.filter(
+                user=user,
+                public_key=public_key,
+                revoked_at__isnull=True,
+            ).update(revoked_at=now)
+            token = CommunityChatBootstrapToken.objects.create(
+                user=user,
+                public_key=public_key,
+                installation_id=installation_id,
+                client_id=data["client_id"],
+                origin=origin,
+                platform=device_data["platform"],
+                name=device_data.get("name", ""),
+                token_hash=hashlib.sha256(raw_token.encode("utf-8")).hexdigest(),
+                expires_at=now
+                + timedelta(seconds=settings.COMMUNITY_CHAT_BOOTSTRAP_TOKEN_TTL_SECONDS),
+            )
+            update_last_login(None, user)
+
+        return Response(
+            {
+                "status": "authenticated",
+                "bootstrap_token": raw_token,
+                "expires_at": token.expires_at,
+                "relay_url": settings.COMMUNITY_CHAT_RELAY_URL,
+                "origin": origin,
+                "profile": own_chat_profile(user),
+            },
+            status=status.HTTP_200_OK,
+        )
 
 
 class DeviceAuthStartView(APIView):
@@ -236,6 +368,7 @@ class DeviceAuthExchangeView(APIView):
                 token = CommunityChatBootstrapToken.objects.create(
                     user=auth_request.user,
                     public_key=auth_request.public_key,
+                    origin=auth_request.origin,
                     token_hash=hashlib.sha256(raw_token.encode("utf-8")).hexdigest(),
                     expires_at=now
                     + timedelta(seconds=settings.COMMUNITY_CHAT_BOOTSTRAP_TOKEN_TTL_SECONDS),
@@ -275,6 +408,8 @@ class SessionView(APIView):
                 "eligible": _is_eligible(request.user),
                 "relay_url": settings.COMMUNITY_CHAT_RELAY_URL,
                 "devices": [_device_payload(device) for device in devices],
+                "profile": own_chat_profile(request.user),
+                "public_profile": public_chat_profile(request.user),
             }
         )
 
@@ -290,6 +425,7 @@ class ChallengeView(APIView):
         public_key = _public_key(request.data.get("public_key"))
         _require_token_key(request, public_key)
         origin = _request_origin(request)
+        installation_id, client_id = _token_enrollment_context(request)
         enforce_bootstrap_limits(
             request,
             action="challenge",
@@ -308,12 +444,23 @@ class ChallengeView(APIView):
                 {"error": "public_key_already_bound"},
                 status=status.HTTP_409_CONFLICT,
             )
+        active_installation = CommunityChatDevice.objects.filter(
+            installation_id=installation_id,
+            status__in=(DeviceBindingStatus.PENDING, DeviceBindingStatus.VERIFIED),
+        ).first()
+        if active_installation and active_installation.public_key != public_key:
+            return Response(
+                {"error": "installation_already_bound"},
+                status=status.HTTP_409_CONFLICT,
+            )
 
         nonce = secrets.token_urlsafe(32)
         expires_at = timezone.now() + timedelta(seconds=settings.COMMUNITY_CHAT_CHALLENGE_TTL_SECONDS)
         challenge = CommunityChatChallenge.objects.create(
             user=request.user,
             public_key=public_key,
+            installation_id=installation_id,
+            client_id=client_id,
             action=BOOTSTRAP_ACTION,
             audience=settings.COMMUNITY_CHAT_API_AUDIENCE,
             origin=origin,
@@ -364,6 +511,7 @@ class InviteView(APIView):
                     id=challenge_id,
                     user=request.user,
                 )
+                _require_token_challenge_context(request, challenge)
                 public_key = challenge.public_key
                 _require_token_key(request, public_key)
                 enforce_bootstrap_limits(
@@ -416,6 +564,10 @@ class InviteView(APIView):
                 device = existing or CommunityChatDevice.objects.create(
                     user=request.user,
                     public_key=public_key,
+                    installation_id=challenge.installation_id,
+                    client_id=challenge.client_id,
+                    platform=getattr(request, "community_chat_platform", ""),
+                    name=getattr(request, "community_chat_device_name", ""),
                 )
                 challenge.used_at = now
                 challenge.save(update_fields=("used_at",))
@@ -499,12 +651,31 @@ class ConfirmView(APIView):
         device.status = DeviceBindingStatus.VERIFIED
         device.verified_at = device.verified_at or now
         device.last_verified_membership_at = now
-        device.save(update_fields=("status", "verified_at", "last_verified_membership_at", "updated_at"))
+        device.last_seen_at = now
+        device.save(
+            update_fields=(
+                "status",
+                "verified_at",
+                "last_verified_membership_at",
+                "last_seen_at",
+                "updated_at",
+            )
+        )
         CommunityChatInviteAudit.objects.filter(
             device=device,
             confirmed_at__isnull=True,
         ).update(confirmed_at=now)
-        return Response({"status": "verified", "device": _device_payload(device)})
+        bootstrap_token = getattr(request, "community_chat_bootstrap_token", None)
+        if bootstrap_token is not None and bootstrap_token.revoked_at is None:
+            bootstrap_token.revoked_at = now
+            bootstrap_token.save(update_fields=("revoked_at",))
+        return Response(
+            {
+                "status": "verified",
+                "device": _device_payload(device),
+                "public_profile": public_chat_profile(request.user),
+            }
+        )
 
 
 class DeviceView(APIView):

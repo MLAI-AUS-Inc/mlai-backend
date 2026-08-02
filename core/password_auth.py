@@ -6,7 +6,7 @@ from urllib.parse import quote
 from uuid import UUID
 
 from django.conf import settings
-from django.contrib.auth import get_user_model
+from django.contrib.auth import authenticate, get_user_model
 from django.contrib.auth.hashers import check_password, make_password
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError as DjangoValidationError
@@ -28,6 +28,20 @@ class InvalidPasswordResetToken(ValueError):
 
 def normalize_account_email(email):
     return User.objects.normalize_email(email)
+
+
+def authenticate_account(request, email, password):
+    """Authenticate without a cheap, account-enumerable failure path."""
+
+    canonical_email = normalize_account_email(email)
+    candidate = User.objects.filter(email=canonical_email).first()
+    if candidate is None or not candidate.has_usable_password():
+        check_password(password, _DUMMY_PASSWORD_HASH)
+        return None
+    if not candidate.is_active:
+        candidate.check_password(password)
+        return None
+    return authenticate(request=request, email=canonical_email, password=password)
 
 
 def _hash_secret(secret):

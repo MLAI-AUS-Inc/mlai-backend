@@ -33,6 +33,7 @@ class CustomUserManager(BaseUserManager):
 
 class User(AbstractBaseUser, PermissionsMixin):
     email = models.EmailField(unique=True)
+    community_chat_profile_id = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
     slack_id = models.CharField(max_length=50, blank=True, null=True, unique=True)
     first_name = models.CharField(max_length=150, blank=True)
     last_name = models.CharField(max_length=150, blank=True)

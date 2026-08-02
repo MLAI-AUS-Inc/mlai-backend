@@ -40,6 +40,11 @@ class CommunityChatBootstrapAuthentication(BaseAuthentication):
 
         request.community_chat_public_key = token.public_key
         request.community_chat_bootstrap_token = token
+        request.community_chat_installation_id = token.installation_id
+        request.community_chat_client_id = token.client_id
+        request.community_chat_origin = token.origin
+        request.community_chat_platform = token.platform
+        request.community_chat_device_name = token.name
         return token.user, token
 
     def authenticate_header(self, request):

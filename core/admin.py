@@ -30,7 +30,7 @@ class UserAdmin(BaseUserAdmin):
         }),
     )
     
-    readonly_fields = ('avatar_preview', 'updated_at', 'password_set_at')
+    readonly_fields = ('avatar_preview', 'updated_at', 'password_set_at', 'community_chat_profile_id')
 
     def avatar_preview(self, obj):
         if obj.avatar_url:
