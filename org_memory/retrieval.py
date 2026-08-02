@@ -194,6 +194,33 @@ def query_terms(value: str) -> tuple[str, ...]:
     )
 
 
+def _entity_name_tokens(value: str) -> tuple[str, ...]:
+    return tuple(token.casefold() for token in _WORD_RE.findall(str(value or "")))
+
+
+def _contains_entity_phrase(
+    query_tokens: tuple[str, ...],
+    entity_name: str,
+) -> bool:
+    entity_tokens = _entity_name_tokens(entity_name)
+    if not entity_tokens:
+        return False
+    # A single character is never a safe implicit entity scope. Explicit external
+    # identifiers are resolved outside this free-text name matcher.
+    if len(entity_tokens) == 1 and len(entity_tokens[0]) < 2:
+        return False
+    width = len(entity_tokens)
+    return any(
+        query_tokens[index : index + width] == entity_tokens
+        for index in range(len(query_tokens) - width + 1)
+    )
+
+
+def _entity_matches_query(entity: MemoryEntity, query_tokens: tuple[str, ...]) -> bool:
+    names = dict.fromkeys((entity.normalized_name, entity.canonical_name))
+    return any(_contains_entity_phrase(query_tokens, name) for name in names if name)
+
+
 def allowed_memory_classifications(
     authorization: OrganizationAuthorizationContext,
 ) -> tuple[str, ...]:
@@ -308,20 +335,16 @@ def plan_memory_query(
     time_end=None,
     answer_mode: str = "auto",
 ) -> QueryPlan:
-    terms = query_terms(query)
+    query_tokens = _entity_name_tokens(query)
     allowed = allowed_memory_classifications(authorization)
     entity_rows = []
-    if terms and allowed:
+    if query_tokens and allowed:
         for entity in MemoryEntity.objects.filter(
             organization=organization,
             merged_into__isnull=True,
             classification__in=allowed,
         ).only("pk", "canonical_name", "normalized_name"):
-            normalized_name = entity.normalized_name.casefold()
-            canonical = entity.canonical_name.casefold()
-            if canonical in query.casefold() or (
-                normalized_name and all(part in terms for part in normalized_name.split())
-            ):
+            if _entity_matches_query(entity, query_tokens):
                 entity_rows.append(entity)
     natural_start, natural_end = _natural_time_range(query)
     time_start = time_start or natural_start

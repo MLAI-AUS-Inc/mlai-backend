@@ -30,6 +30,7 @@ from org_memory.models import (
     MemoryEvidenceSufficiency,
     MemoryFeedback,
     MemoryCorrectionProposal,
+    MemoryEntity,
     MemoryPilotDeployment,
     MemoryPilotDeploymentState,
     MemoryQueryLog,
@@ -267,6 +268,42 @@ class MemoryRetrievalAndAnswerTests(TestCase):
         self.assertEqual(plan.required_kind, MemoryClaimKind.DECISION)
         self.assertEqual(plan.requested_count, 5)
         self.assertTrue(plan.recency_priority)
+
+    def test_query_planner_matches_only_complete_meaningful_entity_phrases(self):
+        one_letter = MemoryEntity.objects.create(
+            organization=self.organization,
+            entity_type="project",
+            canonical_name="R",
+            normalized_name="r",
+            resolved_key="test-project-r",
+        )
+        pilot = MemoryEntity.objects.create(
+            organization=self.organization,
+            entity_type="project",
+            canonical_name="Project Atlas",
+            normalized_name="project atlas",
+            resolved_key="test-project-atlas",
+        )
+
+        broad_plan = plan_memory_query(
+            organization=self.organization,
+            authorization=self.authorization,
+            query="Summarise our five most recent decisions and explain what changed.",
+        )
+        explicit_plan = plan_memory_query(
+            organization=self.organization,
+            authorization=self.authorization,
+            query="What changed on Project Atlas?",
+        )
+        partial_plan = plan_memory_query(
+            organization=self.organization,
+            authorization=self.authorization,
+            query="What changed on the Project Atlases portfolio?",
+        )
+
+        self.assertNotIn(str(one_letter.pk), broad_plan.entity_ids)
+        self.assertEqual(explicit_plan.entity_ids, (str(pilot.pk),))
+        self.assertEqual(partial_plan.entity_ids, ())
 
     def test_retrieval_seed_suite(self):
         result = evaluate_retrieval_seed_suite()
