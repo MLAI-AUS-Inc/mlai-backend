@@ -77,6 +77,19 @@ ATTRIBUTED_TRANSCRIPT_PREFIX_RE = re.compile(
     r"^\s*(?:[-*]\s*)?[^:\n]{1,120}:\s*"
 )
 QUOTED_PROMPT_INJECTION_FLAG = "quoted_prompt_injection"
+LOW_INFORMATION_ENTITY_NAMES = {
+    "action",
+    "committee",
+    "decision",
+    "document",
+    "meeting",
+    "notes",
+    "programme",
+    "project",
+    "status",
+    "task",
+    "transcript",
+}
 
 
 class ExtractionError(RuntimeError):
@@ -307,6 +320,8 @@ def _entity_name_rejection_reason(value: str) -> Optional[str]:
         return "entity name contains no letters or numbers"
     if len(alphanumeric) < 2:
         return "single-character entity names are not durable identifiers"
+    if normalized in LOW_INFORMATION_ENTITY_NAMES:
+        return "generic entity names are not durable identifiers"
     return None
 
 

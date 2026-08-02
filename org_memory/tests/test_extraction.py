@@ -238,7 +238,19 @@ class MemoryExtractionTests(TestCase):
                         "canonical_name": "R",
                         "description": "Project reported as stalled.",
                         "external_refs": [],
-                    }
+                    },
+                    {
+                        "entity_type": "project",
+                        "canonical_name": "Project",
+                        "description": None,
+                        "external_refs": [],
+                    },
+                    {
+                        "entity_type": "project",
+                        "canonical_name": "---",
+                        "description": None,
+                        "external_refs": [],
+                    },
                 ],
                 "claims": [
                     {
@@ -277,8 +289,8 @@ class MemoryExtractionTests(TestCase):
 
         self.assertEqual(result["status"], MemoryExtractionStatus.EXTRACTED)
         self.assertEqual(result["claims_created"], 1)
-        self.assertEqual(result["entities_rejected"], 1)
-        self.assertFalse(MemoryEntity.objects.filter(canonical_name="R").exists())
+        self.assertEqual(result["entities_rejected"], 3)
+        self.assertFalse(MemoryEntity.objects.exists())
         claim = MemoryClaim.objects.get()
         self.assertIsNone(claim.subject_entity_id)
         self.assertEqual(claim.object_value, "stalled")

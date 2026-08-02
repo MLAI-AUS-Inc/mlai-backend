@@ -276,6 +276,7 @@ class MemoryRetrievalAndAnswerTests(TestCase):
             canonical_name="R",
             normalized_name="r",
             resolved_key="test-project-r",
+            external_refs={"linear": "R-123"},
         )
         pilot = MemoryEntity.objects.create(
             organization=self.organization,
@@ -284,6 +285,13 @@ class MemoryRetrievalAndAnswerTests(TestCase):
             normalized_name="project atlas",
             resolved_key="test-project-atlas",
             aliases=["Atlas"],
+        )
+        generic = MemoryEntity.objects.create(
+            organization=self.organization,
+            entity_type="project",
+            canonical_name="Project",
+            normalized_name="project",
+            resolved_key="test-generic-project",
         )
 
         broad_plan = plan_memory_query(
@@ -306,12 +314,24 @@ class MemoryRetrievalAndAnswerTests(TestCase):
             authorization=self.authorization,
             query="What is the latest Atlas status?",
         )
+        identifier_plan = plan_memory_query(
+            organization=self.organization,
+            authorization=self.authorization,
+            query="What changed on R-123?",
+        )
+        generic_plan = plan_memory_query(
+            organization=self.organization,
+            authorization=self.authorization,
+            query="What changed on the project?",
+        )
 
         self.assertNotIn(str(one_letter.pk), broad_plan.entity_ids)
         self.assertEqual(explicit_plan.entity_ids, (str(pilot.pk),))
         self.assertEqual(partial_plan.entity_ids, ())
         self.assertEqual(alias_plan.entity_ids, ())
         self.assertEqual(alias_plan.ranking_entity_ids, (str(pilot.pk),))
+        self.assertEqual(identifier_plan.entity_ids, (str(one_letter.pk),))
+        self.assertNotIn(str(generic.pk), generic_plan.entity_ids)
 
         pilot.metadata = {"retrieval_quarantined": True}
         pilot.save(update_fields=("metadata", "updated_at"))

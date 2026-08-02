@@ -88,6 +88,19 @@ _STOP_WORDS = {
     "who",
     "with",
 }
+_LOW_INFORMATION_ENTITY_NAMES = {
+    "action",
+    "committee",
+    "decision",
+    "document",
+    "meeting",
+    "notes",
+    "programme",
+    "project",
+    "status",
+    "task",
+    "transcript",
+}
 
 
 @dataclass(frozen=True)
@@ -214,9 +227,12 @@ def _contains_entity_phrase(
     entity_tokens = _entity_name_tokens(entity_name)
     if not entity_tokens:
         return False
-    # A single character is never a safe implicit entity scope. Explicit external
-    # identifiers are resolved outside this free-text name matcher.
-    if len(entity_tokens) == 1 and len(entity_tokens[0]) < 2:
+    alphanumeric = "".join(
+        character for token in entity_tokens for character in token if character.isalnum()
+    )
+    if len(alphanumeric) < 2:
+        return False
+    if len(entity_tokens) == 1 and entity_tokens[0] in _LOW_INFORMATION_ENTITY_NAMES:
         return False
     width = len(entity_tokens)
     return any(
@@ -226,7 +242,14 @@ def _contains_entity_phrase(
 
 
 def _entity_matches_query(entity: MemoryEntity, query_tokens: tuple[str, ...]) -> bool:
-    names = dict.fromkeys((entity.normalized_name, entity.canonical_name))
+    external_refs = entity.external_refs if isinstance(entity.external_refs, dict) else {}
+    names = dict.fromkeys(
+        (
+            entity.normalized_name,
+            entity.canonical_name,
+            *(str(value) for value in external_refs.values()),
+        )
+    )
     return any(_contains_entity_phrase(query_tokens, name) for name in names if name)
 
 
@@ -368,7 +391,14 @@ def plan_memory_query(
             organization=organization,
             merged_into__isnull=True,
             classification__in=allowed,
-        ).only("pk", "canonical_name", "normalized_name", "aliases", "metadata"):
+        ).only(
+            "pk",
+            "canonical_name",
+            "normalized_name",
+            "aliases",
+            "external_refs",
+            "metadata",
+        ):
             if (entity.metadata or {}).get("retrieval_quarantined") is True:
                 continue
             if _entity_matches_query(entity, query_tokens):
