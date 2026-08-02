@@ -50,6 +50,11 @@ urlpatterns = [
         api_views_reconciliation.ReconciliationProfitabilityReportView.as_view(),
         name='reconciliation_cashflow_report',
     ),
+    path(
+        'reconciliation/event-finance-audit',
+        api_views_reconciliation.ReconciliationEventFinanceAuditView.as_view(),
+        name='reconciliation_event_finance_audit',
+    ),
     path('reconciliation/payouts/correction-preview', api_views_reconciliation.ReconciliationPayoutCorrectionPreviewView.as_view(), name='reconciliation_payout_correction_preview'),
     path('reconciliation/payouts/<str:payout_id>/preview', api_views_reconciliation.ReconciliationPayoutPreviewView.as_view(), name='reconciliation_payout_preview'),
     path('reconciliation/payouts/<str:payout_id>/post', api_views_reconciliation.ReconciliationPayoutPostView.as_view(), name='reconciliation_payout_post'),

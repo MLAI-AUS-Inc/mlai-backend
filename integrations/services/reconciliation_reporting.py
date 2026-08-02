@@ -22,11 +22,55 @@ from integrations.services.xero_reconciliation import (
     _matching_xero_transactions,
     build_event_cashflow_validation,
     build_event_revenue_rollup,
+    fetch_xero_accounts,
     fetch_xero_bank_transactions,
 )
+from startup_updates.models import LumaEventSelection
 
 
 REPORT_VERSION = "reconciliation-profitability-v1"
+EVENT_FINANCE_AUDIT_VERSION = "reconciliation-event-finance-audit-v1"
+
+EVENT_FINANCE_CATEGORY_SPECS = (
+    {
+        "key": "ticket_sales",
+        "label": "Ticket sales",
+        "kind": "revenue",
+        "transaction_type": "RECEIVE",
+        "xero_account_type": "REVENUE",
+        "account_names": ("Ticket Sales",),
+    },
+    {
+        "key": "sponsorship_revenue",
+        "label": "Sponsorship revenue",
+        "kind": "revenue",
+        "transaction_type": "RECEIVE",
+        "xero_account_type": "REVENUE",
+        "account_names": (
+            "Sponsorships & Grants",
+            "Sponsorships and Grants",
+        ),
+    },
+    {
+        "key": "catering_cost",
+        "label": "Catering cost",
+        "kind": "cost",
+        "transaction_type": "SPEND",
+        "xero_account_type": "EXPENSE",
+        "account_names": (
+            "Catering / Food & Beverages",
+            "Catering / Food and Beverages",
+        ),
+    },
+    {
+        "key": "contractor_cost",
+        "label": "Contractor cost",
+        "kind": "cost",
+        "transaction_type": "SPEND",
+        "xero_account_type": "EXPENSE",
+        "account_names": ("Contractor Expenses",),
+    },
+)
 
 
 def _cents(value: Any) -> int:
@@ -167,6 +211,10 @@ def _source_for_xero_line(line: dict[str, Any]) -> dict[str, Any]:
         "date": line.get("date"),
         "transaction_type": str(line.get("transaction_type") or ""),
         "account_code": str(line.get("account_code") or ""),
+        "account_name": str(line.get("account_name") or ""),
+        "description": str(line.get("description") or ""),
+        "reference": str(line.get("reference") or ""),
+        "contact_name": str(line.get("contact_name") or ""),
         "signed_cents": int(line.get("signed_cents") or 0),
     }
 
@@ -442,6 +490,7 @@ def _build_period(
     stripe_records: list[StripePayoutReconciliation],
     bank_transactions: list[dict[str, Any]],
     humanitix_transfer_ids: set[str],
+    account_names_by_code: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     records = [
         record
@@ -462,6 +511,7 @@ def _build_period(
         period_start=period_start,
         period_end=period_end,
         excluded_transfer_transaction_ids=humanitix_transfer_ids,
+        account_names_by_code=account_names_by_code,
     )
     humanitix_revenue = _humanitix_revenue_rollup(
         organization=organization,
@@ -501,6 +551,7 @@ def build_reconciliation_profitability_report(
     period_start: date,
     period_end: date,
     bank_transactions: list[dict[str, Any]] | None = None,
+    account_names_by_code: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     profile = ReconciliationProfile.objects.select_related("xero_connection").get(
         organization=organization
@@ -535,6 +586,7 @@ def build_reconciliation_profitability_report(
         stripe_records=stripe_records,
         bank_transactions=bank_transactions,
         humanitix_transfer_ids=humanitix_transfer_ids,
+        account_names_by_code=account_names_by_code,
     )
     monthly = []
     for month_start, month_end in _month_periods(period_start, period_end):
@@ -546,6 +598,7 @@ def build_reconciliation_profitability_report(
             stripe_records=stripe_records,
             bank_transactions=bank_transactions,
             humanitix_transfer_ids=humanitix_transfer_ids,
+            account_names_by_code=account_names_by_code,
         )
         monthly.append(
             {
@@ -593,5 +646,378 @@ def build_reconciliation_profitability_report(
                 ).items()
             )
         ),
+        "xero_writes": False,
+    }
+
+
+def _resolved_event_finance_accounts(
+    accounts: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    available = []
+    for account in accounts:
+        if str(account.get("Status") or "").strip().upper() == "ARCHIVED":
+            continue
+        available.append(
+            {
+                "account_code": str(account.get("Code") or "").strip(),
+                "account_name": str(account.get("Name") or "").strip(),
+                "account_type": str(account.get("Type") or "").strip().upper(),
+            }
+        )
+
+    resolved = {}
+    for spec in EVENT_FINANCE_CATEGORY_SPECS:
+        match = None
+        for alias in spec["account_names"]:
+            match = next(
+                (
+                    account
+                    for account in available
+                    if account["account_name"].casefold() == alias.casefold()
+                    and (
+                        not account["account_type"]
+                        or account["account_type"] == spec["xero_account_type"]
+                    )
+                ),
+                None,
+            )
+            if match:
+                break
+        resolved[spec["key"]] = {
+            "account_code": match["account_code"] if match else "",
+            "account_name": match["account_name"] if match else "",
+            "account_type": match["account_type"] if match else "",
+            "match_basis": "exact_account_name" if match else "unresolved",
+        }
+    return resolved
+
+
+def _event_catalog(
+    *,
+    organization,
+    period_start: date,
+    period_end: date,
+) -> dict[str, dict[str, Any]]:
+    mappings = {
+        (mapping.source_type, mapping.source_id): mapping
+        for mapping in ReconciliationMapping.objects.filter(
+            organization=organization,
+            source_type__in=(
+                ReconciliationMapping.SOURCE_LUMA_EVENT,
+                ReconciliationMapping.SOURCE_HUMANITIX_EVENT,
+            ),
+            active=True,
+        )
+    }
+    events: dict[str, dict[str, Any]] = {}
+
+    def add_event(
+        *,
+        source_type: str,
+        source_id: str,
+        event_name: str,
+        event_url: str,
+        start_at,
+        extra: dict[str, Any],
+    ) -> None:
+        mapping = mappings.get((source_type, source_id))
+        canonical_name = str(
+            mapping.event_tracking_option_name if mapping else event_name
+        ).strip()
+        if not canonical_name:
+            return
+        key = canonical_name.casefold()
+        row = events.setdefault(
+            key,
+            {
+                "event_name": canonical_name,
+                "start_at": None,
+                "source_catalogs": [],
+                "discovery_sources": [],
+                "financial_sources": [],
+            },
+        )
+        start_at_text = start_at.isoformat() if start_at else None
+        if start_at_text and (
+            not row["start_at"] or start_at_text < row["start_at"]
+        ):
+            row["start_at"] = start_at_text
+        catalog_entry = {
+            "source_type": source_type,
+            "source_id": source_id,
+            "source_event_name": event_name,
+            "event_url": event_url,
+            "start_at": start_at_text,
+            "mapping_status": "approved" if mapping else "missing",
+            **extra,
+        }
+        if not any(
+            item["source_type"] == source_type and item["source_id"] == source_id
+            for item in row["source_catalogs"]
+        ):
+            row["source_catalogs"].append(catalog_entry)
+        if source_type not in row["discovery_sources"]:
+            row["discovery_sources"].append(source_type)
+
+    for event in LumaEventSelection.objects.filter(
+        organization=organization,
+        selected=True,
+        start_at__date__gte=period_start,
+        start_at__date__lte=period_end,
+    ).order_by("start_at", "event_id"):
+        add_event(
+            source_type=ReconciliationMapping.SOURCE_LUMA_EVENT,
+            source_id=event.event_id,
+            event_name=event.event_name,
+            event_url=event.event_url,
+            start_at=event.start_at,
+            extra={"selected": True},
+        )
+
+    for event in HumanitixEvent.objects.filter(
+        organization=organization,
+        start_at__date__gte=period_start,
+        start_at__date__lte=period_end,
+    ).order_by("start_at", "external_event_id"):
+        add_event(
+            source_type=ReconciliationMapping.SOURCE_HUMANITIX_EVENT,
+            source_id=event.external_event_id,
+            event_name=event.event_name,
+            event_url=event.event_url,
+            start_at=event.start_at,
+            extra={
+                "published": event.published,
+                "archived": event.archived,
+            },
+        )
+    return events
+
+
+def _event_finance_evidence(
+    source: dict[str, Any],
+    *,
+    category_key: str,
+    resolved_account: dict[str, Any],
+) -> dict[str, Any] | None:
+    source_type = str(source.get("source_type") or "")
+    if (
+        category_key == "ticket_sales"
+        and source_type
+        in {
+            ReconciliationMapping.SOURCE_LUMA_EVENT,
+            ReconciliationMapping.SOURCE_HUMANITIX_EVENT,
+        }
+        and int(source.get("gross_cents") or 0) > 0
+    ):
+        return {
+            "source_type": source_type,
+            "source_id": str(source.get("source_id") or ""),
+            "amount_cents": int(source.get("gross_cents") or 0),
+            "amount_basis": "provider_gross_ticket_sales",
+            "payout_ids": list(source.get("payout_ids") or []),
+            "payout_references": list(source.get("payout_references") or []),
+        }
+
+    if source_type != "xero_bank_transaction_line":
+        return None
+    expected_code = str(resolved_account.get("account_code") or "").casefold()
+    if not expected_code or str(source.get("account_code") or "").casefold() != expected_code:
+        return None
+    spec = next(
+        item for item in EVENT_FINANCE_CATEGORY_SPECS if item["key"] == category_key
+    )
+    if str(source.get("transaction_type") or "").upper() != spec["transaction_type"]:
+        return None
+    return {
+        "source_type": source_type,
+        "source_id": str(source.get("source_id") or ""),
+        "bank_transaction_id": str(source.get("bank_transaction_id") or ""),
+        "date": source.get("date"),
+        "transaction_type": str(source.get("transaction_type") or ""),
+        "account_code": str(source.get("account_code") or ""),
+        "account_name": str(
+            source.get("account_name")
+            or resolved_account.get("account_name")
+            or ""
+        ),
+        "amount_cents": abs(int(source.get("signed_cents") or 0)),
+        "amount_basis": "tracked_xero_bank_transaction_line",
+        "description": str(source.get("description") or ""),
+        "reference": str(source.get("reference") or ""),
+        "contact_name": str(source.get("contact_name") or ""),
+    }
+
+
+def build_reconciliation_event_finance_audit(
+    *,
+    organization,
+    period_start: date,
+    period_end: date,
+    bank_transactions: list[dict[str, Any]] | None = None,
+    accounts: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Audit expected event revenue/cost categories using provider and Xero evidence."""
+    profile = ReconciliationProfile.objects.select_related("xero_connection").get(
+        organization=organization
+    )
+    bank_transactions = (
+        fetch_xero_bank_transactions(profile)
+        if bank_transactions is None
+        else bank_transactions
+    )
+    accounts = fetch_xero_accounts(profile) if accounts is None else accounts
+    resolved_accounts = _resolved_event_finance_accounts(accounts)
+    account_names_by_code = {
+        str(account.get("Code") or "").strip(): str(account.get("Name") or "").strip()
+        for account in accounts
+        if str(account.get("Code") or "").strip()
+    }
+    profitability = build_reconciliation_profitability_report(
+        organization=organization,
+        period_start=period_start,
+        period_end=period_end,
+        bank_transactions=bank_transactions,
+        account_names_by_code=account_names_by_code,
+    )
+    events = _event_catalog(
+        organization=organization,
+        period_start=period_start,
+        period_end=period_end,
+    )
+
+    for dimension in profitability.get("dimensions", {}).get("events", []):
+        event_name = str(dimension.get("dimension_name") or "").strip()
+        if not event_name:
+            continue
+        row = events.setdefault(
+            event_name.casefold(),
+            {
+                "event_name": event_name,
+                "start_at": None,
+                "source_catalogs": [],
+                "discovery_sources": [],
+                "financial_sources": [],
+            },
+        )
+        row["financial_sources"].extend(dimension.get("sources") or [])
+        for source in dimension.get("sources") or []:
+            source_type = str(source.get("source_type") or "")
+            discovery_source = (
+                "xero_tracking"
+                if source_type == "xero_bank_transaction_line"
+                else source_type
+            )
+            if discovery_source and discovery_source not in row["discovery_sources"]:
+                row["discovery_sources"].append(discovery_source)
+
+    missing_counts = Counter()
+    output_events = []
+    for row in events.values():
+        categories = {}
+        present_categories = []
+        missing_categories = []
+        for spec in EVENT_FINANCE_CATEGORY_SPECS:
+            evidence = [
+                item
+                for item in (
+                    _event_finance_evidence(
+                        source,
+                        category_key=spec["key"],
+                        resolved_account=resolved_accounts[spec["key"]],
+                    )
+                    for source in row["financial_sources"]
+                )
+                if item is not None
+            ]
+            status = "present" if evidence else "missing"
+            categories[spec["key"]] = {
+                "label": spec["label"],
+                "kind": spec["kind"],
+                "status": status,
+                "evidence_count": len(evidence),
+                "evidence": evidence,
+            }
+            if evidence:
+                present_categories.append(spec["key"])
+            else:
+                missing_categories.append(spec["key"])
+                missing_counts[spec["key"]] += 1
+        output_events.append(
+            {
+                "event_name": row["event_name"],
+                "start_at": row["start_at"],
+                "source_catalogs": sorted(
+                    row["source_catalogs"],
+                    key=lambda item: (item["source_type"], item["source_id"]),
+                ),
+                "discovery_sources": sorted(row["discovery_sources"]),
+                "categories": categories,
+                "present_categories": present_categories,
+                "missing_categories": missing_categories,
+                "completeness_status": (
+                    "complete" if not missing_categories else "incomplete"
+                ),
+                "evidence_flags": sorted(
+                    {
+                        flag
+                        for source in row["financial_sources"]
+                        for flag in source.get("validation_flags") or []
+                    }
+                ),
+            }
+        )
+    output_events.sort(
+        key=lambda item: (
+            item["start_at"] is None,
+            item["start_at"] or "",
+            item["event_name"].casefold(),
+        )
+    )
+    complete_count = sum(
+        item["completeness_status"] == "complete" for item in output_events
+    )
+    unresolved_categories = [
+        key
+        for key, account in resolved_accounts.items()
+        if account["match_basis"] == "unresolved"
+    ]
+    return {
+        "schema_version": 1,
+        "audit_version": EVENT_FINANCE_AUDIT_VERSION,
+        "audit_type": "event_finance_completeness",
+        "period_start": period_start.isoformat(),
+        "period_end": period_end.isoformat(),
+        "required_categories": [
+            {
+                "key": spec["key"],
+                "label": spec["label"],
+                "kind": spec["kind"],
+            }
+            for spec in EVENT_FINANCE_CATEGORY_SPECS
+        ],
+        "resolved_accounts": resolved_accounts,
+        "account_resolution_warnings": unresolved_categories,
+        "events": output_events,
+        "summary": {
+            "event_count": len(output_events),
+            "complete_count": complete_count,
+            "incomplete_count": len(output_events) - complete_count,
+            "missing_counts": {
+                spec["key"]: missing_counts.get(spec["key"], 0)
+                for spec in EVENT_FINANCE_CATEGORY_SPECS
+            },
+        },
+        "evidence_basis": (
+            "Ticket sales are present when Luma/Humanitix-linked Stripe revenue or "
+            "a tracked Xero Ticket Sales receipt exists. Other categories require "
+            "tracked Xero bank-transaction lines on the resolved chart-of-accounts code."
+        ),
+        "limitations": [
+            "Missing means no tracked evidence was found in this period; it does not prove the event had no such revenue or cost.",
+            "Bills and journals absent from Xero bank transactions are not included.",
+            "Untracked Xero lines cannot be assigned to an event.",
+            "Humanitix historical costs may be incomplete.",
+            "Category evidence amounts are source observations and must not be added across provider and Xero views.",
+        ],
         "xero_writes": False,
     }
