@@ -16,6 +16,7 @@ from integrations.models import (
     StripePayoutReconciliation,
 )
 from integrations.services.xero_statement_reconciliation import build_statement_reconciliation_context
+from integrations.services.reconciliation_catalogs import build_reconciliation_catalog_status
 from startup_updates.models import LinearProjectArtifact, LinearProjectSelection, LumaEventSelection
 
 
@@ -294,6 +295,7 @@ def build_reconciliation_enrichment_context(*, organization, run_id: str = "") -
     statement_context = build_statement_reconciliation_context(
         organization=organization,
         luma_events=luma_events,
+        humanitix_events=humanitix_events,
         linear_projects=linear_projects,
     )
     return {
@@ -312,6 +314,9 @@ def build_reconciliation_enrichment_context(*, organization, run_id: str = "") -
         "luma_events": luma_events,
         "humanitix_events": humanitix_events,
         "linear_projects": linear_projects,
+        "catalog_status": build_reconciliation_catalog_status(
+            organization=organization
+        ),
         **statement_context,
     }
 
@@ -319,7 +324,10 @@ def build_reconciliation_enrichment_context(*, organization, run_id: str = "") -
 def save_reconciliation_suggestions(
     *, organization, run_id: str, suggestions: list[dict[str, Any]], model_name: str = ""
 ) -> list[ReconciliationSuggestion]:
-    event_by_id = {event["source_id"]: event for event in _luma_events(organization)}
+    event_by_key = {
+        (event["source_type"], event["source_id"]): event
+        for event in [*_luma_events(organization), *_humanitix_events(organization)]
+    }
     project_by_id = {project["source_id"]: project for project in _linear_projects(organization)}
     payout_by_id = {
         record.payout_id: record
@@ -346,11 +354,18 @@ def save_reconciliation_suggestions(
 
             event_payload = item.get("event") if isinstance(item.get("event"), dict) else {}
             event_id = str(event_payload.get("source_id") or "").strip()
+            event_source_type = str(event_payload.get("source_type") or "").strip()
             if not event_id and source_type == ReconciliationMapping.SOURCE_LUMA_EVENT:
                 event_id = source_id
-            event = event_by_id.get(event_id) if event_id else None
+                event_source_type = "luma"
+            if not event_id and source_type == ReconciliationMapping.SOURCE_HUMANITIX_EVENT:
+                event_id = source_id
+                event_source_type = "humanitix"
+            if event_id and event_source_type not in {"luma", "humanitix"}:
+                raise ValueError(f"Unknown event source: {event_source_type}")
+            event = event_by_key.get((event_source_type, event_id)) if event_id else None
             if event_id and event is None:
-                raise ValueError(f"Unknown Luma event: {event_id}")
+                raise ValueError(f"Unknown {event_source_type} event: {event_id}")
 
             project_payload = item.get("project") if isinstance(item.get("project"), dict) else {}
             project_id = str(project_payload.get("source_id") or "").strip()
@@ -386,7 +401,7 @@ def save_reconciliation_suggestions(
                 continue
             defaults = {
                 "source_label": source["source_label"][:500],
-                "event_source_type": "luma" if event else "",
+                "event_source_type": event_source_type if event else "",
                 "event_source_id": event_id if event else "",
                 "event_tracking_option_name": str(event.get("name") if event else "")[:255],
                 "project_source_type": "linear" if project else "",

@@ -17,6 +17,9 @@ from integrations.models import (
 from integrations.services.xero_statement_reconciliation import (
     build_statement_reconciliation_context,
 )
+from integrations.services.reconciliation_catalogs import (
+    build_reconciliation_catalog_status,
+)
 from startup_updates.models import (
     LinearProjectArtifact,
     LinearProjectSelection,
@@ -163,6 +166,7 @@ def build_learning_candidates(*, organization) -> list[dict[str, Any]]:
         if item.project_name:
             project_ids.setdefault(item.project_name.casefold(), item.linear_project_id)
     review_states = _candidate_review_states(organization=organization)
+    catalog_status = build_reconciliation_catalog_status(organization=organization)
     results = []
     for (merchant, direction), merchant_examples in sorted(grouped.items()):
         fingerprints = Counter(
@@ -221,6 +225,7 @@ def build_learning_candidates(*, organization) -> list[dict[str, Any]]:
         candidate_id = _stable_hash(candidate_basis)[:32]
         candidate_version = _stable_hash({
             "candidate": candidate_basis,
+            "catalog_source_hashes": catalog_status["source_hashes"],
             "example_statement_line_ids": example_line_ids,
             "confirmed_example_count": len(merchant_examples),
             "first_confirmed_date": first_confirmed_date,
@@ -294,6 +299,7 @@ def build_learning_candidates(*, organization) -> list[dict[str, Any]]:
         candidate = {
             "candidate_id": candidate_id,
             "candidate_version": candidate_version,
+            "catalog_source_hashes": catalog_status["source_hashes"],
             "merchant_key": merchant,
             "direction": direction,
             "confirmed_example_count": len(merchant_examples),

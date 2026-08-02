@@ -14,6 +14,7 @@ from integrations.models import (
     ExternalServiceConnection,
     ExternalServiceProvider,
     GoogleConnection,
+    HumanitixEvent,
     ReconciliationMapping,
     ReconciliationDecision,
     ReconciliationPartyIdentity,
@@ -53,6 +54,9 @@ from integrations.services.reconciliation_context import (
     build_reconciliation_enrichment_context,
     save_reconciliation_suggestions,
 )
+from integrations.services.reconciliation_catalogs import (
+    build_reconciliation_catalog_status,
+)
 from integrations.services.xero_statement_reconciliation import (
     build_statement_reconciliation_context,
     format_statement_browser_comment,
@@ -87,6 +91,18 @@ class StripeAttributionTests(SimpleTestCase):
             confidence=0.92,
         )
         self.assertEqual(comment, "Uber trip. Confidence: 92%.")
+
+    def test_browser_comment_skips_generic_text_and_appends_confidence_once(self):
+        comment = format_statement_browser_comment(
+            description="Unreconciled bank statement line. Confidence: 20%.",
+            review_note="Likely for Demo Night because the venue appears on the receipt.",
+            confidence=0.81,
+        )
+        self.assertEqual(
+            comment,
+            "Likely for Demo Night because the venue appears on the receipt. Confidence: 81%.",
+        )
+        self.assertEqual(comment.count("Confidence:"), 1)
 
     def test_malformed_api_version_env_is_repaired(self):
         service = ReconciliationReportService(
@@ -139,7 +155,14 @@ class StripeAttributionTests(SimpleTestCase):
                 self.assertEqual(params["payment[payment_intent]"], "pi_invoice")
                 return {"data": [{"id": "ip_1", "invoice": "in_1"}], "has_more": False}
             if path == "/v1/invoices/in_1":
-                return {"id": "in_1", "lines": {"data": [{"description": "MLAI Studio Pro"}]}}
+                return {
+                    "id": "in_1",
+                    "subscription": "sub_1",
+                    "lines": {"data": [{
+                        "description": "MLAI Studio Pro",
+                        "price": {"product": "prod_studio"},
+                    }]},
+                }
             if path == "/v1/payment_intents/pi_luma":
                 return {"id": "pi_luma", "description": "Luma Night", "metadata": {"event_api_id": "evt_2"}}
             raise AssertionError(path)
@@ -156,8 +179,76 @@ class StripeAttributionTests(SimpleTestCase):
         payout = report["payouts"][0]
         self.assertEqual(payout["revenue_groups"][0]["source_type"], "stripe_invoice")
         self.assertEqual(payout["revenue_groups"][0]["source_id"], "in_1")
+        self.assertEqual(payout["revenue_groups"][0]["stripe_invoice_ids"], ["in_1"])
+        self.assertEqual(
+            payout["revenue_groups"][0]["stripe_invoice_payment_ids"],
+            ["ip_1"],
+        )
+        self.assertEqual(
+            payout["revenue_groups"][0]["stripe_payment_intent_ids"],
+            ["pi_invoice"],
+        )
+        self.assertEqual(
+            payout["revenue_groups"][0]["stripe_product_ids"],
+            ["prod_studio"],
+        )
+        self.assertEqual(
+            payout["revenue_groups"][0]["stripe_subscription_ids"],
+            ["sub_1"],
+        )
         self.assertEqual(payout["refunds"][0]["source_id"], "evt_2")
+        self.assertEqual(payout["refunds"][0]["stripe_payment_intent_id"], "pi_luma")
         self.assertFalse(any("Tie-out mismatch" in warning for warning in payout["warnings"]))
+
+    def test_product_metadata_preserves_immutable_product_lineage(self):
+        def handler(path, params):
+            if path == "/v1/payouts":
+                return {
+                    "data": [{
+                        "id": "po_product",
+                        "amount": 9700,
+                        "currency": "aud",
+                        "arrival_date": 1_780_600_000,
+                        "status": "paid",
+                    }],
+                    "has_more": False,
+                }
+            if path == "/v1/balance_transactions":
+                return {
+                    "data": [{
+                        "id": "bt_product",
+                        "type": "payment",
+                        "amount": 10000,
+                        "fee": 300,
+                        "net": 9700,
+                        "currency": "aud",
+                        "source": {
+                            "id": "py_product",
+                            "description": "Studio subscription",
+                            "metadata": {
+                                "product_id": "prod_studio",
+                                "subscription_id": "sub_studio",
+                            },
+                        },
+                    }],
+                    "has_more": False,
+                }
+            raise AssertionError(path)
+
+        report = ReconciliationReportService(
+            stripe_api_key="rk_test",
+            base_url="https://stripe.test",
+            session=FakeSession(handler),
+        ).build_report(
+            since=datetime(2026, 6, 1, tzinfo=timezone.utc),
+            until=datetime(2026, 7, 1, tzinfo=timezone.utc),
+            include_workbook=False,
+        )
+        group = report["payouts"][0]["revenue_groups"][0]
+        self.assertEqual(group["source_type"], "stripe_product")
+        self.assertEqual(group["source_id"], "prod_studio")
+        self.assertEqual(group["stripe_product_ids"], ["prod_studio"])
+        self.assertEqual(group["stripe_subscription_ids"], ["sub_studio"])
 
 
 class XeroReconciliationWorkflowTests(TestCase):
@@ -439,6 +530,20 @@ class XeroReconciliationWorkflowTests(TestCase):
                         }],
                     }],
                 },
+                {
+                    "BankTransactionID": "humanitix-payout-transfer",
+                    "Type": "RECEIVE",
+                    "Status": "AUTHORISED",
+                    "DateString": "2026-05-05",
+                    "LineItems": [{
+                        "UnitAmount": 500.00,
+                        "Quantity": 1,
+                        "Tracking": [{
+                            "Name": "Event Name",
+                            "Option": "Luma Night",
+                        }],
+                    }],
+                },
             ],
             payout_previews=[{
                 "existing_transactions": [{
@@ -448,6 +553,7 @@ class XeroReconciliationWorkflowTests(TestCase):
             profile=self.profile,
             period_start=date(2026, 1, 1),
             period_end=date(2026, 6, 30),
+            excluded_transfer_transaction_ids={"humanitix-payout-transfer"},
         )
         row = validation["rows"][0]
         self.assertEqual(row["xero_other_income_cents"], 10000)
@@ -462,6 +568,17 @@ class XeroReconciliationWorkflowTests(TestCase):
         self.assertEqual(validation["negative_count"], 1)
         self.assertEqual(validation["period_start"], "2026-01-01")
         self.assertEqual(validation["period_end"], "2026-06-30")
+        self.assertEqual(
+            {
+                item["bank_transaction_id"]
+                for item in validation["excluded_payout_transfer_lines"]
+            },
+            {"stripe-payout", "humanitix-payout-transfer"},
+        )
+        self.assertEqual(
+            {item["bank_transaction_id"] for item in row["xero_lines"]},
+            {"sponsor-income", "event-cost"},
+        )
         self.assertEqual(
             validation["unmatched_xero_tracking"][0]["event_name"],
             "Costs Only Event",
@@ -631,15 +748,15 @@ class XeroReconciliationWorkflowTests(TestCase):
                 post_xero_bank_transaction(record, approved_by_slack_id="UFIN")
         put_mock.assert_not_called()
 
-    def test_standalone_fee_requires_project_tracking(self):
+    def test_standalone_fee_allows_blank_or_verified_project_tracking(self):
         report = deepcopy(self.report)
         payout = report["payouts"][0]
         payout["deposit_cents"] = 9100
         payout["standalone_fee_cents"] = 100
         record = persist_report(organization=self.organization, report=report, stripe_account_id="acct_main")[0]
         preview = build_xero_preview(record)
-        self.assertFalse(preview["ready"])
-        self.assertTrue(any("standalone Stripe fees" in error for error in preview["errors"]))
+        self.assertTrue(preview["ready"])
+        self.assertEqual(preview["xero_payload"]["LineItems"][2].get("Tracking"), None)
 
         self.profile.standalone_fee_project_option_name = "Stripe General"
         self.profile.save(update_fields=["standalone_fee_project_option_name", "updated_at"])
@@ -647,6 +764,50 @@ class XeroReconciliationWorkflowTests(TestCase):
         self.assertTrue(preview["ready"])
         self.assertEqual(preview["line_total_cents"], 9100)
         self.assertEqual(preview["xero_payload"]["LineItems"][2]["Tracking"][0]["Option"], "Stripe General")
+
+    def test_correction_preview_ignores_deleted_transaction_and_allows_replacement(self):
+        record = persist_report(
+            organization=self.organization,
+            report=self.report,
+            stripe_account_id="acct_main",
+        )[0]
+        preview = build_xero_correction_preview(
+            record,
+            bank_transactions=[{
+                "BankTransactionID": "deleted-legacy-1",
+                "Type": "RECEIVE",
+                "Reference": "po_ledger",
+                "DateString": "2026-07-10",
+                "Total": 92.00,
+                "Status": "DELETED",
+                "BankAccount": {"AccountID": "bank-1"},
+                "LineItems": [],
+            }],
+        )
+        self.assertEqual(preview["classification"], "missing_xero_transaction")
+        self.assertTrue(preview["automatic_action_allowed"])
+        self.assertEqual(
+            preview["ignored_inactive_transactions"][0]["bank_transaction_id"],
+            "deleted-legacy-1",
+        )
+
+    def test_payout_preview_hash_rejects_stale_post(self):
+        record = persist_report(
+            organization=self.organization,
+            report=self.report,
+            stripe_account_id="acct_main",
+        )[0]
+        preview = build_xero_preview(record)
+        self.assertEqual(len(preview["payload_hash"]), 64)
+        with self.assertRaisesMessage(
+            ReconciliationValidationError,
+            "preview changed after review",
+        ):
+            post_xero_bank_transaction(
+                record,
+                approved_by_slack_id="UFIN",
+                expected_payload_hash="f" * 64,
+            )
 
     def test_monthly_context_suggestion_adds_linear_project_and_review_note(self):
         record = persist_report(organization=self.organization, report=self.report, stripe_account_id="acct_main")[0]
@@ -786,6 +947,9 @@ class XeroReconciliationWorkflowTests(TestCase):
             "ready-uber",
         )
         self.assertEqual(candidates["blank-bill"]["matching_xero_bills"][0]["xero_bill_id"], "bill-print-locker")
+        self.assertTrue(
+            candidates["blank-bill"]["matching_xero_bills"][0]["exact_outstanding_match"]
+        )
 
         saved = save_statement_suggestions(
             organization=self.organization,
@@ -1250,6 +1414,109 @@ class XeroReconciliationWorkflowTests(TestCase):
             "email": "hello@luiz-flavio.com",
             "membership_source": "direct",
         }])
+
+    def test_humanitix_event_keeps_its_source_provenance_in_statement_and_payout_suggestions(self):
+        humanitix_connection = ExternalServiceConnection.objects.create(
+            provider=ExternalServiceProvider.HUMANITIX,
+            user=self.user,
+            organization=self.organization,
+            access_token="humanitix-token",
+            external_account_id="humanitix-main",
+        )
+        HumanitixEvent.objects.create(
+            organization=self.organization,
+            connection=humanitix_connection,
+            external_event_id="htx-historical-1",
+            event_name="Historical Demo Day",
+            start_at=datetime(2026, 7, 20, 18, 0, tzinfo=timezone.utc),
+        )
+        line = import_xero_statement_lines(
+            organization=self.organization,
+            bank_account_id="bank-1",
+            lines=[{
+                "statement_line_id": "humanitix-taxi-1",
+                "date": "19 Jul 2026",
+                "narration": "TAXI FIXTURE",
+                "direction": "debit",
+                "amount": "24.00",
+            }],
+        )[0]
+
+        context = build_reconciliation_enrichment_context(organization=self.organization)
+        candidate = next(
+            item for item in context["statement_candidates"]
+            if item["statement_line_id"] == line.statement_line_id
+        )
+        humanitix_event = next(
+            item for item in candidate["nearby_events"]
+            if item["source_id"] == "htx-historical-1"
+        )
+        self.assertEqual(humanitix_event["source_type"], "humanitix")
+
+        statement = save_statement_suggestions(
+            organization=self.organization,
+            run_id="humanitix-statement-run",
+            suggestions=[{
+                "statement_line_id": line.statement_line_id,
+                "proposed_action": "needs_review",
+                "description": "Taxi near Historical Demo Day.",
+                "event": {
+                    "source_type": "humanitix",
+                    "source_id": "htx-historical-1",
+                },
+                "allocation_confidence": 0.8,
+                "evidence": [{
+                    "source_provider": "humanitix",
+                    "source_record_id": "htx-historical-1",
+                }],
+            }],
+        )[0]
+        self.assertEqual(statement.event_source_type, "humanitix")
+        self.assertEqual(
+            serialize_statement_suggestion(statement)["event"],
+            {
+                "source_type": "humanitix",
+                "source_id": "htx-historical-1",
+                "tracking_option_name": "Historical Demo Day",
+            },
+        )
+
+        payout = StripePayoutReconciliation.objects.create(
+            organization=self.organization,
+            payout_id="po_humanitix_stripe",
+            source_hash="h" * 64,
+            amount_cents=1000,
+            currency="AUD",
+            report_payload={
+                "revenue_groups": [{
+                    "source_type": "humanitix_event",
+                    "source_id": "htx-historical-1",
+                    "source_label": "Historical Demo Day",
+                    "gross_cents": 1000,
+                    "stripe_fee_cents": 0,
+                }],
+            },
+        )
+        suggestion = save_reconciliation_suggestions(
+            organization=self.organization,
+            run_id="humanitix-payout-run",
+            suggestions=[{
+                "payout_id": payout.payout_id,
+                "source_type": "humanitix_event",
+                "source_id": "htx-historical-1",
+                "event": {
+                    "source_type": "humanitix",
+                    "source_id": "htx-historical-1",
+                },
+                "confidence": 0.9,
+                "evidence": [{
+                    "source_provider": "humanitix",
+                    "source_record_id": "htx-historical-1",
+                }],
+            }],
+        )[0]
+        self.assertEqual(suggestion.event_source_type, "humanitix")
+        self.assertEqual(suggestion.event_tracking_option_name, "Historical Demo Day")
 
     def test_verified_party_identity_is_supplied_to_statement_agent(self):
         line = import_xero_statement_lines(
@@ -1851,6 +2118,45 @@ class ReconciliationWorkflowApiTests(APITestCase):
         )
 
     @patch("core.permissions.HasRooApiKey.has_permission", return_value=True)
+    def test_reconciliation_readiness_reports_catalog_drift(self, _permission):
+        initial = build_reconciliation_catalog_status(organization=self.organization)
+        ContentFactoryRun.objects.create(
+            run_id="catalog-drift-run",
+            workflow="xero_reconciliation_agent",
+            domain=self.organization.domain,
+            organization=self.organization,
+            run_request={"catalog_source_hashes": initial["source_hashes"]},
+        )
+        connection = ExternalServiceConnection.objects.create(
+            provider=ExternalServiceProvider.LINEAR,
+            user=self.user,
+            organization=self.organization,
+            access_token="linear-catalog-token",
+            external_account_id="linear-catalog-drift",
+        )
+        LinearProjectArtifact.objects.create(
+            connection=connection,
+            organization=self.organization,
+            linear_project_id="catalog-project-new",
+            name="New project after run start",
+        )
+
+        response = self.client.get(
+            reverse("reconciliation_readiness"),
+            {"slack_user_id": "UADMIN", "domain": "mlai.au"},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data["catalog_status"]["drift_detected"])
+        self.assertEqual(
+            response.data["catalog_status"]["changed_catalogs"],
+            ["linear_projects"],
+        )
+        self.assertTrue(
+            any("Entity catalogs changed" in item for item in response.data["warnings"])
+        )
+
+    @patch("core.permissions.HasRooApiKey.has_permission", return_value=True)
     def test_reconciliation_readiness_confirms_fresh_context_and_xero_scopes(self, _permission):
         connection = ExternalServiceConnection.objects.create(
             provider=ExternalServiceProvider.XERO,
@@ -1982,6 +2288,21 @@ class ReconciliationWorkflowApiTests(APITestCase):
                 "bank_account_id": "bank-1",
                 "expected_count": 1,
                 "complete": True,
+                "capture_metadata": {
+                    "schema_version": 1,
+                    "scan_id": "scan-redacted-api-001",
+                    "source_started_at": "2026-07-18T01:00:00Z",
+                    "source_completed_at": "2026-07-18T01:01:00Z",
+                    "pages": [{
+                        "page_number": 1,
+                        "page_count": 1,
+                        "observed_count": 1,
+                        "has_previous": False,
+                        "has_next": False,
+                    }],
+                    "derived_complete": True,
+                    "blocking_reasons": [],
+                },
                 "lines": [{
                     "statement_line_id": "api-prefilled-luiz",
                     "date": "30 Jun 2026",
@@ -2002,9 +2323,25 @@ class ReconciliationWorkflowApiTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertEqual(response.data["scan"]["status"], XeroStatementScan.STATUS_COMPLETE)
         self.assertEqual(
+            response.data["scan"]["capture_metadata"]["scan_id"],
+            "scan-redacted-api-001",
+        )
+        self.assertTrue(response.data["scan"]["capture_metadata"]["derived_complete"])
+        self.assertEqual(
             response.data["statement_lines"][0]["ui_mode"],
             XeroStatementLineSnapshot.UI_CREATE_PREFILLED,
         )
+
+    def test_statement_scan_capture_metadata_rejects_credentials(self):
+        with self.assertRaisesMessage(ValueError, "forbidden sensitive field"):
+            import_xero_statement_lines(
+                organization=self.organization,
+                bank_account_id="bank-1",
+                lines=[],
+                expected_count=None,
+                complete_scan=False,
+                capture_metadata={"refresh_token": "must-never-be-stored"},
+            )
 
     @patch("core.permissions.HasRooApiKey.has_permission", return_value=True)
     def test_admin_can_verify_bank_to_xero_party_identity(self, _permission):
@@ -2028,6 +2365,8 @@ class ReconciliationWorkflowApiTests(APITestCase):
                 "statement_line_id": line.statement_line_id,
                 "canonical_name": "Luiz Flavio",
                 "xero_contact_name": "Luiz F Oliveira Araujo",
+                "status": "verified",
+                "confirm": True,
             },
             format="json",
         )
@@ -2035,6 +2374,38 @@ class ReconciliationWorkflowApiTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["identity"]["status"], "verified")
         self.assertEqual(response.data["identity"]["verified_by_slack_id"], "UADMIN")
+
+    @patch("core.permissions.HasRooApiKey.has_permission", return_value=True)
+    def test_identity_proposal_is_inactive_until_explicit_verification(self, _permission):
+        proposed = self.client.put(
+            reverse("reconciliation_party_identities"),
+            {
+                "slack_user_id": "UADMIN",
+                "domain": "mlai.au",
+                "bank_narration_key": "redacted contractor",
+                "direction": "debit",
+                "canonical_name": "Redacted Contractor",
+                "status": "proposed",
+            },
+            format="json",
+        )
+        unconfirmed = self.client.put(
+            reverse("reconciliation_party_identities"),
+            {
+                "slack_user_id": "UADMIN",
+                "domain": "mlai.au",
+                "bank_narration_key": "redacted contractor",
+                "direction": "debit",
+                "canonical_name": "Redacted Contractor",
+                "status": "verified",
+            },
+            format="json",
+        )
+
+        self.assertEqual(proposed.status_code, status.HTTP_200_OK)
+        self.assertEqual(proposed.data["identity"]["status"], "proposed")
+        self.assertFalse(proposed.data["identity"]["active"])
+        self.assertEqual(unconfirmed.status_code, status.HTTP_400_BAD_REQUEST)
 
     @patch("core.permissions.HasRooApiKey.has_permission", return_value=True)
     def test_admin_can_create_confirmed_date_bounded_reconciliation_rule(self, _permission):
@@ -2211,6 +2582,42 @@ class ReconciliationWorkflowApiTests(APITestCase):
         )
 
     @patch("core.permissions.HasRooApiKey.has_permission", return_value=True)
+    def test_agent_run_decision_rejects_hashes_that_differ_from_reviewed_preview(self, _permission):
+        run, suggestion = self._agent_run_suggestion(
+            run_id="xero-agent-hash-bound",
+            line_id="agent-hash-bound-line",
+        )
+        preview = self.client.get(
+            reverse("reconciliation_agent_run_preview", kwargs={"run_id": run.run_id}),
+            {"slack_user_id": "UADMIN", "domain": "mlai.au"},
+        ).data["results"][0]
+
+        response = self.client.post(
+            reverse("reconciliation_agent_run_decisions", kwargs={"run_id": run.run_id}),
+            {
+                "slack_user_id": "UADMIN",
+                "domain": "mlai.au",
+                "confirm": True,
+                "decision_request_id": "reviewed-hash-mismatch",
+                "decisions": [{
+                    "suggestion_id": suggestion.id,
+                    "decision": "approve",
+                    "expected_source_hash": preview["suggestion"]["source_hash"],
+                    "expected_payload_hash": "f" * 64,
+                }],
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["recorded_count"], 0)
+        self.assertIn("payload changed", response.data["results"][0]["error"].lower())
+        self.assertFalse(ReconciliationDecision.objects.filter(
+            suggestion=suggestion,
+            decision_type=ReconciliationDecision.TYPE_ADMIN_APPROVED,
+        ).exists())
+
+    @patch("core.permissions.HasRooApiKey.has_permission", return_value=True)
     def test_agent_run_can_reapprove_after_a_later_rejection(self, _permission):
         run, suggestion = self._agent_run_suggestion(
             run_id="xero-agent-reapproval",
@@ -2315,6 +2722,12 @@ class ReconciliationWorkflowApiTests(APITestCase):
         self.assertEqual(run.workflow, "xero_reconciliation_agent")
         self.assertEqual(run.step_order, ["reconciliation_enrichment"])
         self.assertTrue(run.run_request["dry_run"])
+        self.assertEqual(
+            set(run.run_request["catalog_source_hashes"]),
+            {"luma_events", "humanitix_events", "linear_projects"},
+        )
+        self.assertIn("startup_memory", run.run_request["input_sources"])
+        self.assertIn("humanitix", run.run_request["input_sources"])
         self.assertEqual(run.run_request["statement_line_ids"], [line.statement_line_id])
         self.assertEqual(
             run.run_request["requested_statement_line_ids"],
@@ -3134,6 +3547,10 @@ class ReconciliationWorkflowApiTests(APITestCase):
         )
         self.assertTrue(candidate["candidate_id"])
         self.assertTrue(candidate["candidate_version"])
+        self.assertEqual(
+            set(candidate["catalog_source_hashes"]),
+            {"luma_events", "humanitix_events", "linear_projects"},
+        )
         self.assertFalse(outcomes.data["automatic_rule_creation"])
 
         candidate_url = reverse(
@@ -3163,6 +3580,31 @@ class ReconciliationWorkflowApiTests(APITestCase):
         )
         self.assertEqual(stale.status_code, status.HTTP_409_CONFLICT)
         self.assertIn("changed after preview", stale.data["error"])
+
+        LinearProjectArtifact.objects.create(
+            connection=linear_connection,
+            organization=self.organization,
+            linear_project_id="unrelated-catalog-drift",
+            name="Unrelated catalog addition",
+        )
+        catalog_stale = self.client.post(
+            candidate_url,
+            {
+                "slack_user_id": "UADMIN",
+                "domain": "mlai.au",
+                "decision": "promote",
+                "candidate_version": candidate["candidate_version"],
+                "confirm": True,
+            },
+            format="json",
+        )
+        self.assertEqual(catalog_stale.status_code, status.HTTP_409_CONFLICT)
+        self.assertIn("changed after preview", catalog_stale.data["error"])
+        refreshed = self.client.get(
+            candidate_url,
+            {"slack_user_id": "UADMIN", "domain": "mlai.au"},
+        )
+        candidate = refreshed.data["candidate"]
 
         rejected = self.client.post(
             candidate_url,
@@ -3231,6 +3673,52 @@ class ReconciliationWorkflowApiTests(APITestCase):
         )
         self.assertEqual(profile_response.status_code, status.HTTP_200_OK)
         self.assertFalse(profile_response.data["profile"]["xero_write_scope"])
+        self.assertFalse(
+            profile_response.data["profile"][
+                "humanitix_profitability_included"
+            ]
+        )
+
+        unconfirmed_policy = self.client.put(
+            reverse("reconciliation_profile"),
+            {
+                "slack_user_id": "UADMIN",
+                "domain": "mlai.au",
+                "humanitix_profitability_included": True,
+            },
+            format="json",
+        )
+        self.assertEqual(
+            unconfirmed_policy.status_code,
+            status.HTTP_400_BAD_REQUEST,
+        )
+        confirmed_policy = self.client.put(
+            reverse("reconciliation_profile"),
+            {
+                "slack_user_id": "UADMIN",
+                "domain": "mlai.au",
+                "humanitix_profitability_included": True,
+                "confirm": True,
+            },
+            format="json",
+        )
+        self.assertEqual(confirmed_policy.status_code, status.HTTP_200_OK)
+        self.assertTrue(
+            confirmed_policy.data["profile"][
+                "humanitix_profitability_included"
+            ]
+        )
+        self.assertEqual(
+            confirmed_policy.data["profile"][
+                "profitability_policy_verified_by_slack_id"
+            ],
+            "UADMIN",
+        )
+        self.assertIsNotNone(
+            confirmed_policy.data["profile"][
+                "profitability_policy_verified_at"
+            ]
+        )
 
         mapping_response = self.client.put(
             reverse("reconciliation_mappings"),
@@ -3262,6 +3750,13 @@ class ReconciliationWorkflowApiTests(APITestCase):
             format="json",
         )
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        missing_hash = self.client.post(
+            reverse("reconciliation_payout_post", kwargs={"payout_id": "po_api"}),
+            {"slack_user_id": "UADMIN", "domain": "mlai.au", "confirm": True},
+            format="json",
+        )
+        self.assertEqual(missing_hash.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("payload_hash", missing_hash.data["error"])
 
     @patch("core.permissions.HasRooApiKey.has_permission", return_value=True)
     @patch("integrations.api_views_reconciliation.build_xero_correction_batch")
@@ -3404,6 +3899,20 @@ class ReconciliationWorkflowApiTests(APITestCase):
         self.assertEqual(batch.data["ready_count"], 1)
         self.assertEqual(batch.data["posted_count"], 0)
 
+        excluded = self.client.post(
+            reverse("reconciliation_statement_safe_batch"),
+            {
+                "slack_user_id": "UADMIN",
+                "domain": "mlai.au",
+                "dry_run": True,
+                "exclude_statement_line_ids": [line.statement_line_id],
+            },
+            format="json",
+        )
+        self.assertEqual(excluded.status_code, status.HTTP_200_OK)
+        self.assertEqual(excluded.data["excluded_statement_line_ids"], [line.statement_line_id])
+        self.assertEqual(excluded.data["candidate_count"], 0)
+
     @patch("core.permissions.HasRooApiKey.has_permission", return_value=True)
     def test_valley_context_submission_and_human_approval_contract(self, _permission):
         ContentFactoryRun.objects.create(
@@ -3411,6 +3920,14 @@ class ReconciliationWorkflowApiTests(APITestCase):
             workflow="startup_monthly_update",
             domain=self.organization.domain,
             organization=self.organization,
+            run_request={
+                "startup_memory": {
+                    "facts": [{
+                        "id": "memory-fixture-1",
+                        "summary": "Fixture company relationship.",
+                    }]
+                }
+            },
         )
         luma_connection = ExternalServiceConnection.objects.create(
             provider=ExternalServiceProvider.LUMA,
@@ -3470,6 +3987,20 @@ class ReconciliationWorkflowApiTests(APITestCase):
         projects = {item["source_id"]: item for item in context_response.data["linear_projects"]}
         self.assertEqual(projects["lin_agent"]["dimension_hint"], "event_mirror")
         self.assertEqual(projects["lin_agent_project"]["dimension_hint"], "project")
+        self.assertEqual(
+            context_response.data["startup_memory"]["facts"][0]["id"],
+            "memory-fixture-1",
+        )
+        self.assertEqual(
+            context_response.data["startup_memory_provenance"],
+            {
+                "source": "content_factory_run_request",
+                "source_run_id": "monthly-agent",
+                "present": True,
+            },
+        )
+        self.assertEqual(context_response.data["catalog_status"]["counts"]["luma_events"], 1)
+        self.assertFalse(context_response.data["catalog_status"]["drift_detected"])
 
         submission_response = self.client.post(
             reverse("reconciliation_enrichment_context"),

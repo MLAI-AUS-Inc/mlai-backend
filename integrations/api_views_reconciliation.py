@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import json
 import uuid
@@ -27,6 +29,8 @@ from integrations.models import (
     ExternalFinancialRecord,
     ExternalServiceConnection,
     ExternalServiceProvider,
+    HumanitixEvent,
+    HumanitixEventFinancialSummary,
     HumanitixPayout,
     ReconciliationMapping,
     ReconciliationDecision,
@@ -39,13 +43,23 @@ from integrations.models import (
     XeroStatementScan,
     XeroStatementSuggestion,
 )
+from integrations.services.humanitix import (
+    HumanitixAPIError,
+    HumanitixConfigurationError,
+    sync_humanitix_connection,
+)
 from integrations.services.humanitix_payouts import (
     HumanitixPayoutImportError,
     build_humanitix_xero_correction_batch,
     build_humanitix_xero_preview,
+    import_humanitix_payout_receipt_bundle,
+    import_humanitix_payout_receipt_pdf,
     import_payout_csv,
     post_humanitix_xero_bank_transaction,
     serialize_humanitix_payout,
+)
+from integrations.services.reconciliation_reporting import (
+    build_reconciliation_profitability_report,
 )
 from integrations.services.reconciliation import (
     ReconciliationReportService,
@@ -103,6 +117,12 @@ from integrations.services.reconciliation_rules import (
 from integrations.services.reconciliation_outcomes import (
     build_reconciliation_outcome_summary,
     get_learning_candidate,
+)
+from integrations.services.reconciliation_knowledge import (
+    build_reconciliation_knowledge_export,
+)
+from integrations.services.reconciliation_catalogs import (
+    build_reconciliation_catalog_status,
 )
 
 
@@ -205,6 +225,7 @@ def _reconciliation_request_fingerprint(
             "account_name",
             "tax_type",
             "description_template",
+            "event_source_type",
             "event_source_id",
             "event_tracking_option_name",
             "project_source_id",
@@ -236,6 +257,7 @@ def _reconciliation_request_fingerprint(
         .select_related("xero_connection")
         .first()
     )
+    catalog_status = build_reconciliation_catalog_status(organization=organization)
     return _stable_reconciliation_hash({
         "organization_id": organization.id,
         "statement_scan_id": scan.id,
@@ -244,6 +266,7 @@ def _reconciliation_request_fingerprint(
         "requested_statement_line_ids": sorted(requested_line_ids),
         "verified_rule_revisions": rule_revisions,
         "outstanding_xero_bill_revisions": bill_revisions,
+        "catalog_source_hashes": catalog_status["source_hashes"],
         "profile_revision": (
             {
                 **serialize_profile(profile),
@@ -316,6 +339,16 @@ class ReconciliationAdminView(APIView):
         return slack_user_id, organization, response
 
 
+class ReconciliationKnowledgeExportView(ReconciliationAdminView):
+    """Admin-only, read-only and sanitized agent knowledge snapshot."""
+
+    def get(self, request):
+        _, organization, error = self.context(request)
+        if error:
+            return error
+        return Response(build_reconciliation_knowledge_export(organization=organization))
+
+
 class ReconciliationReportView(APIView):
     """Roo-only endpoint: Luma->Stripe reconciliation report for Points Admins.
 
@@ -386,7 +419,7 @@ class ReconciliationReportView(APIView):
         return Response(
             {
                 "payout_count": len(records),
-                "payouts": [serialize_payout(record) for record in records],
+                "payouts": [serialize_payout(record, include_payload=True) for record in records],
                 "requested_by": slack_user_id,
             },
             status=status.HTTP_200_OK,
@@ -499,6 +532,7 @@ class ReconciliationProfileView(ReconciliationAdminView):
         "project_tracking_category_name",
         "standalone_fee_project_option_id",
         "standalone_fee_project_option_name",
+        "humanitix_profitability_included",
         "enabled",
     }
 
@@ -515,7 +549,7 @@ class ReconciliationProfileView(ReconciliationAdminView):
         return Response({"profile": serialize_profile(profile)})
 
     def put(self, request):
-        _, organization, error = self.context(request, from_body=True)
+        slack_user_id, organization, error = self.context(request, from_body=True)
         if error:
             return error
         profile, _ = ReconciliationProfile.objects.get_or_create(organization=organization)
@@ -532,6 +566,31 @@ class ReconciliationProfileView(ReconciliationAdminView):
         for field in self.EDITABLE_FIELDS:
             if field in request.data:
                 setattr(profile, field, request.data[field])
+        if "humanitix_profitability_included" in request.data:
+            if request.data.get("confirm") is not True:
+                return Response(
+                    {
+                        "error": (
+                            "confirm must be true to change Humanitix "
+                            "profitability policy"
+                        )
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if not isinstance(
+                request.data.get("humanitix_profitability_included"),
+                bool,
+            ):
+                return Response(
+                    {
+                        "error": (
+                            "humanitix_profitability_included must be a boolean"
+                        )
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            profile.profitability_policy_verified_by_slack_id = slack_user_id
+            profile.profitability_policy_verified_at = datetime.now(timezone.utc)
         if profile.line_amount_types not in {"Inclusive", "Exclusive", "NoTax"}:
             return Response({"error": "line_amount_types must be Inclusive, Exclusive, or NoTax"}, status=status.HTTP_400_BAD_REQUEST)
         profile.save()
@@ -606,6 +665,13 @@ class ReconciliationEnrichmentContextView(APIView):
         if error:
             return error
         context = build_reconciliation_enrichment_context(organization=organization, run_id=run_id)
+        request_payload = run.run_request if isinstance(run.run_request, dict) else {}
+        expected_catalog_hashes = request_payload.get("catalog_source_hashes") or {}
+        context["catalog_status"] = build_reconciliation_catalog_status(
+            organization=organization,
+            expected_source_hashes=expected_catalog_hashes,
+        )
+        memory_run = run
         if run.workflow == RECONCILIATION_AGENT_WORKFLOW:
             selected_line_ids = {
                 str(item or "").strip()
@@ -617,8 +683,24 @@ class ReconciliationEnrichmentContextView(APIView):
                     item for item in context.get("statement_candidates") or []
                     if str(item.get("statement_line_id") or "") in selected_line_ids
                 ]
-            context["agent_instruction"] = str((run.run_request or {}).get("instruction") or "")
-            context["base_monthly_run_id"] = str((run.run_request or {}).get("base_monthly_run_id") or "")
+            context["agent_instruction"] = str(request_payload.get("instruction") or "")
+            context["base_monthly_run_id"] = str(request_payload.get("base_monthly_run_id") or "")
+            if context["base_monthly_run_id"]:
+                memory_run = ContentFactoryRun.objects.filter(
+                    organization=organization,
+                    workflow="startup_monthly_update",
+                    run_id=context["base_monthly_run_id"],
+                ).first() or run
+        memory_payload = (
+            memory_run.run_request if isinstance(memory_run.run_request, dict) else {}
+        )
+        startup_memory = memory_payload.get("startup_memory") or {}
+        context["startup_memory"] = startup_memory
+        context["startup_memory_provenance"] = {
+            "source": "content_factory_run_request",
+            "source_run_id": memory_run.run_id,
+            "present": bool(startup_memory),
+        }
         return Response(context)
 
     def post(self, request):
@@ -757,12 +839,30 @@ class ReconciliationPartyIdentityView(ReconciliationAdminView):
             return Response({"error": "A statement line or bank narration key is required."}, status=status.HTTP_400_BAD_REQUEST)
         if direction not in {"", XeroStatementLineSnapshot.DIRECTION_DEBIT, XeroStatementLineSnapshot.DIRECTION_CREDIT}:
             return Response({"error": "direction must be debit or credit"}, status=status.HTTP_400_BAD_REQUEST)
-        identity_status = str(request.data.get("status") or ReconciliationPartyIdentity.STATUS_VERIFIED).strip().lower()
+        identity_status = str(
+            request.data.get("status") or ReconciliationPartyIdentity.STATUS_PROPOSED
+        ).strip().lower()
         if identity_status not in {
+            ReconciliationPartyIdentity.STATUS_PROPOSED,
             ReconciliationPartyIdentity.STATUS_VERIFIED,
             ReconciliationPartyIdentity.STATUS_REVOKED,
         }:
-            return Response({"error": "status must be verified or revoked"}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {"error": "status must be proposed, verified or revoked"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if (
+            identity_status
+            in {
+                ReconciliationPartyIdentity.STATUS_VERIFIED,
+                ReconciliationPartyIdentity.STATUS_REVOKED,
+            }
+            and request.data.get("confirm") is not True
+        ):
+            return Response(
+                {"error": "confirm must be true to verify or revoke an identity"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         linear_user_id = str(request.data.get("linear_user_id") or "").strip()
         linear_name = str(request.data.get("linear_name") or "").strip()
         linear_email = str(request.data.get("linear_email") or "").strip()
@@ -787,6 +887,20 @@ class ReconciliationPartyIdentityView(ReconciliationAdminView):
             identity_confidence = max(0.0, min(float(request.data.get("confidence", 1.0)), 1.0))
         except (TypeError, ValueError):
             return Response({"error": "confidence must be a number"}, status=status.HTTP_400_BAD_REQUEST)
+        existing = ReconciliationPartyIdentity.objects.filter(
+            organization=organization,
+            bank_narration_key=narration_key,
+            direction=direction,
+        ).first()
+        if (
+            identity_status == ReconciliationPartyIdentity.STATUS_PROPOSED
+            and existing is not None
+            and existing.status == ReconciliationPartyIdentity.STATUS_VERIFIED
+        ):
+            return Response(
+                {"error": "A proposal cannot replace an existing verified identity; revoke it first."},
+                status=status.HTTP_409_CONFLICT,
+            )
         identity, _created = ReconciliationPartyIdentity.objects.update_or_create(
             organization=organization,
             bank_narration_key=narration_key,
@@ -884,14 +998,28 @@ def _save_reconciliation_rule(*, organization, slack_user_id: str, payload, rule
         raise ValueError("Verified rules currently support create_bank_transaction only")
 
     event_source_id = str(payload.get("event_source_id", getattr(rule, "event_source_id", "")) or "").strip()
+    event_source_type = str(
+        payload.get("event_source_type", getattr(rule, "event_source_type", "luma"))
+        or "luma"
+    ).strip()
     event_name = ""
     if event_source_id:
-        event = LumaEventSelection.objects.filter(
-            organization=organization,
-            event_id=event_source_id,
-        ).first()
+        if event_source_type == "luma":
+            event = LumaEventSelection.objects.filter(
+                organization=organization,
+                event_id=event_source_id,
+            ).first()
+        elif event_source_type == "humanitix":
+            event = HumanitixEvent.objects.filter(
+                organization=organization,
+                external_event_id=event_source_id,
+            ).first()
+        else:
+            raise ValueError("event_source_type must be luma or humanitix")
         if event is None:
-            raise ValueError("event_source_id is not a known Luma event")
+            raise ValueError(
+                f"event_source_id is not a known {event_source_type} event"
+            )
         event_name = event.event_name
     project_source_id = str(payload.get("project_source_id", getattr(rule, "project_source_id", "")) or "").strip()
     project_name = ""
@@ -962,6 +1090,7 @@ def _save_reconciliation_rule(*, organization, slack_user_id: str, payload, rule
         "effective_to": effective_to,
         "proposed_action": action,
         "description_template": description_template,
+        "event_source_type": event_source_type if event_source_id else "",
         "event_source_id": event_source_id,
         "event_tracking_option_name": event_name,
         "project_source_id": project_source_id,
@@ -1252,6 +1381,9 @@ class ReconciliationLearningCandidateView(ReconciliationAdminView):
                     "account_name": suggested["account_name"],
                     "tax_type": suggested["tax_type"],
                     "description_template": suggested["description_template"],
+                    "event_source_type": suggested.get("event_source_type") or (
+                        "luma" if suggested["event_source_id"] else ""
+                    ),
                     "event_source_id": suggested["event_source_id"],
                     "project_source_id": suggested["project_source_id"],
                     "priority": 100,
@@ -1336,7 +1468,26 @@ class ReconciliationReadinessView(ReconciliationAdminView):
         monthly_run = _latest_monthly_context_run(organization)
         if monthly_run is None:
             warnings.append(
-                "Run a monthly update first so unresolved lines can use Gmail, Slack, Linear, Luma and Stripe context."
+                "Run a monthly update first so unresolved lines can use Gmail, Slack, Linear, "
+                "Luma, Humanitix, Stripe and startup-memory context."
+            )
+        latest_agent_run = ContentFactoryRun.objects.filter(
+            organization=organization,
+            workflow=RECONCILIATION_AGENT_WORKFLOW,
+        ).order_by("-updated_at", "-id").first()
+        agent_request = (
+            latest_agent_run.run_request
+            if latest_agent_run and isinstance(latest_agent_run.run_request, dict)
+            else {}
+        )
+        catalog_status = build_reconciliation_catalog_status(
+            organization=organization,
+            expected_source_hashes=agent_request.get("catalog_source_hashes") or {},
+        )
+        if catalog_status["drift_detected"]:
+            warnings.append(
+                "Entity catalogs changed after the latest reconciliation run started; "
+                "start a fresh run before approval or learning promotion."
             )
 
         profile = (
@@ -1468,6 +1619,7 @@ class ReconciliationReadinessView(ReconciliationAdminView):
                 "project_tracking_configured": project_tracking_configured,
             },
             "active_verified_rule_count": active_rule_count,
+            "catalog_status": catalog_status,
             "blockers": blockers,
             "warnings": warnings,
             "recommended_next_action": recommended_next_action,
@@ -1549,6 +1701,9 @@ class ReconciliationAgentRunView(ReconciliationAdminView):
             requested_line_ids=requested_line_ids,
         )
         run_id = f"xero-reconciliation-{request_fingerprint[:40]}"
+        catalog_status = build_reconciliation_catalog_status(
+            organization=organization
+        )
         existing_run = ContentFactoryRun.objects.filter(
             organization=organization,
             workflow=RECONCILIATION_AGENT_WORKFLOW,
@@ -1603,8 +1758,18 @@ class ReconciliationAgentRunView(ReconciliationAdminView):
                     "deferred_bill_statement_line_ids": prepared["deferred_bill_line_ids"],
                     "statement_scan_id": latest_scan.id,
                     "base_monthly_run_id": base_monthly_run.run_id if base_monthly_run else "",
+                    "catalog_source_hashes": catalog_status["source_hashes"],
                     "dry_run": True,
-                    "input_sources": ["gmail", "slack", "linear", "luma", "stripe", "xero"],
+                    "input_sources": [
+                        "gmail",
+                        "slack",
+                        "linear",
+                        "luma",
+                        "humanitix",
+                        "stripe",
+                        "xero",
+                        "startup_memory",
+                    ],
                 }
                 run.result = {"deterministic_reconciliation": deterministic_summary}
                 if not agent_line_ids:
@@ -2126,6 +2291,26 @@ class ReconciliationAgentRunDecisionView(ReconciliationAdminView):
                     "errors": preview.get("errors") or [],
                 })
                 continue
+            expected_source_hash = str(item.get("expected_source_hash") or "").strip()
+            expected_payload_hash = str(item.get("expected_payload_hash") or "").strip()
+            if expected_source_hash and expected_source_hash != suggestion.source_hash:
+                results.append({
+                    "suggestion_id": suggestion.id,
+                    "recorded": False,
+                    "error": "Suggestion source changed after review.",
+                    "expected_source_hash": expected_source_hash,
+                    "current_source_hash": suggestion.source_hash,
+                })
+                continue
+            if expected_payload_hash and expected_payload_hash != preview.get("payload_hash"):
+                results.append({
+                    "suggestion_id": suggestion.id,
+                    "recorded": False,
+                    "error": "Posting payload changed after review.",
+                    "expected_payload_hash": expected_payload_hash,
+                    "current_payload_hash": preview.get("payload_hash") or "",
+                })
+                continue
             decision = record_reconciliation_decision(
                 statement_line=suggestion.statement_line,
                 suggestion=suggestion,
@@ -2305,6 +2490,7 @@ class ReconciliationStatementScanView(ReconciliationAdminView):
                 complete_scan=complete,
                 source="browser",
                 requested_by=slack_user_id,
+                capture_metadata=request.data.get("capture_metadata"),
             )
         except ValueError as exc:
             return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
@@ -2325,6 +2511,7 @@ class ReconciliationStatementScanView(ReconciliationAdminView):
                 "observed_count": scan.observed_count,
                 "confirmed_reconciled_count": scan.confirmed_postings.count(),
                 "completed_at": scan.completed_at.isoformat() if scan.completed_at else None,
+                "capture_metadata": scan.capture_metadata,
             } if scan else None,
             "statement_lines": [serialize_statement_line(line) for line in saved],
         }, status=status.HTTP_201_CREATED)
@@ -2407,6 +2594,20 @@ class ReconciliationStatementSafeBatchView(ReconciliationAdminView):
             max_count = max(1, min(int(request.data.get("max_count") or 50), 100))
         except (TypeError, ValueError):
             return Response({"error": "max_count must be an integer"}, status=status.HTTP_400_BAD_REQUEST)
+        raw_exclusions = request.data.get("exclude_statement_line_ids") or []
+        if not isinstance(raw_exclusions, list):
+            return Response(
+                {"error": "exclude_statement_line_ids must be a list"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        excluded_statement_line_ids = {
+            str(value).strip() for value in raw_exclusions if str(value).strip()
+        }
+        if len(excluded_statement_line_ids) > 100:
+            return Response(
+                {"error": "exclude_statement_line_ids may contain at most 100 values"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         suggestions = XeroStatementSuggestion.objects.filter(
             organization=organization,
             status=XeroStatementSuggestion.STATUS_PROPOSED,
@@ -2419,6 +2620,10 @@ class ReconciliationStatementSafeBatchView(ReconciliationAdminView):
         ).select_related("statement_line").order_by(
             "statement_line_id", "-created_at"
         )
+        if excluded_statement_line_ids:
+            suggestions = suggestions.exclude(
+                statement_line__statement_line_id__in=excluded_statement_line_ids
+            )
         latest = []
         seen_lines = set()
         for suggestion in suggestions:
@@ -2470,6 +2675,7 @@ class ReconciliationStatementSafeBatchView(ReconciliationAdminView):
                 })
         return Response({
             "dry_run": dry_run,
+            "excluded_statement_line_ids": sorted(excluded_statement_line_ids),
             "candidate_count": len(results),
             "ready_count": sum(1 for item in results if item.get("ready")),
             "posted_count": sum(1 for item in results if item.get("posted")),
@@ -2577,6 +2783,64 @@ class ReconciliationPayoutListView(ReconciliationAdminView):
         return Response({"payouts": [serialize_payout(record) for record in records]})
 
 
+class ReconciliationProfitabilityReportView(ReconciliationAdminView):
+    """Read-only, period-bounded event/project cashflow report."""
+
+    MAX_PERIOD_DAYS = 1095
+
+    def get(self, request):
+        _, organization, error = self.context(request)
+        if error:
+            return error
+        parsed = {}
+        for field_name in ("since", "until"):
+            raw_value = str(request.query_params.get(field_name) or "").strip()
+            if not raw_value:
+                return Response(
+                    {"error": f"{field_name} is required and must use YYYY-MM-DD"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            try:
+                parsed[field_name] = date.fromisoformat(raw_value)
+            except ValueError:
+                return Response(
+                    {"error": f"{field_name} must use YYYY-MM-DD"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        if parsed["since"] > parsed["until"]:
+            return Response(
+                {"error": "since must be on or before until"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if (parsed["until"] - parsed["since"]).days > self.MAX_PERIOD_DAYS:
+            return Response(
+                {"error": f"report period must be {self.MAX_PERIOD_DAYS} days or fewer"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            report = build_reconciliation_profitability_report(
+                organization=organization,
+                period_start=parsed["since"],
+                period_end=parsed["until"],
+            )
+        except ReconciliationProfile.DoesNotExist:
+            return Response(
+                {"error": "Reconciliation profile is not configured."},
+                status=status.HTTP_409_CONFLICT,
+            )
+        except ReconciliationValidationError as exc:
+            return Response(
+                {"error": str(exc), "errors": exc.errors},
+                status=status.HTTP_409_CONFLICT,
+            )
+        except requests.RequestException:
+            return Response(
+                {"error": "Unable to read Xero data for the profitability report."},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+        return Response(report)
+
+
 class ReconciliationPayoutCorrectionPreviewView(ReconciliationAdminView):
     """Build a read-only Stripe/Luma-to-Xero correction pack.
 
@@ -2665,6 +2929,219 @@ class HumanitixPayoutListView(ReconciliationAdminView):
         )
 
 
+def _humanitix_connection(organization):
+    return (
+        ExternalServiceConnection.objects.filter(
+            organization=organization,
+            provider=ExternalServiceProvider.HUMANITIX,
+        )
+        .exclude(status="disconnected")
+        .order_by("-updated_at", "-id")
+        .first()
+    )
+
+
+def _humanitix_event_summary(event: HumanitixEvent) -> dict[str, Any]:
+    try:
+        summary = event.financial_summary
+    except HumanitixEventFinancialSummary.DoesNotExist:
+        summary = None
+    return {
+        "event_id": event.external_event_id,
+        "event_name": event.event_name,
+        "start_at": event.start_at.isoformat() if event.start_at else None,
+        "end_at": event.end_at.isoformat() if event.end_at else None,
+        "currency": event.currency,
+        "published": event.published,
+        "archived": event.archived,
+        "source_hash": event.source_hash,
+        "last_synced_at": event.last_synced_at.isoformat() if event.last_synced_at else None,
+        "order_count": summary.order_count if summary else 0,
+        "paid_order_count": summary.paid_order_count if summary else 0,
+        "free_order_count": summary.free_order_count if summary else 0,
+        "ticket_count": summary.ticket_count if summary else 0,
+        "gross_sales": str(summary.gross_sales if summary else "0.00"),
+        "net_sales": str(summary.net_sales if summary else "0.00"),
+        "refunds": str(summary.refunds if summary else "0.00"),
+        "discounts": str(summary.discounts if summary else "0.00"),
+        "donations": str(summary.donations if summary else "0.00"),
+        "humanitix_fees": str(summary.humanitix_fees if summary else "0.00"),
+        "absorbed_fees": str(summary.absorbed_fees if summary else "0.00"),
+        "taxes": str(summary.taxes if summary else "0.00"),
+        "gateway_breakdown": summary.gateway_breakdown if summary else {},
+        "ticket_type_breakdown": summary.ticket_type_breakdown if summary else {},
+    }
+
+
+class HumanitixStatusView(ReconciliationAdminView):
+    """Connection and PII-free sync readiness without returning the API key."""
+
+    def get(self, request):
+        _, organization, error = self.context(request)
+        if error:
+            return error
+        connection = _humanitix_connection(organization)
+        if connection is None:
+            return Response({
+                "connected": False,
+                "status": "disconnected",
+                "events_count": 0,
+                "payouts_count": 0,
+                "complete": False,
+            })
+        cursor = dict(connection.sync_cursor or {})
+        return Response({
+            "connected": bool(connection.access_token),
+            "connection_id": connection.id,
+            "status": connection.status,
+            "last_synced_at": (
+                connection.last_synced_at.isoformat()
+                if connection.last_synced_at
+                else None
+            ),
+            "complete": cursor.get("humanitix_complete") is True,
+            "full_backfill": cursor.get("humanitix_full_backfill") is True,
+            "events_synced": int(cursor.get("humanitix_events_synced") or 0),
+            "orders_synced": int(cursor.get("humanitix_orders_synced") or 0),
+            "tickets_synced": int(cursor.get("humanitix_tickets_synced") or 0),
+            "events_count": HumanitixEvent.objects.filter(
+                organization=organization
+            ).count(),
+            "payouts_count": HumanitixPayout.objects.filter(
+                organization=organization
+            ).count(),
+            "last_error": connection.last_error,
+            "api_key_present": bool(connection.access_token),
+        })
+
+
+class HumanitixSyncView(ReconciliationAdminView):
+    def post(self, request):
+        _, organization, error = self.context(request, from_body=True)
+        if error:
+            return error
+        if request.data.get("confirm") is not True:
+            return Response(
+                {"error": "confirm must be true to sync Humanitix"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        connection = _humanitix_connection(organization)
+        if connection is None:
+            return Response(
+                {"error": "Humanitix is not connected for this organisation."},
+                status=status.HTTP_409_CONFLICT,
+            )
+        max_events = request.data.get("max_events")
+        try:
+            max_events = None if max_events in (None, "") else max(1, min(int(max_events), 500))
+        except (TypeError, ValueError):
+            return Response(
+                {"error": "max_events must be an integer"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            result = sync_humanitix_connection(
+                connection,
+                full_backfill=request.data.get("full_backfill") is True,
+                include_tickets=request.data.get("include_tickets") is not False,
+                max_events=max_events,
+            )
+        except (HumanitixAPIError, HumanitixConfigurationError) as exc:
+            return Response({"error": str(exc)}, status=status.HTTP_502_BAD_GATEWAY)
+        return Response(result)
+
+
+class HumanitixEventAggregateView(ReconciliationAdminView):
+    def get(self, request):
+        _, organization, error = self.context(request)
+        if error:
+            return error
+        records = HumanitixEvent.objects.filter(
+            organization=organization
+        ).select_related("financial_summary").order_by("-start_at", "event_name")[:500]
+        events = [_humanitix_event_summary(event) for event in records]
+        return Response({
+            "events": events,
+            "pii_included": False,
+            "gateway_policy": {
+                "stripe": "excluded_from_humanitix_payouts",
+                "offline": "excluded_from_platform_payouts",
+                "humanitix_native": "eligible_for_humanitix_payouts",
+                "unknown": "review_required",
+            },
+        })
+
+
+class HumanitixReceiptImportView(ReconciliationAdminView):
+    def post(self, request):
+        _, organization, error = self.context(request, from_body=True)
+        if error:
+            return error
+        if request.data.get("confirm") is not True:
+            return Response(
+                {"error": "confirm must be true to import payout receipts"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        connection = _humanitix_connection(organization)
+        if connection is None:
+            return Response(
+                {"error": "Humanitix is not connected for this organisation."},
+                status=status.HTTP_409_CONFLICT,
+            )
+        try:
+            content = base64.b64decode(
+                str(request.data.get("content_base64") or ""), validate=True
+            )
+        except (binascii.Error, ValueError):
+            content = b""
+        if not content:
+            return Response(
+                {"error": "content_base64 must contain a PDF or ZIP bundle"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        kind = str(request.data.get("kind") or "").strip().lower()
+        try:
+            if kind == "pdf":
+                payouts = [import_humanitix_payout_receipt_pdf(
+                    organization=organization,
+                    connection=connection,
+                    source=content,
+                )]
+            elif kind == "zip":
+                expected = (
+                    request.data.get("expected_references")
+                    if "expected_references" in request.data
+                    else None
+                )
+                if expected is not None and not isinstance(expected, list):
+                    return Response(
+                        {"error": "expected_references must be a list"},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                payouts = import_humanitix_payout_receipt_bundle(
+                    organization=organization,
+                    connection=connection,
+                    source=content,
+                    expected_references=expected,
+                )
+            else:
+                return Response(
+                    {"error": "kind must be pdf or zip"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            previews = [build_humanitix_xero_preview(payout) for payout in payouts]
+        except HumanitixPayoutImportError as exc:
+            return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({
+            "payouts": [
+                serialize_humanitix_payout(payout, include_payload=True)
+                for payout in payouts
+            ],
+            "previews": previews,
+            "posted_to_xero": False,
+        })
+
+
 class HumanitixPayoutCorrectionPreviewView(ReconciliationAdminView):
     """Compare Humanitix payout previews with Xero without making Xero writes."""
 
@@ -2722,6 +3199,11 @@ class HumanitixPayoutImportView(ReconciliationAdminView):
         _, organization, error = self.context(request, from_body=True)
         if error:
             return error
+        if request.data.get("confirm") is not True:
+            return Response(
+                {"error": "confirm must be true to import Humanitix payouts"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         connection = (
             ExternalServiceConnection.objects.filter(
                 organization=organization,
@@ -2816,6 +3298,15 @@ class HumanitixPayoutPostView(ReconciliationAdminView):
                 {"error": "confirm must be true to post to Xero"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        payload_hash = str(request.data.get("payload_hash") or "").strip().lower()
+        if (
+            len(payload_hash) != 64
+            or any(character not in "0123456789abcdef" for character in payload_hash)
+        ):
+            return Response(
+                {"error": "payload_hash from the reviewed preview is required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         record = HumanitixPayout.objects.filter(
             organization=organization,
             payout_reference=payout_reference,
@@ -2829,6 +3320,7 @@ class HumanitixPayoutPostView(ReconciliationAdminView):
             posted = post_humanitix_xero_bank_transaction(
                 record,
                 approved_by_slack_id=slack_user_id,
+                expected_payload_hash=payload_hash,
             )
         except ReconciliationValidationError as exc:
             return Response(
@@ -2872,11 +3364,24 @@ class ReconciliationPayoutPostView(ReconciliationAdminView):
             return error
         if request.data.get("confirm") is not True:
             return Response({"error": "confirm must be true to post to Xero"}, status=status.HTTP_400_BAD_REQUEST)
+        payload_hash = str(request.data.get("payload_hash") or "").strip().lower()
+        if (
+            len(payload_hash) != 64
+            or any(character not in "0123456789abcdef" for character in payload_hash)
+        ):
+            return Response(
+                {"error": "payload_hash from the reviewed preview is required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         record = StripePayoutReconciliation.objects.filter(organization=organization, payout_id=payout_id).first()
         if record is None:
             return Response({"error": "Payout was not found"}, status=status.HTTP_404_NOT_FOUND)
         try:
-            posted = post_xero_bank_transaction(record, approved_by_slack_id=slack_user_id)
+            posted = post_xero_bank_transaction(
+                record,
+                approved_by_slack_id=slack_user_id,
+                expected_payload_hash=payload_hash,
+            )
         except ReconciliationValidationError as exc:
             return Response({"error": str(exc), "errors": exc.errors}, status=status.HTTP_409_CONFLICT)
         except XeroPostingError as exc:

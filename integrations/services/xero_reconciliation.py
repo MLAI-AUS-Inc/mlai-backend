@@ -131,6 +131,15 @@ def serialize_profile(profile: ReconciliationProfile) -> dict[str, Any]:
         "project_tracking_category_name": profile.project_tracking_category_name,
         "standalone_fee_project_option_id": profile.standalone_fee_project_option_id,
         "standalone_fee_project_option_name": profile.standalone_fee_project_option_name,
+        "humanitix_profitability_included": profile.humanitix_profitability_included,
+        "profitability_policy_verified_by_slack_id": (
+            profile.profitability_policy_verified_by_slack_id
+        ),
+        "profitability_policy_verified_at": (
+            profile.profitability_policy_verified_at.isoformat()
+            if profile.profitability_policy_verified_at
+            else None
+        ),
         "enabled": profile.enabled,
         # Keep the original field for clients already using the payout flow.
         "xero_write_scope": bool(profile.xero_connection and xero_has_bank_transaction_scope(scopes)),
@@ -244,6 +253,18 @@ def _normalized_description_part(value: str) -> str:
     return " ".join(str(value or "").lower().split())
 
 
+def _xero_payload_hash(payload: dict[str, Any]) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            default=str,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
 def build_xero_preview(record: StripePayoutReconciliation) -> dict[str, Any]:
     try:
         profile = ReconciliationProfile.objects.select_related("xero_connection").get(
@@ -319,15 +340,17 @@ def build_xero_preview(record: StripePayoutReconciliation) -> dict[str, Any]:
 
     standalone_fee = int(report.get("standalone_fee_cents") or 0)
     if standalone_fee:
-        if not (profile.standalone_fee_project_option_id or profile.standalone_fee_project_option_name):
-            errors.append("Configure a Project Name tracking option for standalone Stripe fees.")
-        fee_tracking_item = {
-            "TrackingCategoryID": profile.project_tracking_category_id,
-            "Name": profile.project_tracking_category_name,
-            "TrackingOptionID": profile.standalone_fee_project_option_id,
-            "Option": profile.standalone_fee_project_option_name,
-        }
-        fee_tracking = [{key: value for key, value in fee_tracking_item.items() if value}]
+        fee_tracking = []
+        if profile.standalone_fee_project_option_id or profile.standalone_fee_project_option_name:
+            fee_tracking_item = {
+                "TrackingCategoryID": profile.project_tracking_category_id,
+                "Name": profile.project_tracking_category_name,
+                "TrackingOptionID": profile.standalone_fee_project_option_id,
+                "Option": profile.standalone_fee_project_option_name,
+            }
+            fee_tracking = [
+                {key: value for key, value in fee_tracking_item.items() if value}
+            ]
         lines.append(_xero_line(description="Stripe standalone fees", cents=-standalone_fee, account_code=profile.fee_account_code, tax_type=profile.fee_tax_type, tracking=fee_tracking))
         line_total_cents -= standalone_fee
 
@@ -377,6 +400,7 @@ def build_xero_preview(record: StripePayoutReconciliation) -> dict[str, Any]:
         "expected_total_cents": expected_cents,
         "line_total_cents": line_total_cents,
         "xero_payload": payload,
+        "payload_hash": _xero_payload_hash(payload),
         "context_notes": context_notes,
         "human_reconciliation_required": True,
         "note": "Posting creates a matching Receive Money transaction; a human must still click Match/OK on the Xero bank statement line.",
@@ -632,7 +656,22 @@ def build_xero_correction_preview(
 
     if bank_transactions is None:
         bank_transactions = fetch_xero_bank_transactions(profile)
-    matches = _matching_xero_transactions(record, profile, bank_transactions)
+    inactive_transactions = [
+        item
+        for item in bank_transactions
+        if str(item.get("Status") or "").strip().upper() in {"DELETED", "VOIDED"}
+    ]
+    active_transactions = [
+        item
+        for item in bank_transactions
+        if str(item.get("Status") or "").strip().upper() not in {"DELETED", "VOIDED"}
+    ]
+    matches = _matching_xero_transactions(record, profile, active_transactions)
+    inactive_matches = _matching_xero_transactions(
+        record,
+        profile,
+        inactive_transactions,
+    )
     candidate_summaries = [
         _xero_transaction_summary(item, match_basis=basis)
         for item, basis in matches
@@ -645,6 +684,10 @@ def build_xero_correction_preview(
         "proposed_errors": proposed["errors"],
         "candidate_count": len(matches),
         "existing_transactions": candidate_summaries,
+        "ignored_inactive_transactions": [
+            _xero_transaction_summary(item, match_basis=basis)
+            for item, basis in inactive_matches
+        ],
         "classification": "",
         "recommended_action": "",
         "automatic_action_allowed": False,
@@ -878,6 +921,7 @@ def build_event_cashflow_validation(
     profile: ReconciliationProfile,
     period_start: date | None = None,
     period_end: date | None = None,
+    excluded_transfer_transaction_ids: set[str] | None = None,
 ) -> dict[str, Any]:
     """Estimate event/project cashflow without double-counting Stripe payouts.
 
@@ -892,8 +936,14 @@ def build_event_cashflow_validation(
         for transaction in preview.get("existing_transactions") or []
         if str(transaction.get("bank_transaction_id") or "").strip()
     }
+    excluded_transfer_transaction_ids = {
+        str(value or "").strip()
+        for value in (excluded_transfer_transaction_ids or set())
+        if str(value or "").strip()
+    }
     stripe_lines: list[dict[str, Any]] = []
     tracked_lines: list[dict[str, Any]] = []
+    excluded_transfer_lines: list[dict[str, Any]] = []
     for transaction in bank_transactions:
         transaction_id = str(transaction.get("BankTransactionID") or "").strip()
         status = str(transaction.get("Status") or "").strip().upper()
@@ -924,29 +974,34 @@ def build_event_cashflow_validation(
                 category_id=profile.project_tracking_category_id,
                 category_name=profile.project_tracking_category_name,
             )
-            if not (event_name or project_name):
-                continue
             raw_cents = _xero_line_cents(line)
             if not raw_cents:
                 continue
+            source_line = {
+                "line_id": f"{transaction_id}:{index}",
+                "bank_transaction_id": transaction_id,
+                "date": _xero_transaction_date(transaction),
+                "transaction_type": transaction_type,
+                "event_name": event_name,
+                "project_name": project_name,
+                "account_code": str(line.get("AccountCode") or "").strip(),
+                "raw_cents": raw_cents,
+            }
+            if transaction_id in excluded_transfer_transaction_ids:
+                excluded_transfer_lines.append(source_line)
+                continue
+            if not (event_name or project_name):
+                continue
             if transaction_id in stripe_transaction_ids:
                 stripe_lines.append(
-                    {
-                        "event_name": event_name,
-                        "project_name": project_name,
-                        "account_code": str(line.get("AccountCode") or "").strip(),
-                        "raw_cents": raw_cents,
-                    }
+                    source_line
                 )
+                excluded_transfer_lines.append(source_line)
                 continue
             cents = abs(raw_cents)
             tracked_lines.append(
                 {
-                    "line_id": f"{transaction_id}:{index}",
-                    "bank_transaction_id": transaction_id,
-                    "date": _xero_transaction_date(transaction),
-                    "event_name": event_name,
-                    "project_name": project_name,
+                    **source_line,
                     "signed_cents": cents if transaction_type == "RECEIVE" else -cents,
                 }
             )
@@ -1083,6 +1138,7 @@ def build_event_cashflow_validation(
                 "profitability_status": status,
                 "validation_flags": flags,
                 "matched_xero_line_count": len(matching_lines),
+                "xero_lines": matching_lines,
             }
         )
 
@@ -1103,6 +1159,7 @@ def build_event_cashflow_validation(
                 "xero_cost_cents": 0,
                 "matched_xero_line_count": 0,
                 "validation_flag": "xero_tracking_without_stripe_revenue",
+                "xero_lines": [],
             },
         )
         signed_cents = int(line["signed_cents"])
@@ -1111,6 +1168,7 @@ def build_event_cashflow_validation(
         else:
             row["xero_cost_cents"] -= signed_cents
         row["matched_xero_line_count"] += 1
+        row["xero_lines"].append(line)
 
     status_counts = Counter(row["profitability_status"] for row in rows)
     return {
@@ -1135,6 +1193,7 @@ def build_event_cashflow_validation(
             if row["xero_stripe_coding_status"] != "correct"
         ),
         "rows": rows,
+        "excluded_payout_transfer_lines": excluded_transfer_lines,
         "unmatched_xero_tracking": sorted(
             unmatched.values(),
             key=lambda item: (
@@ -1316,13 +1375,23 @@ def ensure_xero_tracking_options(
     return mappings
 
 
-def post_xero_bank_transaction(record: StripePayoutReconciliation, *, approved_by_slack_id: str) -> StripePayoutReconciliation:
+def post_xero_bank_transaction(
+    record: StripePayoutReconciliation,
+    *,
+    approved_by_slack_id: str,
+    expected_payload_hash: str = "",
+) -> StripePayoutReconciliation:
     current = StripePayoutReconciliation.objects.get(pk=record.pk)
     if current.xero_bank_transaction_id:
         return current
     preview = build_xero_preview(record)
     if not preview["ready"]:
         raise ReconciliationValidationError("Payout is not ready to post.", errors=preview["errors"])
+    if expected_payload_hash and preview["payload_hash"] != expected_payload_hash:
+        raise ReconciliationValidationError(
+            "Payout preview changed after review; fetch and approve a new preview.",
+            errors=["The reviewed payout payload hash is stale."],
+        )
     profile = ReconciliationProfile.objects.select_related("xero_connection").get(organization=record.organization)
     connection = profile.xero_connection
     if connection is None:

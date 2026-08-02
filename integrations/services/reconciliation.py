@@ -308,11 +308,25 @@ class ReconciliationReportService:
                         "ticket_count": 0,
                         "gross_cents": 0,
                         "stripe_fee_cents": 0,
+                        "stripe_invoice_ids": set(),
+                        "stripe_invoice_payment_ids": set(),
+                        "stripe_payment_intent_ids": set(),
+                        "stripe_product_ids": set(),
+                        "stripe_subscription_ids": set(),
                     },
                 )
                 bucket["ticket_count"] += 1
                 bucket["gross_cents"] += row_gross
                 bucket["stripe_fee_cents"] += row_fee
+                for field in (
+                    "stripe_invoice_ids",
+                    "stripe_invoice_payment_ids",
+                    "stripe_payment_intent_ids",
+                    "stripe_product_ids",
+                    "stripe_subscription_ids",
+                ):
+                    values = row.get(field) or []
+                    bucket[field].update(str(value) for value in values if str(value))
             elif ttype in STRIPE_FEE_TYPES or txn.get("reporting_category") == "fee":
                 standalone_fee = -int(txn.get("net") or 0)
                 fee_cents += standalone_fee
@@ -362,6 +376,15 @@ class ReconciliationReportService:
         if refunds:
             warnings.append(f"{len(refunds)} non-charge transaction(s) (refunds/adjustments) in this payout.")
         ordered_groups = sorted(groups.values(), key=lambda item: item["event_name"])
+        for group in ordered_groups:
+            for field in (
+                "stripe_invoice_ids",
+                "stripe_invoice_payment_ids",
+                "stripe_payment_intent_ids",
+                "stripe_product_ids",
+                "stripe_subscription_ids",
+            ):
+                group[field] = sorted(group[field])
         report = {
             "payout_id": payout_id,
             "arrival_date": arrival,
@@ -387,34 +410,125 @@ class ReconciliationReportService:
         event_api_id = str(metadata.get("event_api_id") or "").strip()
         source_object_id = str(source.get("id") or txn.get("id") or "").strip()
         description = str(source.get("description") or txn.get("description") or "").strip()
+        payment_intent_id = self._stripe_id(source.get("payment_intent"))
+        if not payment_intent_id and source_object_id.startswith("pi_"):
+            payment_intent_id = source_object_id
+        invoice_id = self._stripe_id(source.get("invoice"))
+        product_ids = self._stripe_product_ids(source, metadata)
+        subscription_ids = self._stripe_subscription_ids(source, metadata)
+        lineage = {
+            "stripe_balance_transaction_id": str(txn.get("id") or ""),
+            "stripe_source_object_id": source_object_id,
+            "stripe_invoice_ids": [invoice_id] if invoice_id else [],
+            "stripe_invoice_payment_ids": [],
+            "stripe_payment_intent_ids": [payment_intent_id] if payment_intent_id else [],
+            "stripe_product_ids": sorted(product_ids),
+            "stripe_subscription_ids": sorted(subscription_ids),
+        }
         if event_api_id:
-            return {"source_type": ReconciliationMappingSource.LUMA_EVENT, "source_id": event_api_id, "source_label": description or event_api_id, "event_api_id": event_api_id, "project_name": "", "metadata": metadata}
+            return {"source_type": ReconciliationMappingSource.LUMA_EVENT, "source_id": event_api_id, "source_label": description or event_api_id, "event_api_id": event_api_id, "project_name": "", "metadata": metadata, **lineage}
         if metadata.get("points_purchase_id") or metadata.get("pack_id") or metadata.get("points"):
-            return {"source_type": ReconciliationMappingSource.STRIPE_METADATA, "source_id": "roo_points", "source_label": description or "Roo Points", "event_api_id": "", "project_name": "Roo Points", "metadata": metadata}
-        invoice = self._invoice_for_payment(source)
+            return {"source_type": ReconciliationMappingSource.STRIPE_METADATA, "source_id": "roo_points", "source_label": description or "Roo Points", "event_api_id": "", "project_name": "Roo Points", "metadata": metadata, **lineage}
+        invoice, invoice_payment_id = self._invoice_for_payment(source)
         if invoice:
             invoice_id = str(invoice.get("id") or source_object_id)
             lines = invoice.get("lines") if isinstance(invoice.get("lines"), dict) else {}
             descriptions = [str(line.get("description") or "").strip() for line in lines.get("data", []) if isinstance(line, dict) and str(line.get("description") or "").strip()]
             label = descriptions[0] if descriptions else description or invoice_id
-            return {"source_type": ReconciliationMappingSource.STRIPE_INVOICE, "source_id": invoice_id, "source_label": label, "event_api_id": "", "project_name": label, "stripe_invoice_id": invoice_id, "metadata": metadata}
-        return {"source_type": ReconciliationMappingSource.UNATTRIBUTED, "source_id": source_object_id, "source_label": description or "(unattributed Stripe payment)", "event_api_id": "", "project_name": "", "metadata": metadata}
+            lineage["stripe_invoice_ids"] = [invoice_id]
+            lineage["stripe_invoice_payment_ids"] = (
+                [invoice_payment_id] if invoice_payment_id else []
+            )
+            lineage["stripe_product_ids"] = sorted(
+                set(lineage["stripe_product_ids"]) | self._invoice_product_ids(invoice)
+            )
+            lineage["stripe_subscription_ids"] = sorted(
+                set(lineage["stripe_subscription_ids"])
+                | self._invoice_subscription_ids(invoice)
+            )
+            return {"source_type": ReconciliationMappingSource.STRIPE_INVOICE, "source_id": invoice_id, "source_label": label, "event_api_id": "", "project_name": label, "stripe_invoice_id": invoice_id, "metadata": metadata, **lineage}
+        if lineage["stripe_product_ids"]:
+            product_id = lineage["stripe_product_ids"][0]
+            return {"source_type": "stripe_product", "source_id": product_id, "source_label": description or product_id, "event_api_id": "", "project_name": "", "metadata": metadata, **lineage}
+        return {"source_type": ReconciliationMappingSource.UNATTRIBUTED, "source_id": source_object_id, "source_label": description or "(unattributed Stripe payment)", "event_api_id": "", "project_name": "", "metadata": metadata, **lineage}
 
-    def _invoice_for_payment(self, source: Dict[str, Any]) -> Dict[str, Any]:
+    @staticmethod
+    def _stripe_id(value: Any) -> str:
+        return str(value.get("id") if isinstance(value, dict) else value or "").strip()
+
+    @classmethod
+    def _stripe_product_ids(cls, source: Dict[str, Any], metadata: Dict[str, Any]) -> set[str]:
+        price = source.get("price") if isinstance(source.get("price"), dict) else {}
+        values = {
+            cls._stripe_id(source.get("product")),
+            cls._stripe_id(price.get("product")),
+            str(metadata.get("product_id") or "").strip(),
+        }
+        return {value for value in values if value.startswith("prod_")}
+
+    @staticmethod
+    def _stripe_subscription_ids(source: Dict[str, Any], metadata: Dict[str, Any]) -> set[str]:
+        values = {
+            ReconciliationReportService._stripe_id(source.get("subscription")),
+            str(metadata.get("subscription_id") or "").strip(),
+        }
+        return {value for value in values if value.startswith("sub_")}
+
+    @classmethod
+    def _invoice_product_ids(cls, invoice: Dict[str, Any]) -> set[str]:
+        lines = invoice.get("lines") if isinstance(invoice.get("lines"), dict) else {}
+        values: set[str] = set()
+        for line in lines.get("data") or []:
+            if not isinstance(line, dict):
+                continue
+            price = line.get("price") if isinstance(line.get("price"), dict) else {}
+            pricing = line.get("pricing") if isinstance(line.get("pricing"), dict) else {}
+            price_details = (
+                pricing.get("price_details")
+                if isinstance(pricing.get("price_details"), dict)
+                else {}
+            )
+            values.update({
+                cls._stripe_id(line.get("product")),
+                cls._stripe_id(price.get("product")),
+                cls._stripe_id(price_details.get("product")),
+            })
+        return {value for value in values if value.startswith("prod_")}
+
+    @classmethod
+    def _invoice_subscription_ids(cls, invoice: Dict[str, Any]) -> set[str]:
+        parent = invoice.get("parent") if isinstance(invoice.get("parent"), dict) else {}
+        details = (
+            parent.get("subscription_details")
+            if isinstance(parent.get("subscription_details"), dict)
+            else {}
+        )
+        values = {
+            cls._stripe_id(invoice.get("subscription")),
+            cls._stripe_id(details.get("subscription")),
+        }
+        return {value for value in values if value.startswith("sub_")}
+
+    def _invoice_for_payment(self, source: Dict[str, Any]) -> tuple[Dict[str, Any], str]:
         raw_invoice = source.get("invoice")
         if isinstance(raw_invoice, dict):
-            return raw_invoice
+            return raw_invoice, ""
         invoice_id = str(raw_invoice or "").strip()
         raw_intent = source.get("payment_intent")
         intent_id = str(raw_intent.get("id") if isinstance(raw_intent, dict) else raw_intent or "").strip()
         if not intent_id and str(source.get("id") or "").startswith("pi_"):
             intent_id = str(source["id"])
+        invoice_payment_id = ""
         if not invoice_id and intent_id:
             payments = self._list("/v1/invoice_payments", {"payment[type]": "payment_intent", "payment[payment_intent]": intent_id})
             if payments:
+                invoice_payment_id = str(payments[0].get("id") or "").strip()
                 raw_invoice = payments[0].get("invoice")
                 invoice_id = str(raw_invoice.get("id") if isinstance(raw_invoice, dict) else raw_invoice or "").strip()
-        return self._get(f"/v1/invoices/{invoice_id}", {}) if invoice_id else {}
+        return (
+            self._get(f"/v1/invoices/{invoice_id}", {}) if invoice_id else {},
+            invoice_payment_id,
+        )
 
     def _refund_attribution(self, source: Dict[str, Any]) -> Dict[str, Any]:
         raw_intent = source.get("payment_intent")
@@ -425,9 +539,16 @@ class ReconciliationReportService:
             intent = self._get(f"/v1/payment_intents/{intent_id}", {}) if intent_id else {}
         metadata = intent.get("metadata") if isinstance(intent.get("metadata"), dict) else {}
         event_id = str(metadata.get("event_api_id") or "").strip()
+        intent_id = str(intent.get("id") or "").strip()
+        lineage = {
+            "stripe_refund_id": str(source.get("id") or ""),
+            "stripe_payment_intent_id": intent_id,
+            "stripe_invoice_id": self._stripe_id(intent.get("invoice")),
+            "stripe_charge_id": self._stripe_id(source.get("charge")),
+        }
         if event_id:
-            return {"source_type": ReconciliationMappingSource.LUMA_EVENT, "source_id": event_id, "source_label": str(intent.get("description") or event_id), "event_api_id": event_id}
-        return {"source_type": ReconciliationMappingSource.UNATTRIBUTED, "source_id": str(intent.get("id") or source.get("id") or ""), "source_label": str(intent.get("description") or source.get("description") or ""), "event_api_id": ""}
+            return {"source_type": ReconciliationMappingSource.LUMA_EVENT, "source_id": event_id, "source_label": str(intent.get("description") or event_id), "event_api_id": event_id, **lineage}
+        return {"source_type": ReconciliationMappingSource.UNATTRIBUTED, "source_id": str(intent.get("id") or source.get("id") or ""), "source_label": str(intent.get("description") or source.get("description") or ""), "event_api_id": "", **lineage}
 
     # ---- Stripe HTTP -----------------------------------------------------
 
