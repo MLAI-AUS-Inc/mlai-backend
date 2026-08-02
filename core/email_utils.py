@@ -103,3 +103,17 @@ def send_magic_link_email(user, magic_link, message_id="2"):
         full_name=user.full_name,
         message_id=message_id,
     )
+
+
+def send_password_reset_email(user, reset_link):
+    """Send the one-use MLAI password setup/reset link without logging it."""
+
+    message_id = os.getenv('CUSTOMERIO_PASSWORD_RESET_MESSAGE_ID', '2')
+    return send_magic_link_email_to_address(
+        user.email,
+        reset_link,
+        identifier=user.id,
+        first_name=user.first_name,
+        full_name=user.full_name,
+        message_id=message_id,
+    )

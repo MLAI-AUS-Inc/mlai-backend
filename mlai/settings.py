@@ -487,6 +487,11 @@ COMMUNITY_CHAT_ALLOWED_ORIGINS = _env_list(
         'mlaichat://callback',
     ],
 )
+COMMUNITY_CHAT_PASSWORD_RESET_URL = os.getenv(
+    'COMMUNITY_CHAT_PASSWORD_RESET_URL',
+    'http://localhost:3001/#/reset-password' if DEBUG else 'https://chat.mlai.au/#/reset-password',
+)
+PASSWORD_RESET_TTL_SECONDS = int(os.getenv('PASSWORD_RESET_TTL_SECONDS', '3600'))
 
 HEALTH_HACK_ACTIVE_CASE_ID = int(os.getenv('HEALTH_HACK_ACTIVE_CASE_ID', '1'))
 HEALTH_HACK_AI_BODY_MAX_BYTES = int(os.getenv('HEALTH_HACK_AI_BODY_MAX_BYTES', str(16 * 1024)))
