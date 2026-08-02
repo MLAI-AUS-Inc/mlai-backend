@@ -378,10 +378,18 @@ class EmailCodeRequestView(APIView):
             requested_ip_digest=ip_digest,
         )
         _uniform_email_code_delay(started_at)
+        resend_available_at = challenge.created_at + timedelta(
+            seconds=settings.COMMUNITY_CHAT_EMAIL_CODE_RESEND_SECONDS
+        )
         return Response(
             {
                 "status": "accepted",
                 "challenge_id": str(challenge.id),
+                "expires_at": challenge.expires_at,
+                "resend_available_at": resend_available_at,
+                "message": "If this email is eligible, MLAI has sent a six-digit sign-in code.",
+                # Relative values remain for the compatibility window while
+                # released clients move to the absolute timestamps above.
                 "expires_in": settings.COMMUNITY_CHAT_EMAIL_CODE_TTL_SECONDS,
                 "resend_after": settings.COMMUNITY_CHAT_EMAIL_CODE_RESEND_SECONDS,
             },

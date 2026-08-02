@@ -99,8 +99,19 @@ class CommunityChatEmailCodeAuthTests(APITestCase):
 
         self.assertEqual(existing.status_code, status.HTTP_202_ACCEPTED)
         self.assertEqual(missing.status_code, status.HTTP_202_ACCEPTED)
-        for field in ("status", "expires_in", "resend_after"):
+        for field in (
+            "status",
+            "message",
+            "expires_in",
+            "resend_after",
+        ):
             self.assertEqual(existing.data[field], missing.data[field])
+        self.assertIn("expires_at", existing.data)
+        self.assertIn("resend_available_at", existing.data)
+        self.assertLess(
+            existing.data["resend_available_at"],
+            existing.data["expires_at"],
+        )
         self.assertNotEqual(existing.data["challenge_id"], missing.data["challenge_id"])
         self.assertEqual(CommunityChatEmailCodeChallenge.objects.count(), 2)
         self.assertEqual(CommunityChatEmailCodeDelivery.objects.count(), 1)
