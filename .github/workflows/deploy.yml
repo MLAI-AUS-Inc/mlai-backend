@@ -169,6 +169,7 @@ jobs:
           org_memory.tests.test_runtime_postgres \
           org_memory.tests.test_runtime.MemoryRuntimeTests.test_legacy_access_restored_dead_letters_get_version_pinned_replacements \
           org_memory.tests.test_consolidation.MemoryConsolidationTests.test_consolidation_work_payload_is_identifier_only_and_idempotent \
+          org_memory.tests.test_activation.StrongGroundingActivationTests.test_existing_new_review_can_be_reconciled_after_reviewed_policy_allows_it \
           org_memory.tests.test_runtime.MemoryRuntimeTests.test_legacy_consolidation_lock_dead_letters_are_requeued_once \
           org_memory.tests.test_runtime.MemoryRuntimeTests.test_stopped_worker_work_is_recovered_and_attempt_is_refunded \
           org_memory.tests.test_extraction.MemoryExtractionTests.test_legacy_dead_letter_reconciliation_schedules_current_target \

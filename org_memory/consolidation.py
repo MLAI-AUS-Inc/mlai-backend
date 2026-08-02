@@ -776,12 +776,13 @@ def apply_strong_grounding_auto_activation(
 ) -> MemoryConsolidationRun:
     """Apply one existing NEW review after re-proving every auto-activation invariant."""
 
-    run = (
-        MemoryConsolidationRun.objects.select_for_update()
-        .select_related("candidate_claim", "matched_claim", "review_item")
-        .get(pk=run.pk)
+    # Lock each mutable row directly. Joining nullable matched/review relations
+    # under an unqualified FOR UPDATE makes PostgreSQL reject the query because
+    # it cannot lock the nullable side of an outer join.
+    run = MemoryConsolidationRun.objects.select_for_update().get(pk=run.pk)
+    candidate = MemoryClaim.objects.select_for_update().get(
+        pk=run.candidate_claim_id
     )
-    candidate = run.candidate_claim
     if operator is None:
         raise ConsolidationInvariantError("Automatic activation requires an operator audit identity.")
     if (
@@ -793,7 +794,11 @@ def apply_strong_grounding_auto_activation(
         raise ConsolidationInvariantError(
             "Only an unresolved NEW candidate can use automatic activation."
         )
-    review = run.review_item
+    review = (
+        MemoryReviewItem.objects.select_for_update()
+        .filter(pk=run.review_item_id)
+        .first()
+    )
     if (
         review is None
         or review.review_type != MemoryReviewType.CLAIM_ACTIVATION
