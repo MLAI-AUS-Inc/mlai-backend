@@ -2,6 +2,7 @@ import hashlib
 import base64
 import re
 import secrets
+import time
 import uuid
 from datetime import datetime, timedelta, timezone as datetime_timezone
 
@@ -9,6 +10,7 @@ from django.conf import settings
 from django.contrib.auth.models import update_last_login
 from django.db import IntegrityError, transaction
 from django.utils import timezone
+from django.utils.crypto import salted_hmac
 from rest_framework import status
 from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.permissions import AllowAny, IsAuthenticated
@@ -43,9 +45,21 @@ from .nostr import (
     verify_device_proof,
 )
 from .throttles import CommunityChatScopedThrottle, enforce_bootstrap_limits
-from core.auth_throttles import enforce_chat_password_login_limits
+from core.auth_throttles import (
+    client_ip,
+    enforce_chat_email_code_request_limits,
+    enforce_chat_email_code_verify_limits,
+    enforce_chat_password_login_limits,
+)
 from core.password_auth import authenticate_account, normalize_account_email
+from .email_codes import (
+    InvalidEmailCode,
+    consume_email_code,
+    issue_email_code_challenge,
+)
 from .serializers import (
+    CommunityChatEmailCodeRequestSerializer,
+    CommunityChatEmailCodeVerifySerializer,
     CommunityChatPasswordLoginSerializer,
     own_chat_profile,
     public_chat_profile,
@@ -228,6 +242,158 @@ class PasswordAuthView(APIView):
                 "expires_at": token.expires_at,
                 "relay_url": settings.COMMUNITY_CHAT_RELAY_URL,
                 "origin": origin,
+                "profile": own_chat_profile(user),
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+def _uniform_email_code_delay(started_at):
+    minimum = settings.COMMUNITY_CHAT_EMAIL_CODE_MIN_RESPONSE_SECONDS
+    jitter = secrets.randbelow(21) / 1000
+    remaining = minimum + jitter - (time.monotonic() - started_at)
+    if remaining > 0:
+        time.sleep(remaining)
+
+
+def _issue_email_code_bootstrap(user, challenge):
+    active_key = CommunityChatDevice.objects.filter(
+        public_key=challenge.public_key,
+        status__in=(DeviceBindingStatus.PENDING, DeviceBindingStatus.VERIFIED),
+    ).first()
+    if active_key and active_key.user_id != user.id:
+        return None, "public_key_already_bound"
+    active_installation = CommunityChatDevice.objects.filter(
+        installation_id=challenge.installation_id,
+        status__in=(DeviceBindingStatus.PENDING, DeviceBindingStatus.VERIFIED),
+    ).first()
+    if active_installation and (
+        active_installation.user_id != user.id
+        or active_installation.public_key != challenge.public_key
+    ):
+        return None, "installation_already_bound"
+
+    now = timezone.now()
+    raw_token = f"{TOKEN_PREFIX}{secrets.token_urlsafe(48)}"
+    CommunityChatBootstrapToken.objects.filter(
+        user=user,
+        public_key=challenge.public_key,
+        revoked_at__isnull=True,
+    ).update(revoked_at=now)
+    token = CommunityChatBootstrapToken.objects.create(
+        user=user,
+        public_key=challenge.public_key,
+        installation_id=challenge.installation_id,
+        client_id=challenge.client_id,
+        origin=challenge.origin,
+        platform=challenge.platform,
+        name=challenge.device_name,
+        token_hash=hashlib.sha256(raw_token.encode("utf-8")).hexdigest(),
+        expires_at=now
+        + timedelta(seconds=settings.COMMUNITY_CHAT_BOOTSTRAP_TOKEN_TTL_SECONDS),
+    )
+    update_last_login(None, user)
+    return (raw_token, token), None
+
+
+class EmailCodeRequestView(APIView):
+    """Create a uniform, installation-bound MLAI Chat email proof."""
+
+    authentication_classes = []
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        if not settings.COMMUNITY_CHAT_EMAIL_CODE_AUTH_ENABLED:
+            return Response(
+                {"error": "email_code_auth_disabled"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        started_at = time.monotonic()
+        serializer = CommunityChatEmailCodeRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        device = data["device"]
+        email = normalize_account_email(data["email"])
+        origin = _password_auth_origin(request, data["client_id"])
+        enforce_chat_email_code_request_limits(
+            request,
+            email,
+            device["installation_id"],
+        )
+        ip_digest = salted_hmac(
+            "community-chat-email-code-ip",
+            client_ip(request),
+            algorithm="sha256",
+        ).hexdigest()
+        challenge = issue_email_code_challenge(
+            email=email,
+            client_id=data["client_id"],
+            installation_id=device["installation_id"],
+            origin=origin,
+            platform=device["platform"],
+            device_name=device.get("name", ""),
+            public_key=device["public_key"],
+            requested_ip_digest=ip_digest,
+        )
+        _uniform_email_code_delay(started_at)
+        return Response(
+            {
+                "status": "accepted",
+                "challenge_id": str(challenge.id),
+                "expires_in": settings.COMMUNITY_CHAT_EMAIL_CODE_TTL_SECONDS,
+                "resend_after": settings.COMMUNITY_CHAT_EMAIL_CODE_RESEND_SECONDS,
+            },
+            status=status.HTTP_202_ACCEPTED,
+        )
+
+
+class EmailCodeVerifyView(APIView):
+    """Consume a one-use email proof and mint one device bootstrap."""
+
+    authentication_classes = []
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        if not settings.COMMUNITY_CHAT_EMAIL_CODE_AUTH_ENABLED:
+            return Response(
+                {"error": "email_code_auth_disabled"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        serializer = CommunityChatEmailCodeVerifySerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        enforce_chat_email_code_verify_limits(
+            request,
+            data["challenge_id"],
+            data["installation_id"],
+        )
+        try:
+            user, challenge = consume_email_code(
+                challenge_id=data["challenge_id"],
+                code=data["code"],
+                client_id=data["client_id"],
+                installation_id=data["installation_id"],
+            )
+        except InvalidEmailCode:
+            return Response(
+                {"error": "invalid_or_expired_code"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        issued, binding_error = _issue_email_code_bootstrap(user, challenge)
+        if binding_error:
+            return Response(
+                {"error": binding_error},
+                status=status.HTTP_409_CONFLICT,
+            )
+        raw_token, token = issued
+        return Response(
+            {
+                "status": "authenticated",
+                "bootstrap_token": raw_token,
+                "expires_at": token.expires_at,
+                "relay_url": settings.COMMUNITY_CHAT_RELAY_URL,
+                "origin": challenge.origin,
                 "profile": own_chat_profile(user),
             },
             status=status.HTTP_200_OK,

@@ -48,6 +48,28 @@ class CommunityChatPasswordLoginSerializer(serializers.Serializer):
         return attrs
 
 
+class CommunityChatEmailCodeRequestSerializer(serializers.Serializer):
+    email = serializers.EmailField(max_length=254)
+    client_id = serializers.ChoiceField(choices=COMMUNITY_CHAT_CLIENT_IDS)
+    device = CommunityChatDeviceLoginSerializer()
+
+    def validate(self, attrs):
+        return CommunityChatPasswordLoginSerializer().validate(attrs)
+
+
+class CommunityChatEmailCodeVerifySerializer(serializers.Serializer):
+    challenge_id = serializers.UUIDField()
+    code = serializers.CharField(min_length=6, max_length=16, trim_whitespace=True)
+    client_id = serializers.ChoiceField(choices=COMMUNITY_CHAT_CLIENT_IDS)
+    installation_id = serializers.UUIDField()
+
+    def validate_code(self, value):
+        normalized = value.replace(" ", "").replace("-", "")
+        if len(normalized) != 6 or not normalized.isdigit():
+            raise serializers.ValidationError("Enter the six-digit code.")
+        return normalized
+
+
 def display_name_for_user(user):
     return user.full_name or 'MLAI member'
 

@@ -90,3 +90,40 @@ def enforce_chat_password_login_limits(request, email, public_key):
             limit=limit,
             window_seconds=600,
         )
+
+
+def enforce_chat_email_code_request_limits(request, email, installation_id):
+    _enforce_limit(
+        action='community-chat-email-code-cooldown',
+        dimension='email-installation',
+        value=f'{email}:{installation_id}',
+        limit=1,
+        window_seconds=60,
+    )
+    for dimension, value, limit in (
+        ('email', email, 5),
+        ('installation', installation_id, 10),
+        ('ip', client_ip(request), 20),
+    ):
+        _enforce_limit(
+            action='community-chat-email-code-request',
+            dimension=dimension,
+            value=value,
+            limit=limit,
+            window_seconds=3600,
+        )
+
+
+def enforce_chat_email_code_verify_limits(request, challenge_id, installation_id):
+    for dimension, value, limit in (
+        ('challenge', challenge_id, 10),
+        ('installation', installation_id, 30),
+        ('ip', client_ip(request), 30),
+    ):
+        _enforce_limit(
+            action='community-chat-email-code-verify',
+            dimension=dimension,
+            value=value,
+            limit=limit,
+            window_seconds=600,
+        )

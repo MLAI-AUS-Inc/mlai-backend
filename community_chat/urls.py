@@ -6,6 +6,8 @@ from .views import (
     DeviceAuthAuthorizeView,
     DeviceAuthExchangeView,
     DeviceAuthStartView,
+    EmailCodeRequestView,
+    EmailCodeVerifyView,
     DeviceView,
     InviteView,
     PasswordAuthView,
@@ -14,6 +16,8 @@ from .views import (
 
 
 urlpatterns = [
+    path("auth/email-code/request/", EmailCodeRequestView.as_view(), name="community_chat_email_code_request"),
+    path("auth/email-code/verify/", EmailCodeVerifyView.as_view(), name="community_chat_email_code_verify"),
     path("auth/password/", PasswordAuthView.as_view(), name="community_chat_password_auth"),
     path("auth/device/start/", DeviceAuthStartView.as_view(), name="community_chat_auth_start"),
     path(
