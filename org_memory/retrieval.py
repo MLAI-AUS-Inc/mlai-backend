@@ -620,6 +620,20 @@ def _relevant_chunk_excerpt(text: str, terms: Iterable[str], *, limit: int = 160
     return "\n".join(lines[index] for index in sorted(selected_indices))[:limit]
 
 
+def _citation_context(citations: Iterable[dict]) -> list[dict]:
+    """Expose only authorised source metadata needed to describe citations."""
+
+    return [
+        {
+            "citation_id": item["evidence_id"],
+            "provider": item["provider"],
+            "source_title": item["label"],
+            "occurred_at": item["occurred_at"],
+        }
+        for item in citations
+    ]
+
+
 def _pack_candidate(candidate: MemoryCandidate, *, terms: Iterable[str] = ()) -> PackedMemory:
     citations = _candidate_citations(candidate)
     if candidate.claim:
@@ -640,6 +654,7 @@ def _pack_candidate(candidate: MemoryCandidate, *, terms: Iterable[str] = ()) ->
             "source_authority": float(claim.source_authority),
             "exact_evidence": quotes,
             "citation_ids": [item["evidence_id"] for item in citations],
+            "sources": _citation_context(citations),
         }
     else:
         chunk = candidate.chunk
@@ -654,6 +669,7 @@ def _pack_candidate(candidate: MemoryCandidate, *, terms: Iterable[str] = ()) ->
             if (chunk.occurred_at or chunk.source_version.occurred_at)
             else None,
             "citation_ids": [item["evidence_id"] for item in citations],
+            "sources": _citation_context(citations),
         }
     estimated_tokens = max(len(str(payload)) // 4, 1)
     return PackedMemory(
