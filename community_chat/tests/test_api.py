@@ -279,6 +279,7 @@ class CommunityChatApiTests(APITestCase):
             reverse("community_chat_device", args=(self.public_key,)),
             {"reason": "lost phone"},
             format="json",
+            HTTP_ORIGIN=ORIGIN,
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         device.refresh_from_db()
@@ -298,7 +299,30 @@ class CommunityChatApiTests(APITestCase):
         response = self.client.delete(
             reverse("community_chat_device", args=(self.public_key,)),
             format="json",
+            HTTP_ORIGIN=ORIGIN,
         )
         self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
         device.refresh_from_db()
         self.assertEqual(device.status, DeviceBindingStatus.VERIFIED)
+
+    @patch("community_chat.views.revoke_relay_membership")
+    def test_revoke_rejects_missing_or_unapproved_origin(self, mock_revoke):
+        CommunityChatDevice.objects.create(
+            user=self.user,
+            public_key=self.public_key,
+            status=DeviceBindingStatus.VERIFIED,
+        )
+
+        missing = self.client.delete(
+            reverse("community_chat_device", args=(self.public_key,)),
+            format="json",
+        )
+        unapproved = self.client.delete(
+            reverse("community_chat_device", args=(self.public_key,)),
+            format="json",
+            HTTP_ORIGIN="https://attacker.example",
+        )
+
+        self.assertEqual(missing.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(unapproved.status_code, status.HTTP_403_FORBIDDEN)
+        mock_revoke.assert_not_called()

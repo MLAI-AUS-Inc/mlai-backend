@@ -686,6 +686,7 @@ class DeviceView(APIView):
 
     def delete(self, request, public_key):
         _require_eligible(request.user)
+        _request_origin(request)
         public_key = _public_key(public_key)
         _require_token_key(request, public_key)
         enforce_bootstrap_limits(

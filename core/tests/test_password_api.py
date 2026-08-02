@@ -153,6 +153,25 @@ class PasswordChangeApiTests(TestCase):
         self.client = APIClient()
         self.client.cookies[ACCESS_COOKIE] = str(refresh.access_token)
 
+    def test_cookie_authenticated_change_requires_exact_trusted_origin(self):
+        payload = {
+            'current_password': 'Existing-secure-password-42!',
+            'new_password': 'Replacement-secure-password-42!',
+        }
+
+        missing = self.client.post(CHANGE_URL, payload, format='json')
+        untrusted = self.client.post(
+            CHANGE_URL,
+            payload,
+            format='json',
+            HTTP_ORIGIN='https://attacker.example',
+        )
+
+        self.assertEqual(missing.status_code, 403)
+        self.assertEqual(untrusted.status_code, 403)
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.check_password('Existing-secure-password-42!'))
+
     def test_change_requires_current_password_and_invalidates_session(self):
         wrong = self.client.post(
             CHANGE_URL,
@@ -161,6 +180,7 @@ class PasswordChangeApiTests(TestCase):
                 'new_password': 'Replacement-secure-password-42!',
             },
             format='json',
+            HTTP_ORIGIN='https://chat.mlai.au',
         )
         self.assertEqual(wrong.status_code, 400)
 
@@ -171,6 +191,7 @@ class PasswordChangeApiTests(TestCase):
                 'new_password': 'Replacement-secure-password-42!',
             },
             format='json',
+            HTTP_ORIGIN='https://chat.mlai.au',
         )
         self.assertEqual(changed.status_code, 200)
         self.assertTrue(changed.data['reauthentication_required'])
