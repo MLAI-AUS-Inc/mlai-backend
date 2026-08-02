@@ -95,6 +95,7 @@ class CommunityChatAccountAuthentication(BaseAuthentication):
             ):
                 raise AuthenticationFailed("MLAI Chat session origin is invalid.")
         request.community_chat_account_session = session
+        request.community_chat_public_key = session.public_key
         request.community_chat_installation_id = session.installation_id
         request.community_chat_client_id = session.client_id
         request.community_chat_origin = session.origin

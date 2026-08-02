@@ -1,7 +1,9 @@
 from datetime import timedelta
 import hashlib
 import uuid
+from unittest.mock import patch
 
+from coincurve import PrivateKey
 from django.contrib.auth import get_user_model
 from django.test import TestCase, override_settings
 from django.urls import reverse
@@ -12,11 +14,17 @@ from rest_framework.test import APIClient
 from community_chat.account_sessions import issue_account_session
 from community_chat.models import (
     CommunityChatAccountSession,
+    CommunityChatDevice,
     CommunityChatEmailCodeChallenge,
+    DeviceBindingStatus,
 )
 
 
 ORIGIN = "https://chat.mlai.au"
+
+
+def public_key(private_int):
+    return PrivateKey.from_int(private_int).public_key.format(compressed=True)[1:].hex()
 
 
 @override_settings(
@@ -40,7 +48,7 @@ class CommunityChatAccountSessionTests(TestCase):
             origin="mlaichat://callback",
             platform="ios",
             device_name="iPhone",
-            public_key="c" * 64,
+            public_key=public_key(41),
             expires_at=timezone.now() + timedelta(minutes=10),
         )
         self.credentials = issue_account_session(self.user, self.challenge)
@@ -116,6 +124,56 @@ class CommunityChatAccountSessionTests(TestCase):
         self.assertIsNotNone(self.credentials.session.revoked_at)
         denied = self.bearer_client().get(reverse("community_chat_account"))
         self.assertEqual(denied.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    @patch("community_chat.views.revoke_relay_membership")
+    def test_account_session_can_revoke_only_its_bound_device(self, mock_revoke):
+        device = CommunityChatDevice.objects.create(
+            user=self.user,
+            public_key=self.challenge.public_key,
+            installation_id=self.challenge.installation_id,
+            client_id=self.challenge.client_id,
+            platform=self.challenge.platform,
+            status=DeviceBindingStatus.VERIFIED,
+            verified_at=timezone.now(),
+        )
+        mock_revoke.return_value = ("revoked", uuid.uuid4())
+
+        response = self.bearer_client().delete(
+            reverse("community_chat_device", args=(device.public_key,)),
+            {"reason": "user_requested_device_removal"},
+            format="json",
+            HTTP_ORIGIN="mlaichat://callback",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        device.refresh_from_db()
+        self.credentials.session.refresh_from_db()
+        self.assertEqual(device.status, DeviceBindingStatus.REVOKED)
+        self.assertIsNotNone(self.credentials.session.revoked_at)
+        denied = self.bearer_client().get(reverse("community_chat_account"))
+        self.assertEqual(denied.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    @patch("community_chat.views.revoke_relay_membership")
+    def test_account_session_cannot_revoke_another_device(self, mock_revoke):
+        other_device = CommunityChatDevice.objects.create(
+            user=self.user,
+            public_key=public_key(42),
+            installation_id=uuid.uuid4(),
+            client_id=self.challenge.client_id,
+            platform=self.challenge.platform,
+            status=DeviceBindingStatus.VERIFIED,
+            verified_at=timezone.now(),
+        )
+
+        response = self.bearer_client().delete(
+            reverse("community_chat_device", args=(other_device.public_key,)),
+            {"reason": "user_requested_device_removal"},
+            format="json",
+            HTTP_ORIGIN="mlaichat://callback",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        mock_revoke.assert_not_called()
 
     def test_auth_version_change_invalidates_session(self):
         self.user.auth_version += 1

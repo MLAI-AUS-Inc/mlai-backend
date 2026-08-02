@@ -981,7 +981,7 @@ class ConfirmView(APIView):
 
 
 class DeviceView(APIView):
-    authentication_classes = AUTHENTICATION_CLASSES
+    authentication_classes = ACCOUNT_AUTHENTICATION_CLASSES
     permission_classes = [IsAuthenticated]
     throttle_classes = [CommunityChatScopedThrottle]
     community_chat_throttle_scope = "community_chat_revoke"
@@ -1035,4 +1035,8 @@ class DeviceView(APIView):
         if bootstrap_token is not None and bootstrap_token.revoked_at is None:
             bootstrap_token.revoked_at = now
             bootstrap_token.save(update_fields=("revoked_at",))
+        account_session = getattr(request, "community_chat_account_session", None)
+        if account_session is not None and account_session.revoked_at is None:
+            account_session.revoked_at = now
+            account_session.save(update_fields=("revoked_at", "updated_at"))
         return Response({"status": "revoked", "relay_status": relay_status})
