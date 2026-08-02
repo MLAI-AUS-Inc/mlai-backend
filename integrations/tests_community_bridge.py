@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import discord
+from django.contrib.auth import get_user_model
 from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.test import TestCase, TransactionTestCase, override_settings
@@ -16,6 +17,7 @@ from django.urls import reverse
 from django.utils import timezone
 from rest_framework.test import APIClient
 
+from community_chat.models import CommunityChatDevice, DeviceBindingStatus
 from integrations.models import (
     CommunityBridgeChannel,
     CommunityBridgeDelivery,
@@ -39,6 +41,13 @@ from integrations.services.community_bridge.buzz import (
     BuzzBridgePermanentError,
 )
 from integrations.services.community_bridge.worker import CommunityBridgeDiscordClient
+from integrations.services.community_bridge.identity import (
+    verified_identity_for_buzz,
+    verified_identity_for_slack,
+)
+
+
+User = get_user_model()
 
 
 class _FakeSentMessage:
@@ -892,6 +901,18 @@ class CommunityBridgeStagingVerificationTests(TestCase):
 )
 class BuzzCommunityBridgeWorkerTests(TransactionTestCase):
     def setUp(self):
+        self.user = User.objects.create_user(
+            email="alice.bridge@example.com",
+            password="Correct-Horse-Bridge-9!",
+            slack_id="U123",
+            first_name="Alice",
+        )
+        self.device = CommunityChatDevice.objects.create(
+            user=self.user,
+            public_key="9" * 64,
+            status=DeviceBindingStatus.VERIFIED,
+            verified_at=timezone.now(),
+        )
         self.channel = CommunityBridgeChannel.objects.create(
             slack_workspace_id="T-MLAI",
             slack_channel_id="C-MLAI-CHAT",
@@ -903,6 +924,7 @@ class BuzzCommunityBridgeWorkerTests(TransactionTestCase):
         )
         self.client = CommunityBridgeDiscordClient()
         self.identity = CommunityBridgeIdentityLink.objects.create(
+            user=self.user,
             slack_workspace_id="T-MLAI",
             slack_user_id="U123",
             buzz_pubkey="9" * 64,
@@ -1200,11 +1222,115 @@ class BuzzCommunityBridgeWorkerTests(TransactionTestCase):
         )
 
 
+class CommunityBridgeAccountIdentityTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            email="account-identity@example.com",
+            password="Correct-Horse-Account-9!",
+            slack_id="U-ACCOUNT",
+            first_name="Current",
+            last_name="Name",
+        )
+        self.original_device = CommunityChatDevice.objects.create(
+            user=self.user,
+            public_key="1" * 64,
+            status=DeviceBindingStatus.VERIFIED,
+            verified_at=timezone.now(),
+        )
+        self.rotated_device = CommunityChatDevice.objects.create(
+            user=self.user,
+            public_key="2" * 64,
+            status=DeviceBindingStatus.VERIFIED,
+            verified_at=timezone.now(),
+            last_seen_at=timezone.now(),
+        )
+        self.link = CommunityBridgeIdentityLink.objects.create(
+            user=self.user,
+            slack_workspace_id="T-ACCOUNT",
+            slack_user_id="U-ACCOUNT",
+            buzz_pubkey=self.original_device.public_key,
+            display_name="Stale Name",
+            verification_method=CommunityBridgeIdentityVerificationMethod.ACCOUNT_CHALLENGE,
+            verification_reference="account-link-1",
+            verified_at=timezone.now(),
+        )
+
+    def test_slack_identity_uses_account_profile_and_rotates_revoked_device(self):
+        identity = verified_identity_for_slack(
+            slack_workspace_id="T-ACCOUNT",
+            slack_user_id="U-ACCOUNT",
+        )
+        self.assertEqual(identity["identity_source"], "mlai_account")
+        self.assertEqual(identity["display_name"], "Current Name")
+        self.assertEqual(identity["buzz_pubkey"], self.original_device.public_key)
+
+        self.original_device.status = DeviceBindingStatus.REVOKED
+        self.original_device.revoked_at = timezone.now()
+        self.original_device.save(update_fields=["status", "revoked_at", "updated_at"])
+
+        identity = verified_identity_for_slack(
+            slack_workspace_id="T-ACCOUNT",
+            slack_user_id="U-ACCOUNT",
+        )
+        self.assertEqual(identity["buzz_pubkey"], self.rotated_device.public_key)
+
+    def test_any_active_account_device_resolves_to_the_same_slack_identity(self):
+        identity = verified_identity_for_buzz(
+            slack_workspace_id="T-ACCOUNT",
+            buzz_pubkey=self.rotated_device.public_key,
+        )
+        self.assertEqual(identity["slack_user_id"], "U-ACCOUNT")
+        self.assertEqual(identity["user_profile_id"], str(self.user.community_chat_profile_id))
+
+    def test_revoked_device_does_not_resolve(self):
+        self.rotated_device.status = DeviceBindingStatus.REVOKED
+        self.rotated_device.revoked_at = timezone.now()
+        self.rotated_device.save(update_fields=["status", "revoked_at", "updated_at"])
+
+        self.assertIsNone(
+            verified_identity_for_buzz(
+                slack_workspace_id="T-ACCOUNT",
+                buzz_pubkey=self.rotated_device.public_key,
+            )
+        )
+
+    def test_legacy_key_link_remains_readable_during_migration_window(self):
+        CommunityBridgeIdentityLink.objects.create(
+            slack_workspace_id="T-LEGACY",
+            slack_user_id="U-LEGACY",
+            buzz_pubkey="3" * 64,
+            display_name="Legacy",
+            verification_method=CommunityBridgeIdentityVerificationMethod.OPERATOR_ATTESTED,
+            verification_reference="legacy-link",
+            verified_at=timezone.now(),
+        )
+        identity = verified_identity_for_buzz(
+            slack_workspace_id="T-LEGACY",
+            buzz_pubkey="3" * 64,
+        )
+        self.assertEqual(identity["identity_source"], "legacy_key")
+
+
 class CommunityBridgeIdentityCommandTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            email="alice.identity@example.com",
+            password="Correct-Horse-Identity-9!",
+            slack_id="U123",
+            first_name="Alice",
+        )
+        self.device = CommunityChatDevice.objects.create(
+            user=self.user,
+            public_key="a" * 64,
+            status=DeviceBindingStatus.VERIFIED,
+            verified_at=timezone.now(),
+        )
+
     def _verify(self, **overrides):
         options = {
             "slack_workspace_id": "T-MLAI",
             "slack_user_id": "U123",
+            "mlai_profile_id": str(self.user.community_chat_profile_id),
             "buzz_pubkey": "a" * 64,
             "display_name": "Alice",
             "verification_method": CommunityBridgeIdentityVerificationMethod.OPERATOR_ATTESTED,
@@ -1220,6 +1346,10 @@ class CommunityBridgeIdentityCommandTests(TestCase):
         with self.assertRaisesMessage(CommandError, "--confirm-dual-control is required"):
             self._verify(confirm_dual_control=False)
 
+    def test_verification_can_select_the_accounts_active_device(self):
+        out = self._verify(buzz_pubkey=None)
+        self.assertEqual(json.loads(out.getvalue())["buzz_pubkey"], self.device.public_key)
+
     def test_verify_and_revoke_identity_link(self):
         out = self._verify()
         link = CommunityBridgeIdentityLink.objects.get()
@@ -1227,6 +1357,7 @@ class CommunityBridgeIdentityCommandTests(TestCase):
         self.assertEqual(json.loads(out.getvalue())["status"], "created")
         self.assertEqual(link.slack_workspace_id, "T-MLAI")
         self.assertEqual(link.slack_user_id, "U123")
+        self.assertEqual(link.user, self.user)
         self.assertEqual(link.buzz_pubkey, "a" * 64)
         self.assertIsNone(link.revoked_at)
 
@@ -1243,10 +1374,10 @@ class CommunityBridgeIdentityCommandTests(TestCase):
         self.assertIsNotNone(link.revoked_at)
         self.assertEqual(link.revocation_reason, "user requested unlink")
 
-    def test_public_key_cannot_link_to_two_users_in_one_workspace(self):
+    def test_account_cannot_link_to_a_different_slack_user(self):
         self._verify()
 
-        with self.assertRaisesMessage(CommandError, "already linked to another Slack user"):
+        with self.assertRaisesMessage(CommandError, "Slack user is not connected"):
             self._verify(slack_user_id="U456")
 
 

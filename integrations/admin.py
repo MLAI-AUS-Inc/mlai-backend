@@ -56,6 +56,7 @@ class CommunityBridgeChannelAdmin(admin.ModelAdmin):
 @admin.register(CommunityBridgeIdentityLink)
 class CommunityBridgeIdentityLinkAdmin(admin.ModelAdmin):
     list_display = (
+        "user",
         "slack_workspace_id",
         "slack_user_id",
         "display_name",
@@ -65,6 +66,8 @@ class CommunityBridgeIdentityLinkAdmin(admin.ModelAdmin):
         "revoked_at",
     )
     search_fields = (
+        "user__email",
+        "user__community_chat_profile_id",
         "slack_workspace_id",
         "slack_user_id",
         "display_name",

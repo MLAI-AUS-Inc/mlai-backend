@@ -439,6 +439,14 @@ class CommunityBridgeChannel(models.Model):
 
 
 class CommunityBridgeIdentityLink(models.Model):
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="community_bridge_identity_links",
+        null=True,
+        blank=True,
+        help_text="Authoritative MLAI account. Null is supported only for legacy links pending reconciliation.",
+    )
     slack_workspace_id = models.CharField(max_length=100)
     slack_user_id = models.CharField(max_length=100)
     buzz_pubkey = models.CharField(
@@ -474,12 +482,18 @@ class CommunityBridgeIdentityLink(models.Model):
                 fields=["slack_workspace_id", "buzz_pubkey"],
                 name="bridge_identity_workspace_buzz_unique",
             ),
+            models.UniqueConstraint(
+                fields=["slack_workspace_id", "user"],
+                condition=models.Q(user__isnull=False),
+                name="bridge_identity_workspace_user_unique",
+            ),
         ]
         indexes = [
             models.Index(
                 fields=["slack_workspace_id", "revoked_at"],
                 name="bridge_identity_active_idx",
-            )
+            ),
+            models.Index(fields=["user", "revoked_at"], name="bridge_identity_user_idx"),
         ]
 
     def save(self, *args, **kwargs):
