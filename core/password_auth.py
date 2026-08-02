@@ -1,5 +1,4 @@
 import hashlib
-import logging
 import secrets
 from datetime import timedelta
 from urllib.parse import quote
@@ -13,11 +12,10 @@ from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
 from django.utils import timezone
 
-from .email_utils import send_password_reset_email
-from .models import PasswordResetChallenge
+from .models import PasswordResetChallenge, PasswordResetEmailDelivery
+from .password_delivery import encrypt_reset_link
 
 
-logger = logging.getLogger(__name__)
 User = get_user_model()
 _DUMMY_PASSWORD_HASH = make_password('mlai-password-reset-timing-padding')
 
@@ -59,7 +57,7 @@ def _reset_link(token):
 
 
 def issue_password_reset(email, *, requested_ip_hash=''):
-    """Issue and email one setup/reset token without revealing account state."""
+    """Issue and queue one setup/reset token without revealing account state."""
 
     canonical_email = normalize_account_email(email)
     # Always perform one password-hash verification so missing/ineligible users
@@ -82,11 +80,11 @@ def issue_password_reset(email, *, requested_ip_hash=''):
             requested_ip_hash=requested_ip_hash,
             expires_at=now + timedelta(seconds=settings.PASSWORD_RESET_TTL_SECONDS),
         )
-    token = f'{challenge.id.hex}.{secret}'
-    try:
-        send_password_reset_email(user, _reset_link(token))
-    except Exception:
-        logger.exception('Password reset email delivery failed for user_id=%s', user.id)
+        token = f'{challenge.id.hex}.{secret}'
+        PasswordResetEmailDelivery.objects.create(
+            challenge=challenge,
+            encrypted_reset_link=encrypt_reset_link(_reset_link(token)),
+        )
     return True
 
 

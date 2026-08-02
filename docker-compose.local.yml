@@ -148,6 +148,35 @@ services:
     restart: unless-stopped
     stop_grace_period: 30s
 
+  password-email-worker:
+    build: .
+    command: >-
+      sh -ec '
+        until python manage.py migrate --check --noinput; do
+          echo "Waiting for migrations to complete...";
+          sleep 5;
+        done;
+        exec python manage.py run_password_reset_email_worker
+          --poll-seconds "$${PASSWORD_RESET_EMAIL_POLL_SECONDS}"
+      '
+    environment:
+      APP_ENV: local
+      PASSWORD_RESET_EMAIL_POLL_SECONDS: ${PASSWORD_RESET_EMAIL_POLL_SECONDS:-2}
+    volumes:
+      - .:/app
+    env_file:
+      - .env
+      - .env.local-docker
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      default:
+      local-shared:
+        aliases:
+          - mlai-backend-password-email-worker
+    restart: unless-stopped
+    stop_grace_period: 30s
+
   bridge-worker:
     build: .
     command: sh -c "until python manage.py migrate --check --noinput; do echo 'Waiting for migrations to complete...'; sleep 5; done; python manage.py run_community_bridge"

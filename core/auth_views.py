@@ -1,6 +1,9 @@
 import hashlib
 import logging
+import secrets
+import time
 
+from django.conf import settings
 from django.contrib.auth import logout as auth_logout
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.utils.crypto import salted_hmac
@@ -43,6 +46,7 @@ class PasswordResetRequestView(APIView):
     permission_classes = [AllowAny]
 
     def post(self, request):
+        started_at = time.monotonic()
         serializer = PasswordResetRequestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         email = normalize_account_email(serializer.validated_data['email'])
@@ -53,6 +57,11 @@ class PasswordResetRequestView(APIView):
             algorithm='sha256',
         ).hexdigest()
         issue_password_reset(email, requested_ip_hash=ip_hash)
+        minimum = settings.PASSWORD_RESET_MIN_RESPONSE_SECONDS
+        jitter = secrets.randbelow(21) / 1000
+        remaining = minimum + jitter - (time.monotonic() - started_at)
+        if remaining > 0:
+            time.sleep(remaining)
         return Response(GENERIC_RESET_RESPONSE, status=status.HTTP_202_ACCEPTED)
 
 

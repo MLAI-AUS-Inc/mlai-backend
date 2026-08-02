@@ -11,7 +11,11 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 
 from core.auth_cookies import ACCESS_COOKIE
-from core.models import PasswordResetChallenge
+from core.models import (
+    PasswordResetChallenge,
+    PasswordResetDeliveryStatus,
+    PasswordResetEmailDelivery,
+)
 from core.refresh_sessions import issue_refresh_token
 
 
@@ -27,12 +31,19 @@ def token_from_reset_link(link):
     return parse_qs(query)['token'][0]
 
 
+def deliver_and_read_token(mock_send):
+    mock_send.assert_not_called()
+    call_command('run_password_reset_email_worker', '--once', stdout=StringIO())
+    mock_send.assert_called_once()
+    return token_from_reset_link(mock_send.call_args.args[1])
+
+
 class PasswordResetApiTests(TestCase):
     def setUp(self):
         cache.clear()
         self.client = APIClient()
 
-    @patch('core.password_auth.send_password_reset_email')
+    @patch('core.password_delivery.send_password_reset_email')
     def test_request_is_generic_for_existing_and_missing_accounts(self, mock_send):
         user = User.objects.create_user(email='member@example.com')
 
@@ -43,13 +54,17 @@ class PasswordResetApiTests(TestCase):
         self.assertEqual(missing.status_code, 202)
         self.assertEqual(existing.data, missing.data)
         self.assertEqual(PasswordResetChallenge.objects.count(), 1)
-        mock_send.assert_called_once()
+        self.assertEqual(PasswordResetEmailDelivery.objects.count(), 1)
+        deliver_and_read_token(mock_send)
+        delivery = PasswordResetEmailDelivery.objects.get()
+        self.assertEqual(delivery.status, PasswordResetDeliveryStatus.SENT)
+        self.assertEqual(delivery.encrypted_reset_link, '')
 
-    @patch('core.password_auth.send_password_reset_email')
+    @patch('core.password_delivery.send_password_reset_email')
     def test_valid_token_sets_password_verifies_email_and_is_one_use(self, mock_send):
         user = User.objects.create_user(email='setup@example.com')
         self.client.post(REQUEST_URL, {'email': user.email}, format='json')
-        token = token_from_reset_link(mock_send.call_args.args[1])
+        token = deliver_and_read_token(mock_send)
 
         response = self.client.post(
             CONFIRM_URL,
@@ -71,11 +86,11 @@ class PasswordResetApiTests(TestCase):
         self.assertEqual(replay.status_code, 400)
         self.assertEqual(replay.data['error'], 'invalid_or_expired_token')
 
-    @patch('core.password_auth.send_password_reset_email')
+    @patch('core.password_delivery.send_password_reset_email')
     def test_expired_token_is_rejected(self, mock_send):
         user = User.objects.create_user(email='expired@example.com')
         self.client.post(REQUEST_URL, {'email': user.email}, format='json')
-        token = token_from_reset_link(mock_send.call_args.args[1])
+        token = deliver_and_read_token(mock_send)
         PasswordResetChallenge.objects.update(
             expires_at=timezone.now() - timedelta(seconds=1)
         )
@@ -89,7 +104,7 @@ class PasswordResetApiTests(TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.data['error'], 'invalid_or_expired_token')
 
-    @patch('core.password_auth.send_password_reset_email')
+    @patch('core.password_delivery.send_password_reset_email')
     def test_suspended_and_placeholder_accounts_receive_no_challenge(self, mock_send):
         User.objects.create_user(email='placeholder@slack.placeholder.com')
         suspended = User.objects.create_user(email='suspended@example.com')
@@ -101,9 +116,10 @@ class PasswordResetApiTests(TestCase):
             self.assertEqual(response.status_code, 202)
 
         self.assertFalse(PasswordResetChallenge.objects.exists())
+        self.assertFalse(PasswordResetEmailDelivery.objects.exists())
         mock_send.assert_not_called()
 
-    @patch('core.password_auth.send_password_reset_email')
+    @patch('core.password_delivery.send_password_reset_email')
     def test_password_reset_revokes_pre_reset_access_tokens(self, mock_send):
         user = User.objects.create_user(
             email='revoke@example.com',
@@ -111,7 +127,7 @@ class PasswordResetApiTests(TestCase):
         )
         old_access = str(issue_refresh_token(user).access_token)
         self.client.post(REQUEST_URL, {'email': user.email}, format='json')
-        token = token_from_reset_link(mock_send.call_args.args[1])
+        token = deliver_and_read_token(mock_send)
         self.client.post(
             CONFIRM_URL,
             {'token': token, 'new_password': 'Replacement-secure-password-42!'},
@@ -124,7 +140,7 @@ class PasswordResetApiTests(TestCase):
 
         self.assertEqual(response.status_code, 401)
 
-    @patch('core.password_auth.send_password_reset_email')
+    @patch('core.password_delivery.send_password_reset_email')
     def test_reset_request_is_rate_limited_by_email(self, _mock_send):
         for _ in range(5):
             response = self.client.post(
@@ -140,6 +156,24 @@ class PasswordResetApiTests(TestCase):
             format='json',
         )
         self.assertEqual(blocked.status_code, 429)
+
+    @patch(
+        'core.password_delivery.send_password_reset_email',
+        side_effect=RuntimeError('provider unavailable secret=do-not-store'),
+    )
+    def test_delivery_failure_retries_without_persisting_sensitive_error(self, mock_send):
+        user = User.objects.create_user(email='retry@example.com')
+        self.client.post(REQUEST_URL, {'email': user.email}, format='json')
+
+        call_command('run_password_reset_email_worker', '--once', stdout=StringIO())
+
+        delivery = PasswordResetEmailDelivery.objects.get()
+        self.assertEqual(delivery.status, PasswordResetDeliveryStatus.PENDING)
+        self.assertEqual(delivery.attempts, 1)
+        self.assertEqual(delivery.last_error_code, 'RuntimeError')
+        self.assertNotIn('do-not-store', delivery.last_error_code)
+        self.assertTrue(delivery.encrypted_reset_link)
+        mock_send.assert_called_once()
 
 
 class PasswordChangeApiTests(TestCase):
@@ -202,7 +236,7 @@ class PasswordChangeApiTests(TestCase):
 
 
 class PasswordSetupInviteCommandTests(TestCase):
-    @patch('core.password_auth.send_password_reset_email')
+    @patch('core.password_delivery.send_password_reset_email')
     def test_dry_run_does_not_create_tokens_and_send_mode_does(self, mock_send):
         User.objects.create_user(email='needs-password@example.com')
         User.objects.create_user(
@@ -217,4 +251,5 @@ class PasswordSetupInviteCommandTests(TestCase):
 
         call_command('send_password_setup_invites', '--send', stdout=StringIO())
         self.assertEqual(PasswordResetChallenge.objects.count(), 1)
-        mock_send.assert_called_once()
+        self.assertEqual(PasswordResetEmailDelivery.objects.count(), 1)
+        deliver_and_read_token(mock_send)

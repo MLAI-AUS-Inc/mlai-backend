@@ -40,6 +40,7 @@ time, result, and log artifact.
 | Device identity | One-time challenge, expiry/replay rejection, proof-of-key control, role-escalation rejection, revocation, and throttling tests |
 | NIP-98 | Exact URL/method/payload binding, bounded timestamp/nonce replay window, and invalid-signature tests |
 | Browser session | Production CORS allowlist, CSRF trusted origin/cookie policy, secure cookies, TLS redirect, and no wildcard credentials |
+| Password recovery | Generic padded request response, encrypted durable outbox, one-use expiry, retry/dead-letter visibility, and no email/token/error detail in logs |
 | Membership | Eligibility adapter failure closes access; invite/challenge values are absent from responses and logs |
 | Media | Membership authorization on read/write, safe MIME/download headers, tenant isolation, and object-store denial tests |
 | Slack ingress | Raw-body signature before parsing, five-minute replay window, 256 KiB limit, public mapped-channel-only normalization |
@@ -86,13 +87,17 @@ no backfill of the disabled window.
 ## Deployment order
 
 1. Apply additive database migrations.
-2. Deploy the backend image by immutable digest with workers paused.
+2. Set a stable `PASSWORD_RESET_DELIVERY_SECRET`, deploy the backend image by
+   immutable digest, and start `run_password_reset_email_worker`. Rotating this
+   secret cancels pending encrypted links, so rotate only with the outbox empty
+   or after intentionally invalidating those requests.
 3. Deploy the bridge adapter by immutable digest and confirm its dedicated
    public key matches client release configuration.
 4. Run health checks and one synthetic private adapter delivery.
 5. Resume workers, then enable only the selected staging mapping.
 6. Observe receipt/delivery rates, retry/dead counts, callback rejections,
-   membership denials, auth throttles, and latency before expanding the cohort.
+   password-email failures, membership denials, auth throttles, and latency
+   before expanding the cohort.
 
 ## Rollback triggers and procedure
 

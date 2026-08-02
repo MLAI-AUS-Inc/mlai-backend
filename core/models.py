@@ -112,6 +112,50 @@ class PasswordResetChallenge(models.Model):
 
     def __str__(self):
         return f"{self.user_id}:{self.id}"
+
+
+class PasswordResetDeliveryStatus(models.TextChoices):
+    PENDING = 'pending', 'Pending'
+    SENDING = 'sending', 'Sending'
+    SENT = 'sent', 'Sent'
+    FAILED = 'failed', 'Failed'
+    CANCELLED = 'cancelled', 'Cancelled'
+
+
+class PasswordResetEmailDelivery(models.Model):
+    """Durable outbox row containing an encrypted reset link."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    challenge = models.OneToOneField(
+        PasswordResetChallenge,
+        on_delete=models.CASCADE,
+        related_name='email_delivery',
+    )
+    encrypted_reset_link = models.TextField()
+    status = models.CharField(
+        max_length=16,
+        choices=PasswordResetDeliveryStatus.choices,
+        default=PasswordResetDeliveryStatus.PENDING,
+    )
+    attempts = models.PositiveSmallIntegerField(default=0)
+    available_at = models.DateTimeField(default=timezone.now)
+    claimed_at = models.DateTimeField(blank=True, null=True)
+    sent_at = models.DateTimeField(blank=True, null=True)
+    last_error_code = models.CharField(max_length=120, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ('created_at',)
+        indexes = [
+            models.Index(
+                fields=('status', 'available_at', 'created_at'),
+                name='password_delivery_pending_idx',
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.challenge_id}:{self.status}"
 class Hackathon(models.Model):
     name = models.CharField(max_length=255)
     slug = models.SlugField(unique=True)

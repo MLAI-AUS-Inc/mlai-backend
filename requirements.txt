@@ -1,6 +1,7 @@
 asgiref==3.8.1
 cachetools==5.5.1
 coincurve==21.0.0
+cryptography>=43.0.0,<51
 certifi==2025.1.31
 charset-normalizer==3.4.1
 customerio==2.1

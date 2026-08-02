@@ -1,7 +1,12 @@
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
 from django.utils.html import format_html
-from .models import GlobalSettings, PasswordResetChallenge, User
+from .models import (
+    GlobalSettings,
+    PasswordResetChallenge,
+    PasswordResetEmailDelivery,
+    User,
+)
 from .forms import CustomUserCreationForm, CustomUserChangeForm
 
 
@@ -61,3 +66,11 @@ admin.site.register(User, UserAdmin)
 class PasswordResetChallengeAdmin(admin.ModelAdmin):
     list_display = ('id', 'user_id', 'expires_at', 'consumed_at', 'created_at')
     readonly_fields = tuple(field.name for field in PasswordResetChallenge._meta.fields)
+
+
+@admin.register(PasswordResetEmailDelivery)
+class PasswordResetEmailDeliveryAdmin(admin.ModelAdmin):
+    list_display = ('id', 'challenge_id', 'status', 'attempts', 'available_at', 'sent_at')
+    list_filter = ('status',)
+    search_fields = ('challenge__user__email', 'challenge_id')
+    readonly_fields = tuple(field.name for field in PasswordResetEmailDelivery._meta.fields)
