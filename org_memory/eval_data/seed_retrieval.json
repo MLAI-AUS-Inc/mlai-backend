@@ -70,7 +70,7 @@
     "id": "exact-authorised-evidence-abstention",
     "mode": "abstention",
     "expected": {
-      "answer": "I do not have enough authorised evidence to answer that reliably."
+      "answer": "I couldn't find enough reliable information in MLAI's internal memory to answer that confidently."
     }
   },
   {

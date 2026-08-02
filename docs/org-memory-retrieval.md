@@ -36,12 +36,20 @@ outside the selected bundle, and answers with no authorised citations.
 
 Insufficient evidence does not call the model. It returns exactly:
 
-> I do not have enough authorised evidence to answer that reliably.
+> I couldn't find enough reliable information in MLAI's internal memory to answer that confidently.
 
 Partial, stale, conflicted, semantically degraded, and unhealthy-source states
 are returned as explicit warnings rather than hidden. An absence of evidence
 is not converted into a factual “no”. The model cannot mutate memory or call
 connectors; corrections enter the existing human review flow as proposals.
+
+The answer model always returns authorised memory IDs in a structured field for
+server-side validation and audit, never in user-facing prose. Presentation is
+separate from grounding: normal replies hide source details, requests for a
+source title mention titles naturally, and explicit requests for citations or
+links allow the Slack client to render a clickable source list. Successful
+answers suppress formal evidence-status details; stale, conflicted, partial, or
+insufficient answers continue to surface them.
 
 ## Private API
 
@@ -83,7 +91,7 @@ ORG_MEMORY_QUERY_VECTOR_ENABLED=true
 ORG_MEMORY_ANSWER_MODEL=gpt-5.6-terra
 ORG_MEMORY_ANSWERER_VERSION=org-memory-answerer-v1
 ORG_MEMORY_ANSWER_SCHEMA_VERSION=org-memory-answer-schema-v2
-ORG_MEMORY_ANSWER_PROMPT_VERSION=org-memory-answer-prompt-v2
+ORG_MEMORY_ANSWER_PROMPT_VERSION=org-memory-answer-prompt-v3
 ORG_MEMORY_ANSWER_MAX_OUTPUT_TOKENS=1600
 ORG_MEMORY_ANSWER_REASONING_EFFORT=none
 ORG_MEMORY_ANSWER_MAX_CONTEXT_TOKENS=6000

@@ -13,10 +13,15 @@ from organizations.models import Organization
 from org_memory.answering import (
     ABSTENTION_ANSWER,
     ANSWER_PROMPT,
+    SOURCE_DISPLAY_LINKS,
+    SOURCE_DISPLAY_NONE,
+    SOURCE_DISPLAY_TITLES,
     AnswerProviderResult,
     GroundedAnswerProviderError,
+    answer_presentation,
     answer_memory_query,
     search_memory_query,
+    source_display_for_query,
 )
 from org_memory.authorization import OrganizationAuthorizationContext
 from org_memory.assertions import actor_identity_headers, build_actor_assertion
@@ -258,9 +263,56 @@ class MemoryRetrievalAndAnswerTests(TestCase):
 
     def test_answer_prompt_preserves_grounding_when_optional_details_are_absent(self):
         self.assertIn("Use the authorised sources metadata", ANSWER_PROMPT)
-        self.assertIn("not mentioned in the selected evidence", ANSWER_PROMPT)
+        self.assertIn("helpful teammate in Slack", ANSWER_PROMPT)
+        self.assertIn("Never put claim IDs", ANSWER_PROMPT)
+        self.assertIn("only place for memory IDs", ANSWER_PROMPT)
         self.assertIn("not abstain solely", ANSWER_PROMPT)
-        self.assertIn("cite every item", ANSWER_PROMPT)
+        self.assertIn("cited_memory_ids", ANSWER_PROMPT)
+
+    def test_source_display_policy_requires_an_explicit_display_request(self):
+        self.assertEqual(
+            source_display_for_query("What did the committee decide?"),
+            SOURCE_DISPLAY_NONE,
+        )
+        self.assertEqual(
+            source_display_for_query(
+                "Summarise the decisions. Only use evidence you can cite from committee sources."
+            ),
+            SOURCE_DISPLAY_NONE,
+        )
+        self.assertEqual(
+            source_display_for_query("Include the source document title for each decision."),
+            SOURCE_DISPLAY_TITLES,
+        )
+        self.assertEqual(
+            source_display_for_query("Show me the source document title for that decision."),
+            SOURCE_DISPLAY_TITLES,
+        )
+        self.assertEqual(
+            source_display_for_query("Cite your sources and link the meeting notes."),
+            SOURCE_DISPLAY_LINKS,
+        )
+
+    def test_evidence_status_is_only_prominent_when_material(self):
+        self.assertFalse(
+            answer_presentation(
+                query="What did we decide?",
+                evidence_sufficiency=MemoryEvidenceSufficiency.SUFFICIENT,
+            )["show_evidence_status"]
+        )
+        self.assertTrue(
+            answer_presentation(
+                query="What did we decide?",
+                evidence_sufficiency=MemoryEvidenceSufficiency.PARTIAL,
+            )["show_evidence_status"]
+        )
+        self.assertTrue(
+            answer_presentation(
+                query="What did we decide?",
+                evidence_sufficiency=MemoryEvidenceSufficiency.SUFFICIENT,
+                warnings=("stale_memory",),
+            )["show_evidence_status"]
+        )
 
     def test_query_planner_recognises_counted_recent_decisions(self):
         plan = plan_memory_query(
@@ -455,6 +507,8 @@ class MemoryRetrievalAndAnswerTests(TestCase):
         self.assertEqual(provider.calls, 0)
         self.assertEqual(selection.sufficiency, MemoryEvidenceSufficiency.INSUFFICIENT)
         self.assertEqual(answer["answer"], ABSTENTION_ANSWER)
+        self.assertEqual(answer["presentation"]["source_display"], SOURCE_DISPLAY_NONE)
+        self.assertTrue(answer["presentation"]["show_evidence_status"])
         self.assertEqual(query_log.status, MemoryQueryStatus.ABSTAINED)
         self.assertEqual(query_log.citation_data, [])
 
@@ -490,6 +544,10 @@ class MemoryRetrievalAndAnswerTests(TestCase):
             ],
         )
         self.assertEqual(answer["answer"], "The pilot status is green.")
+        self.assertEqual(
+            answer["presentation"],
+            {"source_display": SOURCE_DISPLAY_NONE, "show_evidence_status": False},
+        )
         self.assertEqual(answer["citations"][0]["provider"], "linear")
         self.assertEqual(answer["citations"][0]["source_url"], "https://linear.example/PILOT-GREEN")
         self.assertEqual(query_log.status, MemoryQueryStatus.ANSWERED)
@@ -618,6 +676,8 @@ class MemoryRetrievalAndAnswerTests(TestCase):
         self.assertTrue(query_log.candidate_trace)
         self.assertGreater(query_log.input_tokens, 0)
         self.assertTrue(answer["citations"])
+        self.assertEqual(answer["presentation"]["source_display"], SOURCE_DISPLAY_TITLES)
+        self.assertFalse(answer["presentation"]["show_evidence_status"])
 
     def test_decision_timeline_includes_a_superseded_decision(self):
         older = self.make_claim(
@@ -984,6 +1044,10 @@ class MemoryQueryApiTests(TestCase):
         self.assertEqual(answer_response.data["answer"], "The pilot status is green.")
         self.assertEqual(answer_response.data["intent"]["mode"], "CURRENT_STATE")
         self.assertEqual(answer_response.data["citations"][0]["provider"], "linear")
+        self.assertEqual(
+            answer_response.data["presentation"],
+            {"source_display": SOURCE_DISPLAY_NONE, "show_evidence_status": False},
+        )
         query_id = answer_response.data["query_id"]
 
         trace_response = self.client.get(
@@ -1069,6 +1133,10 @@ class MemoryQueryApiTests(TestCase):
         )
         self.assertEqual(response.data["confidence"], 0)
         self.assertEqual(response.data["citations"], [])
+        self.assertEqual(
+            response.data["presentation"],
+            {"source_display": SOURCE_DISPLAY_NONE, "show_evidence_status": True},
+        )
         self.assertIn("answer_model_abstained", response.data["warnings"])
 
     def test_revoked_source_cannot_be_recovered_from_old_query_trace(self):

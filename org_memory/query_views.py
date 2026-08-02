@@ -242,6 +242,7 @@ class OrgMemoryAnswerView(OrgMemoryQueryView):
                     "contains_stale_memory": "stale_memory" in selection.warnings,
                 },
                 "citations": answer["citations"],
+                "presentation": answer["presentation"],
                 "warnings": list(query_log.warnings),
                 "suggested_follow_up": answer.get("suggested_follow_up"),
             }
