@@ -257,3 +257,45 @@ class CommunityChatEmailCodeDelivery(models.Model):
 
     def __str__(self):
         return f"{self.challenge_id}:{self.status}"
+
+
+class CommunityChatAccountSession(models.Model):
+    """Rotating, Chat-scoped account session for one app installation."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="community_chat_account_sessions",
+    )
+    public_key = models.CharField(max_length=64)
+    installation_id = models.UUIDField()
+    client_id = models.CharField(max_length=64)
+    origin = models.CharField(max_length=255)
+    platform = models.CharField(max_length=32)
+    name = models.CharField(max_length=120, blank=True)
+    access_token_hash = models.CharField(max_length=64, unique=True)
+    refresh_token_hash = models.CharField(max_length=64, unique=True)
+    auth_version = models.PositiveIntegerField()
+    access_expires_at = models.DateTimeField()
+    expires_at = models.DateTimeField()
+    revoked_at = models.DateTimeField(blank=True, null=True)
+    last_used_at = models.DateTimeField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ("-created_at",)
+        indexes = [
+            models.Index(
+                fields=("user", "revoked_at", "expires_at"),
+                name="chat_session_user_active_idx",
+            ),
+            models.Index(
+                fields=("client_id", "installation_id"),
+                name="chat_session_install_idx",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.user_id}:{self.client_id}:{self.installation_id}"

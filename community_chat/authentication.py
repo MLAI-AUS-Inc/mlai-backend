@@ -1,11 +1,18 @@
 import hashlib
 import hmac
 
+from django.conf import settings
 from django.utils import timezone
 from rest_framework.authentication import BaseAuthentication
 from rest_framework.exceptions import AuthenticationFailed
 
 from .models import CommunityChatBootstrapToken
+from .account_cookies import ACCESS_COOKIE
+from .account_sessions import (
+    ACCESS_TOKEN_PREFIX,
+    InvalidAccountSession,
+    authenticate_access_token,
+)
 
 
 TOKEN_PREFIX = "mlai_chat_"
@@ -46,6 +53,54 @@ class CommunityChatBootstrapAuthentication(BaseAuthentication):
         request.community_chat_platform = token.platform
         request.community_chat_device_name = token.name
         return token.user, token
+
+    def authenticate_header(self, request):
+        return "Bearer"
+
+
+class CommunityChatAccountAuthentication(BaseAuthentication):
+    """Authenticate the narrowly scoped access token for an MLAI Chat session."""
+
+    def authenticate(self, request):
+        header = request.headers.get("Authorization", "")
+        raw_token = ""
+        cookie_authenticated = False
+        if header.startswith("Bearer "):
+            raw_token = header.removeprefix("Bearer ").strip()
+            if not raw_token.startswith(ACCESS_TOKEN_PREFIX):
+                return None
+        elif request.COOKIES.get(ACCESS_COOKIE):
+            raw_token = request.COOKIES[ACCESS_COOKIE]
+            cookie_authenticated = True
+        else:
+            return None
+        try:
+            session = authenticate_access_token(raw_token)
+        except InvalidAccountSession as exc:
+            raise AuthenticationFailed("MLAI Chat session has expired.") from exc
+        if cookie_authenticated and request.method not in {
+            "GET",
+            "HEAD",
+            "OPTIONS",
+            "TRACE",
+        }:
+            origin = str(request.headers.get("Origin") or "").strip().rstrip("/")
+            trusted = {
+                str(item).strip().rstrip("/")
+                for item in settings.COMMUNITY_CHAT_ALLOWED_ORIGINS
+            }
+            if not origin or origin not in trusted or not hmac.compare_digest(
+                origin,
+                session.origin,
+            ):
+                raise AuthenticationFailed("MLAI Chat session origin is invalid.")
+        request.community_chat_account_session = session
+        request.community_chat_installation_id = session.installation_id
+        request.community_chat_client_id = session.client_id
+        request.community_chat_origin = session.origin
+        request.community_chat_platform = session.platform
+        request.community_chat_device_name = session.name
+        return session.user, session
 
     def authenticate_header(self, request):
         return "Bearer"

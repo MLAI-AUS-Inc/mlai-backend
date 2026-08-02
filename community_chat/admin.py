@@ -2,6 +2,7 @@ from django.contrib import admin
 
 from .models import (
     CommunityChatBootstrapToken,
+    CommunityChatAccountSession,
     CommunityChatChallenge,
     CommunityChatDevice,
     CommunityChatDeviceAuthRequest,
@@ -87,3 +88,20 @@ class CommunityChatEmailCodeDeliveryAdmin(admin.ModelAdmin):
     )
     list_filter = ("status",)
     readonly_fields = tuple(field.name for field in CommunityChatEmailCodeDelivery._meta.fields)
+
+
+@admin.register(CommunityChatAccountSession)
+class CommunityChatAccountSessionAdmin(admin.ModelAdmin):
+    list_display = (
+        "id",
+        "user_id",
+        "client_id",
+        "platform",
+        "installation_id",
+        "access_expires_at",
+        "expires_at",
+        "revoked_at",
+    )
+    list_filter = ("client_id", "platform")
+    search_fields = ("user__email", "installation_id", "name")
+    readonly_fields = tuple(field.name for field in CommunityChatAccountSession._meta.fields)

@@ -1,6 +1,9 @@
 from django.urls import path
 
 from .views import (
+    AccountSessionLogoutView,
+    AccountSessionRefreshView,
+    AccountView,
     ChallengeView,
     ConfirmView,
     DeviceAuthAuthorizeView,
@@ -16,6 +19,9 @@ from .views import (
 
 
 urlpatterns = [
+    path("account/", AccountView.as_view(), name="community_chat_account"),
+    path("auth/session/refresh/", AccountSessionRefreshView.as_view(), name="community_chat_session_refresh"),
+    path("auth/session/logout/", AccountSessionLogoutView.as_view(), name="community_chat_session_logout"),
     path("auth/email-code/request/", EmailCodeRequestView.as_view(), name="community_chat_email_code_request"),
     path("auth/email-code/verify/", EmailCodeVerifyView.as_view(), name="community_chat_email_code_verify"),
     path("auth/password/", PasswordAuthView.as_view(), name="community_chat_password_auth"),

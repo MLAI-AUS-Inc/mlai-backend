@@ -14,6 +14,7 @@ from rest_framework import status
 from rest_framework.test import APITestCase
 
 from community_chat.models import (
+    CommunityChatAccountSession,
     CommunityChatBootstrapToken,
     CommunityChatEmailCodeChallenge,
     CommunityChatEmailCodeDelivery,
@@ -118,6 +119,11 @@ class CommunityChatEmailCodeAuthTests(APITestCase):
         self.assertEqual(verified.data["status"], "authenticated")
         self.assertTrue(verified.data["bootstrap_token"].startswith("mlai_chat_"))
         self.assertEqual(verified.data["profile"]["email"], self.user.email)
+        self.assertIn("session", verified.data)
+        self.assertNotIn("access_token", verified.data["session"])
+        self.assertIn("mlai_chat_access", verified.cookies)
+        self.assertIn("mlai_chat_refresh", verified.cookies)
+        self.assertEqual(CommunityChatAccountSession.objects.count(), 1)
         token = CommunityChatBootstrapToken.objects.get()
         self.assertEqual(token.user, self.user)
         self.assertEqual(token.public_key, self.public_key)

@@ -28,7 +28,19 @@ from hospital.authentication import CustomJWTAuthentication
 
 from .authentication import (
     TOKEN_PREFIX,
+    CommunityChatAccountAuthentication,
     CommunityChatBootstrapAuthentication,
+)
+from .account_cookies import (
+    REFRESH_COOKIE as ACCOUNT_REFRESH_COOKIE,
+    clear_account_session_cookies,
+    set_account_session_cookies,
+)
+from .account_sessions import (
+    InvalidAccountSession,
+    issue_account_session,
+    revoke_account_session,
+    rotate_account_session,
 )
 from .models import (
     CommunityChatBootstrapToken,
@@ -68,6 +80,11 @@ from .serializers import (
 
 BOOTSTRAP_ACTION = "community-chat:enrol-device"
 AUTHENTICATION_CLASSES = (
+    CommunityChatBootstrapAuthentication,
+    CustomJWTAuthentication,
+)
+ACCOUNT_AUTHENTICATION_CLASSES = (
+    CommunityChatAccountAuthentication,
     CommunityChatBootstrapAuthentication,
     CustomJWTAuthentication,
 )
@@ -296,6 +313,31 @@ def _issue_email_code_bootstrap(user, challenge):
     return (raw_token, token), None
 
 
+def _account_session_payload(credentials):
+    session = credentials.session
+    payload = {
+        "id": str(session.id),
+        "access_expires_at": session.access_expires_at,
+        "refresh_expires_at": session.expires_at,
+        "installation_id": str(session.installation_id),
+        "client_id": session.client_id,
+    }
+    if session.client_id != "mlai-chat-web":
+        payload.update(
+            {
+                "access_token": credentials.access_token,
+                "refresh_token": credentials.refresh_token,
+            }
+        )
+    return payload
+
+
+def _attach_account_session(response, credentials):
+    if credentials.session.client_id == "mlai-chat-web":
+        set_account_session_cookies(response, credentials)
+    return response
+
+
 class EmailCodeRequestView(APIView):
     """Create a uniform, installation-bound MLAI Chat email proof."""
 
@@ -387,7 +429,8 @@ class EmailCodeVerifyView(APIView):
                 status=status.HTTP_409_CONFLICT,
             )
         raw_token, token = issued
-        return Response(
+        account_session = issue_account_session(user, challenge)
+        response = Response(
             {
                 "status": "authenticated",
                 "bootstrap_token": raw_token,
@@ -395,8 +438,101 @@ class EmailCodeVerifyView(APIView):
                 "relay_url": settings.COMMUNITY_CHAT_RELAY_URL,
                 "origin": challenge.origin,
                 "profile": own_chat_profile(user),
+                "session": _account_session_payload(account_session),
             },
             status=status.HTTP_200_OK,
+        )
+        return _attach_account_session(response, account_session)
+
+
+class AccountSessionRefreshView(APIView):
+    authentication_classes = []
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        explicit_token = str(request.data.get("refresh_token") or "").strip()
+        raw_token = explicit_token or str(
+            request.COOKIES.get(ACCOUNT_REFRESH_COOKIE) or ""
+        ).strip()
+        required_origin = None
+        if not explicit_token:
+            required_origin = str(request.headers.get("Origin") or "").strip().rstrip("/")
+            if not required_origin:
+                return Response(
+                    {"error": "invalid_session"},
+                    status=status.HTTP_401_UNAUTHORIZED,
+                )
+        try:
+            credentials = rotate_account_session(
+                raw_token,
+                required_origin=required_origin,
+            )
+        except InvalidAccountSession:
+            response = Response(
+                {"error": "invalid_session"},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+            return clear_account_session_cookies(response)
+        response = Response(
+            {
+                "status": "refreshed",
+                "session": _account_session_payload(credentials),
+            },
+            status=status.HTTP_200_OK,
+        )
+        return _attach_account_session(response, credentials)
+
+
+class AccountSessionLogoutView(APIView):
+    authentication_classes = []
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        explicit_token = str(request.data.get("refresh_token") or "").strip()
+        raw_token = explicit_token or str(
+            request.COOKIES.get(ACCOUNT_REFRESH_COOKIE) or ""
+        ).strip()
+        required_origin = None
+        if not explicit_token:
+            required_origin = str(request.headers.get("Origin") or "").strip().rstrip("/")
+        try:
+            revoke_account_session(raw_token, required_origin=required_origin)
+        except InvalidAccountSession:
+            response = Response(
+                {"error": "invalid_session"},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+            return clear_account_session_cookies(response)
+        response = Response({"status": "signed_out"}, status=status.HTTP_200_OK)
+        return clear_account_session_cookies(response)
+
+
+class AccountView(APIView):
+    authentication_classes = (CommunityChatAccountAuthentication,)
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        account_session = request.community_chat_account_session
+        devices = CommunityChatDevice.objects.filter(
+            user=request.user,
+            status__in=(DeviceBindingStatus.PENDING, DeviceBindingStatus.VERIFIED),
+        )
+        return Response(
+            {
+                "authenticated": True,
+                "profile": own_chat_profile(request.user),
+                "public_profile": public_chat_profile(request.user),
+                "session": {
+                    "id": str(account_session.id),
+                    "installation_id": str(account_session.installation_id),
+                    "client_id": account_session.client_id,
+                    "platform": account_session.platform,
+                    "name": account_session.name,
+                    "access_expires_at": account_session.access_expires_at,
+                    "refresh_expires_at": account_session.expires_at,
+                },
+                "devices": [_device_payload(device) for device in devices],
+            }
         )
 
 
@@ -555,7 +691,7 @@ class DeviceAuthExchangeView(APIView):
 
 
 class SessionView(APIView):
-    authentication_classes = AUTHENTICATION_CLASSES
+    authentication_classes = ACCOUNT_AUTHENTICATION_CLASSES
     permission_classes = [IsAuthenticated]
     throttle_classes = [CommunityChatScopedThrottle]
     community_chat_throttle_scope = "community_chat_session"
