@@ -283,6 +283,7 @@ class MemoryRetrievalAndAnswerTests(TestCase):
             canonical_name="Project Atlas",
             normalized_name="project atlas",
             resolved_key="test-project-atlas",
+            aliases=["Atlas"],
         )
 
         broad_plan = plan_memory_query(
@@ -300,10 +301,17 @@ class MemoryRetrievalAndAnswerTests(TestCase):
             authorization=self.authorization,
             query="What changed on the Project Atlases portfolio?",
         )
+        alias_plan = plan_memory_query(
+            organization=self.organization,
+            authorization=self.authorization,
+            query="What is the latest Atlas status?",
+        )
 
         self.assertNotIn(str(one_letter.pk), broad_plan.entity_ids)
         self.assertEqual(explicit_plan.entity_ids, (str(pilot.pk),))
         self.assertEqual(partial_plan.entity_ids, ())
+        self.assertEqual(alias_plan.entity_ids, ())
+        self.assertEqual(alias_plan.ranking_entity_ids, (str(pilot.pk),))
 
     def test_retrieval_seed_suite(self):
         result = evaluate_retrieval_seed_suite()

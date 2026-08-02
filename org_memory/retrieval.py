@@ -95,6 +95,8 @@ class QueryPlan:
     mode: str
     entity_ids: tuple[str, ...]
     entity_names: tuple[str, ...]
+    ranking_entity_ids: tuple[str, ...]
+    ranking_entity_names: tuple[str, ...]
     kinds: tuple[str, ...]
     as_of: object
     time_start: object
@@ -109,8 +111,15 @@ class QueryPlan:
         return {
             "mode": self.mode.upper(),
             "entities": [
-                {"id": entity_id, "name": name}
+                {"id": entity_id, "name": name, "match_strength": "explicit"}
                 for entity_id, name in zip(self.entity_ids, self.entity_names)
+            ],
+            "ranking_entities": [
+                {"id": entity_id, "name": name, "match_strength": "inferred"}
+                for entity_id, name in zip(
+                    self.ranking_entity_ids,
+                    self.ranking_entity_names,
+                )
             ],
             "kinds": list(self.kinds),
             "as_of": self.as_of.isoformat() if self.as_of else None,
@@ -219,6 +228,21 @@ def _contains_entity_phrase(
 def _entity_matches_query(entity: MemoryEntity, query_tokens: tuple[str, ...]) -> bool:
     names = dict.fromkeys((entity.normalized_name, entity.canonical_name))
     return any(_contains_entity_phrase(query_tokens, name) for name in names if name)
+
+
+def _entity_alias_matches_query(entity: MemoryEntity, query_tokens: tuple[str, ...]) -> bool:
+    strong_names = {
+        _entity_name_tokens(name)
+        for name in (entity.normalized_name, entity.canonical_name)
+        if name
+    }
+    for alias in entity.aliases if isinstance(entity.aliases, list) else ():
+        alias_tokens = _entity_name_tokens(alias)
+        if alias_tokens in strong_names:
+            continue
+        if _contains_entity_phrase(query_tokens, alias):
+            return True
+    return False
 
 
 def allowed_memory_classifications(
@@ -338,14 +362,17 @@ def plan_memory_query(
     query_tokens = _entity_name_tokens(query)
     allowed = allowed_memory_classifications(authorization)
     entity_rows = []
+    ranking_entity_rows = []
     if query_tokens and allowed:
         for entity in MemoryEntity.objects.filter(
             organization=organization,
             merged_into__isnull=True,
             classification__in=allowed,
-        ).only("pk", "canonical_name", "normalized_name"):
+        ).only("pk", "canonical_name", "normalized_name", "aliases"):
             if _entity_matches_query(entity, query_tokens):
                 entity_rows.append(entity)
+            elif _entity_alias_matches_query(entity, query_tokens):
+                ranking_entity_rows.append(entity)
     natural_start, natural_end = _natural_time_range(query)
     time_start = time_start or natural_start
     time_end = time_end or natural_end
@@ -366,6 +393,8 @@ def plan_memory_query(
         mode=mode,
         entity_ids=tuple(str(entity.pk) for entity in entity_rows[:10]),
         entity_names=tuple(entity.canonical_name for entity in entity_rows[:10]),
+        ranking_entity_ids=tuple(str(entity.pk) for entity in ranking_entity_rows[:10]),
+        ranking_entity_names=tuple(entity.canonical_name for entity in ranking_entity_rows[:10]),
         kinds=_kinds_for_mode(mode, query=query),
         as_of=as_of,
         time_start=time_start,
@@ -699,14 +728,15 @@ def select_memory(
         if plan.mode == MemoryQueryMode.TIMELINE
         else claims.filter(pk__in=current_ids)
     )
+    ranking_entity_ids = frozenset((*plan.entity_ids, *plan.ranking_entity_ids))
     for claim in structured_claims.order_by(
         "-source_authority", "-confidence", "-observed_at", "-recorded_at"
     )[: max(candidate_limit * 5, 100)]:
         entity_match = bool(
-            plan.entity_ids
+            ranking_entity_ids
             and (
-                str(claim.subject_entity_id) in plan.entity_ids
-                or str(claim.object_entity_id) in plan.entity_ids
+                str(claim.subject_entity_id) in ranking_entity_ids
+                or str(claim.object_entity_id) in ranking_entity_ids
             )
         )
         text_match = _text_relevance(
@@ -811,10 +841,10 @@ def select_memory(
         lexical = _text_relevance(text, terms)
         entity_match = bool(
             claim
-            and plan.entity_ids
+            and ranking_entity_ids
             and (
-                str(claim.subject_entity_id) in plan.entity_ids
-                or str(claim.object_entity_id) in plan.entity_ids
+                str(claim.subject_entity_id) in ranking_entity_ids
+                or str(claim.object_entity_id) in ranking_entity_ids
             )
         )
         current_state = bool(claim and str(claim.pk) in current_id_set)
