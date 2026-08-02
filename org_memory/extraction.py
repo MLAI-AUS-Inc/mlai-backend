@@ -11,11 +11,11 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from django.conf import settings
 from django.db import transaction
-from django.db.models import Q
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from pydantic import BaseModel, ConfigDict, Field, ValidationError as PydanticValidationError, field_validator
 
+from .activation import evaluate_claim_auto_activation, source_policy_for_version
 from .kernel import EvidenceKernelError, create_work_item, open_review_item
 from .models import (
     MemoryClaim,
@@ -674,15 +674,7 @@ def _claim_classification(candidate: ClaimCandidate, *, source_classification: s
 
 
 def _claim_policy(source_version):
-    configuration = source_version.source.configuration
-    if configuration and configuration.default_policy_id:
-        return configuration.default_policy
-    return source_version.source.organization.memory_source_policies.filter(
-        provider=source_version.source.provider,
-        is_active=True,
-    ).filter(
-        Q(scope_type="") | Q(scope_type=source_version.source.source_type)
-    ).order_by("-scope_type", "policy_key").first()
+    return source_policy_for_version(source_version)
 
 
 def _deduplicate_candidates(candidates: list[ClaimCandidate]) -> list[ClaimCandidate]:
@@ -1019,21 +1011,29 @@ def extract_source_version(*, source_version, provider: Optional[ExtractionProvi
             )
         if not claim.evidence.exists():
             raise ExtractionInvariantError("Every persisted claim must have exact evidence.")
+        activation_decision = evaluate_claim_auto_activation(claim)
+        if activation_decision.eligible:
+            claim.review_required = False
+            claim.save(update_fields=("review_required", "updated_at"))
+        state_metadata = {"extraction_run_id": str(run.pk)}
+        if activation_decision.eligible:
+            state_metadata["auto_activation"] = activation_decision.audit_metadata()
         MemoryClaimStateEvent.objects.create(
             claim=claim,
             from_status="",
             to_status=MemoryClaimStatus.CANDIDATE,
             reason="versioned_extraction",
-            metadata={"extraction_run_id": str(run.pk)},
+            metadata=state_metadata,
         )
-        open_review_item(
-            organization=source_version.source.organization,
-            target=claim,
-            review_type=MemoryReviewType.CLAIM_ACTIVATION,
-            reason="Review extracted candidate against its exact evidence before activation.",
-            severity=MemoryReviewSeverity.HIGH if candidate.kind in {MemoryClaimKind.DECISION, MemoryClaimKind.COMMITMENT} else MemoryReviewSeverity.NORMAL,
-            idempotency_key=f"claim-activation:{claim.pk}",
-        )
+        if claim.review_required:
+            open_review_item(
+                organization=source_version.source.organization,
+                target=claim,
+                review_type=MemoryReviewType.CLAIM_ACTIVATION,
+                reason="Review extracted candidate against its exact evidence before activation.",
+                severity=MemoryReviewSeverity.HIGH if candidate.kind in {MemoryClaimKind.DECISION, MemoryClaimKind.COMMITMENT} else MemoryReviewSeverity.NORMAL,
+                idempotency_key=f"claim-activation:{claim.pk}",
+            )
         claims_created += 1
     return {
         "extraction_run_id": str(run.pk),
