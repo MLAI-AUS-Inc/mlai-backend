@@ -972,7 +972,7 @@ def extract_source_version(*, source_version, provider: Optional[ExtractionProvi
             metadata={"candidate_classification": candidate.classification},
             **_claim_datetimes(candidate, source_version=source_version),
         )
-        from .consolidation import default_stale_after
+        from .consolidation import NON_EXPIRING_KINDS, default_stale_after
 
         structured_stale_after = (
             parse_datetime(str((source_version.metadata or {}).get("stale_after") or ""))
@@ -982,6 +982,13 @@ def extract_source_version(*, source_version, provider: Optional[ExtractionProvi
         if structured_stale_after is not None:
             claim.last_confirmed_at = source_version.captured_at
             claim.stale_after = structured_stale_after
+        elif claim.kind in NON_EXPIRING_KINDS:
+            # A connector-supplied expiry is authoritative, but a source
+            # policy's freshness window must not turn durable decisions,
+            # policies, lessons, or events into one-day facts. Those claim
+            # kinds remain current until superseded, contradicted, retracted,
+            # or explicitly expired.
+            claim.stale_after = None
         elif policy and policy.stale_after_seconds:
             claim.stale_after = (
                 claim.valid_from or claim.observed_at or claim.recorded_at

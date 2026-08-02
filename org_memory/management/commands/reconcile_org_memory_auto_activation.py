@@ -11,8 +11,11 @@ from org_memory.consolidation import (
     ConsolidationInvariantError,
     apply_strong_grounding_auto_activation,
     refresh_current_state,
+    restore_strong_grounding_durable_claim,
 )
 from org_memory.models import (
+    MemoryClaim,
+    MemoryClaimKind,
     MemoryClaimStatus,
     MemoryConsolidationOperation,
     MemoryConsolidationRun,
@@ -111,7 +114,58 @@ class Command(BaseCommand):
                 reason_counts.update(["activation_invariant_changed"])
                 continue
             activated += 1
-        if activated:
+
+        durable_stale_claims = list(
+            MemoryClaim.objects.filter(
+                organization=organization,
+                kind=MemoryClaimKind.DECISION,
+                status=MemoryClaimStatus.STALE,
+                review_required=False,
+                stale_after__isnull=False,
+                extraction_run__source_version__source__provider=provider,
+                state_events__reason="auto_activation_strong_grounding_v1",
+            )
+            .select_related(
+                "extraction_run__source_version__source__source_scope__policy",
+                "extraction_run__source_version__source__configuration__default_policy",
+                "extraction_run__source_version__acl_snapshot",
+            )
+            .prefetch_related(
+                Prefetch(
+                    "evidence",
+                    queryset=MemoryEvidence.objects.select_related(
+                        "source", "source_version", "chunk"
+                    ),
+                )
+            )
+            .distinct()
+            .order_by("stale_after", "pk")[:limit]
+        )
+        durable_stale_reason_counts = Counter()
+        durable_stale_eligible = 0
+        durable_stale_restored = 0
+        for claim in durable_stale_claims:
+            decision = evaluate_claim_auto_activation(claim)
+            if not decision.eligible:
+                durable_stale_reason_counts.update(decision.reason_codes)
+                continue
+            durable_stale_eligible += 1
+            if not options["apply"]:
+                continue
+            try:
+                restore_strong_grounding_durable_claim(
+                    claim=claim,
+                    operator=operator,
+                    refresh=False,
+                )
+            except ConsolidationInvariantError:
+                durable_stale_reason_counts.update(
+                    ["durable_restoration_invariant_changed"]
+                )
+                continue
+            durable_stale_restored += 1
+
+        if activated or durable_stale_restored:
             refresh_current_state(organization)
 
         report = {
@@ -122,6 +176,12 @@ class Command(BaseCommand):
             "candidates": len(runs),
             "eligible": eligible,
             "activated": activated,
+            "durable_stale_candidates": len(durable_stale_claims),
+            "durable_stale_eligible": durable_stale_eligible,
+            "durable_stale_restored": durable_stale_restored,
+            "durable_stale_reason_counts": dict(
+                sorted(durable_stale_reason_counts.items())
+            ),
             "remaining_review_required": MemoryConsolidationRun.objects.filter(
                 organization=organization,
                 status=MemoryConsolidationStatus.REVIEW_REQUIRED,

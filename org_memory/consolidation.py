@@ -814,7 +814,11 @@ def apply_strong_grounding_auto_activation(
         )
 
     candidate.review_required = False
-    candidate.save(update_fields=("review_required", "updated_at"))
+    candidate_update_fields = ["review_required", "updated_at"]
+    if candidate.kind in NON_EXPIRING_KINDS and candidate.stale_after is not None:
+        candidate.stale_after = None
+        candidate_update_fields.append("stale_after")
+    candidate.save(update_fields=tuple(candidate_update_fields))
     review.status = MemoryReviewStatus.RESOLVED
     review.resolved_by = operator
     review.resolved_at = timezone.now()
@@ -844,6 +848,91 @@ def apply_strong_grounding_auto_activation(
     if refresh:
         refresh_current_state(run.organization)
     return run
+
+
+@transaction.atomic
+def restore_strong_grounding_durable_claim(
+    *,
+    claim: MemoryClaim,
+    operator,
+    refresh: bool = True,
+) -> MemoryClaim:
+    """Restore a durable claim made stale only by the legacy policy window."""
+
+    claim = MemoryClaim.objects.select_for_update().get(pk=claim.pk)
+    if operator is None:
+        raise ConsolidationInvariantError(
+            "Durable claim restoration requires an operator audit identity."
+        )
+    if (
+        claim.kind not in NON_EXPIRING_KINDS
+        or claim.status != MemoryClaimStatus.STALE
+        or claim.review_required
+        or claim.stale_after is None
+    ):
+        raise ConsolidationInvariantError(
+            "Only an auto-activated durable claim with legacy staleness can be restored."
+        )
+    if not claim.state_events.filter(
+        reason="auto_activation_strong_grounding_v1"
+    ).exists():
+        raise ConsolidationInvariantError(
+            "Durable claim restoration requires the original auto-activation audit event."
+        )
+    activation = evaluate_claim_auto_activation(claim)
+    if not activation.eligible:
+        raise ConsolidationInvariantError(
+            "Durable claim no longer satisfies the strong-grounding activation policy."
+        )
+
+    previous_stale_after = claim.stale_after
+    claim.stale_after = None
+    claim.save(update_fields=("stale_after", "updated_at"))
+
+    stale_reviews = list(
+        MemoryReviewItem.objects.select_for_update().filter(
+            organization=claim.organization,
+            review_type=MemoryReviewType.STALE,
+            status__in=(MemoryReviewStatus.OPEN, MemoryReviewStatus.IN_REVIEW),
+            target_object_id=str(claim.pk),
+            idempotency_key__startswith=f"stale-claim:{claim.pk}:",
+        )
+    )
+    resolved_at = timezone.now()
+    for review in stale_reviews:
+        review.status = MemoryReviewStatus.RESOLVED
+        review.resolved_by = operator
+        review.resolved_at = resolved_at
+        review.resolution = {
+            "reason": "legacy_policy_window_removed_from_durable_claim",
+            "previous_stale_after": previous_stale_after.isoformat(),
+            **activation.audit_metadata(),
+        }
+        review.save(
+            update_fields=(
+                "status",
+                "resolved_by",
+                "resolved_at",
+                "resolution",
+                "updated_at",
+            )
+        )
+
+    transition_claim(
+        claim=claim,
+        to_status=MemoryClaimStatus.ACTIVE,
+        reason="auto_activation_durable_staleness_repair_v1",
+        actor=operator,
+        review_item=stale_reviews[-1] if stale_reviews else None,
+        metadata={
+            "auto_activation": activation.audit_metadata(),
+            "previous_stale_after": previous_stale_after.isoformat(),
+            "resolved_stale_reviews": len(stale_reviews),
+        },
+    )
+    if refresh:
+        refresh_current_state(claim.organization)
+    return claim
 
 
 @transaction.atomic
