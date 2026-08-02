@@ -11,15 +11,16 @@ from .models import (
 
 @admin.register(CommunityChatDevice)
 class CommunityChatDeviceAdmin(admin.ModelAdmin):
-    list_display = ("user_id", "public_key_prefix", "status", "verified_at", "revoked_at")
-    list_filter = ("status",)
-    search_fields = ("user__email", "public_key")
+    list_display = ("user_id", "name", "platform", "public_key_prefix", "status", "verified_at", "revoked_at")
+    list_filter = ("status", "client_id", "platform")
+    search_fields = ("user__email", "public_key", "installation_id", "name")
     readonly_fields = (
         "id",
         "created_at",
         "updated_at",
         "verified_at",
         "last_verified_membership_at",
+        "last_seen_at",
         "revoked_at",
     )
 

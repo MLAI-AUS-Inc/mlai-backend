@@ -1,9 +1,18 @@
+import uuid
+
 from django.db import models
 from django.contrib.auth.models import AbstractBaseUser, PermissionsMixin, BaseUserManager
+from django.db.models.functions import Lower
 from django.utils import timezone
 
 
 class CustomUserManager(BaseUserManager):
+    @classmethod
+    def normalize_email(cls, email):
+        """Return the canonical account identifier used by every auth flow."""
+
+        return super().normalize_email(str(email or "").strip()).lower()
+
     def create_user(self, email, role=None, password=None, **extra_fields):
         if not email:
             raise ValueError('Email is required.')
@@ -47,6 +56,9 @@ class User(AbstractBaseUser, PermissionsMixin):
     is_staff = models.BooleanField(default=False)  # Required for admin interface
     date_joined = models.DateTimeField(default=timezone.now)
     updated_at = models.DateTimeField(auto_now=True, null=True)
+    email_verified_at = models.DateTimeField(blank=True, null=True)
+    password_set_at = models.DateTimeField(blank=True, null=True)
+    auth_version = models.PositiveIntegerField(default=1)
     avatar_url = models.URLField(blank=True, null=True)
     personas = models.JSONField(default=list, blank=True)
 
@@ -55,8 +67,50 @@ class User(AbstractBaseUser, PermissionsMixin):
 
     objects = CustomUserManager()
 
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                Lower('email'),
+                name='core_user_email_ci_unique',
+            ),
+        ]
+
+    def save(self, *args, **kwargs):
+        self.email = type(self).objects.normalize_email(self.email)
+        super().save(*args, **kwargs)
+
+    def set_password(self, raw_password):
+        super().set_password(raw_password)
+        self.password_set_at = timezone.now() if raw_password is not None else None
+
     def __str__(self):
         return self.email
+
+
+class PasswordResetChallenge(models.Model):
+    """One-use password setup/reset secret; only the secret hash is persisted."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(
+        User,
+        on_delete=models.PROTECT,
+        related_name='password_reset_challenges',
+    )
+    secret_hash = models.CharField(max_length=64)
+    expires_at = models.DateTimeField()
+    consumed_at = models.DateTimeField(blank=True, null=True)
+    requested_ip_hash = models.CharField(max_length=64, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ('-created_at',)
+        indexes = [
+            models.Index(fields=('user', 'created_at'), name='password_reset_user_idx'),
+            models.Index(fields=('expires_at',), name='password_reset_expiry_idx'),
+        ]
+
+    def __str__(self):
+        return f"{self.user_id}:{self.id}"
 class Hackathon(models.Model):
     name = models.CharField(max_length=255)
     slug = models.SlugField(unique=True)

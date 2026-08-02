@@ -19,6 +19,10 @@ class CommunityChatDevice(models.Model):
         related_name="community_chat_devices",
     )
     public_key = models.CharField(max_length=64)
+    installation_id = models.UUIDField(default=uuid.uuid4, unique=True)
+    client_id = models.CharField(max_length=64, default="legacy")
+    platform = models.CharField(max_length=32, blank=True)
+    name = models.CharField(max_length=120, blank=True)
     status = models.CharField(
         max_length=16,
         choices=DeviceBindingStatus.choices,
@@ -26,6 +30,7 @@ class CommunityChatDevice(models.Model):
     )
     verified_at = models.DateTimeField(blank=True, null=True)
     last_verified_membership_at = models.DateTimeField(blank=True, null=True)
+    last_seen_at = models.DateTimeField(blank=True, null=True)
     revoked_at = models.DateTimeField(blank=True, null=True)
     revoked_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -63,6 +68,8 @@ class CommunityChatChallenge(models.Model):
         related_name="community_chat_challenges",
     )
     public_key = models.CharField(max_length=64)
+    installation_id = models.UUIDField(default=uuid.uuid4)
+    client_id = models.CharField(max_length=64, default="legacy")
     action = models.CharField(max_length=64)
     audience = models.CharField(max_length=255)
     origin = models.CharField(max_length=255)
@@ -142,6 +149,8 @@ class CommunityChatBootstrapToken(models.Model):
         related_name="community_chat_bootstrap_tokens",
     )
     public_key = models.CharField(max_length=64)
+    installation_id = models.UUIDField(default=uuid.uuid4)
+    client_id = models.CharField(max_length=64, default="legacy")
     token_hash = models.CharField(max_length=64, unique=True)
     expires_at = models.DateTimeField()
     revoked_at = models.DateTimeField(blank=True, null=True)
