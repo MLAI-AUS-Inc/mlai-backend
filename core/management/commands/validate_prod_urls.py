@@ -201,6 +201,18 @@ def _validate_community_chat_contract(errors: list[str]) -> None:
             "COMMUNITY_CHAT_ALLOWED_ORIGINS contains development origin(s): "
             f"{', '.join(development_origins)}."
         )
+    if not _as_bool(getattr(settings, "COMMUNITY_CHAT_EMAIL_CODE_AUTH_ENABLED", False)):
+        errors.append("COMMUNITY_CHAT_EMAIL_CODE_AUTH_ENABLED must be true in production.")
+    for legacy_setting in (
+        "COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED",
+        "COMMUNITY_CHAT_DEVICE_AUTH_ENABLED",
+    ):
+        if _as_bool(getattr(settings, legacy_setting, False)):
+            errors.append(f"{legacy_setting} must be false in production.")
+    if not _as_clean_string(
+        getattr(settings, "CUSTOMERIO_COMMUNITY_CHAT_CODE_MESSAGE_ID", "")
+    ):
+        errors.append("CUSTOMERIO_COMMUNITY_CHAT_CODE_MESSAGE_ID is required in production.")
 
 
 def _validate_forbidden_values(

@@ -29,6 +29,7 @@ def _challenge(verifier):
 @override_settings(
     COMMUNITY_CHAT_ALLOWED_ORIGINS=[ORIGIN, NATIVE_ORIGIN],
     COMMUNITY_CHAT_FRONTEND_URL=ORIGIN,
+    COMMUNITY_CHAT_DEVICE_AUTH_ENABLED=True,
     COMMUNITY_CHAT_DEVICE_AUTH_TTL_SECONDS=900,
     COMMUNITY_CHAT_BOOTSTRAP_TOKEN_TTL_SECONDS=1200,
 )
@@ -67,6 +68,13 @@ class CommunityChatDeviceAuthTests(APITestCase):
             format="json",
             HTTP_ORIGIN=ORIGIN,
         )
+
+    @override_settings(COMMUNITY_CHAT_DEVICE_AUTH_ENABLED=False)
+    def test_browser_handoff_is_disabled_for_email_code_only_launches(self):
+        response = self.start()
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(response.data, {"error": "device_auth_disabled"})
 
     def test_state_bound_pkce_handoff_issues_scoped_token_once(self):
         started = self.start()

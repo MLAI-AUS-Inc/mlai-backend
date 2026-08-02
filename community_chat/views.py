@@ -551,6 +551,11 @@ class DeviceAuthStartView(APIView):
     permission_classes = [AllowAny]
 
     def post(self, request):
+        if not settings.COMMUNITY_CHAT_DEVICE_AUTH_ENABLED:
+            return Response(
+                {"error": "device_auth_disabled"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
         public_key = _public_key(request.data.get("public_key"))
         origin = _request_origin(request)
         state = str(request.data.get("state") or "")
@@ -593,6 +598,11 @@ class DeviceAuthAuthorizeView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
+        if not settings.COMMUNITY_CHAT_DEVICE_AUTH_ENABLED:
+            return Response(
+                {"error": "device_auth_disabled"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
         _require_eligible(request.user)
         origin = _request_origin(request)
         browser_origin = str(settings.COMMUNITY_CHAT_FRONTEND_URL).strip().rstrip("/")
@@ -632,6 +642,11 @@ class DeviceAuthExchangeView(APIView):
     permission_classes = [AllowAny]
 
     def post(self, request):
+        if not settings.COMMUNITY_CHAT_DEVICE_AUTH_ENABLED:
+            return Response(
+                {"error": "device_auth_disabled"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
         request_id = request.data.get("request_id")
         state_value = str(request.data.get("state") or "")
         verifier = str(request.data.get("code_verifier") or "")

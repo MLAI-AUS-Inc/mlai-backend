@@ -40,7 +40,7 @@ time, result, and log artifact.
 | Device identity | One-time challenge, expiry/replay rejection, proof-of-key control, role-escalation rejection, revocation, and throttling tests |
 | NIP-98 | Exact URL/method/payload binding, bounded timestamp/nonce replay window, and invalid-signature tests |
 | Browser session | Production CORS allowlist, CSRF trusted origin/cookie policy, secure cookies, TLS redirect, and no wildcard credentials |
-| Password recovery | Generic padded request response, encrypted durable outbox, one-use expiry, retry/dead-letter visibility, and no email/token/error detail in logs |
+| Email-code sign-in | Generic padded request response, encrypted durable outbox, six-digit one-use expiry, attempt limits, retry/dead-letter visibility, and no email/code/error detail in logs |
 | Membership | Eligibility adapter failure closes access; invite/challenge values are absent from responses and logs |
 | Media | Membership authorization on read/write, safe MIME/download headers, tenant isolation, and object-store denial tests |
 | Slack ingress | Raw-body signature before parsing, five-minute replay window, 256 KiB limit, public mapped-channel-only normalization |
@@ -49,6 +49,25 @@ time, result, and log artifact.
 
 Any unresolved item blocks production approval. Record the reviewer and link to
 evidence rather than copying sensitive values into the change record.
+
+## Email-code cutover controls
+
+MLAI Chat launches with `COMMUNITY_CHAT_EMAIL_CODE_AUTH_ENABLED=true`,
+`COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED=false`, and
+`COMMUNITY_CHAT_DEVICE_AUTH_ENABLED=false`. The latter two switches are
+temporary rollback controls for pre-launch clients, not supported member-facing
+sign-in methods. `validate_prod_urls` rejects a production configuration that
+enables either legacy path, disables email codes, or omits
+`CUSTOMERIO_COMMUNITY_CHAT_CODE_MESSAGE_ID`.
+
+Before deploying the web/API process, provision independent values for
+`COMMUNITY_CHAT_EMAIL_CODE_PEPPER` and
+`COMMUNITY_CHAT_EMAIL_CODE_DELIVERY_SECRET`, publish the Customer.io six-digit
+code template, and start `run_email_code_worker` under the same immutable
+release. Test request, delivery, expiry, resend, invalid-attempt lockout, scoped
+session refresh, sign-out, and server-first device removal in staging. Never
+copy a code, normalized email, token, or delivery ciphertext into release
+evidence.
 
 ## Migration and backup exercise
 

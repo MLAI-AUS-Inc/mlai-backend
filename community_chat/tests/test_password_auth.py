@@ -64,6 +64,13 @@ class CommunityChatPasswordAuthTests(APITestCase):
             **request_kwargs,
         )
 
+    @override_settings(COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED=False)
+    def test_password_auth_is_disabled_for_email_code_only_launches(self):
+        response = self.login()
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(response.data, {'error': 'password_auth_disabled'})
+
     def test_success_issues_only_scoped_bootstrap_and_safe_own_profile(self):
         response = self.login()
 
