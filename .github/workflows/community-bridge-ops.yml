@@ -1,0 +1,55 @@
+name: Inspect production community bridge
+
+on:
+  workflow_dispatch:
+    inputs:
+      slack_message_id:
+        description: Slack message timestamp, for example 1710000000.9000
+        required: true
+        type: string
+      slack_channel_id:
+        description: Slack channel ID
+        required: true
+        default: C05M54Z7A2K
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Validate inputs
+        env:
+          SLACK_MESSAGE_ID: ${{ inputs.slack_message_id }}
+          SLACK_CHANNEL_ID: ${{ inputs.slack_channel_id }}
+        run: |
+          if ! [[ "$SLACK_MESSAGE_ID" =~ ^[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::slack_message_id must be a Slack message timestamp"
+            exit 1
+          fi
+          if ! [[ "$SLACK_CHANNEL_ID" =~ ^[A-Z0-9]+$ ]]; then
+            echo "::error::slack_channel_id must be an uppercase Slack channel ID"
+            exit 1
+          fi
+
+      - name: Install SSH key
+        uses: webfactory/ssh-agent@v0.10.0
+        with:
+          ssh-private-key: ${{ secrets.DO_SSH_KEY }}
+
+      - name: Add known host
+        run: ssh-keyscan -H 209.38.85.60 >> ~/.ssh/known_hosts
+
+      - name: Inspect bridge state
+        env:
+          SLACK_MESSAGE_ID: ${{ inputs.slack_message_id }}
+          SLACK_CHANNEL_ID: ${{ inputs.slack_channel_id }}
+        run: |
+          ssh root@209.38.85.60 \
+            "cd /root/mlai-backend && docker compose exec -T web python manage.py inspect_community_bridge --slack-channel-id '$SLACK_CHANNEL_ID' --slack-message-id '$SLACK_MESSAGE_ID' --recent-minutes 60"
+          ssh root@209.38.85.60 \
+            "cd /root/mlai-backend && docker compose ps web bridge-worker"
