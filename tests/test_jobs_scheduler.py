@@ -550,6 +550,29 @@ class JobsSchedulerTests(TestCase):
         self.assertEqual(response.data[0]["top_jobs"][0]["title"], "AI Engineer")
         self.assertEqual(response.data[0]["status_url"], f"/api/v1/jobs/runs/{newer.run_id}")
 
+    @patch("jobs.services.job_pipeline.collect_from_source")
+    def test_disabled_careerone_source_is_skipped_without_an_error(
+        self,
+        mock_collect_from_source,
+    ):
+        run = JobRun.objects.create(
+            run_date="2026-05-31",
+            run_id="2026-05-31-disabled-careerone",
+        )
+
+        jobs, source_errors = job_pipeline.fetch_raw_jobs(
+            run,
+            collect_live=True,
+            source_names=["CareerOne"],
+            max_pages=1,
+            per_keyword_limit=1,
+        )
+
+        self.assertEqual(jobs, [])
+        self.assertEqual(source_errors, [])
+        mock_collect_from_source.assert_not_called()
+        self.assertFalse(SourceRunLog.objects.filter(run=run, source_name="CareerOne").exists())
+
     def test_daily_jobs_html_page_renders_populated_run(self):
         run = JobRun.objects.create(run_date="2026-05-31", run_id="2026-05-31-html-page")
         JobListing.objects.create(

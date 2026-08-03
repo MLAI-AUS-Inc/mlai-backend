@@ -26,13 +26,10 @@ HEADERS = {
 }
 RETRY_STATUS_CODES = {403, 429, 500, 502, 503, 504}
 MAX_RETRIES = 3
-CAREERONE_ENABLED = True
 logger = logging.getLogger(__name__)
 
 
 def collect_careerone_jobs(per_query_limit: int = 10) -> list[dict[str, Any]]:
-    if not CAREERONE_ENABLED:
-        return []
     jobs: list[dict[str, Any]] = []
     seen: set[str] = set()
     for query in QUERIES:

@@ -56,7 +56,8 @@ PHASE_1_SOURCES: tuple[SourceConfig, ...] = (
     SourceConfig("Company Brew", "startup_board", 0.76, True, ("AI", "startup", "software")),
     SourceConfig("Matchstiq", "startup_board", 0.76, True, ("AI", "startup", "software")),
     SourceConfig("Himalayas", "remote_board", 0.82, True, ("AI", "machine learning", "startup")),
-    SourceConfig("CareerOne", "broad_board", 0.56, True, ("AI", "startup", "machine learning")),
+    # CareerOne has consistently rejected production scraper traffic with HTTP 403.
+    SourceConfig("CareerOne", "broad_board", 0.56, False, ("AI", "startup", "machine learning")),
     SourceConfig("Workforce Australia", "government_board", 0.62, True, ("AI", "startup", "machine learning")),
     SourceConfig("YC Jobs", "startup_board", 0.9, True, ("AI", "remote", "startup")),
 )
