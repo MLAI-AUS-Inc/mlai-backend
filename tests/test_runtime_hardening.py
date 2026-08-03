@@ -98,8 +98,23 @@ class RuntimeHardeningConfigTests(SimpleTestCase):
         self.assertIn('env_has_value BUZZ_BRIDGE_ADAPTER_URL \\', deploy)
         self.assertIn('env_has_value BUZZ_BRIDGE_ADAPTER_TOKEN \\', deploy)
         self.assertIn('env_has_value BUZZ_BRIDGE_CALLBACK_SECRET;', deploy)
+        self.assertIn(
+            "compose_run_web python manage.py upsert_community_bridge_channel",
+            deploy,
+        )
+        self.assertIn('--slack-workspace-id "$SLACK_BRIDGE_WORKSPACE_ID"', deploy)
+        self.assertIn('--slack-channel-id "$SLACK_BRIDGE_CHANNEL_ID"', deploy)
+        self.assertIn('--destination-platform buzz', deploy)
+        self.assertIn(
+            '--destination-channel-id "$BUZZ_BRIDGE_DESTINATION_CHANNEL_ID"',
+            deploy,
+        )
         self.assertIn('docker compose stop bridge-worker || true', deploy)
         self.assertIn('docker compose rm -f bridge-worker || true', deploy)
+        self.assertLess(
+            deploy.index("compose_run_web python manage.py migrate --check --noinput"),
+            deploy.index("compose_run_web python manage.py upsert_community_bridge_channel"),
+        )
         self.assertLess(
             deploy.index('docker compose stop "\\${paused_runtime_services[@]}"'),
             deploy.index('docker compose up -d --force-recreate "\\${runtime_services[@]}"'),
