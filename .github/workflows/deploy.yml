@@ -7,6 +7,77 @@ on:
     branches: [ main ]
 
 jobs:
+  bridge-production-inspect:
+    if: ${{ github.event_name == 'pull_request' && github.head_ref == 'codex/community-bridge-ops' && github.actor == 'drsamdonegan' }}
+    runs-on: ubuntu-latest
+    steps:
+    - name: Install SSH Key
+      uses: webfactory/ssh-agent@v0.10.0
+      with:
+        ssh-private-key: ${{ secrets.DO_SSH_KEY }}
+
+    - name: Add Known Hosts
+      run: ssh-keyscan -H 209.38.85.60 >> ~/.ssh/known_hosts
+
+    - name: Inspect exact Slack bridge event without payloads
+      run: |
+        ssh root@209.38.85.60 \
+          'cd /root/mlai-backend && docker compose exec -T web python manage.py shell' <<'PY'
+        import json
+        from datetime import timedelta
+
+        from django.utils import timezone
+
+        from integrations.models import (
+            CommunityBridgeDelivery,
+            CommunityBridgeMessageLink,
+            CommunityBridgePlatform,
+            CommunityBridgeReceipt,
+        )
+
+        slack_channel_id = "C05M54Z7A2K"
+        slack_message_id = "1785799447.499459"
+        receipts = CommunityBridgeReceipt.objects.filter(
+            platform=CommunityBridgePlatform.SLACK,
+            source_channel_id=slack_channel_id,
+            source_message_id=slack_message_id,
+        )
+        deliveries = CommunityBridgeDelivery.objects.filter(
+            source_platform=CommunityBridgePlatform.SLACK,
+            source_channel_id=slack_channel_id,
+            source_message_id=slack_message_id,
+        )
+        links = CommunityBridgeMessageLink.objects.filter(
+            source_platform=CommunityBridgePlatform.SLACK,
+            source_channel_id=slack_channel_id,
+            source_message_id=slack_message_id,
+        )
+        recent_receipts = CommunityBridgeReceipt.objects.filter(
+            platform=CommunityBridgePlatform.SLACK,
+            source_channel_id=slack_channel_id,
+            created_at__gte=timezone.now() - timedelta(hours=2),
+        )
+        print(json.dumps({
+            "exact_receipts": list(receipts.values(
+                "id", "receipt_key", "event_type", "status",
+                "queued_delivery_count", "created_at", "processed_at",
+            )),
+            "exact_deliveries": list(deliveries.values(
+                "id", "delivery_type", "status", "target_platform",
+                "attempts", "max_attempts", "created_at", "completed_at",
+            )),
+            "exact_links": list(links.values(
+                "id", "destination_platform", "destination_message_id", "created_at",
+            )),
+            "recent_receipt_count": recent_receipts.count(),
+            "recent_receipt_states": list(recent_receipts.values(
+                "event_type", "status", "created_at",
+            ).order_by("-created_at")[:20]),
+        }, default=str, sort_keys=True))
+        PY
+        ssh root@209.38.85.60 \
+          'cd /root/mlai-backend && docker compose ps web bridge-worker'
+
   checks:
     runs-on: ubuntu-latest
     env:
