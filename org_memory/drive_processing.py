@@ -41,6 +41,7 @@ from .models import (
     DriveMeetingRelation,
     DriveReconciliationReport,
     DriveWorkClassification,
+    MemoryActionType,
     MemorySource,
     MemorySourceLifecycle,
 )
@@ -535,6 +536,8 @@ def _restore_unchanged_extraction_access(
     artifact,
     item,
     extraction,
+    *,
+    backfill_action=None,
 ):
     if extraction.status != DriveExtractionStatus.EXTRACTED:
         return
@@ -564,10 +567,16 @@ def _restore_unchanged_extraction_access(
         source,
         acl=_source_acl(configuration, artifact, item),
         reason="drive_unchanged_source_still_accessible",
+        backfill_action=backfill_action,
     )
 
 
-def _process_record(configuration, record: Mapping) -> tuple[bool, str]:
+def _process_record(
+    configuration,
+    record: Mapping,
+    *,
+    backfill_action=None,
+) -> tuple[bool, str]:
     item = record.get("artifact") if isinstance(record.get("artifact"), Mapping) else None
     processing = record.get("processing") if isinstance(record.get("processing"), Mapping) else None
     if item is None or processing is None:
@@ -598,6 +607,7 @@ def _process_record(configuration, record: Mapping) -> tuple[bool, str]:
             artifact,
             item,
             extraction,
+            backfill_action=backfill_action,
         )
         return version_created, "unchanged"
     existing = artifact.current_version.extractions.filter(
@@ -610,6 +620,7 @@ def _process_record(configuration, record: Mapping) -> tuple[bool, str]:
             artifact,
             item,
             existing,
+            backfill_action=backfill_action,
         )
         return version_created, "unchanged"
     status = str(processing.get("status") or "")
@@ -784,8 +795,19 @@ def commit_drive_processing_page(
     records_processed = 0
     removals_processed = 0
     metadata_versions_created = 0
+    backfill_action = None
+    if (
+        sync_run is not None
+        and sync_run.action_type == MemoryActionType.BACKFILL
+        and sync_run.action_request_id
+    ):
+        backfill_action = sync_run.action_request
     for record in records:
-        version_created, outcome = _process_record(configuration, record)
+        version_created, outcome = _process_record(
+            configuration,
+            record,
+            backfill_action=backfill_action,
+        )
         records_processed += 1
         metadata_versions_created += int(version_created)
         outcomes[outcome] += 1
