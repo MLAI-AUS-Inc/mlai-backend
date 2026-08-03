@@ -569,7 +569,7 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     # below at heredoc construction). The default grants the reconciliation
     # agent's write path: granular accounting.invoices + accounting.payments
     # (draft bills / bill payments) and accounting.attachments (source PDFs).
-    upsert_env_value XERO_OAUTH_SCOPES "${XERO_OAUTH_SCOPES:-offline_access accounting.invoices accounting.payments accounting.settings.read accounting.settings accounting.contacts.read accounting.reports.balancesheet.read accounting.reports.profitandloss.read accounting.banktransactions accounting.attachments}"
+    upsert_env_value XERO_OAUTH_SCOPES "${XERO_OAUTH_SCOPES:-offline_access accounting.invoices accounting.invoices.read accounting.payments accounting.payments.read accounting.settings.read accounting.settings accounting.contacts.read accounting.reports.balancesheet.read accounting.reports.profitandloss.read accounting.banktransactions accounting.attachments}"
     upsert_env_value RECONCILIATION_DEFAULT_DOMAIN "mlai.au"
     upsert_env_value RECONCILIATION_SCHEDULER_ENABLED "true"
     upsert_env_value NOTION_OAUTH_REDIRECT_URI "https://api.mlai.au/integrations/callback/notion"

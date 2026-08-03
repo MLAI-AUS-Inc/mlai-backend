@@ -657,3 +657,26 @@ class GranularScopeTests(TestCase):
         preview = build_reconciliation_bill_preview(self.organization, payload=_bill_payload())
         self.assertFalse(preview["ready"])
         self.assertTrue(any("accounting.transactions" in item for item in preview["errors"]))
+
+
+class OperationalScopeCoverageTests(TestCase):
+    """Granular write scopes must satisfy their .read requirements so a
+    write-capable XERO_OAUTH_SCOPES config can still build the connect URL."""
+
+    def test_write_scopes_cover_read_requirements(self):
+        from integrations.services.xero_scopes import xero_missing_operational_scopes
+
+        write_only = (
+            "offline_access accounting.invoices accounting.payments "
+            "accounting.settings accounting.settings.read accounting.contacts.read "
+            "accounting.banktransactions accounting.attachments"
+        )
+        self.assertEqual(xero_missing_operational_scopes(write_only), ())
+
+    def test_genuinely_missing_scopes_still_reported(self):
+        from integrations.services.xero_scopes import xero_missing_operational_scopes
+
+        self.assertEqual(
+            xero_missing_operational_scopes("offline_access accounting.invoices"),
+            ("accounting.payments.read", "accounting.settings.read", "accounting.contacts.read"),
+        )

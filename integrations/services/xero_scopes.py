@@ -37,6 +37,24 @@ def normalize_xero_scopes(value: Any) -> set[str]:
     return set()
 
 
+def xero_missing_operational_scopes(value: Any) -> tuple[str, ...]:
+    """Required operational scopes not covered by the given scope set.
+
+    A granular write scope covers its .read counterpart (Xero grants read
+    access with the write scope), so a config carrying accounting.invoices
+    must not be reported as missing accounting.invoices.read."""
+
+    scopes = normalize_xero_scopes(value)
+    missing = []
+    for required in XERO_REQUIRED_OPERATIONAL_SCOPES:
+        if required in scopes:
+            continue
+        if required.endswith(".read") and required[: -len(".read")] in scopes:
+            continue
+        missing.append(required)
+    return tuple(missing)
+
+
 def xero_has_report_scope(value: Any) -> bool:
     scopes = normalize_xero_scopes(value)
     return (

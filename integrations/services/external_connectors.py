@@ -64,10 +64,10 @@ from startup_updates.services import bind_user_to_startup, get_default_gmail_bin
 from integrations.services.xero_scopes import (
     XERO_REPORT_SCOPE_WARNING,
     XERO_REPORT_SCOPE_CONFIGURATION_WARNING,
-    XERO_REQUIRED_OPERATIONAL_SCOPES,
     XERO_REQUIRED_REPORT_SCOPES,
     xero_can_request_report_scopes,
     xero_has_report_scope,
+    xero_missing_operational_scopes,
     xero_needs_report_reconnect,
 )
 from integrations.utils import normalize_domain
@@ -415,7 +415,6 @@ def _provider_configuration_error(provider: str) -> Optional[str]:
         client_secret = str(getattr(settings, "XERO_CLIENT_SECRET", "") or "").strip()
         redirect_uri = str(getattr(settings, "XERO_OAUTH_REDIRECT_URI", "") or "").strip()
         scopes = set(_xero_oauth_scope_list())
-        required_scopes = set(XERO_REQUIRED_OPERATIONAL_SCOPES)
         missing = []
         if not client_id:
             missing.append("XERO_CLIENT_ID")
@@ -435,7 +434,7 @@ def _provider_configuration_error(provider: str) -> Optional[str]:
         parsed_redirect = urllib.parse.urlparse(redirect_uri)
         if parsed_redirect.scheme not in {"http", "https"} or not parsed_redirect.netloc:
             return "Xero OAuth redirect URI must be an absolute http or https URL."
-        missing_scopes = sorted(required_scopes - scopes)
+        missing_scopes = sorted(xero_missing_operational_scopes(scopes))
         if missing_scopes:
             return f"Xero OAuth scopes are missing: {', '.join(missing_scopes)}."
         return None
