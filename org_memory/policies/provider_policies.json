@@ -2,7 +2,7 @@
   "schema_version": 1,
   "policy_id": "mlai-org-memory-provider-policy",
   "status": "approved",
-  "last_reviewed_at": "2026-08-01T08:02:17Z",
+  "last_reviewed_at": "2026-08-03T11:38:11Z",
   "default_production_decision": "deny",
   "owners": {
     "data": "sam@mlai.au",
@@ -54,7 +54,8 @@
         "selectors": [
           "organization:16",
           "connection:12",
-          "folder:1UBvYpQuZiug1QB3KDotTJtd5xltQdFKp"
+          "folder:1UBvYpQuZiug1QB3KDotTJtd5xltQdFKp",
+          "folder:1NnAt4Sio7CDLXsOsSR3rompYa0_ouDvY"
         ],
         "historical_cutoff": "2000-01-01T00:00:00Z",
         "allowed_formats": ["google_doc", "docx", "pdf", "txt", "md", "vtt", "srt"],
@@ -72,7 +73,7 @@
       "inventory": {
         "status": "approved",
         "approved_by": "sam@mlai.au",
-        "approved_at": "2026-08-01T08:02:17Z",
+        "approved_at": "2026-08-03T11:38:11Z",
         "privacy_approved_by": "sam@mlai.au",
         "max_files": 10000
       },
@@ -80,9 +81,9 @@
       "approval": {
         "status": "approved",
         "approved_by": "sam@mlai.au",
-        "approved_at": "2026-08-01T08:02:17Z",
+        "approved_at": "2026-08-03T11:38:11Z",
         "terms_reviewed_by": "sam@mlai.au",
-        "terms_reviewed_at": "2026-08-01T08:02:17Z"
+        "terms_reviewed_at": "2026-08-03T11:38:11Z"
       }
     },
     "slack": {
