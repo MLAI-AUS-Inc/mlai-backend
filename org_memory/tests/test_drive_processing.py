@@ -25,6 +25,7 @@ from org_memory.models import (
     DriveMeetingRelation,
     DriveReconciliationReport,
     DriveWorkClassification,
+    MemoryActionStatus,
     MemoryActionType,
     MemoryChunk,
     MemoryConnectionConfiguration,
@@ -35,6 +36,7 @@ from org_memory.models import (
     MemorySource,
     MemorySourceActionRequest,
     MemorySourceLifecycle,
+    MemorySourcePreview,
     MemorySourceScope,
     MemorySyncRun,
 )
@@ -495,6 +497,66 @@ class DriveProcessingTests(TestCase):
                 source_version_id=version_id,
                 event_type=MemoryOutboxEventType.SOURCE_ACCESS_RESTORED,
             ).exists()
+        )
+
+    def test_approved_running_backfill_restores_unchanged_revoked_source(self):
+        item = self.item("approved-backfill-restored-1", version="1")
+        record, _service = self._prepare(
+            item,
+            b"Sam: The committee approved the recurring Drive backfill.",
+        )
+        commit_drive_processing_page(self.configuration, records=[record], removals=[])
+        source = MemorySource.objects.get(external_id="approved-backfill-restored-1")
+
+        revoke_configuration_sources(
+            self.configuration,
+            reason="source_configuration_changed",
+        )
+        preview = MemorySourcePreview.objects.create(
+            configuration=self.configuration,
+            version=1,
+            selection_fingerprint="a" * 64,
+            dry_run_completed_at=timezone.now(),
+        )
+        self.configuration.lifecycle_state = MemoryConnectionState.BACKFILL_PENDING
+        self.configuration.approved_preview = preview
+        self.configuration.save(
+            update_fields=("lifecycle_state", "approved_preview", "updated_at")
+        )
+        action = MemorySourceActionRequest.objects.create(
+            configuration=self.configuration,
+            action=MemoryActionType.BACKFILL,
+            status=MemoryActionStatus.RUNNING,
+            parameters={"approved_preview_id": preview.pk},
+        )
+        sync_run = MemorySyncRun.objects.create(
+            organization=self.organization,
+            configuration=self.configuration,
+            action_request=action,
+            provider="google_drive",
+            action_type=MemoryActionType.BACKFILL,
+        )
+        unchanged = prepare_drive_processing_record(
+            ContentService({}),
+            self.configuration,
+            item,
+        )
+
+        replay = commit_drive_processing_page(
+            self.configuration,
+            records=[unchanged],
+            removals=[],
+            sync_run=sync_run,
+        )
+
+        source.refresh_from_db()
+        source.current_version.acl_snapshot.refresh_from_db()
+        self.assertEqual(replay.outcomes["unchanged"], 1)
+        self.assertEqual(source.lifecycle_state, MemorySourceLifecycle.ACTIVE)
+        self.assertIsNone(source.access_revoked_at)
+        self.assertTrue(source.current_version.acl_snapshot.is_accessible)
+        self.assertTrue(
+            source.current_version.chunks.filter(active_for_retrieval=True).exists()
         )
 
     def test_audio_and_download_restrictions_create_visible_unsupported_work(self):

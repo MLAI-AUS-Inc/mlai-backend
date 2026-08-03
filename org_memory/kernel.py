@@ -541,6 +541,7 @@ def restore_source_access(
     *,
     acl: Mapping,
     reason: str = "provider_access_restored",
+    backfill_action=None,
 ) -> dict:
     """Restore an unchanged current version only when its captured ACL still matches."""
 
@@ -573,13 +574,32 @@ def restore_source_access(
     )
     if not was_revoked:
         return {"sources_restored": 0, "chunks_activated": 0}
-    if (
-        locked.configuration_id
-        and locked.configuration.lifecycle_state != MemoryConnectionState.ACTIVE
-    ):
-        raise EvidenceKernelError(
-            "Source access cannot be restored until its connection is active."
+    if locked.configuration_id:
+        configuration = locked.configuration
+        connection_active = (
+            configuration.lifecycle_state == MemoryConnectionState.ACTIVE
         )
+        approved_backfill_running = bool(
+            backfill_action is not None
+            and configuration.lifecycle_state
+            == MemoryConnectionState.BACKFILL_PENDING
+            and backfill_action.configuration_id == configuration.pk
+            and backfill_action.action == MemoryActionType.BACKFILL
+            and backfill_action.status
+            in {MemoryActionStatus.PENDING, MemoryActionStatus.RUNNING}
+            and configuration.approved_preview_id
+            and configuration.approved_preview.is_current
+            and configuration.approved_preview.dry_run_completed_at is not None
+            and str(
+                (backfill_action.parameters or {}).get("approved_preview_id") or ""
+            )
+            == str(configuration.approved_preview_id)
+        )
+        if not connection_active and not approved_backfill_running:
+            raise EvidenceKernelError(
+                "Source access cannot be restored until its connection is active "
+                "or a current approved backfill is running."
+            )
     if (
         locked.source_scope_id
         and current.classification != locked.source_scope.default_classification
