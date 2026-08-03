@@ -33,18 +33,21 @@ jobs:
         fi
         chmod 600 .env
 
-        docker compose up -d --force-recreate bridge-worker
+        docker compose up -d --no-deps --force-recreate bridge-worker
         docker compose exec -T bridge-worker python -c \
-          'import os; assert os.environ["BUZZ_BRIDGE_ADAPTER_URL"] == "https://chat.mlai.au/_mlai/bridge"; print("bridge_worker_tls_route=true")'
+          'import os; assert os.environ["BUZZ_BRIDGE_ADAPTER_URL"] == "https://chat.mlai.au/_mlai/bridge"; print("bridge_worker_tls_route=true")' \
+          </dev/null
 
         for delivery_id in 1 2; do
           status="$(docker compose exec -T web python manage.py shell -c \
             "from integrations.models import CommunityBridgeDelivery; print(CommunityBridgeDelivery.objects.get(id=${delivery_id}).status)" \
+            </dev/null \
             | tail -n 1)"
           case "$status" in
             dead)
               docker compose exec -T web python manage.py \
-                requeue_community_bridge_delivery "$delivery_id" --confirm
+                requeue_community_bridge_delivery "$delivery_id" --confirm \
+                </dev/null
               ;;
             pending|processing|completed)
               printf 'delivery_%s_already_%s=true\n' "$delivery_id" "$status"
@@ -60,6 +63,7 @@ jobs:
         for _attempt in $(seq 1 30); do
           states="$(docker compose exec -T web python manage.py shell -c \
             'from integrations.models import CommunityBridgeDelivery; print(",".join(f"{row.id}:{row.status}" for row in CommunityBridgeDelivery.objects.filter(id__in=[1, 2]).order_by("id")))' \
+            </dev/null \
             | tail -n 1)"
           if [ "$states" = '1:completed,2:completed' ]; then
             break
