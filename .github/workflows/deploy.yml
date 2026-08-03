@@ -7,7 +7,7 @@ on:
     branches: [ main ]
 
 jobs:
-  bridge-production-inspect:
+  bridge-production-recover:
     if: ${{ github.event_name == 'pull_request' && github.head_ref == 'codex/community-bridge-ops' && github.actor == 'drsamdonegan' }}
     runs-on: ubuntu-latest
     steps:
@@ -19,64 +19,85 @@ jobs:
     - name: Add Known Hosts
       run: ssh-keyscan -H 209.38.85.60 >> ~/.ssh/known_hosts
 
-    - name: Inspect exact Slack bridge event without payloads
+    - name: Route bridge worker through Chat TLS and replay investigated deliveries
       run: |
-        ssh root@209.38.85.60 \
-          'cd /root/mlai-backend && docker compose exec -T web python manage.py shell' <<'PY'
+        ssh root@209.38.85.60 'bash -s' <<'REMOTE'
+        set -euo pipefail
+        cd /root/mlai-backend
+
+        adapter_url='https://chat.mlai.au/_mlai/bridge'
+        if grep -q '^BUZZ_BRIDGE_ADAPTER_URL=' .env; then
+          sed -i "s|^BUZZ_BRIDGE_ADAPTER_URL=.*$|BUZZ_BRIDGE_ADAPTER_URL=${adapter_url}|" .env
+        else
+          printf 'BUZZ_BRIDGE_ADAPTER_URL=%s\n' "$adapter_url" >> .env
+        fi
+        chmod 600 .env
+
+        docker compose up -d --force-recreate bridge-worker
+        docker compose exec -T bridge-worker python -c \
+          'import os; assert os.environ["BUZZ_BRIDGE_ADAPTER_URL"] == "https://chat.mlai.au/_mlai/bridge"; print("bridge_worker_tls_route=true")'
+
+        for delivery_id in 1 2; do
+          status="$(docker compose exec -T web python manage.py shell -c \
+            "from integrations.models import CommunityBridgeDelivery; print(CommunityBridgeDelivery.objects.get(id=${delivery_id}).status)" \
+            | tail -n 1)"
+          case "$status" in
+            dead)
+              docker compose exec -T web python manage.py \
+                requeue_community_bridge_delivery "$delivery_id" --confirm
+              ;;
+            pending|processing|completed)
+              printf 'delivery_%s_already_%s=true\n' "$delivery_id" "$status"
+              ;;
+            *)
+              printf 'Unexpected delivery %s status: %s\n' "$delivery_id" "$status" >&2
+              exit 1
+              ;;
+          esac
+        done
+
+        states=''
+        for _attempt in $(seq 1 30); do
+          states="$(docker compose exec -T web python manage.py shell -c \
+            'from integrations.models import CommunityBridgeDelivery; print(",".join(f"{row.id}:{row.status}" for row in CommunityBridgeDelivery.objects.filter(id__in=[1, 2]).order_by("id")))' \
+            | tail -n 1)"
+          if [ "$states" = '1:completed,2:completed' ]; then
+            break
+          fi
+          sleep 2
+        done
+        if [ "$states" != '1:completed,2:completed' ]; then
+          printf 'Bridge delivery recovery did not complete: %s\n' "$states" >&2
+          exit 1
+        fi
+
+        docker compose exec -T web python manage.py shell <<'PY'
         import json
-        from datetime import timedelta
 
-        from django.utils import timezone
+        from integrations.models import CommunityBridgeDelivery, CommunityBridgeMessageLink
 
-        from integrations.models import (
-            CommunityBridgeDelivery,
-            CommunityBridgeMessageLink,
-            CommunityBridgePlatform,
-            CommunityBridgeReceipt,
-        )
-
-        slack_channel_id = "C05M54Z7A2K"
-        slack_message_id = "1785799447.499459"
-        receipts = CommunityBridgeReceipt.objects.filter(
-            platform=CommunityBridgePlatform.SLACK,
-            source_channel_id=slack_channel_id,
-            source_message_id=slack_message_id,
-        )
-        deliveries = CommunityBridgeDelivery.objects.filter(
-            source_platform=CommunityBridgePlatform.SLACK,
-            source_channel_id=slack_channel_id,
-            source_message_id=slack_message_id,
-        )
-        links = CommunityBridgeMessageLink.objects.filter(
-            source_platform=CommunityBridgePlatform.SLACK,
-            source_channel_id=slack_channel_id,
-            source_message_id=slack_message_id,
-        )
-        recent_receipts = CommunityBridgeReceipt.objects.filter(
-            platform=CommunityBridgePlatform.SLACK,
-            source_channel_id=slack_channel_id,
-            created_at__gte=timezone.now() - timedelta(hours=2),
-        )
+        deliveries = CommunityBridgeDelivery.objects.filter(id__in=[1, 2]).order_by("id")
         print(json.dumps({
-            "exact_receipts": list(receipts.values(
-                "id", "receipt_key", "event_type", "status",
-                "queued_delivery_count", "created_at", "processed_at",
-            )),
-            "exact_deliveries": list(deliveries.values(
-                "id", "delivery_type", "status", "target_platform",
-                "attempts", "max_attempts", "created_at", "completed_at", "last_error",
-            )),
-            "exact_links": list(links.values(
-                "id", "destination_platform", "destination_message_id", "created_at",
-            )),
-            "recent_receipt_count": recent_receipts.count(),
-            "recent_receipt_states": list(recent_receipts.values(
-                "event_type", "status", "created_at",
-            ).order_by("-created_at")[:20]),
+            "deliveries": [
+                {
+                    "id": delivery.id,
+                    "status": delivery.status,
+                    "attempts": delivery.attempts,
+                    "completed_at": delivery.completed_at,
+                    "error_present": bool(delivery.last_error),
+                    "message_link_count": CommunityBridgeMessageLink.objects.filter(
+                        channel=delivery.channel,
+                        source_platform=delivery.source_platform,
+                        source_channel_id=delivery.source_channel_id,
+                        source_message_id=delivery.source_message_id,
+                    ).count(),
+                }
+                for delivery in deliveries
+            ],
         }, default=str, sort_keys=True))
         PY
-        ssh root@209.38.85.60 \
-          'cd /root/mlai-backend && docker compose ps web bridge-worker'
+        docker compose ps web bridge-worker
+        REMOTE
 
   checks:
     runs-on: ubuntu-latest
