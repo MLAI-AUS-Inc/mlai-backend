@@ -277,6 +277,49 @@ class DriveProcessingTests(TestCase):
         )
         self.assertTrue(source.current_version.chunks.filter(active_for_retrieval=True).exists())
 
+    def test_reprocess_refreshes_gemini_note_classification_from_stale_manifest(self):
+        item = self.item(
+            "quarterly-planning",
+            name="MLAI - Quarterly Planning – 2026/07/06 17:46 AEST – Notes by Gemini",
+        )
+        item.update(
+            transcript_candidate=False,
+            exclusion_reason="supported_non_transcript_name",
+        )
+
+        with patch(
+            "org_memory.drive_processing._is_transcript_candidate",
+            return_value=False,
+        ):
+            unsupported_record, first_service = self._prepare(item, b"")
+        first_result = commit_drive_processing_page(
+            self.configuration,
+            records=[unsupported_record],
+            removals=[],
+        )
+        self.assertEqual(first_result.outcomes["unsupported"], 1)
+        self.assertEqual(first_service.file_resource.calls, [])
+
+        reprocessed_record, second_service = self._prepare(
+            item,
+            b"# Quarterly Planning\n\n## Decisions\n\nThe committee approved the annual plan.",
+        )
+        second_result = commit_drive_processing_page(
+            self.configuration,
+            records=[reprocessed_record],
+            removals=[],
+        )
+
+        artifact = DriveDocumentArtifact.objects.get(file_id="quarterly-planning")
+        source = MemorySource.objects.get(external_id="quarterly-planning")
+        self.assertEqual(second_result.outcomes["processed"], 1)
+        self.assertTrue(artifact.supported)
+        self.assertTrue(artifact.transcript_candidate)
+        self.assertEqual(artifact.exclusion_reason, "")
+        self.assertEqual(artifact.extraction_status, DriveExtractionStatus.EXTRACTED)
+        self.assertEqual(len(second_service.file_resource.calls), 1)
+        self.assertTrue(source.current_version.chunks.filter(active_for_retrieval=True).exists())
+
     def test_new_unsupported_version_retires_previous_retrievable_evidence(self):
         item = self.item("format-change-1", version="1")
         first_record, _service = self._prepare(item, b"Sam: Previously supported transcript.")
