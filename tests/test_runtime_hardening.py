@@ -93,7 +93,19 @@ class RuntimeHardeningConfigTests(SimpleTestCase):
         self.assertIn("community-email-worker:", (ROOT / "docker-compose.yml").read_text())
         self.assertIn("run_email_code_worker", (ROOT / "docker-compose.yml").read_text())
         self.assertIn('runtime_services+=(bridge-worker bridge-retention)', deploy)
-        self.assertIn('if env_has_value SLACK_BRIDGE_BOT_TOKEN \\', deploy)
+        self.assertIn(
+            'COMMUNITY_BRIDGE_PRODUCTION_ENABLED="${COMMUNITY_BRIDGE_PRODUCTION_ENABLED:-false}"',
+            deploy,
+        )
+        self.assertIn(
+            'if [ "\\$community_bridge_production_enabled" = "true" ] \\',
+            deploy,
+        )
+        self.assertIn(
+            'upsert_env_value COMMUNITY_BRIDGE_PRODUCTION_ENABLED "\\$community_bridge_production_enabled"',
+            deploy,
+        )
+        self.assertIn('&& env_has_value SLACK_BRIDGE_BOT_TOKEN \\', deploy)
         self.assertIn('env_has_value DISCORD_BRIDGE_BOT_TOKEN \\', deploy)
         self.assertIn('env_has_value BUZZ_BRIDGE_ADAPTER_URL \\', deploy)
         self.assertIn('env_has_value BUZZ_BRIDGE_ADAPTER_TOKEN \\', deploy)
@@ -118,6 +130,29 @@ class RuntimeHardeningConfigTests(SimpleTestCase):
         self.assertLess(
             deploy.index('docker compose stop "\\${paused_runtime_services[@]}"'),
             deploy.index('docker compose up -d --force-recreate "\\${runtime_services[@]}"'),
+        )
+
+    def test_bridge_deploy_validation_requires_explicit_production_activation(self):
+        workflow = (ROOT / ".github" / "workflows" / "deploy.yml").read_text()
+
+        self.assertIn(
+            "COMMUNITY_BRIDGE_PRODUCTION_ENABLED: "
+            "${{ vars.COMMUNITY_BRIDGE_PRODUCTION_ENABLED || 'false' }}",
+            workflow,
+        )
+        self.assertIn(
+            'if [ "$COMMUNITY_BRIDGE_PRODUCTION_ENABLED" = "true" ]; then',
+            workflow,
+        )
+        self.assertIn(
+            "Slack and Buzz bridge repository settings must be fully configured "
+            "when the production bridge is enabled",
+            workflow,
+        )
+        self.assertIn(
+            "Community bridge production activation is disabled; staged bridge "
+            "settings will not be installed.",
+            workflow,
         )
 
     def test_deploy_compose_run_does_not_consume_ssh_stdin(self):
