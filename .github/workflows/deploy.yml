@@ -64,7 +64,7 @@ jobs:
             )),
             "exact_deliveries": list(deliveries.values(
                 "id", "delivery_type", "status", "target_platform",
-                "attempts", "max_attempts", "created_at", "completed_at",
+                "attempts", "max_attempts", "created_at", "completed_at", "last_error",
             )),
             "exact_links": list(links.values(
                 "id", "destination_platform", "destination_message_id", "created_at",
