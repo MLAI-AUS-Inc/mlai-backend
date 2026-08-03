@@ -11,7 +11,11 @@ from django.db import transaction
 from django.utils import timezone
 
 from .drive_artifacts import remove_drive_artifact, upsert_drive_artifact
-from .drive_inventory import GOOGLE_DOC_MIME_TYPE, SHORTCUT_MIME_TYPE
+from .drive_inventory import (
+    GOOGLE_DOC_MIME_TYPE,
+    SHORTCUT_MIME_TYPE,
+    _is_transcript_candidate,
+)
 from .drive_parsing import (
     DRIVE_PARSER_VERSION,
     GOOGLE_DOC_EXPORT_MIME_TYPE,
@@ -84,6 +88,26 @@ def _connection_scopes(configuration) -> set[str]:
     return {str(value).strip() for value in raw if str(value).strip()}
 
 
+def _refresh_ingestibility(item: Mapping) -> dict:
+    """Apply current title rules to an approved inventory item at processing time."""
+
+    refreshed = dict(item)
+    supported = bool(refreshed.get("supported"))
+    transcript_candidate = supported and (
+        bool(refreshed.get("transcript_candidate"))
+        or _is_transcript_candidate(
+            str(refreshed.get("name") or ""),
+            str(refreshed.get("mime_type") or ""),
+        )
+    )
+    refreshed["transcript_candidate"] = transcript_candidate
+    if transcript_candidate and refreshed.get("exclusion_reason") == "supported_non_transcript_name":
+        refreshed["exclusion_reason"] = None
+    elif supported and not transcript_candidate and not refreshed.get("exclusion_reason"):
+        refreshed["exclusion_reason"] = "supported_non_transcript_name"
+    return refreshed
+
+
 def _unchanged_extraction(configuration, item: Mapping) -> Optional[DriveDocumentExtraction]:
     artifact = (
         DriveDocumentArtifact.objects.filter(
@@ -92,6 +116,9 @@ def _unchanged_extraction(configuration, item: Mapping) -> Optional[DriveDocumen
             provider_version=str(item.get("version") or ""),
             source_modified_at=item.get("modified_at") or None,
             permission_snapshot=dict(item.get("permission_class") or {}),
+            supported=bool(item.get("supported")),
+            transcript_candidate=bool(item.get("transcript_candidate")),
+            exclusion_reason=str(item.get("exclusion_reason") or ""),
             lifecycle_state=DriveArtifactState.ACTIVE,
         )
         .select_related("current_version")
@@ -181,7 +208,11 @@ def _download_bytes(service, item: Mapping) -> tuple[bytes, str]:
 def prepare_drive_processing_record(service, configuration, item: Mapping) -> dict:
     """Fetch and parse an already-inventoried item without writing source content."""
 
-    item = dict(item)
+    # Approval binds the selected scope and immutable inventory item. Reprocessing
+    # still needs to apply the currently deployed, bounded title classifier so a
+    # parser release can make newly supported document names ingestible without
+    # widening the approved Drive scope or permitting unsupported media.
+    item = _refresh_ingestibility(item)
     selected_roots = set(
         configuration.source_scopes.filter(
             selected=True,
