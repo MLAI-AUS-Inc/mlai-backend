@@ -80,10 +80,18 @@ class RuntimeHardeningConfigTests(SimpleTestCase):
     def test_deploy_pauses_web_until_constraint_is_verified(self):
         deploy = (ROOT / "deploy.sh").read_text()
 
-        self.assertIn('paused_runtime_services=(web memory-worker memory-scheduler)', deploy)
+        self.assertIn(
+            'paused_runtime_services=(web memory-worker memory-scheduler community-email-worker)',
+            deploy,
+        )
         self.assertIn('docker compose stop "\\${paused_runtime_services[@]}"', deploy)
         self.assertIn("unique_active_booking_per_user_date is missing", deploy)
-        self.assertIn('runtime_services=(web scheduler memory-worker memory-scheduler)', deploy)
+        self.assertIn(
+            'runtime_services=(web scheduler memory-worker memory-scheduler community-email-worker)',
+            deploy,
+        )
+        self.assertIn("community-email-worker:", (ROOT / "docker-compose.yml").read_text())
+        self.assertIn("run_email_code_worker", (ROOT / "docker-compose.yml").read_text())
         self.assertIn('runtime_services+=(bridge-worker bridge-retention)', deploy)
         self.assertIn('if env_has_value SLACK_BRIDGE_BOT_TOKEN \\', deploy)
         self.assertIn('env_has_value DISCORD_BRIDGE_BOT_TOKEN \\', deploy)

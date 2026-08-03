@@ -214,6 +214,49 @@ def _validate_community_chat_contract(errors: list[str]) -> None:
     ):
         errors.append("CUSTOMERIO_COMMUNITY_CHAT_CODE_MESSAGE_ID is required in production.")
 
+    adapter_url = _as_clean_string(getattr(settings, "COMMUNITY_CHAT_ADAPTER_URL", ""))
+    parsed_adapter = _parse_http_url("COMMUNITY_CHAT_ADAPTER_URL", adapter_url, errors)
+    if parsed_adapter:
+        try:
+            adapter_address = ipaddress.ip_address(parsed_adapter.hostname or "")
+        except ValueError:
+            errors.append("COMMUNITY_CHAT_ADAPTER_URL must use a private or loopback IP address.")
+        else:
+            if not (adapter_address.is_private or adapter_address.is_loopback):
+                errors.append("COMMUNITY_CHAT_ADAPTER_URL must use a private or loopback IP address.")
+        if (
+            parsed_adapter.scheme != "http"
+            or parsed_adapter.port != 3100
+            or parsed_adapter.username
+            or parsed_adapter.password
+            or parsed_adapter.path not in {"", "/"}
+            or parsed_adapter.query
+            or parsed_adapter.fragment
+        ):
+            errors.append(
+                "COMMUNITY_CHAT_ADAPTER_URL must be a credential-free private HTTP URL on port 3100."
+            )
+
+    secret_names = (
+        "COMMUNITY_CHAT_EMAIL_CODE_PEPPER",
+        "COMMUNITY_CHAT_EMAIL_CODE_DELIVERY_SECRET",
+        "COMMUNITY_CHAT_ADAPTER_TOKEN",
+    )
+    secret_values = {
+        name: _as_clean_string(getattr(settings, name, "")) for name in secret_names
+    }
+    for name, value in secret_values.items():
+        if len(value) < 32:
+            errors.append(f"{name} must contain at least 32 characters in production.")
+    populated = [value for value in secret_values.values() if value]
+    if len(populated) != len(set(populated)):
+        errors.append("MLAI Chat email and membership-adapter secrets must be independent.")
+    django_secret = _as_clean_string(getattr(settings, "SECRET_KEY", ""))
+    if django_secret and django_secret in populated:
+        errors.append("MLAI Chat email and membership-adapter secrets must not reuse SECRET_KEY.")
+    if not _as_clean_string(getattr(settings, "CUSTOMERIO_API_KEY", "")):
+        errors.append("CUSTOMERIO_API_KEY is required for MLAI Chat email-code delivery.")
+
 
 def _validate_forbidden_values(
     setting_name: str,

@@ -79,10 +79,15 @@ jobs:
         COMMUNITY_CHAT_API_AUDIENCE: https://api.mlai.au
         COMMUNITY_CHAT_FRONTEND_URL: https://chat.mlai.au
         COMMUNITY_CHAT_RELAY_URL: wss://chat.mlai.au
+        COMMUNITY_CHAT_ADAPTER_URL: http://10.126.0.9:3100
         COMMUNITY_CHAT_EMAIL_CODE_AUTH_ENABLED: "true"
         COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED: "false"
         COMMUNITY_CHAT_DEVICE_AUTH_ENABLED: "false"
         CUSTOMERIO_COMMUNITY_CHAT_CODE_MESSAGE_ID: mlai_chat_sign_in_code
+        CUSTOMERIO_API_KEY: ci-customerio-api-key-placeholder
+        COMMUNITY_CHAT_EMAIL_CODE_PEPPER: ci-chat-code-pepper-independent-value
+        COMMUNITY_CHAT_EMAIL_CODE_DELIVERY_SECRET: ci-chat-delivery-independent-value
+        COMMUNITY_CHAT_ADAPTER_TOKEN: ci-chat-adapter-independent-value
         COMMUNITY_CHAT_ALLOWED_ORIGINS: https://chat.mlai.au,tauri://localhost,http://tauri.localhost,mlaichat://callback
         GOOGLE_OAUTH_REDIRECT_URI: https://api.mlai.au/integrations/callback/google
         GITHUB_OAUTH_REDIRECT_URI: https://api.mlai.au/integrations/callback/github
@@ -234,6 +239,16 @@ jobs:
         XERO_OAUTH_SCOPES: ${{ vars.XERO_OAUTH_SCOPES || '' }}
         ROO_SIM_PATIENT_KEY: ${{ secrets.ROO_SIM_PATIENT_KEY }}
         VICTOR_AI_ROO_SIGNING_SECRET: ${{ secrets.VICTOR_AI_ROO_SIGNING_SECRET }}
+        COMMUNITY_CHAT_EMAIL_CODE_PEPPER: ${{ secrets.COMMUNITY_CHAT_EMAIL_CODE_PEPPER }}
+        COMMUNITY_CHAT_EMAIL_CODE_DELIVERY_SECRET: ${{ secrets.COMMUNITY_CHAT_EMAIL_CODE_DELIVERY_SECRET }}
+        COMMUNITY_CHAT_ADAPTER_TOKEN: ${{ secrets.COMMUNITY_CHAT_ADAPTER_TOKEN }}
+        COMMUNITY_CHAT_ADAPTER_URL: ${{ vars.COMMUNITY_CHAT_ADAPTER_URL }}
+        SLACK_BRIDGE_BOT_TOKEN: ${{ secrets.SLACK_BRIDGE_BOT_TOKEN }}
+        SLACK_BRIDGE_SIGNING_SECRET: ${{ secrets.SLACK_BRIDGE_SIGNING_SECRET }}
+        SLACK_BRIDGE_BOT_USER_ID: ${{ vars.SLACK_BRIDGE_BOT_USER_ID }}
+        BUZZ_BRIDGE_ADAPTER_URL: ${{ vars.BUZZ_BRIDGE_ADAPTER_URL }}
+        BUZZ_BRIDGE_ADAPTER_TOKEN: ${{ secrets.BUZZ_BRIDGE_ADAPTER_TOKEN }}
+        BUZZ_BRIDGE_CALLBACK_SECRET: ${{ secrets.BUZZ_BRIDGE_CALLBACK_SECRET }}
         ORG_MEMORY_PRODUCTION_DEPLOY_ENABLED: ${{ vars.ORG_MEMORY_PRODUCTION_DEPLOY_ENABLED || 'false' }}
         ORG_MEMORY_PRODUCTION_PUBLIC_CHANNEL_ADMIN_SCOPE_APPROVED: ${{ vars.ORG_MEMORY_PRODUCTION_PUBLIC_CHANNEL_ADMIN_SCOPE_APPROVED || 'false' }}
         ORG_MEMORY_PILOT_ALLOWLIST_KEY_VERSION: ${{ secrets.ORG_MEMORY_PILOT_ALLOWLIST_KEY_VERSION }}
@@ -273,6 +288,41 @@ jobs:
         fi
         if [ "$VICTOR_AI_ROO_SIGNING_SECRET" = "$ROO_SIM_PATIENT_KEY" ]; then
           echo "::error::Victor AI and simulated-patient credentials must be distinct"
+          exit 1
+        fi
+        for key in COMMUNITY_CHAT_EMAIL_CODE_PEPPER COMMUNITY_CHAT_EMAIL_CODE_DELIVERY_SECRET COMMUNITY_CHAT_ADAPTER_TOKEN; do
+          value="${!key}"
+          if [ "${#value}" -lt 32 ]; then
+            echo "::error::Required repository secret $key is missing or shorter than 32 characters"
+            exit 1
+          fi
+        done
+        if [ "$COMMUNITY_CHAT_EMAIL_CODE_PEPPER" = "$COMMUNITY_CHAT_EMAIL_CODE_DELIVERY_SECRET" ] || [ "$COMMUNITY_CHAT_EMAIL_CODE_PEPPER" = "$COMMUNITY_CHAT_ADAPTER_TOKEN" ] || [ "$COMMUNITY_CHAT_EMAIL_CODE_DELIVERY_SECRET" = "$COMMUNITY_CHAT_ADAPTER_TOKEN" ]; then
+          echo "::error::MLAI Chat email and adapter secrets must be independent"
+          exit 1
+        fi
+        if [ -z "$COMMUNITY_CHAT_ADAPTER_URL" ]; then
+          echo "::error::Required repository variable COMMUNITY_CHAT_ADAPTER_URL is not configured"
+          exit 1
+        fi
+        bridge_values=(
+          "$SLACK_BRIDGE_BOT_TOKEN"
+          "$SLACK_BRIDGE_SIGNING_SECRET"
+          "$SLACK_BRIDGE_BOT_USER_ID"
+          "$BUZZ_BRIDGE_ADAPTER_URL"
+          "$BUZZ_BRIDGE_ADAPTER_TOKEN"
+          "$BUZZ_BRIDGE_CALLBACK_SECRET"
+        )
+        bridge_present=0
+        for value in "${bridge_values[@]}"; do
+          [ -n "$value" ] && bridge_present=$((bridge_present + 1))
+        done
+        if [ "$bridge_present" -ne 0 ] && [ "$bridge_present" -ne "${#bridge_values[@]}" ]; then
+          echo "::error::Slack and Buzz bridge repository settings must be either fully configured or fully absent"
+          exit 1
+        fi
+        if [ "$bridge_present" -gt 0 ] && { [ "${#SLACK_BRIDGE_SIGNING_SECRET}" -lt 32 ] || [ "${#BUZZ_BRIDGE_ADAPTER_TOKEN}" -lt 32 ] || [ "${#BUZZ_BRIDGE_CALLBACK_SECRET}" -lt 32 ]; }; then
+          echo "::error::Slack signing, bridge adapter, and bridge callback secrets must each contain at least 32 characters"
           exit 1
         fi
         case "$ORG_MEMORY_PRODUCTION_DEPLOY_ENABLED" in

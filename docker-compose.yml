@@ -168,6 +168,29 @@ services:
     restart: unless-stopped
     stop_grace_period: 30s
 
+  community-email-worker:
+    build: .
+    command: >-
+      sh -ec '
+        until python manage.py migrate --check --noinput; do
+          echo "Waiting for migrations to complete...";
+          sleep 5;
+        done;
+        exec python manage.py run_email_code_worker
+          --poll-seconds "$${COMMUNITY_CHAT_EMAIL_POLL_SECONDS}"
+          --batch-size "$${COMMUNITY_CHAT_EMAIL_BATCH_SIZE}"
+      '
+    environment:
+      APP_ENV: ${APP_ENV:-production}
+      COMMUNITY_CHAT_EMAIL_POLL_SECONDS: ${COMMUNITY_CHAT_EMAIL_POLL_SECONDS:-2}
+      COMMUNITY_CHAT_EMAIL_BATCH_SIZE: ${COMMUNITY_CHAT_EMAIL_BATCH_SIZE:-25}
+    env_file:
+      - .env
+    depends_on:
+      - db
+    restart: unless-stopped
+    stop_grace_period: 30s
+
   bridge-worker:
     build: .
     command: sh -c "until python manage.py migrate --check --noinput; do echo 'Waiting for migrations to complete...'; sleep 5; done; python manage.py run_community_bridge"

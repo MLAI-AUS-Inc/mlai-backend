@@ -106,10 +106,12 @@ no backfill of the disabled window.
 ## Deployment order
 
 1. Apply additive database migrations.
-2. Set a stable `PASSWORD_RESET_DELIVERY_SECRET`, deploy the backend image by
-   immutable digest, and start `run_password_reset_email_worker`. Rotating this
-   secret cancels pending encrypted links, so rotate only with the outbox empty
-   or after intentionally invalidating those requests.
+2. Provision independent `COMMUNITY_CHAT_EMAIL_CODE_PEPPER`,
+   `COMMUNITY_CHAT_EMAIL_CODE_DELIVERY_SECRET`, and
+   `COMMUNITY_CHAT_ADAPTER_TOKEN` values, deploy the backend image by immutable
+   digest, and start `run_email_code_worker`. Rotating the delivery secret
+   cancels pending encrypted codes, so rotate only with the outbox empty or
+   after intentionally invalidating those requests.
 3. Deploy the bridge adapter by immutable digest and confirm its dedicated
    public key matches client release configuration.
 4. Run health checks and one synthetic private adapter delivery.

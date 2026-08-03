@@ -25,10 +25,16 @@ VALID_PROD_URL_SETTINGS = {
     "COMMUNITY_CHAT_API_AUDIENCE": "https://api.mlai.au",
     "COMMUNITY_CHAT_FRONTEND_URL": "https://chat.mlai.au",
     "COMMUNITY_CHAT_RELAY_URL": "wss://chat.mlai.au",
+    "COMMUNITY_CHAT_ADAPTER_URL": "http://10.126.0.9:3100",
+    "COMMUNITY_CHAT_ADAPTER_TOKEN": "adapter-token-independent-00000000000000",
+    "COMMUNITY_CHAT_EMAIL_CODE_PEPPER": "email-code-pepper-independent-00000000",
+    "COMMUNITY_CHAT_EMAIL_CODE_DELIVERY_SECRET": "email-delivery-independent-0000000000",
     "COMMUNITY_CHAT_EMAIL_CODE_AUTH_ENABLED": True,
     "COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED": False,
     "COMMUNITY_CHAT_DEVICE_AUTH_ENABLED": False,
     "CUSTOMERIO_COMMUNITY_CHAT_CODE_MESSAGE_ID": "community-chat-code",
+    "CUSTOMERIO_API_KEY": "customerio-production-test-key",
+    "SECRET_KEY": "django-production-test-key-independent",
     "COMMUNITY_CHAT_ALLOWED_ORIGINS": [
         "https://chat.mlai.au",
         "tauri://localhost",
@@ -266,6 +272,37 @@ class ValidateProdUrlsTests(SimpleTestCase):
         )
         self.assertIn(
             "CUSTOMERIO_COMMUNITY_CHAT_CODE_MESSAGE_ID is required in production.",
+            errors,
+        )
+
+    def test_community_chat_production_requires_private_adapter_and_independent_secrets(self):
+        shared_secret = "shared-chat-secret-0000000000000000"
+        errors = self._validation_errors(
+            COMMUNITY_CHAT_ADAPTER_URL="https://chat.mlai.au:3100/membership",
+            COMMUNITY_CHAT_ADAPTER_TOKEN=shared_secret,
+            COMMUNITY_CHAT_EMAIL_CODE_PEPPER=shared_secret,
+            COMMUNITY_CHAT_EMAIL_CODE_DELIVERY_SECRET="short",
+            CUSTOMERIO_API_KEY="",
+        )
+
+        self.assertIn(
+            "COMMUNITY_CHAT_ADAPTER_URL must use a private or loopback IP address.",
+            errors,
+        )
+        self.assertIn(
+            "COMMUNITY_CHAT_ADAPTER_URL must be a credential-free private HTTP URL on port 3100.",
+            errors,
+        )
+        self.assertIn(
+            "COMMUNITY_CHAT_EMAIL_CODE_DELIVERY_SECRET must contain at least 32 characters in production.",
+            errors,
+        )
+        self.assertIn(
+            "MLAI Chat email and membership-adapter secrets must be independent.",
+            errors,
+        )
+        self.assertIn(
+            "CUSTOMERIO_API_KEY is required for MLAI Chat email-code delivery.",
             errors,
         )
 
