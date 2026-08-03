@@ -15,7 +15,10 @@ class JobsPublicPagesParserTests(SimpleTestCase):
         self.assertIn("TopStartups.io", enabled)
         self.assertIn("ai-jobs.com.au", enabled)
         self.assertIn("Matchstiq", enabled)
-        self.assertTrue(all(source.enabled for source in PHASE_1_SOURCES))
+        self.assertNotIn("CareerOne", enabled)
+        self.assertTrue(
+            all(source.enabled for source in PHASE_1_SOURCES if source.name != "CareerOne")
+        )
 
     def test_parse_topstartups_jobs(self):
         soup = BeautifulSoup(
