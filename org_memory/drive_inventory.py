@@ -77,6 +77,10 @@ TRANSCRIPT_HINT_PATTERN = re.compile(
     r"workshop|committee|board|sync|catch[ -]?up|otter|fireflies|granola)\b",
     re.IGNORECASE,
 )
+GEMINI_MEETING_NOTES_PATTERN = re.compile(
+    r"\bnotes\s+by\s+gemini\b",
+    re.IGNORECASE,
+)
 COPY_SUFFIX_PATTERN = re.compile(r"(?:\s+-\s+copy|\s+copy|\s*\(\d+\))$", re.IGNORECASE)
 
 
@@ -239,7 +243,10 @@ def _is_transcript_candidate(name: str, mime_type: str) -> bool:
     extension = PurePath(name).suffix.lower()
     if extension in {".vtt", ".srt"}:
         return True
-    return bool(TRANSCRIPT_HINT_PATTERN.search(name))
+    return bool(
+        TRANSCRIPT_HINT_PATTERN.search(name)
+        or GEMINI_MEETING_NOTES_PATTERN.search(name)
+    )
 
 
 def _metadata_item(

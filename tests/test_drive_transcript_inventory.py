@@ -92,6 +92,53 @@ class FakeDriveClient:
 
 
 class DriveInventoryEngineTests(SimpleTestCase):
+    def test_gemini_meeting_notes_are_transcript_candidates_even_without_meeting_keyword(self):
+        client = FakeDriveClient(
+            pages={
+                (ROOT_ID, None): (
+                    [
+                        drive_file(
+                            "quarterly-planning",
+                            "MLAI - Quarterly Planning – 2026/07/06 17:46 AEST – Notes by Gemini",
+                            "application/vnd.google-apps.document",
+                        ),
+                        drive_file(
+                            "ordinary-planning",
+                            "MLAI quarterly planning notes",
+                            "application/vnd.google-apps.document",
+                        ),
+                        drive_file(
+                            "gemini-recording",
+                            "MLAI planning – Notes by Gemini.mp4",
+                            "video/mp4",
+                        ),
+                    ],
+                    None,
+                )
+            }
+        )
+
+        result = inventory_drive_metadata(
+            client,
+            organization_id="org-1",
+            connection_id="connection-1",
+            folder_ids=[ROOT_ID],
+            modified_after=date(2026, 7, 1),
+        )
+
+        items = {item["id"]: item for item in result["items"]}
+        self.assertTrue(items["quarterly-planning"]["supported"])
+        self.assertTrue(items["quarterly-planning"]["transcript_candidate"])
+        self.assertIsNone(items["quarterly-planning"]["exclusion_reason"])
+        self.assertTrue(items["ordinary-planning"]["supported"])
+        self.assertFalse(items["ordinary-planning"]["transcript_candidate"])
+        self.assertFalse(items["gemini-recording"]["supported"])
+        self.assertFalse(items["gemini-recording"]["transcript_candidate"])
+        self.assertEqual(
+            items["gemini-recording"]["exclusion_reason"],
+            "unsupported_mime_type",
+        )
+
     def test_inventory_is_metadata_only_paginated_and_traverses_folders(self):
         client = FakeDriveClient(
             pages={
