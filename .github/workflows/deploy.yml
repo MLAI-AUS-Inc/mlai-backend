@@ -203,6 +203,7 @@ jobs:
           tests.test_content_factory_reconciliation \
           tests.test_content_factory_status_contract \
           content_factory.tests_admin_metrics \
+          tests.test_community_bridge_adapter_url \
           integrations.tests_community_bridge \
           integrations.tests_community_bridge_contracts \
           core.tests.test_auth_contract \

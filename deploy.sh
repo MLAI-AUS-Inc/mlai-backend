@@ -112,20 +112,10 @@ if [ "$COMMUNITY_BRIDGE_PRODUCTION_ENABLED" = "true" ]; then
         echo "❌ Slack signing, bridge adapter, and bridge callback secrets must each contain at least 32 characters."
         exit 1
     fi
+    python3 scripts/validate_community_bridge_adapter_url.py "$BUZZ_BRIDGE_ADAPTER_URL"
     python3 - <<'PY'
-import ipaddress
 import os
 import re
-from urllib.parse import urlparse
-
-parsed = urlparse(os.environ["BUZZ_BRIDGE_ADAPTER_URL"])
-if parsed.scheme != "http" or parsed.username or parsed.password or parsed.query or parsed.fragment:
-    raise SystemExit("BUZZ_BRIDGE_ADAPTER_URL must be a credential-free private HTTP URL")
-if parsed.path not in {"", "/"} or parsed.port != 8090:
-    raise SystemExit("BUZZ_BRIDGE_ADAPTER_URL must use the private bridge adapter port 8090")
-address = ipaddress.ip_address(parsed.hostname or "")
-if not (address.is_private or address.is_loopback):
-    raise SystemExit("BUZZ_BRIDGE_ADAPTER_URL must use a private or loopback IP address")
 
 if not re.fullmatch(r"T[A-Z0-9]+", os.environ["SLACK_BRIDGE_WORKSPACE_ID"]):
     raise SystemExit("SLACK_BRIDGE_WORKSPACE_ID must be a Slack workspace ID")

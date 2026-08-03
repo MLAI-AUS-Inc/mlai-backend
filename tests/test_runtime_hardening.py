@@ -111,6 +111,11 @@ class RuntimeHardeningConfigTests(SimpleTestCase):
         self.assertIn('env_has_value BUZZ_BRIDGE_ADAPTER_TOKEN \\', deploy)
         self.assertIn('env_has_value BUZZ_BRIDGE_CALLBACK_SECRET;', deploy)
         self.assertIn(
+            'python3 scripts/validate_community_bridge_adapter_url.py '
+            '"$BUZZ_BRIDGE_ADAPTER_URL"',
+            deploy,
+        )
+        self.assertIn(
             "compose_run_web python manage.py upsert_community_bridge_channel",
             deploy,
         )

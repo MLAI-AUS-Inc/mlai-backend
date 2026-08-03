@@ -46,9 +46,13 @@ content.
   row. Ordering is best effort within one mapped channel.
 - Exhausted deliveries enter a dead state for operator inspection and replay.
 
-The backend reaches the Rust sidecar only through its private
-`POST /v1/deliveries` endpoint with `BUZZ_BRIDGE_ADAPTER_TOKEN`. The sidecar
-posts relay events to
+The backend reaches the Rust sidecar with `BUZZ_BRIDGE_ADAPTER_TOKEN`. When the
+backend and MLAI Chat share a private network, it uses the adapter's private
+`POST /v1/deliveries` endpoint on port 8090. The production cross-VPC deployment
+uses the exact TLS base `https://chat.mlai.au/_mlai/bridge`; Caddy strips that
+prefix and proxies to the same private adapter, which is not bound to a public
+port. No other public adapter host or path is accepted. The sidecar posts relay
+events to
 `/api/v1/integrations/bridge/buzz/events`; it signs the exact raw body and Unix
 timestamp with `BUZZ_BRIDGE_CALLBACK_SECRET`. The API rejects bodies over 256
 KiB, invalid signatures, and callbacks outside the five-minute replay window
@@ -96,7 +100,7 @@ credential to a member client.
 SLACK_BRIDGE_BOT_TOKEN=xoxb-...
 SLACK_BRIDGE_SIGNING_SECRET=...
 SLACK_BRIDGE_BOT_USER_ID=U...
-BUZZ_BRIDGE_ADAPTER_URL=http://buzz-bridge-adapter:8090
+BUZZ_BRIDGE_ADAPTER_URL=https://chat.mlai.au/_mlai/bridge
 BUZZ_BRIDGE_ADAPTER_TOKEN=...
 BUZZ_BRIDGE_CALLBACK_SECRET=...
 ```
