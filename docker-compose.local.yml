@@ -4,6 +4,7 @@ services:
     command: sh /app/scripts/start-web.sh
     environment:
       APP_ENV: local
+      RUN_MIGRATIONS_ON_START: "1"
       GUNICORN_WORKERS: ${GUNICORN_WORKERS:-2}
       JOBS_SCRAPE_HEADLESS: ${JOBS_SCRAPE_HEADLESS:-false}
     volumes:
@@ -147,6 +148,35 @@ services:
     restart: unless-stopped
     stop_grace_period: 30s
 
+  password-email-worker:
+    build: .
+    command: >-
+      sh -ec '
+        until python manage.py migrate --check --noinput; do
+          echo "Waiting for migrations to complete...";
+          sleep 5;
+        done;
+        exec python manage.py run_password_reset_email_worker
+          --poll-seconds "$${PASSWORD_RESET_EMAIL_POLL_SECONDS}"
+      '
+    environment:
+      APP_ENV: local
+      PASSWORD_RESET_EMAIL_POLL_SECONDS: ${PASSWORD_RESET_EMAIL_POLL_SECONDS:-2}
+    volumes:
+      - .:/app
+    env_file:
+      - .env
+      - .env.local-docker
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      default:
+      local-shared:
+        aliases:
+          - mlai-backend-password-email-worker
+    restart: unless-stopped
+    stop_grace_period: 30s
+
   bridge-worker:
     build: .
     command: sh -c "until python manage.py migrate --check --noinput; do echo 'Waiting for migrations to complete...'; sleep 5; done; python manage.py run_community_bridge"
@@ -166,6 +196,39 @@ services:
         aliases:
           - mlai-backend-bridge-worker
     restart: unless-stopped
+
+  bridge-retention:
+    build: .
+    command: >-
+      sh -ec '
+        until python manage.py migrate --check --noinput; do
+          echo "Waiting for migrations to complete...";
+          sleep 5;
+        done;
+        while true; do
+          if ! python manage.py purge_community_bridge_payloads; then
+            echo "Community bridge payload purge failed; the next bounded poll will retry" >&2;
+          fi;
+          sleep "$${COMMUNITY_BRIDGE_PURGE_POLL_SECONDS}";
+        done
+      '
+    environment:
+      APP_ENV: local
+      COMMUNITY_BRIDGE_PURGE_POLL_SECONDS: ${COMMUNITY_BRIDGE_PURGE_POLL_SECONDS:-86400}
+    volumes:
+      - .:/app
+    env_file:
+      - .env
+      - .env.local-docker
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      default:
+      local-shared:
+        aliases:
+          - mlai-backend-bridge-retention
+    restart: unless-stopped
+    stop_grace_period: 30s
 
 networks:
   local-shared:

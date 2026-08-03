@@ -1,4 +1,5 @@
 from io import StringIO
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 import urllib.error
 
@@ -21,6 +22,25 @@ VALID_PROD_URL_SETTINGS = {
     "ESAFETY_URL": "https://mlai.au",
     "VIBE_RAISING_URL": "https://mlai.au",
     "FOUNDER_TOOLS_URL": "https://mlai.au",
+    "COMMUNITY_CHAT_API_AUDIENCE": "https://api.mlai.au",
+    "COMMUNITY_CHAT_FRONTEND_URL": "https://chat.mlai.au",
+    "COMMUNITY_CHAT_RELAY_URL": "wss://chat.mlai.au",
+    "COMMUNITY_CHAT_ADAPTER_URL": "http://10.126.0.9:3100",
+    "COMMUNITY_CHAT_ADAPTER_TOKEN": "adapter-token-independent-00000000000000",
+    "COMMUNITY_CHAT_EMAIL_CODE_PEPPER": "email-code-pepper-independent-00000000",
+    "COMMUNITY_CHAT_EMAIL_CODE_DELIVERY_SECRET": "email-delivery-independent-0000000000",
+    "COMMUNITY_CHAT_EMAIL_CODE_AUTH_ENABLED": True,
+    "COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED": False,
+    "COMMUNITY_CHAT_DEVICE_AUTH_ENABLED": False,
+    "CUSTOMERIO_COMMUNITY_CHAT_CODE_MESSAGE_ID": "community-chat-code",
+    "CUSTOMERIO_API_KEY": "customerio-production-test-key",
+    "SECRET_KEY": "django-production-test-key-independent",
+    "COMMUNITY_CHAT_ALLOWED_ORIGINS": [
+        "https://chat.mlai.au",
+        "tauri://localhost",
+        "http://tauri.localhost",
+        "mlaichat://callback",
+    ],
     "GOOGLE_OAUTH_REDIRECT_URI": "https://api.mlai.au/integrations/callback/google",
     "GITHUB_OAUTH_REDIRECT_URI": "https://api.mlai.au/integrations/callback/github",
     "STRIPE_OAUTH_REDIRECT_URI": "https://api.mlai.au/integrations/callback/stripe",
@@ -33,6 +53,7 @@ VALID_PROD_URL_SETTINGS = {
     "VALLEY_HARNESS_API_KEY": "valley-key",
     "ALLOWED_HOSTS": ["api.mlai.au", "10.126.0.2"],
     "CORS_ALLOWED_ORIGINS": [
+        "https://chat.mlai.au",
         "https://mlai.au",
         "https://ops.mlai.au",
         "https://www.mlai.au",
@@ -41,6 +62,7 @@ VALID_PROD_URL_SETTINGS = {
     ],
     "CSRF_TRUSTED_ORIGINS": [
         "https://api.mlai.au",
+        "https://chat.mlai.au",
         "https://mlai.au",
         "https://ops.mlai.au",
         "https://www.mlai.au",
@@ -117,12 +139,21 @@ class ValidateProdUrlsTests(SimpleTestCase):
             ],
         )
 
-        self.assertIn("CORS_ALLOWED_ORIGINS is missing required origin(s): https://www.mlai.au.", errors)
-        self.assertIn("CSRF_TRUSTED_ORIGINS is missing required origin(s): https://api.mlai.au.", errors)
+        self.assertIn(
+            "CORS_ALLOWED_ORIGINS is missing required origin(s): "
+            "https://chat.mlai.au, https://www.mlai.au.",
+            errors,
+        )
+        self.assertIn(
+            "CSRF_TRUSTED_ORIGINS is missing required origin(s): "
+            "https://api.mlai.au, https://chat.mlai.au.",
+            errors,
+        )
 
     def test_ops_origin_is_required_and_plane_origin_is_not(self):
         errors = self._validation_errors(
             CORS_ALLOWED_ORIGINS=[
+                "https://chat.mlai.au",
                 "https://mlai.au",
                 "https://www.mlai.au",
                 "https://victorai.win",
@@ -130,6 +161,7 @@ class ValidateProdUrlsTests(SimpleTestCase):
             ],
             CSRF_TRUSTED_ORIGINS=[
                 "https://api.mlai.au",
+                "https://chat.mlai.au",
                 "https://mlai.au",
                 "https://www.mlai.au",
             ],
@@ -167,6 +199,112 @@ class ValidateProdUrlsTests(SimpleTestCase):
         errors = self._validation_errors(ALLOWED_HOSTS=["api.mlai.au"])
 
         self.assertIn("ALLOWED_HOSTS is missing required host(s): 10.126.0.2.", errors)
+
+    def test_community_chat_production_endpoints_are_exact(self):
+        errors = self._validation_errors(
+            COMMUNITY_CHAT_FRONTEND_URL="https://chat-preview.mlai.au",
+            COMMUNITY_CHAT_RELAY_URL="wss://chat.mlai.au/relay",
+            COMMUNITY_CHAT_API_AUDIENCE="https://api.mlai.au/api/v1",
+        )
+
+        self.assertIn(
+            "COMMUNITY_CHAT_FRONTEND_URL must be exactly https://chat.mlai.au in production.",
+            errors,
+        )
+        self.assertIn(
+            "COMMUNITY_CHAT_RELAY_URL must be exactly wss://chat.mlai.au in production.",
+            errors,
+        )
+        self.assertIn(
+            "COMMUNITY_CHAT_API_AUDIENCE must be exactly https://api.mlai.au in production.",
+            errors,
+        )
+
+    def test_deploy_workflow_supplies_community_chat_production_contract(self):
+        workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/deploy.yml").read_text()
+
+        self.assertIn("COMMUNITY_CHAT_API_AUDIENCE: https://api.mlai.au", workflow)
+        self.assertIn("COMMUNITY_CHAT_FRONTEND_URL: https://chat.mlai.au", workflow)
+        self.assertIn("COMMUNITY_CHAT_RELAY_URL: wss://chat.mlai.au", workflow)
+        self.assertIn('COMMUNITY_CHAT_EMAIL_CODE_AUTH_ENABLED: "true"', workflow)
+        self.assertIn('COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED: "false"', workflow)
+        self.assertIn('COMMUNITY_CHAT_DEVICE_AUTH_ENABLED: "false"', workflow)
+        self.assertIn("CUSTOMERIO_COMMUNITY_CHAT_CODE_MESSAGE_ID:", workflow)
+        self.assertIn(
+            "COMMUNITY_CHAT_ALLOWED_ORIGINS: "
+            "https://chat.mlai.au,tauri://localhost,http://tauri.localhost,mlaichat://callback",
+            workflow,
+        )
+
+    def test_community_chat_production_origins_exclude_loopback(self):
+        errors = self._validation_errors(
+            COMMUNITY_CHAT_ALLOWED_ORIGINS=[
+                "https://chat.mlai.au",
+                "http://localhost:3001",
+            ]
+        )
+
+        self.assertIn(
+            "COMMUNITY_CHAT_ALLOWED_ORIGINS contains development origin(s): "
+            "http://localhost:3001.",
+            errors,
+        )
+
+    def test_community_chat_production_requires_email_code_only_auth(self):
+        errors = self._validation_errors(
+            COMMUNITY_CHAT_EMAIL_CODE_AUTH_ENABLED=False,
+            COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED=True,
+            COMMUNITY_CHAT_DEVICE_AUTH_ENABLED=True,
+            CUSTOMERIO_COMMUNITY_CHAT_CODE_MESSAGE_ID="",
+        )
+
+        self.assertIn(
+            "COMMUNITY_CHAT_EMAIL_CODE_AUTH_ENABLED must be true in production.",
+            errors,
+        )
+        self.assertIn(
+            "COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED must be false in production.",
+            errors,
+        )
+        self.assertIn(
+            "COMMUNITY_CHAT_DEVICE_AUTH_ENABLED must be false in production.",
+            errors,
+        )
+        self.assertIn(
+            "CUSTOMERIO_COMMUNITY_CHAT_CODE_MESSAGE_ID is required in production.",
+            errors,
+        )
+
+    def test_community_chat_production_requires_private_adapter_and_independent_secrets(self):
+        shared_secret = "shared-chat-secret-0000000000000000"
+        errors = self._validation_errors(
+            COMMUNITY_CHAT_ADAPTER_URL="https://chat.mlai.au:3100/membership",
+            COMMUNITY_CHAT_ADAPTER_TOKEN=shared_secret,
+            COMMUNITY_CHAT_EMAIL_CODE_PEPPER=shared_secret,
+            COMMUNITY_CHAT_EMAIL_CODE_DELIVERY_SECRET="short",
+            CUSTOMERIO_API_KEY="",
+        )
+
+        self.assertIn(
+            "COMMUNITY_CHAT_ADAPTER_URL must use a private or loopback IP address.",
+            errors,
+        )
+        self.assertIn(
+            "COMMUNITY_CHAT_ADAPTER_URL must be a credential-free private HTTP URL on port 3100.",
+            errors,
+        )
+        self.assertIn(
+            "COMMUNITY_CHAT_EMAIL_CODE_DELIVERY_SECRET must contain at least 32 characters in production.",
+            errors,
+        )
+        self.assertIn(
+            "MLAI Chat email and membership-adapter secrets must be independent.",
+            errors,
+        )
+        self.assertIn(
+            "CUSTOMERIO_API_KEY is required for MLAI Chat email-code delivery.",
+            errors,
+        )
 
     def test_command_succeeds_for_valid_prod_urls(self):
         out = StringIO()

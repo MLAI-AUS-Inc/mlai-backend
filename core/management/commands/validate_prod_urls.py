@@ -18,6 +18,8 @@ PUBLIC_URL_SETTINGS = (
     "ESAFETY_URL",
     "VIBE_RAISING_URL",
     "FOUNDER_TOOLS_URL",
+    "COMMUNITY_CHAT_API_AUDIENCE",
+    "COMMUNITY_CHAT_FRONTEND_URL",
 )
 
 OAUTH_REDIRECT_URI_SETTINGS = (
@@ -48,6 +50,7 @@ DOCKER_ONLY_SERVICE_HOSTS = {
 }
 
 REQUIRED_CORS_ORIGINS = {
+    "https://chat.mlai.au",
     "https://mlai.au",
     "https://ops.mlai.au",
     "https://www.mlai.au",
@@ -58,6 +61,7 @@ REQUIRED_CORS_ORIGINS = {
 
 REQUIRED_CSRF_ORIGINS = {
     "https://api.mlai.au",
+    "https://chat.mlai.au",
     "https://mlai.au",
     "https://ops.mlai.au",
     "https://www.mlai.au",
@@ -66,6 +70,18 @@ REQUIRED_CSRF_ORIGINS = {
 REQUIRED_ALLOWED_HOSTS = {
     "api.mlai.au",
     "10.126.0.2",
+}
+
+EXACT_COMMUNITY_CHAT_SETTINGS = {
+    "COMMUNITY_CHAT_API_AUDIENCE": "https://api.mlai.au",
+    "COMMUNITY_CHAT_FRONTEND_URL": "https://chat.mlai.au",
+    "COMMUNITY_CHAT_RELAY_URL": "wss://chat.mlai.au",
+}
+
+DEVELOPMENT_COMMUNITY_CHAT_ORIGINS = {
+    "http://localhost:3001",
+    "http://localhost:5173",
+    "http://127.0.0.1:4173",
 }
 
 FORBIDDEN_CREDENTIAL_ORIGINS = {
@@ -168,6 +184,80 @@ def _validate_required_values(
         errors.append(f"{setting_name} is missing required {value_label}(s): {', '.join(missing)}.")
 
 
+def _validate_community_chat_contract(errors: list[str]) -> None:
+    for setting_name, expected in EXACT_COMMUNITY_CHAT_SETTINGS.items():
+        actual = _as_clean_string(getattr(settings, setting_name, ""))
+        if actual != expected:
+            errors.append(f"{setting_name} must be exactly {expected} in production.")
+
+    allowed_origins = set(_as_list(getattr(settings, "COMMUNITY_CHAT_ALLOWED_ORIGINS", [])))
+    if "https://chat.mlai.au" not in allowed_origins:
+        errors.append(
+            "COMMUNITY_CHAT_ALLOWED_ORIGINS is missing required origin(s): https://chat.mlai.au."
+        )
+    development_origins = sorted(allowed_origins & DEVELOPMENT_COMMUNITY_CHAT_ORIGINS)
+    if development_origins:
+        errors.append(
+            "COMMUNITY_CHAT_ALLOWED_ORIGINS contains development origin(s): "
+            f"{', '.join(development_origins)}."
+        )
+    if not _as_bool(getattr(settings, "COMMUNITY_CHAT_EMAIL_CODE_AUTH_ENABLED", False)):
+        errors.append("COMMUNITY_CHAT_EMAIL_CODE_AUTH_ENABLED must be true in production.")
+    for legacy_setting in (
+        "COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED",
+        "COMMUNITY_CHAT_DEVICE_AUTH_ENABLED",
+    ):
+        if _as_bool(getattr(settings, legacy_setting, False)):
+            errors.append(f"{legacy_setting} must be false in production.")
+    if not _as_clean_string(
+        getattr(settings, "CUSTOMERIO_COMMUNITY_CHAT_CODE_MESSAGE_ID", "")
+    ):
+        errors.append("CUSTOMERIO_COMMUNITY_CHAT_CODE_MESSAGE_ID is required in production.")
+
+    adapter_url = _as_clean_string(getattr(settings, "COMMUNITY_CHAT_ADAPTER_URL", ""))
+    parsed_adapter = _parse_http_url("COMMUNITY_CHAT_ADAPTER_URL", adapter_url, errors)
+    if parsed_adapter:
+        try:
+            adapter_address = ipaddress.ip_address(parsed_adapter.hostname or "")
+        except ValueError:
+            errors.append("COMMUNITY_CHAT_ADAPTER_URL must use a private or loopback IP address.")
+        else:
+            if not (adapter_address.is_private or adapter_address.is_loopback):
+                errors.append("COMMUNITY_CHAT_ADAPTER_URL must use a private or loopback IP address.")
+        if (
+            parsed_adapter.scheme != "http"
+            or parsed_adapter.port != 3100
+            or parsed_adapter.username
+            or parsed_adapter.password
+            or parsed_adapter.path not in {"", "/"}
+            or parsed_adapter.query
+            or parsed_adapter.fragment
+        ):
+            errors.append(
+                "COMMUNITY_CHAT_ADAPTER_URL must be a credential-free private HTTP URL on port 3100."
+            )
+
+    secret_names = (
+        "COMMUNITY_CHAT_EMAIL_CODE_PEPPER",
+        "COMMUNITY_CHAT_EMAIL_CODE_DELIVERY_SECRET",
+        "COMMUNITY_CHAT_ADAPTER_TOKEN",
+    )
+    secret_values = {
+        name: _as_clean_string(getattr(settings, name, "")) for name in secret_names
+    }
+    for name, value in secret_values.items():
+        if len(value) < 32:
+            errors.append(f"{name} must contain at least 32 characters in production.")
+    populated = [value for value in secret_values.values() if value]
+    if len(populated) != len(set(populated)):
+        errors.append("MLAI Chat email and membership-adapter secrets must be independent.")
+    django_secret = _as_clean_string(getattr(settings, "SECRET_KEY", ""))
+    if django_secret and django_secret in populated:
+        errors.append("MLAI Chat email and membership-adapter secrets must not reuse SECRET_KEY.")
+    if not _as_clean_string(getattr(settings, "CUSTOMERIO_API_KEY", "")):
+        errors.append("CUSTOMERIO_API_KEY is required for MLAI Chat email-code delivery.")
+
+
 def _validate_forbidden_values(
     setting_name: str,
     forbidden_values: set[str],
@@ -206,6 +296,7 @@ def validate_prod_url_settings() -> list[str]:
     _validate_required_values("CORS_ALLOWED_ORIGINS", REQUIRED_CORS_ORIGINS, errors, value_label="origin")
     _validate_required_values("CSRF_TRUSTED_ORIGINS", REQUIRED_CSRF_ORIGINS, errors, value_label="origin")
     _validate_required_values("ALLOWED_HOSTS", REQUIRED_ALLOWED_HOSTS, errors, value_label="host")
+    _validate_community_chat_contract(errors)
     _validate_forbidden_values(
         "CORS_ALLOWED_ORIGINS",
         FORBIDDEN_CREDENTIAL_ORIGINS,

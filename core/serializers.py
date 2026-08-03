@@ -1,7 +1,12 @@
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer, TokenRefreshSerializer
 from django.contrib.auth import get_user_model
-from .refresh_sessions import add_refresh_session_claim, ensure_refresh_session_active
+from .refresh_sessions import (
+    add_auth_version_claim,
+    add_refresh_session_claim,
+    ensure_refresh_session_active,
+    ensure_token_auth_version,
+)
 from .user_compat import get_compat_user_role
 
 User = get_user_model()
@@ -11,6 +16,7 @@ class MyTokenObtainPairSerializer(TokenObtainPairSerializer):
     def get_token(cls, user):
         token = super().get_token(user)
         add_refresh_session_claim(token)
+        add_auth_version_claim(token, user)
         token['role'] = get_compat_user_role(user)
         return token
 
@@ -21,6 +27,7 @@ class RevocableTokenRefreshSerializer(TokenRefreshSerializer):
     def validate(self, attrs):
         refresh = self.token_class(attrs['refresh'])
         ensure_refresh_session_active(refresh)
+        ensure_token_auth_version(refresh)
         return super().validate(attrs)
 
 class RegisterSerializer(serializers.ModelSerializer):

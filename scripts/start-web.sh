@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-if [ "${RUN_MIGRATIONS_ON_START:-1}" = "1" ]; then
+if [ "${RUN_MIGRATIONS_ON_START:-0}" = "1" ]; then
   python manage.py migrate --noinput
   python manage.py migrate --check --noinput
 fi

@@ -12,6 +12,7 @@ import time
 from uuid import uuid4
 
 from django.conf import settings
+from django.contrib.auth import get_user_model
 from django.core.cache import cache
 from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.settings import api_settings
@@ -19,6 +20,7 @@ from rest_framework_simplejwt.tokens import RefreshToken
 
 
 REFRESH_SESSION_CLAIM = 'refresh_session_id'
+AUTH_VERSION_CLAIM = 'auth_version'
 REVOCATION_CACHE_PREFIX = 'auth:revoked-refresh-session:'
 LEGACY_REVOCATION_CACHE_PREFIX = 'auth:revoked-legacy-refresh-before:'
 
@@ -34,8 +36,43 @@ def add_refresh_session_claim(token):
     return token
 
 
+def add_auth_version_claim(token, user):
+    token[AUTH_VERSION_CLAIM] = int(user.auth_version)
+    return token
+
+
 def issue_refresh_token(user):
-    return add_refresh_session_claim(RefreshToken.for_user(user))
+    token = add_refresh_session_claim(RefreshToken.for_user(user))
+    return add_auth_version_claim(token, user)
+
+
+def ensure_token_auth_version(token, user=None):
+    """Reject account credentials minted before a password/session reset."""
+
+    if user is None:
+        identifier = token.payload.get(api_settings.USER_ID_CLAIM)
+        identifier = _validated_identifier(
+            identifier,
+            error_message='Token is missing a valid user identifier',
+        )
+        User = get_user_model()
+        try:
+            user = User.objects.get(**{api_settings.USER_ID_FIELD: identifier})
+        except User.DoesNotExist as exc:
+            raise TokenError('Token user no longer exists') from exc
+    presented = token.payload.get(AUTH_VERSION_CLAIM)
+    expected = int(user.auth_version)
+    # Tokens created before the migration remain valid only while the account
+    # is still at its initial version. Any password reset invalidates them.
+    if presented is None and expected == 1:
+        return token
+    try:
+        matches = int(presented) == expected
+    except (TypeError, ValueError):
+        matches = False
+    if not matches:
+        raise TokenError('Account session has been revoked')
+    return token
 
 
 def _validated_identifier(value, *, error_message):

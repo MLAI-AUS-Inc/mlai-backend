@@ -206,6 +206,7 @@ INSTALLED_APPS = [
     'startup_updates',
     'content_factory',
     'content_analytics',
+    'community_chat',
     'founder_tools',
     'data_access',
     'core',
@@ -256,16 +257,30 @@ TEMPLATES = [
 
 WSGI_APPLICATION = 'mlai.wsgi.application'
 
-CORS_ALLOWED_ORIGINS = os.getenv(
+CORS_ALLOWED_ORIGINS = _env_list(
     'CORS_ALLOWED_ORIGINS',
-    'http://localhost:3000,http://localhost:5173,https://mlai.au,https://www.mlai.au,'
-    'https://ops.mlai.au',
-).split(',')
-CSRF_TRUSTED_ORIGINS = os.getenv(
+    [
+        'http://localhost:3000',
+        'http://localhost:3001',
+        'http://localhost:5173',
+        'https://mlai.au',
+        'https://www.mlai.au',
+        'https://chat.mlai.au',
+        'https://ops.mlai.au',
+    ],
+)
+CSRF_TRUSTED_ORIGINS = _env_list(
     'CSRF_TRUSTED_ORIGINS',
-    'http://localhost:3000,http://localhost:5173,https://mlai.au,https://www.mlai.au,'
-    'https://ops.mlai.au',
-).split(',')
+    [
+        'http://localhost:3000',
+        'http://localhost:3001',
+        'http://localhost:5173',
+        'https://mlai.au',
+        'https://www.mlai.au',
+        'https://chat.mlai.au',
+        'https://ops.mlai.au',
+    ],
+)
 # ops.mlai.au is the operations dashboard's sole credentialed origin. Plane at
 # admin.mlai.au must remain untrusted even if production env lists are replaced;
 # otherwise Plane-origin JavaScript could call the MLAI API with parent-domain
@@ -278,6 +293,25 @@ for _operations_origin in ('https://ops.mlai.au',):
 CORS_ALLOW_CREDENTIALS = True
 CORS_ALLOW_HEADERS = (*default_headers, "x-request-id")
 CORS_EXPOSE_HEADERS = ["X-Request-ID"]
+
+# Bound request buffering before application-specific parsers run. Larger
+# uploads use the dedicated streaming/media paths rather than unbounded Django
+# request bodies.
+DATA_UPLOAD_MAX_MEMORY_SIZE = int(os.getenv('DATA_UPLOAD_MAX_MEMORY_SIZE', str(10 * 1024 * 1024)))
+FILE_UPLOAD_MAX_MEMORY_SIZE = int(os.getenv('FILE_UPLOAD_MAX_MEMORY_SIZE', str(5 * 1024 * 1024)))
+DATA_UPLOAD_MAX_NUMBER_FIELDS = int(os.getenv('DATA_UPLOAD_MAX_NUMBER_FIELDS', '2000'))
+
+# Safe cookie/header defaults apply in every environment. settings_prod.py may
+# tighten deployment-specific transport behavior after these values are loaded.
+SESSION_COOKIE_SECURE = not DEBUG
+SESSION_COOKIE_HTTPONLY = True
+SESSION_COOKIE_SAMESITE = 'Lax'
+CSRF_COOKIE_SECURE = not DEBUG
+CSRF_COOKIE_HTTPONLY = False  # browser clients read the token for the CSRF header
+CSRF_COOKIE_SAMESITE = 'Lax'
+SECURE_CONTENT_TYPE_NOSNIFF = True
+SECURE_REFERRER_POLICY = 'same-origin'
+X_FRAME_OPTIONS = 'DENY'
 
 
 WATT_THE_HACK_REGISTERED_TEAMS = {}
@@ -409,8 +443,104 @@ REST_FRAMEWORK = {
         'watt_unity_ticket_redeem': os.getenv('WATT_UNITY_TICKET_REDEEM_RATE', '60/minute'),
         'public_knowledge': os.getenv('ORG_MEMORY_PUBLIC_RATE', '60/minute'),
         'org_memory_actions': os.getenv('ORG_MEMORY_ACTION_RATE', '30/minute'),
+        'community_chat_session': os.getenv('COMMUNITY_CHAT_SESSION_RATE', '120/minute'),
+        'community_chat_challenge': os.getenv('COMMUNITY_CHAT_CHALLENGE_RATE', '20/minute'),
+        'community_chat_invite': os.getenv('COMMUNITY_CHAT_INVITE_RATE', '10/minute'),
+        'community_chat_confirm': os.getenv('COMMUNITY_CHAT_CONFIRM_RATE', '30/minute'),
+        'community_chat_revoke': os.getenv('COMMUNITY_CHAT_REVOKE_RATE', '10/minute'),
     }
 }
+
+# MLAI Chat device bootstrap. The adapter URL is private service-to-service;
+# only the public relay/client URLs are returned to browsers.
+COMMUNITY_CHAT_RELAY_URL = os.getenv('COMMUNITY_CHAT_RELAY_URL', 'wss://chat.mlai.au')
+COMMUNITY_CHAT_API_AUDIENCE = os.getenv('COMMUNITY_CHAT_API_AUDIENCE', 'https://api.mlai.au')
+COMMUNITY_CHAT_ADAPTER_URL = os.getenv(
+    'COMMUNITY_CHAT_ADAPTER_URL', 'http://127.0.0.1:3100'
+).rstrip('/')
+COMMUNITY_CHAT_ADAPTER_TOKEN = os.getenv('COMMUNITY_CHAT_ADAPTER_TOKEN', '')
+COMMUNITY_CHAT_ADAPTER_TIMEOUT_SECONDS = float(
+    os.getenv('COMMUNITY_CHAT_ADAPTER_TIMEOUT_SECONDS', '5')
+)
+COMMUNITY_CHAT_CHALLENGE_TTL_SECONDS = int(
+    os.getenv('COMMUNITY_CHAT_CHALLENGE_TTL_SECONDS', '300')
+)
+COMMUNITY_CHAT_DEVICE_AUTH_TTL_SECONDS = int(
+    os.getenv('COMMUNITY_CHAT_DEVICE_AUTH_TTL_SECONDS', '900')
+)
+COMMUNITY_CHAT_BOOTSTRAP_TOKEN_TTL_SECONDS = int(
+    os.getenv('COMMUNITY_CHAT_BOOTSTRAP_TOKEN_TTL_SECONDS', '300')
+)
+COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED = _env_is_true(
+    'COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED',
+    False,
+)
+COMMUNITY_CHAT_DEVICE_AUTH_ENABLED = _env_is_true(
+    'COMMUNITY_CHAT_DEVICE_AUTH_ENABLED',
+    False,
+)
+COMMUNITY_CHAT_EMAIL_CODE_AUTH_ENABLED = _env_is_true(
+    'COMMUNITY_CHAT_EMAIL_CODE_AUTH_ENABLED',
+    True,
+)
+COMMUNITY_CHAT_EMAIL_CODE_TTL_SECONDS = int(
+    os.getenv('COMMUNITY_CHAT_EMAIL_CODE_TTL_SECONDS', '600')
+)
+COMMUNITY_CHAT_EMAIL_CODE_MAX_ATTEMPTS = int(
+    os.getenv('COMMUNITY_CHAT_EMAIL_CODE_MAX_ATTEMPTS', '5')
+)
+COMMUNITY_CHAT_EMAIL_CODE_RESEND_SECONDS = int(
+    os.getenv('COMMUNITY_CHAT_EMAIL_CODE_RESEND_SECONDS', '60')
+)
+COMMUNITY_CHAT_EMAIL_CODE_MIN_RESPONSE_SECONDS = float(
+    os.getenv('COMMUNITY_CHAT_EMAIL_CODE_MIN_RESPONSE_SECONDS', '0.12')
+)
+COMMUNITY_CHAT_EMAIL_CODE_PEPPER = os.getenv(
+    'COMMUNITY_CHAT_EMAIL_CODE_PEPPER',
+    SECRET_KEY,
+)
+COMMUNITY_CHAT_EMAIL_CODE_DELIVERY_SECRET = os.getenv(
+    'COMMUNITY_CHAT_EMAIL_CODE_DELIVERY_SECRET',
+    SECRET_KEY,
+)
+COMMUNITY_CHAT_SESSION_ACCESS_TTL_SECONDS = int(
+    os.getenv('COMMUNITY_CHAT_SESSION_ACCESS_TTL_SECONDS', '900')
+)
+COMMUNITY_CHAT_SESSION_REFRESH_TTL_DAYS = int(
+    os.getenv('COMMUNITY_CHAT_SESSION_REFRESH_TTL_DAYS', '30')
+)
+CUSTOMERIO_COMMUNITY_CHAT_CODE_MESSAGE_ID = os.getenv(
+    'CUSTOMERIO_COMMUNITY_CHAT_CODE_MESSAGE_ID',
+    '',
+)
+COMMUNITY_CHAT_FRONTEND_URL = os.getenv(
+    'COMMUNITY_CHAT_FRONTEND_URL',
+    'http://localhost:3001' if DEBUG else 'https://chat.mlai.au',
+)
+COMMUNITY_CHAT_ALLOWED_ORIGINS = _env_list(
+    'COMMUNITY_CHAT_ALLOWED_ORIGINS',
+    [
+        'https://chat.mlai.au',
+        'http://localhost:5173',
+        'http://localhost:3001',
+        'http://127.0.0.1:4173',
+        'tauri://localhost',
+        'http://tauri.localhost',
+        'mlaichat://callback',
+    ],
+)
+COMMUNITY_CHAT_PASSWORD_RESET_URL = os.getenv(
+    'COMMUNITY_CHAT_PASSWORD_RESET_URL',
+    'http://localhost:3001/#/reset-password' if DEBUG else 'https://chat.mlai.au/#/reset-password',
+)
+PASSWORD_RESET_TTL_SECONDS = int(os.getenv('PASSWORD_RESET_TTL_SECONDS', '3600'))
+PASSWORD_RESET_MIN_RESPONSE_SECONDS = float(
+    os.getenv('PASSWORD_RESET_MIN_RESPONSE_SECONDS', '0.12')
+)
+PASSWORD_RESET_DELIVERY_SECRET = os.getenv(
+    'PASSWORD_RESET_DELIVERY_SECRET',
+    SECRET_KEY,
+)
 
 HEALTH_HACK_ACTIVE_CASE_ID = int(os.getenv('HEALTH_HACK_ACTIVE_CASE_ID', '1'))
 HEALTH_HACK_AI_BODY_MAX_BYTES = int(os.getenv('HEALTH_HACK_AI_BODY_MAX_BYTES', str(16 * 1024)))
@@ -593,6 +723,12 @@ LOGGING = {
 SECURE_HSTS_SECONDS = 31536000
 SECURE_HSTS_INCLUDE_SUBDOMAINS = True
 SECURE_HSTS_PRELOAD = True
+
+# Raw provider webhook bodies are useful for bounded replay/forensics only.
+# The purge_community_bridge_payloads command clears them after this window.
+COMMUNITY_BRIDGE_RAW_PAYLOAD_RETENTION_DAYS = int(
+    os.getenv('COMMUNITY_BRIDGE_RAW_PAYLOAD_RETENTION_DAYS', '30')
+)
 
 
 
@@ -806,9 +942,46 @@ VALLEY_HARNESS_API_KEY = os.getenv('VALLEY_HARNESS_API_KEY', '')
 SLACK_BRIDGE_BOT_TOKEN = os.getenv('SLACK_BRIDGE_BOT_TOKEN', '')
 SLACK_BRIDGE_SIGNING_SECRET = os.getenv('SLACK_BRIDGE_SIGNING_SECRET', '')
 SLACK_BRIDGE_BOT_USER_ID = os.getenv('SLACK_BRIDGE_BOT_USER_ID', '')
+BUZZ_BRIDGE_ADAPTER_URL = os.getenv('BUZZ_BRIDGE_ADAPTER_URL', '')
+BUZZ_BRIDGE_ADAPTER_TOKEN = os.getenv('BUZZ_BRIDGE_ADAPTER_TOKEN', '')
+BUZZ_BRIDGE_ADAPTER_TIMEOUT_SECONDS = int(
+    os.getenv('BUZZ_BRIDGE_ADAPTER_TIMEOUT_SECONDS', '15')
+)
+BUZZ_BRIDGE_CALLBACK_SECRET = os.getenv('BUZZ_BRIDGE_CALLBACK_SECRET', '')
+BUZZ_BRIDGE_CALLBACK_MAX_AGE_SECONDS = int(
+    os.getenv('BUZZ_BRIDGE_CALLBACK_MAX_AGE_SECONDS', '300')
+)
+COMMUNITY_BRIDGE_WORKER_POLL_SECONDS = float(
+    os.getenv('COMMUNITY_BRIDGE_WORKER_POLL_SECONDS', '1')
+)
 DISCORD_BRIDGE_BOT_TOKEN = os.getenv('DISCORD_BRIDGE_BOT_TOKEN', '')
 DISCORD_BRIDGE_APPLICATION_ID = os.getenv('DISCORD_BRIDGE_APPLICATION_ID', '')
 DISCORD_BRIDGE_PUBLIC_KEY = os.getenv('DISCORD_BRIDGE_PUBLIC_KEY', '')
+
+_BUZZ_BRIDGE_SETTINGS = {
+    'BUZZ_BRIDGE_ADAPTER_URL': BUZZ_BRIDGE_ADAPTER_URL,
+    'BUZZ_BRIDGE_ADAPTER_TOKEN': BUZZ_BRIDGE_ADAPTER_TOKEN,
+    'BUZZ_BRIDGE_CALLBACK_SECRET': BUZZ_BRIDGE_CALLBACK_SECRET,
+}
+if IS_PRODUCTION_ENV and any(_BUZZ_BRIDGE_SETTINGS.values()):
+    missing_buzz_bridge_settings = [
+        name for name, value in _BUZZ_BRIDGE_SETTINGS.items() if not value
+    ]
+    if missing_buzz_bridge_settings:
+        raise ImproperlyConfigured(
+            'MLAI Chat bridge configuration is incomplete: '
+            + ', '.join(missing_buzz_bridge_settings)
+        )
+    short_buzz_bridge_secrets = [
+        name
+        for name in ('BUZZ_BRIDGE_ADAPTER_TOKEN', 'BUZZ_BRIDGE_CALLBACK_SECRET')
+        if len(_BUZZ_BRIDGE_SETTINGS[name]) < 32
+    ]
+    if short_buzz_bridge_secrets:
+        raise ImproperlyConfigured(
+            'MLAI Chat bridge secrets must contain at least 32 characters: '
+            + ', '.join(short_buzz_bridge_secrets)
+        )
 
 # Google OAuth Settings
 GOOGLE_OAUTH_CLIENT_ID = os.environ.get("GOOGLE_OAUTH_CLIENT_ID")

@@ -6,6 +6,7 @@ services:
     command: sh /app/scripts/start-web.sh
     environment:
       APP_ENV: ${APP_ENV:-production}
+      RUN_MIGRATIONS_ON_START: "0"
       JOBS_SCRAPE_HEADLESS: ${JOBS_SCRAPE_HEADLESS:-true}
     ports:
       - "80:8000"
@@ -146,6 +147,50 @@ services:
         aliases:
           - mlai-backend-memory-scheduler
 
+  password-email-worker:
+    build: .
+    command: >-
+      sh -ec '
+        until python manage.py migrate --check --noinput; do
+          echo "Waiting for migrations to complete...";
+          sleep 5;
+        done;
+        exec python manage.py run_password_reset_email_worker
+          --poll-seconds "$${PASSWORD_RESET_EMAIL_POLL_SECONDS}"
+      '
+    environment:
+      APP_ENV: ${APP_ENV:-production}
+      PASSWORD_RESET_EMAIL_POLL_SECONDS: ${PASSWORD_RESET_EMAIL_POLL_SECONDS:-2}
+    env_file:
+      - .env
+    depends_on:
+      - db
+    restart: unless-stopped
+    stop_grace_period: 30s
+
+  community-email-worker:
+    build: .
+    command: >-
+      sh -ec '
+        until python manage.py migrate --check --noinput; do
+          echo "Waiting for migrations to complete...";
+          sleep 5;
+        done;
+        exec python manage.py run_email_code_worker
+          --poll-seconds "$${COMMUNITY_CHAT_EMAIL_POLL_SECONDS}"
+          --batch-size "$${COMMUNITY_CHAT_EMAIL_BATCH_SIZE}"
+      '
+    environment:
+      APP_ENV: ${APP_ENV:-production}
+      COMMUNITY_CHAT_EMAIL_POLL_SECONDS: ${COMMUNITY_CHAT_EMAIL_POLL_SECONDS:-2}
+      COMMUNITY_CHAT_EMAIL_BATCH_SIZE: ${COMMUNITY_CHAT_EMAIL_BATCH_SIZE:-25}
+    env_file:
+      - .env
+    depends_on:
+      - db
+    restart: unless-stopped
+    stop_grace_period: 30s
+
   bridge-worker:
     build: .
     command: sh -c "until python manage.py migrate --check --noinput; do echo 'Waiting for migrations to complete...'; sleep 5; done; python manage.py run_community_bridge"
@@ -162,6 +207,36 @@ services:
         aliases:
           - mlai-backend-bridge-worker
     restart: unless-stopped
+
+  bridge-retention:
+    build: .
+    command: >-
+      sh -ec '
+        until python manage.py migrate --check --noinput; do
+          echo "Waiting for migrations to complete...";
+          sleep 5;
+        done;
+        while true; do
+          if ! python manage.py purge_community_bridge_payloads; then
+            echo "Community bridge payload purge failed; the next bounded poll will retry" >&2;
+          fi;
+          sleep "$${COMMUNITY_BRIDGE_PURGE_POLL_SECONDS}";
+        done
+      '
+    environment:
+      APP_ENV: ${APP_ENV:-production}
+      COMMUNITY_BRIDGE_PURGE_POLL_SECONDS: ${COMMUNITY_BRIDGE_PURGE_POLL_SECONDS:-86400}
+    env_file:
+      - .env
+    depends_on:
+      - db
+    networks:
+      default:
+      mlai-shared:
+        aliases:
+          - mlai-backend-bridge-retention
+    restart: unless-stopped
+    stop_grace_period: 30s
 
   db:
     image: pgvector/pgvector:0.8.2-pg15-bookworm

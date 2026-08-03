@@ -18,8 +18,15 @@ from integrations.models import (
     CommunityBridgeReceiptStatus,
 )
 from integrations.services.community_bridge.formatting import (
+    emoji_to_slack_reaction,
     normalize_slack_files,
+    reaction_object_id,
     sanitize_slack_text,
+    slack_reaction_to_emoji,
+)
+from integrations.services.community_bridge.contracts import (
+    BridgeAttachment,
+    CanonicalBridgeEvent,
 )
 
 
@@ -77,8 +84,24 @@ def ingest_inbound_event(
         return {"status": "ignored", "reason": "missing_receipt_key"}
 
     normalized_channel_id = str(source_channel_id or "").strip()
-    target_platform = _target_platform(source_platform)
     channel = _get_enabled_channel(source_platform=source_platform, channel_id=normalized_channel_id)
+
+    if normalized_event:
+        try:
+            normalized_event = _canonicalize_event(
+                receipt_key=normalized_receipt_key,
+                source_platform=source_platform,
+                source_channel_id=normalized_channel_id,
+                normalized_event=normalized_event,
+            )
+        except (TypeError, ValueError) as exc:
+            logger.warning(
+                "community_bridge_invalid_canonical_event platform=%s receipt_key=%s error=%s",
+                source_platform,
+                normalized_receipt_key,
+                exc,
+            )
+            normalized_event = None
 
     try:
         with transaction.atomic():
@@ -109,6 +132,39 @@ def ingest_inbound_event(
 
     if not normalized_event:
         return _mark_receipt_ignored(receipt, reason="unsupported_or_ignored_event")
+
+    if (
+        normalized_event["delivery_type"] == CommunityBridgeDeliveryType.EDIT
+        and not channel.sync_edits
+    ):
+        return _mark_receipt_ignored(receipt, reason="edit_sync_disabled")
+    if (
+        normalized_event["delivery_type"] == CommunityBridgeDeliveryType.DELETE
+        and not channel.sync_deletes
+    ):
+        return _mark_receipt_ignored(receipt, reason="delete_sync_disabled")
+    if (
+        normalized_event["delivery_type"]
+        not in {
+            CommunityBridgeDeliveryType.REACTION_ADD,
+            CommunityBridgeDeliveryType.REACTION_REMOVE,
+        }
+        and normalized_event.get("source_parent_message_id")
+        and not channel.sync_replies
+    ):
+        return _mark_receipt_ignored(receipt, reason="reply_sync_disabled")
+
+    target_platform = _target_platform(channel=channel, source_platform=source_platform)
+    if (
+        normalized_event["delivery_type"]
+        in {
+            CommunityBridgeDeliveryType.REACTION_ADD,
+            CommunityBridgeDeliveryType.REACTION_REMOVE,
+        }
+        and CommunityBridgePlatform.BUZZ
+        not in {source_platform, target_platform}
+    ):
+        return _mark_receipt_ignored(receipt, reason="reaction_sync_unsupported")
 
     delivery = CommunityBridgeDelivery.objects.create(
         channel=channel,
@@ -186,6 +242,42 @@ def resolve_message_link(
         "destination_parent_message_id": link.destination_parent_message_id,
         "source_payload": link.source_payload or {},
         "destination_payload": link.destination_payload or {},
+    }
+
+
+def resolve_mapped_message(
+    *,
+    source_platform: str,
+    source_channel_id: str,
+    source_message_id: str,
+    destination_platform: str,
+) -> Optional[dict]:
+    """Resolve a target whether the current object began here or was mirrored here."""
+
+    direct = resolve_message_link(
+        source_platform=source_platform,
+        source_channel_id=source_channel_id,
+        source_message_id=source_message_id,
+        destination_platform=destination_platform,
+    )
+    if direct:
+        return direct
+
+    reverse = CommunityBridgeMessageLink.objects.filter(
+        source_platform=destination_platform,
+        destination_platform=source_platform,
+        destination_channel_id=str(source_channel_id or "").strip(),
+        destination_message_id=str(source_message_id or "").strip(),
+    ).first()
+    if not reverse:
+        return None
+    return {
+        "id": reverse.id,
+        "destination_channel_id": reverse.source_channel_id,
+        "destination_message_id": reverse.source_message_id,
+        "destination_parent_message_id": reverse.source_parent_message_id,
+        "source_payload": reverse.destination_payload or {},
+        "destination_payload": reverse.source_payload or {},
     }
 
 
@@ -282,11 +374,16 @@ def reset_stale_processing_deliveries(max_age_seconds: int = 300) -> int:
 
 def _normalize_slack_event(payload: dict) -> Optional[dict]:
     event = dict(payload.get("event") or {})
-    if str(event.get("type") or "").strip() != "message":
+    event_type = str(event.get("type") or "").strip()
+    if event_type in {"reaction_added", "reaction_removed"}:
+        return _normalize_slack_reaction(event, event_type=event_type)
+    if event_type != "message":
         return None
     if str(event.get("channel_type") or "").strip() != "channel":
         return None
     if bool(event.get("hidden")):
+        return None
+    if bool(event.get("is_ext_shared_channel")) or bool(event.get("is_shared")):
         return None
 
     subtype = str(event.get("subtype") or "").strip()
@@ -336,7 +433,12 @@ def _normalize_slack_event(payload: dict) -> Optional[dict]:
     if subtype == "message_deleted":
         previous = dict(event.get("previous_message") or {})
         source_message_id = str(event.get("deleted_ts") or previous.get("ts") or "").strip()
-        if not source_message_id:
+        user_id = str(previous.get("user") or "").strip()
+        if (
+            not source_message_id
+            or previous.get("bot_id")
+            or user_id == bridge_bot_user_id
+        ):
             return None
         source_parent_message_id = _normalize_parent_message_id(
             thread_ts=str(previous.get("thread_ts") or "").strip(),
@@ -347,13 +449,56 @@ def _normalize_slack_event(payload: dict) -> Optional[dict]:
             "source_channel_id": str(event.get("channel") or "").strip(),
             "source_message_id": source_message_id,
             "source_parent_message_id": source_parent_message_id,
-            "source_author_id": str(previous.get("user") or "").strip(),
+            "source_author_id": user_id,
             "source_author_display_name": "",
             "text": "",
             "attachments": [],
         }
 
     return None
+
+
+def _normalize_slack_reaction(event: dict, *, event_type: str) -> Optional[dict]:
+    item = dict(event.get("item") or {})
+    channel_id = str(item.get("channel") or "").strip()
+    target_message_id = str(item.get("ts") or "").strip()
+    author_id = str(event.get("user") or "").strip()
+    slack_reaction = str(event.get("reaction") or "").strip().lower()
+    bridge_bot_user_id = str(
+        getattr(settings, "SLACK_BRIDGE_BOT_USER_ID", "") or ""
+    ).strip()
+    emoji = slack_reaction_to_emoji(slack_reaction)
+    if (
+        str(item.get("type") or "").strip() != "message"
+        or not channel_id
+        or not target_message_id
+        or not author_id
+        or author_id == bridge_bot_user_id
+        or not emoji
+    ):
+        return None
+    return {
+        "delivery_type": (
+            CommunityBridgeDeliveryType.REACTION_ADD
+            if event_type == "reaction_added"
+            else CommunityBridgeDeliveryType.REACTION_REMOVE
+        ),
+        "source_channel_id": channel_id,
+        "source_message_id": reaction_object_id(
+            message_id=target_message_id,
+            reaction=slack_reaction,
+            author_id=author_id,
+        ),
+        "source_parent_message_id": target_message_id,
+        "source_author_id": author_id,
+        "source_author_display_name": "",
+        "text": emoji,
+        "attachments": [],
+        "metadata": {
+            "slack_message_id": target_message_id,
+            "slack_reaction": slack_reaction,
+        },
+    }
 
 
 def _get_enabled_channel(*, source_platform: str, channel_id: str) -> Optional[CommunityBridgeChannel]:
@@ -364,20 +509,62 @@ def _get_enabled_channel(*, source_platform: str, channel_id: str) -> Optional[C
     if source_platform == CommunityBridgePlatform.SLACK:
         filters["slack_channel_id"] = normalized_channel_id
     else:
-        filters["discord_channel_id"] = normalized_channel_id
+        filters["destination_platform"] = source_platform
+        filters["destination_channel_id"] = normalized_channel_id
     return CommunityBridgeChannel.objects.filter(**filters).first()
 
 
-def _target_platform(source_platform: str) -> str:
+def _target_platform(*, channel: CommunityBridgeChannel, source_platform: str) -> str:
     if source_platform == CommunityBridgePlatform.SLACK:
-        return CommunityBridgePlatform.DISCORD
-    return CommunityBridgePlatform.SLACK
+        return channel.destination_platform
+    if source_platform == channel.destination_platform:
+        return CommunityBridgePlatform.SLACK
+    raise ValueError("source platform does not match the mapped destination")
 
 
 def _channel_id_for_platform(*, channel: CommunityBridgeChannel, platform: str) -> str:
     if platform == CommunityBridgePlatform.SLACK:
         return channel.slack_channel_id
-    return channel.discord_channel_id
+    if platform == channel.destination_platform:
+        return channel.destination_channel_id
+    return ""
+
+
+def _canonicalize_event(
+    *,
+    receipt_key: str,
+    source_platform: str,
+    source_channel_id: str,
+    normalized_event: dict,
+) -> dict:
+    delivery_type = str(normalized_event.get("delivery_type") or "")
+    if delivery_type in {
+        CommunityBridgeDeliveryType.REACTION_ADD,
+        CommunityBridgeDeliveryType.REACTION_REMOVE,
+    } and not emoji_to_slack_reaction(str(normalized_event.get("text") or "")):
+        raise ValueError("reaction is not in the approved bridge set")
+    attachments = tuple(
+        BridgeAttachment(
+            title=str(item.get("title") or item.get("url") or "Attachment"),
+            url=str(item.get("url") or ""),
+        )
+        for item in (normalized_event.get("attachments") or [])
+        if isinstance(item, dict)
+    )
+    event = CanonicalBridgeEvent(
+        receipt_key=receipt_key,
+        source_platform=source_platform,
+        source_channel_id=source_channel_id,
+        source_message_id=str(normalized_event.get("source_message_id") or ""),
+        source_parent_message_id=str(normalized_event.get("source_parent_message_id") or ""),
+        source_author_id=str(normalized_event.get("source_author_id") or ""),
+        source_author_display_name=str(normalized_event.get("source_author_display_name") or ""),
+        delivery_type=delivery_type,
+        text=str(normalized_event.get("text") or ""),
+        attachments=attachments,
+        metadata=normalized_event.get("metadata") or {},
+    )
+    return event.normalized_payload()
 
 
 def _mark_receipt_ignored(receipt: CommunityBridgeReceipt, *, reason: str) -> dict:
@@ -399,6 +586,7 @@ def _normalize_parent_message_id(*, thread_ts: str, source_message_id: str) -> s
 def _serialize_delivery(delivery: CommunityBridgeDelivery) -> dict:
     return {
         "id": delivery.id,
+        "created_at": int(delivery.created_at.timestamp()),
         "channel_id": delivery.channel_id,
         "target_platform": delivery.target_platform,
         "source_platform": delivery.source_platform,
@@ -412,7 +600,12 @@ def _serialize_delivery(delivery: CommunityBridgeDelivery) -> dict:
         "attempts": int(delivery.attempts or 0),
         "max_attempts": int(delivery.max_attempts or 0),
         "channel": {
+            "slack_workspace_id": delivery.channel.slack_workspace_id,
             "slack_channel_id": delivery.channel.slack_channel_id,
+            "destination_platform": delivery.channel.destination_platform,
+            "destination_workspace_id": delivery.channel.destination_workspace_id,
+            "destination_channel_id": delivery.channel.destination_channel_id,
+            "destination_channel_name": delivery.channel.destination_channel_name,
             "discord_channel_id": delivery.channel.discord_channel_id,
             "slack_channel_name": delivery.channel.slack_channel_name,
             "discord_channel_name": delivery.channel.discord_channel_name,

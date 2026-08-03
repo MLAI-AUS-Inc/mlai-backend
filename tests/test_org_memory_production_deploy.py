@@ -87,7 +87,10 @@ class OrgMemoryProductionDeployTests(SimpleTestCase):
             "reconcile_org_memory_naive_datetime_dead_letters",
             deploy,
         )
-        self.assertIn("paused_runtime_services=(web memory-worker memory-scheduler)", deploy)
+        self.assertIn(
+            "paused_runtime_services=(web memory-worker memory-scheduler community-email-worker)",
+            deploy,
+        )
         self.assertIn('docker compose stop "\\${paused_runtime_services[@]}"', deploy)
         self.assertIn(
             'docker compose up -d --force-recreate "\\${paused_runtime_services[@]}"',

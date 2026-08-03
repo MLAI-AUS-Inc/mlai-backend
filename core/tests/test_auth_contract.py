@@ -243,6 +243,48 @@ class AuthContractTests(TestCase):
         mock_generate.assert_called_once_with(user, base_url='http://localhost:3000')
         mock_send.assert_called_once()
 
+    @override_settings(COMMUNITY_CHAT_FRONTEND_URL='https://chat.mlai.au')
+    @patch('core.views.send_magic_link_email')
+    @patch('core.views.generate_magic_link', return_value='https://chat.mlai.au/verify-email?token=chat')
+    def test_send_magic_link_supports_community_chat_callback(self, mock_generate, mock_send):
+        user = User.objects.create_user(email='chat-origin@example.com', role='participant')
+
+        response = self.client.post(
+            '/api/v1/auth/send-magic-link/',
+            {
+                'email': user.email,
+                'app': 'community-chat',
+                'next': '/auth/callback?request=123',
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 200)
+        mock_generate.assert_called_once_with(user, base_url='https://chat.mlai.au')
+        magic_link = mock_send.call_args.args[1]
+        self.assertIn('app=community-chat', magic_link)
+        self.assertIn('next=/auth/callback%3Frequest%3D123', magic_link)
+
+    @patch('core.views.send_magic_link_email')
+    @patch(
+        'core.views.generate_magic_link',
+        return_value='https://mlai.au/verify-email?token=super-secret-magic-token',
+    )
+    def test_send_magic_link_never_logs_token_or_email(self, _mock_generate, _mock_send):
+        user = User.objects.create_user(email='private-login@example.com', role='participant')
+
+        with self.assertLogs('core.views', level='INFO') as captured:
+            response = self.client.post(
+                '/api/v1/auth/send-magic-link/',
+                {'email': user.email, 'app': 'founder-tools'},
+                format='json',
+            )
+
+        logs = '\n'.join(captured.output)
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn('super-secret-magic-token', logs)
+        self.assertNotIn(user.email, logs)
+
     @patch('core.views.send_magic_link_email')
     @patch('core.views.generate_magic_link')
     def test_healthhack_admin_login_does_not_email_non_superuser(self, mock_generate, mock_send):
@@ -407,6 +449,28 @@ class AuthContractTests(TestCase):
         self.assertIn('sessionid', response.cookies)
         self.assertEqual(str(user.id), self.client.session.get('_auth_user_id'))
 
+        mock_verify.assert_called_once_with('test-token')
+
+    @override_settings(COMMUNITY_CHAT_FRONTEND_URL='https://chat.mlai.au')
+    @patch(
+        'core.views.verify_magic_link',
+        return_value={'kind': 'user', 'email': 'chat-verify@example.com'},
+    )
+    def test_verify_community_chat_magic_link_returns_to_state_bound_callback(self, mock_verify):
+        user = User.objects.create_user(email='chat-verify@example.com', role='participant')
+
+        response = self.client.get(
+            '/api/v1/auth/verify-magic-link/?token=test-token&app=community-chat'
+            '&next=/auth/callback%3Frequest%3D123'
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['redirect'], '/auth/callback?request=123')
+        self.assertEqual(
+            response.data['next_url'],
+            'https://chat.mlai.au/auth/callback?request=123',
+        )
+        self.assertIn('access_token', response.cookies)
         mock_verify.assert_called_once_with('test-token')
 
     @patch('core.views.verify_magic_link', return_value={'kind': 'user', 'email': 'closed-verify@example.com'})

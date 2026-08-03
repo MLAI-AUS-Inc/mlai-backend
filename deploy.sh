@@ -38,6 +38,101 @@ if [ -z "${REDIS_URL:-}" ]; then
     echo "❌ REDIS_URL must be supplied by the deployment secret store."
     exit 1
 fi
+for chat_secret_name in \
+    COMMUNITY_CHAT_EMAIL_CODE_PEPPER \
+    COMMUNITY_CHAT_EMAIL_CODE_DELIVERY_SECRET \
+    COMMUNITY_CHAT_ADAPTER_TOKEN; do
+    chat_secret_value="${!chat_secret_name:-}"
+    if [ "${#chat_secret_value}" -lt 32 ]; then
+        echo "❌ ${chat_secret_name} must be supplied by the deployment secret store and contain at least 32 characters."
+        exit 1
+    fi
+done
+if [ "$COMMUNITY_CHAT_EMAIL_CODE_PEPPER" = "$COMMUNITY_CHAT_EMAIL_CODE_DELIVERY_SECRET" ] \
+    || [ "$COMMUNITY_CHAT_EMAIL_CODE_PEPPER" = "$COMMUNITY_CHAT_ADAPTER_TOKEN" ] \
+    || [ "$COMMUNITY_CHAT_EMAIL_CODE_DELIVERY_SECRET" = "$COMMUNITY_CHAT_ADAPTER_TOKEN" ]; then
+    echo "❌ MLAI Chat email and membership-adapter secrets must be independent."
+    exit 1
+fi
+if [ -z "${COMMUNITY_CHAT_ADAPTER_URL:-}" ]; then
+    echo "❌ COMMUNITY_CHAT_ADAPTER_URL must be supplied by the deployment configuration."
+    exit 1
+fi
+python3 - <<'PY'
+import ipaddress
+import os
+from urllib.parse import urlparse
+
+parsed = urlparse(os.environ["COMMUNITY_CHAT_ADAPTER_URL"])
+if parsed.scheme != "http" or parsed.username or parsed.password or parsed.query or parsed.fragment:
+    raise SystemExit("COMMUNITY_CHAT_ADAPTER_URL must be a credential-free private HTTP URL")
+if parsed.path not in {"", "/"} or parsed.port != 3100:
+    raise SystemExit("COMMUNITY_CHAT_ADAPTER_URL must use the private membership adapter port 3100")
+address = ipaddress.ip_address(parsed.hostname or "")
+if not (address.is_private or address.is_loopback):
+    raise SystemExit("COMMUNITY_CHAT_ADAPTER_URL must use a private or loopback IP address")
+PY
+bridge_values=(
+    "${SLACK_BRIDGE_BOT_TOKEN:-}"
+    "${SLACK_BRIDGE_SIGNING_SECRET:-}"
+    "${SLACK_BRIDGE_BOT_USER_ID:-}"
+    "${SLACK_BRIDGE_WORKSPACE_ID:-}"
+    "${SLACK_BRIDGE_CHANNEL_ID:-}"
+    "${SLACK_BRIDGE_CHANNEL_NAME:-}"
+    "${BUZZ_BRIDGE_ADAPTER_URL:-}"
+    "${BUZZ_BRIDGE_ADAPTER_TOKEN:-}"
+    "${BUZZ_BRIDGE_CALLBACK_SECRET:-}"
+    "${BUZZ_BRIDGE_DESTINATION_WORKSPACE_ID:-}"
+    "${BUZZ_BRIDGE_DESTINATION_CHANNEL_ID:-}"
+    "${BUZZ_BRIDGE_DESTINATION_CHANNEL_NAME:-}"
+)
+bridge_present=0
+for bridge_value in "${bridge_values[@]}"; do
+    [ -n "$bridge_value" ] && bridge_present=$((bridge_present + 1))
+done
+if [ "$bridge_present" -ne 0 ] && [ "$bridge_present" -ne "${#bridge_values[@]}" ]; then
+    echo "❌ Slack and Buzz bridge settings must be either fully configured or fully absent."
+    exit 1
+fi
+if [ "$bridge_present" -gt 0 ]; then
+    if [ "${#SLACK_BRIDGE_SIGNING_SECRET}" -lt 32 ] \
+        || [ "${#BUZZ_BRIDGE_ADAPTER_TOKEN}" -lt 32 ] \
+        || [ "${#BUZZ_BRIDGE_CALLBACK_SECRET}" -lt 32 ]; then
+        echo "❌ Slack signing, bridge adapter, and bridge callback secrets must each contain at least 32 characters."
+        exit 1
+    fi
+    python3 - <<'PY'
+import ipaddress
+import os
+import re
+from urllib.parse import urlparse
+
+parsed = urlparse(os.environ["BUZZ_BRIDGE_ADAPTER_URL"])
+if parsed.scheme != "http" or parsed.username or parsed.password or parsed.query or parsed.fragment:
+    raise SystemExit("BUZZ_BRIDGE_ADAPTER_URL must be a credential-free private HTTP URL")
+if parsed.path not in {"", "/"} or parsed.port != 8090:
+    raise SystemExit("BUZZ_BRIDGE_ADAPTER_URL must use the private bridge adapter port 8090")
+address = ipaddress.ip_address(parsed.hostname or "")
+if not (address.is_private or address.is_loopback):
+    raise SystemExit("BUZZ_BRIDGE_ADAPTER_URL must use a private or loopback IP address")
+
+if not re.fullmatch(r"T[A-Z0-9]+", os.environ["SLACK_BRIDGE_WORKSPACE_ID"]):
+    raise SystemExit("SLACK_BRIDGE_WORKSPACE_ID must be a Slack workspace ID")
+if not re.fullmatch(r"C[A-Z0-9]+", os.environ["SLACK_BRIDGE_CHANNEL_ID"]):
+    raise SystemExit("SLACK_BRIDGE_CHANNEL_ID must be a public Slack channel ID")
+if not re.fullmatch(r"[a-z0-9_-]{1,80}", os.environ["SLACK_BRIDGE_CHANNEL_NAME"]):
+    raise SystemExit("SLACK_BRIDGE_CHANNEL_NAME must be a valid public channel name")
+if os.environ["BUZZ_BRIDGE_DESTINATION_WORKSPACE_ID"] != "chat.mlai.au":
+    raise SystemExit("BUZZ_BRIDGE_DESTINATION_WORKSPACE_ID must be chat.mlai.au")
+if not re.fullmatch(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+    os.environ["BUZZ_BRIDGE_DESTINATION_CHANNEL_ID"],
+):
+    raise SystemExit("BUZZ_BRIDGE_DESTINATION_CHANNEL_ID must be a lowercase UUID")
+if not re.fullmatch(r"[a-z0-9_-]{1,80}", os.environ["BUZZ_BRIDGE_DESTINATION_CHANNEL_NAME"]):
+    raise SystemExit("BUZZ_BRIDGE_DESTINATION_CHANNEL_NAME must be a valid channel name")
+PY
+fi
 if [ -z "${CONNECTOR_CREDENTIAL_KEYS:-}" ]; then
     echo "❌ CONNECTOR_CREDENTIAL_KEYS must be supplied by the deployment secret store."
     exit 1
@@ -130,6 +225,24 @@ echo "🚀 Deploying release $APP_RELEASE to $DEPLOY_SSH_TARGET ($DROPLET_IP)...
 # 1. Sync files to the server
 echo "📦 Syncing files..."
 rsync -avz --delete --exclude 'venv' --exclude '.git' --exclude '__pycache__' --exclude '.env' . "$DEPLOY_SSH_TARGET:$PROJECT_DIR"
+
+install_remote_env_secret() {
+    local key="$1"
+    local value="$2"
+    printf '%s' "$value" \
+        | ssh "$DEPLOY_SSH_TARGET" "$PROJECT_DIR/scripts/upsert_env_secret_from_stdin.sh $key"
+}
+
+echo "🔐 Updating MLAI Chat credentials (values redacted)..."
+install_remote_env_secret COMMUNITY_CHAT_EMAIL_CODE_PEPPER "$COMMUNITY_CHAT_EMAIL_CODE_PEPPER"
+install_remote_env_secret COMMUNITY_CHAT_EMAIL_CODE_DELIVERY_SECRET "$COMMUNITY_CHAT_EMAIL_CODE_DELIVERY_SECRET"
+install_remote_env_secret COMMUNITY_CHAT_ADAPTER_TOKEN "$COMMUNITY_CHAT_ADAPTER_TOKEN"
+if [ "$bridge_present" -gt 0 ]; then
+    install_remote_env_secret SLACK_BRIDGE_BOT_TOKEN "$SLACK_BRIDGE_BOT_TOKEN"
+    install_remote_env_secret SLACK_BRIDGE_SIGNING_SECRET "$SLACK_BRIDGE_SIGNING_SECRET"
+    install_remote_env_secret BUZZ_BRIDGE_ADAPTER_TOKEN "$BUZZ_BRIDGE_ADAPTER_TOKEN"
+    install_remote_env_secret BUZZ_BRIDGE_CALLBACK_SECRET "$BUZZ_BRIDGE_CALLBACK_SECRET"
+fi
 
 # Send the credential over SSH stdin rather than a command-line argument. The
 # remote shell updates .env using builtins, so the value is neither echoed nor
@@ -416,11 +529,25 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     upsert_env_value VICTOR_AI_ROO_ENABLED "true"
     upsert_env_value ALLOWED_HOSTS "api.mlai.au,209.38.85.60,10.126.0.2,localhost,127.0.0.1,esafety.localhost"
     # Plane owns admin.mlai.au after cutover, so it must not be trusted as a
-    # credentialed browser origin for the MLAI API. Rollback routes to ops.
-    upsert_env_value CORS_ALLOWED_ORIGINS "https://mlai.au,https://www.mlai.au,https://victorai.win,https://www.victorai.win,https://ops.mlai.au"
-    upsert_env_value CSRF_TRUSTED_ORIGINS "https://mlai.au,https://www.mlai.au,https://api.mlai.au,https://ops.mlai.au"
+    # credentialed browser origin for the MLAI API. Rollback routes to ops;
+    # MLAI Chat remains a separately required credentialed origin.
+    upsert_env_value CORS_ALLOWED_ORIGINS "https://mlai.au,https://www.mlai.au,https://victorai.win,https://www.victorai.win,https://ops.mlai.au,https://chat.mlai.au"
+    upsert_env_value CSRF_TRUSTED_ORIGINS "https://mlai.au,https://www.mlai.au,https://api.mlai.au,https://ops.mlai.au,https://chat.mlai.au"
     upsert_env_value DEFAULT_BACKEND_URL "https://api.mlai.au"
     upsert_env_value DEFAULT_FRONTEND_URL "https://mlai.au"
+    upsert_env_value COMMUNITY_CHAT_API_AUDIENCE "https://api.mlai.au"
+    upsert_env_value COMMUNITY_CHAT_FRONTEND_URL "https://chat.mlai.au"
+    upsert_env_value COMMUNITY_CHAT_RELAY_URL "wss://chat.mlai.au"
+    upsert_env_value COMMUNITY_CHAT_ADAPTER_URL "$COMMUNITY_CHAT_ADAPTER_URL"
+    upsert_env_value COMMUNITY_CHAT_EMAIL_CODE_AUTH_ENABLED "true"
+    upsert_env_value COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED "false"
+    upsert_env_value COMMUNITY_CHAT_DEVICE_AUTH_ENABLED "false"
+    upsert_env_value CUSTOMERIO_COMMUNITY_CHAT_CODE_MESSAGE_ID "mlai_chat_sign_in_code"
+    upsert_env_value COMMUNITY_CHAT_ALLOWED_ORIGINS "https://chat.mlai.au,tauri://localhost,http://tauri.localhost,mlaichat://callback"
+    if [ "$bridge_present" -gt 0 ]; then
+        upsert_env_value SLACK_BRIDGE_BOT_USER_ID "$SLACK_BRIDGE_BOT_USER_ID"
+        upsert_env_value BUZZ_BRIDGE_ADAPTER_URL "$BUZZ_BRIDGE_ADAPTER_URL"
+    fi
     upsert_env_value MEDHACK_URL "https://mlai.au"
     upsert_env_value ESAFETY_URL "https://mlai.au"
     upsert_env_value VIBE_RAISING_URL "https://mlai.au"
@@ -490,7 +617,7 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     # Web concurrency: gunicorn sync-worker count (read by scripts/start-web.sh).
     # Sized to droplet RAM (~250MB/worker). 16 fits the 8GB/4vCPU droplet with headroom.
     upsert_env_value GUNICORN_WORKERS "16"
-    print_redacted_env_status CONTENT_FACTORY_URL GITHUB_APP_ID GITHUB_APP_PRIVATE_KEY VALLEY_HARNESS_URL REDIS_URL ROO_SERVICE_URL ROO_SIM_PATIENT_KEY HEALTH_HACK_API_KEY ROO_API_KEY VICTOR_AI_ROO_SIGNING_SECRET VICTOR_AI_ROO_ENABLED UMAMI_BASE_URL CONTENT_ANALYTICS_HOST_URL
+    print_redacted_env_status CONTENT_FACTORY_URL GITHUB_APP_ID GITHUB_APP_PRIVATE_KEY VALLEY_HARNESS_URL REDIS_URL ROO_SERVICE_URL ROO_SIM_PATIENT_KEY HEALTH_HACK_API_KEY ROO_API_KEY VICTOR_AI_ROO_SIGNING_SECRET VICTOR_AI_ROO_ENABLED UMAMI_BASE_URL CONTENT_ANALYTICS_HOST_URL COMMUNITY_CHAT_ADAPTER_URL COMMUNITY_CHAT_ADAPTER_TOKEN COMMUNITY_CHAT_EMAIL_CODE_PEPPER COMMUNITY_CHAT_EMAIL_CODE_DELIVERY_SECRET CUSTOMERIO_API_KEY CUSTOMERIO_COMMUNITY_CHAT_CODE_MESSAGE_ID
     require_env_value CONTENT_FACTORY_URL "Set CONTENT_FACTORY_URL to http://<content-factory-private-ip>:8000 for the cross-droplet Content Factory deployment."
     require_env_value GITHUB_APP_ID "Set GITHUB_APP_ID to the MLAI Tools GitHub App id so Content Factory can receive installation tokens."
     require_env_value GITHUB_APP_PRIVATE_KEY "Set GITHUB_APP_PRIVATE_KEY to the MLAI Tools GitHub App private key with escaped newlines."
@@ -518,13 +645,17 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     fi
     unset health_hack_key roo_sim_key roo_api_key victor_ai_roo_secret
 
-    runtime_services=(web scheduler memory-worker memory-scheduler)
-    if env_has_value SLACK_BRIDGE_BOT_TOKEN && env_has_value DISCORD_BRIDGE_BOT_TOKEN; then
-        runtime_services+=(bridge-worker)
+    runtime_services=(web scheduler memory-worker memory-scheduler community-email-worker)
+    if env_has_value SLACK_BRIDGE_BOT_TOKEN \
+        && { env_has_value DISCORD_BRIDGE_BOT_TOKEN \
+            || { env_has_value BUZZ_BRIDGE_ADAPTER_URL \
+                && env_has_value BUZZ_BRIDGE_ADAPTER_TOKEN \
+                && env_has_value BUZZ_BRIDGE_CALLBACK_SECRET; }; }; then
+        runtime_services+=(bridge-worker bridge-retention)
         bridge_worker_enabled=1
     else
         bridge_worker_enabled=0
-        echo "ℹ️ Skipping bridge-worker startup because bridge tokens are not fully configured."
+        echo "ℹ️ Skipping bridge-worker startup because Slack plus a destination adapter are not fully configured."
     fi
 
     # The Umami data plane (ops/content-analytics) is a separate Compose
@@ -611,7 +742,7 @@ print('yes' if recorder.migration_qs.filter(app='\${app_label}', name='\${migrat
     echo "🗺️ Migration plan..."
     compose_run_web python manage.py migrate --plan
 
-    paused_runtime_services=(web memory-worker memory-scheduler)
+    paused_runtime_services=(web memory-worker memory-scheduler community-email-worker)
     restore_runtime_on_error() {
         echo "⚠️ Deployment failed after runtime services were paused; restoring them with the reviewed image."
         docker compose up -d --force-recreate "\${paused_runtime_services[@]}" || true
@@ -626,6 +757,18 @@ print('yes' if recorder.migration_qs.filter(app='\${app_label}', name='\${migrat
 
     echo "✅ Verifying migration readiness..."
     compose_run_web python manage.py migrate --check --noinput
+
+    if [ "$bridge_present" -gt 0 ]; then
+        echo "🌉 Upserting the reviewed Slack to MLAI Chat channel mapping..."
+        compose_run_web python manage.py upsert_community_bridge_channel \
+            --slack-workspace-id "$SLACK_BRIDGE_WORKSPACE_ID" \
+            --slack-channel-id "$SLACK_BRIDGE_CHANNEL_ID" \
+            --slack-channel-name "$SLACK_BRIDGE_CHANNEL_NAME" \
+            --destination-platform buzz \
+            --destination-workspace-id "$BUZZ_BRIDGE_DESTINATION_WORKSPACE_ID" \
+            --destination-channel-id "$BUZZ_BRIDGE_DESTINATION_CHANNEL_ID" \
+            --destination-channel-name "$BUZZ_BRIDGE_DESTINATION_CHANNEL_NAME"
+    fi
 
     echo "🧠 Verifying vector installation and rebuilding memory text indexes..."
     compose_run_web python manage.py check_org_memory_search --require-vector --require-installed
