@@ -11,8 +11,19 @@ DEPLOY_SSH_TARGET="${DEPLOY_SSH_TARGET:-root@$DROPLET_IP}"
 PROJECT_DIR="/root/mlai-backend"
 APP_RELEASE="${APP_RELEASE:-$(git rev-parse --short=12 HEAD 2>/dev/null || date +%Y%m%d%H%M)}"
 APP_RELEASE_SHORT="${APP_RELEASE:0:12}"
+COMMUNITY_BRIDGE_PRODUCTION_ENABLED="${COMMUNITY_BRIDGE_PRODUCTION_ENABLED:-false}"
 ORG_MEMORY_PRODUCTION_DEPLOY_ENABLED="${ORG_MEMORY_PRODUCTION_DEPLOY_ENABLED:-false}"
 ORG_MEMORY_PRODUCTION_PUBLIC_CHANNEL_ADMIN_SCOPE_APPROVED="${ORG_MEMORY_PRODUCTION_PUBLIC_CHANNEL_ADMIN_SCOPE_APPROVED:-false}"
+
+case "$COMMUNITY_BRIDGE_PRODUCTION_ENABLED" in
+    true|TRUE|True|1|yes|YES|Yes|on|ON|On) COMMUNITY_BRIDGE_PRODUCTION_ENABLED=true ;;
+    false|FALSE|False|0|no|NO|No|off|OFF|Off|"") COMMUNITY_BRIDGE_PRODUCTION_ENABLED=false ;;
+    *)
+        echo "❌ COMMUNITY_BRIDGE_PRODUCTION_ENABLED must be true or false."
+        exit 1
+        ;;
+esac
+export COMMUNITY_BRIDGE_PRODUCTION_ENABLED
 
 case "$ORG_MEMORY_PRODUCTION_DEPLOY_ENABLED" in
     true|TRUE|True|1|yes|YES|Yes|on|ON|On) ORG_MEMORY_PRODUCTION_DEPLOY_ENABLED=true ;;
@@ -72,29 +83,29 @@ address = ipaddress.ip_address(parsed.hostname or "")
 if not (address.is_private or address.is_loopback):
     raise SystemExit("COMMUNITY_CHAT_ADAPTER_URL must use a private or loopback IP address")
 PY
-bridge_values=(
-    "${SLACK_BRIDGE_BOT_TOKEN:-}"
-    "${SLACK_BRIDGE_SIGNING_SECRET:-}"
-    "${SLACK_BRIDGE_BOT_USER_ID:-}"
-    "${SLACK_BRIDGE_WORKSPACE_ID:-}"
-    "${SLACK_BRIDGE_CHANNEL_ID:-}"
-    "${SLACK_BRIDGE_CHANNEL_NAME:-}"
-    "${BUZZ_BRIDGE_ADAPTER_URL:-}"
-    "${BUZZ_BRIDGE_ADAPTER_TOKEN:-}"
-    "${BUZZ_BRIDGE_CALLBACK_SECRET:-}"
-    "${BUZZ_BRIDGE_DESTINATION_WORKSPACE_ID:-}"
-    "${BUZZ_BRIDGE_DESTINATION_CHANNEL_ID:-}"
-    "${BUZZ_BRIDGE_DESTINATION_CHANNEL_NAME:-}"
-)
 bridge_present=0
-for bridge_value in "${bridge_values[@]}"; do
-    [ -n "$bridge_value" ] && bridge_present=$((bridge_present + 1))
-done
-if [ "$bridge_present" -ne 0 ] && [ "$bridge_present" -ne "${#bridge_values[@]}" ]; then
-    echo "❌ Slack and Buzz bridge settings must be either fully configured or fully absent."
-    exit 1
-fi
-if [ "$bridge_present" -gt 0 ]; then
+if [ "$COMMUNITY_BRIDGE_PRODUCTION_ENABLED" = "true" ]; then
+    bridge_values=(
+        "${SLACK_BRIDGE_BOT_TOKEN:-}"
+        "${SLACK_BRIDGE_SIGNING_SECRET:-}"
+        "${SLACK_BRIDGE_BOT_USER_ID:-}"
+        "${SLACK_BRIDGE_WORKSPACE_ID:-}"
+        "${SLACK_BRIDGE_CHANNEL_ID:-}"
+        "${SLACK_BRIDGE_CHANNEL_NAME:-}"
+        "${BUZZ_BRIDGE_ADAPTER_URL:-}"
+        "${BUZZ_BRIDGE_ADAPTER_TOKEN:-}"
+        "${BUZZ_BRIDGE_CALLBACK_SECRET:-}"
+        "${BUZZ_BRIDGE_DESTINATION_WORKSPACE_ID:-}"
+        "${BUZZ_BRIDGE_DESTINATION_CHANNEL_ID:-}"
+        "${BUZZ_BRIDGE_DESTINATION_CHANNEL_NAME:-}"
+    )
+    for bridge_value in "${bridge_values[@]}"; do
+        [ -n "$bridge_value" ] && bridge_present=$((bridge_present + 1))
+    done
+    if [ "$bridge_present" -ne "${#bridge_values[@]}" ]; then
+        echo "❌ Slack and Buzz bridge settings must be fully configured when the production bridge is enabled."
+        exit 1
+    fi
     if [ "${#SLACK_BRIDGE_SIGNING_SECRET}" -lt 32 ] \
         || [ "${#BUZZ_BRIDGE_ADAPTER_TOKEN}" -lt 32 ] \
         || [ "${#BUZZ_BRIDGE_CALLBACK_SECRET}" -lt 32 ]; then
@@ -132,6 +143,8 @@ if not re.fullmatch(
 if not re.fullmatch(r"[a-z0-9_-]{1,80}", os.environ["BUZZ_BRIDGE_DESTINATION_CHANNEL_NAME"]):
     raise SystemExit("BUZZ_BRIDGE_DESTINATION_CHANNEL_NAME must be a valid channel name")
 PY
+else
+    echo "ℹ️ Community bridge production activation is disabled; staged bridge settings will not be installed."
 fi
 if [ -z "${CONNECTOR_CREDENTIAL_KEYS:-}" ]; then
     echo "❌ CONNECTOR_CREDENTIAL_KEYS must be supplied by the deployment secret store."
@@ -512,6 +525,7 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     fi
 
     cd $PROJECT_DIR
+    community_bridge_production_enabled="$COMMUNITY_BRIDGE_PRODUCTION_ENABLED"
     org_memory_production_deploy_enabled="$ORG_MEMORY_PRODUCTION_DEPLOY_ENABLED"
 
     compose_run_web() {
@@ -544,6 +558,7 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     upsert_env_value COMMUNITY_CHAT_DEVICE_AUTH_ENABLED "false"
     upsert_env_value CUSTOMERIO_COMMUNITY_CHAT_CODE_MESSAGE_ID "mlai_chat_sign_in_code"
     upsert_env_value COMMUNITY_CHAT_ALLOWED_ORIGINS "https://chat.mlai.au,tauri://localhost,http://tauri.localhost,mlaichat://callback"
+    upsert_env_value COMMUNITY_BRIDGE_PRODUCTION_ENABLED "\$community_bridge_production_enabled"
     if [ "$bridge_present" -gt 0 ]; then
         upsert_env_value SLACK_BRIDGE_BOT_USER_ID "$SLACK_BRIDGE_BOT_USER_ID"
         upsert_env_value BUZZ_BRIDGE_ADAPTER_URL "$BUZZ_BRIDGE_ADAPTER_URL"
@@ -646,7 +661,8 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     unset health_hack_key roo_sim_key roo_api_key victor_ai_roo_secret
 
     runtime_services=(web scheduler memory-worker memory-scheduler community-email-worker)
-    if env_has_value SLACK_BRIDGE_BOT_TOKEN \
+    if [ "\$community_bridge_production_enabled" = "true" ] \
+        && env_has_value SLACK_BRIDGE_BOT_TOKEN \
         && { env_has_value DISCORD_BRIDGE_BOT_TOKEN \
             || { env_has_value BUZZ_BRIDGE_ADAPTER_URL \
                 && env_has_value BUZZ_BRIDGE_ADAPTER_TOKEN \

@@ -115,8 +115,10 @@ no backfill of the disabled window.
 3. Deploy the bridge adapter by immutable digest and confirm its dedicated
    public key matches client release configuration.
 4. Run health checks and one synthetic private adapter delivery.
-5. Resume workers, then enable only the selected staging mapping.
-6. Observe receipt/delivery rates, retry/dead counts, callback rejections,
+5. Set the protected `COMMUNITY_BRIDGE_PRODUCTION_ENABLED=true` deployment
+   variable only after the credential, topology, and mapping review is complete.
+6. Resume workers, then enable only the selected reviewed mapping.
+7. Observe receipt/delivery rates, retry/dead counts, callback rejections,
    password-email failures, membership denials, auth throttles, and latency
    before expanding the cohort.
 

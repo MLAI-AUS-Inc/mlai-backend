@@ -255,6 +255,7 @@ jobs:
         BUZZ_BRIDGE_DESTINATION_WORKSPACE_ID: ${{ vars.BUZZ_BRIDGE_DESTINATION_WORKSPACE_ID }}
         BUZZ_BRIDGE_DESTINATION_CHANNEL_ID: ${{ vars.BUZZ_BRIDGE_DESTINATION_CHANNEL_ID }}
         BUZZ_BRIDGE_DESTINATION_CHANNEL_NAME: ${{ vars.BUZZ_BRIDGE_DESTINATION_CHANNEL_NAME }}
+        COMMUNITY_BRIDGE_PRODUCTION_ENABLED: ${{ vars.COMMUNITY_BRIDGE_PRODUCTION_ENABLED || 'false' }}
         ORG_MEMORY_PRODUCTION_DEPLOY_ENABLED: ${{ vars.ORG_MEMORY_PRODUCTION_DEPLOY_ENABLED || 'false' }}
         ORG_MEMORY_PRODUCTION_PUBLIC_CHANNEL_ADMIN_SCOPE_APPROVED: ${{ vars.ORG_MEMORY_PRODUCTION_PUBLIC_CHANNEL_ADMIN_SCOPE_APPROVED || 'false' }}
         ORG_MEMORY_PILOT_ALLOWLIST_KEY_VERSION: ${{ secrets.ORG_MEMORY_PILOT_ALLOWLIST_KEY_VERSION }}
@@ -311,31 +312,44 @@ jobs:
           echo "::error::Required repository variable COMMUNITY_CHAT_ADAPTER_URL is not configured"
           exit 1
         fi
-        bridge_values=(
-          "$SLACK_BRIDGE_BOT_TOKEN"
-          "$SLACK_BRIDGE_SIGNING_SECRET"
-          "$SLACK_BRIDGE_BOT_USER_ID"
-          "$SLACK_BRIDGE_WORKSPACE_ID"
-          "$SLACK_BRIDGE_CHANNEL_ID"
-          "$SLACK_BRIDGE_CHANNEL_NAME"
-          "$BUZZ_BRIDGE_ADAPTER_URL"
-          "$BUZZ_BRIDGE_ADAPTER_TOKEN"
-          "$BUZZ_BRIDGE_CALLBACK_SECRET"
-          "$BUZZ_BRIDGE_DESTINATION_WORKSPACE_ID"
-          "$BUZZ_BRIDGE_DESTINATION_CHANNEL_ID"
-          "$BUZZ_BRIDGE_DESTINATION_CHANNEL_NAME"
-        )
+        case "$COMMUNITY_BRIDGE_PRODUCTION_ENABLED" in
+          true|TRUE|True|1|yes|YES|Yes|on|ON|On) COMMUNITY_BRIDGE_PRODUCTION_ENABLED=true ;;
+          false|FALSE|False|0|no|NO|No|off|OFF|Off|"") COMMUNITY_BRIDGE_PRODUCTION_ENABLED=false ;;
+          *)
+            echo "::error::COMMUNITY_BRIDGE_PRODUCTION_ENABLED must be true or false"
+            exit 1
+            ;;
+        esac
+        export COMMUNITY_BRIDGE_PRODUCTION_ENABLED
         bridge_present=0
-        for value in "${bridge_values[@]}"; do
-          [ -n "$value" ] && bridge_present=$((bridge_present + 1))
-        done
-        if [ "$bridge_present" -ne 0 ] && [ "$bridge_present" -ne "${#bridge_values[@]}" ]; then
-          echo "::error::Slack and Buzz bridge repository settings must be either fully configured or fully absent"
-          exit 1
-        fi
-        if [ "$bridge_present" -gt 0 ] && { [ "${#SLACK_BRIDGE_SIGNING_SECRET}" -lt 32 ] || [ "${#BUZZ_BRIDGE_ADAPTER_TOKEN}" -lt 32 ] || [ "${#BUZZ_BRIDGE_CALLBACK_SECRET}" -lt 32 ]; }; then
-          echo "::error::Slack signing, bridge adapter, and bridge callback secrets must each contain at least 32 characters"
-          exit 1
+        if [ "$COMMUNITY_BRIDGE_PRODUCTION_ENABLED" = "true" ]; then
+          bridge_values=(
+            "$SLACK_BRIDGE_BOT_TOKEN"
+            "$SLACK_BRIDGE_SIGNING_SECRET"
+            "$SLACK_BRIDGE_BOT_USER_ID"
+            "$SLACK_BRIDGE_WORKSPACE_ID"
+            "$SLACK_BRIDGE_CHANNEL_ID"
+            "$SLACK_BRIDGE_CHANNEL_NAME"
+            "$BUZZ_BRIDGE_ADAPTER_URL"
+            "$BUZZ_BRIDGE_ADAPTER_TOKEN"
+            "$BUZZ_BRIDGE_CALLBACK_SECRET"
+            "$BUZZ_BRIDGE_DESTINATION_WORKSPACE_ID"
+            "$BUZZ_BRIDGE_DESTINATION_CHANNEL_ID"
+            "$BUZZ_BRIDGE_DESTINATION_CHANNEL_NAME"
+          )
+          for value in "${bridge_values[@]}"; do
+            [ -n "$value" ] && bridge_present=$((bridge_present + 1))
+          done
+          if [ "$bridge_present" -ne "${#bridge_values[@]}" ]; then
+            echo "::error::Slack and Buzz bridge repository settings must be fully configured when the production bridge is enabled"
+            exit 1
+          fi
+          if [ "${#SLACK_BRIDGE_SIGNING_SECRET}" -lt 32 ] || [ "${#BUZZ_BRIDGE_ADAPTER_TOKEN}" -lt 32 ] || [ "${#BUZZ_BRIDGE_CALLBACK_SECRET}" -lt 32 ]; then
+            echo "::error::Slack signing, bridge adapter, and bridge callback secrets must each contain at least 32 characters"
+            exit 1
+          fi
+        else
+          echo "Community bridge production activation is disabled; staged bridge settings will not be installed."
         fi
         case "$ORG_MEMORY_PRODUCTION_DEPLOY_ENABLED" in
           true|TRUE|True|1|yes|YES|Yes|on|ON|On) ORG_MEMORY_PRODUCTION_DEPLOY_ENABLED=true ;;
