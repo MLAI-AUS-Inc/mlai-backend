@@ -82,7 +82,7 @@ jobs:
         COMMUNITY_CHAT_EMAIL_CODE_AUTH_ENABLED: "true"
         COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED: "false"
         COMMUNITY_CHAT_DEVICE_AUTH_ENABLED: "false"
-        CUSTOMERIO_COMMUNITY_CHAT_CODE_MESSAGE_ID: ci-community-chat-code-template
+        CUSTOMERIO_COMMUNITY_CHAT_CODE_MESSAGE_ID: mlai_chat_sign_in_code
         COMMUNITY_CHAT_ALLOWED_ORIGINS: https://chat.mlai.au,tauri://localhost,http://tauri.localhost,mlaichat://callback
         GOOGLE_OAUTH_REDIRECT_URI: https://api.mlai.au/integrations/callback/google
         GITHUB_OAUTH_REDIRECT_URI: https://api.mlai.au/integrations/callback/github
