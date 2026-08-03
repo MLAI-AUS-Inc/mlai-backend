@@ -107,7 +107,7 @@ def draft_drive_manifest():
 
 
 class GovernanceManifestTests(SimpleTestCase):
-    def test_checked_in_manifest_approves_only_the_reviewed_drive_source(self):
+    def test_checked_in_manifest_approves_only_the_reviewed_drive_sources(self):
         manifest = load_policy_manifest()
 
         self.assertEqual(
@@ -133,8 +133,37 @@ class GovernanceManifestTests(SimpleTestCase):
                 "organization:16",
                 "connection:12",
                 "folder:1UBvYpQuZiug1QB3KDotTJtd5xltQdFKp",
+                "folder:1NnAt4Sio7CDLXsOsSR3rompYa0_ouDvY",
             ],
         )
+
+        for folder_id in (
+            "1UBvYpQuZiug1QB3KDotTJtd5xltQdFKp",
+            "1NnAt4Sio7CDLXsOsSR3rompYa0_ouDvY",
+        ):
+            policy = assert_provider_inventory_allowed(
+                "google_drive",
+                {
+                    "organization:16",
+                    "connection:12",
+                    f"folder:{folder_id}",
+                },
+                requested_max_files=10000,
+                manifest=manifest,
+            )
+            self.assertTrue(policy["production_enabled"])
+
+        with self.assertRaises(GovernancePolicyError):
+            assert_provider_inventory_allowed(
+                "google_drive",
+                {
+                    "organization:16",
+                    "connection:12",
+                    "folder:unreviewed-folder",
+                },
+                requested_max_files=10000,
+                manifest=manifest,
+            )
 
     def test_enabled_provider_parser_accepts_commas_spaces_and_iterables(self):
         self.assertEqual(
