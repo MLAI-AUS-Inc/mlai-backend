@@ -38,49 +38,55 @@ jobs:
           'import os; assert os.environ["BUZZ_BRIDGE_ADAPTER_URL"] == "https://chat.mlai.au/_mlai/bridge"; print("bridge_worker_tls_route=true")' \
           </dev/null
 
-        for delivery_id in 1 2; do
-          status="$(docker compose exec -T web python manage.py shell -c \
-            "from integrations.models import CommunityBridgeDelivery; print(CommunityBridgeDelivery.objects.get(id=${delivery_id}).status)" \
-            </dev/null \
-            | tail -n 1)"
-          case "$status" in
-            dead)
-              docker compose exec -T web python manage.py \
-                requeue_community_bridge_delivery "$delivery_id" --confirm \
-                </dev/null
-              ;;
-            pending|processing|completed)
-              printf 'delivery_%s_already_%s=true\n' "$delivery_id" "$status"
-              ;;
-            *)
-              printf 'Unexpected delivery %s status: %s\n' "$delivery_id" "$status" >&2
-              exit 1
-              ;;
-          esac
-        done
-
-        states=''
-        for _attempt in $(seq 1 30); do
-          states="$(docker compose exec -T web python manage.py shell -c \
-            'from integrations.models import CommunityBridgeDelivery; print(",".join(f"{row.id}:{row.status}" for row in CommunityBridgeDelivery.objects.filter(id__in=[1, 2]).order_by("id")))' \
-            </dev/null \
-            | tail -n 1)"
-          if [ "$states" = '1:completed,2:completed' ]; then
-            break
-          fi
-          sleep 2
-        done
-        if [ "$states" != '1:completed,2:completed' ]; then
-          printf 'Bridge delivery recovery did not complete: %s\n' "$states" >&2
-          exit 1
-        fi
-
         docker compose exec -T web python manage.py shell <<'PY'
         import json
+        import time
 
-        from integrations.models import CommunityBridgeDelivery, CommunityBridgeMessageLink
+        from django.core.management import call_command
 
-        deliveries = CommunityBridgeDelivery.objects.filter(id__in=[1, 2]).order_by("id")
+        from integrations.models import (
+            CommunityBridgeDelivery,
+            CommunityBridgeDeliveryStatus,
+            CommunityBridgeMessageLink,
+        )
+
+
+        delivery_ids = [1, 2]
+        for delivery in CommunityBridgeDelivery.objects.filter(id__in=delivery_ids).order_by("id"):
+            if delivery.status == CommunityBridgeDeliveryStatus.DEAD:
+                call_command(
+                    "requeue_community_bridge_delivery",
+                    delivery.id,
+                    confirm=True,
+                )
+
+        deadline = time.monotonic() + 90
+        while True:
+            deliveries = list(
+                CommunityBridgeDelivery.objects.filter(id__in=delivery_ids).order_by("id")
+            )
+            statuses = [delivery.status for delivery in deliveries]
+            if len(deliveries) != len(delivery_ids):
+                raise SystemExit("Investigated bridge delivery rows are missing")
+            if all(status == CommunityBridgeDeliveryStatus.COMPLETED for status in statuses):
+                break
+            if any(status == CommunityBridgeDeliveryStatus.DEAD for status in statuses):
+                break
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(2)
+
+        def error_class(error):
+            value = str(error or "")
+            for marker in ("HTTP 401", "HTTP 403", "HTTP 404", "HTTP 429"):
+                if marker in value:
+                    return marker.lower().replace(" ", "_")
+            if "ConnectionError" in value:
+                return "connection_error"
+            if "Timeout" in value:
+                return "timeout"
+            return value.split(":", 1)[0] if value else ""
+
         print(json.dumps({
             "deliveries": [
                 {
@@ -89,6 +95,7 @@ jobs:
                     "attempts": delivery.attempts,
                     "completed_at": delivery.completed_at,
                     "error_present": bool(delivery.last_error),
+                    "error_class": error_class(delivery.last_error),
                     "message_link_count": CommunityBridgeMessageLink.objects.filter(
                         channel=delivery.channel,
                         source_platform=delivery.source_platform,
@@ -99,6 +106,11 @@ jobs:
                 for delivery in deliveries
             ],
         }, default=str, sort_keys=True))
+        if not all(
+            delivery.status == CommunityBridgeDeliveryStatus.COMPLETED
+            for delivery in deliveries
+        ):
+            raise SystemExit("Investigated bridge deliveries did not complete")
         PY
         docker compose ps web bridge-worker
         REMOTE
