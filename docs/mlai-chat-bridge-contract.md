@@ -125,6 +125,23 @@ idempotency identity:
 python manage.py requeue_community_bridge_delivery 1234 --confirm
 ```
 
+If the relay's audited rejection log proves that an otherwise valid delivery
+was rejected only because its deterministic event timestamp is stale, and the
+operator has separately verified that no destination event or message link
+exists, refresh the timestamp explicitly while preserving the durable delivery
+ID:
+
+```sh
+python manage.py requeue_community_bridge_delivery 1234 \
+  --confirm \
+  --refresh-event-timestamp \
+  --confirm-stale-relay-timestamp \
+  --confirm-no-destination-event
+```
+
+Never use timestamp refresh for an ambiguous timeout or after a destination
+link exists; normal retries retain the original timestamp and signed event ID.
+
 Run the live staging matrix and capture durable, content-free evidence with
 [`mlai-chat-bridge-staging.md`](mlai-chat-bridge-staging.md). The final database
 check is:
