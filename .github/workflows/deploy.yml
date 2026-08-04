@@ -7,7 +7,7 @@ on:
     branches: [ main ]
 
 jobs:
-  bridge-production-inspect-rejection:
+  bridge-production-recover-stale-deliveries:
     if: ${{ github.event_name == 'pull_request' && github.head_ref == 'codex/community-bridge-ops' && github.actor == 'drsamdonegan' }}
     runs-on: ubuntu-latest
     steps:
@@ -19,80 +19,118 @@ jobs:
     - name: Add Known Hosts
       run: ssh-keyscan -H 209.38.85.60 >> ~/.ssh/known_hosts
 
-    - name: Inspect exact permanent delivery rejection without payloads
+    - name: Verify the production worker uses the public TLS adapter route
+      run: |
+        ssh root@209.38.85.60 \
+          'cd /root/mlai-backend && test "$(docker compose exec -T bridge-worker printenv BUZZ_BRIDGE_ADAPTER_URL | tr -d "\r")" = "https://chat.mlai.au/_mlai/bridge"'
+
+    - name: Refresh and replay the two audited stale deliveries
       run: |
         ssh root@209.38.85.60 \
           'cd /root/mlai-backend && docker compose exec -T web python manage.py shell' <<'PY'
         import json
-        import re
-        import uuid
+        import time
 
+        from django.db import transaction
+        from django.utils import timezone
         from integrations.models import (
             CommunityBridgeDelivery,
+            CommunityBridgeDeliveryStatus,
             CommunityBridgeMessageLink,
         )
-        from integrations.services.community_bridge.identity import verified_identity_for_slack
 
-        def valid_uuid(value):
-            try:
-                return str(uuid.UUID(str(value))) == str(value)
-            except (TypeError, ValueError):
-                return False
+        delivery_ids = [1, 2]
 
-        def request_shape(delivery):
-            payload = dict(delivery.payload or {})
-            metadata = dict(payload.get("metadata") or {})
-            identity = verified_identity_for_slack(
-                slack_workspace_id=delivery.channel.slack_workspace_id,
-                slack_user_id=str(payload.get("source_author_id") or ""),
+        def link_count(delivery):
+            return CommunityBridgeMessageLink.objects.filter(
+                channel=delivery.channel,
+                source_platform=delivery.source_platform,
+                source_channel_id=delivery.source_channel_id,
+                source_message_id=delivery.source_message_id,
+            ).count()
+
+        with transaction.atomic():
+            deliveries = list(
+                CommunityBridgeDelivery.objects.select_for_update()
+                .filter(id__in=delivery_ids)
+                .order_by("id")
             )
-            return {
-                "delivery_id_valid": 0 < len(str(delivery.id)) <= 128,
-                "created_at_positive": int(delivery.created_at.timestamp()) > 0,
-                "operation": delivery.delivery_type,
-                "target_channel_uuid": valid_uuid(delivery.target_channel_id),
-                "text_length": len(str(payload.get("text") or "")),
-                "target_message_present": False,
-                "parent_message_present": bool(delivery.source_parent_message_id),
-                "workspace_id_valid": bool(re.fullmatch(
-                    r"T[A-Z0-9]+", delivery.channel.slack_workspace_id
-                )),
-                "source_channel_id_valid": bool(re.fullmatch(
-                    r"C[A-Z0-9]+", delivery.source_channel_id
-                )),
-                "source_message_id_valid": bool(re.fullmatch(
-                    r"[0-9]{1,20}\.[0-9]{1,20}",
-                    str(metadata.get("slack_message_id") or delivery.source_message_id),
-                )),
-                "source_author_id_valid": bool(re.fullmatch(
-                    r"[UW][A-Z0-9]+", str(payload.get("source_author_id") or "")
-                )),
-                "linked_pubkey_valid": not identity or bool(re.fullmatch(
-                    r"[0-9a-f]{64}", str(identity.get("buzz_pubkey") or "")
-                )),
-            }
+            if [delivery.id for delivery in deliveries] != delivery_ids:
+                raise RuntimeError("the exact audited delivery set was not found")
 
-        deliveries = CommunityBridgeDelivery.objects.filter(id__in=[1, 2]).order_by("id")
-        print(json.dumps({
-            "deliveries": [
+            now = timezone.now()
+            for delivery in deliveries:
+                if delivery.status != CommunityBridgeDeliveryStatus.DEAD:
+                    raise RuntimeError(f"delivery {delivery.id} is not dead")
+                if delivery.attempts != 1:
+                    raise RuntimeError(
+                        f"delivery {delivery.id} no longer has the audited attempt count"
+                    )
+                if "HTTP 400" not in delivery.last_error:
+                    raise RuntimeError(
+                        f"delivery {delivery.id} no longer has the audited relay rejection"
+                    )
+                if link_count(delivery):
+                    raise RuntimeError(
+                        f"delivery {delivery.id} already has a destination message link"
+                    )
+
+                delivery.status = CommunityBridgeDeliveryStatus.PENDING
+                delivery.attempts = 0
+                delivery.created_at = now
+                delivery.available_at = now
+                delivery.locked_at = None
+                delivery.completed_at = None
+                delivery.last_error = ""
+                delivery.save(
+                    update_fields=[
+                        "status",
+                        "attempts",
+                        "created_at",
+                        "available_at",
+                        "locked_at",
+                        "completed_at",
+                        "last_error",
+                        "updated_at",
+                    ]
+                )
+
+        print(json.dumps({"refreshed_delivery_ids": delivery_ids}, sort_keys=True))
+
+        deadline = time.monotonic() + 90
+        results = []
+        while time.monotonic() < deadline:
+            deliveries = list(
+                CommunityBridgeDelivery.objects.filter(id__in=delivery_ids).order_by("id")
+            )
+            results = [
                 {
                     "id": delivery.id,
                     "status": delivery.status,
                     "attempts": delivery.attempts,
-                    "completed_at": delivery.completed_at,
+                    "completed": bool(delivery.completed_at),
+                    "message_link_count": link_count(delivery),
                     "error_present": bool(delivery.last_error),
-                    "last_error": delivery.last_error,
-                    "request_shape": request_shape(delivery),
-                    "message_link_count": CommunityBridgeMessageLink.objects.filter(
-                        channel=delivery.channel,
-                        source_platform=delivery.source_platform,
-                        source_channel_id=delivery.source_channel_id,
-                        source_message_id=delivery.source_message_id,
-                    ).count(),
                 }
                 for delivery in deliveries
-            ],
-        }, default=str, sort_keys=True))
+            ]
+            if all(
+                result["status"] == CommunityBridgeDeliveryStatus.COMPLETED
+                and result["message_link_count"] == 1
+                for result in results
+            ):
+                break
+            if any(result["status"] == CommunityBridgeDeliveryStatus.DEAD for result in results):
+                break
+            time.sleep(2)
+
+        print(json.dumps({"deliveries": results}, sort_keys=True))
+        if not all(
+            result["status"] == CommunityBridgeDeliveryStatus.COMPLETED
+            and result["message_link_count"] == 1
+            for result in results
+        ):
+            raise RuntimeError("the audited deliveries did not complete exactly once")
         PY
 
   checks:
