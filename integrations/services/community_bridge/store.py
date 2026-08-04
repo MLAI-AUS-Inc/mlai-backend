@@ -34,6 +34,13 @@ logger = logging.getLogger(__name__)
 
 RETRY_DELAYS_SECONDS = [10, 30, 120, 300, 900]
 
+# Slack conversation types that may be mirrored: public channels ("channel")
+# and private channels ("group"). Direct messages ("im") and group DMs
+# ("mpim") are never bridgeable. A private channel still only mirrors once an
+# operator has created its CommunityBridgeChannel mapping and pointed it at a
+# private MLAI Chat channel — the mapping, not this set, is the access control.
+BRIDGEABLE_SLACK_CHANNEL_TYPES = frozenset({"channel", "group"})
+
 
 def ingest_slack_event(payload: dict) -> dict:
     event = dict(payload.get("event") or {})
@@ -379,7 +386,7 @@ def _normalize_slack_event(payload: dict) -> Optional[dict]:
         return _normalize_slack_reaction(event, event_type=event_type)
     if event_type != "message":
         return None
-    if str(event.get("channel_type") or "").strip() != "channel":
+    if str(event.get("channel_type") or "").strip() not in BRIDGEABLE_SLACK_CHANNEL_TYPES:
         return None
     if bool(event.get("hidden")):
         return None
