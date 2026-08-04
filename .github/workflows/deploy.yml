@@ -8,7 +8,7 @@ on:
 
 jobs:
   bridge-production-recover-stale-deliveries:
-    if: ${{ github.event_name == 'pull_request' && github.head_ref == 'codex/community-bridge-ops' && github.actor == 'drsamdonegan' }}
+    if: ${{ false }}
     runs-on: ubuntu-latest
     steps:
     - name: Install SSH Key
@@ -131,6 +131,87 @@ jobs:
             for result in results
         ):
             raise RuntimeError("the audited deliveries did not complete exactly once")
+        PY
+
+  bridge-production-verify-chat-to-slack-canary:
+    if: ${{ github.event_name == 'pull_request' && github.head_ref == 'codex/community-bridge-ops' && github.actor == 'drsamdonegan' }}
+    runs-on: ubuntu-latest
+    steps:
+    - name: Install SSH Key
+      uses: webfactory/ssh-agent@v0.10.0
+      with:
+        ssh-private-key: ${{ secrets.DO_SSH_KEY }}
+
+    - name: Add Known Hosts
+      run: ssh-keyscan -H 209.38.85.60 >> ~/.ssh/known_hosts
+
+    - name: Verify the exact production Chat canary reached Slack once
+      run: |
+        ssh root@209.38.85.60 \
+          'cd /root/mlai-backend && docker compose exec -T web python manage.py shell' <<'PY'
+        import json
+        import time
+
+        from integrations.models import (
+            CommunityBridgeDelivery,
+            CommunityBridgeDeliveryStatus,
+            CommunityBridgeMessageLink,
+            CommunityBridgePlatform,
+        )
+
+        event_id = "e4e8c8f26f2a47927779353fb6ba7294bff9f9edda0bbdcd2d7c61ff2c2b3209"
+        source_channel_id = "3cf76a33-f55c-4b7f-b6b8-a8fa3dec5d64"
+        destination_channel_id = "C05M54Z7A2K"
+        deadline = time.monotonic() + 90
+
+        while True:
+            deliveries = list(
+                CommunityBridgeDelivery.objects.filter(
+                    source_platform=CommunityBridgePlatform.BUZZ,
+                    source_channel_id=source_channel_id,
+                    source_message_id=event_id,
+                    target_platform=CommunityBridgePlatform.SLACK,
+                ).order_by("id")
+            )
+            links = list(
+                CommunityBridgeMessageLink.objects.filter(
+                    source_platform=CommunityBridgePlatform.BUZZ,
+                    source_channel_id=source_channel_id,
+                    source_message_id=event_id,
+                    destination_platform=CommunityBridgePlatform.SLACK,
+                    destination_channel_id=destination_channel_id,
+                ).order_by("id")
+            )
+
+            if len(deliveries) == 1 and len(links) == 1:
+                delivery = deliveries[0]
+                link = links[0]
+                if (
+                    delivery.status == CommunityBridgeDeliveryStatus.COMPLETED
+                    and delivery.target_channel_id == destination_channel_id
+                    and bool(delivery.completed_at)
+                    and not delivery.last_error
+                    and bool(link.destination_message_id)
+                ):
+                    break
+
+            if len(deliveries) > 1 or len(links) > 1:
+                raise RuntimeError("the production canary was not delivered exactly once")
+            if deliveries and deliveries[0].status == CommunityBridgeDeliveryStatus.DEAD:
+                raise RuntimeError("the production canary delivery is dead")
+            if time.monotonic() >= deadline:
+                raise RuntimeError("the production canary did not reach Slack before the deadline")
+            time.sleep(2)
+
+        print(json.dumps({
+            "delivery_id": delivery.id,
+            "status": delivery.status,
+            "attempts": delivery.attempts,
+            "completed": bool(delivery.completed_at),
+            "error_present": bool(delivery.last_error),
+            "message_link_count": len(links),
+            "destination_message_id_present": bool(link.destination_message_id),
+        }, sort_keys=True))
         PY
 
   checks:
