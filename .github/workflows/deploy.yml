@@ -24,11 +24,53 @@ jobs:
         ssh root@209.38.85.60 \
           'cd /root/mlai-backend && docker compose exec -T web python manage.py shell' <<'PY'
         import json
+        import re
+        import uuid
 
         from integrations.models import (
             CommunityBridgeDelivery,
             CommunityBridgeMessageLink,
         )
+        from integrations.services.community_bridge.identity import verified_identity_for_slack
+
+        def valid_uuid(value):
+            try:
+                return str(uuid.UUID(str(value))) == str(value)
+            except (TypeError, ValueError):
+                return False
+
+        def request_shape(delivery):
+            payload = dict(delivery.payload or {})
+            metadata = dict(payload.get("metadata") or {})
+            identity = verified_identity_for_slack(
+                slack_workspace_id=delivery.channel.slack_workspace_id,
+                slack_user_id=str(payload.get("source_author_id") or ""),
+            )
+            return {
+                "delivery_id_valid": 0 < len(str(delivery.id)) <= 128,
+                "created_at_positive": int(delivery.created_at.timestamp()) > 0,
+                "operation": delivery.delivery_type,
+                "target_channel_uuid": valid_uuid(delivery.target_channel_id),
+                "text_length": len(str(payload.get("text") or "")),
+                "target_message_present": False,
+                "parent_message_present": bool(delivery.source_parent_message_id),
+                "workspace_id_valid": bool(re.fullmatch(
+                    r"T[A-Z0-9]+", delivery.channel.slack_workspace_id
+                )),
+                "source_channel_id_valid": bool(re.fullmatch(
+                    r"C[A-Z0-9]+", delivery.source_channel_id
+                )),
+                "source_message_id_valid": bool(re.fullmatch(
+                    r"[0-9]{1,20}\.[0-9]{1,20}",
+                    str(metadata.get("slack_message_id") or delivery.source_message_id),
+                )),
+                "source_author_id_valid": bool(re.fullmatch(
+                    r"[UW][A-Z0-9]+", str(payload.get("source_author_id") or "")
+                )),
+                "linked_pubkey_valid": not identity or bool(re.fullmatch(
+                    r"[0-9a-f]{64}", str(identity.get("buzz_pubkey") or "")
+                )),
+            }
 
         deliveries = CommunityBridgeDelivery.objects.filter(id__in=[1, 2]).order_by("id")
         print(json.dumps({
@@ -40,6 +82,7 @@ jobs:
                     "completed_at": delivery.completed_at,
                     "error_present": bool(delivery.last_error),
                     "last_error": delivery.last_error,
+                    "request_shape": request_shape(delivery),
                     "message_link_count": CommunityBridgeMessageLink.objects.filter(
                         channel=delivery.channel,
                         source_platform=delivery.source_platform,
