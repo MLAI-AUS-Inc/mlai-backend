@@ -2758,6 +2758,174 @@ class ReconciliationWorkflowApiTests(APITestCase):
 
     @patch("integrations.services.valley_harness.notify_valley_run_created")
     @patch("core.permissions.HasRooApiKey.has_permission", return_value=True)
+    def test_external_agent_run_owns_submitted_suggestions_and_completes_without_valley(
+        self, _permission, notify_valley
+    ):
+        line = import_xero_statement_lines(
+            organization=self.organization,
+            bank_account_id="bank-1",
+            expected_count=1,
+            requested_by="UADMIN",
+            lines=[{
+                "statement_line_id": "external-agent-current-line",
+                "date": "20 Jul 2026",
+                "narration": "Transfer To CONTRACTOR ONE",
+                "direction": "debit",
+                "amount": "845.00",
+            }],
+        )[0]
+
+        started = self.client.post(
+            reverse("reconciliation_agent_runs"),
+            {
+                "slack_user_id": "UADMIN",
+                "domain": "mlai.au",
+                "analysis_mode": "external_agent",
+                "instruction": "Use the treasurer mailbox and monthly context.",
+                "statement_line_ids": [line.statement_line_id],
+            },
+            format="json",
+        )
+
+        self.assertEqual(started.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(started.data["analysis_mode"], "external_agent")
+        self.assertEqual(started.data["status"], ContentFactoryRunStatus.RUNNING)
+        self.assertFalse(started.data["valley_dispatched"])
+        notify_valley.assert_not_called()
+        run = ContentFactoryRun.objects.get(run_id=started.data["run_id"])
+        self.assertEqual(run.run_request["analysis_mode"], "external_agent")
+        self.assertIn("treasurer_mailbox", run.run_request["input_sources"])
+
+        context = self.client.get(
+            reverse("reconciliation_enrichment_context"),
+            {"domain": "mlai.au", "run_id": run.run_id},
+        )
+        self.assertEqual(context.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            [item["statement_line_id"] for item in context.data["statement_candidates"]],
+            [line.statement_line_id],
+        )
+        self.assertIn("months", context.data["monthly_timeline"])
+
+        submitted = self.client.post(
+            reverse("reconciliation_enrichment_context"),
+            {
+                "domain": "mlai.au",
+                "run_id": run.run_id,
+                "model_name": "gpt-reasoner",
+                "suggestions": [],
+                "statement_suggestions": [{
+                    "statement_line_id": line.statement_line_id,
+                    "proposed_action": "needs_review",
+                    "contact_name": "Contractor One",
+                    "review_note": "The treasurer mailbox identifies this as contractor work.",
+                    "confidence": 0.99,
+                    "identity_confidence": 0.99,
+                    "accounting_confidence": 0.0,
+                    "allocation_confidence": 0.0,
+                    "document_confidence": 0.95,
+                    "evidence": [{
+                        "source_provider": "gmail",
+                        "source_record_id": "treasurer-message-1",
+                    }],
+                }],
+            },
+            format="json",
+        )
+
+        self.assertEqual(submitted.status_code, status.HTTP_200_OK)
+        self.assertEqual(submitted.data["statement_suggestion_count"], 1)
+        run.refresh_from_db()
+        self.assertEqual(run.status, ContentFactoryRunStatus.COMPLETED)
+        self.assertEqual(run.current_step, "")
+        suggestion = XeroStatementSuggestion.objects.get(run_id=run.run_id)
+        self.assertEqual(suggestion.statement_line, line)
+        self.assertEqual(suggestion.model_name, "gpt-reasoner")
+        step = ContentFactoryRunStep.objects.get(run=run)
+        self.assertEqual(step.status, ContentFactoryStepStatus.COMPLETED)
+
+    @patch("core.permissions.HasRooApiKey.has_permission", return_value=True)
+    def test_external_agent_submission_rejects_missing_or_historical_lines(self, _permission):
+        current_line = import_xero_statement_lines(
+            organization=self.organization,
+            bank_account_id="bank-1",
+            expected_count=1,
+            requested_by="UADMIN",
+            lines=[{
+                "statement_line_id": "external-agent-required-line",
+                "date": "20 Jul 2026",
+                "narration": "JAYCAR FRANKLIN",
+                "direction": "debit",
+                "amount": "95.05",
+            }],
+        )[0]
+        started = self.client.post(
+            reverse("reconciliation_agent_runs"),
+            {
+                "slack_user_id": "UADMIN",
+                "domain": "mlai.au",
+                "analysis_mode": "external_agent",
+                "statement_line_ids": [current_line.statement_line_id],
+            },
+            format="json",
+        )
+
+        submitted = self.client.post(
+            reverse("reconciliation_enrichment_context"),
+            {
+                "domain": "mlai.au",
+                "run_id": started.data["run_id"],
+                "model_name": "gpt-reasoner",
+                "suggestions": [],
+                "statement_suggestions": [],
+            },
+            format="json",
+        )
+
+        self.assertEqual(submitted.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(
+            submitted.data["expected_statement_line_ids"],
+            [current_line.statement_line_id],
+        )
+
+        import_xero_statement_lines(
+            organization=self.organization,
+            bank_account_id="bank-1",
+            expected_count=1,
+            requested_by="UADMIN",
+            lines=[{
+                "statement_line_id": "external-agent-newer-scan-line",
+                "date": "21 Jul 2026",
+                "narration": "NEWER QUEUE ITEM",
+                "direction": "debit",
+                "amount": "12.00",
+            }],
+        )
+        stale_submission = self.client.post(
+            reverse("reconciliation_enrichment_context"),
+            {
+                "domain": "mlai.au",
+                "run_id": started.data["run_id"],
+                "model_name": "gpt-reasoner",
+                "suggestions": [],
+                "statement_suggestions": [{
+                    "statement_line_id": current_line.statement_line_id,
+                    "proposed_action": "needs_review",
+                    "confidence": 0.0,
+                    "identity_confidence": 0.0,
+                    "accounting_confidence": 0.0,
+                    "allocation_confidence": 0.0,
+                    "document_confidence": 0.0,
+                    "evidence": [],
+                }],
+            },
+            format="json",
+        )
+        self.assertEqual(stale_submission.status_code, status.HTTP_409_CONFLICT)
+        self.assertIn("queue changed", stale_submission.data["error"])
+
+    @patch("integrations.services.valley_harness.notify_valley_run_created")
+    @patch("core.permissions.HasRooApiKey.has_permission", return_value=True)
     def test_repeated_identical_agent_start_reuses_run_without_duplicate_dispatch(
         self, _permission, notify_valley
     ):

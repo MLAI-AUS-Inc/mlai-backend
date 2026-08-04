@@ -204,6 +204,8 @@ def _reconciliation_request_fingerprint(
     monthly_run,
     instruction: str,
     requested_line_ids: list[str],
+    analysis_mode: str = "valley",
+    request_id: str = "",
 ) -> str:
     rule_revisions = list(
         ReconciliationRule.objects.filter(
@@ -264,6 +266,8 @@ def _reconciliation_request_fingerprint(
         "statement_scan_id": scan.id,
         "base_monthly_run_id": monthly_run.run_id if monthly_run else "",
         "instruction": " ".join(str(instruction or "").split()),
+        "analysis_mode": analysis_mode,
+        "request_id": request_id,
         "requested_statement_line_ids": sorted(requested_line_ids),
         "verified_rule_revisions": rule_revisions,
         "outstanding_xero_bill_revisions": bill_revisions,
@@ -297,6 +301,7 @@ def _agent_run_start_response(run, *, idempotent: bool) -> dict:
         "base_monthly_run_id": request_payload.get("base_monthly_run_id") or "",
         "request_fingerprint": request_payload.get("request_fingerprint") or "",
         "dry_run": True,
+        "analysis_mode": request_payload.get("analysis_mode") or "valley",
         **summary,
         "retry_available": bool(
             run.resume_available
@@ -674,18 +679,22 @@ class ReconciliationEnrichmentContextView(APIView):
         )
         memory_run = run
         if run.workflow == RECONCILIATION_AGENT_WORKFLOW:
+            from startup_updates.services import build_timeline_payload
+
             selected_line_ids = {
                 str(item or "").strip()
                 for item in (run.run_request or {}).get("statement_line_ids") or []
                 if str(item or "").strip()
             }
-            if selected_line_ids:
-                context["statement_candidates"] = [
-                    item for item in context.get("statement_candidates") or []
-                    if str(item.get("statement_line_id") or "") in selected_line_ids
-                ]
+            context["statement_candidates"] = [
+                item for item in context.get("statement_candidates") or []
+                if str(item.get("statement_line_id") or "") in selected_line_ids
+            ]
             context["agent_instruction"] = str(request_payload.get("instruction") or "")
             context["base_monthly_run_id"] = str(request_payload.get("base_monthly_run_id") or "")
+            context["monthly_timeline"] = build_timeline_payload(
+                organization=organization
+            )
             if context["base_monthly_run_id"]:
                 memory_run = ContentFactoryRun.objects.filter(
                     organization=organization,
@@ -719,6 +728,45 @@ class ReconciliationEnrichmentContextView(APIView):
                 {"error": "suggestions and statement_suggestions must be lists"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        request_payload = run.run_request if isinstance(run.run_request, dict) else {}
+        external_agent_run = bool(
+            run.workflow == RECONCILIATION_AGENT_WORKFLOW
+            and request_payload.get("analysis_mode") == "external_agent"
+        )
+        if external_agent_run:
+            stale_run_error = _reconciliation_run_retry_error(
+                organization=organization,
+                run=run,
+            )
+            if stale_run_error:
+                return Response(
+                    {"error": stale_run_error},
+                    status=status.HTTP_409_CONFLICT,
+                )
+            allowed_line_ids = {
+                str(item or "").strip()
+                for item in request_payload.get("statement_line_ids") or []
+                if str(item or "").strip()
+            }
+            submitted_line_ids = [
+                str(item.get("statement_line_id") or "").strip()
+                for item in statement_suggestions
+                if isinstance(item, dict)
+            ]
+            if len(submitted_line_ids) != len(set(submitted_line_ids)):
+                return Response(
+                    {"error": "External reconciliation submissions require one suggestion per statement line."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if set(submitted_line_ids) != allowed_line_ids:
+                return Response(
+                    {
+                        "error": "External reconciliation suggestions must exactly match the run's unresolved statement lines.",
+                        "expected_statement_line_ids": sorted(allowed_line_ids),
+                        "submitted_statement_line_ids": sorted(submitted_line_ids),
+                    },
+                    status=status.HTTP_409_CONFLICT,
+                )
         try:
             saved = save_reconciliation_suggestions(
                 organization=organization,
@@ -765,6 +813,38 @@ class ReconciliationEnrichmentContextView(APIView):
                         "status": "failed",
                         "errors": [str(exc)],
                     })
+        if external_agent_run:
+            completed_at = datetime.now(timezone.utc)
+            result = run.result if isinstance(run.result, dict) else {}
+            run.result = {
+                **result,
+                "external_agent_submission": {
+                    "model_name": str(request.data.get("model_name") or ""),
+                    "payout_suggestion_count": len(saved),
+                    "statement_suggestion_count": len(saved_statements),
+                    "completed_at": completed_at.isoformat(),
+                },
+            }
+            run.status = ContentFactoryRunStatus.COMPLETED
+            run.current_step = ""
+            run.error = ""
+            run.resume_available = False
+            run.save(update_fields=[
+                "result",
+                "status",
+                "current_step",
+                "error",
+                "resume_available",
+                "updated_at",
+            ])
+            ContentFactoryRunStep.objects.filter(
+                run=run,
+                step_key=RECONCILIATION_AGENT_STEP_ORDER[0],
+            ).update(
+                status=ContentFactoryStepStatus.COMPLETED,
+                completed_at=completed_at,
+                message="The external reconciliation agent submitted the complete reviewed suggestion set.",
+            )
         return Response({
             "suggestion_count": len(saved),
             "suggestions": [serialize_suggestion(item) for item in saved],
@@ -1690,6 +1770,13 @@ class ReconciliationAgentRunView(ReconciliationAdminView):
 
         base_monthly_run = _latest_monthly_context_run(organization)
         requested_line_ids = statement_line_ids
+        analysis_mode = str(request.data.get("analysis_mode") or "valley").strip()
+        if analysis_mode not in {"valley", "external_agent"}:
+            return Response(
+                {"error": "analysis_mode must be valley or external_agent"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        request_id = str(request.data.get("request_id") or "").strip()[:255]
         instruction = str(
             request.data.get("instruction")
             or "Reconcile the current Xero statement queue."
@@ -1700,6 +1787,8 @@ class ReconciliationAgentRunView(ReconciliationAdminView):
             monthly_run=base_monthly_run,
             instruction=instruction,
             requested_line_ids=requested_line_ids,
+            analysis_mode=analysis_mode,
+            request_id=request_id,
         )
         run_id = f"xero-reconciliation-{request_fingerprint[:40]}"
         catalog_status = build_reconciliation_catalog_status(
@@ -1751,6 +1840,8 @@ class ReconciliationAgentRunView(ReconciliationAdminView):
                 run.run_request = {
                     "organization_id": organization.id,
                     "instruction": instruction,
+                    "analysis_mode": analysis_mode,
+                    "request_id": request_id,
                     "request_fingerprint": request_fingerprint,
                     "statement_line_ids": agent_line_ids,
                     "requested_statement_line_ids": requested_line_ids,
@@ -1763,6 +1854,7 @@ class ReconciliationAgentRunView(ReconciliationAdminView):
                     "dry_run": True,
                     "input_sources": [
                         "gmail",
+                        "treasurer_mailbox",
                         "slack",
                         "linear",
                         "luma",
@@ -1782,6 +1874,14 @@ class ReconciliationAgentRunView(ReconciliationAdminView):
                     step.message = "All selected lines were resolved by verified rules or rule-conflict checks."
                     step.save(update_fields=[
                         "status", "completed_at", "message",
+                    ])
+                elif analysis_mode == "external_agent":
+                    run.status = ContentFactoryRunStatus.RUNNING
+                    step.status = ContentFactoryStepStatus.RUNNING
+                    step.started_at = datetime.now(timezone.utc)
+                    step.message = "Waiting for the external reconciliation agent to submit reviewed suggestions."
+                    step.save(update_fields=[
+                        "status", "started_at", "message",
                     ])
                 run.save(update_fields=[
                     "run_request", "result", "status", "current_step", "updated_at",
@@ -1811,6 +1911,24 @@ class ReconciliationAgentRunView(ReconciliationAdminView):
                 "statement_scan_id": latest_scan.id,
                 "base_monthly_run_id": base_monthly_run.run_id if base_monthly_run else "",
                 "dry_run": True,
+                "analysis_mode": analysis_mode,
+                **deterministic_summary,
+                "valley_dispatched": False,
+                "retry_available": False,
+                "request_fingerprint": request_fingerprint,
+                "idempotent": False,
+            }, status=status.HTTP_201_CREATED)
+
+        if analysis_mode == "external_agent":
+            return Response({
+                "run_id": run.run_id,
+                "workflow": run.workflow,
+                "status": run.status,
+                "current_step": run.current_step,
+                "statement_scan_id": latest_scan.id,
+                "base_monthly_run_id": base_monthly_run.run_id if base_monthly_run else "",
+                "dry_run": True,
+                "analysis_mode": analysis_mode,
                 **deterministic_summary,
                 "valley_dispatched": False,
                 "retry_available": False,
@@ -1849,6 +1967,7 @@ class ReconciliationAgentRunView(ReconciliationAdminView):
             "statement_scan_id": latest_scan.id,
             "base_monthly_run_id": base_monthly_run.run_id if base_monthly_run else "",
             "dry_run": True,
+            "analysis_mode": analysis_mode,
             **deterministic_summary,
             "valley_dispatched": valley_dispatched,
             "retry_available": False,
