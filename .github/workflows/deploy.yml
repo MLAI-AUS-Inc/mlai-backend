@@ -159,7 +159,7 @@ jobs:
             CommunityBridgePlatform,
         )
 
-        event_id = "e4e8c8f26f2a47927779353fb6ba7294bff9f9edda0bbdcd2d7c61ff2c2b3209"
+        event_id = "c7b927b7cf4ec44c0961c12f6ee62cd89e143b4d810e6c49d70f0c8636011d56"
         source_channel_id = "3cf76a33-f55c-4b7f-b6b8-a8fa3dec5d64"
         destination_channel_id = "C05M54Z7A2K"
         deadline = time.monotonic() + 90
