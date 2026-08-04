@@ -771,6 +771,7 @@ class CommunityBridgeDeadLetterReplayTests(TestCase):
 
     def test_requeue_preserves_delivery_id_and_resets_retry_state(self):
         original_id = self.delivery.id
+        original_created_at = self.delivery.created_at
         call_command(
             "requeue_community_bridge_delivery",
             str(original_id),
@@ -781,6 +782,7 @@ class CommunityBridgeDeadLetterReplayTests(TestCase):
         self.assertEqual(self.delivery.status, CommunityBridgeDeliveryStatus.PENDING)
         self.assertEqual(self.delivery.attempts, 0)
         self.assertEqual(self.delivery.last_error, "")
+        self.assertEqual(self.delivery.created_at, original_created_at)
 
     def test_requeue_requires_confirmation_and_dead_status(self):
         with self.assertRaisesMessage(CommandError, "--confirm is required"):
@@ -793,6 +795,63 @@ class CommunityBridgeDeadLetterReplayTests(TestCase):
                 str(self.delivery.id),
                 confirm=True,
             )
+
+    def test_timestamp_refresh_requires_both_explicit_safety_confirmations(self):
+        with self.assertRaisesMessage(CommandError, "--confirm-stale-relay-timestamp"):
+            call_command(
+                "requeue_community_bridge_delivery",
+                str(self.delivery.id),
+                confirm=True,
+                refresh_event_timestamp=True,
+            )
+        with self.assertRaisesMessage(CommandError, "--confirm-no-destination-event"):
+            call_command(
+                "requeue_community_bridge_delivery",
+                str(self.delivery.id),
+                confirm=True,
+                refresh_event_timestamp=True,
+                confirm_stale_relay_timestamp=True,
+            )
+
+    def test_timestamp_refresh_is_guarded_by_absent_destination_link(self):
+        CommunityBridgeMessageLink.objects.create(
+            channel=self.channel,
+            source_platform=self.delivery.source_platform,
+            source_channel_id=self.delivery.source_channel_id,
+            source_message_id=self.delivery.source_message_id,
+            destination_platform=self.delivery.target_platform,
+            destination_channel_id=self.delivery.target_channel_id,
+            destination_message_id="a" * 64,
+        )
+
+        with self.assertRaisesMessage(CommandError, "destination message link exists"):
+            call_command(
+                "requeue_community_bridge_delivery",
+                str(self.delivery.id),
+                confirm=True,
+                refresh_event_timestamp=True,
+                confirm_stale_relay_timestamp=True,
+                confirm_no_destination_event=True,
+            )
+
+    def test_confirmed_stale_timestamp_refresh_preserves_delivery_id(self):
+        stale_created_at = timezone.now() - timedelta(hours=1)
+        CommunityBridgeDelivery.objects.filter(id=self.delivery.id).update(
+            created_at=stale_created_at
+        )
+
+        call_command(
+            "requeue_community_bridge_delivery",
+            str(self.delivery.id),
+            confirm=True,
+            refresh_event_timestamp=True,
+            confirm_stale_relay_timestamp=True,
+            confirm_no_destination_event=True,
+        )
+
+        self.delivery.refresh_from_db()
+        self.assertEqual(self.delivery.status, CommunityBridgeDeliveryStatus.PENDING)
+        self.assertGreater(self.delivery.created_at, stale_created_at)
 
 
 class CommunityBridgeStagingVerificationTests(TestCase):
@@ -891,6 +950,98 @@ class CommunityBridgeStagingVerificationTests(TestCase):
                 slack_message_id="1710000000.9000",
                 buzz_event_id="c" * 64,
             )
+
+
+class CommunityBridgeInspectionTests(TestCase):
+    def setUp(self):
+        self.channel = CommunityBridgeChannel.objects.create(
+            slack_workspace_id="TMLAI",
+            slack_channel_id="CGENERAL",
+            slack_channel_name="general",
+            destination_platform=CommunityBridgePlatform.BUZZ,
+            destination_workspace_id="chat.mlai.au",
+            destination_channel_id="a" * 32,
+            destination_channel_name="general",
+        )
+
+    def test_inspector_reports_payload_free_delivery_metadata(self):
+        receipt = CommunityBridgeReceipt.objects.create(
+            channel=self.channel,
+            platform=CommunityBridgePlatform.SLACK,
+            receipt_key="Ev-inspect-1",
+            event_type="message",
+            source_channel_id=self.channel.slack_channel_id,
+            source_message_id="1710000000.9000",
+            status=CommunityBridgeReceiptStatus.ENQUEUED,
+            queued_delivery_count=1,
+            payload={"event": {"text": "must not be reported"}},
+            processed_at=timezone.now(),
+        )
+        CommunityBridgeDelivery.objects.create(
+            channel=self.channel,
+            receipt=receipt,
+            target_platform=CommunityBridgePlatform.BUZZ,
+            source_platform=CommunityBridgePlatform.SLACK,
+            delivery_type=CommunityBridgeDeliveryType.CREATE,
+            status=CommunityBridgeDeliveryStatus.COMPLETED,
+            source_event_key=receipt.receipt_key,
+            source_channel_id=self.channel.slack_channel_id,
+            source_message_id=receipt.source_message_id,
+            target_channel_id=self.channel.destination_channel_id,
+            payload={"text": "must not be reported"},
+            available_at=timezone.now(),
+            completed_at=timezone.now(),
+        )
+        CommunityBridgeMessageLink.objects.create(
+            channel=self.channel,
+            source_platform=CommunityBridgePlatform.SLACK,
+            source_channel_id=self.channel.slack_channel_id,
+            source_message_id=receipt.source_message_id,
+            destination_platform=CommunityBridgePlatform.BUZZ,
+            destination_channel_id=self.channel.destination_channel_id,
+            destination_message_id="b" * 64,
+            source_payload={"text": "must not be reported"},
+        )
+
+        output = StringIO()
+        call_command(
+            "inspect_community_bridge",
+            slack_channel_id=self.channel.slack_channel_id,
+            slack_message_id=receipt.source_message_id,
+            stdout=output,
+        )
+        result = json.loads(output.getvalue())
+
+        self.assertEqual(result["status"], "found")
+        self.assertEqual(result["receipts"][0]["status"], CommunityBridgeReceiptStatus.ENQUEUED)
+        self.assertEqual(result["deliveries"][0]["status"], CommunityBridgeDeliveryStatus.COMPLETED)
+        self.assertEqual(result["message_links"][0]["destination_message_id"], "b" * 64)
+        self.assertNotIn("must not be reported", output.getvalue())
+
+    def test_inspector_reports_not_found_without_exposing_other_messages(self):
+        CommunityBridgeReceipt.objects.create(
+            channel=self.channel,
+            platform=CommunityBridgePlatform.SLACK,
+            receipt_key="Ev-other",
+            event_type="message",
+            source_channel_id=self.channel.slack_channel_id,
+            source_message_id="1710000001.1000",
+            payload={"event": {"text": "private payload"}},
+        )
+        output = StringIO()
+
+        call_command(
+            "inspect_community_bridge",
+            slack_channel_id=self.channel.slack_channel_id,
+            slack_message_id="1710000002.2000",
+            stdout=output,
+        )
+        result = json.loads(output.getvalue())
+
+        self.assertEqual(result["status"], "not_found")
+        self.assertEqual(result["receipts"], [])
+        self.assertEqual(result["recent_receipts"]["count"], 1)
+        self.assertNotIn("private payload", output.getvalue())
 
 
 @override_settings(
