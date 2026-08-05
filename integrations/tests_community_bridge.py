@@ -339,6 +339,47 @@ class SlackCommunityBridgeEventViewTests(TestCase):
         self.assertEqual(shared_message.data["status"], "ignored")
         self.assertEqual(CommunityBridgeDelivery.objects.count(), 0)
 
+    def test_mapped_private_channel_message_is_mirrored(self):
+        response = self._post(
+            {
+                "type": "event_callback",
+                "event_id": "EvPrivateChannel",
+                "event": {
+                    "type": "message",
+                    "channel_type": "group",
+                    "channel": self.channel.slack_channel_id,
+                    "user": "U12345",
+                    "ts": "1710000000.7000",
+                    "text": "private channel message",
+                },
+            }
+        )
+
+        self.assertEqual(response.data["status"], "enqueued")
+        delivery = CommunityBridgeDelivery.objects.get()
+        self.assertEqual(delivery.source_message_id, "1710000000.7000")
+        self.assertEqual(delivery.payload["text"], "private channel message")
+
+    def test_direct_messages_are_never_mirrored(self):
+        for index, channel_type in enumerate(("im", "mpim")):
+            response = self._post(
+                {
+                    "type": "event_callback",
+                    "event_id": f"EvDirectMessage{index}",
+                    "event": {
+                        "type": "message",
+                        "channel_type": channel_type,
+                        "channel": self.channel.slack_channel_id,
+                        "user": "U12345",
+                        "ts": f"1710000000.80{index}0",
+                        "text": "direct message",
+                    },
+                }
+            )
+            self.assertEqual(response.data["status"], "ignored", channel_type)
+
+        self.assertEqual(CommunityBridgeDelivery.objects.count(), 0)
+
     def test_mapping_capability_flags_fail_closed(self):
         self.channel.sync_edits = False
         self.channel.sync_deletes = False
