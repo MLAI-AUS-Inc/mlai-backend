@@ -300,6 +300,76 @@ class SlackCommunityBridgeEventViewTests(TestCase):
         self.assertEqual(receipt.status, CommunityBridgeReceiptStatus.IGNORED)
         self.assertEqual(CommunityBridgeDelivery.objects.count(), 0)
 
+    def test_hidden_plain_message_is_ignored(self):
+        response = self._post(
+            {
+                "type": "event_callback",
+                "event_id": "EvHiddenPlainMessage",
+                "event": {
+                    "type": "message",
+                    "channel_type": "channel",
+                    "channel": self.channel.slack_channel_id,
+                    "user": "U12345",
+                    "ts": "1710000000.3500",
+                    "text": "hidden create",
+                    "hidden": True,
+                },
+            }
+        )
+
+        self.assertEqual(response.data["status"], "ignored")
+        self.assertEqual(CommunityBridgeDelivery.objects.count(), 0)
+
+    def test_hidden_slack_edit_and_delete_events_are_enqueued(self):
+        edit = self._post(
+            {
+                "type": "event_callback",
+                "event_id": "EvHiddenMessageEdit",
+                "event": {
+                    "type": "message",
+                    "subtype": "message_changed",
+                    "channel_type": "channel",
+                    "channel": self.channel.slack_channel_id,
+                    "hidden": True,
+                    "message": {
+                        "ts": "1710000000.3600",
+                        "user": "U12345",
+                        "text": "edited message",
+                    },
+                },
+            }
+        )
+        delete = self._post(
+            {
+                "type": "event_callback",
+                "event_id": "EvHiddenMessageDelete",
+                "event": {
+                    "type": "message",
+                    "subtype": "message_deleted",
+                    "channel_type": "channel",
+                    "channel": self.channel.slack_channel_id,
+                    "hidden": True,
+                    "deleted_ts": "1710000000.3600",
+                    "previous_message": {
+                        "ts": "1710000000.3600",
+                        "user": "U12345",
+                    },
+                },
+            }
+        )
+
+        self.assertEqual(edit.data["status"], "enqueued")
+        self.assertEqual(delete.data["status"], "enqueued")
+        deliveries = list(CommunityBridgeDelivery.objects.order_by("id"))
+        self.assertEqual(
+            [delivery.delivery_type for delivery in deliveries],
+            [CommunityBridgeDeliveryType.EDIT, CommunityBridgeDeliveryType.DELETE],
+        )
+        self.assertEqual(
+            [delivery.source_message_id for delivery in deliveries],
+            ["1710000000.3600", "1710000000.3600"],
+        )
+
     def test_bridge_bot_delete_and_slack_connect_events_are_ignored(self):
         bot_delete = self._post(
             {
