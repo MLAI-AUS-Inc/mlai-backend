@@ -388,12 +388,12 @@ def _normalize_slack_event(payload: dict) -> Optional[dict]:
         return None
     if str(event.get("channel_type") or "").strip() not in BRIDGEABLE_SLACK_CHANNEL_TYPES:
         return None
-    if bool(event.get("hidden")):
-        return None
     if bool(event.get("is_ext_shared_channel")) or bool(event.get("is_shared")):
         return None
 
     subtype = str(event.get("subtype") or "").strip()
+    if bool(event.get("hidden")) and subtype not in {"message_changed", "message_deleted"}:
+        return None
     bridge_bot_user_id = str(getattr(settings, "SLACK_BRIDGE_BOT_USER_ID", "") or "").strip()
 
     if not subtype:
