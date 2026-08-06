@@ -102,7 +102,7 @@ run_batch() {
   local total="$2"
   seq 1 "${total}" | xargs -n 1 -P "${CONCURRENCY}" sh -c '
     started=$(date +%s%3N)
-    output=$(curl -sS -o /dev/null -H "Connection: close" -w "%{http_code}\t%{time_total}\t%{size_download}" --max-time "$1" "$2" 2>&1)
+    output=$(curl -sS -o /dev/null -H "Connection: close" -H "X-Forwarded-Proto: https" -w "%{http_code}\t%{time_total}\t%{size_download}" --max-time "$1" "$2" 2>&1)
     rc=$?
     ended=$(date +%s%3N)
     printf "%s\t%s\t%s\t%s\t%s\n" "$3" "$rc" "$ended" "$started" "$output"
