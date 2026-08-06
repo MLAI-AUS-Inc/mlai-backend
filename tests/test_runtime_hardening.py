@@ -18,6 +18,28 @@ class RuntimeHardeningConfigTests(SimpleTestCase):
                 return stripped.removeprefix("command:").strip()
         self.fail(f"Missing web command in {compose_filename}")
 
+    def _web_healthcheck_test(self, compose_filename):
+        lines = (ROOT / compose_filename).read_text().splitlines()
+        web_index = lines.index("  web:")
+        healthcheck_index = None
+        for index, line in enumerate(lines[web_index + 1:], start=web_index + 1):
+            if line.startswith("  ") and not line.startswith("    "):
+                break
+            if line == "    healthcheck:":
+                healthcheck_index = index
+                break
+
+        if healthcheck_index is None:
+            self.fail(f"Missing web healthcheck in {compose_filename}")
+
+        for line in lines[healthcheck_index + 1:]:
+            if line.startswith("    ") and not line.startswith("      "):
+                break
+            stripped = line.strip()
+            if stripped.startswith("test:"):
+                return stripped.removeprefix("test:").strip()
+        self.fail(f"Missing web healthcheck test in {compose_filename}")
+
     def test_production_gunicorn_config_uses_sync_workers_and_short_timeouts(self):
         compose = (ROOT / "docker-compose.yml").read_text()
         start_script = (ROOT / "scripts" / "start-web.sh").read_text()
@@ -49,12 +71,19 @@ class RuntimeHardeningConfigTests(SimpleTestCase):
         self.assertNotIn("collectstatic", start_script)
 
     def test_healthcheck_uses_proxy_tls_header_and_closes_connection(self):
-        compose = (ROOT / "docker-compose.yml").read_text()
+        healthcheck_test = self._web_healthcheck_test("docker-compose.yml")
 
-        self.assertIn("'Connection':'close'", compose)
-        self.assertIn("'X-Forwarded-Proto':'https'", compose)
-        self.assertIn("body=resp.read()", compose)
-        self.assertIn("resp.close()", compose)
+        self.assertIn("'http://127.0.0.1:8000/healthz/live'", healthcheck_test)
+        self.assertIn("'Connection':'close'", healthcheck_test)
+        self.assertIn("'X-Forwarded-Proto':'https'", healthcheck_test)
+        self.assertIn("body=resp.read()", healthcheck_test)
+        self.assertIn("resp.close()", healthcheck_test)
+
+    def test_backend_socket_smoke_uses_proxy_tls_header(self):
+        script = (ROOT / "ops" / "backend-socket-smoke.sh").read_text()
+
+        self.assertIn('URL="${URL:-http://127.0.0.1/healthz/ready}"', script)
+        self.assertIn('-H "Connection: close" -H "X-Forwarded-Proto: https"', script)
 
     def test_watchdog_has_restart_rate_limit(self):
         script = (ROOT / "ops" / "docker-health-watchdog.sh").read_text()
