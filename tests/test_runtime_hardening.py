@@ -48,10 +48,11 @@ class RuntimeHardeningConfigTests(SimpleTestCase):
         self.assertIn('${RUN_MIGRATIONS_ON_START:-0}', start_script)
         self.assertNotIn("collectstatic", start_script)
 
-    def test_healthcheck_closes_connection_after_reading_body(self):
+    def test_healthcheck_uses_proxy_tls_header_and_closes_connection(self):
         compose = (ROOT / "docker-compose.yml").read_text()
 
         self.assertIn("'Connection':'close'", compose)
+        self.assertIn("'X-Forwarded-Proto':'https'", compose)
         self.assertIn("body=resp.read()", compose)
         self.assertIn("resp.close()", compose)
 
