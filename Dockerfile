@@ -25,8 +25,11 @@ RUN pip install --no-cache-dir -r requirements-engine.txt
 
 COPY . /app/
 
-# Collect static files
-RUN python manage.py collectstatic --noinput
+# Collect static files with the same storage backend used at runtime. The
+# build-only flag avoids loading production secrets while still creating the
+# hashed manifest that Django Admin and DRF expect.
+RUN DJANGO_STATIC_BUILD=True python manage.py collectstatic --noinput \
+    && python -c "import json; manifest = json.load(open('/app/staticfiles/staticfiles.json')); paths = manifest.get('paths', {}); required = {'admin/css/base.css', 'rest_framework/css/bootstrap.min.css'}; missing = sorted(required - paths.keys()); assert not missing, f'Missing production static manifest entries: {missing}'"
 
 EXPOSE 8000
 
