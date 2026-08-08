@@ -678,40 +678,6 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
         echo "ℹ️ Skipping analytics-sync startup because the Umami analytics contract is not fully configured."
     fi
 
-    migration_applied() {
-        local app_label="\$1"
-        local migration_name="\$2"
-        compose_run_web python manage.py shell -c "
-from django.db.migrations.recorder import MigrationRecorder
-from django.db import connections
-recorder = MigrationRecorder(connections['default'])
-print('yes' if recorder.migration_qs.filter(app='\${app_label}', name='\${migration_name}').exists() else 'no')
-" | tail -n 1
-    }
-
-    inspect_stale_migration() {
-        local app_label="\$1"
-        local migration_name="\$2"
-        local file_path="\$3"
-        local applied
-
-        applied=\$(migration_applied "\$app_label" "\$migration_name" || echo no)
-        applied=\$(printf "%s\n" "\$applied" | tail -n 1)
-        if [ -f "\$file_path" ] && [ "\$applied" != "yes" ]; then
-            echo "🧹 Removing stale unapplied migration \$app_label.\$migration_name (\$file_path)"
-            rm -f "\$file_path"
-            return
-        fi
-
-        if [ ! -f "\$file_path" ] && [ "\$applied" = "yes" ]; then
-            echo "❌ Migration \$app_label.\$migration_name is applied in the database but the file is missing on disk."
-            echo "   Restore the migration file before redeploying so Django sees a consistent graph."
-            exit 1
-        fi
-
-        return 0
-    }
-
     docker network inspect mlai-shared >/dev/null 2>&1 || docker network create mlai-shared
 
     echo "🐘 Starting database..."
@@ -720,33 +686,15 @@ print('yes' if recorder.migration_qs.filter(app='\${app_label}', name='\${migrat
     echo "🏗️ Building runtime images: \${runtime_services[*]}..."
     docker compose build "\${runtime_services[@]}"
 
-    echo "🧱 Validating shared Redis security state..."
-    compose_run_web python manage.py validate_health_hack_ai_cache
-
-    echo "🔗 Validating production URL configuration and service connectivity..."
-    compose_run_web python manage.py validate_prod_urls --check-connectivity --warn-connectivity --timeout 8
-
-    echo "🧠 Validating organisational-memory provider governance..."
-    compose_run_web python manage.py validate_org_memory_governance --environment production
-
-    echo "🔎 Preflighting PostgreSQL full-text and vector support..."
-    compose_run_web python manage.py check_org_memory_search --require-vector
-
-    echo "🔐 Verifying GitHub App server credentials..."
-    compose_run_web python manage.py check_github_app_credentials
-
-    echo "🔍 Inspecting for stale generated migrations..."
-    inspect_stale_migration \
-        core \
-        0035_rename_cf_run_workflow_status_idx_content_fac_workflo_10aee3_idx_and_more \
-        core/migrations/0035_rename_cf_run_workflow_status_idx_content_fac_workflo_10aee3_idx_and_more.py
-    inspect_stale_migration \
-        roo \
-        0016_rename_roo_pointsr_status_8f1eab_idx_roo_pointsr_status_1880e1_idx_and_more \
-        roo/migrations/0016_rename_roo_pointsr_status_8f1eab_idx_roo_pointsr_status_1880e1_idx_and_more.py
-
-    echo "🗺️ Migration plan..."
-    compose_run_web python manage.py migrate --plan
+    # Every pre-migration gate (Redis security state, production URLs and
+    # service connectivity, memory provider governance, PostgreSQL vector
+    # support, GitHub App credentials) plus the migration plan, in one
+    # container. They used to be six separate compose-run invocations that
+    # spent ~35s on cold Django starts to do a few seconds of work.
+    # (No backticks in this heredoc: it is unquoted, so they would be
+    # command-substituted on the deploying runner.)
+    echo "🧪 Running deployment preflight..."
+    compose_run_web python manage.py deploy_preflight
 
     paused_runtime_services=(web memory-worker memory-scheduler community-email-worker)
     restore_runtime_on_error() {
@@ -761,8 +709,13 @@ print('yes' if recorder.migration_qs.filter(app='\${app_label}', name='\${migrat
     echo "🗄️ Running migrations..."
     compose_run_web python manage.py migrate --noinput
 
-    echo "✅ Verifying migration readiness..."
-    compose_run_web python manage.py migrate --check --noinput
+    # Migration readiness, vector installation, memory index rebuild, startup
+    # update schema, Vibe Raising upload routes, Firebase Storage CORS and the
+    # coworking booking guard, in one container. These were seven separate
+    # compose-run invocations, each paying a cold Django start while web was
+    # stopped — so the boot overhead was production downtime.
+    echo "✅ Running post-migration deployment checks..."
+    compose_run_web python manage.py deploy_postmigrate
 
     if [ "$bridge_present" -gt 0 ]; then
         echo "🌉 Upserting the reviewed Slack to MLAI Chat channel mapping..."
@@ -775,35 +728,6 @@ print('yes' if recorder.migration_qs.filter(app='\${app_label}', name='\${migrat
             --destination-channel-id "$BUZZ_BRIDGE_DESTINATION_CHANNEL_ID" \
             --destination-channel-name "$BUZZ_BRIDGE_DESTINATION_CHANNEL_NAME"
     fi
-
-    echo "🧠 Verifying vector installation and rebuilding memory text indexes..."
-    compose_run_web python manage.py check_org_memory_search --require-vector --require-installed
-    compose_run_web python manage.py rebuild_memory_search_vectors
-
-    echo "🧩 Verifying startup update schema..."
-    compose_run_web python manage.py validate_startup_update_schema
-
-    echo "🧭 Verifying Vibe Raising video upload routes..."
-    compose_run_web python manage.py shell -c "
-from django.urls import resolve
-resolve('/api/v1/vibe-raising/uploads/video/session/')
-resolve('/api/v1/vibe-raising/uploads/video/complete/')
-print('vibe raising video upload routes ok')
-"
-
-    echo "🎞️ Configuring Firebase Storage CORS for direct video uploads..."
-    compose_run_web python manage.py configure_firebase_storage_cors
-
-    echo "🔒 Verifying coworking booking concurrency guard..."
-    compose_run_web python manage.py shell -c "
-from django.db import connection
-with connection.cursor() as cursor:
-    cursor.execute(\"SELECT to_regclass('public.unique_active_booking_per_user_date')\")
-    index_name = cursor.fetchone()[0]
-if not index_name:
-    raise SystemExit('unique_active_booking_per_user_date is missing')
-print(index_name)
-"
 
     if [ "\$org_memory_production_deploy_enabled" = "true" ]; then
         approval_manifest="/root/mlai-backend-operations/pilot-approval.json"
@@ -850,26 +774,13 @@ PY
             --operator-email "\$stage_operator" \
             --apply
 
-        echo "🧹 Reconciling versionless source-access-restored dead letters..."
-        compose_run_web python manage.py reconcile_org_memory_access_restored_dead_letters \
-            --organization-domain mlai.au \
-            --provider google_drive \
-            --operator-email "\$stage_operator" \
-            --apply
-
-        echo "🧹 Reconciling consolidation jobs affected by the outer-join lock bug..."
-        compose_run_web python manage.py reconcile_org_memory_consolidation_lock_dead_letters \
-            --organization-domain mlai.au \
-            --provider google_drive \
-            --operator-email "\$stage_operator" \
-            --apply
-
-        echo "🧹 Reconciling timezone-less claim datetime extraction dead letters..."
-        compose_run_web python manage.py reconcile_org_memory_naive_datetime_dead_letters \
-            --organization-domain mlai.au \
-            --provider google_drive \
-            --operator-email "\$stage_operator" \
-            --apply
+        # One-shot repairs for the versionless source-access-restored, the
+        # consolidation outer-join lock, and the timezone-less claim datetime
+        # dead letters were removed here. They drained on the deploy that
+        # shipped them and have reported "candidates": 0 on every deploy since,
+        # so they only added cold-start time to the window where web is
+        # stopped. Their management commands are still available to run by hand
+        # if a matching backlog ever reappears.
 
         echo "🧹 Cancelling queued extraction work for superseded targets..."
         compose_run_web python manage.py cancel_org_memory_superseded_extraction_work \
@@ -885,53 +796,13 @@ PY
             --operator-email "\$stage_operator" \
             --apply
 
-        echo "🧹 Reconciling superseded Admin Brain extraction dead letters..."
-        compose_run_web python manage.py reconcile_org_memory_extraction_dead_letters \
-            --organization-domain mlai.au \
-            --provider google_drive \
-            --superseded-schema-version org-memory-extraction-schema-v1 \
-            --operator-email "\$stage_operator" \
-            --apply
-
-        echo "🧹 Reconciling superseded quote-grounding extraction dead letters..."
-        compose_run_web python manage.py reconcile_org_memory_extraction_dead_letters \
-            --organization-domain mlai.au \
-            --provider google_drive \
-            --superseded-schema-version org-memory-extraction-schema-v2 \
-            --superseded-extractor-version org-memory-extractor-v1 \
-            --superseded-prompt-version org-memory-extraction-prompt-v1 \
-            --operator-email "\$stage_operator" \
-            --apply
-
-        echo "🧹 Reconciling extractor-v2 jobs claimed during the previous deploy handoff..."
-        compose_run_web python manage.py reconcile_org_memory_extraction_dead_letters \
-            --organization-domain mlai.au \
-            --provider google_drive \
-            --superseded-schema-version org-memory-extraction-schema-v2 \
-            --superseded-extractor-version org-memory-extractor-v2 \
-            --superseded-prompt-version org-memory-extraction-prompt-v2 \
-            --operator-email "\$stage_operator" \
-            --apply
-
-        echo "🧹 Reconciling extractor-v3 transcript-safety dead letters..."
-        compose_run_web python manage.py reconcile_org_memory_extraction_dead_letters \
-            --organization-domain mlai.au \
-            --provider google_drive \
-            --superseded-schema-version org-memory-extraction-schema-v2 \
-            --superseded-extractor-version org-memory-extractor-v3 \
-            --superseded-prompt-version org-memory-extraction-prompt-v2 \
-            --operator-email "\$stage_operator" \
-            --apply
-
-        echo "🧹 Reconciling extractor-v4 attributed-transcript dead letters..."
-        compose_run_web python manage.py reconcile_org_memory_extraction_dead_letters \
-            --organization-domain mlai.au \
-            --provider google_drive \
-            --superseded-schema-version org-memory-extraction-schema-v2 \
-            --superseded-extractor-version org-memory-extractor-v4 \
-            --superseded-prompt-version org-memory-extraction-prompt-v2 \
-            --operator-email "\$stage_operator" \
-            --apply
+        # Five per-version extraction dead-letter reconciliations (schema-v1,
+        # then extractor-v1 through v4) were removed here. The deployed
+        # extractor is v5 and each of these has reported "candidates": 0 on
+        # every deploy since its own, so they repaired backlogs that no longer
+        # exist. When the extractor version is next bumped, add a single
+        # reconciliation for the version being superseded and delete it again
+        # once it has drained.
 
         echo "🧠 Scheduling the reviewed extractor-v5 target for current Drive evidence..."
         compose_run_web python manage.py schedule_org_memory_reextraction \

@@ -1,18 +1,18 @@
 from django.contrib.auth import get_user_model
 from django.db import connection
 from django.db.migrations.executor import MigrationExecutor
-from django.test import TransactionTestCase
+from django.test import TransactionTestCase, tag
 
 
+# Rewinding and replaying the org_memory graph rebuilds every affected table on
+# SQLite, which cost ~119s in the sqlite `checks` job — more than the other
+# ~1,050 tests combined. PostgreSQL is both the engine this migration actually
+# runs on in production and far cheaper to rewind, so this runs in the
+# postgres-search job and is excluded from the sqlite one by tag.
+@tag("postgres-only")
 class OrganizationAuthorizationMigrationTests(TransactionTestCase):
     migrate_from = [("org_memory", "0001_service_identity")]
     migrate_to = [("org_memory", "0002_organization_authorization")]
-    migrate_latest = [
-        (
-            "org_memory",
-            "0021_memory_selector_shadow",
-        )
-    ]
 
     def setUp(self):
         super().setUp()
@@ -46,7 +46,14 @@ class OrganizationAuthorizationMigrationTests(TransactionTestCase):
         self.apps = executor.loader.project_state(self.migrate_to).apps
 
     def tearDown(self):
-        MigrationExecutor(connection).migrate(self.migrate_latest)
+        # Rewinding org_memory to 0001 also unapplies migrations in the apps
+        # that depend on it, so the restore has to target every leaf in the
+        # graph rather than org_memory alone. Reading the leaves from the
+        # loader also keeps this from silently going stale: it was pinned to
+        # org_memory.0021 while the app had moved on to 0024, which left the
+        # database three migrations behind for anything running afterwards.
+        executor = MigrationExecutor(connection)
+        executor.migrate(executor.loader.graph.leaf_nodes())
         super().tearDown()
 
     def test_initial_capabilities_are_seeded_and_duplicate_legacy_users_fail_closed(self):

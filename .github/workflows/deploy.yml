@@ -124,6 +124,7 @@ jobs:
           tests.test_org_memory_production_deploy \
           tests.test_drive_transcript_inventory \
           tests.test_validate_prod_urls \
+          tests.test_deploy_command_wiring \
           tests.test_health_check \
           tests.test_content_factory_org_config \
           tests.test_new_endpoints.EndpointTests \
@@ -155,6 +156,7 @@ jobs:
           hospital.test_world_view \
           hospital.test_leaderboard_view \
           victor_ai \
+          --exclude-tag postgres-only \
           --verbosity 2
 
   postgres-search:
@@ -200,6 +202,7 @@ jobs:
         python manage.py test \
           org_memory.tests.test_search_postgres \
           org_memory.tests.test_runtime_postgres \
+          org_memory.tests.test_migrations \
           org_memory.tests.test_runtime.MemoryRuntimeTests.test_legacy_access_restored_dead_letters_get_version_pinned_replacements \
           org_memory.tests.test_consolidation.MemoryConsolidationTests.test_consolidation_work_payload_is_identifier_only_and_idempotent \
           org_memory.tests.test_activation.StrongGroundingActivationTests.test_existing_new_review_can_be_reconciled_after_reviewed_policy_allows_it \
