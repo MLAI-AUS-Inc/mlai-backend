@@ -15,6 +15,11 @@ from dotenv import load_dotenv
 import json
 import os
 import subprocess
+import sys
+
+# True when invoked via the Django test runner (`manage.py test ...`). Used to
+# relax rate throttles that would otherwise trip loop-heavy test suites.
+_RUNNING_TESTS = 'test' in sys.argv
 from datetime import timedelta
 from corsheaders.defaults import default_headers
 
@@ -443,6 +448,12 @@ REST_FRAMEWORK = {
         'watt_unity_ticket_redeem': os.getenv('WATT_UNITY_TICKET_REDEEM_RATE', '60/minute'),
         'public_knowledge': os.getenv('ORG_MEMORY_PUBLIC_RATE', '60/minute'),
         'org_memory_actions': os.getenv('ORG_MEMORY_ACTION_RATE', '30/minute'),
+        # Unauthenticated auth entry points (core.throttles). Bound
+        # credential-enumeration and magic-link email spam. Disabled under the
+        # test runner so suites that issue many auth calls in a loop aren't
+        # tripped; production/dev keep the limits.
+        'auth_endpoint': None if _RUNNING_TESTS else os.getenv('AUTH_ENDPOINT_RATE', '20/minute'),
+        'auth_magic_link': None if _RUNNING_TESTS else os.getenv('AUTH_MAGIC_LINK_RATE', '5/minute'),
         'community_chat_session': os.getenv('COMMUNITY_CHAT_SESSION_RATE', '120/minute'),
         'community_chat_challenge': os.getenv('COMMUNITY_CHAT_CHALLENGE_RATE', '20/minute'),
         'community_chat_invite': os.getenv('COMMUNITY_CHAT_INVITE_RATE', '10/minute'),

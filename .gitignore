@@ -62,6 +62,16 @@ db.sqlite3
 db.sqlite3-journal
 test.sqlite3
 *.sqlite3
+# SQLite WAL/SHM sidecar files: *.sqlite3 does NOT match the -wal/-shm/.db-
+# suffixed names, so these leaked into history previously. Match them explicitly.
+*.sqlite3-wal
+*.sqlite3-shm
+*.db-wal
+*.db-shm
+*.db
+# Exported auth cookies (contain live/session JWTs) must never be committed.
+cookies.txt
+*.cookies.txt
 
 # Project Markdown docs and notes
 /*.md
