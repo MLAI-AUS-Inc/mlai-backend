@@ -20,7 +20,7 @@ from community_chat.models import (
     CommunityChatEmailCodeDelivery,
     EmailCodeDeliveryStatus,
 )
-from community_chat.email_codes import code_digest
+from community_chat.email_codes import _locked_email_code_challenges, code_digest
 
 
 ORIGIN = "https://chat.mlai.au"
@@ -144,6 +144,12 @@ class CommunityChatEmailCodeAuthTests(APITestCase):
         replay = self.verify(requested.data["challenge_id"], code)
         self.assertEqual(replay.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(replay.data, {"error": "invalid_or_expired_code"})
+
+    def test_verification_locks_only_the_challenge_row(self):
+        queryset = _locked_email_code_challenges()
+
+        self.assertTrue(queryset.query.select_for_update)
+        self.assertEqual(queryset.query.select_for_update_of, ("self",))
 
     def test_fifth_incorrect_code_invalidates_challenge(self):
         requested = self.request_code()
