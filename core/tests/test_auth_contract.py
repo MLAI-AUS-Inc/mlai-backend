@@ -2,6 +2,7 @@ from unittest.mock import patch
 from urllib.parse import parse_qs, urlparse
 
 from django.contrib.auth import get_user_model
+from django.core.cache import cache
 from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
 
@@ -14,6 +15,9 @@ User = get_user_model()
 class AuthContractTests(TestCase):
     def setUp(self):
         self.client = APIClient()
+        # Reset DRF throttle history between tests so the auth-endpoint rate
+        # limits don't bleed across the many magic-link/check-user calls here.
+        cache.clear()
 
     def test_check_user_returns_true_for_existing_email(self):
         User.objects.create_user(email='existing@example.com', role='participant')
@@ -318,7 +322,8 @@ class AuthContractTests(TestCase):
         )
 
         self.assertEqual(response.status_code, 200)
-        self.assertTrue(response.data['user_exists'])
+        # Anti-enumeration: the response no longer exposes user_exists.
+        self.assertNotIn('user_exists', response.data)
         self.assertTrue(response.data['magic_link_sent'])
         mock_generate.assert_called_once_with(user, base_url='http://localhost:5173')
         mock_send.assert_called_once()
@@ -342,16 +347,20 @@ class AuthContractTests(TestCase):
 
     @override_settings(VIBE_RAISING_URL='http://localhost:5173')
     @patch('core.views.send_magic_link_email')
-    def test_send_magic_link_returns_missing_user_for_vibe_raising(self, mock_send):
+    def test_send_magic_link_does_not_disclose_missing_user(self, mock_send):
         response = self.client.post(
             '/api/v1/auth/send-magic-link/',
             {'email': 'new-vibe@example.com', 'app': 'vibe-raising', 'next': '/vibe-raising'},
             format='json',
         )
 
+        # Anti-enumeration: a non-existent email returns the SAME generic
+        # response as an existing one (no user_exists, no "User does not exist"),
+        # and no email is sent.
         self.assertEqual(response.status_code, 200)
-        self.assertFalse(response.data['user_exists'])
-        self.assertEqual(response.data['message'], 'User does not exist.')
+        self.assertNotIn('user_exists', response.data)
+        self.assertTrue(response.data['magic_link_sent'])
+        self.assertNotIn('does not exist', response.data['message'].lower())
         mock_send.assert_not_called()
 
     @override_settings(VIBE_RAISING_URL='http://localhost:5173')

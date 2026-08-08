@@ -43,6 +43,7 @@ from .serializers import (
 )
 from rest_framework.generics import ListAPIView, RetrieveAPIView, RetrieveUpdateAPIView
 from .permissions import IsOwnerOrTeammateOrSuperuser, HasAPIKey, HasRooApiKey
+from .throttles import AuthEndpointRateThrottle, MagicLinkSendRateThrottle
 from .user_compat import DEFAULT_USER_ROLE, get_compat_user_role, user_has_team
 
 User = get_user_model()
@@ -279,6 +280,10 @@ def _frontend_base_url(app_context):
 class CheckUserView(APIView):
     authentication_classes = []
     permission_classes = [permissions.AllowAny]
+    # check-user is an intentional existence oracle the passwordless login flow
+    # depends on (branch to signup vs magic link). It cannot be flattened without
+    # breaking that UX, so the mitigation is rate limiting the enumeration.
+    throttle_classes = [AuthEndpointRateThrottle]
 
     def post(self, request):
         data = request.data
@@ -306,6 +311,16 @@ class CheckUserView(APIView):
 class SendMagicLinkView(APIView):
     authentication_classes = []
     permission_classes = [permissions.AllowAny]
+    throttle_classes = [MagicLinkSendRateThrottle]
+
+    # Generic response returned regardless of whether the account exists, so this
+    # endpoint is not an enumeration oracle. The login frontend only reads
+    # `magic_link_sent`/`message` here (it branches to signup off the separate
+    # check-user endpoint), so a constant response is safe for that flow.
+    _GENERIC_RESPONSE = {
+        "magic_link_sent": True,
+        "message": "If an account exists for this email, a magic link has been sent.",
+    }
 
     def post(self, request):
         data = request.data
@@ -317,48 +332,39 @@ class SendMagicLinkView(APIView):
         next_path = _normalize_next_path_for_app(requested_next_path, app)
         if _invalid_operations_next_path(requested_next_path, next_path, app):
             return _invalid_next_path_response()
-        
+
         if not email:
             return Response({"error": "Email is required."}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
             user = User.objects.filter(email__iexact=email).first()
 
+            # Admin-surface gates are preserved. They gate on privilege, not on
+            # existence, and return an identical response for every non-admin
+            # (existent or not), so they remain non-enumerating.
             if app == 'admin' and not _is_operations_admin(user):
                 return _operations_admin_only_response()
 
-            if not user:
-                # User does not exist, return specific response to frontend
-                return Response(
-                    {"user_exists": False, "message": "User does not exist."}, 
-                    status=status.HTTP_200_OK
-                )
-
             if _healthhack_admin_only_requested(data, app) and not (
-                user.is_active and user.is_superuser
+                user and user.is_active and user.is_superuser
             ):
                 return _healthhack_admin_only_response()
 
-            # User exists, send magic link
-            if not user.is_active:
-                # Optionally handle inactive users differently, but for now we'll allow them to re-verify
-                pass
+            # Only send when the account exists, but return an identical generic
+            # response either way so callers cannot distinguish the two cases.
+            if user:
+                base_url = _frontend_base_url(app)
+                magic_link = generate_magic_link(user, base_url=base_url)
+                magic_link = _append_auth_query_params(magic_link, app, next_path=next_path)
+                # A magic link is a bearer credential. Never emit the link or its
+                # signed token—or the destination email—into application logs.
+                logger.info("Generated magic link for user_id=%s app=%s", user.id, app)
+                send_magic_link_email(user, magic_link, message_id="2")
+                logger.info("Sent magic link to existing user_id=%s app=%s", user.id, app)
+            else:
+                logger.info("send-magic-link requested for non-existent email (suppressed) app=%s", app)
 
-            base_url = _frontend_base_url(app)
-
-            magic_link = generate_magic_link(user, base_url=base_url)
-            magic_link = _append_auth_query_params(magic_link, app, next_path=next_path)
-
-            # A magic link is a bearer credential. Never emit the link or its
-            # signed token—or the destination email—into application logs.
-            logger.info("Generated magic link for user_id=%s app=%s", user.id, app)
-            send_magic_link_email(user, magic_link, message_id="2")
-            logger.info("Sent magic link to existing user_id=%s app=%s", user.id, app)
-
-            return Response(
-                {"user_exists": True, "magic_link_sent": True, "message": "Magic link sent to your email."},
-                status=status.HTTP_200_OK
-            )
+            return Response(self._GENERIC_RESPONSE, status=status.HTTP_200_OK)
 
         except Exception as e:
             logger.exception(f"Error in SendMagicLinkView: {str(e)}")
@@ -368,6 +374,7 @@ class SendMagicLinkView(APIView):
 class CreateUserView(APIView):
     authentication_classes = []
     permission_classes = [permissions.AllowAny]
+    throttle_classes = [AuthEndpointRateThrottle]
 
     def post(self, request):
         data = request.data
@@ -455,6 +462,7 @@ class MagicLinkVerifyView(APIView):
     """
     authentication_classes = []
     permission_classes = [AllowAny]
+    throttle_classes = [AuthEndpointRateThrottle]
 
     def get(self, request):
         token = request.query_params.get('token')
