@@ -1061,6 +1061,36 @@ PY
         exit 1
     fi
 
+    echo "🛠️ Verifying external Django admin assets..."
+    admin_login_ok=0
+    for attempt in \$(seq 1 12); do
+        if curl -fsS \
+            -o /dev/null \
+            'https://api.mlai.au/admin/login/?next=%2Fadmin%2F'; then
+            admin_login_ok=1
+            break
+        fi
+        sleep 5
+    done
+    if [ "\$admin_login_ok" != "1" ]; then
+        echo "Expected Django admin login page to return HTTP 200"
+        exit 1
+    fi
+
+    admin_css_path=\$(
+        docker compose exec -T web python manage.py shell -c \
+            'from django.contrib.staticfiles.storage import staticfiles_storage; print(staticfiles_storage.url("admin/css/base.css"))' \
+            </dev/null | tail -n 1
+    )
+    case "\$admin_css_path" in
+        /*) ;;
+        *) admin_css_path="/\$admin_css_path" ;;
+    esac
+    if ! curl -fsS -o /dev/null "https://api.mlai.au\$admin_css_path"; then
+        echo "Expected Django admin stylesheet to be reachable at \$admin_css_path"
+        exit 1
+    fi
+
     echo "🌐 Verifying external Vibe Raising video upload CORS preflight..."
     preflight_headers=\$(mktemp)
     cors_ok=0
