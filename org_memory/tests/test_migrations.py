@@ -4,11 +4,13 @@ from django.db.migrations.executor import MigrationExecutor
 from django.test import TransactionTestCase, tag
 
 
-# Rewinding and replaying the org_memory graph rebuilds every affected table on
-# SQLite, which cost ~119s in the sqlite `checks` job — more than the other
-# ~1,050 tests combined. PostgreSQL is both the engine this migration actually
-# runs on in production and far cheaper to rewind, so this runs in the
-# postgres-search job and is excluded from the sqlite one by tag.
+# Rewinding the org_memory graph to 0001 and replaying it costs ~116s, which
+# was more than the other ~1,050 tests in the `checks` job combined. Measured
+# on both engines, that cost is the number of migration operations rather than
+# the engine — PostgreSQL is no cheaper than SQLite here — so it cannot be
+# optimised away by relocating it. It gets its own parallel CI job instead, on
+# PostgreSQL because that is the engine the migration runs on in production.
+# The tag keeps it out of the SQLite `checks` job.
 @tag("postgres-only")
 class OrganizationAuthorizationMigrationTests(TransactionTestCase):
     migrate_from = [("org_memory", "0001_service_identity")]
