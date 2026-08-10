@@ -60,6 +60,7 @@ class CanonicalBridgeEvent:
     source_parent_message_id: str = ""
     source_author_id: str = ""
     source_author_display_name: str = ""
+    source_author_avatar_url: str = ""
     text: str = ""
     attachments: Sequence[BridgeAttachment] = field(default_factory=tuple)
     metadata: Mapping[str, Any] = field(default_factory=dict)
@@ -104,6 +105,14 @@ class CanonicalBridgeEvent:
                 255,
             ),
         )
+        avatar_url = _optional_text(
+            self.source_author_avatar_url,
+            "source_author_avatar_url",
+            2048,
+        )
+        if avatar_url and not avatar_url.startswith("https://"):
+            raise ValueError("source_author_avatar_url must use https")
+        object.__setattr__(self, "source_author_avatar_url", avatar_url)
         if delivery_type == "delete" and (self.text or self.attachments):
             raise ValueError("delete events must not retain message content")
 
@@ -115,6 +124,7 @@ class CanonicalBridgeEvent:
             "source_parent_message_id": str(self.source_parent_message_id or "").strip(),
             "source_author_id": str(self.source_author_id or "").strip(),
             "source_author_display_name": str(self.source_author_display_name or "").strip(),
+            "source_author_avatar_url": str(self.source_author_avatar_url or "").strip(),
             "text": str(self.text or ""),
             "attachments": [attachment.as_payload() for attachment in self.attachments],
             "metadata": dict(self.metadata or {}),

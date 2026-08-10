@@ -3,6 +3,7 @@ import hmac
 import logging
 import time
 from typing import Optional
+from urllib.parse import urlparse
 
 from django.conf import settings
 from slack_sdk import WebClient
@@ -14,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 class SlackBridgeClient:
     _client: Optional[WebClient] = None
-    _display_name_cache: dict[str, str] = {}
+    _profile_cache: dict[str, dict[str, str]] = {}
 
     @classmethod
     def is_configured(cls) -> bool:
@@ -48,17 +49,21 @@ class SlackBridgeClient:
 
     @classmethod
     def get_user_display_name(cls, user_id: str) -> str:
+        return cls.get_user_profile(user_id)["display_name"]
+
+    @classmethod
+    def get_user_profile(cls, user_id: str) -> dict[str, str]:
         normalized_user_id = str(user_id or "").strip()
         if not normalized_user_id:
-            return "Unknown user"
-        cached = cls._display_name_cache.get(normalized_user_id)
+            return {"display_name": "Unknown user", "avatar_url": ""}
+        cached = cls._profile_cache.get(normalized_user_id)
         if cached:
-            return cached
+            return dict(cached)
         client = cls.get_client()
         try:
             response = client.users_info(user=normalized_user_id)
             if not response.get("ok"):
-                return normalized_user_id
+                return {"display_name": normalized_user_id, "avatar_url": ""}
             user = response.get("user") or {}
             profile = user.get("profile") or {}
             display_name = (
@@ -67,15 +72,17 @@ class SlackBridgeClient:
                 or str(user.get("real_name") or "").strip()
                 or normalized_user_id
             )
-            cls._display_name_cache[normalized_user_id] = display_name
-            return display_name
+            avatar_url = cls._approved_avatar_url(profile)
+            resolved = {"display_name": display_name, "avatar_url": avatar_url}
+            cls._profile_cache[normalized_user_id] = resolved
+            return dict(resolved)
         except SlackApiError as exc:
             logger.warning(
                 "community_bridge_slack_user_lookup_failed user_id=%s error=%s",
                 normalized_user_id,
                 exc.response.get("error"),
             )
-            return normalized_user_id
+            return {"display_name": normalized_user_id, "avatar_url": ""}
         except Exception as exc:
             logger.warning(
                 "community_bridge_slack_user_lookup_failed user_id=%s exc_type=%s exc=%r",
@@ -83,7 +90,27 @@ class SlackBridgeClient:
                 exc.__class__.__name__,
                 exc,
             )
-            return normalized_user_id
+            return {"display_name": normalized_user_id, "avatar_url": ""}
+
+    @staticmethod
+    def _approved_avatar_url(profile: dict) -> str:
+        for field_name in ("image_192", "image_512", "image_72", "image_48", "image_original"):
+            value = str(profile.get(field_name) or "").strip()
+            if not value or len(value) > 2048:
+                continue
+            parsed = urlparse(value)
+            host = str(parsed.hostname or "").lower()
+            is_slack_cdn = host == "avatars.slack-edge.com"
+            is_gravatar = host == "secure.gravatar.com"
+            if (
+                parsed.scheme == "https"
+                and parsed.netloc
+                and not parsed.username
+                and not parsed.password
+                and (is_slack_cdn or is_gravatar)
+            ):
+                return value
+        return ""
 
     @classmethod
     def post_message(
