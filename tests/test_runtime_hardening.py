@@ -148,7 +148,20 @@ class RuntimeHardeningConfigTests(SimpleTestCase):
             deploy,
         )
         self.assertIn('docker compose stop "\\${paused_runtime_services[@]}"', deploy)
-        self.assertIn("unique_active_booking_per_user_date is missing", deploy)
+
+        # The coworking booking guard is still verified on every deploy, but it
+        # now lives in deploy_postmigrate alongside the other post-migration
+        # checks instead of in its own `manage.py shell` container.
+        self.assertIn("compose_run_web python manage.py deploy_postmigrate", deploy)
+        postmigrate = (
+            ROOT / "core" / "management" / "commands" / "deploy_postmigrate.py"
+        ).read_text()
+        self.assertIn("unique_active_booking_per_user_date", postmigrate)
+        self.assertIn("to_regclass", postmigrate)
+        self.assertLess(
+            deploy.index('docker compose stop "\\${paused_runtime_services[@]}"'),
+            deploy.index("compose_run_web python manage.py deploy_postmigrate"),
+        )
         self.assertIn(
             'runtime_services=(web scheduler memory-worker memory-scheduler community-email-worker)',
             deploy,
@@ -191,8 +204,11 @@ class RuntimeHardeningConfigTests(SimpleTestCase):
         )
         self.assertIn('docker compose stop bridge-worker || true', deploy)
         self.assertIn('docker compose rm -f bridge-worker || true', deploy)
+        # deploy_postmigrate verifies migration readiness as its first step, so
+        # the bridge mapping still cannot be written against a half-migrated
+        # database.
         self.assertLess(
-            deploy.index("compose_run_web python manage.py migrate --check --noinput"),
+            deploy.index("compose_run_web python manage.py deploy_postmigrate"),
             deploy.index("compose_run_web python manage.py upsert_community_bridge_channel"),
         )
         self.assertLess(
