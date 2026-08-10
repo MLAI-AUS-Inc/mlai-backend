@@ -740,7 +740,11 @@ class SessionView(APIView):
 
 
 class ChallengeView(APIView):
-    authentication_classes = AUTHENTICATION_CLASSES
+    # Browser reloads restore the durable, device-bound account session after
+    # the one-use bootstrap token has been consumed. Accept that session for
+    # re-enrollment while `_require_token_key` and the origin checks below keep
+    # every request bound to the same key, installation, client, and origin.
+    authentication_classes = ACCOUNT_AUTHENTICATION_CLASSES
     permission_classes = [IsAuthenticated]
     throttle_classes = [CommunityChatScopedThrottle]
     community_chat_throttle_scope = "community_chat_challenge"
@@ -815,7 +819,7 @@ class ChallengeView(APIView):
 
 
 class InviteView(APIView):
-    authentication_classes = AUTHENTICATION_CLASSES
+    authentication_classes = ACCOUNT_AUTHENTICATION_CLASSES
     permission_classes = [IsAuthenticated]
     throttle_classes = [CommunityChatScopedThrottle]
     community_chat_throttle_scope = "community_chat_invite"
@@ -934,7 +938,7 @@ class InviteView(APIView):
 
 
 class ConfirmView(APIView):
-    authentication_classes = AUTHENTICATION_CLASSES
+    authentication_classes = ACCOUNT_AUTHENTICATION_CLASSES
     permission_classes = [IsAuthenticated]
     throttle_classes = [CommunityChatScopedThrottle]
     community_chat_throttle_scope = "community_chat_confirm"
