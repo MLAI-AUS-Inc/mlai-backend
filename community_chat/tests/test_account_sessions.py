@@ -12,8 +12,10 @@ from rest_framework import status
 from rest_framework.test import APIClient
 
 from community_chat.account_sessions import issue_account_session
+from community_chat.adapter import RelayMembership
 from community_chat.models import (
     CommunityChatAccountSession,
+    CommunityChatChallenge,
     CommunityChatDevice,
     CommunityChatEmailCodeChallenge,
     DeviceBindingStatus,
@@ -59,6 +61,24 @@ class CommunityChatAccountSessionTests(TestCase):
             HTTP_AUTHORIZATION=f"Bearer {token or self.credentials.access_token}"
         )
         return client
+
+    def web_session(self, private_int=51):
+        challenge = CommunityChatEmailCodeChallenge.objects.create(
+            user=self.user,
+            email_digest="d" * 64,
+            code_digest="e" * 64,
+            client_id="mlai-chat-web",
+            installation_id=uuid.uuid4(),
+            origin=ORIGIN,
+            platform="web",
+            device_name="Chrome",
+            public_key=public_key(private_int),
+            expires_at=timezone.now() + timedelta(minutes=10),
+        )
+        credentials = issue_account_session(self.user, challenge)
+        client = APIClient()
+        client.cookies["mlai_chat_access"] = credentials.access_token
+        return challenge, credentials, client
 
     def test_tokens_are_hashed_and_account_endpoint_returns_own_profile(self):
         session = self.credentials.session
@@ -220,6 +240,67 @@ class CommunityChatAccountSessionTests(TestCase):
         self.assertNotIn("access_token", accepted.data["session"])
         self.assertIn("mlai_chat_access", accepted.cookies)
         self.assertIn("mlai_chat_refresh", accepted.cookies)
+
+    @patch("community_chat.views.get_relay_membership")
+    def test_web_cookie_session_reconfirms_verified_device_after_reload(
+        self,
+        mock_membership,
+    ):
+        challenge, _, client = self.web_session()
+        device = CommunityChatDevice.objects.create(
+            user=self.user,
+            public_key=challenge.public_key,
+            installation_id=challenge.installation_id,
+            client_id=challenge.client_id,
+            platform=challenge.platform,
+            status=DeviceBindingStatus.VERIFIED,
+            verified_at=timezone.now(),
+        )
+        mock_membership.return_value = RelayMembership(True, "member", timezone.now())
+
+        response = client.post(
+            reverse("community_chat_confirm"),
+            {"origin": ORIGIN, "public_key": challenge.public_key},
+            format="json",
+            HTTP_ORIGIN=ORIGIN,
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["status"], "verified")
+        device.refresh_from_db()
+        self.assertIsNotNone(device.last_seen_at)
+
+    def test_web_cookie_session_can_resume_device_enrollment_after_reload(self):
+        challenge, _, client = self.web_session(private_int=52)
+
+        response = client.post(
+            reverse("community_chat_challenge"),
+            {"origin": ORIGIN, "public_key": challenge.public_key},
+            format="json",
+            HTTP_ORIGIN=ORIGIN,
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        enrollment = CommunityChatChallenge.objects.get(
+            id=response.data["challenge_id"]
+        )
+        self.assertEqual(enrollment.user, self.user)
+        self.assertEqual(enrollment.public_key, challenge.public_key)
+        self.assertEqual(enrollment.installation_id, challenge.installation_id)
+        self.assertEqual(enrollment.client_id, challenge.client_id)
+
+    def test_web_cookie_session_cannot_enroll_a_different_device_key(self):
+        _, _, client = self.web_session(private_int=53)
+
+        response = client.post(
+            reverse("community_chat_challenge"),
+            {"origin": ORIGIN, "public_key": public_key(54)},
+            format="json",
+            HTTP_ORIGIN=ORIGIN,
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertFalse(CommunityChatChallenge.objects.exists())
 
     def test_expired_access_is_rejected_while_refresh_remains_valid(self):
         CommunityChatAccountSession.objects.filter(id=self.credentials.session.id).update(
