@@ -7,6 +7,7 @@ from .views import (
     RateCardView, AdminAllowanceView, PointsRequestViewSet, PointsPurchaseViewSet,
     PointsPacksView, CurrentUserPurchaseView,
     StripeWebhookView, SystemAwardView, BoostPostAdmissionView,
+    CommitteeCandidateEmailsView,
     # Activity views
     ChannelActivityView, FirstChannelPostAwardView,
     # Quest views
@@ -38,6 +39,15 @@ urlpatterns = [
     # ============================================================
     path('me/balance/', CurrentUserBalanceView.as_view(), name='current-user-balance'),
     path('users/<str:pk>/balance/', UserBalanceViewSet.as_view({'get': 'retrieve'}), name='user-balance'),
+
+    # ============================================================
+    # Committee candidate email export
+    # ============================================================
+    path(
+        'committee-candidates/emails/',
+        CommitteeCandidateEmailsView.as_view(),
+        name='committee-candidate-emails',
+    ),
     
     # ============================================================
     # Coworking

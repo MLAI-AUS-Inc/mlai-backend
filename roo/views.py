@@ -23,7 +23,7 @@ from typing import Optional, Tuple
 from .models import (
     PointsAdmin, Minter, Task, Ledger, PointsAccount, BoostPostAdmission,
     TaskAssignment, TaskSubmission, CoworkingBooking, CoworkingDayCapacity,
-    RewardsCatalog, RewardRedemption, TaskTemplate, PointsRequest, PointsPurchase
+    RewardsCatalog, RewardRedemption, TaskTemplate, PointsRequest, PointsPurchase,
 )
 
 from .services import (
@@ -32,12 +32,14 @@ from .services import (
     TaskService, RewardsService,
 )
 from .permissions import (
+    can_list_committee_candidate_emails,
     can_generate_coworking_reports,
     is_points_admin,
     is_points_super_admin,
     InsufficientBalanceError,
     PermissionDeniedError,
 )
+from .committee_candidates import CommitteeCandidateEmailService
 from core.models import User
 from core.permissions import HasAPIKey, HasRooApiKey, HasStrictRooApiKey
 from integrations.services import SlackService
@@ -1197,6 +1199,29 @@ class CurrentUserBalanceView(APIView):
             },
             status=status.HTTP_200_OK,
         )
+
+
+class CommitteeCandidateEmailsView(APIView):
+    """Return a private, copy-ready list of eligible member emails."""
+
+    permission_classes = [HasStrictRooApiKey]
+
+    def post(self, request):
+        requester_slack_id = clean_slack_id(request.data.get('requester_slack_id'))
+        if not requester_slack_id:
+            return Response(
+                {'code': 'requester_required', 'error': 'requester_slack_id is required'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not can_list_committee_candidate_emails(requester_slack_id):
+            return Response(
+                {
+                    'code': 'committee_admin_only',
+                    'error': 'Only active admin or committee Points Admins can list candidate emails',
+                },
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        return Response(CommitteeCandidateEmailService.list_emails())
 
 
 class BoostPostAdmissionView(APIView):

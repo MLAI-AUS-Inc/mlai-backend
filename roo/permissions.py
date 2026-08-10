@@ -12,6 +12,7 @@ POINTS_SUPER_ADMIN_SLACK_ID = "U05QPB483K9"
 FULL_POINTS_ADMIN_ROLES = ("admin", "committee", "portfolio_lead")
 COWORKING_REPORT_ROLES = (*FULL_POINTS_ADMIN_ROLES, "partner")
 LUMA_EXPORT_ROLES = ("admin", "committee", "partner")
+COMMITTEE_CANDIDATE_EMAIL_ROLES = ("admin", "committee")
 
 
 def _clean_slack_id(slack_id: str) -> str:
@@ -110,6 +111,15 @@ def can_export_luma_attendees(slack_id: str) -> bool:
         return True
 
     return _active_admin_with_role_exists(slack_id, LUMA_EXPORT_ROLES)
+
+
+def can_list_committee_candidate_emails(slack_id: str) -> bool:
+    """Allow active admin and committee roles to access candidate emails."""
+    slack_id = _clean_slack_id(slack_id)
+    if not slack_id:
+        return False
+
+    return _active_admin_with_role_exists(slack_id, COMMITTEE_CANDIDATE_EMAIL_ROLES)
 
 
 def is_points_super_admin(slack_id: str) -> bool:
