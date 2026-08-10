@@ -135,6 +135,7 @@ jobs:
           content_factory.tests_admin_metrics \
           tests.test_community_bridge_adapter_url \
           integrations.tests_community_bridge \
+          integrations.tests_community_bridge_avatar_backfill \
           integrations.tests_community_bridge_contracts \
           core.tests.test_auth_contract \
           tests.test_runtime_hardening \
