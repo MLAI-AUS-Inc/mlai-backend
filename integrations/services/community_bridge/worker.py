@@ -433,11 +433,35 @@ class CommunityBridgeDiscordClient(discord.Client):
             slack_workspace_id=slack_workspace_id,
             slack_user_id=source_author_id,
         )
+        author_display_name = str(payload.get("source_author_display_name") or "").strip()
+        author_avatar_url = str(payload.get("source_author_avatar_url") or "").strip()
+        if (
+            delivery["source_platform"] == CommunityBridgePlatform.SLACK
+            and source_author_id
+            and operation
+            in {
+                CommunityBridgeDeliveryType.CREATE,
+                CommunityBridgeDeliveryType.EDIT,
+            }
+            and (not author_display_name or not author_avatar_url)
+        ):
+            slack_profile = await asyncio.to_thread(
+                SlackBridgeClient.get_user_profile,
+                source_author_id,
+            )
+            author_display_name = author_display_name or str(
+                slack_profile.get("display_name") or ""
+            ).strip()
+            author_avatar_url = author_avatar_url or str(
+                slack_profile.get("avatar_url") or ""
+            ).strip()
         provenance = {
             "source_workspace_id": slack_workspace_id,
             "source_channel_id": delivery["source_channel_id"],
             "source_message_id": provenance_message_id,
             "source_author_id": source_author_id,
+            "source_author_display_name": author_display_name,
+            "source_author_avatar_url": author_avatar_url,
             "linked_pubkey": str((identity or {}).get("buzz_pubkey") or ""),
         }
         text = ""
@@ -446,11 +470,12 @@ class CommunityBridgeDiscordClient(discord.Client):
             CommunityBridgeDeliveryType.REACTION_ADD,
             CommunityBridgeDeliveryType.REACTION_REMOVE,
         }:
-            author_display_name = await self._resolve_author_display_name(
-                payload,
-                source_platform=delivery["source_platform"],
-                channel=channel,
-            )
+            if not author_display_name:
+                author_display_name = await self._resolve_author_display_name(
+                    payload,
+                    source_platform=delivery["source_platform"],
+                    channel=channel,
+                )
             text = build_mirrored_text(
                 destination_platform=CommunityBridgePlatform.BUZZ,
                 source_platform=delivery["source_platform"],

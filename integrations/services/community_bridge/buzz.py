@@ -59,6 +59,8 @@ class BuzzBridgeClient:
         source_channel_id: str = "",
         source_message_id: str = "",
         source_author_id: str = "",
+        source_author_display_name: str = "",
+        source_author_avatar_url: str = "",
         linked_pubkey: str = "",
     ) -> dict:
         adapter_url = cls._validated_adapter_url()
@@ -77,6 +79,8 @@ class BuzzBridgeClient:
             "source_channel_id": str(source_channel_id or ""),
             "source_message_id": str(source_message_id or ""),
             "source_author_id": str(source_author_id or ""),
+            "source_author_display_name": str(source_author_display_name or "") or None,
+            "source_author_avatar_url": str(source_author_avatar_url or "") or None,
             "linked_pubkey": str(linked_pubkey or "") or None,
         }
         timeout = max(1, min(int(getattr(settings, "BUZZ_BRIDGE_ADAPTER_TIMEOUT_SECONDS", 15)), 60))

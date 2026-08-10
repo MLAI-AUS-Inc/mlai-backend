@@ -40,6 +40,7 @@ from integrations.services.community_bridge.buzz import (
     BuzzBridgeClient,
     BuzzBridgePermanentError,
 )
+from integrations.services.community_bridge.slack import SlackBridgeClient
 from integrations.services.community_bridge.worker import CommunityBridgeDiscordClient
 from integrations.services.community_bridge.identity import (
     verified_identity_for_buzz,
@@ -48,6 +49,52 @@ from integrations.services.community_bridge.identity import (
 
 
 User = get_user_model()
+
+
+class SlackBridgeClientProfileTests(TestCase):
+    def setUp(self):
+        SlackBridgeClient._profile_cache.clear()
+
+    def tearDown(self):
+        SlackBridgeClient._profile_cache.clear()
+
+    @patch("integrations.services.community_bridge.slack.SlackBridgeClient.get_client")
+    def test_profile_resolves_display_name_and_approved_avatar_once(self, mock_get_client):
+        mock_get_client.return_value.users_info.return_value = {
+            "ok": True,
+            "user": {
+                "profile": {
+                    "display_name": "Alice Nguyen",
+                    "real_name": "Alice N.",
+                    "image_192": "https://avatars.slack-edge.com/2026-08-10/alice_192.png",
+                }
+            },
+        }
+
+        expected = {
+            "display_name": "Alice Nguyen",
+            "avatar_url": "https://avatars.slack-edge.com/2026-08-10/alice_192.png",
+        }
+        self.assertEqual(SlackBridgeClient.get_user_profile("U123"), expected)
+        self.assertEqual(SlackBridgeClient.get_user_profile("U123"), expected)
+        mock_get_client.return_value.users_info.assert_called_once_with(user="U123")
+
+    @patch("integrations.services.community_bridge.slack.SlackBridgeClient.get_client")
+    def test_profile_rejects_unapproved_avatar_host(self, mock_get_client):
+        mock_get_client.return_value.users_info.return_value = {
+            "ok": True,
+            "user": {
+                "profile": {
+                    "display_name": "Alice",
+                    "image_192": "https://evil.example/alice.png",
+                }
+            },
+        }
+
+        self.assertEqual(
+            SlackBridgeClient.get_user_profile("U123"),
+            {"display_name": "Alice", "avatar_url": ""},
+        )
 
 
 class _FakeSentMessage:
@@ -829,6 +876,8 @@ class BuzzBridgeClientTests(TestCase):
             source_channel_id="C-MLAI-CHAT",
             source_message_id="1710000000.1000",
             source_author_id="U123",
+            source_author_display_name="Alice Nguyen",
+            source_author_avatar_url="https://avatars.slack-edge.com/2026-08-10/alice_192.png",
             linked_pubkey="9" * 64,
         )
 
@@ -839,6 +888,11 @@ class BuzzBridgeClientTests(TestCase):
         self.assertEqual(call.kwargs["json"]["delivery_id"], "42")
         self.assertEqual(call.kwargs["json"]["created_at"], 1785568000)
         self.assertEqual(call.kwargs["json"]["source_workspace_id"], "T-MLAI")
+        self.assertEqual(call.kwargs["json"]["source_author_display_name"], "Alice Nguyen")
+        self.assertEqual(
+            call.kwargs["json"]["source_author_avatar_url"],
+            "https://avatars.slack-edge.com/2026-08-10/alice_192.png",
+        )
         self.assertEqual(call.kwargs["json"]["linked_pubkey"], "9" * 64)
         self.assertEqual(call.kwargs["timeout"], 12)
 
@@ -1219,8 +1273,15 @@ class BuzzCommunityBridgeWorkerTests(TransactionTestCase):
             available_at=timezone.now(),
         )
 
+    @patch(
+        "integrations.services.community_bridge.worker.SlackBridgeClient.get_user_profile",
+        return_value={
+            "display_name": "Alice Nguyen",
+            "avatar_url": "https://avatars.slack-edge.com/2026-08-10/alice_192.png",
+        },
+    )
     @patch("integrations.services.community_bridge.worker.BuzzBridgeClient.deliver")
-    def test_create_preserves_reply_and_creates_message_link(self, mock_deliver):
+    def test_create_preserves_reply_and_creates_message_link(self, mock_deliver, _mock_profile):
         parent_event_id = "1" * 64
         CommunityBridgeMessageLink.objects.create(
             channel=self.channel,
@@ -1255,6 +1316,11 @@ class BuzzCommunityBridgeWorkerTests(TransactionTestCase):
         self.assertEqual(kwargs["source_channel_id"], self.channel.slack_channel_id)
         self.assertEqual(kwargs["source_message_id"], "1710000000.2000")
         self.assertEqual(kwargs["source_author_id"], "U123")
+        self.assertEqual(kwargs["source_author_display_name"], "Alice")
+        self.assertEqual(
+            kwargs["source_author_avatar_url"],
+            "https://avatars.slack-edge.com/2026-08-10/alice_192.png",
+        )
         self.assertEqual(kwargs["linked_pubkey"], "9" * 64)
         link = resolve_message_link(
             source_platform=CommunityBridgePlatform.SLACK,
