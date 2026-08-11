@@ -1,7 +1,8 @@
 import uuid
-from datetime import timedelta
+from datetime import timedelta, timezone as datetime_timezone
 
 from django.conf import settings
+from django.core.exceptions import ValidationError
 from django.db import models
 from django.db.models import Q
 from django.utils import timezone
@@ -508,6 +509,7 @@ class Ledger(models.Model):
     SOURCE_CHOICES = (
         ('TASK', 'Task'),
         ('COWORKING', 'Coworking'),
+        ('MEETING_ROOM', 'Meeting Room'),
         ('EVENT', 'Event'),
         ('MERCH', 'Merch'),
         ('CONTENT_FACTORY', 'Content Factory'),
@@ -852,6 +854,143 @@ class CoworkingBooking(models.Model):
 
     def __str__(self):
         return f"{self.user.email} - {self.date} ({self.status})"
+
+
+class MeetingRoom(models.Model):
+    """A reservable room managed by Roo."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    slug = models.SlugField(max_length=80, unique=True)
+    name = models.CharField(max_length=120)
+    is_active = models.BooleanField(default=True, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['name', 'id']
+
+    def __str__(self):
+        return self.name
+
+
+class MeetingRoomBooking(models.Model):
+    """An exclusive, points-backed reservation for a meeting room."""
+
+    STATUS_CHOICES = (
+        ('booked', 'Booked'),
+        ('cancelled', 'Cancelled'),
+    )
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    room = models.ForeignKey(
+        MeetingRoom,
+        on_delete=models.PROTECT,
+        related_name='bookings',
+    )
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='meeting_room_bookings',
+    )
+    starts_at = models.DateTimeField()
+    ends_at = models.DateTimeField()
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='booked')
+    points_cost = models.PositiveIntegerField()
+    client_request_id = models.UUIDField(unique=True)
+    ledger_entry = models.ForeignKey(
+        Ledger,
+        on_delete=models.SET_NULL,
+        blank=True,
+        null=True,
+        related_name='meeting_room_booking',
+    )
+    refund_ledger_entry = models.ForeignKey(
+        Ledger,
+        on_delete=models.SET_NULL,
+        blank=True,
+        null=True,
+        related_name='meeting_room_refund',
+    )
+    requested_by_slack_id = models.CharField(max_length=50)
+    slack_channel_id = models.CharField(max_length=50, blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    cancelled_at = models.DateTimeField(blank=True, null=True)
+
+    class Meta:
+        ordering = ['starts_at', 'id']
+        indexes = [
+            models.Index(
+                fields=['room', 'status', 'starts_at', 'ends_at'],
+                name='roo_room_time_status_idx',
+            ),
+            models.Index(
+                fields=['user', 'status', 'starts_at'],
+                name='roo_room_user_start_idx',
+            ),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                check=models.Q(ends_at__gt=models.F('starts_at')),
+                name='meeting_room_booking_end_after_start',
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.room.name}: {self.starts_at} - {self.ends_at}"
+
+
+class MeetingRoomBlock(models.Model):
+    """An operations-managed period when a meeting room is unavailable."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    room = models.ForeignKey(
+        MeetingRoom,
+        on_delete=models.CASCADE,
+        related_name='blocks',
+    )
+    starts_at = models.DateTimeField()
+    ends_at = models.DateTimeField()
+    reason = models.CharField(max_length=255, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['starts_at', 'id']
+        indexes = [
+            models.Index(
+                fields=['room', 'starts_at', 'ends_at'],
+                name='roo_room_block_time_idx',
+            ),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                check=models.Q(ends_at__gt=models.F('starts_at')),
+                name='meeting_room_block_end_after_start',
+            ),
+        ]
+
+    def clean(self):
+        super().clean()
+        invalid_interval = not self.starts_at or not self.ends_at
+        if not invalid_interval:
+            invalid_interval = (
+                self.ends_at.astimezone(datetime_timezone.utc)
+                <= self.starts_at.astimezone(datetime_timezone.utc)
+            )
+        if invalid_interval:
+            raise ValidationError({'ends_at': 'End time must be after start time.'})
+        if MeetingRoomBooking.objects.filter(
+            room=self.room,
+            status='booked',
+            starts_at__lt=self.ends_at,
+            ends_at__gt=self.starts_at,
+        ).exists():
+            raise ValidationError(
+                'This block overlaps an active meeting-room booking.'
+            )
+
+    def __str__(self):
+        return f"{self.room.name}: unavailable {self.starts_at} - {self.ends_at}"
 
 
 class RewardsCatalog(models.Model):

@@ -1,8 +1,11 @@
 from django.contrib import admin
+from django.db import transaction
 from django.utils.html import format_html
+from .meeting_rooms import MeetingRoomService
 from .models import (
     PointsAdmin, Minter, Task, Ledger, PointsAccount, PointsPurchase, BoostPostAdmission,
     TaskSubmission, CoworkingBooking, CoworkingDayCapacity,
+    MeetingRoom, MeetingRoomBlock, MeetingRoomBooking,
     RewardsCatalog, RewardRedemption, TaskTemplate, QuestProgress,
 )
 
@@ -211,6 +214,54 @@ class CoworkingBookingAdmin(admin.ModelAdmin):
     search_fields = ('user__email', 'user__slack_id')
     readonly_fields = ('id', 'created_at', 'ledger_entry', 'refund_ledger_entry')
     ordering = ('-date',)
+
+
+@admin.register(MeetingRoom)
+class MeetingRoomAdmin(admin.ModelAdmin):
+    list_display = ('name', 'slug', 'is_active', 'updated_at')
+    list_editable = ('is_active',)
+    search_fields = ('name', 'slug')
+    readonly_fields = ('id', 'created_at', 'updated_at')
+    ordering = ('name',)
+
+
+@admin.register(MeetingRoomBlock)
+class MeetingRoomBlockAdmin(admin.ModelAdmin):
+    list_display = ('room', 'starts_at', 'ends_at', 'reason', 'created_at')
+    list_filter = ('room', 'starts_at')
+    search_fields = ('room__name', 'reason')
+    readonly_fields = ('id', 'created_at', 'updated_at')
+    ordering = ('starts_at',)
+
+    def save_model(self, request, obj, form, change):
+        with transaction.atomic():
+            MeetingRoomService.lock_room_interval(
+                room=obj.room,
+                starts_at=obj.starts_at,
+                ends_at=obj.ends_at,
+            )
+            obj.full_clean()
+            super().save_model(request, obj, form, change)
+
+
+@admin.register(MeetingRoomBooking)
+class MeetingRoomBookingAdmin(admin.ModelAdmin):
+    list_display = (
+        'id', 'room', 'user', 'starts_at', 'ends_at', 'status',
+        'points_cost', 'created_at',
+    )
+    list_filter = ('room', 'status', 'starts_at')
+    search_fields = (
+        'id', 'client_request_id', 'user__email', 'user__slack_id',
+    )
+    readonly_fields = [field.name for field in MeetingRoomBooking._meta.fields]
+    ordering = ('-starts_at',)
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
 
 
 @admin.register(TaskTemplate)

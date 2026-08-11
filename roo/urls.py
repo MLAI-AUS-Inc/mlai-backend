@@ -21,6 +21,13 @@ from .coding_views import (
     CodingCallFailView,
     CodingCallSettleView,
 )
+from .meeting_room_views import (
+    MeetingRoomAvailabilityView,
+    MeetingRoomBookView,
+    MeetingRoomCancelView,
+    MeetingRoomListView,
+    MyMeetingRoomBookingsView,
+)
 
 router = DefaultRouter()
 router.register(r'admins', PointsAdminViewSet, basename='points-admin')
@@ -59,6 +66,27 @@ urlpatterns = [
         'committee-candidates/emails/',
         CommitteeCandidateEmailsView.as_view(),
         name='committee-candidate-emails',
+    ),
+
+    # ============================================================
+    # Meeting room booking
+    # ============================================================
+    path('meeting-rooms/rooms/', MeetingRoomListView.as_view(), name='meeting-room-list'),
+    path(
+        'meeting-rooms/availability/',
+        MeetingRoomAvailabilityView.as_view(),
+        name='meeting-room-availability',
+    ),
+    path('meeting-rooms/book/', MeetingRoomBookView.as_view(), name='meeting-room-book'),
+    path(
+        'meeting-rooms/my-bookings/',
+        MyMeetingRoomBookingsView.as_view(),
+        name='meeting-room-my-bookings',
+    ),
+    path(
+        'meeting-rooms/cancel/',
+        MeetingRoomCancelView.as_view(),
+        name='meeting-room-cancel',
     ),
     
     # ============================================================

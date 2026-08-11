@@ -1417,6 +1417,23 @@ COWORKING_DAY_DISCOUNT_COST_POINTS = int(os.getenv('COWORKING_DAY_DISCOUNT_COST_
 COWORKING_REFUND_CUTOFF_HOURS = int(os.getenv('COWORKING_REFUND_CUTOFF_HOURS', '18'))  # 6pm prev day
 COWORKING_BOOKING_ADVANCE_DAYS = int(os.environ.get('COWORKING_BOOKING_ADVANCE_DAYS', 30))
 
+# Roo meeting-room booking. Deploy the backend and Roo support first, then
+# enable this flag once the seeded room has been verified in production.
+MEETING_ROOM_BOOKING_ENABLED = _env_is_true('MEETING_ROOM_BOOKING_ENABLED', False)
+MEETING_ROOM_BOOKING_ADVANCE_DAYS = int(
+    os.environ.get('MEETING_ROOM_BOOKING_ADVANCE_DAYS', 30)
+)
+MEETING_ROOM_MAX_BOOKING_HOURS = int(
+    os.environ.get('MEETING_ROOM_MAX_BOOKING_HOURS', 4)
+)
+MEETING_ROOM_DAILY_MEMBER_HOURS = int(
+    os.environ.get('MEETING_ROOM_DAILY_MEMBER_HOURS', 4)
+)
+MEETING_ROOM_TIMEZONE = os.environ.get(
+    'MEETING_ROOM_TIMEZONE',
+    'Australia/Melbourne',
+).strip()
+
 # Internal API Key for service-to-service auth (e.g. from Roo agent)
 MLAI_API_KEY = os.environ.get('MLAI_API_KEY')
 INTERNAL_API_KEY = os.environ.get('INTERNAL_API_KEY') or ROO_API_KEY or MLAI_API_KEY
