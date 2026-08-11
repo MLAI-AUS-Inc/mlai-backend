@@ -1270,11 +1270,25 @@ class BoostPostAdmissionView(APIView):
             request.data.get('social_post_url') or ''
         ).strip()[:2048]
         root_text = str(request.data.get('root_text') or '')[:10000]
+        recheck_insufficient_points = request.data.get(
+            'recheck_insufficient_points',
+            False,
+        )
+        if not isinstance(recheck_insufficient_points, bool):
+            return Response(
+                {
+                    'status': 'invalid_post',
+                    'code': 'invalid_post',
+                    'message': 'recheck_insufficient_points must be a boolean',
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         try:
             admission, created = BoostPostAdmissionService.admit(
                 **values,
                 root_text=root_text,
+                recheck_insufficient_points=recheck_insufficient_points,
             )
         except InvalidBoostPostError as exc:
             return Response(
@@ -1297,6 +1311,7 @@ class BoostPostAdmissionView(APIView):
 
         data = self._response(admission)
         data['idempotent_replay'] = not created
+        data['recheck_requested'] = recheck_insufficient_points
         if admission.status == 'approved':
             return Response(
                 data,
