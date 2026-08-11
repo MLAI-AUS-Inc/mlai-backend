@@ -113,8 +113,9 @@ author's image.
 
 The command is dry-run by default. It only considers undeleted Slack-to-Buzz
 message links in enabled mappings with edit synchronisation enabled. It excludes
-links created after the supplied cutover and messages that already received a
-successful bridge edit after that cutover.
+reaction receipt links, links created after the supplied cutover, and messages
+that already received a successful bridge edit after that cutover. Slack message
+IDs must have the native timestamp form (`digits.digits`).
 
 Run a dry-run first:
 

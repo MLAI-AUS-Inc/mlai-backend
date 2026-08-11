@@ -137,9 +137,15 @@ jobs:
               CommunityBridgePlatform,
           )
 
-          deliveries = Delivery.objects.filter(
+          all_backfill_deliveries = Delivery.objects.filter(
               source_event_key__startswith="slack-avatar-backfill-v1:"
           )
+          deliveries = all_backfill_deliveries.filter(
+              source_message_id__regex=r"^\d+\.\d+$"
+          )
+          excluded_non_message_count = all_backfill_deliveries.exclude(
+              source_message_id__regex=r"^\d+\.\d+$"
+          ).count()
           counts = list(
               deliveries.values("status")
               .annotate(count=Count("id"))
@@ -192,6 +198,7 @@ jobs:
                   {
                       "backfill_dead_delivery_fingerprints": fingerprints,
                       "backfill_delivery_status_counts": counts,
+                      "backfill_excluded_non_message_count": excluded_non_message_count,
                   },
                   sort_keys=True,
               )
