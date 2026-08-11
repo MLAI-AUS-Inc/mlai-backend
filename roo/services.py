@@ -1364,6 +1364,7 @@ class BoostPostAdmissionService:
         poster_slack_id: str,
         root_text: str,
         social_post_url: str,
+        recheck_insufficient_points: bool = False,
     ) -> tuple[BoostPostAdmission, bool]:
         # Campaign content is not an admission rule. Keep the first URL only as
         # optional metadata while points balance remains the sole business gate.
@@ -1399,6 +1400,10 @@ class BoostPostAdmissionService:
             raise BoostPostPayloadConflictError(
                 'submission_key is already bound to a different Slack root'
             )
+        if admission.status == 'insufficient_points' and recheck_insufficient_points:
+            admission.status = 'processing'
+            admission.rejection_message = ''
+            admission.save(update_fields=['status', 'rejection_message', 'updated_at'])
         if admission.status != 'processing':
             return admission, False
 
