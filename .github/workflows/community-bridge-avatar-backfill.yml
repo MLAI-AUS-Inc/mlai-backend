@@ -140,11 +140,11 @@ jobs:
           all_backfill_deliveries = Delivery.objects.filter(
               source_event_key__startswith="slack-avatar-backfill-v1:"
           )
-          deliveries = all_backfill_deliveries.filter(
-              source_message_id__regex=r"^[0-9]+[.][0-9]+$"
+          deliveries = all_backfill_deliveries.exclude(
+              source_message_id__startswith="reaction:"
           )
-          excluded_non_message_count = all_backfill_deliveries.exclude(
-              source_message_id__regex=r"^[0-9]+[.][0-9]+$"
+          excluded_reaction_count = all_backfill_deliveries.filter(
+              source_message_id__startswith="reaction:"
           ).count()
           counts = list(
               deliveries.values("status")
@@ -198,7 +198,7 @@ jobs:
                   {
                       "backfill_dead_delivery_fingerprints": fingerprints,
                       "backfill_delivery_status_counts": counts,
-                      "backfill_excluded_non_message_count": excluded_non_message_count,
+                      "backfill_excluded_reaction_count": excluded_reaction_count,
                   },
                   sort_keys=True,
               )

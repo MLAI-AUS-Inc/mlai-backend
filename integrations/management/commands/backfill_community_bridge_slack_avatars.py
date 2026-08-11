@@ -23,7 +23,7 @@ from integrations.services.community_bridge.contracts import (
 from integrations.services.community_bridge.slack import SlackBridgeClient
 
 BACKFILL_VERSION = "slack-avatar-backfill-v1"
-SLACK_MESSAGE_ID_REGEX = r"^[0-9]+[.][0-9]+$"
+REACTION_MESSAGE_ID_PREFIX = "reaction:"
 
 
 class Command(BaseCommand):
@@ -197,13 +197,13 @@ class Command(BaseCommand):
                 created_at__lt=cutoff,
                 source_platform=CommunityBridgePlatform.SLACK,
                 destination_platform=CommunityBridgePlatform.BUZZ,
-                source_message_id__regex=SLACK_MESSAGE_ID_REGEX,
                 source_deleted_at__isnull=True,
                 destination_deleted_at__isnull=True,
                 channel__enabled=True,
                 channel__sync_edits=True,
                 channel__destination_platform=CommunityBridgePlatform.BUZZ,
             )
+            .exclude(source_message_id__startswith=REACTION_MESSAGE_ID_PREFIX)
             .exclude(source_author_id="")
             .annotate(has_post_cutover_edit=Exists(post_cutover_edit))
             .filter(has_post_cutover_edit=False)
