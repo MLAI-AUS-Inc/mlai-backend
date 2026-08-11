@@ -122,7 +122,9 @@ jobs:
           if [[ "$mode" == "apply" ]]; then
             args+=(--apply --confirm-historical-edits)
           fi
-          docker compose exec -T web "${args[@]}"
+          docker compose exec -T web "${args[@]}" </dev/null
+          status_query='import json; from django.db.models import Count; from integrations.models import CommunityBridgeDelivery as Delivery; counts = list(Delivery.objects.filter(source_event_key__startswith="slack-avatar-backfill-v1:").values("status").annotate(count=Count("id")).order_by("status")); print(json.dumps({"backfill_delivery_status_counts": counts}, sort_keys=True))'
+          docker compose exec -T web python manage.py shell -c "$status_query" </dev/null
           docker compose ps web bridge-worker
-          docker compose logs --since 5m --tail 200 bridge-worker
+          docker compose logs --since 10m --tail 200 bridge-worker
           REMOTE
