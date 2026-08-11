@@ -125,6 +125,7 @@ jobs:
           docker compose exec -T web "${args[@]}" </dev/null
           docker compose exec -T web python manage.py shell <<'PY'
           import json
+          import unicodedata
           from urllib.parse import urlparse
 
           from django.db.models import Count, OuterRef, Subquery
@@ -175,7 +176,8 @@ jobs:
                       "avatar_host": urlparse(avatar_url).hostname or "",
                       "avatar_url_length": len(avatar_url),
                       "display_name_has_control": any(
-                          character.iscontrol() for character in display_name
+                          unicodedata.category(character) == "Cc"
+                          for character in display_name
                       ),
                       "display_name_length": len(display_name),
                       "source_author_id": str(payload.get("source_author_id") or ""),
