@@ -23,7 +23,7 @@ from integrations.services.community_bridge.contracts import (
 from integrations.services.community_bridge.slack import SlackBridgeClient
 
 BACKFILL_VERSION = "slack-avatar-backfill-v1"
-SLACK_MESSAGE_ID_REGEX = r"^\d+\.\d+$"
+SLACK_MESSAGE_ID_REGEX = r"^[0-9]+[.][0-9]+$"
 
 
 class Command(BaseCommand):

@@ -141,10 +141,10 @@ jobs:
               source_event_key__startswith="slack-avatar-backfill-v1:"
           )
           deliveries = all_backfill_deliveries.filter(
-              source_message_id__regex=r"^\d+\.\d+$"
+              source_message_id__regex=r"^[0-9]+[.][0-9]+$"
           )
           excluded_non_message_count = all_backfill_deliveries.exclude(
-              source_message_id__regex=r"^\d+\.\d+$"
+              source_message_id__regex=r"^[0-9]+[.][0-9]+$"
           ).count()
           counts = list(
               deliveries.values("status")
