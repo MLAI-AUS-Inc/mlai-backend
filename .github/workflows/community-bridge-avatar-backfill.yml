@@ -122,7 +122,88 @@ jobs:
           if [[ "$mode" == "apply" ]]; then
             args+=(--apply --confirm-historical-edits)
           fi
-          docker compose exec -T web "${args[@]}"
+          docker compose exec -T web "${args[@]}" </dev/null
+          docker compose exec -T web python manage.py shell <<'PY'
+          import json
+          import unicodedata
+          from urllib.parse import urlparse
+
+          from django.db.models import Count, OuterRef, Subquery
+
+          from integrations.models import (
+              CommunityBridgeDelivery as Delivery,
+              CommunityBridgeDeliveryStatus,
+              CommunityBridgeMessageLink as MessageLink,
+              CommunityBridgePlatform,
+          )
+
+          all_backfill_deliveries = Delivery.objects.filter(
+              source_event_key__startswith="slack-avatar-backfill-v1:"
+          )
+          deliveries = all_backfill_deliveries.exclude(
+              source_message_id__startswith="reaction:"
+          )
+          excluded_reaction_count = all_backfill_deliveries.filter(
+              source_message_id__startswith="reaction:"
+          ).count()
+          counts = list(
+              deliveries.values("status")
+              .annotate(count=Count("id"))
+              .order_by("status")
+          )
+          target_event = MessageLink.objects.filter(
+              channel_id=OuterRef("channel_id"),
+              source_platform=CommunityBridgePlatform.SLACK,
+              source_channel_id=OuterRef("source_channel_id"),
+              source_message_id=OuterRef("source_message_id"),
+              destination_platform=CommunityBridgePlatform.BUZZ,
+          ).values("destination_message_id")[:1]
+          dead_rows = list(
+              deliveries.filter(status=CommunityBridgeDeliveryStatus.DEAD)
+              .annotate(target_event_id=Subquery(target_event))
+              .values(
+                  "id",
+                  "source_channel_id",
+                  "source_message_id",
+                  "target_channel_id",
+                  "target_event_id",
+                  "payload",
+              )
+              .order_by("id")
+          )
+          fingerprints = []
+          for row in dead_rows:
+              payload = dict(row.pop("payload") or {})
+              avatar_url = str(payload.get("source_author_avatar_url") or "")
+              display_name = str(payload.get("source_author_display_name") or "")
+              target_event_id = str(row.get("target_event_id") or "")
+              row.update(
+                  {
+                      "avatar_host": urlparse(avatar_url).hostname or "",
+                      "avatar_url_length": len(avatar_url),
+                      "display_name_has_control": any(
+                          unicodedata.category(character) == "Cc"
+                          for character in display_name
+                      ),
+                      "display_name_length": len(display_name),
+                      "source_author_id": str(payload.get("source_author_id") or ""),
+                      "target_event_id_is_hex64": len(target_event_id) == 64
+                      and all(character in "0123456789abcdef" for character in target_event_id),
+                      "text_length": len(str(payload.get("text") or "")),
+                  }
+              )
+              fingerprints.append(row)
+          print(
+              json.dumps(
+                  {
+                      "backfill_dead_delivery_fingerprints": fingerprints,
+                      "backfill_delivery_status_counts": counts,
+                      "backfill_excluded_reaction_count": excluded_reaction_count,
+                  },
+                  sort_keys=True,
+              )
+          )
+          PY
           docker compose ps web bridge-worker
-          docker compose logs --since 5m --tail 200 bridge-worker
+          docker compose logs --since 10m --tail 200 bridge-worker
           REMOTE

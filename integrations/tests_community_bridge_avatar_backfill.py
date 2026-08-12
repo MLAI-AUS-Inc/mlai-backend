@@ -223,6 +223,25 @@ class BackfillCommunityBridgeSlackAvatarsTests(TestCase):
         "integrations.management.commands.backfill_community_bridge_slack_avatars."
         "SlackBridgeClient.get_user_profile"
     )
+    def test_skips_non_message_links_such_as_reactions(self, mock_profile):
+        self._link(message_id="reaction:receipt-key")
+
+        stdout = StringIO()
+        call_command(
+            "backfill_community_bridge_slack_avatars",
+            before=CUTOVER.isoformat(),
+            stdout=stdout,
+        )
+
+        report = json.loads(stdout.getvalue())
+        self.assertEqual(report["candidate_count"], 0)
+        self.assertEqual(report["scanned"], 0)
+        mock_profile.assert_not_called()
+
+    @patch(
+        "integrations.management.commands.backfill_community_bridge_slack_avatars."
+        "SlackBridgeClient.get_user_profile"
+    )
     def test_skips_profiles_without_an_approved_avatar(self, mock_profile):
         mock_profile.return_value = {
             "display_name": "Alice Nguyen",
