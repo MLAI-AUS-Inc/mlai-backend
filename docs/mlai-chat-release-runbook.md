@@ -17,6 +17,7 @@ python manage.py test \
   core.tests.test_auth_contract \
   integrations.tests_community_bridge \
   integrations.tests_community_bridge_avatar_backfill \
+  integrations.tests_community_bridge_mention_backfill \
   integrations.tests_community_bridge_contracts \
   community_chat.tests \
   tests.test_runtime_hardening \
@@ -158,6 +159,43 @@ Operators without direct production SSH access can dispatch the restricted
 `Backfill production community bridge Slack avatars` GitHub Actions workflow.
 It applies the same validation, dry-run default, explicit apply confirmation,
 batch cursor, and single-channel restriction.
+
+## One-off Slack mention backfill
+
+New Slack events retain their inline user/channel references until the bridge
+worker resolves them with the scoped bot token. The worker caches `users.info`
+and `conversations.info` results, emits plain `@Display Name` and `#channel-name`
+text, and falls back to `@user`/`#channel` without exposing provider IDs when a
+lookup is unavailable.
+
+Messages mirrored before this behavior was deployed can be repaired while the
+raw Slack receipt is still inside the retention window. The command is dry-run
+by default, never guesses from generic placeholder text, and enqueues
+idempotent edit deliveries only when retained Slack markup resolves to a
+different body:
+
+```sh
+docker compose exec -T web python manage.py \
+  backfill_community_bridge_slack_mentions \
+  --limit 100
+```
+
+Apply in controlled batches, using `last_scanned_link_id` from each JSON report:
+
+```sh
+docker compose exec -T web python manage.py \
+  backfill_community_bridge_slack_mentions \
+  --after-link-id <last_scanned_link_id> \
+  --limit 100 \
+  --apply \
+  --confirm-historical-edits
+```
+
+Use repeated `--slack-channel-id` arguments to restrict a run. Stop and inspect
+bridge-worker retries/dead letters after every batch. A
+`no_retained_slack_markup` result means the raw receipt has expired or the
+original message did not contain a Slack user/channel reference; the command
+does not rewrite those rows.
 
 ## Deployment order
 

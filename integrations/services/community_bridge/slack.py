@@ -9,6 +9,8 @@ from django.conf import settings
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
+from integrations.services.community_bridge.formatting import sanitize_slack_text
+
 
 logger = logging.getLogger(__name__)
 
@@ -16,6 +18,7 @@ logger = logging.getLogger(__name__)
 class SlackBridgeClient:
     _client: Optional[WebClient] = None
     _profile_cache: dict[str, dict[str, str]] = {}
+    _channel_name_cache: dict[str, str] = {}
 
     @classmethod
     def is_configured(cls) -> bool:
@@ -91,6 +94,46 @@ class SlackBridgeClient:
                 exc,
             )
             return {"display_name": normalized_user_id, "avatar_url": ""}
+
+    @classmethod
+    def get_channel_display_name(cls, channel_id: str) -> str:
+        normalized_channel_id = str(channel_id or "").strip()
+        if not normalized_channel_id:
+            return ""
+        cached = cls._channel_name_cache.get(normalized_channel_id)
+        if cached:
+            return cached
+        try:
+            response = cls.get_client().conversations_info(channel=normalized_channel_id)
+            if not response.get("ok"):
+                return normalized_channel_id
+            channel = response.get("channel") or {}
+            display_name = str(channel.get("name") or "").strip() or normalized_channel_id
+            cls._channel_name_cache[normalized_channel_id] = display_name
+            return display_name
+        except SlackApiError as exc:
+            logger.warning(
+                "community_bridge_slack_channel_lookup_failed channel_id=%s error=%s",
+                normalized_channel_id,
+                exc.response.get("error"),
+            )
+            return normalized_channel_id
+        except Exception as exc:
+            logger.warning(
+                "community_bridge_slack_channel_lookup_failed channel_id=%s exc_type=%s exc=%r",
+                normalized_channel_id,
+                exc.__class__.__name__,
+                exc,
+            )
+            return normalized_channel_id
+
+    @classmethod
+    def resolve_message_text(cls, value: str) -> str:
+        return sanitize_slack_text(
+            value,
+            user_name_resolver=cls.get_user_display_name,
+            channel_name_resolver=cls.get_channel_display_name,
+        )
 
     @staticmethod
     def _approved_avatar_url(profile: dict) -> str:

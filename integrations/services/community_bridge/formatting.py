@@ -1,12 +1,12 @@
 import html
 import hashlib
 import re
-from typing import Iterable, Optional
+from typing import Callable, Iterable, Optional
 
 from integrations.models import CommunityBridgePlatform
 
 
-SLACK_USER_MENTION_RE = re.compile(r"<@[^>]+>")
+SLACK_USER_MENTION_RE = re.compile(r"<@([^>]+)>")
 SLACK_CHANNEL_MENTION_RE = re.compile(r"<#([^>|]+)\|?([^>]*)>")
 SLACK_SPECIAL_MENTION_RE = re.compile(r"<!([^>|]+)\|?([^>]*)>")
 SLACK_LINK_RE = re.compile(r"<((?:https?|mailto):[^>|]+)\|?([^>]*)>")
@@ -57,13 +57,38 @@ def reaction_object_id(*, message_id: str, reaction: str, author_id: str) -> str
     return "reaction:" + hashlib.sha256(material).hexdigest()
 
 
-def sanitize_slack_text(value: str) -> str:
+def sanitize_slack_text(
+    value: str,
+    *,
+    user_name_resolver: Optional[Callable[[str], str]] = None,
+    channel_name_resolver: Optional[Callable[[str], str]] = None,
+) -> str:
     text = html.unescape(str(value or ""))
     text = SLACK_LINK_RE.sub(_replace_slack_link, text)
-    text = SLACK_CHANNEL_MENTION_RE.sub(_replace_slack_channel, text)
+    text = SLACK_CHANNEL_MENTION_RE.sub(
+        lambda match: _replace_slack_channel(
+            match,
+            channel_name_resolver=channel_name_resolver,
+        ),
+        text,
+    )
     text = SLACK_SPECIAL_MENTION_RE.sub(_replace_slack_special_mention, text)
-    text = SLACK_USER_MENTION_RE.sub("@user", text)
+    text = SLACK_USER_MENTION_RE.sub(
+        lambda match: _replace_slack_user(
+            match,
+            user_name_resolver=user_name_resolver,
+        ),
+        text,
+    )
     return _strip_trailing_whitespace(text)
+
+
+def has_slack_entity_references(value: str) -> bool:
+    text = str(value or "")
+    return bool(
+        SLACK_USER_MENTION_RE.search(text)
+        or SLACK_CHANNEL_MENTION_RE.search(text)
+    )
 
 
 def sanitize_discord_text(value: str) -> str:
@@ -164,11 +189,43 @@ def _replace_slack_link(match: re.Match) -> str:
     return f"{label} ({url})"
 
 
-def _replace_slack_channel(match: re.Match) -> str:
+def _replace_slack_user(
+    match: re.Match,
+    *,
+    user_name_resolver: Optional[Callable[[str], str]],
+) -> str:
+    user_id = str(match.group(1) or "").strip()
+    label = _resolved_slack_label(user_id, user_name_resolver)
+    return f"@{label}" if label else "@user"
+
+
+def _replace_slack_channel(
+    match: re.Match,
+    *,
+    channel_name_resolver: Optional[Callable[[str], str]],
+) -> str:
+    channel_id = str(match.group(1) or "").strip()
     label = str(match.group(2) or "").strip()
+    if not label:
+        label = _resolved_slack_label(channel_id, channel_name_resolver)
     if label:
         return f"#{label}"
     return "#channel"
+
+
+def _resolved_slack_label(
+    entity_id: str,
+    resolver: Optional[Callable[[str], str]],
+) -> str:
+    if not entity_id or resolver is None:
+        return ""
+    try:
+        label = str(resolver(entity_id) or "").strip()
+    except Exception:
+        return ""
+    if not label or label == entity_id:
+        return ""
+    return " ".join(label.splitlines()).strip()
 
 
 def _replace_slack_special_mention(match: re.Match) -> str:
