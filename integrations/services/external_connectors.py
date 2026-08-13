@@ -3112,11 +3112,16 @@ query LinearProjects($first: Int!, $after: String) {
       lead { id name email }
       teams(first: 10) { nodes { id key name } }
       lastUpdate { id body health createdAt updatedAt url user { id name email } }
+      issues(first: 1, orderBy: updatedAt) { nodes { updatedAt } }
     }
     pageInfo { hasNextPage endCursor }
   }
 }
 """
+
+LINEAR_ACTIVITY_WINDOW_DAYS = 30
+LINEAR_PROJECT_CATALOG_PAGE_LIMIT = 250
+LINEAR_PROJECT_CATALOG_MAX_PAGES = 50
 
 
 LINEAR_PROJECT_DETAIL_QUERY = """
@@ -3313,14 +3318,47 @@ def _linear_float_or_none(value: Any) -> Optional[float]:
         return None
 
 
-def _linear_project_is_active(project: dict[str, Any]) -> bool:
-    if project.get("canceledAt"):
-        return False
-    status = project.get("status") if isinstance(project.get("status"), dict) else {}
-    status_type = str(status.get("type") or "").lower()
-    if status_type in {"canceled", "cancelled"}:
-        return False
-    return True
+def _linear_project_activity_at(project: dict[str, Any]) -> Optional[datetime]:
+    """Latest project, project-update, or issue activity exposed by Linear."""
+
+    candidates = [
+        _datetime_or_none(project.get("updatedAt")),
+        _datetime_or_none(project.get("createdAt")),
+        _datetime_or_none(project.get("startedAt")),
+        _datetime_or_none(project.get("completedAt")),
+        _datetime_or_none(project.get("canceledAt")),
+    ]
+    last_update = project.get("lastUpdate") if isinstance(project.get("lastUpdate"), dict) else {}
+    candidates.extend(
+        [
+            _datetime_or_none(last_update.get("updatedAt")),
+            _datetime_or_none(last_update.get("createdAt")),
+        ]
+    )
+    issues = project.get("issues") if isinstance(project.get("issues"), dict) else {}
+    for issue in issues.get("nodes") or []:
+        if isinstance(issue, dict):
+            candidates.append(_datetime_or_none(issue.get("updatedAt")))
+    resolved = []
+    for value in candidates:
+        if value is None:
+            continue
+        if timezone.is_naive(value):
+            value = timezone.make_aware(value)
+        resolved.append(value)
+    return max(resolved) if resolved else None
+
+
+def _linear_project_has_recent_activity(
+    project: dict[str, Any],
+    *,
+    reference: Optional[datetime] = None,
+) -> bool:
+    now = reference or timezone.now()
+    if timezone.is_naive(now):
+        now = timezone.make_aware(now)
+    activity_at = _linear_project_activity_at(project)
+    return bool(activity_at and activity_at >= now - timedelta(days=LINEAR_ACTIVITY_WINDOW_DAYS))
 
 
 def _linear_project_defaults(project: dict[str, Any]) -> dict[str, Any]:
@@ -3362,6 +3400,9 @@ def _linear_project_defaults(project: dict[str, Any]) -> dict[str, Any]:
 
 
 def _serialize_linear_project_selection(selection: LinearProjectSelection) -> dict[str, Any]:
+    activity_at = _linear_project_activity_at(
+        selection.raw_payload if isinstance(selection.raw_payload, dict) else {}
+    )
     return {
         "id": selection.id,
         "projectId": selection.linear_project_id,
@@ -3374,9 +3415,89 @@ def _serialize_linear_project_selection(selection: LinearProjectSelection) -> di
         "status": selection.project_status,
         "health": selection.project_health,
         "selected": bool(selection.selected),
+        "activityAt": activity_at.isoformat() if activity_at else None,
+        "activity_at": activity_at.isoformat() if activity_at else None,
         "lastSyncedAt": selection.last_synced_at.isoformat() if selection.last_synced_at else None,
         "last_synced_at": selection.last_synced_at.isoformat() if selection.last_synced_at else None,
     }
+
+
+def refresh_linear_activity_selections(
+    connection: ExternalServiceConnection,
+    *,
+    reference: Optional[datetime] = None,
+) -> list[LinearProjectSelection]:
+    """Select projects with project, update, or issue activity in 30 days."""
+
+    if connection.provider != ExternalServiceProvider.LINEAR:
+        raise ConnectorConfigurationError("Connection is not a Linear connection.")
+    if not connection.organization:
+        raise ConnectorConfigurationError("Linear connection is not linked to an organization.")
+
+    now = reference or timezone.now()
+    if timezone.is_naive(now):
+        now = timezone.make_aware(now)
+    cursor: Optional[str] = None
+    projects: list[dict[str, Any]] = []
+    seen_cursors: set[str] = set()
+    for _page_index in range(LINEAR_PROJECT_CATALOG_MAX_PAGES):
+        payload = _linear_graphql_request(
+            connection,
+            LINEAR_PROJECT_LIST_QUERY,
+            {
+                "first": LINEAR_PROJECT_CATALOG_PAGE_LIMIT,
+                "after": cursor,
+            },
+        )
+        project_connection = payload.get("projects") if isinstance(payload.get("projects"), dict) else {}
+        projects.extend(
+            item for item in project_connection.get("nodes") or [] if isinstance(item, dict)
+        )
+        page_info = project_connection.get("pageInfo") if isinstance(project_connection.get("pageInfo"), dict) else {}
+        if not page_info.get("hasNextPage"):
+            break
+        next_cursor = str(page_info.get("endCursor") or "").strip()
+        if not next_cursor or next_cursor in seen_cursors:
+            break
+        seen_cursors.add(next_cursor)
+        cursor = next_cursor
+
+    recent_ids: set[str] = set()
+    with transaction.atomic():
+        LinearProjectSelection.objects.filter(connection=connection).update(selected=False)
+        for project in projects:
+            project_id = str(project.get("id") or "").strip()
+            if not project_id:
+                continue
+            selected = _linear_project_has_recent_activity(project, reference=now)
+            if selected:
+                recent_ids.add(project_id)
+            status_payload = project.get("status") if isinstance(project.get("status"), dict) else {}
+            LinearProjectSelection.objects.update_or_create(
+                connection=connection,
+                linear_project_id=project_id,
+                defaults={
+                    "user": connection.user,
+                    "organization": connection.organization,
+                    "project_name": str(project.get("name") or project_id).strip(),
+                    "project_status": str(status_payload.get("name") or status_payload.get("type") or ""),
+                    "project_health": str(project.get("health") or ""),
+                    "selected": selected,
+                    "raw_payload": project,
+                },
+            )
+
+        metadata = dict(connection.provider_metadata or {})
+        metadata["project_selection_mode"] = "recent_activity"
+        metadata["project_activity_window_days"] = LINEAR_ACTIVITY_WINDOW_DAYS
+        metadata["project_activity_cutoff"] = (
+            now - timedelta(days=LINEAR_ACTIVITY_WINDOW_DAYS)
+        ).isoformat()
+        metadata["recent_project_count"] = len(recent_ids)
+        connection.provider_metadata = metadata
+        connection.save(update_fields=["provider_metadata", "updated_at"])
+
+    return list(_selected_linear_projects(connection))
 
 
 def serialize_linear_projects(user, *, cursor: Optional[str] = None, limit: int = 100, organization=_ACTIVE_ORG) -> dict[str, Any]:
@@ -3390,51 +3511,27 @@ def serialize_linear_projects(user, *, cursor: Optional[str] = None, limit: int 
             "projects": [],
             "nextCursor": None,
             "next_cursor": None,
+            "projectSelectionMode": "recent_activity",
+            "project_selection_mode": "recent_activity",
+            "activityWindowDays": LINEAR_ACTIVITY_WINDOW_DAYS,
+            "activity_window_days": LINEAR_ACTIVITY_WINDOW_DAYS,
             "warnings": ["Linear is not connected."],
         }
-
+    del cursor
     limit = min(max(int(limit or 100), 1), 250)
-    payload = _linear_graphql_request(
-        connection,
-        LINEAR_PROJECT_LIST_QUERY,
-        {"first": limit, "after": cursor or None},
-    )
-    project_connection = payload.get("projects") if isinstance(payload.get("projects"), dict) else {}
-    nodes = [item for item in project_connection.get("nodes") or [] if isinstance(item, dict)]
-    project_rows = []
-    with transaction.atomic():
-        for project in nodes:
-            if not _linear_project_is_active(project):
-                continue
-            project_id = str(project.get("id") or "").strip()
-            if not project_id:
-                continue
-            status_payload = project.get("status") if isinstance(project.get("status"), dict) else {}
-            defaults = {
-                "user": connection.user,
-                "organization": connection.organization,
-                "project_name": str(project.get("name") or project_id).strip(),
-                "project_status": str(status_payload.get("name") or status_payload.get("type") or ""),
-                "project_health": str(project.get("health") or ""),
-                "raw_payload": project,
-            }
-            selection, _created = LinearProjectSelection.objects.update_or_create(
-                connection=connection,
-                linear_project_id=project_id,
-                defaults=defaults,
-            )
-            project_rows.append(selection)
-
-    page_info = project_connection.get("pageInfo") if isinstance(project_connection.get("pageInfo"), dict) else {}
-    next_cursor = str(page_info.get("endCursor") or "").strip() if page_info.get("hasNextPage") else ""
+    project_rows = refresh_linear_activity_selections(connection)[:limit]
     return {
         "accountLabel": connection.account_label or connection.external_account_id,
         "account_label": connection.account_label or connection.external_account_id,
         "workspaceId": connection.external_account_id,
         "workspace_id": connection.external_account_id,
         "projects": [_serialize_linear_project_selection(selection) for selection in project_rows],
-        "nextCursor": next_cursor or None,
-        "next_cursor": next_cursor or None,
+        "nextCursor": None,
+        "next_cursor": None,
+        "projectSelectionMode": "recent_activity",
+        "project_selection_mode": "recent_activity",
+        "activityWindowDays": LINEAR_ACTIVITY_WINDOW_DAYS,
+        "activity_window_days": LINEAR_ACTIVITY_WINDOW_DAYS,
         "warnings": [],
     }
 
@@ -3450,35 +3547,9 @@ def update_linear_project_selections(user, project_ids: Iterable[str], *, organi
     connection = _latest_linear_connection(user, organization)
     if not connection:
         raise ConnectorConfigurationError("Linear is not connected.")
-    selected_ids = {
-        str(project_id or "").strip()
-        for project_id in project_ids or []
-        if str(project_id or "").strip()
-    }
-    with transaction.atomic():
-        LinearProjectSelection.objects.filter(connection=connection).update(selected=False)
-        for project_id in sorted(selected_ids):
-            selection, created = LinearProjectSelection.objects.get_or_create(
-                connection=connection,
-                linear_project_id=project_id,
-                defaults={
-                    "user": connection.user,
-                    "organization": connection.organization,
-                    "project_name": project_id,
-                    "selected": True,
-                },
-            )
-            if not created:
-                selection.selected = True
-                selection.user = connection.user
-                selection.organization = connection.organization
-                selection.save(update_fields=["selected", "user", "organization", "updated_at"])
-        if selected_ids:
-            LinearProjectSelection.objects.filter(
-                connection=connection,
-                linear_project_id__in=selected_ids,
-            ).update(selected=True)
-    selected = list(_selected_linear_projects(connection))
+    # Accepted for backwards compatibility; project inclusion is activity-based.
+    del project_ids
+    selected = refresh_linear_activity_selections(connection)
     return {
         "accountLabel": connection.account_label or connection.external_account_id,
         "account_label": connection.account_label or connection.external_account_id,
@@ -3488,6 +3559,10 @@ def update_linear_project_selections(user, project_ids: Iterable[str], *, organi
         "selected_projects": [_serialize_linear_project_selection(selection) for selection in selected],
         "selectedProjectCount": len(selected),
         "selected_project_count": len(selected),
+        "projectSelectionMode": "recent_activity",
+        "project_selection_mode": "recent_activity",
+        "activityWindowDays": LINEAR_ACTIVITY_WINDOW_DAYS,
+        "activity_window_days": LINEAR_ACTIVITY_WINDOW_DAYS,
     }
 
 
@@ -3702,16 +3777,48 @@ def sync_linear_connection_page(
         raise ConnectorOAuthError("Linear connection needs to be reauthorised.")
 
     selected_qs = _selected_linear_projects(connection)
-    if project_ids:
+    if project_ids is not None:
         selected_set = {str(item or "").strip() for item in project_ids if str(item or "").strip()}
         selected_qs = selected_qs.filter(linear_project_id__in=selected_set)
     selections = list(selected_qs)
-    if not selections:
-        raise ConnectorConfigurationError("Select at least one Linear project before syncing.")
 
     selected_run_id = str(run_id or "").strip()
     if not selected_run_id:
         raise ConnectorConfigurationError("Linear sync run id is required.")
+
+    if not selections:
+        synced_at = timezone.now()
+        connection.status = ExternalServiceConnectionStatus.CONNECTED
+        connection.last_error = ""
+        connection.last_synced_at = synced_at
+        connection.sync_cursor = {
+            **dict(connection.sync_cursor or {}),
+            "last_synced_at": synced_at.isoformat(),
+            "linear_project_selection_mode": "recent_activity",
+            "linear_activity_window_days": LINEAR_ACTIVITY_WINDOW_DAYS,
+            "linear_recent_project_count": 0,
+        }
+        connection.save(
+            update_fields=["status", "last_error", "last_synced_at", "sync_cursor", "updated_at"]
+        )
+        return {
+            "connectionId": connection.id,
+            "connection_id": connection.id,
+            "provider": connection.provider,
+            "status": "synced",
+            "lastSyncedAt": synced_at.isoformat(),
+            "last_synced_at": synced_at.isoformat(),
+            "projectsSynced": 0,
+            "projects_synced": 0,
+            "issuesSynced": 0,
+            "issues_synced": 0,
+            "updatesSynced": 0,
+            "updates_synced": 0,
+            "membersSynced": 0,
+            "members_synced": 0,
+            "projects": [],
+            "has_more": False,
+        }
 
     connection.status = ExternalServiceConnectionStatus.SYNCING
     connection.last_error = ""
@@ -3872,6 +3979,9 @@ def sync_linear_connection_page(
         connection.sync_cursor = {
             **dict(connection.sync_cursor or {}),
             "last_synced_at": synced_at.isoformat(),
+            "linear_project_selection_mode": "recent_activity",
+            "linear_activity_window_days": LINEAR_ACTIVITY_WINDOW_DAYS,
+            "linear_recent_project_count": len(selections),
         }
         connection.save(update_fields=["status", "last_error", "last_synced_at", "sync_cursor", "updated_at"])
         return {
@@ -3906,6 +4016,15 @@ def sync_linear_connection(
     *,
     project_ids: Optional[Iterable[str]] = None,
 ) -> dict[str, Any]:
+    recent_projects = refresh_linear_activity_selections(connection)
+    recent_project_ids = {project.linear_project_id for project in recent_projects}
+    if project_ids is not None:
+        requested_ids = {
+            str(project_id or "").strip()
+            for project_id in project_ids
+            if str(project_id or "").strip()
+        }
+        project_ids = sorted(recent_project_ids.intersection(requested_ids))
     run_id = f"manual-{timezone.now().timestamp()}"
     aggregate = {
         "connectionId": connection.id,
@@ -3923,7 +4042,7 @@ def sync_linear_connection(
         "projects": [],
         "has_more": False,
     }
-    selected_count = _selected_linear_projects(connection).count()
+    selected_count = len(recent_projects)
     max_pages = max(selected_count * 20, 1)
     for _index in range(max_pages):
         page = sync_linear_connection_page(connection, run_id=run_id, project_ids=project_ids)
@@ -3999,6 +4118,10 @@ def serialize_linear_preview(user, *, limit: int = 5, organization=_ACTIVE_ORG) 
             "last_synced_at": None,
             "selectedProjects": [],
             "selected_projects": [],
+            "projectSelectionMode": "recent_activity",
+            "project_selection_mode": "recent_activity",
+            "activityWindowDays": LINEAR_ACTIVITY_WINDOW_DAYS,
+            "activity_window_days": LINEAR_ACTIVITY_WINDOW_DAYS,
             "projects": [],
             "projectUpdates": [],
             "project_updates": [],
@@ -4013,8 +4136,6 @@ def serialize_linear_preview(user, *, limit: int = 5, organization=_ACTIVE_ORG) 
         }
     selected = list(_selected_linear_projects(connection))
     warnings: list[str] = []
-    if not selected:
-        warnings.append("Select at least one Linear project before syncing.")
     if connection.status == ExternalServiceConnectionStatus.ERROR and connection.last_error:
         warnings.append(connection.last_error)
 
@@ -4025,6 +4146,8 @@ def serialize_linear_preview(user, *, limit: int = 5, organization=_ACTIVE_ORG) 
     )
     if selected_ids:
         project_queryset = project_queryset.filter(linear_project_id__in=selected_ids)
+    else:
+        project_queryset = project_queryset.none()
     issue_queryset = LinearIssueArtifact.objects.filter(
         connection=connection,
         organization=connection.organization,
@@ -4036,6 +4159,9 @@ def serialize_linear_preview(user, *, limit: int = 5, organization=_ACTIVE_ORG) 
     if selected_ids:
         issue_queryset = issue_queryset.filter(project__linear_project_id__in=selected_ids)
         update_queryset = update_queryset.filter(project__linear_project_id__in=selected_ids)
+    else:
+        issue_queryset = issue_queryset.none()
+        update_queryset = update_queryset.none()
 
     limit = min(max(int(limit or 5), 1), 20)
     projects = [_serialize_linear_project_artifact(project) for project in project_queryset.order_by("name", "id")[:limit]]
@@ -4088,6 +4214,10 @@ def serialize_linear_preview(user, *, limit: int = 5, organization=_ACTIVE_ORG) 
         "last_synced_at": connection.last_synced_at.isoformat() if connection.last_synced_at else None,
         "selectedProjects": [_serialize_linear_project_selection(selection) for selection in selected],
         "selected_projects": [_serialize_linear_project_selection(selection) for selection in selected],
+        "projectSelectionMode": "recent_activity",
+        "project_selection_mode": "recent_activity",
+        "activityWindowDays": LINEAR_ACTIVITY_WINDOW_DAYS,
+        "activity_window_days": LINEAR_ACTIVITY_WINDOW_DAYS,
         "projects": projects,
         "projectUpdates": project_updates,
         "project_updates": project_updates,
@@ -5267,6 +5397,8 @@ def serialize_luma_events(user, *, cursor: Optional[str] = None, limit: int = 50
             "next_cursor": None,
             "selectedMetrics": [],
             "selected_metrics": [],
+            "eventSelectionMode": "target_month",
+            "event_selection_mode": "target_month",
             "availableMetrics": available_metrics,
             "available_metrics": available_metrics,
             "warnings": ["Luma is not connected."],
@@ -5281,6 +5413,8 @@ def serialize_luma_events(user, *, cursor: Optional[str] = None, limit: int = 50
             "next_cursor": None,
             "selectedMetrics": selected_metrics,
             "selected_metrics": selected_metrics,
+            "eventSelectionMode": "target_month",
+            "event_selection_mode": "target_month",
             "availableMetrics": available_metrics,
             "available_metrics": available_metrics,
             "warnings": ["Reconnect Luma to refresh the event list."],
@@ -5301,6 +5435,7 @@ def serialize_luma_events(user, *, cursor: Optional[str] = None, limit: int = 50
                 "event_name": str(event.get("name") or event_id).strip()[:255],
                 "event_url": str(event.get("url") or "").strip()[:512],
                 "start_at": parse_datetime(str(event.get("start_at") or "")) or None,
+                "selected": False,
                 "raw_payload": event,
             }
             selection, _created = LumaEventSelection.objects.update_or_create(
@@ -5320,6 +5455,8 @@ def serialize_luma_events(user, *, cursor: Optional[str] = None, limit: int = 50
         "next_cursor": next_cursor or None,
         "selectedMetrics": selected_metrics,
         "selected_metrics": selected_metrics,
+        "eventSelectionMode": "target_month",
+        "event_selection_mode": "target_month",
         "availableMetrics": available_metrics,
         "available_metrics": available_metrics,
         "warnings": [],
@@ -5330,48 +5467,31 @@ def update_luma_selections(user, event_ids: Iterable[str], metric_keys: Iterable
     connection = _latest_luma_connection(user, organization)
     if not connection:
         raise ConnectorConfigurationError("Luma is not connected.")
-    selected_ids = {str(event_id).strip() for event_id in (event_ids or []) if str(event_id).strip()}
+    # Accepted for backwards compatibility. Event scope is derived from the
+    # monthly update's target month rather than a persisted manual selection.
+    del event_ids
     chosen = {str(metric_key) for metric_key in (metric_keys or [])}
     selected_metric_keys = [key for key in LUMA_METRIC_KEYS if key in chosen]
     with transaction.atomic():
         LumaEventSelection.objects.filter(connection=connection).update(selected=False)
-        for event_id in sorted(selected_ids):
-            selection, created = LumaEventSelection.objects.get_or_create(
-                connection=connection,
-                event_id=event_id,
-                defaults={
-                    "user": connection.user,
-                    "organization": connection.organization,
-                    "event_name": event_id,
-                    "selected": True,
-                },
-            )
-            if not created:
-                selection.selected = True
-                selection.user = connection.user
-                selection.organization = connection.organization
-                selection.save(update_fields=["selected", "user", "organization", "updated_at"])
-        if selected_ids:
-            LumaEventSelection.objects.filter(
-                connection=connection,
-                event_id__in=selected_ids,
-            ).update(selected=True)
         metadata = dict(connection.provider_metadata or {})
         metadata["selected_metrics"] = selected_metric_keys
+        metadata["event_selection_mode"] = "target_month"
         connection.provider_metadata = metadata
         connection.save(update_fields=["provider_metadata", "updated_at"])
 
-    selected = list(_selected_luma_events(connection))
     resolved_metrics = selected_metric_keys or list(LUMA_METRIC_KEYS)
     return {
-        "selectedEvents": [_serialize_luma_event_selection(selection) for selection in selected],
-        "selected_events": [_serialize_luma_event_selection(selection) for selection in selected],
-        "selectedEventCount": len(selected),
-        "selected_event_count": len(selected),
+        "selectedEvents": [],
+        "selected_events": [],
+        "selectedEventCount": 0,
+        "selected_event_count": 0,
         "selectedMetrics": resolved_metrics,
         "selected_metrics": resolved_metrics,
         "availableMetrics": _luma_available_metrics(),
         "available_metrics": _luma_available_metrics(),
+        "eventSelectionMode": "target_month",
+        "event_selection_mode": "target_month",
     }
 
 
@@ -5409,8 +5529,6 @@ def _serialize_external_source(user, provider: str, organization=_ACTIVE_ORG) ->
             connection=connection,
             selected=True,
         ).count()
-        if status_value in {"connected", "syncing"} and selected_project_count == 0:
-            warning = warning or "Select Linear projects before using Linear in a monthly update."
     selected_property_count = 0
     if provider == ExternalServiceProvider.GOOGLE_ANALYTICS and connection:
         selected_property_count = GoogleAnalyticsPropertySelection.objects.filter(
@@ -5420,11 +5538,6 @@ def _serialize_external_source(user, provider: str, organization=_ACTIVE_ORG) ->
         if status_value in {"connected", "syncing"} and selected_property_count == 0:
             warning = warning or "Select a Google Analytics property before using Google Analytics in a monthly update."
     selected_event_count = 0
-    if provider == ExternalServiceProvider.LUMA and connection:
-        selected_event_count = LumaEventSelection.objects.filter(
-            connection=connection,
-            selected=True,
-        ).count()
 
     payload = {
         "key": provider,
@@ -5434,8 +5547,6 @@ def _serialize_external_source(user, provider: str, organization=_ACTIVE_ORG) ->
         "selected": (
             selected_channel_count > 0
             if provider == ExternalServiceProvider.SLACK
-            else selected_project_count > 0
-            if provider == ExternalServiceProvider.LINEAR
             else selected_property_count > 0
             if provider == ExternalServiceProvider.GOOGLE_ANALYTICS
             else status_value in {"connected", "syncing"}
@@ -5460,6 +5571,14 @@ def _serialize_external_source(user, provider: str, organization=_ACTIVE_ORG) ->
         "selectedEventCount": selected_event_count,
         "selected_event_count": selected_event_count,
     }
+    if provider == ExternalServiceProvider.LUMA:
+        payload["eventSelectionMode"] = "target_month"
+        payload["event_selection_mode"] = "target_month"
+    if provider == ExternalServiceProvider.LINEAR:
+        payload["projectSelectionMode"] = "recent_activity"
+        payload["project_selection_mode"] = "recent_activity"
+        payload["activityWindowDays"] = LINEAR_ACTIVITY_WINDOW_DAYS
+        payload["activity_window_days"] = LINEAR_ACTIVITY_WINDOW_DAYS
     if provider == ExternalServiceProvider.XERO:
         has_report_scope = xero_has_report_scope(connection.scopes if connection else [])
         can_request_report_scopes = _xero_can_request_report_scopes()
