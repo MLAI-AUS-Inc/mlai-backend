@@ -186,56 +186,79 @@ VIBE_RAISING_INPUT_SOURCE_KEYS = {
     "luma",
     MANUAL_DOCUMENTS_SOURCE,
 }
-XERO_DRAFT_SYNC_STALE_AFTER = timedelta(minutes=15)
+CONNECTED_SOURCE_DRAFT_SYNC_STALE_AFTER = timedelta(minutes=15)
 
 
-def _sync_selected_financial_sources_for_draft(user, input_sources: list[str]) -> dict[str, list[str]]:
+def _sync_selected_connector_sources_for_draft(user, input_sources: list[str]) -> dict[str, list[str]]:
     warnings: dict[str, list[str]] = {}
     selected = set(input_sources or [])
-    if ExternalServiceProvider.XERO not in selected:
-        return warnings
-
-    connection_qs = ExternalServiceConnection.objects.filter(
-        user=user,
-        provider=ExternalServiceProvider.XERO,
-    ).exclude(status=ExternalServiceConnectionStatus.DISCONNECTED)
     organization = active_organization_for_user(user)
-    if organization is not None:
-        connection_qs = connection_qs.filter(organization=organization)
-    connection = connection_qs.order_by("-updated_at", "-id").first()
-    if not connection:
-        warnings[ExternalServiceProvider.XERO] = ["Xero was selected but no active Xero connection is available."]
-        return warnings
+    provider_labels = {
+        ExternalServiceProvider.XERO: "Xero",
+        ExternalServiceProvider.LINEAR: "Linear",
+        ExternalServiceProvider.LUMA: "Luma",
+    }
+    for provider, label in provider_labels.items():
+        if provider not in selected:
+            continue
+        connection_qs = ExternalServiceConnection.objects.filter(
+            user=user,
+            provider=provider,
+        ).exclude(status=ExternalServiceConnectionStatus.DISCONNECTED)
+        if organization is not None:
+            connection_qs = connection_qs.filter(organization=organization)
+        connection = connection_qs.order_by("-updated_at", "-id").first()
+        if not connection:
+            warnings[provider] = [
+                f"{label} was selected but no active {label} connection is available."
+            ]
+            continue
 
-    last_synced_at = connection.last_synced_at
-    should_sync = (
-        connection.status != ExternalServiceConnectionStatus.CONNECTED
-        or last_synced_at is None
-        or timezone.now() - last_synced_at > XERO_DRAFT_SYNC_STALE_AFTER
-    )
-    if not should_sync:
-        return warnings
-
-    try:
-        payload = mark_sources_sync_requested(
-            user,
-            [ExternalServiceProvider.XERO],
-            financial_only=True,
+        last_synced_at = connection.last_synced_at
+        provider_metadata = (
+            connection.provider_metadata
+            if isinstance(connection.provider_metadata, dict)
+            else {}
         )
-    except Exception as exc:
-        logger.exception("Unable to prepare Xero source before monthly update draft", extra={"user_id": user.id})
-        warnings[ExternalServiceProvider.XERO] = [str(exc) or "Xero sync failed before draft generation."]
-        return warnings
+        needs_linear_activity_migration = (
+            provider == ExternalServiceProvider.LINEAR
+            and provider_metadata.get("project_selection_mode") != "recent_activity"
+        )
+        should_sync = (
+            needs_linear_activity_migration
+            or connection.status != ExternalServiceConnectionStatus.CONNECTED
+            or last_synced_at is None
+            or timezone.now() - last_synced_at > CONNECTED_SOURCE_DRAFT_SYNC_STALE_AFTER
+        )
+        if not should_sync:
+            continue
 
-    sync_errors = [
-        str(item.get("error") or item.get("warning") or "").strip()
-        for item in payload.get("syncRuns", []) or payload.get("sync_runs", [])
-        if str(item.get("status") or "").lower() == "error"
-    ]
-    if payload.get("status") == "error" or sync_errors:
-        warnings[ExternalServiceProvider.XERO] = [
-            item for item in sync_errors if item
-        ] or ["Xero sync failed before draft generation."]
+        try:
+            payload = mark_sources_sync_requested(
+                user,
+                [provider],
+                financial_only=provider == ExternalServiceProvider.XERO,
+                organization=organization,
+            )
+        except Exception as exc:
+            logger.exception(
+                "Unable to prepare connected source before monthly update draft",
+                extra={"user_id": user.id, "provider": provider},
+            )
+            warnings[provider] = [
+                str(exc) or f"{label} sync failed before draft generation."
+            ]
+            continue
+
+        sync_errors = [
+            str(item.get("error") or item.get("warning") or "").strip()
+            for item in payload.get("syncRuns", []) or payload.get("sync_runs", [])
+            if str(item.get("status") or "").lower() == "error"
+        ]
+        if payload.get("status") == "error" or sync_errors:
+            warnings[provider] = [item for item in sync_errors if item] or [
+                f"{label} sync failed before draft generation."
+            ]
     return warnings
 
 
@@ -2672,7 +2695,7 @@ class VibeRaisingStartupUpdateRunView(APIView):
             google_connection,
         )
         source_warnings = merge_source_warnings(
-            _sync_selected_financial_sources_for_draft(request.user, input_sources),
+            _sync_selected_connector_sources_for_draft(request.user, input_sources),
             gmail_scope_warnings,
         )
         if gmail_required_for_sources(input_sources) and (
@@ -2828,7 +2851,7 @@ class VibeRaisingEmailDraftStartView(APIView):
             google_connection,
         )
         source_warnings = merge_source_warnings(
-            _sync_selected_financial_sources_for_draft(request.user, input_sources),
+            _sync_selected_connector_sources_for_draft(request.user, input_sources),
             gmail_scope_warnings,
         )
         if gmail_required_for_sources(input_sources) and (

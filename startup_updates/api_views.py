@@ -142,7 +142,7 @@ EMAIL_DRAFT_DISPLAY_STAGES = {
     "slack_backfill": "Scanning selected Slack channels",
     "slack_relevance_classification": "Filtering Slack highlights",
     "slack_event_extraction": "Extracting Slack highlights",
-    "linear_backfill": "Scanning selected Linear projects",
+    "linear_backfill": "Scanning recently active Linear projects",
     "linear_relevance_classification": "Filtering Linear project context",
     "linear_event_extraction": "Extracting Linear project highlights",
     "notion_backfill": "Scanning selected Notion workspace",

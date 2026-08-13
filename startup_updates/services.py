@@ -6,6 +6,7 @@ import uuid
 from decimal import Decimal, InvalidOperation
 from datetime import date, datetime, time, timedelta, timezone as dt_timezone
 from typing import Any, Iterable, Optional, Union
+from zoneinfo import ZoneInfo
 
 from django.db import transaction
 from django.utils import timezone
@@ -41,6 +42,7 @@ from startup_updates.models import (
     GmailThreadArtifact,
     GoogleAnalyticsPropertySelection,
     LinearIssueArtifact,
+    LumaEventSelection,
     LinearProjectArtifact,
     LinearProjectSelection,
     LinearProjectUpdateArtifact,
@@ -75,6 +77,8 @@ SUPERSEDED_GMAIL_CONNECTION_ERROR = "Superseded by a newer Gmail connection."
 MANUAL_DOCUMENTS_SOURCE = "manual_documents"
 MAX_MANUAL_DOCUMENT_CONTEXT_CHARS = 40000
 MAX_MANUAL_DOCUMENT_CONTEXT_CHARS_PER_DOCUMENT = 12000
+LUMA_EVENT_CONTEXT_DAYS = 14
+LUMA_EVENT_TIMEZONE = "Australia/Melbourne"
 MERGEABLE_DRAFT_LIST_SECTIONS = (
     "financial_performance",
     "highlights",
@@ -1794,7 +1798,7 @@ def build_linear_run_context(*, organization: Organization, selected_project_ids
         organization=organization,
         selected=True,
     ).exclude(connection__status=ExternalServiceConnectionStatus.DISCONNECTED)
-    if selected_project_ids:
+    if selected_project_ids is not None:
         queryset = queryset.filter(linear_project_id__in=selected_project_ids)
     projects = [
         {
@@ -1815,15 +1819,17 @@ def build_linear_run_context(*, organization: Organization, selected_project_ids
     update_count = LinearProjectUpdateArtifact.objects.filter(organization=organization, project__in=artifacts).count()
     return {
         "source": "linear",
-        "purpose": "selected_project_management_context",
+        "purpose": "recent_project_activity_context",
         "warning": "Linear is project-management context only and is not financial truth.",
+        "project_selection_mode": "recent_activity",
+        "activity_window_days": 30,
         "selected_project_ids": project_ids,
         "selected_project_count": len(projects),
         "selected_projects": projects,
         "cached_project_count": artifacts.count(),
         "cached_issue_count": issue_count,
         "cached_update_count": update_count,
-        "warnings": [] if projects else ["Linear was selected but no projects are selected."],
+        "warnings": [],
     }
 
 
@@ -1913,6 +1919,100 @@ def build_google_analytics_run_context(*, organization: Organization) -> dict:
     }
 
 
+def build_luma_run_context(
+    *,
+    organization: Organization,
+    target_month: date,
+    warnings: Optional[list[str]] = None,
+) -> dict:
+    """Selected-month Luma events plus a two-week narrative context buffer."""
+
+    month = _month_start(target_month)
+    month_end = _month_end(month)
+    context_start = month - timedelta(days=LUMA_EVENT_CONTEXT_DAYS)
+    context_end = month_end + timedelta(days=LUMA_EVENT_CONTEXT_DAYS)
+    local_tz = ZoneInfo(LUMA_EVENT_TIMEZONE)
+    context_start_at = datetime.combine(context_start, time.min, tzinfo=local_tz).astimezone(
+        dt_timezone.utc
+    )
+    context_end_at = datetime.combine(context_end, time.max, tzinfo=local_tz).astimezone(
+        dt_timezone.utc
+    )
+
+    connection = (
+        ExternalServiceConnection.objects.filter(
+            organization=organization,
+            provider=ExternalServiceProvider.LUMA,
+        )
+        .exclude(status=ExternalServiceConnectionStatus.DISCONNECTED)
+        .order_by("-updated_at", "-id")
+        .first()
+    )
+    event_rows = LumaEventSelection.objects.none()
+    if connection is not None:
+        event_rows = LumaEventSelection.objects.filter(
+            connection=connection,
+            start_at__gte=context_start_at,
+            start_at__lte=context_end_at,
+        ).order_by("start_at", "event_name", "event_id")
+    events = []
+    for row in event_rows:
+        local_date = row.start_at.astimezone(local_tz).date() if row.start_at else None
+        in_target_month = bool(local_date and month <= local_date <= month_end)
+        context_role = "selected_month"
+        if local_date and local_date < month:
+            context_role = "before_month"
+        elif local_date and local_date > month_end:
+            context_role = "after_month"
+        events.append(
+            {
+                "event_id": row.event_id,
+                "name": row.event_name or row.event_id,
+                "url": row.event_url,
+                "start_at": row.start_at.isoformat() if row.start_at else None,
+                "local_date": local_date.isoformat() if local_date else None,
+                "context_role": context_role,
+                "counted_in_selected_month_metrics": in_target_month,
+                "registration_count": int(row.registration_count or 0),
+                "checked_in_count": int(row.checked_in_count or 0),
+            }
+        )
+
+    metrics = [
+        {
+            "metric_key": metric.metric_key,
+            "label": metric.metric_name or metric.metric_key,
+            "value": metric.value_text,
+            "unit": metric.unit,
+            "summary": metric.summary,
+            "event_ids": list(metric.source_record_ids or []),
+        }
+        for metric in StartupMetricObservation.objects.filter(
+            organization=organization,
+            source_provider=ExternalServiceProvider.LUMA,
+            period_month=month,
+            run__isnull=True,
+        ).order_by("metric_key")
+    ]
+
+    return {
+        "source": "luma",
+        "purpose": "automatic_target_month_event_context",
+        "event_selection_mode": "target_month",
+        "target_month": month.isoformat(),
+        "context_days_each_side": LUMA_EVENT_CONTEXT_DAYS,
+        "context_start": context_start.isoformat(),
+        "context_end": context_end.isoformat(),
+        "counting_rule": (
+            "Only selected_month events contribute to the target month's metrics; "
+            "before_month and after_month events are narrative context only."
+        ),
+        "events": events,
+        "metrics": metrics,
+        "warnings": list(warnings or []),
+    }
+
+
 def build_external_context_for_sources(
     *,
     organization: Organization,
@@ -1956,6 +2056,12 @@ def build_external_context_for_sources(
         context["notion"] = build_notion_run_context(organization=organization)
     if ExternalServiceProvider.GOOGLE_ANALYTICS in selected:
         context["google_analytics"] = build_google_analytics_run_context(organization=organization)
+    if ExternalServiceProvider.LUMA in selected:
+        context["luma"] = build_luma_run_context(
+            organization=organization,
+            target_month=_month_start(end_date),
+            warnings=warnings_by_source.get(ExternalServiceProvider.LUMA),
+        )
     if MANUAL_DOCUMENTS_SOURCE in selected:
         context[MANUAL_DOCUMENTS_SOURCE] = build_manual_documents_run_context(
             organization=organization,
