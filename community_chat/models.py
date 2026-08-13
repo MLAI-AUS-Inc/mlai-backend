@@ -27,7 +27,7 @@ class CommunityChatDevice(models.Model):
         related_name="community_chat_devices",
     )
     public_key = models.CharField(max_length=64)
-    installation_id = models.UUIDField(default=uuid.uuid4, unique=True)
+    installation_id = models.UUIDField(default=uuid.uuid4)
     client_id = models.CharField(max_length=64, default="legacy")
     platform = models.CharField(max_length=32, blank=True)
     name = models.CharField(max_length=120, blank=True)
@@ -58,6 +58,11 @@ class CommunityChatDevice(models.Model):
                 fields=("public_key",),
                 condition=Q(status__in=(DeviceBindingStatus.PENDING, DeviceBindingStatus.VERIFIED)),
                 name="community_chat_unique_active_public_key",
+            ),
+            models.UniqueConstraint(
+                fields=("installation_id",),
+                condition=Q(status__in=(DeviceBindingStatus.PENDING, DeviceBindingStatus.VERIFIED)),
+                name="chat_unique_active_installation",
             ),
         ]
         indexes = [
