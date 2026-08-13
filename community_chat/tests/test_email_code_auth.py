@@ -13,14 +13,18 @@ from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
 
+from community_chat.account_sessions import issue_account_session
+from community_chat.adapter import MembershipAdapterUnavailable
+from community_chat.email_codes import _locked_email_code_challenges, code_digest
 from community_chat.models import (
     CommunityChatAccountSession,
     CommunityChatBootstrapToken,
+    CommunityChatDevice,
     CommunityChatEmailCodeChallenge,
     CommunityChatEmailCodeDelivery,
+    DeviceBindingStatus,
     EmailCodeDeliveryStatus,
 )
-from community_chat.email_codes import _locked_email_code_challenges, code_digest
 
 
 ORIGIN = "https://chat.mlai.au"
@@ -144,6 +148,204 @@ class CommunityChatEmailCodeAuthTests(APITestCase):
         replay = self.verify(requested.data["challenge_id"], code)
         self.assertEqual(replay.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(replay.data, {"error": "invalid_or_expired_code"})
+
+    @patch("community_chat.views.revoke_relay_membership")
+    def test_valid_code_replaces_existing_session_for_same_device(
+        self,
+        mock_revoke,
+    ):
+        device = CommunityChatDevice.objects.create(
+            user=self.user,
+            public_key=self.public_key,
+            installation_id=self.installation_id,
+            client_id="mlai-chat-web",
+            platform="web",
+            name="Chrome",
+            status=DeviceBindingStatus.VERIFIED,
+            verified_at=timezone.now(),
+        )
+        old_challenge = CommunityChatEmailCodeChallenge.objects.create(
+            user=self.user,
+            email_digest="a" * 64,
+            code_digest="b" * 64,
+            client_id="mlai-chat-web",
+            installation_id=self.installation_id,
+            origin=ORIGIN,
+            platform="web",
+            device_name="Chrome",
+            public_key=self.public_key,
+            expires_at=timezone.now() + timedelta(minutes=10),
+        )
+        old_session = issue_account_session(self.user, old_challenge).session
+        requested = self.request_code()
+        code = self.deliver_code()
+
+        verified = self.verify(requested.data["challenge_id"], code)
+
+        self.assertEqual(verified.status_code, status.HTTP_200_OK)
+        mock_revoke.assert_not_called()
+        device.refresh_from_db()
+        self.assertEqual(device.status, DeviceBindingStatus.VERIFIED)
+        old_session.refresh_from_db()
+        self.assertIsNotNone(old_session.revoked_at)
+        active_session = CommunityChatAccountSession.objects.get(
+            installation_id=self.installation_id,
+            revoked_at__isnull=True,
+        )
+        self.assertNotEqual(active_session.id, old_session.id)
+        self.assertEqual(active_session.public_key, self.public_key)
+
+    @patch("community_chat.views.revoke_relay_membership")
+    def test_valid_code_recovers_same_user_after_browser_key_rotation(
+        self,
+        mock_revoke,
+    ):
+        old_public_key = public_key(40)
+        old_device = CommunityChatDevice.objects.create(
+            user=self.user,
+            public_key=old_public_key,
+            installation_id=self.installation_id,
+            client_id="mlai-chat-web",
+            platform="web",
+            name="Chrome",
+            status=DeviceBindingStatus.VERIFIED,
+            verified_at=timezone.now(),
+        )
+        old_challenge = CommunityChatEmailCodeChallenge.objects.create(
+            user=self.user,
+            email_digest="a" * 64,
+            code_digest="b" * 64,
+            client_id="mlai-chat-web",
+            installation_id=self.installation_id,
+            origin=ORIGIN,
+            platform="web",
+            device_name="Chrome",
+            public_key=old_public_key,
+            expires_at=timezone.now() + timedelta(minutes=10),
+        )
+        old_session = issue_account_session(self.user, old_challenge).session
+        old_bootstrap = CommunityChatBootstrapToken.objects.create(
+            user=self.user,
+            public_key=old_public_key,
+            installation_id=self.installation_id,
+            client_id="mlai-chat-web",
+            origin=ORIGIN,
+            platform="web",
+            name="Chrome",
+            token_hash="c" * 64,
+            expires_at=timezone.now() + timedelta(minutes=10),
+        )
+        mock_revoke.return_value = ("revoked", uuid.uuid4())
+        requested = self.request_code()
+        code = self.deliver_code()
+
+        verified = self.verify(requested.data["challenge_id"], code)
+
+        self.assertEqual(verified.status_code, status.HTTP_200_OK)
+        self.assertEqual(verified.data["status"], "authenticated")
+        mock_revoke.assert_called_once_with(old_public_key)
+        old_device.refresh_from_db()
+        self.assertEqual(old_device.status, DeviceBindingStatus.REVOKED)
+        self.assertEqual(
+            old_device.revocation_reason,
+            "email_code_identity_recovery",
+        )
+        self.assertEqual(old_device.revoked_by, self.user)
+        replacement = CommunityChatDevice.objects.get(
+            installation_id=self.installation_id,
+            status=DeviceBindingStatus.PENDING,
+        )
+        self.assertEqual(replacement.user, self.user)
+        self.assertEqual(replacement.public_key, self.public_key)
+        old_session.refresh_from_db()
+        self.assertIsNotNone(old_session.revoked_at)
+        active_session = CommunityChatAccountSession.objects.get(
+            installation_id=self.installation_id,
+            revoked_at__isnull=True,
+        )
+        self.assertEqual(active_session.public_key, self.public_key)
+        old_bootstrap.refresh_from_db()
+        self.assertIsNotNone(old_bootstrap.revoked_at)
+        active_bootstrap = CommunityChatBootstrapToken.objects.get(
+            installation_id=self.installation_id,
+            revoked_at__isnull=True,
+        )
+        self.assertEqual(active_bootstrap.public_key, self.public_key)
+        enrollment = self.client.post(
+            reverse("community_chat_challenge"),
+            {"origin": ORIGIN, "public_key": self.public_key},
+            format="json",
+            HTTP_ORIGIN=ORIGIN,
+        )
+        self.assertEqual(enrollment.status_code, status.HTTP_201_CREATED)
+
+    @patch("community_chat.views.revoke_relay_membership")
+    def test_key_rotation_rolls_back_when_relay_revocation_is_unavailable(
+        self,
+        mock_revoke,
+    ):
+        old_public_key = public_key(40)
+        old_device = CommunityChatDevice.objects.create(
+            user=self.user,
+            public_key=old_public_key,
+            installation_id=self.installation_id,
+            client_id="mlai-chat-web",
+            platform="web",
+            name="Chrome",
+            status=DeviceBindingStatus.VERIFIED,
+            verified_at=timezone.now(),
+        )
+        mock_revoke.side_effect = MembershipAdapterUnavailable("adapter_unavailable")
+        requested = self.request_code()
+        code = self.deliver_code()
+
+        response = self.verify(requested.data["challenge_id"], code)
+
+        self.assertEqual(response.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
+        self.assertEqual(response.data, {"error": "membership_service_unavailable"})
+        old_device.refresh_from_db()
+        self.assertEqual(old_device.status, DeviceBindingStatus.VERIFIED)
+        challenge = CommunityChatEmailCodeChallenge.objects.get(
+            id=requested.data["challenge_id"]
+        )
+        self.assertIsNone(challenge.consumed_at)
+        self.assertEqual(CommunityChatDevice.objects.count(), 1)
+        self.assertFalse(CommunityChatBootstrapToken.objects.exists())
+        self.assertFalse(CommunityChatAccountSession.objects.exists())
+
+    @patch("community_chat.views.revoke_relay_membership")
+    def test_email_code_cannot_take_over_another_users_installation(
+        self,
+        mock_revoke,
+    ):
+        other_user = get_user_model().objects.create_user(email="other@example.com")
+        other_device = CommunityChatDevice.objects.create(
+            user=other_user,
+            public_key=public_key(40),
+            installation_id=self.installation_id,
+            client_id="mlai-chat-web",
+            platform="web",
+            name="Chrome",
+            status=DeviceBindingStatus.VERIFIED,
+            verified_at=timezone.now(),
+        )
+        requested = self.request_code()
+        code = self.deliver_code()
+
+        response = self.verify(requested.data["challenge_id"], code)
+
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(response.data, {"error": "installation_already_bound"})
+        mock_revoke.assert_not_called()
+        other_device.refresh_from_db()
+        self.assertEqual(other_device.status, DeviceBindingStatus.VERIFIED)
+        challenge = CommunityChatEmailCodeChallenge.objects.get(
+            id=requested.data["challenge_id"]
+        )
+        self.assertIsNone(challenge.consumed_at)
+        self.assertEqual(CommunityChatDevice.objects.count(), 1)
+        self.assertFalse(CommunityChatBootstrapToken.objects.exists())
+        self.assertFalse(CommunityChatAccountSession.objects.exists())
 
     def test_verification_locks_only_the_challenge_row(self):
         queryset = _locked_email_code_challenges()
