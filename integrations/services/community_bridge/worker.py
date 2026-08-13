@@ -187,11 +187,15 @@ class CommunityBridgeDiscordClient(discord.Client):
             source_platform=delivery["source_platform"],
             channel=delivery.get("channel"),
         )
+        body = await self._resolve_message_body(
+            payload,
+            source_platform=delivery["source_platform"],
+        )
         content = build_mirrored_text(
             destination_platform=CommunityBridgePlatform.DISCORD,
             source_platform=delivery["source_platform"],
             author_display_name=author_display_name,
-            body=str(payload.get("text") or ""),
+            body=body,
             attachments=payload.get("attachments") or [],
         )
 
@@ -476,11 +480,15 @@ class CommunityBridgeDiscordClient(discord.Client):
                     source_platform=delivery["source_platform"],
                     channel=channel,
                 )
+            body = await self._resolve_message_body(
+                payload,
+                source_platform=delivery["source_platform"],
+            )
             text = build_mirrored_text(
                 destination_platform=CommunityBridgePlatform.BUZZ,
                 source_platform=delivery["source_platform"],
                 author_display_name=author_display_name,
-                body=str(payload.get("text") or ""),
+                body=body,
                 attachments=payload.get("attachments") or [],
             )
 
@@ -603,6 +611,16 @@ class CommunityBridgeDiscordClient(discord.Client):
             if user_id:
                 return await asyncio.to_thread(SlackBridgeClient.get_user_display_name, user_id)
         return user_id or "Unknown user"
+
+    async def _resolve_message_body(self, payload: dict, *, source_platform: str) -> str:
+        body = str(payload.get("text") or "")
+        if source_platform != CommunityBridgePlatform.SLACK:
+            return body
+        metadata = dict(payload.get("metadata") or {})
+        raw_text = str(metadata.get("slack_raw_text") or "")
+        if not raw_text:
+            return body
+        return await asyncio.to_thread(SlackBridgeClient.resolve_message_text, raw_text)
 
     def _should_process_message(self, message: discord.Message) -> bool:
         if message.guild is None:

@@ -9,7 +9,9 @@ MLAI Chat is another client surface, not a one-time data migration.
 - Operators explicitly map a public Slack channel to one MLAI Chat channel.
 - New messages, replies, edits, deletes, and the approved reaction set (`👍`,
   `❤️`, `🎉`, `👀`, `🚀`, `✅`) are mirrored after the mapping is enabled.
-  Historical backfill and custom emoji are out of scope.
+  General historical backfill and custom emoji are out of scope. A bounded,
+  operator-confirmed repair command exists only for pre-cutover messages whose
+  retained Slack receipts still contain resolvable user/channel references.
 - Direct messages, private channels, huddles, workflow payloads, ephemeral
   messages, and Slack Connect channels fail closed unless separately approved.
 - Attachments are represented as safe provider-hosted links. The bridge does
@@ -25,12 +27,15 @@ Every verified provider event is normalized to:
 - source channel, message, optional parent, and author identifiers;
 - one delivery operation: `create`, `edit`, `delete`, `reaction_add`, or
   `reaction_remove`;
-- sanitized text and HTTP(S) attachment links; and
+- sanitized text, deferred Slack user/channel reference metadata, and HTTP(S)
+  attachment links; and
 - non-secret adapter metadata.
 
 Provider-specific payloads stay at the ingestion edge and are cleared under the
-raw-payload retention policy. Delete events deliberately retain no message
-content.
+raw-payload retention policy. The only provider markup copied into canonical
+metadata is the Slack message text needed for deferred user/channel resolution;
+it is never sent to a destination without sanitization. Delete events
+deliberately retain no message content.
 
 ## Delivery guarantees
 

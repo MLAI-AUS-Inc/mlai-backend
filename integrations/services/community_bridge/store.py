@@ -405,6 +405,7 @@ def _normalize_slack_event(payload: dict) -> Optional[dict]:
             thread_ts=str(event.get("thread_ts") or "").strip(),
             source_message_id=source_message_id,
         )
+        raw_text = str(event.get("text") or "")
         return {
             "delivery_type": CommunityBridgeDeliveryType.CREATE,
             "source_channel_id": str(event.get("channel") or "").strip(),
@@ -412,8 +413,9 @@ def _normalize_slack_event(payload: dict) -> Optional[dict]:
             "source_parent_message_id": source_parent_message_id,
             "source_author_id": user_id,
             "source_author_display_name": "",
-            "text": sanitize_slack_text(event.get("text") or ""),
+            "text": sanitize_slack_text(raw_text),
             "attachments": normalize_slack_files(event.get("files") or []),
+            "metadata": {"slack_raw_text": raw_text},
         }
 
     if subtype == "message_changed":
@@ -426,6 +428,7 @@ def _normalize_slack_event(payload: dict) -> Optional[dict]:
             thread_ts=str(message.get("thread_ts") or "").strip(),
             source_message_id=source_message_id,
         )
+        raw_text = str(message.get("text") or "")
         return {
             "delivery_type": CommunityBridgeDeliveryType.EDIT,
             "source_channel_id": str(event.get("channel") or "").strip(),
@@ -433,8 +436,9 @@ def _normalize_slack_event(payload: dict) -> Optional[dict]:
             "source_parent_message_id": source_parent_message_id,
             "source_author_id": user_id,
             "source_author_display_name": "",
-            "text": sanitize_slack_text(message.get("text") or ""),
+            "text": sanitize_slack_text(raw_text),
             "attachments": normalize_slack_files(message.get("files") or []),
+            "metadata": {"slack_raw_text": raw_text},
         }
 
     if subtype == "message_deleted":

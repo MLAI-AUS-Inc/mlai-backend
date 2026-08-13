@@ -54,9 +54,11 @@ User = get_user_model()
 class SlackBridgeClientProfileTests(TestCase):
     def setUp(self):
         SlackBridgeClient._profile_cache.clear()
+        SlackBridgeClient._channel_name_cache.clear()
 
     def tearDown(self):
         SlackBridgeClient._profile_cache.clear()
+        SlackBridgeClient._channel_name_cache.clear()
 
     @patch("integrations.services.community_bridge.slack.SlackBridgeClient.get_client")
     def test_profile_resolves_display_name_and_approved_avatar_once(self, mock_get_client):
@@ -94,6 +96,38 @@ class SlackBridgeClientProfileTests(TestCase):
         self.assertEqual(
             SlackBridgeClient.get_user_profile("U123"),
             {"display_name": "Alice", "avatar_url": ""},
+        )
+
+    @patch("integrations.services.community_bridge.slack.SlackBridgeClient.get_client")
+    def test_message_text_resolves_user_and_unlabelled_channel_once(self, mock_get_client):
+        mock_get_client.return_value.users_info.return_value = {
+            "ok": True,
+            "user": {"profile": {"display_name": "Alice Nguyen"}},
+        }
+        mock_get_client.return_value.conversations_info.return_value = {
+            "ok": True,
+            "channel": {"name": "general"},
+        }
+
+        raw_text = (
+            "Ask <@U123> in <#C123> or <#C456|announcements>; "
+            "notify <!channel>."
+        )
+        expected = "Ask @Alice Nguyen in #general or #announcements; notify @channel."
+
+        self.assertEqual(SlackBridgeClient.resolve_message_text(raw_text), expected)
+        self.assertEqual(SlackBridgeClient.resolve_message_text(raw_text), expected)
+        mock_get_client.return_value.users_info.assert_called_once_with(user="U123")
+        mock_get_client.return_value.conversations_info.assert_called_once_with(channel="C123")
+
+    @patch("integrations.services.community_bridge.slack.SlackBridgeClient.get_client")
+    def test_message_text_uses_safe_fallback_when_slack_lookup_fails(self, mock_get_client):
+        mock_get_client.return_value.users_info.return_value = {"ok": False}
+        mock_get_client.return_value.conversations_info.return_value = {"ok": False}
+
+        self.assertEqual(
+            SlackBridgeClient.resolve_message_text("Ask <@U404> in <#C404>"),
+            "Ask @user in #channel",
         )
 
 
@@ -213,6 +247,10 @@ class SlackCommunityBridgeEventViewTests(TestCase):
         self.assertEqual(delivery.target_platform, CommunityBridgePlatform.DISCORD)
         self.assertEqual(delivery.delivery_type, CommunityBridgeDeliveryType.CREATE)
         self.assertEqual(delivery.payload["text"], "Hello @user Example (http://example.com)")
+        self.assertEqual(
+            delivery.payload["metadata"]["slack_raw_text"],
+            "Hello <@U999> <http://example.com|Example>",
+        )
         self.assertEqual(
             delivery.payload["attachments"],
             [{"title": "guide.pdf", "url": "https://files.example.com/guide.pdf"}],
@@ -1272,6 +1310,38 @@ class BuzzCommunityBridgeWorkerTests(TransactionTestCase):
             },
             available_at=timezone.now(),
         )
+
+    @patch(
+        "integrations.services.community_bridge.worker.SlackBridgeClient.resolve_message_text",
+        return_value="Ask @Alice Nguyen in #general",
+    )
+    @patch(
+        "integrations.services.community_bridge.worker.SlackBridgeClient.get_user_profile",
+        return_value={"display_name": "Alice", "avatar_url": ""},
+    )
+    @patch("integrations.services.community_bridge.worker.BuzzBridgeClient.deliver")
+    def test_create_resolves_slack_mentions_before_buzz_delivery(
+        self, mock_deliver, _mock_profile, mock_resolve_text
+    ):
+        delivery = self._delivery(
+            delivery_type=CommunityBridgeDeliveryType.CREATE,
+            message_id="1710000000.1500",
+        )
+        delivery.payload["metadata"] = {
+            "slack_raw_text": "Ask <@U999> in <#C999>"
+        }
+        delivery.save(update_fields=["payload"])
+        mock_deliver.return_value = {
+            "channel_id": self.channel.destination_channel_id,
+            "message_id": "f" * 64,
+            "parent_message_id": "",
+        }
+
+        asyncio.run(self.client.process_pending_deliveries_once(limit=5))
+
+        mock_resolve_text.assert_called_once_with("Ask <@U999> in <#C999>")
+        self.assertIn("Ask @Alice Nguyen in #general", mock_deliver.call_args.kwargs["text"])
+        self.assertNotIn("<@U999>", mock_deliver.call_args.kwargs["text"])
 
     @patch(
         "integrations.services.community_bridge.worker.SlackBridgeClient.get_user_profile",
