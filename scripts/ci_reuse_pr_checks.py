@@ -126,7 +126,15 @@ def find_reusable_validation(
             if not isinstance(run_attempt, int) or run_attempt < 1:
                 continue
             run_pulls = run.get("pull_requests")
-            if not isinstance(run_pulls, list) or not any(
+            if not isinstance(run_pulls, list):
+                continue
+            # GitHub currently returns an empty pull_requests array for some
+            # same-repository pull_request workflow runs. The merged-commit
+            # lookup, exact head SHA, successful workflow run, and tree-bound
+            # artifact already provide the association in that case. When
+            # GitHub does provide PR references, still require the candidate
+            # PR number so an inconsistent response fails closed.
+            if run_pulls and not any(
                 isinstance(run_pull, dict) and run_pull.get("number") == pull_number
                 for run_pull in run_pulls
             ):

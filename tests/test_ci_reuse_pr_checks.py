@@ -34,7 +34,11 @@ def api_fixture(*, artifact_tree=TREE_SHA, expired=False, run_pull_number=42):
                         "conclusion": "success",
                         "event": "pull_request",
                         "id": RUN_ID,
-                        "pull_requests": [{"number": run_pull_number}],
+                        "pull_requests": (
+                            []
+                            if run_pull_number is None
+                            else [{"number": run_pull_number}]
+                        ),
                         "run_attempt": 1,
                     }
                 ]
@@ -70,6 +74,12 @@ class ReusePrChecksTests(TestCase):
         self.assertTrue(reuse)
         self.assertIn("PR #42", reason)
         self.assertIn(str(RUN_ID), reason)
+
+    def test_reuses_when_github_omits_run_pull_request_associations(self):
+        reuse, reason = self.route(api_fixture(run_pull_number=None))
+
+        self.assertTrue(reuse)
+        self.assertIn("PR #42", reason)
 
     def test_stale_base_tree_falls_back_to_full_checks(self):
         reuse, reason = self.route(api_fixture(artifact_tree="d" * 40))
