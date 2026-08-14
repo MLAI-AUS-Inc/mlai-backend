@@ -2,6 +2,7 @@ import hashlib
 import hmac
 import re
 import time
+from typing import List, Optional
 from urllib.parse import urljoin, urlparse
 
 import requests
@@ -62,6 +63,8 @@ class BuzzBridgeClient:
         source_author_display_name: str = "",
         source_author_avatar_url: str = "",
         linked_pubkey: str = "",
+        source_created_at: int = 0,
+        broadcast: bool = False,
     ) -> dict:
         adapter_url = cls._validated_adapter_url()
         api_token = cls._api_token()
@@ -82,6 +85,8 @@ class BuzzBridgeClient:
             "source_author_display_name": str(source_author_display_name or "") or None,
             "source_author_avatar_url": str(source_author_avatar_url or "") or None,
             "linked_pubkey": str(linked_pubkey or "") or None,
+            "source_created_at": int(source_created_at or 0) or None,
+            "broadcast": bool(broadcast),
         }
         timeout = max(1, min(int(getattr(settings, "BUZZ_BRIDGE_ADAPTER_TIMEOUT_SECONDS", 15)), 60))
         try:
@@ -117,6 +122,112 @@ class BuzzBridgeClient:
             "message_id": message_id,
             "parent_message_id": str(result.get("parent_message_id") or "").strip(),
         }
+
+    @classmethod
+    def lookup_messages(
+        cls,
+        *,
+        channel_id: str,
+        source_workspace_id: str,
+        source_channel_id: str,
+        source_message_ids: List[str],
+        destination_message_ids: Optional[List[str]] = None,
+    ) -> list[dict]:
+        """Return active trusted bridge events for reconciliation only."""
+
+        requested_sources = {
+            str(message_id or "").strip() for message_id in source_message_ids
+        }
+        requested_destinations = {
+            str(message_id or "").strip().lower()
+            for message_id in (destination_message_ids or [])
+            if str(message_id or "").strip()
+        }
+        if not requested_sources and not requested_destinations:
+            return []
+        if len(requested_sources) + len(requested_destinations) > 200:
+            raise BuzzBridgePermanentError("MLAI Chat lookup is limited to 200 identifiers")
+        adapter_url = cls._validated_adapter_url()
+        api_token = cls._api_token()
+        if not api_token:
+            raise BuzzBridgePermanentError("BUZZ_BRIDGE_ADAPTER_TOKEN is not configured")
+        timeout = max(
+            1,
+            min(
+                int(getattr(settings, "BUZZ_BRIDGE_ADAPTER_TIMEOUT_SECONDS", 15)),
+                60,
+            ),
+        )
+        try:
+            response = requests.post(
+                urljoin(adapter_url, "v1/lookups"),
+                headers={
+                    "Authorization": f"Bearer {api_token}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "channel_id": str(channel_id),
+                    "source_workspace_id": str(source_workspace_id),
+                    "source_channel_id": str(source_channel_id),
+                    "source_message_ids": sorted(requested_sources),
+                    "destination_message_ids": sorted(requested_destinations),
+                },
+                timeout=timeout,
+            )
+        except requests.RequestException as exc:
+            raise BuzzBridgeError(
+                f"MLAI Chat adapter lookup failed: {exc.__class__.__name__}"
+            ) from exc
+        if 400 <= response.status_code < 500 and response.status_code not in {408, 429}:
+            raise BuzzBridgePermanentError(
+                f"MLAI Chat adapter rejected lookup with HTTP {response.status_code}"
+            )
+        if not response.ok:
+            raise BuzzBridgeError(
+                f"MLAI Chat adapter lookup returned HTTP {response.status_code}"
+            )
+        try:
+            result = response.json()
+        except ValueError as exc:
+            raise BuzzBridgeError("MLAI Chat adapter lookup returned invalid JSON") from exc
+        if str(result.get("channel_id") or "").strip() != str(channel_id).strip():
+            raise BuzzBridgeError("MLAI Chat adapter lookup returned the wrong channel")
+        matches = result.get("matches") or []
+        if not isinstance(matches, list) or len(matches) > 500:
+            raise BuzzBridgeError("MLAI Chat adapter lookup returned invalid matches")
+        validated = []
+        for match in matches:
+            if not isinstance(match, dict):
+                raise BuzzBridgeError("MLAI Chat adapter lookup returned an invalid match")
+            source_message_id = str(match.get("source_message_id") or "").strip()
+            destination_message_id = str(
+                match.get("destination_message_id") or ""
+            ).strip().lower()
+            parent_message_id = str(match.get("parent_message_id") or "").strip().lower()
+            if source_message_id not in requested_sources:
+                raise BuzzBridgeError("MLAI Chat adapter lookup returned an unknown source message")
+            if not EVENT_ID_RE.fullmatch(destination_message_id):
+                raise BuzzBridgeError("MLAI Chat adapter lookup returned an invalid event ID")
+            if parent_message_id and not EVENT_ID_RE.fullmatch(parent_message_id):
+                raise BuzzBridgeError("MLAI Chat adapter lookup returned an invalid parent ID")
+            try:
+                created_at = int(match.get("created_at") or 0)
+            except (TypeError, ValueError) as exc:
+                raise BuzzBridgeError(
+                    "MLAI Chat adapter lookup returned an invalid timestamp"
+                ) from exc
+            if created_at <= 0:
+                raise BuzzBridgeError("MLAI Chat adapter lookup returned an invalid timestamp")
+            validated.append(
+                {
+                    "source_message_id": source_message_id,
+                    "destination_message_id": destination_message_id,
+                    "parent_message_id": parent_message_id,
+                    "broadcast": bool(match.get("broadcast")),
+                    "created_at": created_at,
+                }
+            )
+        return validated
 
     @staticmethod
     def _adapter_url() -> str:
