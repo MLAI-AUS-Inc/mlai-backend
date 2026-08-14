@@ -1980,6 +1980,49 @@ class VibeRaisingApiTests(TestCase):
         self.assertEqual(run.run_request["window_months"], DEFAULT_BACKFILL_MONTHS)
         self.assertEqual(run.run_request["google_connection_id"], google_connection.id)
 
+    @patch("vibe_raising.views.notify_valley_run_created")
+    @patch("vibe_raising.views.mark_sources_sync_requested")
+    @patch("vibe_raising.views.refresh_linear_activity_selections")
+    def test_email_draft_start_does_not_full_sync_linear_or_luma(
+        self,
+        mock_refresh_linear_scope,
+        mock_sync_sources,
+        mock_notify,
+    ):
+        self.client.force_authenticate(user=self.user)
+        self._create_founder_company()
+        organization, _profile = resolve_or_create_profile(domain="acme.com")
+        linear_connection = ExternalServiceConnection.objects.create(
+            user=self.user,
+            organization=organization,
+            provider=ExternalServiceProvider.LINEAR,
+            account_label="Acme Linear",
+            status="connected",
+        )
+        ExternalServiceConnection.objects.create(
+            user=self.user,
+            organization=organization,
+            provider=ExternalServiceProvider.LUMA,
+            account_label="Acme Luma",
+            status="connected",
+        )
+
+        response = self.client.post(
+            "/api/v1/vibe-raising/email-draft/start/",
+            {
+                "inputSources": ["linear", "luma"],
+                "targetMonth": "2026-03-01",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 201)
+        mock_refresh_linear_scope.assert_called_once_with(linear_connection)
+        mock_sync_sources.assert_not_called()
+        mock_notify.assert_called_once_with(response.data["runId"])
+        run = ContentFactoryRun.objects.get(run_id=response.data["runId"])
+        self.assertEqual(run.run_request["input_sources"], ["linear", "luma"])
+
     @patch("startup_updates.services.timezone.now")
     def test_email_draft_start_creates_single_target_month_run_with_partial_current_window(self, mock_now):
         mock_now.return_value = datetime(2026, 4, 26, 5, 30, tzinfo=dt_timezone.utc)

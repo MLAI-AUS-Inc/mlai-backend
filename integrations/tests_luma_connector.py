@@ -420,23 +420,13 @@ class LumaSelectionEndpointTests(TestCase):
         self.assertEqual(LumaEventSelection.objects.filter(connection=self.connection).count(), 2)
 
     @patch("vibe_raising.views.mark_sources_sync_requested")
-    def test_monthly_update_preparation_refreshes_luma(self, mock_sync):
+    def test_monthly_update_preparation_uses_cached_luma_snapshot(self, mock_sync):
         from vibe_raising.views import _sync_selected_connector_sources_for_draft
-
-        mock_sync.return_value = {
-            "status": "sync_requested",
-            "syncRuns": [{"provider": "luma", "status": "synced"}],
-        }
 
         warnings = _sync_selected_connector_sources_for_draft(self.user, ["luma"])
 
         self.assertEqual(warnings, {})
-        mock_sync.assert_called_once_with(
-            self.user,
-            [ExternalServiceProvider.LUMA],
-            financial_only=False,
-            organization=None,
-        )
+        mock_sync.assert_not_called()
 
     def test_save_selections_ignores_event_ids_and_persists_metrics(self):
         for event_id in ("e1", "e2", "e3"):

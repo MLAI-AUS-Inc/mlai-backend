@@ -2428,29 +2428,21 @@ class LinearRecentActivitySelectionTests(TestCase):
         self.assertEqual(source["activityWindowDays"], 30)
         self.assertIsNone(source["warning"])
 
-    def test_monthly_update_preparation_migrates_recent_manual_selection(self):
+    def test_monthly_update_preparation_only_refreshes_linear_activity_scope(self):
         from vibe_raising.views import _sync_selected_connector_sources_for_draft
 
         self.connection.last_synced_at = timezone.now()
         self.connection.provider_metadata = {}
         self.connection.save(update_fields=["last_synced_at", "provider_metadata", "updated_at"])
 
-        with patch(
-            "vibe_raising.views.mark_sources_sync_requested",
-            return_value={
-                "status": "sync_requested",
-                "syncRuns": [{"provider": "linear", "status": "synced"}],
-            },
+        with patch("vibe_raising.views.refresh_linear_activity_selections") as refresh_scope, patch(
+            "vibe_raising.views.mark_sources_sync_requested"
         ) as sync_requested:
             warnings = _sync_selected_connector_sources_for_draft(self.user, ["linear"])
 
         self.assertEqual(warnings, {})
-        sync_requested.assert_called_once_with(
-            self.user,
-            [ExternalServiceProvider.LINEAR],
-            financial_only=False,
-            organization=None,
-        )
+        refresh_scope.assert_called_once_with(self.connection)
+        sync_requested.assert_not_called()
 
 
 class LinearProjectArtifactUpsertTests(TestCase):
