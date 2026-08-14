@@ -30,6 +30,10 @@ from integrations.services.xero_statement_reconciliation import (
     _serialize_evidence,
     import_xero_statement_lines,
 )
+from integrations.services.xero_statement_posting import (
+    _ensure_bill_tracking,
+    resolve_xero_tracking_assignment,
+)
 from roo.models import PointsAdmin
 
 
@@ -89,6 +93,156 @@ class XeroBillIntakeServiceTests(TestCase):
         self.assertIn("contact_name", joined)
         self.assertIn("invoice_number", joined)
         self.assertIn("issue_date", joined)
+
+    def test_mandatory_tracking_is_added_to_every_bill_line(self):
+        self.profile.require_statement_tracking = True
+        self.profile.default_project_tracking_option_name = "MLAI core"
+        self.profile.default_project_tracking_option_id = "project-core"
+        self.profile.project_tracking_category_id = "project-category"
+        self.profile.save(update_fields=[
+            "require_statement_tracking",
+            "default_project_tracking_option_name",
+            "default_project_tracking_option_id",
+            "project_tracking_category_id",
+            "updated_at",
+        ])
+        payload = _bill_payload(
+            total="12.34",
+            line_amounts=[
+                {"description": "Venue", "amount": "10.00", "account_code": "429", "tax_type": "INPUT"},
+                {"description": "Catering", "amount": "2.34", "account_code": "401", "tax_type": "INPUT"},
+            ],
+            effective_tracking={
+                "allocation_mode": "mlai_core",
+                "kind": "project",
+                "option_name": "MLAI core",
+                "option_id": "project-core",
+                "default": True,
+            },
+        )
+
+        preview = build_reconciliation_bill_preview(self.organization, payload=payload)
+
+        self.assertTrue(preview["ready"])
+        for line in preview["xero_payload"]["LineItems"]:
+            self.assertEqual(len(line["Tracking"]), 1)
+            self.assertEqual(line["Tracking"][0]["Option"], "MLAI core")
+
+    @patch("integrations.services.xero_statement_posting.http_client.post")
+    def test_existing_bill_tracking_update_preserves_line_financial_fields(self, post):
+        response = Mock()
+        response.json.return_value = {"Invoices": [{"InvoiceID": "bill-1"}]}
+        response.raise_for_status.return_value = None
+        post.return_value = response
+        bill = {
+            "InvoiceID": "bill-1",
+            "Type": "ACCPAY",
+            "Status": "AUTHORISED",
+            "Date": "2026-08-01",
+            "DueDate": "2026-08-14",
+            "LineAmountTypes": "Inclusive",
+            "Contact": {"ContactID": "contact-1"},
+            "LineItems": [{
+                "LineItemID": "line-1",
+                "Description": "Venue hire",
+                "Quantity": 1,
+                "UnitAmount": 100.0,
+                "AccountCode": "429",
+                "TaxType": "INPUT",
+            }],
+        }
+        tracking = {
+            "TrackingCategoryID": "project-category",
+            "Name": "Project Name",
+            "TrackingOptionID": "project-core",
+            "Option": "MLAI core",
+        }
+
+        _ensure_bill_tracking(self.connection, bill=bill, tracking=tracking)
+
+        sent = post.call_args.kwargs["json"]["Invoices"][0]["LineItems"][0]
+        self.assertEqual(sent["LineItemID"], "line-1")
+        self.assertEqual(sent["UnitAmount"], 100.0)
+        self.assertEqual(sent["AccountCode"], "429")
+        self.assertEqual(sent["TaxType"], "INPUT")
+        self.assertEqual(sent["Tracking"], [tracking])
+
+    def test_existing_bill_conflicting_tracking_fails_without_write(self):
+        bill = {
+            "InvoiceID": "bill-1",
+            "LineItems": [{
+                "LineItemID": "line-1",
+                "Description": "Venue hire",
+                "Quantity": 1,
+                "UnitAmount": 100.0,
+                "AccountCode": "429",
+                "TaxType": "INPUT",
+                "Tracking": [{
+                    "TrackingCategoryID": "event-category",
+                    "TrackingOptionID": "event-other",
+                    "Option": "Other Event",
+                }],
+            }],
+        }
+        with self.assertRaisesMessage(XeroPostingError, "conflicts"):
+            _ensure_bill_tracking(
+                self.connection,
+                bill=bill,
+                tracking={
+                    "TrackingCategoryID": "project-category",
+                    "Name": "Project Name",
+                    "TrackingOptionID": "project-core",
+                    "Option": "MLAI core",
+                },
+            )
+
+    @patch("integrations.services.xero_statement_posting.http_client.put")
+    @patch("integrations.services.xero_statement_posting.http_client.get")
+    def test_missing_mlai_core_is_created_only_when_resolving_approved_write(self, get, put):
+        self.connection.scopes = [*self.connection.scopes, "accounting.settings"]
+        self.connection.save(update_fields=["scopes", "updated_at"])
+        self.profile.default_project_tracking_option_name = "MLAI core"
+        self.profile.project_tracking_category_id = "project-category"
+        self.profile.save(update_fields=[
+            "default_project_tracking_option_name",
+            "project_tracking_category_id",
+            "updated_at",
+        ])
+        categories = Mock()
+        categories.json.return_value = {
+            "TrackingCategories": [{
+                "TrackingCategoryID": "project-category",
+                "Status": "ACTIVE",
+                "Options": [],
+            }]
+        }
+        categories.raise_for_status.return_value = None
+        get.return_value = categories
+        created = Mock()
+        created.json.return_value = {
+            "Options": [{"TrackingOptionID": "project-core", "Name": "MLAI core"}]
+        }
+        created.raise_for_status.return_value = None
+        put.return_value = created
+
+        resolved = resolve_xero_tracking_assignment(
+            self.connection,
+            self.profile,
+            {
+                "allocation_mode": "mlai_core",
+                "kind": "project",
+                "category_id": "project-category",
+                "category_name": "Project Name",
+                "option_id": "",
+                "option_name": "MLAI core",
+                "default": True,
+            },
+        )
+
+        self.assertEqual(resolved[0]["TrackingOptionID"], "project-core")
+        put.assert_called_once()
+        self.profile.refresh_from_db()
+        self.assertEqual(self.profile.default_project_tracking_option_id, "project-core")
 
     def test_preview_downgrades_authorised_without_account_fields(self):
         preview = build_reconciliation_bill_preview(

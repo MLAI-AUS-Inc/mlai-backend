@@ -37,7 +37,12 @@ from integrations.services.xero_scopes import (
     xero_has_attachments_scope,
     xero_has_invoice_write_scope,
 )
-from integrations.services.xero_statement_posting import _first_xero_row
+from integrations.services.xero_statement_posting import (
+    _ensure_bill_tracking,
+    _first_xero_row,
+    resolve_xero_tracking_assignment,
+)
+from integrations.services.reconciliation_tracking import xero_tracking_entry
 
 BILL_STATUS_DRAFT = "DRAFT"
 BILL_STATUS_AUTHORISED = "AUTHORISED"
@@ -90,6 +95,64 @@ def _profile_and_connection(organization):
     if profile.xero_connection is None:
         raise ReconciliationValidationError("A Xero connection must be selected.")
     return profile, profile.xero_connection
+
+
+def _bill_effective_tracking(
+    profile: ReconciliationProfile | None,
+    payload: dict[str, Any],
+    errors: list[str],
+) -> dict[str, Any] | None:
+    raw = payload.get("effective_tracking")
+    if not isinstance(raw, dict):
+        if profile and profile.require_statement_tracking:
+            errors.append("Every bill requires an Event, Project, or MLAI core allocation.")
+        return None
+    mode = _clean_text(raw.get("allocation_mode"), limit=16)
+    kind = _clean_text(raw.get("kind"), limit=16)
+    if mode not in {"event", "project", "mlai_core"}:
+        errors.append("effective_tracking.allocation_mode must be event, project or mlai_core.")
+        return None
+    if mode == "event" and kind != "event":
+        errors.append("Event allocation must use the Event Name tracking category.")
+        return None
+    if mode in {"project", "mlai_core"} and kind != "project":
+        errors.append("Project allocation must use the Project Name tracking category.")
+        return None
+    if profile is None:
+        return None
+    default = mode == "mlai_core"
+    option_name = (
+        profile.default_project_tracking_option_name
+        if default
+        else _clean_text(raw.get("option_name"))
+    )
+    option_id = (
+        profile.default_project_tracking_option_id
+        if default
+        else _clean_text(raw.get("option_id"))
+    )
+    if not option_name:
+        errors.append("effective_tracking requires a tracking option name.")
+        return None
+    category_id = (
+        profile.event_tracking_category_id if kind == "event"
+        else profile.project_tracking_category_id
+    )
+    category_name = (
+        profile.event_tracking_category_name if kind == "event"
+        else profile.project_tracking_category_name
+    )
+    if not category_id:
+        errors.append(f"Configure the Xero {category_name} tracking category ID.")
+    return {
+        "allocation_mode": mode,
+        "kind": kind,
+        "category_id": category_id,
+        "category_name": category_name,
+        "option_id": option_id,
+        "option_name": option_name,
+        "default": default,
+    }
 
 
 def _parse_line_items(payload: dict[str, Any], *, contact_name: str, invoice_number: str) -> tuple[list[dict[str, Any]], Decimal, list[str]]:
@@ -168,6 +231,7 @@ def build_reconciliation_bill_preview(organization, *, payload: dict[str, Any]) 
         profile, connection = _profile_and_connection(organization)
     except ReconciliationValidationError as exc:
         errors.extend(exc.errors)
+    tracking_assignment = _bill_effective_tracking(profile, payload, errors)
 
     contact_name = _clean_text(payload.get("contact_name"))
     invoice_number = _clean_text(payload.get("invoice_number"))
@@ -231,6 +295,8 @@ def build_reconciliation_bill_preview(organization, *, payload: dict[str, Any]) 
             item["AccountCode"] = line["account_code"]
         if line["tax_type"]:
             item["TaxType"] = line["tax_type"]
+        if tracking_assignment:
+            item["Tracking"] = [xero_tracking_entry(tracking_assignment)]
         line_items.append(item)
 
     document_metadata = {
@@ -266,6 +332,10 @@ def build_reconciliation_bill_preview(organization, *, payload: dict[str, Any]) 
         "invoice_number": invoice_number,
         "total": str(line_total),
         "document_metadata": document_metadata,
+        "effective_tracking": tracking_assignment,
+        "tracking_policy_ready": not (
+            profile and profile.require_statement_tracking and not tracking_assignment
+        ),
         "xero_payload": xero_payload,
     }
 
@@ -444,7 +514,7 @@ def create_reconciliation_bill(
         raise ReconciliationValidationError(
             "Bill request is not ready to post.", errors=preview["errors"]
         )
-    _, connection = _profile_and_connection(organization)
+    profile, connection = _profile_and_connection(organization)
     invoice_number = preview["invoice_number"]
     contact_name = preview["contact_name"]
 
@@ -459,6 +529,18 @@ def create_reconciliation_bill(
                 f"Xero already has bill {invoice_number} for {contact_name} with total "
                 f"{existing_total}, not {requested_total}. Review it before creating another."
             )
+        tracking = resolve_xero_tracking_assignment(
+            connection, profile, preview.get("effective_tracking")
+        )
+        if tracking:
+            full_response = http_client.get(
+                f"{XERO_API_URL}/Invoices/{existing['InvoiceID']}",
+                headers=_xero_headers(connection),
+                timeout=(3, 30),
+            )
+            full_response.raise_for_status()
+            full_bill = _first_xero_row(full_response.json(), "Invoices")
+            _ensure_bill_tracking(connection, bill=full_bill, tracking=tracking[0])
         _mirror_authorised_bill(
             connection,
             existing,
@@ -473,6 +555,12 @@ def create_reconciliation_bill(
         }
 
     xero_payload = dict(preview["xero_payload"])
+    tracking = resolve_xero_tracking_assignment(
+        connection, profile, preview.get("effective_tracking")
+    )
+    if tracking:
+        for line_item in xero_payload.get("LineItems") or []:
+            line_item["Tracking"] = tracking
     xero_payload["Contact"] = _contact_payload(connection, contact_name)
     if xero_payload["Status"] == BILL_STATUS_AUTHORISED:
         _validate_authorised_lines(connection, xero_payload)

@@ -3,7 +3,9 @@ from copy import deepcopy
 from unittest.mock import Mock, patch
 
 from django.contrib.auth import get_user_model
+from django.db import connection
 from django.test import SimpleTestCase, TestCase
+from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
@@ -840,8 +842,9 @@ class XeroReconciliationWorkflowTests(TestCase):
         self.assertEqual(suggestion.status, ReconciliationSuggestion.STATUS_PROPOSED)
         approved, mapping = approve_reconciliation_suggestion(suggestion, reviewed_by_slack_id="UFIN")
         self.assertEqual(approved.status, ReconciliationSuggestion.STATUS_APPROVED)
-        self.assertEqual(mapping.project_source_id, "lin_project_1")
-        self.assertEqual(mapping.project_tracking_option_name, "Community Events")
+        self.assertEqual(mapping.event_tracking_option_name, "Luma Night")
+        self.assertEqual(mapping.project_source_id, "")
+        self.assertEqual(mapping.project_tracking_option_name, "")
 
         retried = save_reconciliation_suggestions(
             organization=self.organization,
@@ -856,14 +859,45 @@ class XeroReconciliationWorkflowTests(TestCase):
             }],
         )[0]
         self.assertEqual(retried.status, ReconciliationSuggestion.STATUS_APPROVED)
-        self.assertEqual(retried.project_source_id, "lin_project_1")
+        self.assertEqual(retried.event_source_id, "evt_1")
+        self.assertEqual(retried.project_source_id, "")
 
         preview = build_xero_preview(record)
         revenue_line = preview["xero_payload"]["LineItems"][0]
-        self.assertEqual([item["Name"] for item in revenue_line["Tracking"]], ["Event Name", "Project Name"])
-        self.assertIn("Project: Community Events", revenue_line["Description"])
+        self.assertEqual([item["Name"] for item in revenue_line["Tracking"]], ["Event Name"])
+        self.assertNotIn("Project: Community Events", revenue_line["Description"])
         self.assertIn("confirmed in the event planning thread", revenue_line["Description"])
-        self.assertEqual(preview["context_notes"][0]["project_name"], "Community Events")
+        self.assertEqual(preview["context_notes"][0]["project_name"], "")
+
+    @patch("integrations.services.reconciliation_context.active_xero_project_options")
+    def test_context_deduplicates_linear_and_xero_projects_and_keeps_xero_only_options(self, options):
+        options.return_value = [
+            {
+                "source_type": "xero_tracking",
+                "source_id": "xero-community",
+                "tracking_option_id": "xero-community",
+                "name": "Community Events",
+            },
+            {
+                "source_type": "xero_tracking",
+                "source_id": "xero-victor",
+                "tracking_option_id": "xero-victor",
+                "name": "VictorAI",
+            },
+        ]
+
+        context = build_reconciliation_enrichment_context(
+            organization=self.organization,
+            run_id="project-catalog",
+        )
+
+        projects = context["linear_projects"]
+        community = [item for item in projects if item["name"] == "Community Events"]
+        self.assertEqual(len(community), 1)
+        self.assertEqual(community[0]["xero_tracking_option_id"], "xero-community")
+        victor = next(item for item in projects if item["name"] == "VictorAI")
+        self.assertEqual(victor["source_type"], "xero_tracking")
+        self.assertEqual(victor["source_id"], "xero-victor")
 
     def test_contextual_review_note_requires_source_evidence(self):
         persist_report(organization=self.organization, report=self.report, stripe_account_id="acct_main")
@@ -1819,6 +1853,107 @@ class XeroReconciliationWorkflowTests(TestCase):
 
         self.assertTrue(preview["ready"])
         self.assertFalse(preview["errors"])
+
+    def test_mandatory_tracking_uses_exactly_one_mlai_core_project(self):
+        self.profile.require_statement_tracking = True
+        self.profile.default_project_tracking_option_name = "MLAI core"
+        self.profile.default_project_tracking_option_id = "project-core"
+        self.profile.save(update_fields=[
+            "require_statement_tracking",
+            "default_project_tracking_option_name",
+            "default_project_tracking_option_id",
+            "updated_at",
+        ])
+        suggestion = self._statement_suggestion(line_id="core-fallback")
+        suggestion.allocation_mode = XeroStatementSuggestion.ALLOCATION_MLAI_CORE
+        suggestion.identity_confidence = 0.99
+        suggestion.accounting_confidence = 0.99
+        suggestion.allocation_confidence = 1.0
+        suggestion.execution_ready = True
+        suggestion.save()
+
+        preview = build_statement_posting_preview(suggestion)
+
+        self.assertTrue(preview["ready"])
+        self.assertTrue(preview["tracking_policy_ready"])
+        self.assertEqual(preview["effective_tracking"]["option_name"], "MLAI core")
+        self.assertTrue(preview["effective_tracking"]["default"])
+        tracking = preview["xero_payload"]["LineItems"][0]["Tracking"]
+        self.assertEqual(len(tracking), 1)
+        self.assertEqual(tracking[0]["Name"], "Project Name")
+        self.assertEqual(tracking[0]["Option"], "MLAI core")
+
+        suggestion.allocation_mode = XeroStatementSuggestion.ALLOCATION_EVENT
+        suggestion.event_source_id = "evt_1"
+        suggestion.event_tracking_option_name = "Luma Night"
+        suggestion.save(update_fields=[
+            "allocation_mode",
+            "event_source_id",
+            "event_tracking_option_name",
+            "updated_at",
+        ])
+        event_preview = build_statement_posting_preview(suggestion)
+        self.assertNotEqual(event_preview["payload_hash"], preview["payload_hash"])
+        self.assertEqual(event_preview["effective_tracking"]["kind"], "event")
+
+    def test_mandatory_tracking_rejects_dual_event_and_project(self):
+        self.profile.require_statement_tracking = True
+        self.profile.default_project_tracking_option_name = "MLAI core"
+        self.profile.save(update_fields=[
+            "require_statement_tracking",
+            "default_project_tracking_option_name",
+            "updated_at",
+        ])
+        suggestion = self._statement_suggestion(line_id="dual-tracking")
+        suggestion.allocation_mode = XeroStatementSuggestion.ALLOCATION_EVENT
+        suggestion.event_source_id = "evt_1"
+        suggestion.event_tracking_option_name = "Luma Night"
+        suggestion.project_source_id = "lin_project_1"
+        suggestion.project_tracking_option_name = "Community Events"
+        suggestion.identity_confidence = 0.99
+        suggestion.accounting_confidence = 0.99
+        suggestion.allocation_confidence = 0.99
+        suggestion.execution_ready = True
+        suggestion.save()
+
+        preview = build_statement_posting_preview(suggestion)
+
+        self.assertFalse(preview["ready"])
+        self.assertIn(
+            "Choose exactly one Event Name or Project Name, not both.",
+            preview["errors"],
+        )
+
+    def test_74_line_context_batches_gmail_and_slack_evidence_queries(self):
+        XeroStatementLineSnapshot.objects.bulk_create([
+            XeroStatementLineSnapshot(
+                organization=self.organization,
+                bank_account_id="bank-1",
+                statement_line_id=f"batch-{index}",
+                transaction_date=date(2026, 7, 1) + timedelta(days=index % 31),
+                narration=f"Merchant {index}",
+                reference="POS",
+                direction=XeroStatementLineSnapshot.DIRECTION_DEBIT,
+                amount="10.00",
+                currency="AUD",
+                source_hash=f"{index:064d}",
+            )
+            for index in range(74)
+        ])
+
+        with CaptureQueriesContext(connection) as queries:
+            context = build_statement_reconciliation_context(
+                organization=self.organization,
+                include_external_evidence=True,
+            )
+
+        self.assertEqual(len(context["statement_candidates"]), 74)
+        gmail_table = GmailMessageArtifact._meta.db_table.casefold()
+        slack_table = SlackMessageArtifact._meta.db_table.casefold()
+        gmail_queries = [query for query in queries if gmail_table in query["sql"].casefold()]
+        slack_queries = [query for query in queries if slack_table in query["sql"].casefold()]
+        self.assertLessEqual(len(gmail_queries), 1)
+        self.assertLessEqual(len(slack_queries), 1)
 
     def test_statement_post_translates_xero_tax_rate_label_to_api_code(self):
         suggestion = self._statement_suggestion(line_id="tax-label")
@@ -4200,5 +4335,6 @@ class ReconciliationWorkflowApiTests(APITestCase):
             format="json",
         )
         self.assertEqual(decision_response.status_code, status.HTTP_200_OK)
-        self.assertEqual(decision_response.data["mapping"]["project_source_id"], "lin_agent_project")
-        self.assertEqual(decision_response.data["mapping"]["project_tracking_option_name"], "Community Events")
+        self.assertEqual(decision_response.data["mapping"]["event_tracking_option_name"], "Agent Night")
+        self.assertEqual(decision_response.data["mapping"]["project_source_id"], "")
+        self.assertEqual(decision_response.data["mapping"]["project_tracking_option_name"], "")
