@@ -3,28 +3,50 @@
 from django.db import migrations, models
 
 
+class AddFieldIfMissing(migrations.AddField):
+    """Add a field while tolerating production schemas that already contain it."""
+
+    def database_forwards(self, app_label, schema_editor, from_state, to_state):
+        model = to_state.apps.get_model(app_label, self.model_name)
+        field = model._meta.get_field(self.name)
+
+        with schema_editor.connection.cursor() as cursor:
+            columns = {
+                column.name
+                for column in schema_editor.connection.introspection.get_table_description(
+                    cursor,
+                    model._meta.db_table,
+                )
+            }
+
+        if field.column in columns:
+            return
+
+        super().database_forwards(app_label, schema_editor, from_state, to_state)
+
+
 class Migration(migrations.Migration):
     dependencies = [
         ("integrations", "0039_merge_20260802_1530"),
     ]
 
     operations = [
-        migrations.AddField(
+        AddFieldIfMissing(
             model_name="reconciliationprofile",
             name="require_statement_tracking",
             field=models.BooleanField(default=False),
         ),
-        migrations.AddField(
+        AddFieldIfMissing(
             model_name="reconciliationprofile",
             name="default_project_tracking_option_name",
             field=models.CharField(blank=True, default="", max_length=255),
         ),
-        migrations.AddField(
+        AddFieldIfMissing(
             model_name="reconciliationprofile",
             name="default_project_tracking_option_id",
             field=models.CharField(blank=True, default="", max_length=255),
         ),
-        migrations.AddField(
+        AddFieldIfMissing(
             model_name="reconciliationsuggestion",
             name="allocation_mode",
             field=models.CharField(
@@ -38,12 +60,12 @@ class Migration(migrations.Migration):
                 max_length=16,
             ),
         ),
-        migrations.AddField(
+        AddFieldIfMissing(
             model_name="reconciliationsuggestion",
             name="project_tracking_option_id",
             field=models.CharField(blank=True, default="", max_length=255),
         ),
-        migrations.AddField(
+        AddFieldIfMissing(
             model_name="reconciliationrule",
             name="allocation_mode",
             field=models.CharField(
@@ -57,17 +79,17 @@ class Migration(migrations.Migration):
                 max_length=16,
             ),
         ),
-        migrations.AddField(
+        AddFieldIfMissing(
             model_name="reconciliationrule",
             name="project_source_type",
             field=models.CharField(blank=True, default="", max_length=32),
         ),
-        migrations.AddField(
+        AddFieldIfMissing(
             model_name="reconciliationrule",
             name="project_tracking_option_id",
             field=models.CharField(blank=True, default="", max_length=255),
         ),
-        migrations.AddField(
+        AddFieldIfMissing(
             model_name="xerostatementsuggestion",
             name="allocation_mode",
             field=models.CharField(
@@ -81,12 +103,12 @@ class Migration(migrations.Migration):
                 max_length=16,
             ),
         ),
-        migrations.AddField(
+        AddFieldIfMissing(
             model_name="xerostatementsuggestion",
             name="project_source_type",
             field=models.CharField(blank=True, default="", max_length=32),
         ),
-        migrations.AddField(
+        AddFieldIfMissing(
             model_name="xerostatementsuggestion",
             name="project_tracking_option_id",
             field=models.CharField(blank=True, default="", max_length=255),
