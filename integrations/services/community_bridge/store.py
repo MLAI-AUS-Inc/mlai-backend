@@ -313,6 +313,8 @@ def complete_create_delivery(
                 "destination_parent_message_id": str(destination_parent_message_id or "").strip(),
                 "source_payload": payload,
                 "destination_payload": destination_payload or {},
+                "source_deleted_at": None,
+                "destination_deleted_at": None,
             },
         )
         delivery.status = CommunityBridgeDeliveryStatus.COMPLETED
@@ -396,10 +398,10 @@ def _normalize_slack_event(payload: dict) -> Optional[dict]:
         return None
     bridge_bot_user_id = str(getattr(settings, "SLACK_BRIDGE_BOT_USER_ID", "") or "").strip()
 
-    if not subtype:
+    if subtype in {"", "bot_message", "thread_broadcast"}:
         source_message_id = str(event.get("ts") or "").strip()
         user_id = str(event.get("user") or "").strip()
-        if not source_message_id or not user_id or user_id == bridge_bot_user_id or event.get("bot_id"):
+        if not source_message_id or not user_id or user_id == bridge_bot_user_id:
             return None
         source_parent_message_id = _normalize_parent_message_id(
             thread_ts=str(event.get("thread_ts") or "").strip(),
@@ -422,7 +424,7 @@ def _normalize_slack_event(payload: dict) -> Optional[dict]:
         message = dict(event.get("message") or {})
         source_message_id = str(message.get("ts") or "").strip()
         user_id = str(message.get("user") or "").strip()
-        if not source_message_id or not user_id or user_id == bridge_bot_user_id or message.get("bot_id"):
+        if not source_message_id or not user_id or user_id == bridge_bot_user_id:
             return None
         source_parent_message_id = _normalize_parent_message_id(
             thread_ts=str(message.get("thread_ts") or "").strip(),
@@ -445,11 +447,7 @@ def _normalize_slack_event(payload: dict) -> Optional[dict]:
         previous = dict(event.get("previous_message") or {})
         source_message_id = str(event.get("deleted_ts") or previous.get("ts") or "").strip()
         user_id = str(previous.get("user") or "").strip()
-        if (
-            not source_message_id
-            or previous.get("bot_id")
-            or user_id == bridge_bot_user_id
-        ):
+        if not source_message_id or not user_id or user_id == bridge_bot_user_id:
             return None
         source_parent_message_id = _normalize_parent_message_id(
             thread_ts=str(previous.get("thread_ts") or "").strip(),

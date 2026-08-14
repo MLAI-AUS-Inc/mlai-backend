@@ -385,6 +385,115 @@ class SlackCommunityBridgeEventViewTests(TestCase):
         self.assertEqual(receipt.status, CommunityBridgeReceiptStatus.IGNORED)
         self.assertEqual(CommunityBridgeDelivery.objects.count(), 0)
 
+    def test_user_backed_slack_app_message_and_reply_are_enqueued(self):
+        root = self._post(
+            {
+                "type": "event_callback",
+                "event_id": "EvThirdPartyBotRoot",
+                "event": {
+                    "type": "message",
+                    "subtype": "bot_message",
+                    "channel_type": "channel",
+                    "channel": self.channel.slack_channel_id,
+                    "user": "UROOBOT",
+                    "bot_id": "BROO",
+                    "ts": "1710000000.3100",
+                    "text": "A community member earned points",
+                },
+            }
+        )
+        reply = self._post(
+            {
+                "type": "event_callback",
+                "event_id": "EvThirdPartyBotReply",
+                "event": {
+                    "type": "message",
+                    "subtype": "thread_broadcast",
+                    "channel_type": "channel",
+                    "channel": self.channel.slack_channel_id,
+                    "user": "U12345",
+                    "ts": "1710000000.3200",
+                    "thread_ts": "1710000000.3100",
+                    "text": "Great flex",
+                },
+            }
+        )
+
+        self.assertEqual(root.data["status"], "enqueued")
+        self.assertEqual(reply.data["status"], "enqueued")
+        deliveries = list(CommunityBridgeDelivery.objects.order_by("id"))
+        self.assertEqual(deliveries[0].payload["source_author_id"], "UROOBOT")
+        self.assertEqual(deliveries[0].source_parent_message_id, "")
+        self.assertEqual(deliveries[1].source_parent_message_id, "1710000000.3100")
+
+    def test_slack_app_message_without_user_is_ignored(self):
+        response = self._post(
+            {
+                "type": "event_callback",
+                "event_id": "EvBotWithoutUser",
+                "event": {
+                    "type": "message",
+                    "channel_type": "channel",
+                    "channel": self.channel.slack_channel_id,
+                    "bot_id": "BNOUSER",
+                    "ts": "1710000000.3300",
+                    "text": "No stable Slack author",
+                },
+            }
+        )
+
+        self.assertEqual(response.data["status"], "ignored")
+        self.assertEqual(CommunityBridgeDelivery.objects.count(), 0)
+
+    def test_user_backed_slack_app_edit_and_delete_are_enqueued(self):
+        edit = self._post(
+            {
+                "type": "event_callback",
+                "event_id": "EvThirdPartyBotEdit",
+                "event": {
+                    "type": "message",
+                    "subtype": "message_changed",
+                    "channel_type": "channel",
+                    "channel": self.channel.slack_channel_id,
+                    "message": {
+                        "ts": "1710000000.3400",
+                        "user": "UROOBOT",
+                        "bot_id": "BROO",
+                        "text": "Updated points",
+                    },
+                },
+            }
+        )
+        delete = self._post(
+            {
+                "type": "event_callback",
+                "event_id": "EvThirdPartyBotDelete",
+                "event": {
+                    "type": "message",
+                    "subtype": "message_deleted",
+                    "channel_type": "channel",
+                    "channel": self.channel.slack_channel_id,
+                    "deleted_ts": "1710000000.3400",
+                    "previous_message": {
+                        "ts": "1710000000.3400",
+                        "user": "UROOBOT",
+                        "bot_id": "BROO",
+                    },
+                },
+            }
+        )
+
+        self.assertEqual(edit.data["status"], "enqueued")
+        self.assertEqual(delete.data["status"], "enqueued")
+        self.assertEqual(
+            list(
+                CommunityBridgeDelivery.objects.order_by("id").values_list(
+                    "delivery_type", flat=True
+                )
+            ),
+            [CommunityBridgeDeliveryType.EDIT, CommunityBridgeDeliveryType.DELETE],
+        )
+
     def test_hidden_plain_message_is_ignored(self):
         response = self._post(
             {
@@ -1247,6 +1356,114 @@ class CommunityBridgeInspectionTests(TestCase):
         self.assertNotIn("private payload", output.getvalue())
 
 
+@override_settings(SLACK_BRIDGE_BOT_TOKEN="xoxb-bridge")
+class CommunityBridgeSlackThreadRepairTests(TestCase):
+    def setUp(self):
+        self.channel = CommunityBridgeChannel.objects.create(
+            slack_workspace_id="TMLAI",
+            slack_channel_id="CGENERAL",
+            slack_channel_name="general",
+            destination_platform=CommunityBridgePlatform.BUZZ,
+            destination_workspace_id="chat.mlai.au",
+            destination_channel_id="a" * 32,
+            destination_channel_name="general",
+        )
+        self.root_message_id = "1786660929.427979"
+        self.reply_message_id = "1786666478.295369"
+        self.thread = [
+            {
+                "ts": self.root_message_id,
+                "user": "UROOBOT",
+                "bot_id": "BROO",
+                "text": "Alan earned points",
+            },
+            {
+                "ts": self.reply_message_id,
+                "thread_ts": self.root_message_id,
+                "user": "USAM",
+                "text": "Great flex",
+            },
+        ]
+
+    def _command(self, phase):
+        output = StringIO()
+        call_command(
+            "repair_community_bridge_slack_thread",
+            slack_channel_id=self.channel.slack_channel_id,
+            root_message_id=self.root_message_id,
+            phase=phase,
+            apply=True,
+            confirm_historical_repair=True,
+            stdout=output,
+        )
+        return json.loads(output.getvalue())
+
+    @patch(
+        "integrations.management.commands.repair_community_bridge_slack_thread."
+        "SlackBridgeClient.get_thread_messages"
+    )
+    def test_root_phase_enqueues_app_authored_root_at_slack_timestamp(self, mock_thread):
+        mock_thread.return_value = self.thread
+
+        result = self._command("root")
+        repeated = self._command("root")
+
+        delivery = CommunityBridgeDelivery.objects.get()
+        self.assertEqual(result["enqueued"], 1)
+        self.assertEqual(repeated["existing"], 1)
+        self.assertEqual(CommunityBridgeDelivery.objects.count(), 1)
+        self.assertEqual(delivery.delivery_type, CommunityBridgeDeliveryType.CREATE)
+        self.assertEqual(delivery.source_message_id, self.root_message_id)
+        self.assertEqual(delivery.source_parent_message_id, "")
+        self.assertEqual(delivery.payload["source_author_id"], "UROOBOT")
+        self.assertEqual(delivery.payload["metadata"]["slack_raw_text"], "Alan earned points")
+        self.assertEqual(int(delivery.created_at.timestamp()), 1786660929)
+
+    @patch(
+        "integrations.management.commands.repair_community_bridge_slack_thread."
+        "SlackBridgeClient.get_thread_messages"
+    )
+    def test_delete_then_recreate_phase_reparents_existing_top_level_reply(self, mock_thread):
+        mock_thread.return_value = self.thread
+        root_destination_id = "b" * 64
+        CommunityBridgeMessageLink.objects.create(
+            channel=self.channel,
+            source_platform=CommunityBridgePlatform.SLACK,
+            source_channel_id=self.channel.slack_channel_id,
+            source_message_id=self.root_message_id,
+            destination_platform=CommunityBridgePlatform.BUZZ,
+            destination_channel_id=self.channel.destination_channel_id,
+            destination_message_id=root_destination_id,
+        )
+        orphan = CommunityBridgeMessageLink.objects.create(
+            channel=self.channel,
+            source_platform=CommunityBridgePlatform.SLACK,
+            source_channel_id=self.channel.slack_channel_id,
+            source_message_id=self.reply_message_id,
+            destination_platform=CommunityBridgePlatform.BUZZ,
+            destination_channel_id=self.channel.destination_channel_id,
+            destination_message_id="c" * 64,
+            destination_parent_message_id="",
+        )
+
+        deleted = self._command("delete_orphans")
+        orphan.source_deleted_at = timezone.now()
+        orphan.destination_deleted_at = timezone.now()
+        orphan.save(update_fields=["source_deleted_at", "destination_deleted_at"])
+        recreated = self._command("recreate_orphans")
+
+        deliveries = list(CommunityBridgeDelivery.objects.order_by("id"))
+        self.assertEqual(deleted["enqueued"], 1)
+        self.assertEqual(recreated["enqueued"], 1)
+        self.assertEqual(
+            [delivery.delivery_type for delivery in deliveries],
+            [CommunityBridgeDeliveryType.DELETE, CommunityBridgeDeliveryType.CREATE],
+        )
+        self.assertEqual(deliveries[1].source_parent_message_id, self.root_message_id)
+        self.assertEqual(deliveries[1].payload["text"], "Great flex")
+        self.assertEqual(int(deliveries[1].created_at.timestamp()), 1786666478)
+
+
 @override_settings(
     SLACK_BRIDGE_BOT_TOKEN="xoxb-bridge",
     BUZZ_BRIDGE_ADAPTER_URL="http://buzz-bridge-adapter:8090",
@@ -1399,6 +1616,68 @@ class BuzzCommunityBridgeWorkerTests(TransactionTestCase):
             destination_platform=CommunityBridgePlatform.BUZZ,
         )
         self.assertEqual(link["destination_message_id"], "2" * 64)
+
+    @patch("integrations.services.community_bridge.worker.BuzzBridgeClient.deliver")
+    def test_reply_waits_for_parent_mapping_instead_of_becoming_top_level(self, mock_deliver):
+        delivery = self._delivery(
+            delivery_type=CommunityBridgeDeliveryType.CREATE,
+            message_id="1710000000.2200",
+            parent_id="1710000000.2100",
+        )
+
+        asyncio.run(self.client.process_pending_deliveries_once(limit=5))
+
+        delivery.refresh_from_db()
+        self.assertEqual(delivery.status, CommunityBridgeDeliveryStatus.FAILED)
+        self.assertIn("CommunityBridgeParentNotReady", delivery.last_error)
+        self.assertIn("1710000000.2100", delivery.last_error)
+        mock_deliver.assert_not_called()
+
+    @patch("integrations.services.community_bridge.worker.BuzzBridgeClient.deliver")
+    def test_recreated_reply_clears_deleted_link_markers(self, mock_deliver):
+        parent_event_id = "a" * 64
+        CommunityBridgeMessageLink.objects.create(
+            channel=self.channel,
+            source_platform=CommunityBridgePlatform.SLACK,
+            source_channel_id=self.channel.slack_channel_id,
+            source_message_id="1710000000.2300",
+            destination_platform=CommunityBridgePlatform.BUZZ,
+            destination_channel_id=self.channel.destination_channel_id,
+            destination_message_id=parent_event_id,
+        )
+        deleted_at = timezone.now()
+        CommunityBridgeMessageLink.objects.create(
+            channel=self.channel,
+            source_platform=CommunityBridgePlatform.SLACK,
+            source_channel_id=self.channel.slack_channel_id,
+            source_message_id="1710000000.2400",
+            source_parent_message_id="1710000000.2300",
+            destination_platform=CommunityBridgePlatform.BUZZ,
+            destination_channel_id=self.channel.destination_channel_id,
+            destination_message_id="b" * 64,
+            source_deleted_at=deleted_at,
+            destination_deleted_at=deleted_at,
+        )
+        delivery = self._delivery(
+            delivery_type=CommunityBridgeDeliveryType.CREATE,
+            message_id="1710000000.2400",
+            parent_id="1710000000.2300",
+        )
+        mock_deliver.return_value = {
+            "channel_id": self.channel.destination_channel_id,
+            "message_id": "c" * 64,
+            "parent_message_id": parent_event_id,
+        }
+
+        asyncio.run(self.client.process_pending_deliveries_once(limit=5))
+
+        link = CommunityBridgeMessageLink.objects.get(
+            source_message_id="1710000000.2400"
+        )
+        self.assertEqual(link.destination_message_id, "c" * 64)
+        self.assertEqual(link.destination_parent_message_id, parent_event_id)
+        self.assertIsNone(link.source_deleted_at)
+        self.assertIsNone(link.destination_deleted_at)
 
     @patch("integrations.services.community_bridge.worker.BuzzBridgeClient.deliver")
     def test_edit_targets_linked_buzz_event(self, mock_deliver):

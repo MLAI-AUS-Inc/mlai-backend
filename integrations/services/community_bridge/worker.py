@@ -38,6 +38,10 @@ from integrations.services.community_bridge.store import (
 logger = logging.getLogger(__name__)
 
 
+class CommunityBridgeParentNotReady(RuntimeError):
+    """Raised when a reply reaches the worker before its parent mapping exists."""
+
+
 class CommunityBridgeDiscordClient(discord.Client):
     def __init__(self):
         intents = discord.Intents.default()
@@ -573,8 +577,19 @@ class CommunityBridgeDiscordClient(discord.Client):
             destination_platform=delivery["target_platform"],
         )
         if not link:
-            return ""
-        return str(link.get("destination_message_id") or "").strip()
+            raise CommunityBridgeParentNotReady(
+                "Parent mapping is not ready for "
+                f"{delivery['source_platform']}:{delivery['source_channel_id']}:"
+                f"{source_parent_message_id} -> {delivery['target_platform']}"
+            )
+        destination_message_id = str(link.get("destination_message_id") or "").strip()
+        if not destination_message_id:
+            raise CommunityBridgeParentNotReady(
+                "Parent mapping has no destination message for "
+                f"{delivery['source_platform']}:{delivery['source_channel_id']}:"
+                f"{source_parent_message_id} -> {delivery['target_platform']}"
+            )
+        return destination_message_id
 
     async def _get_channel_or_fetch(self, channel_id: str) -> Optional[discord.abc.Messageable]:
         normalized_channel_id = str(channel_id or "").strip()
