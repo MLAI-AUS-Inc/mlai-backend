@@ -51,6 +51,7 @@ from integrations.services.external_connectors import (
     active_organization_for_user,
     google_connection_for_org,
     mark_sources_sync_requested,
+    refresh_linear_activity_selections,
 )
 from integrations.services.gmail_scopes import (
     gmail_scope_status_payload,
@@ -186,7 +187,7 @@ VIBE_RAISING_INPUT_SOURCE_KEYS = {
     "luma",
     MANUAL_DOCUMENTS_SOURCE,
 }
-CONNECTED_SOURCE_DRAFT_SYNC_STALE_AFTER = timedelta(minutes=15)
+XERO_DRAFT_SYNC_STALE_AFTER = timedelta(minutes=15)
 
 
 def _sync_selected_connector_sources_for_draft(user, input_sources: list[str]) -> dict[str, list[str]]:
@@ -214,21 +215,33 @@ def _sync_selected_connector_sources_for_draft(user, input_sources: list[str]) -
             ]
             continue
 
+        # Starting a draft is a browser-facing request and must return quickly.
+        # Refresh Linear's lightweight recent-activity selection here, then let
+        # Valley backfill the selected projects page-by-page. Luma drafting uses
+        # the latest cached monthly snapshot. A full inline refresh of either
+        # connector can make dozens of upstream requests and cause the browser
+        # connection to close before the run is even created.
+        if provider == ExternalServiceProvider.LINEAR:
+            try:
+                refresh_linear_activity_selections(connection)
+            except Exception as exc:
+                logger.exception(
+                    "Unable to refresh Linear activity scope before monthly update draft",
+                    extra={"user_id": user.id, "provider": provider},
+                )
+                warnings[provider] = [
+                    str(exc) or "Linear activity scope could not be refreshed before draft generation."
+                ]
+            continue
+
+        if provider != ExternalServiceProvider.XERO:
+            continue
+
         last_synced_at = connection.last_synced_at
-        provider_metadata = (
-            connection.provider_metadata
-            if isinstance(connection.provider_metadata, dict)
-            else {}
-        )
-        needs_linear_activity_migration = (
-            provider == ExternalServiceProvider.LINEAR
-            and provider_metadata.get("project_selection_mode") != "recent_activity"
-        )
         should_sync = (
-            needs_linear_activity_migration
-            or connection.status != ExternalServiceConnectionStatus.CONNECTED
+            connection.status != ExternalServiceConnectionStatus.CONNECTED
             or last_synced_at is None
-            or timezone.now() - last_synced_at > CONNECTED_SOURCE_DRAFT_SYNC_STALE_AFTER
+            or timezone.now() - last_synced_at > XERO_DRAFT_SYNC_STALE_AFTER
         )
         if not should_sync:
             continue
@@ -237,7 +250,7 @@ def _sync_selected_connector_sources_for_draft(user, input_sources: list[str]) -
             payload = mark_sources_sync_requested(
                 user,
                 [provider],
-                financial_only=provider == ExternalServiceProvider.XERO,
+                financial_only=True,
                 organization=organization,
             )
         except Exception as exc:
