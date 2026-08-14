@@ -197,6 +197,37 @@ bridge-worker retries/dead letters after every batch. A
 original message did not contain a Slack user/channel reference; the command
 does not rewrite those rows.
 
+## Slack thread reconciliation
+
+If Slack reply counts disagree with MLAI Chat or replies render as top-level
+messages, use the dry-run-first `Reconcile production Slack threads` workflow.
+Restrict the first run to one channel and no more than 25 roots. Review
+`mismatches`, `wrong_parent`, `orphan_replies`, `wrong_broadcast`,
+`duplicate_events`, `stale_links`, and `errors` before selecting apply mode.
+
+Apply requires one explicit Slack channel and the historical-repair
+confirmation. It processes each
+root before its replies, waits for the bridge worker between mutations, and
+stops on dead deliveries, timeouts, adapter lookup failures, or a configured
+mismatch-rate guard. Use the returned `resume.latest` value for the next batch;
+do not widen the channel set until the previous batch is clean and a second
+dry-run reports no remaining mismatches.
+
+Deploy the MLAI Chat adapter/client change before the backend change that sends
+the new `source_created_at` and `broadcast` delivery fields. After both are
+live, verify one normal reply and one Slack “also send to channel” reply in
+Slack and MLAI Chat, then run:
+
+```sh
+docker compose exec -T web python manage.py inspect_community_bridge \
+  --slack-channel-id <channel-id> \
+  --recent-minutes 30
+docker compose logs --since 15m --tail 200 bridge-worker
+```
+
+Rollback by disabling the affected mapping and pausing the worker. Never delete
+receipts, message links, or relay events by hand during triage.
+
 ## Deployment order
 
 1. Apply additive database migrations.

@@ -417,7 +417,12 @@ def _normalize_slack_event(payload: dict) -> Optional[dict]:
             "source_author_display_name": "",
             "text": sanitize_slack_text(raw_text),
             "attachments": normalize_slack_files(event.get("files") or []),
-            "metadata": {"slack_raw_text": raw_text},
+            "metadata": {
+                "broadcast": subtype == "thread_broadcast"
+                or bool(event.get("reply_broadcast")),
+                "slack_created_at": _slack_timestamp_seconds(source_message_id),
+                "slack_raw_text": raw_text,
+            },
         }
 
     if subtype == "message_changed":
@@ -440,7 +445,13 @@ def _normalize_slack_event(payload: dict) -> Optional[dict]:
             "source_author_display_name": "",
             "text": sanitize_slack_text(raw_text),
             "attachments": normalize_slack_files(message.get("files") or []),
-            "metadata": {"slack_raw_text": raw_text},
+            "metadata": {
+                "broadcast": str(message.get("subtype") or "").strip()
+                == "thread_broadcast"
+                or bool(message.get("reply_broadcast")),
+                "slack_created_at": _slack_timestamp_seconds(source_message_id),
+                "slack_raw_text": raw_text,
+            },
         }
 
     if subtype == "message_deleted":
@@ -590,6 +601,14 @@ def _normalize_parent_message_id(*, thread_ts: str, source_message_id: str) -> s
     if normalized_thread_ts and normalized_thread_ts != normalized_source_message_id:
         return normalized_thread_ts
     return ""
+
+
+def _slack_timestamp_seconds(value: str) -> int:
+    try:
+        seconds = int(str(value or "").split(".", 1)[0])
+    except (TypeError, ValueError):
+        return 0
+    return max(0, seconds)
 
 
 def _serialize_delivery(delivery: CommunityBridgeDelivery) -> dict:
