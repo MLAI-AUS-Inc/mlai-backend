@@ -160,6 +160,7 @@ jobs:
           tests.test_content_factory_status_contract \
           content_factory.tests_admin_metrics \
           tests.test_community_bridge_adapter_url \
+          community_chat.tests.test_account_sessions \
           integrations.tests_community_bridge \
           integrations.tests_community_bridge_avatar_backfill \
           integrations.tests_community_bridge_mention_backfill \
