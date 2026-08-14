@@ -135,6 +135,36 @@ class SlackBridgeClient:
             channel_name_resolver=cls.get_channel_display_name,
         )
 
+    @classmethod
+    def get_thread_messages(cls, *, channel_id: str, root_message_id: str) -> list[dict]:
+        """Return one complete Slack thread, failing closed on partial pagination."""
+
+        messages: list[dict] = []
+        cursor = ""
+        while True:
+            payload = {
+                "channel": str(channel_id or "").strip(),
+                "ts": str(root_message_id or "").strip(),
+                "limit": 200,
+            }
+            if cursor:
+                payload["cursor"] = cursor
+            response = cls.get_client().conversations_replies(**payload)
+            if not response.get("ok"):
+                raise SlackApiError("conversations.replies failed", response)
+            messages.extend(
+                dict(message)
+                for message in (response.get("messages") or [])
+                if isinstance(message, dict)
+            )
+            cursor = str(
+                (response.get("response_metadata") or {}).get("next_cursor") or ""
+            ).strip()
+            if not cursor:
+                return messages
+            if len(messages) >= 1000:
+                raise RuntimeError("Slack thread exceeds the 1000-message repair limit")
+
     @staticmethod
     def _approved_avatar_url(profile: dict) -> str:
         for field_name in ("image_192", "image_512", "image_72", "image_48", "image_original"):

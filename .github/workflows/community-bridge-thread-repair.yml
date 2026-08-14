@@ -1,0 +1,96 @@
+name: Repair one production Slack thread mirror
+
+on:
+  workflow_dispatch:
+    inputs:
+      slack_channel_id:
+        description: Slack channel ID
+        required: true
+        default: C05M54Z7A2K
+        type: string
+      root_message_id:
+        description: Slack root message timestamp
+        required: true
+        type: string
+      mode:
+        description: Preview or apply the repair
+        required: true
+        default: dry_run
+        type: choice
+        options:
+          - dry_run
+          - apply
+      confirm_historical_repair:
+        description: Required when mode is apply
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-community-bridge-thread-repair
+  cancel-in-progress: false
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate inputs
+        env:
+          CHANNEL_ID: ${{ inputs.slack_channel_id }}
+          ROOT_MESSAGE_ID: ${{ inputs.root_message_id }}
+          MODE: ${{ inputs.mode }}
+          CONFIRM: ${{ inputs.confirm_historical_repair }}
+        run: |
+          set -euo pipefail
+          [[ "$CHANNEL_ID" =~ ^[A-Z0-9]+$ ]]
+          [[ "$ROOT_MESSAGE_ID" =~ ^[0-9]+\.[0-9]+$ ]]
+          [[ "$MODE" == "dry_run" || "$MODE" == "apply" ]]
+          if [[ "$MODE" == "apply" && "$CONFIRM" != "true" ]]; then
+            echo "::error::confirm_historical_repair must be selected"
+            exit 1
+          fi
+
+      - name: Install SSH key
+        uses: webfactory/ssh-agent@v0.10.0
+        with:
+          ssh-private-key: ${{ secrets.DO_SSH_KEY }}
+
+      - name: Add known host
+        run: ssh-keyscan -H 209.38.85.60 >> ~/.ssh/known_hosts
+
+      - name: Repair Slack thread
+        env:
+          CHANNEL_ID: ${{ inputs.slack_channel_id }}
+          ROOT_MESSAGE_ID: ${{ inputs.root_message_id }}
+          MODE: ${{ inputs.mode }}
+        run: |
+          set -euo pipefail
+          ssh root@209.38.85.60 bash -s -- \
+            "$CHANNEL_ID" "$ROOT_MESSAGE_ID" "$MODE" <<'REMOTE'
+          set -euo pipefail
+          channel_id="$1"
+          root_message_id="$2"
+          mode="$3"
+          cd /root/mlai-backend
+          for phase in root delete_orphans recreate_orphans; do
+            args=(
+              python manage.py repair_community_bridge_slack_thread
+              --slack-channel-id "$channel_id"
+              --root-message-id "$root_message_id"
+              --phase "$phase"
+            )
+            if [[ "$mode" == "apply" ]]; then
+              args+=(--apply --confirm-historical-repair --wait-seconds 120)
+            fi
+            docker compose exec -T web "${args[@]}" </dev/null
+          done
+          docker compose exec -T web python manage.py inspect_community_bridge \
+            --slack-channel-id "$channel_id" \
+            --slack-message-id "$root_message_id" \
+            --recent-minutes 120
+          docker compose ps web bridge-worker
+          docker compose logs --since 10m --tail 200 bridge-worker
+          REMOTE
