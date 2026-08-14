@@ -610,7 +610,12 @@ class AccountView(APIView):
 
 
 class PublicProfileBatchView(APIView):
-    """Resolve verified MLAI chat device keys to public account profiles."""
+    """Resolve current and historical verified chat keys to public profiles.
+
+    Revoking a device removes its access, but it must not erase attribution on
+    messages and membership events that the key signed while it was verified.
+    Pending or otherwise never-verified keys remain private and unresolved.
+    """
 
     authentication_classes = (CommunityChatAccountAuthentication,)
     permission_classes = [IsAuthenticated]
@@ -626,12 +631,18 @@ class PublicProfileBatchView(APIView):
             CommunityChatDevice.objects.select_related("user")
             .filter(
                 public_key__in=public_keys,
-                status=DeviceBindingStatus.VERIFIED,
-                revoked_at__isnull=True,
+                status__in=(
+                    DeviceBindingStatus.VERIFIED,
+                    DeviceBindingStatus.REVOKED,
+                ),
+                verified_at__isnull=False,
                 user__is_active=True,
             )
+            .order_by("public_key", "-verified_at", "-created_at")
         )
-        devices_by_key = {device.public_key: device for device in devices}
+        devices_by_key = {}
+        for device in devices:
+            devices_by_key.setdefault(device.public_key, device)
         profiles = {
             public_key: public_chat_profile(devices_by_key[public_key].user)
             for public_key in public_keys
