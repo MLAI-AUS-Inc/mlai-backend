@@ -14,12 +14,18 @@ from .views import (
     DeviceView,
     InviteView,
     PasswordAuthView,
+    PublicProfileBatchView,
     SessionView,
 )
 
 
 urlpatterns = [
     path("account/", AccountView.as_view(), name="community_chat_account"),
+    path(
+        "profiles/batch/",
+        PublicProfileBatchView.as_view(),
+        name="community_chat_public_profiles_batch",
+    ),
     path("auth/session/refresh/", AccountSessionRefreshView.as_view(), name="community_chat_session_refresh"),
     path("auth/session/logout/", AccountSessionLogoutView.as_view(), name="community_chat_session_logout"),
     path("auth/email-code/request/", EmailCodeRequestView.as_view(), name="community_chat_email_code_request"),

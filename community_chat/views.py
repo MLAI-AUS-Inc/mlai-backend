@@ -75,6 +75,7 @@ from .serializers import (
     CommunityChatEmailCodeRequestSerializer,
     CommunityChatEmailCodeVerifySerializer,
     CommunityChatPasswordLoginSerializer,
+    CommunityChatPublicProfileBatchSerializer,
     own_chat_profile,
     public_chat_profile,
 )
@@ -606,6 +607,40 @@ class AccountView(APIView):
                 "devices": [_device_payload(device) for device in devices],
             }
         )
+
+
+class PublicProfileBatchView(APIView):
+    """Resolve verified MLAI chat device keys to public account profiles."""
+
+    authentication_classes = (CommunityChatAccountAuthentication,)
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [CommunityChatScopedThrottle]
+    community_chat_throttle_scope = "community_chat_session"
+
+    def post(self, request):
+        serializer = CommunityChatPublicProfileBatchSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        public_keys = serializer.validated_data["public_keys"]
+
+        devices = (
+            CommunityChatDevice.objects.select_related("user")
+            .filter(
+                public_key__in=public_keys,
+                status=DeviceBindingStatus.VERIFIED,
+                revoked_at__isnull=True,
+                user__is_active=True,
+            )
+        )
+        devices_by_key = {device.public_key: device for device in devices}
+        profiles = {
+            public_key: public_chat_profile(devices_by_key[public_key].user)
+            for public_key in public_keys
+            if public_key in devices_by_key
+        }
+        missing = [
+            public_key for public_key in public_keys if public_key not in profiles
+        ]
+        return Response({"profiles": profiles, "missing": missing})
 
 
 class DeviceAuthStartView(APIView):
