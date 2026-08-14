@@ -101,7 +101,7 @@ class CommunityChatAccountSessionTests(TestCase):
             str(self.challenge.installation_id),
         )
 
-    def test_public_profile_batch_resolves_only_verified_active_devices(self):
+    def test_public_profile_batch_resolves_current_and_historical_verified_devices(self):
         user_model = get_user_model()
         verified_user = user_model.objects.create_user(
             email="verified-profile@example.com",
@@ -119,9 +119,10 @@ class CommunityChatAccountSessionTests(TestCase):
         inactive_user.save(update_fields=("is_active",))
         verified_key = public_key(61)
         pending_key = public_key(62)
-        revoked_key = public_key(63)
-        inactive_key = public_key(64)
-        unknown_key = public_key(65)
+        revoked_verified_key = public_key(63)
+        revoked_unverified_key = public_key(64)
+        inactive_key = public_key(65)
+        unknown_key = public_key(66)
         CommunityChatDevice.objects.create(
             user=verified_user,
             public_key=verified_key,
@@ -135,7 +136,14 @@ class CommunityChatAccountSessionTests(TestCase):
         )
         CommunityChatDevice.objects.create(
             user=verified_user,
-            public_key=revoked_key,
+            public_key=revoked_verified_key,
+            status=DeviceBindingStatus.REVOKED,
+            verified_at=timezone.now(),
+            revoked_at=timezone.now(),
+        )
+        CommunityChatDevice.objects.create(
+            user=verified_user,
+            public_key=revoked_unverified_key,
             status=DeviceBindingStatus.REVOKED,
             revoked_at=timezone.now(),
         )
@@ -153,7 +161,8 @@ class CommunityChatAccountSessionTests(TestCase):
                     verified_key.upper(),
                     pending_key,
                     verified_key,
-                    revoked_key,
+                    revoked_verified_key,
+                    revoked_unverified_key,
                     inactive_key,
                     unknown_key,
                 ],
@@ -162,7 +171,10 @@ class CommunityChatAccountSessionTests(TestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(list(response.data["profiles"]), [verified_key])
+        self.assertEqual(
+            list(response.data["profiles"]),
+            [verified_key, revoked_verified_key],
+        )
         self.assertEqual(
             set(response.data["profiles"][verified_key]),
             {
@@ -183,8 +195,12 @@ class CommunityChatAccountSessionTests(TestCase):
             "https://cdn.example.com/verified.png",
         )
         self.assertEqual(
+            response.data["profiles"][revoked_verified_key]["display_name"],
+            "Verified Member",
+        )
+        self.assertEqual(
             response.data["missing"],
-            [pending_key, revoked_key, inactive_key, unknown_key],
+            [pending_key, revoked_unverified_key, inactive_key, unknown_key],
         )
 
     def test_public_profile_batch_requires_an_account_session(self):
