@@ -677,9 +677,13 @@ def approve_publication(
             "public_revision": item.revision,
         },
     )
-    from .public_knowledge import refresh_public_search_vectors
+    from .public_knowledge import (
+        refresh_public_search_vectors,
+        schedule_public_knowledge_embedding,
+    )
 
     refresh_public_search_vectors(item_ids=[item.pk])
+    schedule_public_knowledge_embedding(item)
     return item
 
 
