@@ -14,6 +14,7 @@ from org_memory.public_knowledge import (
     embed_public_knowledge_item,
     generate_public_query_embedding,
     public_embedding_text,
+    refresh_public_search_vectors,
     schedule_public_knowledge_embedding,
     search_public_knowledge,
 )
@@ -205,22 +206,52 @@ class PublicVectorLaneTests(TestCase):
             "openai-text-embedding-3-small-v1",
         )
 
-    def test_vector_lane_surfaces_an_item_the_text_lane_misses(self):
+    def test_vector_lane_promotes_the_semantically_closer_item(self):
+        embedded = self._item(
+            key="desks",
+            title="Desk availability",
+            body="Hot desks are bookable on weekdays.",
+        )
+        unembedded = self._item(
+            key="booking",
+            title="Desk booking",
+            body="Hot desks are bookable on weekdays.",
+        )
+        embed_public_knowledge_item(
+            item=embedded,
+            provider=StubEmbeddingProvider(axis=0),
+        )
+        refresh_public_search_vectors(item_ids=[embedded.pk, unembedded.pk])
+
+        # Both items are equally strong lexically, so any ordering difference
+        # is contributed by the vector lane alone.
+        hits = search_public_knowledge(
+            query="hot desks",
+            organization_id=self.organization.pk,
+            query_embedding=[1.0] + [0.0] * 1535,
+        )
+        by_id = {hit.item.pk: hit for hit in hits}
+        self.assertIn(embedded.pk, by_id)
+        self.assertEqual(hits[0].item.pk, embedded.pk)
+        self.assertEqual(by_id[embedded.pk].vector_rank, 1)
+        self.assertIsNone(by_id[unembedded.pk].vector_rank)
+        self.assertGreater(by_id[embedded.pk].score, by_id[unembedded.pk].score)
+
+    def test_text_only_search_ignores_the_vector_lane(self):
         item = self._item(
             key="desks",
             title="Desk availability",
             body="Hot desks are bookable on weekdays.",
         )
-        embed_public_knowledge_item(item=item, provider=StubEmbeddingProvider(axis=0))
-        # A lexically unrelated query: only the vector lane can retrieve it.
+        embed_public_knowledge_item(item=item, provider=StubEmbeddingProvider())
+        refresh_public_search_vectors(item_ids=[item.pk])
+
         hits = search_public_knowledge(
-            query="zzzz unrelated lexical tokens",
+            query="hot desks",
             organization_id=self.organization.pk,
-            query_embedding=[1.0] + [0.0] * 1535,
         )
         self.assertEqual([hit.item.pk for hit in hits], [item.pk])
-        self.assertEqual(hits[0].text_rank, None)
-        self.assertEqual(hits[0].vector_rank, 1)
+        self.assertIsNone(hits[0].vector_rank)
 
     def test_only_active_items_are_embedded(self):
         item = self._item(key="retired", title="Retired", body="Old policy.")
