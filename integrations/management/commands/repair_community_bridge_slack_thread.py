@@ -1,6 +1,5 @@
 import json
 import time
-from datetime import datetime, timezone as datetime_timezone
 
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
@@ -24,7 +23,7 @@ from integrations.services.community_bridge.formatting import normalize_slack_fi
 from integrations.services.community_bridge.slack import SlackBridgeClient
 
 
-REPAIR_VERSION = "slack-thread-repair-v1"
+REPAIR_VERSION = "slack-thread-repair-v2"
 PHASES = ("root", "delete_orphans", "recreate_orphans")
 TERMINAL_STATUSES = {
     CommunityBridgeDeliveryStatus.COMPLETED,
@@ -117,7 +116,6 @@ class Command(BaseCommand):
                     root_message_id=root_message_id,
                     delivery_type=CommunityBridgeDeliveryType.CREATE,
                     receipt_suffix="root",
-                    preserve_source_time=True,
                 )
         else:
             if not root_destination_id:
@@ -152,7 +150,6 @@ class Command(BaseCommand):
                         root_message_id=root_message_id,
                         delivery_type=CommunityBridgeDeliveryType.DELETE,
                         receipt_suffix="delete",
-                        preserve_source_time=False,
                     )
                     continue
                 if correctly_threaded:
@@ -170,7 +167,6 @@ class Command(BaseCommand):
                     root_message_id=root_message_id,
                     delivery_type=CommunityBridgeDeliveryType.CREATE,
                     receipt_suffix="recreate",
-                    preserve_source_time=True,
                 )
 
         if apply_changes and delivery_ids and wait_seconds:
@@ -229,7 +225,6 @@ class Command(BaseCommand):
         root_message_id,
         delivery_type,
         receipt_suffix,
-        preserve_source_time,
     ):
         if not apply_changes:
             report["would_enqueue"] += 1
@@ -240,7 +235,6 @@ class Command(BaseCommand):
             root_message_id=root_message_id,
             delivery_type=delivery_type,
             receipt_suffix=receipt_suffix,
-            preserve_source_time=preserve_source_time,
         )
         if created:
             report["enqueued"] += 1
@@ -262,7 +256,6 @@ class Command(BaseCommand):
         root_message_id,
         delivery_type,
         receipt_suffix,
-        preserve_source_time,
     ):
         message_id = str(message.get("ts") or "").strip()
         is_reply = message_id != root_message_id
@@ -311,15 +304,6 @@ class Command(BaseCommand):
                 payload=payload,
                 available_at=now,
             )
-            if preserve_source_time:
-                source_time = datetime.fromtimestamp(
-                    int(message_id.split(".", 1)[0]),
-                    tz=datetime_timezone.utc,
-                )
-                CommunityBridgeDelivery.objects.filter(id=delivery.id).update(
-                    created_at=source_time
-                )
-                delivery.created_at = source_time
         return delivery, True
 
     @staticmethod
@@ -345,6 +329,7 @@ class Command(BaseCommand):
             attachments=attachments,
             metadata={
                 "backfill_version": REPAIR_VERSION,
+                "slack_created_at": int(str(message.get("ts") or "0").split(".", 1)[0]),
                 "slack_raw_text": raw_text,
             },
         ).normalized_payload()

@@ -1402,8 +1402,9 @@ class CommunityBridgeSlackThreadRepairTests(TestCase):
         "integrations.management.commands.repair_community_bridge_slack_thread."
         "SlackBridgeClient.get_thread_messages"
     )
-    def test_root_phase_enqueues_app_authored_root_at_slack_timestamp(self, mock_thread):
+    def test_root_phase_enqueues_app_authored_root_with_fresh_relay_timestamp(self, mock_thread):
         mock_thread.return_value = self.thread
+        started_at = timezone.now()
 
         result = self._command("root")
         repeated = self._command("root")
@@ -1417,7 +1418,9 @@ class CommunityBridgeSlackThreadRepairTests(TestCase):
         self.assertEqual(delivery.source_parent_message_id, "")
         self.assertEqual(delivery.payload["source_author_id"], "UROOBOT")
         self.assertEqual(delivery.payload["metadata"]["slack_raw_text"], "Alan earned points")
-        self.assertEqual(int(delivery.created_at.timestamp()), 1786660929)
+        self.assertEqual(delivery.payload["metadata"]["slack_created_at"], 1786660929)
+        self.assertGreaterEqual(delivery.created_at, started_at)
+        self.assertLessEqual(delivery.created_at, timezone.now())
 
     @patch(
         "integrations.management.commands.repair_community_bridge_slack_thread."
@@ -1450,6 +1453,7 @@ class CommunityBridgeSlackThreadRepairTests(TestCase):
         orphan.source_deleted_at = timezone.now()
         orphan.destination_deleted_at = timezone.now()
         orphan.save(update_fields=["source_deleted_at", "destination_deleted_at"])
+        recreate_started_at = timezone.now()
         recreated = self._command("recreate_orphans")
 
         deliveries = list(CommunityBridgeDelivery.objects.order_by("id"))
@@ -1461,7 +1465,12 @@ class CommunityBridgeSlackThreadRepairTests(TestCase):
         )
         self.assertEqual(deliveries[1].source_parent_message_id, self.root_message_id)
         self.assertEqual(deliveries[1].payload["text"], "Great flex")
-        self.assertEqual(int(deliveries[1].created_at.timestamp()), 1786666478)
+        self.assertEqual(
+            deliveries[1].payload["metadata"]["slack_created_at"],
+            1786666478,
+        )
+        self.assertGreaterEqual(deliveries[1].created_at, recreate_started_at)
+        self.assertLessEqual(deliveries[1].created_at, timezone.now())
 
 
 @override_settings(
