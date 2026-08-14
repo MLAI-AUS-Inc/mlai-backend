@@ -708,6 +708,9 @@ class ReconciliationProfile(models.Model):
     event_tracking_category_name = models.CharField(max_length=255, default="Event Name")
     project_tracking_category_id = models.CharField(max_length=255, blank=True, default="")
     project_tracking_category_name = models.CharField(max_length=255, default="Project Name")
+    require_statement_tracking = models.BooleanField(default=False)
+    default_project_tracking_option_name = models.CharField(max_length=255, blank=True, default="")
+    default_project_tracking_option_id = models.CharField(max_length=255, blank=True, default="")
     standalone_fee_project_option_id = models.CharField(max_length=255, blank=True, default="")
     standalone_fee_project_option_name = models.CharField(max_length=255, blank=True, default="")
     humanitix_profitability_included = models.BooleanField(default=False)
@@ -1066,6 +1069,16 @@ class ReconciliationSuggestion(models.Model):
         (STATUS_REJECTED, "Rejected"),
         (STATUS_SUPERSEDED, "Superseded"),
     ]
+    ALLOCATION_EVENT = "event"
+    ALLOCATION_PROJECT = "project"
+    ALLOCATION_MLAI_CORE = "mlai_core"
+    ALLOCATION_UNASSIGNED = "unassigned"
+    ALLOCATION_CHOICES = [
+        (ALLOCATION_EVENT, "Event"),
+        (ALLOCATION_PROJECT, "Project"),
+        (ALLOCATION_MLAI_CORE, "MLAI core"),
+        (ALLOCATION_UNASSIGNED, "Unassigned"),
+    ]
 
     organization = models.ForeignKey(
         "organizations.Organization",
@@ -1084,8 +1097,14 @@ class ReconciliationSuggestion(models.Model):
     event_source_type = models.CharField(max_length=32, blank=True, default="")
     event_source_id = models.CharField(max_length=255, blank=True, default="")
     event_tracking_option_name = models.CharField(max_length=255, blank=True, default="")
+    allocation_mode = models.CharField(
+        max_length=16,
+        choices=ALLOCATION_CHOICES,
+        default=ALLOCATION_UNASSIGNED,
+    )
     project_source_type = models.CharField(max_length=32, blank=True, default="")
     project_source_id = models.CharField(max_length=255, blank=True, default="")
+    project_tracking_option_id = models.CharField(max_length=255, blank=True, default="")
     project_tracking_option_name = models.CharField(max_length=255, blank=True, default="")
     confidence = models.FloatField(default=0.0)
     rationale = models.TextField(blank=True, default="")
@@ -1235,6 +1254,16 @@ class ReconciliationRule(models.Model):
     ACTION_CHOICES = [
         (ACTION_CREATE_BANK_TRANSACTION, "Create bank transaction"),
     ]
+    ALLOCATION_EVENT = "event"
+    ALLOCATION_PROJECT = "project"
+    ALLOCATION_MLAI_CORE = "mlai_core"
+    ALLOCATION_UNASSIGNED = "unassigned"
+    ALLOCATION_CHOICES = [
+        (ALLOCATION_EVENT, "Event"),
+        (ALLOCATION_PROJECT, "Project"),
+        (ALLOCATION_MLAI_CORE, "MLAI core"),
+        (ALLOCATION_UNASSIGNED, "Unassigned"),
+    ]
 
     organization = models.ForeignKey(
         "organizations.Organization",
@@ -1267,7 +1296,14 @@ class ReconciliationRule(models.Model):
     event_source_type = models.CharField(max_length=32, blank=True, default="")
     event_source_id = models.CharField(max_length=255, blank=True, default="")
     event_tracking_option_name = models.CharField(max_length=255, blank=True, default="")
+    allocation_mode = models.CharField(
+        max_length=16,
+        choices=ALLOCATION_CHOICES,
+        default=ALLOCATION_UNASSIGNED,
+    )
+    project_source_type = models.CharField(max_length=32, blank=True, default="")
     project_source_id = models.CharField(max_length=255, blank=True, default="")
+    project_tracking_option_id = models.CharField(max_length=255, blank=True, default="")
     project_tracking_option_name = models.CharField(max_length=255, blank=True, default="")
     priority = models.IntegerField(default=100)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_PROPOSED, db_index=True)
@@ -1423,6 +1459,16 @@ class XeroStatementSuggestion(models.Model):
         (ACTION_MATCH_BILL, "Match Existing Bill"),
         (ACTION_NEEDS_REVIEW, "Needs Review"),
     ]
+    ALLOCATION_EVENT = "event"
+    ALLOCATION_PROJECT = "project"
+    ALLOCATION_MLAI_CORE = "mlai_core"
+    ALLOCATION_UNASSIGNED = "unassigned"
+    ALLOCATION_CHOICES = [
+        (ALLOCATION_EVENT, "Event"),
+        (ALLOCATION_PROJECT, "Project"),
+        (ALLOCATION_MLAI_CORE, "MLAI core"),
+        (ALLOCATION_UNASSIGNED, "Unassigned"),
+    ]
     STATUS_PROPOSED = "proposed"
     STATUS_APPLIED = "applied"
     STATUS_REJECTED = "rejected"
@@ -1454,7 +1500,14 @@ class XeroStatementSuggestion(models.Model):
     event_source_type = models.CharField(max_length=32, blank=True, default="")
     event_source_id = models.CharField(max_length=255, blank=True, default="")
     event_tracking_option_name = models.CharField(max_length=255, blank=True, default="")
+    allocation_mode = models.CharField(
+        max_length=16,
+        choices=ALLOCATION_CHOICES,
+        default=ALLOCATION_UNASSIGNED,
+    )
+    project_source_type = models.CharField(max_length=32, blank=True, default="")
     project_source_id = models.CharField(max_length=255, blank=True, default="")
+    project_tracking_option_id = models.CharField(max_length=255, blank=True, default="")
     project_tracking_option_name = models.CharField(max_length=255, blank=True, default="")
     matched_xero_bill_id = models.CharField(max_length=255, blank=True, default="")
     confidence = models.FloatField(default=0.0)

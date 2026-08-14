@@ -114,6 +114,9 @@ def _profile_records(*, organization, fetched_at: str) -> list[dict[str, Any]]:
         "event_tracking_category_name": profile.event_tracking_category_name,
         "project_tracking_category_id": profile.project_tracking_category_id,
         "project_tracking_category_name": profile.project_tracking_category_name,
+        "require_statement_tracking": profile.require_statement_tracking,
+        "default_project_tracking_option_id": profile.default_project_tracking_option_id,
+        "default_project_tracking_option_name": profile.default_project_tracking_option_name,
         "standalone_fee_project_option_id": profile.standalone_fee_project_option_id,
         "standalone_fee_project_option_name": profile.standalone_fee_project_option_name,
         "enabled": profile.enabled,
@@ -213,7 +216,10 @@ def _rule_records(*, organization, fetched_at: str) -> list[dict[str, Any]]:
             "event_source_type": rule.event_source_type,
             "event_source_id": rule.event_source_id,
             "event_tracking_option_name": rule.event_tracking_option_name,
+            "allocation_mode": rule.allocation_mode,
+            "project_source_type": rule.project_source_type,
             "project_source_id": rule.project_source_id,
+            "project_tracking_option_id": rule.project_tracking_option_id,
             "project_tracking_option_name": rule.project_tracking_option_name,
             "priority": rule.priority,
         }
@@ -241,6 +247,12 @@ def _tracking_option_records(*, organization, fetched_at: str) -> list[dict[str,
             "project",
             profile.standalone_fee_project_option_id,
             profile.standalone_fee_project_option_name,
+        ))
+    if profile.default_project_tracking_option_id or profile.default_project_tracking_option_name:
+        values.add((
+            "project",
+            profile.default_project_tracking_option_id,
+            profile.default_project_tracking_option_name,
         ))
     for mapping in ReconciliationMapping.objects.filter(
         organization=organization,
@@ -395,6 +407,7 @@ def _confirmed_outcome_records(*, organization, fetched_at: str) -> list[dict[st
             "account_code": suggestion.account_code,
             "account_name": suggestion.account_name,
             "tax_type": suggestion.tax_type,
+            "allocation_mode": suggestion.allocation_mode,
             "event_tracking_option_name": suggestion.event_tracking_option_name,
             "project_tracking_option_name": suggestion.project_tracking_option_name,
             "status": posting.status,

@@ -79,6 +79,7 @@ from integrations.services.xero_reconciliation import (
     serialize_payout,
     serialize_profile,
     xero_has_bank_transaction_scope,
+    xero_has_settings_write_scope,
 )
 from integrations.services.xero_scopes import (
     xero_has_attachments_scope,
@@ -91,6 +92,7 @@ from integrations.services.reconciliation_context import (
     save_reconciliation_suggestions,
     serialize_suggestion,
 )
+from integrations.services.xero_tracking_catalog import active_xero_project_options
 from integrations.services.xero_statement_reconciliation import (
     import_xero_statement_lines,
     merchant_key,
@@ -536,6 +538,9 @@ class ReconciliationProfileView(ReconciliationAdminView):
         "event_tracking_category_name",
         "project_tracking_category_id",
         "project_tracking_category_name",
+        "require_statement_tracking",
+        "default_project_tracking_option_name",
+        "default_project_tracking_option_id",
         "standalone_fee_project_option_id",
         "standalone_fee_project_option_name",
         "humanitix_profitability_included",
@@ -597,6 +602,17 @@ class ReconciliationProfileView(ReconciliationAdminView):
                 )
             profile.profitability_policy_verified_by_slack_id = slack_user_id
             profile.profitability_policy_verified_at = datetime.now(timezone.utc)
+        if "require_statement_tracking" in request.data and not isinstance(
+            request.data.get("require_statement_tracking"), bool
+        ):
+            return Response(
+                {"error": "require_statement_tracking must be a boolean"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if profile.require_statement_tracking:
+            profile.default_project_tracking_option_name = (
+                profile.default_project_tracking_option_name.strip() or "MLAI core"
+            )
         if profile.line_amount_types not in {"Inclusive", "Exclusive", "NoTax"}:
             return Response({"error": "line_amount_types must be Inclusive, Exclusive, or NoTax"}, status=status.HTTP_400_BAD_REQUEST)
         profile.save()
@@ -1102,19 +1118,62 @@ def _save_reconciliation_rule(*, organization, slack_user_id: str, payload, rule
                 f"event_source_id is not a known {event_source_type} event"
             )
         event_name = event.event_name
+    project_source_type = str(
+        payload.get("project_source_type", getattr(rule, "project_source_type", "linear"))
+        or "linear"
+    ).strip()
     project_source_id = str(payload.get("project_source_id", getattr(rule, "project_source_id", "")) or "").strip()
+    project_option_id = str(
+        payload.get("project_tracking_option_id", getattr(rule, "project_tracking_option_id", ""))
+        or ""
+    ).strip()
     project_name = ""
     if project_source_id:
-        project = LinearProjectArtifact.objects.filter(
-            organization=organization,
-            linear_project_id=project_source_id,
-        ).first() or LinearProjectSelection.objects.filter(
-            organization=organization,
-            linear_project_id=project_source_id,
-        ).first()
-        if project is None:
-            raise ValueError("project_source_id is not a known Linear project")
-        project_name = str(getattr(project, "name", "") or getattr(project, "project_name", ""))
+        if project_source_type == "linear":
+            project = LinearProjectArtifact.objects.filter(
+                organization=organization,
+                linear_project_id=project_source_id,
+            ).first() or LinearProjectSelection.objects.filter(
+                organization=organization,
+                linear_project_id=project_source_id,
+            ).first()
+            if project is None:
+                raise ValueError("project_source_id is not a known Linear project")
+            project_name = str(getattr(project, "name", "") or getattr(project, "project_name", ""))
+        elif project_source_type == "xero_tracking":
+            project_name = str(payload.get("project_tracking_option_name") or "").strip()
+            if not project_option_id or not project_name:
+                raise ValueError("Xero tracking projects require a stable option ID and name")
+            try:
+                xero_options = active_xero_project_options(organization=organization)
+            except Exception as exc:
+                raise ValueError("Could not refresh active Xero Project Name options") from exc
+            exact = next((
+                option for option in xero_options
+                if option["tracking_option_id"] == project_option_id
+                and option["name"].casefold() == project_name.casefold()
+            ), None)
+            if exact is None:
+                raise ValueError("The Xero Project Name option is unknown or archived")
+        else:
+            raise ValueError("project_source_type must be linear or xero_tracking")
+
+    allocation_mode = str(
+        payload.get("allocation_mode", getattr(rule, "allocation_mode", "unassigned"))
+        or "unassigned"
+    ).strip()
+    if allocation_mode not in {choice[0] for choice in ReconciliationRule.ALLOCATION_CHOICES}:
+        raise ValueError("allocation_mode must be event, project, mlai_core or unassigned")
+    if event_source_id and project_source_id:
+        raise ValueError("A reconciliation rule can select either an event or a project, not both")
+    inferred_mode = (
+        ReconciliationRule.ALLOCATION_EVENT if event_source_id
+        else ReconciliationRule.ALLOCATION_PROJECT if project_source_id
+        else allocation_mode
+    )
+    if allocation_mode not in {ReconciliationRule.ALLOCATION_UNASSIGNED, inferred_mode}:
+        raise ValueError("allocation_mode does not match the selected event or project")
+    allocation_mode = inferred_mode
 
     def value(name, default=""):
         return str(payload.get(name, getattr(rule, name, default)) or "").strip()
@@ -1174,7 +1233,10 @@ def _save_reconciliation_rule(*, organization, slack_user_id: str, payload, rule
         "event_source_type": event_source_type if event_source_id else "",
         "event_source_id": event_source_id,
         "event_tracking_option_name": event_name,
+        "allocation_mode": allocation_mode,
+        "project_source_type": project_source_type if project_source_id else "",
         "project_source_id": project_source_id,
+        "project_tracking_option_id": project_option_id if project_source_id else "",
         "project_tracking_option_name": project_name,
         "priority": priority,
         "status": requested_status,
@@ -1601,6 +1663,35 @@ class ReconciliationReadinessView(ReconciliationAdminView):
         project_tracking_configured = bool(
             profile and profile.project_tracking_category_id
         )
+        tracking_required = bool(profile and profile.require_statement_tracking)
+        default_project_configured = bool(
+            profile and profile.default_project_tracking_option_name
+        )
+        settings_write_scope = bool(
+            connection_active and xero_has_settings_write_scope(connection.scopes)
+        )
+        default_project_available = bool(
+            profile and profile.default_project_tracking_option_id
+        )
+        tracking_policy_ready = bool(
+            event_tracking_configured
+            and project_tracking_configured
+            and (
+                not tracking_required
+                or (
+                    default_project_configured
+                    and (default_project_available or settings_write_scope)
+                )
+            )
+        )
+        untracked_executable_count = XeroStatementSuggestion.objects.filter(
+            organization=organization,
+            status=XeroStatementSuggestion.STATUS_PROPOSED,
+            execution_ready=True,
+            allocation_mode=XeroStatementSuggestion.ALLOCATION_UNASSIGNED,
+            event_source_id="",
+            project_source_id="",
+        ).count()
         profile_enabled = bool(profile and profile.enabled)
 
         if not profile_enabled:
@@ -1629,6 +1720,16 @@ class ReconciliationReadinessView(ReconciliationAdminView):
             warnings.append("Configure the Xero Event Name tracking category.")
         if not project_tracking_configured:
             warnings.append("Configure the Xero Project Name tracking category.")
+        if tracking_required and not default_project_configured:
+            warnings.append("Configure MLAI core as the default Project Name.")
+        if tracking_required and default_project_configured and not default_project_available and not settings_write_scope:
+            warnings.append(
+                "Reconnect Xero with accounting.settings so MLAI core can be created during an approved write."
+            )
+        if tracking_required and untracked_executable_count:
+            warnings.append(
+                f"{untracked_executable_count} execution-ready suggestion(s) have no effective tracking."
+            )
 
         active_rule_count = ReconciliationRule.objects.filter(
             organization=organization,
@@ -1640,12 +1741,16 @@ class ReconciliationReadinessView(ReconciliationAdminView):
             and connection_active
             and bank_account_configured
             and bank_transaction_scope
+            and (not tracking_required or tracking_policy_ready)
+            and untracked_executable_count == 0
         )
         ready_to_execute_bill_payments = bool(
             profile_enabled
             and connection_active
             and bank_account_configured
             and payment_write_scope
+            and (not tracking_required or tracking_policy_ready)
+            and untracked_executable_count == 0
         )
         ready_to_start = not blockers
         if not ready_to_start:
@@ -1663,6 +1768,8 @@ class ReconciliationReadinessView(ReconciliationAdminView):
             "tracking_ready": bool(
                 event_tracking_configured and project_tracking_configured
             ),
+            "tracking_policy_ready": tracking_policy_ready,
+            "untracked_executable_count": untracked_executable_count,
             "latest_statement_scan": (
                 {
                     "id": latest_scan.id,
@@ -1698,6 +1805,14 @@ class ReconciliationReadinessView(ReconciliationAdminView):
                 "attachments_scope": attachments_scope,
                 "event_tracking_configured": event_tracking_configured,
                 "project_tracking_configured": project_tracking_configured,
+                "require_statement_tracking": tracking_required,
+                "default_project_tracking_option_name": (
+                    profile.default_project_tracking_option_name if profile else ""
+                ),
+                "default_project_tracking_option_id": (
+                    profile.default_project_tracking_option_id if profile else ""
+                ),
+                "settings_write_scope": settings_write_scope,
             },
             "active_verified_rule_count": active_rule_count,
             "catalog_status": catalog_status,

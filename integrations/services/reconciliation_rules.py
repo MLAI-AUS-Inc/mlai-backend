@@ -93,9 +93,11 @@ def serialize_reconciliation_rule(rule: ReconciliationRule) -> dict[str, Any]:
             "source_id": rule.event_source_id,
             "tracking_option_name": rule.event_tracking_option_name,
         } if rule.event_source_id else None,
+        "allocation_mode": rule.allocation_mode,
         "project": {
-            "source_type": "linear",
+            "source_type": rule.project_source_type or "linear",
             "source_id": rule.project_source_id,
+            "tracking_option_id": rule.project_tracking_option_id,
             "tracking_option_name": rule.project_tracking_option_name,
         } if rule.project_source_id else None,
         "priority": rule.priority,
@@ -159,7 +161,11 @@ def _rule_accounting_fingerprint(rule: ReconciliationRule) -> tuple[str, ...]:
         rule.description_template,
         rule.event_source_type,
         rule.event_source_id,
+        rule.allocation_mode,
+        rule.project_source_type,
         rule.project_source_id,
+        rule.project_tracking_option_id,
+        rule.project_tracking_option_name,
     )
 
 
@@ -261,10 +267,19 @@ def apply_verified_rule(
             "source_type": rule.event_source_type or "luma",
             "source_id": rule.event_source_id,
         } if rule.event_source_id else None,
-        "project": {"source_type": "linear", "source_id": rule.project_source_id} if rule.project_source_id else None,
+        "allocation_mode": rule.allocation_mode,
+        "project": {
+            "source_type": rule.project_source_type or "linear",
+            "source_id": rule.project_source_id,
+            "tracking_option_id": rule.project_tracking_option_id,
+        } if rule.project_source_id else None,
         "identity_confidence": 1.0,
         "accounting_confidence": 1.0,
-        "allocation_confidence": 1.0 if (rule.event_source_id or rule.project_source_id) else 0.0,
+        "allocation_confidence": 1.0 if (
+            rule.allocation_mode != ReconciliationRule.ALLOCATION_UNASSIGNED
+            or rule.event_source_id
+            or rule.project_source_id
+        ) else 0.0,
         "confidence": max(prior_confidence, 0.99),
     })
     supplied_evidence = result.get("evidence") if isinstance(result.get("evidence"), list) else []
