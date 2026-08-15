@@ -119,6 +119,20 @@ def issue_email_code_challenge(
     return challenge
 
 
+def _locked_email_code_challenges():
+    """Lock only challenge rows while loading the optional user relation.
+
+    ``user`` is nullable so ``select_related`` uses a left outer join. PostgreSQL
+    rejects an unscoped ``FOR UPDATE`` for that query because the nullable side
+    of an outer join cannot be locked. The challenge is the concurrency boundary
+    for one-use code consumption; the related user does not need a row lock.
+    """
+
+    return CommunityChatEmailCodeChallenge.objects.select_for_update(
+        of=("self",)
+    ).select_related("user")
+
+
 def consume_email_code(*, challenge_id, code, client_id, installation_id):
     """Consume one valid code and return its eligible user and device context."""
 
@@ -126,11 +140,7 @@ def consume_email_code(*, challenge_id, code, client_id, installation_id):
     invalid = False
     with transaction.atomic():
         try:
-            challenge = (
-                CommunityChatEmailCodeChallenge.objects.select_for_update()
-                .select_related("user")
-                .get(id=challenge_id)
-            )
+            challenge = _locked_email_code_challenges().get(id=challenge_id)
         except (CommunityChatEmailCodeChallenge.DoesNotExist, ValueError):
             challenge = None
 

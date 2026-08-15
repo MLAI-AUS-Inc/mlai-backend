@@ -12,11 +12,13 @@ from django.utils import timezone
 from integrations.models import (
     HumanitixEvent,
     ReconciliationMapping,
+    ReconciliationProfile,
     ReconciliationSuggestion,
     StripePayoutReconciliation,
 )
 from integrations.services.xero_statement_reconciliation import build_statement_reconciliation_context
 from integrations.services.reconciliation_catalogs import build_reconciliation_catalog_status
+from integrations.services.xero_tracking_catalog import active_xero_project_options
 from startup_updates.models import LinearProjectArtifact, LinearProjectSelection, LumaEventSelection
 
 
@@ -44,6 +46,7 @@ def serialize_suggestion(suggestion: ReconciliationSuggestion) -> dict[str, Any]
         "source_type": suggestion.source_type,
         "source_id": suggestion.source_id,
         "source_label": suggestion.source_label,
+        "allocation_mode": suggestion.allocation_mode,
         "event": {
             "source_type": suggestion.event_source_type,
             "source_id": suggestion.event_source_id,
@@ -52,6 +55,7 @@ def serialize_suggestion(suggestion: ReconciliationSuggestion) -> dict[str, Any]
         "project": {
             "source_type": suggestion.project_source_type,
             "source_id": suggestion.project_source_id,
+            "tracking_option_id": suggestion.project_tracking_option_id,
             "tracking_option_name": suggestion.project_tracking_option_name,
         } if suggestion.project_source_id or suggestion.project_tracking_option_name else None,
         "confidence": suggestion.confidence,
@@ -110,6 +114,30 @@ def _linear_projects(organization) -> list[dict[str, Any]]:
                 "members": [],
             },
         )
+    try:
+        xero_options = active_xero_project_options(organization=organization)
+    except Exception:
+        xero_options = []
+    by_name = {_normalized_name(item["name"]): item for item in projects.values()}
+    for option in xero_options:
+        existing = by_name.get(_normalized_name(option["name"]))
+        if existing:
+            existing["xero_tracking_option_id"] = option["tracking_option_id"]
+            existing["sources"] = ["linear", "xero_tracking"]
+            continue
+        projects[option["source_id"]] = {
+            "source_type": "xero_tracking",
+            "source_id": option["source_id"],
+            "xero_tracking_option_id": option["tracking_option_id"],
+            "name": option["name"],
+            "description": "Active Xero Project Name tracking option.",
+            "status": "active",
+            "start_date": None,
+            "target_date": None,
+            "url": "",
+            "members": [],
+            "sources": ["xero_tracking"],
+        }
     return list(projects.values())
 
 
@@ -220,6 +248,7 @@ def build_reconciliation_enrichment_context(*, organization, run_id: str = "") -
     luma_events = _luma_events(organization)
     humanitix_events = _humanitix_events(organization)
     linear_projects = _linear_projects(organization)
+    profile = ReconciliationProfile.objects.filter(organization=organization).first()
     linear_by_name: dict[str, list[dict[str, Any]]] = {}
     for project in linear_projects:
         linear_by_name.setdefault(_normalized_name(project["name"]), []).append(project)
@@ -302,12 +331,22 @@ def build_reconciliation_enrichment_context(*, organization, run_id: str = "") -
         "organization_id": organization.id,
         "domain": organization.domain,
         "run_id": run_id,
+        "tracking_policy": {
+            "required": bool(profile and profile.require_statement_tracking),
+            "default_project_name": (
+                profile.default_project_tracking_option_name if profile else ""
+            ),
+            "default_project_option_id": (
+                profile.default_project_tracking_option_id if profile else ""
+            ),
+            "mutually_exclusive": True,
+        },
         "source_policy": {
             "events": (
                 "Luma and Humanitix are canonical for events on their respective platforms; "
                 "a same-name Linear record is an event cross-reference, not automatically a Project Name."
             ),
-            "projects": "Linear is canonical for Project Name. Prefer Linear-only records marked dimension_hint=project.",
+            "projects": "Linear and active Xero Project Name options are canonical projects. Matching names are deduplicated while preserving the Xero option ID.",
             "narrative_context": "Gmail and Slack may support the review note but cannot establish amounts, tax, or accounts.",
         },
         "candidates": candidates,
@@ -328,7 +367,11 @@ def save_reconciliation_suggestions(
         (event["source_type"], event["source_id"]): event
         for event in [*_luma_events(organization), *_humanitix_events(organization)]
     }
-    project_by_id = {project["source_id"]: project for project in _linear_projects(organization)}
+    project_by_id = {
+        (str(project.get("source_type") or "linear"), project["source_id"]): project
+        for project in _linear_projects(organization)
+    }
+    profile = ReconciliationProfile.objects.filter(organization=organization).first()
     payout_by_id = {
         record.payout_id: record
         for record in StripePayoutReconciliation.objects.filter(
@@ -369,9 +412,18 @@ def save_reconciliation_suggestions(
 
             project_payload = item.get("project") if isinstance(item.get("project"), dict) else {}
             project_id = str(project_payload.get("source_id") or "").strip()
-            project = project_by_id.get(project_id) if project_id else None
+            project_source_type = str(project_payload.get("source_type") or "linear").strip()
+            project = project_by_id.get((project_source_type, project_id)) if project_id else None
             if project_id and project is None:
-                raise ValueError(f"Unknown Linear project: {project_id}")
+                raise ValueError(f"Unknown {project_source_type} project: {project_id}")
+            if event_id and project_id:
+                project_id = ""
+                project = None
+            allocation_mode = (
+                ReconciliationSuggestion.ALLOCATION_EVENT if event_id
+                else ReconciliationSuggestion.ALLOCATION_PROJECT if project_id
+                else ReconciliationSuggestion.ALLOCATION_MLAI_CORE
+            )
 
             confidence = max(0.0, min(float(item.get("confidence") or 0.0), 1.0))
             evidence = _validated_evidence(item.get("evidence"))
@@ -404,9 +456,21 @@ def save_reconciliation_suggestions(
                 "event_source_type": event_source_type if event else "",
                 "event_source_id": event_id if event else "",
                 "event_tracking_option_name": str(event.get("name") if event else "")[:255],
-                "project_source_type": "linear" if project else "",
+                "allocation_mode": allocation_mode,
+                "project_source_type": project_source_type if project else (
+                    "xero_tracking" if allocation_mode == ReconciliationSuggestion.ALLOCATION_MLAI_CORE else ""
+                ),
                 "project_source_id": project_id if project else "",
-                "project_tracking_option_name": str(project.get("name") if project else "")[:255],
+                "project_tracking_option_id": str(
+                    (project.get("xero_tracking_option_id") or "") if project else (
+                        profile.default_project_tracking_option_id if profile else ""
+                    )
+                )[:255],
+                "project_tracking_option_name": str(
+                    project.get("name") if project else (
+                        (profile.default_project_tracking_option_name or "MLAI core") if profile else "MLAI core"
+                    )
+                )[:255],
                 "confidence": confidence,
                 "rationale": str(item.get("rationale") or "")[:4000],
                 "review_note": review_note,
@@ -440,11 +504,21 @@ def approve_reconciliation_suggestion(
             source_id=locked.source_id,
         )
         mapping.source_label = locked.source_label
-        if locked.event_tracking_option_name:
+        if locked.allocation_mode == ReconciliationSuggestion.ALLOCATION_EVENT:
             mapping.event_tracking_option_name = locked.event_tracking_option_name
-        if locked.project_tracking_option_name:
+            mapping.project_tracking_option_id = ""
+            mapping.project_tracking_option_name = ""
+            mapping.project_source_type = ""
+            mapping.project_source_id = ""
+        elif locked.allocation_mode in {
+            ReconciliationSuggestion.ALLOCATION_PROJECT,
+            ReconciliationSuggestion.ALLOCATION_MLAI_CORE,
+        }:
+            mapping.event_tracking_option_id = ""
+            mapping.event_tracking_option_name = ""
             mapping.project_source_type = locked.project_source_type
             mapping.project_source_id = locked.project_source_id
+            mapping.project_tracking_option_id = locked.project_tracking_option_id
             mapping.project_tracking_option_name = locked.project_tracking_option_name
         if locked.review_note:
             mapping.reconciliation_note = locked.review_note

@@ -10,6 +10,31 @@ COMMUNITY_CHAT_CLIENT_IDS = (
     'mlai-chat-android',
 )
 
+COMMUNITY_CHAT_PUBLIC_PROFILE_BATCH_SIZE = 200
+
+
+class CommunityChatPublicProfileBatchSerializer(serializers.Serializer):
+    public_keys = serializers.ListField(
+        child=serializers.CharField(min_length=64, max_length=64),
+        allow_empty=True,
+        max_length=COMMUNITY_CHAT_PUBLIC_PROFILE_BATCH_SIZE,
+    )
+
+    def validate_public_keys(self, values):
+        normalized = []
+        seen = set()
+        for index, value in enumerate(values):
+            try:
+                public_key = normalize_public_key(value)
+            except InvalidDeviceProof as exc:
+                raise serializers.ValidationError(
+                    {index: str(exc)},
+                ) from exc
+            if public_key not in seen:
+                normalized.append(public_key)
+                seen.add(public_key)
+        return normalized
+
 
 class CommunityChatDeviceLoginSerializer(serializers.Serializer):
     installation_id = serializers.UUIDField()

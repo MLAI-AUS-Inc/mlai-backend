@@ -129,6 +129,9 @@ def serialize_profile(profile: ReconciliationProfile) -> dict[str, Any]:
         "event_tracking_category_name": profile.event_tracking_category_name,
         "project_tracking_category_id": profile.project_tracking_category_id,
         "project_tracking_category_name": profile.project_tracking_category_name,
+        "require_statement_tracking": profile.require_statement_tracking,
+        "default_project_tracking_option_name": profile.default_project_tracking_option_name,
+        "default_project_tracking_option_id": profile.default_project_tracking_option_id,
         "standalone_fee_project_option_id": profile.standalone_fee_project_option_id,
         "standalone_fee_project_option_name": profile.standalone_fee_project_option_name,
         "humanitix_profitability_included": profile.humanitix_profitability_included,
@@ -212,7 +215,7 @@ def _tracking(profile: ReconciliationProfile, mapping: ReconciliationMapping) ->
             "Option": mapping.event_tracking_option_name,
         }
         values.append({key: value for key, value in item.items() if value})
-    if mapping.project_tracking_option_id or mapping.project_tracking_option_name:
+    elif mapping.project_tracking_option_id or mapping.project_tracking_option_name:
         item = {
             "TrackingCategoryID": profile.project_tracking_category_id,
             "Name": profile.project_tracking_category_name,
@@ -242,7 +245,7 @@ def _contextual_description(prefix: str, source_label: str, mapping: Reconciliat
         _normalized_description_part(value) for value in parts
     }:
         parts.append(f"Event: {mapping.event_tracking_option_name}")
-    if mapping.project_tracking_option_name:
+    if not mapping.event_tracking_option_name and mapping.project_tracking_option_name:
         parts.append(f"Project: {mapping.project_tracking_option_name}")
     if mapping.reconciliation_note:
         parts.append(mapping.reconciliation_note.strip())
@@ -330,7 +333,9 @@ def build_xero_preview(record: StripePayoutReconciliation) -> dict[str, Any]:
             "source_type": source_key[0],
             "source_id": source_key[1],
             "event_name": mapping.event_tracking_option_name,
-            "project_name": mapping.project_tracking_option_name,
+            "project_name": (
+                "" if mapping.event_tracking_option_name else mapping.project_tracking_option_name
+            ),
             "review_note": mapping.reconciliation_note,
         })
         line_total_cents += gross

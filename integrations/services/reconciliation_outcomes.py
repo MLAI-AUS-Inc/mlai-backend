@@ -45,6 +45,7 @@ def _posting_outcome(posting: XeroStatementPosting) -> dict[str, Any]:
         "account_name": suggestion.account_name,
         "tax_type": suggestion.tax_type,
         "description": suggestion.description,
+        "allocation_mode": suggestion.allocation_mode,
         "event_name": suggestion.event_tracking_option_name,
         "project_name": suggestion.project_tracking_option_name,
         "xero_bank_transaction_id": posting.xero_bank_transaction_id,

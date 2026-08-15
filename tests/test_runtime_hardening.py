@@ -70,6 +70,39 @@ class RuntimeHardeningConfigTests(SimpleTestCase):
         self.assertIn('${RUN_MIGRATIONS_ON_START:-0}', start_script)
         self.assertNotIn("collectstatic", start_script)
 
+    def test_image_build_collects_production_static_manifest(self):
+        dockerfile = (ROOT / "Dockerfile").read_text()
+        settings = (ROOT / "mlai" / "settings.py").read_text()
+
+        self.assertIn(
+            "RUN DJANGO_STATIC_BUILD=True python manage.py collectstatic --noinput",
+            dockerfile,
+        )
+        self.assertIn("/app/staticfiles/staticfiles.json", dockerfile)
+        self.assertIn("admin/css/base.css", dockerfile)
+        self.assertIn("rest_framework/css/bootstrap.min.css", dockerfile)
+        self.assertIn("STATIC_URL = '/static/'", settings)
+        self.assertIn(
+            "if not DEBUG or _env_is_true('DJANGO_STATIC_BUILD', False):",
+            settings,
+        )
+
+    def test_deploy_verifies_django_admin_page_and_stylesheet(self):
+        deploy = (ROOT / "deploy.sh").read_text()
+
+        self.assertIn(
+            "https://api.mlai.au/admin/login/?next=%2Fadmin%2F",
+            deploy,
+        )
+        self.assertIn(
+            'staticfiles_storage.url("admin/css/base.css")',
+            deploy,
+        )
+        self.assertIn(
+            'curl -fsS -o /dev/null "https://api.mlai.au\\$admin_css_path"',
+            deploy,
+        )
+
     def test_healthcheck_uses_proxy_tls_header_and_closes_connection(self):
         healthcheck_test = self._web_healthcheck_test("docker-compose.yml")
 
@@ -115,7 +148,20 @@ class RuntimeHardeningConfigTests(SimpleTestCase):
             deploy,
         )
         self.assertIn('docker compose stop "\\${paused_runtime_services[@]}"', deploy)
-        self.assertIn("unique_active_booking_per_user_date is missing", deploy)
+
+        # The coworking booking guard is still verified on every deploy, but it
+        # now lives in deploy_postmigrate alongside the other post-migration
+        # checks instead of in its own `manage.py shell` container.
+        self.assertIn("compose_run_web python manage.py deploy_postmigrate", deploy)
+        postmigrate = (
+            ROOT / "core" / "management" / "commands" / "deploy_postmigrate.py"
+        ).read_text()
+        self.assertIn("unique_active_booking_per_user_date", postmigrate)
+        self.assertIn("to_regclass", postmigrate)
+        self.assertLess(
+            deploy.index('docker compose stop "\\${paused_runtime_services[@]}"'),
+            deploy.index("compose_run_web python manage.py deploy_postmigrate"),
+        )
         self.assertIn(
             'runtime_services=(web scheduler memory-worker memory-scheduler community-email-worker)',
             deploy,
@@ -158,8 +204,11 @@ class RuntimeHardeningConfigTests(SimpleTestCase):
         )
         self.assertIn('docker compose stop bridge-worker || true', deploy)
         self.assertIn('docker compose rm -f bridge-worker || true', deploy)
+        # deploy_postmigrate verifies migration readiness as its first step, so
+        # the bridge mapping still cannot be written against a half-migrated
+        # database.
         self.assertLess(
-            deploy.index("compose_run_web python manage.py migrate --check --noinput"),
+            deploy.index("compose_run_web python manage.py deploy_postmigrate"),
             deploy.index("compose_run_web python manage.py upsert_community_bridge_channel"),
         )
         self.assertLess(

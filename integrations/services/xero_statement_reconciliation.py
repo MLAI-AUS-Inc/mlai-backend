@@ -20,6 +20,7 @@ from integrations.models import (
     HumanitixEvent,
     ReconciliationDecision,
     ReconciliationPartyIdentity,
+    ReconciliationProfile,
     XeroStatementLineSnapshot,
     XeroStatementPosting,
     XeroStatementScan,
@@ -40,6 +41,8 @@ from integrations.services.reconciliation_rules import (
     serialize_reconciliation_rule,
     serialize_suggestion_approval,
 )
+from integrations.services.reconciliation_tracking import effective_tracking
+from integrations.services.xero_tracking_catalog import active_xero_project_options
 
 
 ALLOWED_STATEMENT_EVIDENCE_PROVIDERS = {
@@ -198,7 +201,13 @@ def _score_evidence(*, text: str, terms: list[str], markers: list[str], occurred
     return score, reasons, vendor_hits + ([amount_marker] if amount_marker else [])
 
 
-def _candidate_context_evidence(*, organization, line: XeroStatementLineSnapshot) -> list[dict[str, Any]]:
+def _candidate_context_evidence(
+    *,
+    organization,
+    line: XeroStatementLineSnapshot,
+    gmail_rows: list[dict[str, Any]] | None = None,
+    slack_rows: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
     terms = _merchant_terms(line)
     if not terms:
         return []
@@ -215,21 +224,21 @@ def _candidate_context_evidence(*, organization, line: XeroStatementLineSnapshot
         )
     markers = _amount_markers(line.amount)
     ranked: list[tuple[float, dict[str, Any]]] = []
-    gmail_rows = GmailMessageArtifact.objects.filter(
-        Q(organization=organization)
-        & Q(internal_date__date__gte=start)
-        & Q(internal_date__date__lt=end)
-        & term_query
-    ).values(
-        "gmail_message_id",
-        "internal_date",
-        "subject",
-        "from_address",
-        "snippet",
-        "cleaned_text",
-        "body_preview",
-        "attachment_manifest",
-    )[:250]
+    if gmail_rows is None:
+        gmail_rows = list(GmailMessageArtifact.objects.filter(
+            Q(organization=organization)
+            & Q(internal_date__date__gte=start)
+            & Q(internal_date__date__lt=end)
+            & term_query
+        ).values(
+            "gmail_message_id", "internal_date", "subject", "from_address",
+            "snippet", "cleaned_text", "body_preview", "attachment_manifest",
+        )[:250])
+    else:
+        gmail_rows = [
+            row for row in gmail_rows
+            if start <= row["internal_date"].date() < end
+        ]
     for row in gmail_rows:
         attachment_names = " ".join(
             str(item.get("filename") or "")
@@ -270,20 +279,21 @@ def _candidate_context_evidence(*, organization, line: XeroStatementLineSnapshot
     slack_term_query = Q()
     for term in terms:
         slack_term_query |= Q(text__icontains=term) | Q(cleaned_text__icontains=term)
-    slack_rows = SlackMessageArtifact.objects.filter(
-        Q(organization=organization)
-        & Q(posted_at__date__gte=start)
-        & Q(posted_at__date__lt=end)
-        & slack_term_query
-    ).values(
-        "channel_id",
-        "channel_name",
-        "slack_message_ts",
-        "author_name",
-        "posted_at",
-        "text",
-        "cleaned_text",
-    )[:250]
+    if slack_rows is None:
+        slack_rows = list(SlackMessageArtifact.objects.filter(
+            Q(organization=organization)
+            & Q(posted_at__date__gte=start)
+            & Q(posted_at__date__lt=end)
+            & slack_term_query
+        ).values(
+            "channel_id", "channel_name", "slack_message_ts", "author_name",
+            "posted_at", "text", "cleaned_text",
+        )[:250])
+    else:
+        slack_rows = [
+            row for row in slack_rows
+            if start <= row["posted_at"].date() < end
+        ]
     for row in slack_rows:
         body = "\n".join(str(value or "") for value in [row["text"], row["cleaned_text"]])
         scored = _score_evidence(
@@ -389,13 +399,15 @@ def _candidate_entity_catalogs(
             for alias in aliases
             for event_alias in nearby_event_aliases
         )
-        if not mirrors_nearby_event and (
+        source_type = str(project.get("source_type") or "linear")
+        if source_type != "xero_tracking" and not mirrors_nearby_event and (
             date_delta is None or abs(date_delta) > STATEMENT_NEARBY_EVENT_WINDOW_DAYS
         ):
             continue
         serialized = {
-            "source_type": "linear",
+            "source_type": source_type,
             "source_id": str(project.get("source_id") or ""),
+            "tracking_option_id": str(project.get("xero_tracking_option_id") or ""),
             "name": str(project.get("name") or ""),
             "status": project.get("status"),
             "start_date": project.get("start_date"),
@@ -437,6 +449,8 @@ def _candidate_event_project_evidence(
     organization,
     line: XeroStatementLineSnapshot,
     entity_entries: list[dict[str, Any]],
+    gmail_rows: list[dict[str, Any]] | None = None,
+    slack_rows: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Find nearby Gmail/Slack context naming a canonical event or project.
 
@@ -450,20 +464,20 @@ def _candidate_event_project_evidence(
     end = line.transaction_date + timedelta(days=STATEMENT_ENTITY_EVIDENCE_WINDOW_DAYS + 1)
     ranked: list[tuple[float, dict[str, Any]]] = []
 
-    gmail_rows = GmailMessageArtifact.objects.filter(
-        organization=organization,
-        internal_date__date__gte=start,
-        internal_date__date__lt=end,
-    ).values(
-        "gmail_message_id",
-        "internal_date",
-        "subject",
-        "from_address",
-        "snippet",
-        "cleaned_text",
-        "body_preview",
-        "attachment_manifest",
-    ).order_by("-internal_date")[:500]
+    if gmail_rows is None:
+        gmail_rows = list(GmailMessageArtifact.objects.filter(
+            organization=organization,
+            internal_date__date__gte=start,
+            internal_date__date__lt=end,
+        ).values(
+            "gmail_message_id", "internal_date", "subject", "from_address",
+            "snippet", "cleaned_text", "body_preview", "attachment_manifest",
+        ).order_by("-internal_date")[:500])
+    else:
+        gmail_rows = [
+            row for row in gmail_rows
+            if start <= row["internal_date"].date() < end
+        ]
     for row in gmail_rows:
         attachment_names = " ".join(
             str(item.get("filename") or "")
@@ -493,13 +507,20 @@ def _candidate_event_project_evidence(
             "matched_entities": matched[:4],
         }))
 
-    slack_rows = SlackMessageArtifact.objects.filter(
-        organization=organization,
-        posted_at__date__gte=start,
-        posted_at__date__lt=end,
-    ).values(
-        "channel_id", "channel_name", "slack_message_ts", "author_name", "posted_at", "text", "cleaned_text",
-    ).order_by("-posted_at")[:500]
+    if slack_rows is None:
+        slack_rows = list(SlackMessageArtifact.objects.filter(
+            organization=organization,
+            posted_at__date__gte=start,
+            posted_at__date__lt=end,
+        ).values(
+            "channel_id", "channel_name", "slack_message_ts", "author_name",
+            "posted_at", "text", "cleaned_text",
+        ).order_by("-posted_at")[:500])
+    else:
+        slack_rows = [
+            row for row in slack_rows
+            if start <= row["posted_at"].date() < end
+        ]
     for row in slack_rows:
         body = "\n".join(str(value or "") for value in [row["text"], row["cleaned_text"]])
         matched = _matched_catalog_entities(body, entity_entries)
@@ -897,6 +918,10 @@ def serialize_statement_suggestion(suggestion: XeroStatementSuggestion) -> dict[
     account_display = " - ".join(
         value for value in (suggestion.account_code, suggestion.account_name) if value
     )
+    profile = ReconciliationProfile.objects.filter(
+        organization_id=suggestion.organization_id
+    ).first()
+    tracking = effective_tracking(profile, suggestion) if profile else None
     return {
         "id": suggestion.id,
         "statement_line_id": suggestion.statement_line.statement_line_id,
@@ -908,12 +933,19 @@ def serialize_statement_suggestion(suggestion: XeroStatementSuggestion) -> dict[
         "account_name": suggestion.account_name,
         "tax_type": suggestion.tax_type,
         "description": suggestion.description,
+        "allocation_mode": suggestion.allocation_mode,
+        "effective_tracking": tracking,
         "event": {
             "source_type": suggestion.event_source_type or "luma",
             "source_id": suggestion.event_source_id,
             "tracking_option_name": suggestion.event_tracking_option_name,
         } if suggestion.event_source_id else None,
-        "project": {"source_type": "linear", "source_id": suggestion.project_source_id, "tracking_option_name": suggestion.project_tracking_option_name} if suggestion.project_source_id else None,
+        "project": {
+            "source_type": suggestion.project_source_type or "linear",
+            "source_id": suggestion.project_source_id,
+            "tracking_option_id": suggestion.project_tracking_option_id,
+            "tracking_option_name": suggestion.project_tracking_option_name,
+        } if suggestion.project_source_id else None,
         "matched_xero_bill_id": suggestion.matched_xero_bill_id,
         "confidence": suggestion.confidence,
         "confidence_breakdown": {
@@ -938,7 +970,11 @@ def serialize_statement_suggestion(suggestion: XeroStatementSuggestion) -> dict[
             "account_display": account_display,
             "description": suggestion.description,
             "event_name": suggestion.event_tracking_option_name,
-            "project_name": suggestion.project_tracking_option_name,
+            "project_name": (
+                tracking["option_name"]
+                if tracking and tracking["kind"] == "project"
+                else ""
+            ),
             "tax_type": suggestion.tax_type,
         },
         "evidence": suggestion.evidence or [],
@@ -1165,6 +1201,35 @@ def build_statement_reconciliation_context(
             "transaction_date", "statement_line_id"
         )
     )
+    prefetched_gmail: list[dict[str, Any]] | None = None
+    prefetched_slack: list[dict[str, Any]] | None = None
+    if include_external_evidence and lines:
+        window_days = max(
+            STATEMENT_EVIDENCE_WINDOW_DAYS,
+            STATEMENT_ENTITY_EVIDENCE_WINDOW_DAYS,
+        )
+        evidence_start = lines[0].transaction_date - timedelta(days=window_days)
+        evidence_end = lines[-1].transaction_date + timedelta(days=window_days + 1)
+        prefetched_gmail = list(
+            GmailMessageArtifact.objects.filter(
+                organization=organization,
+                internal_date__date__gte=evidence_start,
+                internal_date__date__lt=evidence_end,
+            ).values(
+                "gmail_message_id", "internal_date", "subject", "from_address",
+                "snippet", "cleaned_text", "body_preview", "attachment_manifest",
+            ).order_by("-internal_date")[:10000]
+        )
+        prefetched_slack = list(
+            SlackMessageArtifact.objects.filter(
+                organization=organization,
+                posted_at__date__gte=evidence_start,
+                posted_at__date__lt=evidence_end,
+            ).values(
+                "channel_id", "channel_name", "slack_message_ts", "author_name",
+                "posted_at", "text", "cleaned_text",
+            ).order_by("-posted_at")[:10000]
+        )
     verified_identities = {
         (identity.bank_narration_key, identity.direction): identity
         for identity in ReconciliationPartyIdentity.objects.filter(
@@ -1257,7 +1322,12 @@ def build_statement_reconciliation_context(
         serialized["nearby_events"] = nearby_events
         serialized["nearby_projects"] = nearby_projects
         serialized["context_evidence"] = (
-            _candidate_context_evidence(organization=organization, line=line)
+            _candidate_context_evidence(
+                organization=organization,
+                line=line,
+                gmail_rows=prefetched_gmail,
+                slack_rows=prefetched_slack,
+            )
             if include_external_evidence
             else []
         )
@@ -1266,6 +1336,8 @@ def build_statement_reconciliation_context(
                 organization=organization,
                 line=line,
                 entity_entries=entity_entries,
+                gmail_rows=prefetched_gmail,
+                slack_rows=prefetched_slack,
             )
             if include_external_evidence
             else []
@@ -1321,11 +1393,31 @@ def _catalogs(organization):
         for item in HumanitixEvent.objects.filter(organization=organization)
     })
     projects = {
-        item.linear_project_id: item
+        ("linear", item.linear_project_id): {
+            "name": item.name,
+            "tracking_option_id": "",
+        }
         for item in LinearProjectArtifact.objects.filter(organization=organization)
     }
     for item in LinearProjectSelection.objects.filter(organization=organization):
-        projects.setdefault(item.linear_project_id, item)
+        projects.setdefault(("linear", item.linear_project_id), {
+            "name": item.project_name or item.linear_project_id,
+            "tracking_option_id": "",
+        })
+    try:
+        xero_projects = active_xero_project_options(organization=organization)
+    except Exception:
+        xero_projects = []
+    xero_by_name = {item["name"].strip().casefold(): item for item in xero_projects}
+    for key, project in projects.items():
+        matching = xero_by_name.get(project["name"].strip().casefold())
+        if matching:
+            project["tracking_option_id"] = matching["tracking_option_id"]
+    for item in xero_projects:
+        projects[("xero_tracking", item["source_id"])] = {
+            "name": item["name"],
+            "tracking_option_id": item["tracking_option_id"],
+        }
     return events, projects
 
 
@@ -1343,6 +1435,7 @@ def _statement_execution_assessment(
     normalized_action: str,
     overall_confidence: float,
     has_tracking_assignment: bool,
+    require_tracking: bool = False,
 ) -> tuple[dict[str, float], bool, list[str]]:
     """Apply deterministic readiness gates to independent confidence scores."""
 
@@ -1363,6 +1456,8 @@ def _statement_execution_assessment(
     if normalized_action == XeroStatementSuggestion.ACTION_NEEDS_REVIEW:
         reasons.append("Suggestion action still requires review.")
     elif not explicit_scores:
+        if require_tracking and not has_tracking_assignment:
+            reasons.append("Every executable suggestion requires an Event, Project, or MLAI core allocation.")
         threshold_name = (
             "XERO_STATEMENT_BILL_PAYMENT_MIN_CONFIDENCE"
             if normalized_action == XeroStatementSuggestion.ACTION_PAY_EXISTING_BILL
@@ -1378,11 +1473,13 @@ def _statement_execution_assessment(
         allocation_threshold = float(getattr(settings, "XERO_STATEMENT_ALLOCATION_MIN_CONFIDENCE", 0.75))
         if scores["identity"] < identity_threshold:
             reasons.append(f"Identity confidence must be at least {identity_threshold:.0%}.")
+        if require_tracking and not has_tracking_assignment:
+            reasons.append("Every executable suggestion requires an Event, Project, or MLAI core allocation.")
+        if has_tracking_assignment and scores["allocation"] < allocation_threshold:
+            reasons.append(f"Allocation confidence must be at least {allocation_threshold:.0%}.")
         if normalized_action == XeroStatementSuggestion.ACTION_CREATE_BANK_TRANSACTION:
             if scores["accounting"] < accounting_threshold:
                 reasons.append(f"Accounting confidence must be at least {accounting_threshold:.0%}.")
-            if has_tracking_assignment and scores["allocation"] < allocation_threshold:
-                reasons.append(f"Allocation confidence must be at least {allocation_threshold:.0%}.")
         elif normalized_action == XeroStatementSuggestion.ACTION_PAY_EXISTING_BILL:
             document_threshold = float(getattr(settings, "XERO_STATEMENT_BILL_DOCUMENT_MIN_CONFIDENCE", 0.95))
             if scores["document"] < document_threshold:
@@ -1409,6 +1506,7 @@ def save_statement_suggestions(
         )
     }
     events, projects = _catalogs(organization)
+    profile = ReconciliationProfile.objects.filter(organization=organization).first()
     context = build_statement_reconciliation_context(organization=organization, include_external_evidence=False)
     context_by_id = {item["statement_line_id"]: item for item in context["statement_candidates"]}
     saved: list[XeroStatementSuggestion] = []
@@ -1450,6 +1548,11 @@ def save_statement_suggestions(
                     "matched_xero_bill_id": "",
                     "event": None,
                     "project": None,
+                    "allocation_mode": (
+                        XeroStatementSuggestion.ALLOCATION_MLAI_CORE
+                        if profile and profile.require_statement_tracking
+                        else XeroStatementSuggestion.ALLOCATION_UNASSIGNED
+                    ),
                     "description": "",
                     "review_note": "Conflicting verified reconciliation rules need an admin decision.",
                     "evidence": conflict_evidence,
@@ -1471,8 +1574,53 @@ def save_statement_suggestions(
                 )
             project_payload = item.get("project") if isinstance(item.get("project"), dict) else {}
             project_id = str(project_payload.get("source_id") or "").strip()
-            if project_id and project_id not in projects:
-                raise ValueError(f"Unknown Linear project for {line_id}: {project_id}")
+            project_source_type = str(project_payload.get("source_type") or "linear").strip()
+            if project_source_type not in {"linear", "xero_tracking"}:
+                raise ValueError(f"Unknown project source for {line_id}: {project_source_type}")
+            project_key = (project_source_type, project_id)
+            if project_id and project_key not in projects:
+                raise ValueError(f"Unknown {project_source_type} project for {line_id}: {project_id}")
+            if event_id and project_id:
+                raise ValueError(f"Suggestion {line_id} must choose either an event or a project, not both")
+            requested_mode = str(item.get("allocation_mode") or "").strip()
+            allocation_mode = (
+                XeroStatementSuggestion.ALLOCATION_EVENT if event_id
+                else XeroStatementSuggestion.ALLOCATION_PROJECT if project_id
+                else requested_mode
+            )
+            valid_modes = {choice[0] for choice in XeroStatementSuggestion.ALLOCATION_CHOICES}
+            if not allocation_mode or (
+                allocation_mode == XeroStatementSuggestion.ALLOCATION_UNASSIGNED
+                and profile
+                and profile.require_statement_tracking
+            ):
+                allocation_mode = (
+                    XeroStatementSuggestion.ALLOCATION_MLAI_CORE
+                    if profile and profile.require_statement_tracking
+                    else XeroStatementSuggestion.ALLOCATION_UNASSIGNED
+                )
+            if allocation_mode not in valid_modes:
+                raise ValueError(f"Invalid allocation_mode for {line_id}: {allocation_mode}")
+            if requested_mode and requested_mode not in {
+                allocation_mode,
+                XeroStatementSuggestion.ALLOCATION_UNASSIGNED,
+            }:
+                raise ValueError(f"allocation_mode does not match the selected allocation for {line_id}")
+            if allocation_mode == XeroStatementSuggestion.ALLOCATION_MLAI_CORE and (event_id or project_id):
+                raise ValueError(f"MLAI core cannot be combined with a specific allocation for {line_id}")
+            if allocation_mode == XeroStatementSuggestion.ALLOCATION_EVENT and not event_id:
+                raise ValueError(f"Event allocation requires a known event for {line_id}")
+            if allocation_mode == XeroStatementSuggestion.ALLOCATION_PROJECT and not project_id:
+                raise ValueError(f"Project allocation requires a known project for {line_id}")
+            if allocation_mode == XeroStatementSuggestion.ALLOCATION_UNASSIGNED and (event_id or project_id):
+                raise ValueError(f"Unassigned allocation cannot include tracking for {line_id}")
+            if (
+                profile
+                and profile.require_statement_tracking
+                and allocation_mode == XeroStatementSuggestion.ALLOCATION_MLAI_CORE
+                and not profile.default_project_tracking_option_name
+            ):
+                raise ValueError("Configure the default Project Name before using mandatory tracking")
             evidence = _serialize_evidence(item.get("evidence"))
             review_note = str(item.get("review_note") or "").strip()[:4000]
             description = str(item.get("description") or "").strip()[:4000]
@@ -1523,11 +1671,14 @@ def save_statement_suggestions(
                     raise ValueError(f"Bill match for {line_id} is not in the supplied Xero candidates")
 
             overall_confidence = _bounded_confidence(item.get("confidence"))
+            if allocation_mode == XeroStatementSuggestion.ALLOCATION_MLAI_CORE:
+                item = {**item, "allocation_confidence": 1.0}
             scores, execution_ready, blocking_reasons = _statement_execution_assessment(
                 item=item,
                 normalized_action=normalized_action,
                 overall_confidence=overall_confidence,
-                has_tracking_assignment=bool(event_id or project_id),
+                has_tracking_assignment=allocation_mode != XeroStatementSuggestion.ALLOCATION_UNASSIGNED,
+                require_tracking=bool(profile and profile.require_statement_tracking),
             )
 
             XeroStatementSuggestion.objects.filter(
@@ -1551,8 +1702,15 @@ def save_statement_suggestions(
                     "event_tracking_option_name": str(
                         getattr(events.get(event_key), "event_name", "") or ""
                     )[:255],
+                    "allocation_mode": allocation_mode,
+                    "project_source_type": project_source_type if project_id else "",
                     "project_source_id": project_id,
-                    "project_tracking_option_name": str(getattr(projects.get(project_id), "name", "") or getattr(projects.get(project_id), "project_name", "") or "")[:255],
+                    "project_tracking_option_id": str(
+                        (projects.get(project_key) or {}).get("tracking_option_id") or ""
+                    )[:255],
+                    "project_tracking_option_name": str(
+                        (projects.get(project_key) or {}).get("name") or ""
+                    )[:255],
                     "matched_xero_bill_id": matched_bill_id,
                     "confidence": overall_confidence,
                     "identity_confidence": scores["identity"],

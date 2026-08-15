@@ -8,6 +8,7 @@ from django.shortcuts import redirect
 from django.http import HttpResponseBadRequest, HttpResponse
 from django.contrib.auth import login as auth_login
 from django.utils import timezone
+from django.utils.html import escape
 from hospital.authentication import CustomJWTAuthentication
 from .models import GoogleConnection, UserIntegration
 from integrations.services.github_connections import (
@@ -589,6 +590,27 @@ def github_callback(request):
 
         # Get or create config and update GitHub credentials
         config, _ = OrganizationContentConfig.objects.get_or_create(organization=org)
+
+        # Authorization gate: the OAuth-initiation endpoint (github_connect) is
+        # unauthenticated and trusts the caller-supplied `domain`/`slack_user_id`.
+        # The signed state only guarantees integrity through the redirect, not
+        # that this actor is entitled to bind credentials for this org. Refuse to
+        # overwrite an org already owned by a *different* founder -- otherwise
+        # anyone can rebind a victim org's GitHub token/repo to their own
+        # installation. First-connect (unowned org) is still permitted, matching
+        # the authenticated connect path (allow_unowned=True).
+        existing_owner = str(config.connected_slack_user_id or "").strip()
+        incoming_actor = str(slack_user_id or "").strip()
+        if existing_owner and existing_owner != incoming_actor:
+            logger.warning(
+                "github_callback_ownership_denied domain=%s existing_owner=%s incoming_actor=%s",
+                normalized_domain, existing_owner, incoming_actor,
+            )
+            return HttpResponse(
+                "This organization's GitHub connection is owned by another account.",
+                status=403,
+            )
+
         previous_repo = str(config.github_repo or "").strip()
         if not selected_repo and len(repo_names) > 1 and previous_repo:
             selected_repo = next(
@@ -754,11 +776,15 @@ def github_select_repo(request):
         from integrations.services.github import trigger_scan_async
         trigger_scan_async(slack_user_id)
         
+        # Escape user-controlled repo name before reflecting it into HTML.
+        # github_repo arrives from the POST body and is echoed straight back,
+        # so an unescaped value is a reflected-XSS sink.
+        safe_github_repo = escape(github_repo)
         return HttpResponse(f"""
         <html>
         <body style="font-family: sans-serif; text-align: center; padding-top: 50px;">
             <h1 style="color: green;">✅ Success!</h1>
-            <p>Repository <strong>{github_repo}</strong> has been linked.</p>
+            <p>Repository <strong>{safe_github_repo}</strong> has been linked.</p>
             <p>You can now close this window and return to Slack.</p>
         </body>
         </html>

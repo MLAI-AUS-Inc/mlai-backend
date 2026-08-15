@@ -313,6 +313,8 @@ def complete_create_delivery(
                 "destination_parent_message_id": str(destination_parent_message_id or "").strip(),
                 "source_payload": payload,
                 "destination_payload": destination_payload or {},
+                "source_deleted_at": None,
+                "destination_deleted_at": None,
             },
         )
         delivery.status = CommunityBridgeDeliveryStatus.COMPLETED
@@ -396,15 +398,16 @@ def _normalize_slack_event(payload: dict) -> Optional[dict]:
         return None
     bridge_bot_user_id = str(getattr(settings, "SLACK_BRIDGE_BOT_USER_ID", "") or "").strip()
 
-    if not subtype:
+    if subtype in {"", "bot_message", "thread_broadcast"}:
         source_message_id = str(event.get("ts") or "").strip()
         user_id = str(event.get("user") or "").strip()
-        if not source_message_id or not user_id or user_id == bridge_bot_user_id or event.get("bot_id"):
+        if not source_message_id or not user_id or user_id == bridge_bot_user_id:
             return None
         source_parent_message_id = _normalize_parent_message_id(
             thread_ts=str(event.get("thread_ts") or "").strip(),
             source_message_id=source_message_id,
         )
+        raw_text = str(event.get("text") or "")
         return {
             "delivery_type": CommunityBridgeDeliveryType.CREATE,
             "source_channel_id": str(event.get("channel") or "").strip(),
@@ -412,20 +415,27 @@ def _normalize_slack_event(payload: dict) -> Optional[dict]:
             "source_parent_message_id": source_parent_message_id,
             "source_author_id": user_id,
             "source_author_display_name": "",
-            "text": sanitize_slack_text(event.get("text") or ""),
+            "text": sanitize_slack_text(raw_text),
             "attachments": normalize_slack_files(event.get("files") or []),
+            "metadata": {
+                "broadcast": subtype == "thread_broadcast"
+                or bool(event.get("reply_broadcast")),
+                "slack_created_at": _slack_timestamp_seconds(source_message_id),
+                "slack_raw_text": raw_text,
+            },
         }
 
     if subtype == "message_changed":
         message = dict(event.get("message") or {})
         source_message_id = str(message.get("ts") or "").strip()
         user_id = str(message.get("user") or "").strip()
-        if not source_message_id or not user_id or user_id == bridge_bot_user_id or message.get("bot_id"):
+        if not source_message_id or not user_id or user_id == bridge_bot_user_id:
             return None
         source_parent_message_id = _normalize_parent_message_id(
             thread_ts=str(message.get("thread_ts") or "").strip(),
             source_message_id=source_message_id,
         )
+        raw_text = str(message.get("text") or "")
         return {
             "delivery_type": CommunityBridgeDeliveryType.EDIT,
             "source_channel_id": str(event.get("channel") or "").strip(),
@@ -433,19 +443,22 @@ def _normalize_slack_event(payload: dict) -> Optional[dict]:
             "source_parent_message_id": source_parent_message_id,
             "source_author_id": user_id,
             "source_author_display_name": "",
-            "text": sanitize_slack_text(message.get("text") or ""),
+            "text": sanitize_slack_text(raw_text),
             "attachments": normalize_slack_files(message.get("files") or []),
+            "metadata": {
+                "broadcast": str(message.get("subtype") or "").strip()
+                == "thread_broadcast"
+                or bool(message.get("reply_broadcast")),
+                "slack_created_at": _slack_timestamp_seconds(source_message_id),
+                "slack_raw_text": raw_text,
+            },
         }
 
     if subtype == "message_deleted":
         previous = dict(event.get("previous_message") or {})
         source_message_id = str(event.get("deleted_ts") or previous.get("ts") or "").strip()
         user_id = str(previous.get("user") or "").strip()
-        if (
-            not source_message_id
-            or previous.get("bot_id")
-            or user_id == bridge_bot_user_id
-        ):
+        if not source_message_id or not user_id or user_id == bridge_bot_user_id:
             return None
         source_parent_message_id = _normalize_parent_message_id(
             thread_ts=str(previous.get("thread_ts") or "").strip(),
@@ -588,6 +601,14 @@ def _normalize_parent_message_id(*, thread_ts: str, source_message_id: str) -> s
     if normalized_thread_ts and normalized_thread_ts != normalized_source_message_id:
         return normalized_thread_ts
     return ""
+
+
+def _slack_timestamp_seconds(value: str) -> int:
+    try:
+        seconds = int(str(value or "").split(".", 1)[0])
+    except (TypeError, ValueError):
+        return 0
+    return max(0, seconds)
 
 
 def _serialize_delivery(delivery: CommunityBridgeDelivery) -> dict:

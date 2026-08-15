@@ -354,7 +354,12 @@ class ValidateProdUrlsTests(SimpleTestCase):
         self.assertIn("Production URL settings are valid.", out.getvalue())
         self.assertIn("WARNING: CONTENT_FACTORY_URL is not reachable", err.getvalue())
 
-    def test_valley_connectivity_requires_service_key(self):
+    # Without this patch the CONTENT_FACTORY_URL leg of the loop dials a
+    # private VPC address for real, so the test spent its whole 8s timeout
+    # budget in CI before ever reaching the Valley assertion.
+    @patch("core.management.commands.validate_prod_urls.urllib.request.urlopen")
+    def test_valley_connectivity_requires_service_key(self, mock_urlopen):
+        mock_urlopen.return_value = MagicMock()
         settings = {**VALID_PROD_URL_SETTINGS, "VALLEY_HARNESS_API_KEY": "", "INTERNAL_API_KEY": "", "ROO_API_KEY": "", "MLAI_API_KEY": ""}
 
         with override_settings(**settings):

@@ -38,6 +38,10 @@ from integrations.services.community_bridge.store import (
 logger = logging.getLogger(__name__)
 
 
+class CommunityBridgeParentNotReady(RuntimeError):
+    """Raised when a reply reaches the worker before its parent mapping exists."""
+
+
 class CommunityBridgeDiscordClient(discord.Client):
     def __init__(self):
         intents = discord.Intents.default()
@@ -187,11 +191,15 @@ class CommunityBridgeDiscordClient(discord.Client):
             source_platform=delivery["source_platform"],
             channel=delivery.get("channel"),
         )
+        body = await self._resolve_message_body(
+            payload,
+            source_platform=delivery["source_platform"],
+        )
         content = build_mirrored_text(
             destination_platform=CommunityBridgePlatform.DISCORD,
             source_platform=delivery["source_platform"],
             author_display_name=author_display_name,
-            body=str(payload.get("text") or ""),
+            body=body,
             attachments=payload.get("attachments") or [],
         )
 
@@ -433,12 +441,37 @@ class CommunityBridgeDiscordClient(discord.Client):
             slack_workspace_id=slack_workspace_id,
             slack_user_id=source_author_id,
         )
+        author_display_name = str(payload.get("source_author_display_name") or "").strip()
+        author_avatar_url = str(payload.get("source_author_avatar_url") or "").strip()
+        if (
+            delivery["source_platform"] == CommunityBridgePlatform.SLACK
+            and source_author_id
+            and operation
+            in {
+                CommunityBridgeDeliveryType.CREATE,
+                CommunityBridgeDeliveryType.EDIT,
+            }
+            and (not author_display_name or not author_avatar_url)
+        ):
+            slack_profile = await asyncio.to_thread(
+                SlackBridgeClient.get_user_profile,
+                source_author_id,
+            )
+            author_display_name = author_display_name or str(
+                slack_profile.get("display_name") or ""
+            ).strip()
+            author_avatar_url = author_avatar_url or str(
+                slack_profile.get("avatar_url") or ""
+            ).strip()
         provenance = {
             "source_workspace_id": slack_workspace_id,
             "source_channel_id": delivery["source_channel_id"],
             "source_message_id": provenance_message_id,
             "source_author_id": source_author_id,
+            "source_author_display_name": author_display_name,
+            "source_author_avatar_url": author_avatar_url,
             "linked_pubkey": str((identity or {}).get("buzz_pubkey") or ""),
+            "source_created_at": int(payload_metadata.get("slack_created_at") or 0),
         }
         text = ""
         if operation not in {
@@ -446,16 +479,21 @@ class CommunityBridgeDiscordClient(discord.Client):
             CommunityBridgeDeliveryType.REACTION_ADD,
             CommunityBridgeDeliveryType.REACTION_REMOVE,
         }:
-            author_display_name = await self._resolve_author_display_name(
+            if not author_display_name:
+                author_display_name = await self._resolve_author_display_name(
+                    payload,
+                    source_platform=delivery["source_platform"],
+                    channel=channel,
+                )
+            body = await self._resolve_message_body(
                 payload,
                 source_platform=delivery["source_platform"],
-                channel=channel,
             )
             text = build_mirrored_text(
                 destination_platform=CommunityBridgePlatform.BUZZ,
                 source_platform=delivery["source_platform"],
                 author_display_name=author_display_name,
-                body=str(payload.get("text") or ""),
+                body=body,
                 attachments=payload.get("attachments") or [],
             )
 
@@ -472,6 +510,9 @@ class CommunityBridgeDiscordClient(discord.Client):
             response = await asyncio.to_thread(
                 BuzzBridgeClient.deliver,
                 delivery_id=str(delivery["id"]),
+                # Relay channel writes have a deliberate freshness floor. Keep
+                # the Nostr protocol timestamp fresh and carry Slack's trusted
+                # chronology in bridge-source-created-at instead.
                 created_at=int(delivery["created_at"]),
                 operation=operation,
                 channel_id=delivery["target_channel_id"],
@@ -482,6 +523,9 @@ class CommunityBridgeDiscordClient(discord.Client):
                     if operation == CommunityBridgeDeliveryType.REACTION_ADD
                     else ""
                 ),
+                broadcast=bool(payload_metadata.get("broadcast"))
+                if operation == CommunityBridgeDeliveryType.CREATE
+                else False,
                 **provenance,
             )
             await asyncio.to_thread(
@@ -492,6 +536,27 @@ class CommunityBridgeDiscordClient(discord.Client):
                 destination_parent_message_id=parent_message_id,
                 destination_payload=response,
             )
+            return
+
+        override_target_message_id = str(
+            payload_metadata.get("destination_message_id_override") or ""
+        ).strip().lower()
+        if override_target_message_id:
+            if operation != CommunityBridgeDeliveryType.DELETE or not _is_buzz_event_id(
+                override_target_message_id
+            ):
+                raise RuntimeError("Invalid reconciliation destination override")
+            await asyncio.to_thread(
+                BuzzBridgeClient.deliver,
+                delivery_id=str(delivery["id"]),
+                created_at=int(delivery["created_at"]),
+                operation=operation,
+                channel_id=delivery["target_channel_id"],
+                text="",
+                target_message_id=override_target_message_id,
+                **provenance,
+            )
+            await asyncio.to_thread(complete_delivery, delivery_id=delivery["id"])
             return
 
         link = await asyncio.to_thread(
@@ -540,8 +605,19 @@ class CommunityBridgeDiscordClient(discord.Client):
             destination_platform=delivery["target_platform"],
         )
         if not link:
-            return ""
-        return str(link.get("destination_message_id") or "").strip()
+            raise CommunityBridgeParentNotReady(
+                "Parent mapping is not ready for "
+                f"{delivery['source_platform']}:{delivery['source_channel_id']}:"
+                f"{source_parent_message_id} -> {delivery['target_platform']}"
+            )
+        destination_message_id = str(link.get("destination_message_id") or "").strip()
+        if not destination_message_id:
+            raise CommunityBridgeParentNotReady(
+                "Parent mapping has no destination message for "
+                f"{delivery['source_platform']}:{delivery['source_channel_id']}:"
+                f"{source_parent_message_id} -> {delivery['target_platform']}"
+            )
+        return destination_message_id
 
     async def _get_channel_or_fetch(self, channel_id: str) -> Optional[discord.abc.Messageable]:
         normalized_channel_id = str(channel_id or "").strip()
@@ -579,6 +655,16 @@ class CommunityBridgeDiscordClient(discord.Client):
                 return await asyncio.to_thread(SlackBridgeClient.get_user_display_name, user_id)
         return user_id or "Unknown user"
 
+    async def _resolve_message_body(self, payload: dict, *, source_platform: str) -> str:
+        body = str(payload.get("text") or "")
+        if source_platform != CommunityBridgePlatform.SLACK:
+            return body
+        metadata = dict(payload.get("metadata") or {})
+        raw_text = str(metadata.get("slack_raw_text") or "")
+        if not raw_text:
+            return body
+        return await asyncio.to_thread(SlackBridgeClient.resolve_message_text, raw_text)
+
     def _should_process_message(self, message: discord.Message) -> bool:
         if message.guild is None:
             return False
@@ -607,6 +693,12 @@ def run_bridge_worker() -> None:
     if not BuzzBridgeClient.is_configured():
         raise RuntimeError("configure either Discord or the MLAI Chat bridge adapter")
     asyncio.run(_run_headless_delivery_worker(client))
+
+
+def _is_buzz_event_id(value: str) -> bool:
+    return len(value) == 64 and all(
+        character.isdigit() or character in "abcdef" for character in value
+    )
 
 
 async def _run_headless_delivery_worker(client: CommunityBridgeDiscordClient) -> None:

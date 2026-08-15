@@ -12,8 +12,10 @@ from rest_framework import status
 from rest_framework.test import APIClient
 
 from community_chat.account_sessions import issue_account_session
+from community_chat.adapter import RelayMembership
 from community_chat.models import (
     CommunityChatAccountSession,
+    CommunityChatChallenge,
     CommunityChatDevice,
     CommunityChatEmailCodeChallenge,
     DeviceBindingStatus,
@@ -60,6 +62,24 @@ class CommunityChatAccountSessionTests(TestCase):
         )
         return client
 
+    def web_session(self, private_int=51):
+        challenge = CommunityChatEmailCodeChallenge.objects.create(
+            user=self.user,
+            email_digest="d" * 64,
+            code_digest="e" * 64,
+            client_id="mlai-chat-web",
+            installation_id=uuid.uuid4(),
+            origin=ORIGIN,
+            platform="web",
+            device_name="Chrome",
+            public_key=public_key(private_int),
+            expires_at=timezone.now() + timedelta(minutes=10),
+        )
+        credentials = issue_account_session(self.user, challenge)
+        client = APIClient()
+        client.cookies["mlai_chat_access"] = credentials.access_token
+        return challenge, credentials, client
+
     def test_tokens_are_hashed_and_account_endpoint_returns_own_profile(self):
         session = self.credentials.session
         self.assertEqual(
@@ -80,6 +100,152 @@ class CommunityChatAccountSessionTests(TestCase):
             response.data["session"]["installation_id"],
             str(self.challenge.installation_id),
         )
+
+    def test_public_profile_batch_resolves_current_and_historical_verified_devices(self):
+        user_model = get_user_model()
+        verified_user = user_model.objects.create_user(
+            email="verified-profile@example.com",
+            first_name="Verified",
+            last_name="Member",
+            avatar_url="https://cdn.example.com/verified.png",
+            about="Public community bio",
+        )
+        inactive_user = user_model.objects.create_user(
+            email="inactive-profile@example.com",
+            first_name="Inactive",
+            last_name="Member",
+        )
+        inactive_user.is_active = False
+        inactive_user.save(update_fields=("is_active",))
+        verified_key = public_key(61)
+        pending_key = public_key(62)
+        revoked_verified_key = public_key(63)
+        revoked_unverified_key = public_key(64)
+        inactive_key = public_key(65)
+        unknown_key = public_key(66)
+        CommunityChatDevice.objects.create(
+            user=verified_user,
+            public_key=verified_key,
+            status=DeviceBindingStatus.VERIFIED,
+            verified_at=timezone.now(),
+        )
+        CommunityChatDevice.objects.create(
+            user=verified_user,
+            public_key=pending_key,
+            status=DeviceBindingStatus.PENDING,
+        )
+        CommunityChatDevice.objects.create(
+            user=verified_user,
+            public_key=revoked_verified_key,
+            status=DeviceBindingStatus.REVOKED,
+            verified_at=timezone.now(),
+            revoked_at=timezone.now(),
+        )
+        CommunityChatDevice.objects.create(
+            user=verified_user,
+            public_key=revoked_unverified_key,
+            status=DeviceBindingStatus.REVOKED,
+            revoked_at=timezone.now(),
+        )
+        CommunityChatDevice.objects.create(
+            user=inactive_user,
+            public_key=inactive_key,
+            status=DeviceBindingStatus.VERIFIED,
+            verified_at=timezone.now(),
+        )
+
+        response = self.bearer_client().post(
+            reverse("community_chat_public_profiles_batch"),
+            {
+                "public_keys": [
+                    verified_key.upper(),
+                    pending_key,
+                    verified_key,
+                    revoked_verified_key,
+                    revoked_unverified_key,
+                    inactive_key,
+                    unknown_key,
+                ],
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            list(response.data["profiles"]),
+            [verified_key, revoked_verified_key],
+        )
+        self.assertEqual(
+            set(response.data["profiles"][verified_key]),
+            {
+                "public_id",
+                "display_name",
+                "avatar_url",
+                "about",
+                "role",
+                "profile_version",
+            },
+        )
+        self.assertEqual(
+            response.data["profiles"][verified_key]["display_name"],
+            "Verified Member",
+        )
+        self.assertEqual(
+            response.data["profiles"][verified_key]["avatar_url"],
+            "https://cdn.example.com/verified.png",
+        )
+        self.assertEqual(
+            response.data["profiles"][revoked_verified_key]["display_name"],
+            "Verified Member",
+        )
+        self.assertEqual(
+            response.data["missing"],
+            [pending_key, revoked_unverified_key, inactive_key, unknown_key],
+        )
+
+    def test_public_profile_batch_requires_an_account_session(self):
+        response = APIClient().post(
+            reverse("community_chat_public_profiles_batch"),
+            {"public_keys": [public_key(66)]},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_public_profile_batch_validates_keys_and_batch_size(self):
+        invalid = self.bearer_client().post(
+            reverse("community_chat_public_profiles_batch"),
+            {"public_keys": ["z" * 64]},
+            format="json",
+        )
+        oversized = self.bearer_client().post(
+            reverse("community_chat_public_profiles_batch"),
+            {"public_keys": [public_key(67)] * 201},
+            format="json",
+        )
+
+        self.assertEqual(invalid.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(oversized.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_public_profile_batch_accepts_bound_web_cookie_origin(self):
+        verified_key = public_key(68)
+        CommunityChatDevice.objects.create(
+            user=self.user,
+            public_key=verified_key,
+            status=DeviceBindingStatus.VERIFIED,
+            verified_at=timezone.now(),
+        )
+        _, _, client = self.web_session()
+
+        response = client.post(
+            reverse("community_chat_public_profiles_batch"),
+            {"public_keys": [verified_key]},
+            format="json",
+            HTTP_ORIGIN=ORIGIN,
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn(verified_key, response.data["profiles"])
 
     def test_refresh_rotates_both_tokens_and_invalidates_old_access(self):
         response = APIClient().post(
@@ -220,6 +386,67 @@ class CommunityChatAccountSessionTests(TestCase):
         self.assertNotIn("access_token", accepted.data["session"])
         self.assertIn("mlai_chat_access", accepted.cookies)
         self.assertIn("mlai_chat_refresh", accepted.cookies)
+
+    @patch("community_chat.views.get_relay_membership")
+    def test_web_cookie_session_reconfirms_verified_device_after_reload(
+        self,
+        mock_membership,
+    ):
+        challenge, _, client = self.web_session()
+        device = CommunityChatDevice.objects.create(
+            user=self.user,
+            public_key=challenge.public_key,
+            installation_id=challenge.installation_id,
+            client_id=challenge.client_id,
+            platform=challenge.platform,
+            status=DeviceBindingStatus.VERIFIED,
+            verified_at=timezone.now(),
+        )
+        mock_membership.return_value = RelayMembership(True, "member", timezone.now())
+
+        response = client.post(
+            reverse("community_chat_confirm"),
+            {"origin": ORIGIN, "public_key": challenge.public_key},
+            format="json",
+            HTTP_ORIGIN=ORIGIN,
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["status"], "verified")
+        device.refresh_from_db()
+        self.assertIsNotNone(device.last_seen_at)
+
+    def test_web_cookie_session_can_resume_device_enrollment_after_reload(self):
+        challenge, _, client = self.web_session(private_int=52)
+
+        response = client.post(
+            reverse("community_chat_challenge"),
+            {"origin": ORIGIN, "public_key": challenge.public_key},
+            format="json",
+            HTTP_ORIGIN=ORIGIN,
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        enrollment = CommunityChatChallenge.objects.get(
+            id=response.data["challenge_id"]
+        )
+        self.assertEqual(enrollment.user, self.user)
+        self.assertEqual(enrollment.public_key, challenge.public_key)
+        self.assertEqual(enrollment.installation_id, challenge.installation_id)
+        self.assertEqual(enrollment.client_id, challenge.client_id)
+
+    def test_web_cookie_session_cannot_enroll_a_different_device_key(self):
+        _, _, client = self.web_session(private_int=53)
+
+        response = client.post(
+            reverse("community_chat_challenge"),
+            {"origin": ORIGIN, "public_key": public_key(54)},
+            format="json",
+            HTTP_ORIGIN=ORIGIN,
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertFalse(CommunityChatChallenge.objects.exists())
 
     def test_expired_access_is_rejected_while_refresh_remains_valid(self):
         CommunityChatAccountSession.objects.filter(id=self.credentials.session.id).update(

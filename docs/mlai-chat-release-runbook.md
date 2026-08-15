@@ -16,6 +16,8 @@ APP_ENV=production DEBUG=false python manage.py check --deploy --fail-level WARN
 python manage.py test \
   core.tests.test_auth_contract \
   integrations.tests_community_bridge \
+  integrations.tests_community_bridge_avatar_backfill \
+  integrations.tests_community_bridge_mention_backfill \
   integrations.tests_community_bridge_contracts \
   community_chat.tests \
   tests.test_runtime_hardening \
@@ -102,6 +104,129 @@ synthetic delivery, investigate it, and use
 `requeue_community_bridge_delivery <id> --confirm`. The same durable delivery
 identity must complete once. Disable/re-enable the mapping and verify there is
 no backfill of the disabled window.
+
+## One-off Slack avatar backfill
+
+MLAI Chat began adding validated Slack avatar metadata to newly mirrored events
+on 10 August 2026. Older Nostr events are immutable, so historical messages need
+one metadata-enriching edit event before the browser can render the Slack
+author's image.
+
+The command is dry-run by default. It only considers undeleted Slack-to-Buzz
+message links in enabled mappings with edit synchronisation enabled. It excludes
+reaction receipt links, links created after the supplied cutover, and messages
+that already received a successful bridge edit after that cutover. Reaction
+receipt links use the internal `reaction:` source-message prefix and are not
+rendered author-message rows, so they do not need avatar edits.
+
+Run a dry-run first:
+
+```sh
+docker compose exec -T web python manage.py \
+  backfill_community_bridge_slack_avatars \
+  --before 2026-08-10T10:26:32Z \
+  --limit 100
+```
+
+The JSON report contains `last_scanned_link_id` and `remaining_candidates`.
+Use the cursor for controlled batches:
+
+```sh
+docker compose exec -T web python manage.py \
+  backfill_community_bridge_slack_avatars \
+  --before 2026-08-10T10:26:32Z \
+  --after-link-id <last_scanned_link_id> \
+  --limit 100 \
+  --apply \
+  --confirm-historical-edits
+```
+
+Each selected message gets a unique receipt, so repeating a batch cannot enqueue
+the same backfill twice. The command reads each distinct Slack profile at most
+once per pass, accepts only the existing approved Slack/Gravatar HTTPS hosts,
+and does not persist raw Slack profile payloads. The bridge worker publishes the
+pending edits asynchronously. Inspect worker logs and dead letters after each
+batch before continuing:
+
+```sh
+docker compose logs --since 15m bridge-worker
+docker compose exec -T web python manage.py inspect_community_bridge \
+  --slack-channel-id <channel-id> \
+  --recent-minutes 30
+```
+
+Operators without direct production SSH access can dispatch the restricted
+`Backfill production community bridge Slack avatars` GitHub Actions workflow.
+It applies the same validation, dry-run default, explicit apply confirmation,
+batch cursor, and single-channel restriction.
+
+## One-off Slack mention backfill
+
+New Slack events retain their inline user/channel references until the bridge
+worker resolves them with the scoped bot token. The worker caches `users.info`
+and `conversations.info` results, emits plain `@Display Name` and `#channel-name`
+text, and falls back to `@user`/`#channel` without exposing provider IDs when a
+lookup is unavailable.
+
+Messages mirrored before this behavior was deployed can be repaired while the
+raw Slack receipt is still inside the retention window. The command is dry-run
+by default, never guesses from generic placeholder text, and enqueues
+idempotent edit deliveries only when retained Slack markup resolves to a
+different body:
+
+```sh
+docker compose exec -T web python manage.py \
+  backfill_community_bridge_slack_mentions \
+  --limit 100
+```
+
+Apply in controlled batches, using `last_scanned_link_id` from each JSON report:
+
+```sh
+docker compose exec -T web python manage.py \
+  backfill_community_bridge_slack_mentions \
+  --after-link-id <last_scanned_link_id> \
+  --limit 100 \
+  --apply \
+  --confirm-historical-edits
+```
+
+Use repeated `--slack-channel-id` arguments to restrict a run. Stop and inspect
+bridge-worker retries/dead letters after every batch. A
+`no_retained_slack_markup` result means the raw receipt has expired or the
+original message did not contain a Slack user/channel reference; the command
+does not rewrite those rows.
+
+## Slack thread reconciliation
+
+If Slack reply counts disagree with MLAI Chat or replies render as top-level
+messages, use the dry-run-first `Reconcile production Slack threads` workflow.
+Restrict the first run to one channel and no more than 25 roots. Review
+`mismatches`, `wrong_parent`, `orphan_replies`, `wrong_broadcast`,
+`duplicate_events`, `stale_links`, and `errors` before selecting apply mode.
+
+Apply requires one explicit Slack channel and the historical-repair
+confirmation. It processes each
+root before its replies, waits for the bridge worker between mutations, and
+stops on dead deliveries, timeouts, adapter lookup failures, or a configured
+mismatch-rate guard. Use the returned `resume.latest` value for the next batch;
+do not widen the channel set until the previous batch is clean and a second
+dry-run reports no remaining mismatches.
+
+Deploy the MLAI Chat adapter/client change before the backend change that sends
+the new `source_created_at` and `broadcast` delivery fields. After both are
+live, verify one normal reply and one Slack “also send to channel” reply in
+Slack and MLAI Chat, then run:
+
+```sh
+docker compose exec -T web python manage.py inspect_community_bridge \
+  --slack-channel-id <channel-id> \
+  --recent-minutes 30
+docker compose logs --since 15m --tail 200 bridge-worker
+```
+
+Rollback by disabling the affected mapping and pausing the worker. Never delete
+receipts, message links, or relay events by hand during triage.
 
 ## Deployment order
 

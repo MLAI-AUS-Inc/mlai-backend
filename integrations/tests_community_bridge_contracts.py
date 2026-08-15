@@ -17,6 +17,7 @@ class CanonicalBridgeEventTests(SimpleTestCase):
             source_parent_message_id="1710000000.0000",
             source_author_id="U123",
             source_author_display_name="Sam",
+            source_author_avatar_url="https://avatars.slack-edge.com/sam.png",
             delivery_type="create",
             text="Hello",
             attachments=(BridgeAttachment(title="notes.txt", url="https://files.example/notes.txt"),),
@@ -32,6 +33,7 @@ class CanonicalBridgeEventTests(SimpleTestCase):
                 "source_parent_message_id": "1710000000.0000",
                 "source_author_id": "U123",
                 "source_author_display_name": "Sam",
+                "source_author_avatar_url": "https://avatars.slack-edge.com/sam.png",
                 "text": "Hello",
                 "attachments": [
                     {"title": "notes.txt", "url": "https://files.example/notes.txt"}

@@ -24,7 +24,7 @@ from typing import Optional, Tuple
 from .models import (
     PointsAdmin, Minter, Task, Ledger, PointsAccount, BoostPostAdmission,
     TaskAssignment, TaskSubmission, CoworkingBooking, CoworkingDayCapacity,
-    RewardsCatalog, RewardRedemption, TaskTemplate, PointsRequest, PointsPurchase
+    RewardsCatalog, RewardRedemption, TaskTemplate, PointsRequest, PointsPurchase,
 )
 
 from .services import (
@@ -33,12 +33,14 @@ from .services import (
     TaskService, RewardsService,
 )
 from .permissions import (
+    can_list_committee_candidate_emails,
     can_generate_coworking_reports,
     is_points_admin,
     is_points_super_admin,
     InsufficientBalanceError,
     PermissionDeniedError,
 )
+from .committee_candidates import CommitteeCandidateEmailService
 from core.models import User
 from core.permissions import HasAPIKey, HasRooApiKey, HasStrictRooApiKey
 from integrations.services import SlackService
@@ -1340,6 +1342,29 @@ class KimiPromptUsageView(APIView):
         )
 
 
+class CommitteeCandidateEmailsView(APIView):
+    """Return a private, copy-ready list of eligible member emails."""
+
+    permission_classes = [HasStrictRooApiKey]
+
+    def post(self, request):
+        requester_slack_id = clean_slack_id(request.data.get('requester_slack_id'))
+        if not requester_slack_id:
+            return Response(
+                {'code': 'requester_required', 'error': 'requester_slack_id is required'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not can_list_committee_candidate_emails(requester_slack_id):
+            return Response(
+                {
+                    'code': 'committee_admin_only',
+                    'error': 'Only active admin or committee Points Admins can list candidate emails',
+                },
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        return Response(CommitteeCandidateEmailService.list_emails())
+
+
 class BoostPostAdmissionView(APIView):
     """Price and atomically debit one direct #boost-my-startup root post."""
 
@@ -1386,11 +1411,25 @@ class BoostPostAdmissionView(APIView):
             request.data.get('social_post_url') or ''
         ).strip()[:2048]
         root_text = str(request.data.get('root_text') or '')[:10000]
+        recheck_insufficient_points = request.data.get(
+            'recheck_insufficient_points',
+            False,
+        )
+        if not isinstance(recheck_insufficient_points, bool):
+            return Response(
+                {
+                    'status': 'invalid_post',
+                    'code': 'invalid_post',
+                    'message': 'recheck_insufficient_points must be a boolean',
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         try:
             admission, created = BoostPostAdmissionService.admit(
                 **values,
                 root_text=root_text,
+                recheck_insufficient_points=recheck_insufficient_points,
             )
         except InvalidBoostPostError as exc:
             return Response(
@@ -1413,6 +1452,7 @@ class BoostPostAdmissionView(APIView):
 
         data = self._response(admission)
         data['idempotent_replay'] = not created
+        data['recheck_requested'] = recheck_insufficient_points
         if admission.status == 'approved':
             return Response(
                 data,

@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone as datetime_timezone
 from django.conf import settings
 from django.contrib.auth.models import update_last_login
 from django.db import IntegrityError, transaction
+from django.db.models import Q
 from django.utils import timezone
 from django.utils.crypto import salted_hmac
 from rest_framework import status
@@ -43,6 +44,7 @@ from .account_sessions import (
     rotate_account_session,
 )
 from .models import (
+    CommunityChatAccountSession,
     CommunityChatBootstrapToken,
     CommunityChatChallenge,
     CommunityChatDevice,
@@ -73,6 +75,7 @@ from .serializers import (
     CommunityChatEmailCodeRequestSerializer,
     CommunityChatEmailCodeVerifySerializer,
     CommunityChatPasswordLoginSerializer,
+    CommunityChatPublicProfileBatchSerializer,
     own_chat_profile,
     public_chat_profile,
 )
@@ -89,6 +92,12 @@ ACCOUNT_AUTHENTICATION_CLASSES = (
     CustomJWTAuthentication,
 )
 PKCE_CHALLENGE_RE = re.compile(r"^[A-Za-z0-9_-]{43}$")
+
+
+class _EmailCodeBindingConflict(ValueError):
+    def __init__(self, code: str):
+        super().__init__(code)
+        self.code = code
 
 
 def _is_eligible(user):
@@ -274,27 +283,67 @@ def _uniform_email_code_delay(started_at):
 
 
 def _issue_email_code_bootstrap(user, challenge):
-    active_key = CommunityChatDevice.objects.filter(
+    active_key = CommunityChatDevice.objects.select_for_update().filter(
         public_key=challenge.public_key,
         status__in=(DeviceBindingStatus.PENDING, DeviceBindingStatus.VERIFIED),
     ).first()
     if active_key and active_key.user_id != user.id:
-        return None, "public_key_already_bound"
-    active_installation = CommunityChatDevice.objects.filter(
+        raise _EmailCodeBindingConflict("public_key_already_bound")
+    active_installation = CommunityChatDevice.objects.select_for_update().filter(
         installation_id=challenge.installation_id,
         status__in=(DeviceBindingStatus.PENDING, DeviceBindingStatus.VERIFIED),
     ).first()
-    if active_installation and (
-        active_installation.user_id != user.id
-        or active_installation.public_key != challenge.public_key
+    if active_installation and active_installation.user_id != user.id:
+        raise _EmailCodeBindingConflict("installation_already_bound")
+    if (
+        active_installation
+        and active_installation.public_key != challenge.public_key
     ):
-        return None, "installation_already_bound"
+        if active_key and active_key.id != active_installation.id:
+            raise _EmailCodeBindingConflict("public_key_already_bound")
+
+        # A valid email code proves control of the same MLAI account that owns
+        # this installation. Recover from a lost or regenerated browser signer
+        # by retiring the old relay identity and preserving it as audit history.
+        # The replacement remains pending until the normal signed challenge,
+        # invite, and membership-confirmation flow proves the new key.
+        revoke_relay_membership(active_installation.public_key)
+        now = timezone.now()
+        active_installation.status = DeviceBindingStatus.REVOKED
+        active_installation.revoked_at = now
+        active_installation.revoked_by = user
+        active_installation.revocation_reason = "email_code_identity_recovery"
+        active_installation.save(
+            update_fields=(
+                "status",
+                "revoked_at",
+                "revoked_by",
+                "revocation_reason",
+                "updated_at",
+            )
+        )
+        CommunityChatDevice.objects.create(
+            user=user,
+            public_key=challenge.public_key,
+            installation_id=challenge.installation_id,
+            client_id=challenge.client_id,
+            platform=challenge.platform,
+            name=challenge.device_name,
+            status=DeviceBindingStatus.PENDING,
+        )
 
     now = timezone.now()
     raw_token = f"{TOKEN_PREFIX}{secrets.token_urlsafe(48)}"
     CommunityChatBootstrapToken.objects.filter(
         user=user,
-        public_key=challenge.public_key,
+        revoked_at__isnull=True,
+    ).filter(
+        Q(public_key=challenge.public_key)
+        | Q(installation_id=challenge.installation_id)
+    ).update(revoked_at=now)
+    CommunityChatAccountSession.objects.filter(
+        user=user,
+        installation_id=challenge.installation_id,
         revoked_at__isnull=True,
     ).update(revoked_at=now)
     token = CommunityChatBootstrapToken.objects.create(
@@ -310,7 +359,7 @@ def _issue_email_code_bootstrap(user, challenge):
         + timedelta(seconds=settings.COMMUNITY_CHAT_BOOTSTRAP_TOKEN_TTL_SECONDS),
     )
     update_last_login(None, user)
-    return (raw_token, token), None
+    return raw_token, token
 
 
 def _account_session_payload(credentials):
@@ -417,27 +466,43 @@ class EmailCodeVerifyView(APIView):
             data["challenge_id"],
             data["installation_id"],
         )
+        invalid_email_code = False
         try:
-            user, challenge = consume_email_code(
-                challenge_id=data["challenge_id"],
-                code=data["code"],
-                client_id=data["client_id"],
-                installation_id=data["installation_id"],
+            # Keep code consumption, device recovery, bootstrap creation, and
+            # session replacement in one database transaction. Any binding or
+            # adapter failure leaves the one-use code available for a retry.
+            with transaction.atomic():
+                try:
+                    user, challenge = consume_email_code(
+                        challenge_id=data["challenge_id"],
+                        code=data["code"],
+                        client_id=data["client_id"],
+                        installation_id=data["installation_id"],
+                    )
+                except InvalidEmailCode:
+                    # Exit this transaction normally so failed-attempt counters
+                    # and terminal invalidation remain durable.
+                    invalid_email_code = True
+                else:
+                    raw_token, token = _issue_email_code_bootstrap(user, challenge)
+                    account_session = issue_account_session(user, challenge)
+        except _EmailCodeBindingConflict as exc:
+            return Response(
+                {"error": exc.code},
+                status=status.HTTP_409_CONFLICT,
             )
-        except InvalidEmailCode:
+        except MembershipAdapterConflict as exc:
+            return Response({"error": exc.code}, status=status.HTTP_409_CONFLICT)
+        except MembershipAdapterUnavailable:
+            return Response(
+                {"error": "membership_service_unavailable"},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        if invalid_email_code:
             return Response(
                 {"error": "invalid_or_expired_code"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-
-        issued, binding_error = _issue_email_code_bootstrap(user, challenge)
-        if binding_error:
-            return Response(
-                {"error": binding_error},
-                status=status.HTTP_409_CONFLICT,
-            )
-        raw_token, token = issued
-        account_session = issue_account_session(user, challenge)
         response = Response(
             {
                 "status": "authenticated",
@@ -542,6 +607,51 @@ class AccountView(APIView):
                 "devices": [_device_payload(device) for device in devices],
             }
         )
+
+
+class PublicProfileBatchView(APIView):
+    """Resolve current and historical verified chat keys to public profiles.
+
+    Revoking a device removes its access, but it must not erase attribution on
+    messages and membership events that the key signed while it was verified.
+    Pending or otherwise never-verified keys remain private and unresolved.
+    """
+
+    authentication_classes = (CommunityChatAccountAuthentication,)
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [CommunityChatScopedThrottle]
+    community_chat_throttle_scope = "community_chat_session"
+
+    def post(self, request):
+        serializer = CommunityChatPublicProfileBatchSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        public_keys = serializer.validated_data["public_keys"]
+
+        devices = (
+            CommunityChatDevice.objects.select_related("user")
+            .filter(
+                public_key__in=public_keys,
+                status__in=(
+                    DeviceBindingStatus.VERIFIED,
+                    DeviceBindingStatus.REVOKED,
+                ),
+                verified_at__isnull=False,
+                user__is_active=True,
+            )
+            .order_by("public_key", "-verified_at", "-created_at")
+        )
+        devices_by_key = {}
+        for device in devices:
+            devices_by_key.setdefault(device.public_key, device)
+        profiles = {
+            public_key: public_chat_profile(devices_by_key[public_key].user)
+            for public_key in public_keys
+            if public_key in devices_by_key
+        }
+        missing = [
+            public_key for public_key in public_keys if public_key not in profiles
+        ]
+        return Response({"profiles": profiles, "missing": missing})
 
 
 class DeviceAuthStartView(APIView):
@@ -740,7 +850,11 @@ class SessionView(APIView):
 
 
 class ChallengeView(APIView):
-    authentication_classes = AUTHENTICATION_CLASSES
+    # Browser reloads restore the durable, device-bound account session after
+    # the one-use bootstrap token has been consumed. Accept that session for
+    # re-enrollment while `_require_token_key` and the origin checks below keep
+    # every request bound to the same key, installation, client, and origin.
+    authentication_classes = ACCOUNT_AUTHENTICATION_CLASSES
     permission_classes = [IsAuthenticated]
     throttle_classes = [CommunityChatScopedThrottle]
     community_chat_throttle_scope = "community_chat_challenge"
@@ -815,7 +929,7 @@ class ChallengeView(APIView):
 
 
 class InviteView(APIView):
-    authentication_classes = AUTHENTICATION_CLASSES
+    authentication_classes = ACCOUNT_AUTHENTICATION_CLASSES
     permission_classes = [IsAuthenticated]
     throttle_classes = [CommunityChatScopedThrottle]
     community_chat_throttle_scope = "community_chat_invite"
@@ -934,7 +1048,7 @@ class InviteView(APIView):
 
 
 class ConfirmView(APIView):
-    authentication_classes = AUTHENTICATION_CLASSES
+    authentication_classes = ACCOUNT_AUTHENTICATION_CLASSES
     permission_classes = [IsAuthenticated]
     throttle_classes = [CommunityChatScopedThrottle]
     community_chat_throttle_scope = "community_chat_confirm"

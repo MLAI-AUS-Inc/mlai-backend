@@ -25,6 +25,8 @@ from integrations.services.luma_sync import (
 from integrations.tests_luma import FakeSession
 from startup_updates.models import LumaEventSelection, StartupMetricObservation
 from startup_updates.services import (
+    build_external_context_for_sources,
+    build_luma_run_context,
     merge_luma_metrics_into_structured_memo,
     normalize_startup_update_input_sources,
 )
@@ -417,7 +419,16 @@ class LumaSelectionEndpointTests(TestCase):
         )
         self.assertEqual(LumaEventSelection.objects.filter(connection=self.connection).count(), 2)
 
-    def test_save_selections_persists_events_and_metrics(self):
+    @patch("vibe_raising.views.mark_sources_sync_requested")
+    def test_monthly_update_preparation_uses_cached_luma_snapshot(self, mock_sync):
+        from vibe_raising.views import _sync_selected_connector_sources_for_draft
+
+        warnings = _sync_selected_connector_sources_for_draft(self.user, ["luma"])
+
+        self.assertEqual(warnings, {})
+        mock_sync.assert_not_called()
+
+    def test_save_selections_ignores_event_ids_and_persists_metrics(self):
         for event_id in ("e1", "e2", "e3"):
             LumaEventSelection.objects.create(
                 connection=self.connection, user=self.user, organization=self.org,
@@ -431,23 +442,22 @@ class LumaSelectionEndpointTests(TestCase):
         )
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data["selectedEventCount"], 2)
-        self.assertEqual(
-            set(
-                LumaEventSelection.objects.filter(connection=self.connection, selected=True)
-                .values_list("event_id", flat=True)
-            ),
-            {"e1", "e3"},
+        self.assertEqual(response.data["selectedEventCount"], 0)
+        self.assertEqual(response.data["eventSelectionMode"], "target_month")
+        self.assertFalse(
+            LumaEventSelection.objects.filter(connection=self.connection, selected=True).exists()
         )
         self.connection.refresh_from_db()
         self.assertEqual(self.connection.provider_metadata["selected_metrics"], ["eventsRun", "eventAttendees"])
+        self.assertEqual(self.connection.provider_metadata["event_selection_mode"], "target_month")
         status_resp = self.api_client.get("/api/v1/integrations/sources/status")
         sources = {source["key"]: source for source in status_resp.data["sources"]}
-        self.assertEqual(sources["luma"]["selectedEventCount"], 2)
+        self.assertEqual(sources["luma"]["selectedEventCount"], 0)
+        self.assertEqual(sources["luma"]["eventSelectionMode"], "target_month")
         self.assertEqual(sources["luma"]["status"], "connected")
 
     @patch("integrations.services.luma_sync.LumaAttendeeReportService")
-    def test_sync_respects_selected_events_and_metrics(self, mock_service_cls):
+    def test_sync_ignores_legacy_event_selection_and_respects_metrics(self, mock_service_cls):
         LumaEventSelection.objects.create(
             connection=self.connection, user=self.user, organization=self.org,
             event_id="e1", event_name="E1", selected=True,
@@ -461,18 +471,29 @@ class LumaSelectionEndpointTests(TestCase):
             captured["event_ids"] = kwargs.get("event_ids")
             return [
                 {"event": {"id": "e1", "name": "E1"}, "start_at": datetime(2026, 3, 5, 3, 0, tzinfo=ZoneInfo("UTC")), "registration_count": 5, "checked_in_count": 2},
+                {"event": {"id": "e2", "name": "E2"}, "start_at": datetime(2026, 3, 15, 3, 0, tzinfo=ZoneInfo("UTC")), "registration_count": 3, "checked_in_count": 1},
             ]
 
         mock_service_cls.return_value = SimpleNamespace(collect_ended_event_attendance=_collect)
 
         sync_luma_connection(self.connection)
 
-        self.assertEqual(set(captured["event_ids"]), {"e1"})  # only the selected event is fetched
+        self.assertIsNone(captured["event_ids"])
+        self.assertFalse(
+            LumaEventSelection.objects.filter(connection=self.connection, selected=True).exists()
+        )
         keys = set(
             StartupMetricObservation.objects.filter(organization=self.org, source_provider="luma")
             .values_list("metric_key", flat=True)
         )
         self.assertEqual(keys, {"eventsRun"})  # only the selected metric is written
+        events_run = StartupMetricObservation.objects.get(
+            organization=self.org,
+            source_provider="luma",
+            metric_key="eventsRun",
+            period_month=date(2026, 3, 1),
+        )
+        self.assertEqual(events_run.value_number, Decimal("2"))
 
     @patch("integrations.services.luma_sync.LumaAttendeeReportService")
     def test_sync_removes_stale_metrics(self, mock_service_cls):
@@ -549,3 +570,88 @@ class LumaDraftMergeTests(TestCase):
 
         self.assertIn("luma", VIBE_RAISING_INPUT_SOURCE_KEYS)
         self.assertIn("luma", normalize_startup_update_input_sources(["gmail", "luma"]))
+
+
+class LumaRunContextTests(TestCase):
+    def setUp(self):
+        self.org = Organization.objects.create(name="Acme", domain="acme.com")
+        self.user = User.objects.create_user(email="founder@example.com", role="participant")
+        self.connection = ExternalServiceConnection.objects.create(
+            user=self.user,
+            provider=ExternalServiceProvider.LUMA,
+            organization=self.org,
+            access_token="luma-secret",
+            account_label="Luma",
+            status=ExternalServiceConnectionStatus.CONNECTED,
+        )
+
+    def _cached_event(self, event_id: str, local_date: date, registrations: int = 1):
+        return LumaEventSelection.objects.create(
+            connection=self.connection,
+            user=self.user,
+            organization=self.org,
+            event_id=event_id,
+            event_name=event_id,
+            start_at=datetime(
+                local_date.year,
+                local_date.month,
+                local_date.day,
+                12,
+                tzinfo=ZoneInfo("Australia/Melbourne"),
+            ),
+            registration_count=registrations,
+            checked_in_count=0,
+        )
+
+    def test_context_uses_target_month_with_two_week_buffer(self):
+        self._cached_event("outside-before", date(2026, 2, 14))
+        self._cached_event("before", date(2026, 2, 15))
+        self._cached_event("selected", date(2026, 3, 20), registrations=10)
+        self._cached_event("after", date(2026, 4, 14))
+        self._cached_event("outside-after", date(2026, 4, 15))
+        StartupMetricObservation.objects.create(
+            organization=self.org,
+            metric_key="eventsRun",
+            metric_name="Events Run",
+            value_text="1",
+            value_number=Decimal("1"),
+            period_month=date(2026, 3, 1),
+            source_provider="luma",
+        )
+        StartupMetricObservation.objects.create(
+            organization=self.org,
+            metric_key="eventsRun",
+            metric_name="Events Run",
+            value_text="99",
+            value_number=Decimal("99"),
+            period_month=date(2026, 4, 1),
+            source_provider="luma",
+        )
+
+        context = build_luma_run_context(
+            organization=self.org,
+            target_month=date(2026, 3, 1),
+        )
+
+        self.assertEqual(context["event_selection_mode"], "target_month")
+        self.assertEqual(context["context_days_each_side"], 14)
+        by_id = {event["event_id"]: event for event in context["events"]}
+        self.assertEqual(set(by_id), {"before", "selected", "after"})
+        self.assertEqual(by_id["before"]["context_role"], "before_month")
+        self.assertEqual(by_id["selected"]["context_role"], "selected_month")
+        self.assertTrue(by_id["selected"]["counted_in_selected_month_metrics"])
+        self.assertEqual(by_id["selected"]["registration_count"], 10)
+        self.assertEqual(by_id["after"]["context_role"], "after_month")
+        self.assertEqual([metric["value"] for metric in context["metrics"]], ["1"])
+
+        external_context = build_external_context_for_sources(
+            organization=self.org,
+            input_sources=["luma"],
+            start_date=date(2026, 2, 1),
+            end_date=date(2026, 3, 31),
+        )
+        self.assertEqual(external_context["luma"]["target_month"], "2026-03-01")
+        self.assertEqual(
+            external_context["luma"]["context_days_each_side"],
+            14,
+        )

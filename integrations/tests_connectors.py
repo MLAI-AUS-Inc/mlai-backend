@@ -1,6 +1,6 @@
 from unittest.mock import MagicMock, patch
 import urllib.parse
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone as dt_timezone
 from decimal import Decimal
 from typing import Optional
 
@@ -39,7 +39,7 @@ from startup_updates.models import (
     UserStartupBinding,
     StartupMetricObservation,
 )
-from startup_updates.services import publish_xero_metric_observations
+from startup_updates.services import build_monthly_financial_snapshot, publish_xero_metric_observations
 from workflow_runs.models import ContentFactoryRun, ContentFactoryRunStatus
 
 User = get_user_model()
@@ -2289,6 +2289,254 @@ class ConnectorEndpointTests(TestCase):
         )
         self.assertIn("invoiceRevenue", keys)
         self.assertNotIn("revenue", keys)
+
+    def test_monthly_financial_snapshot_uses_cached_totals_and_line_attribution(self):
+        organization = Organization.objects.create(name="Acme", domain="financial-brief.example")
+        connection = ExternalServiceConnection.objects.create(
+            user=self.user,
+            organization=organization,
+            provider=ExternalServiceProvider.XERO,
+            external_account_id="tenant-financial-brief",
+            account_label="Acme Xero",
+            status=ExternalServiceConnectionStatus.CONNECTED,
+        )
+        ExternalFinancialRecord.objects.create(
+            user=self.user,
+            organization=organization,
+            connection=connection,
+            provider=ExternalServiceProvider.XERO,
+            record_type=ExternalFinancialRecord.RECORD_XERO_INVOICE,
+            external_account_id=connection.external_account_id,
+            external_record_id="invoice-april",
+            currency="AUD",
+            amount="10000.00",
+            direction="credit",
+            status="PAID",
+            transaction_date=date(2026, 4, 15),
+            raw_payload={
+                "LineItems": [
+                    {"Description": "State innovation grant", "LineAmount": "4000.00"},
+                    {
+                        "Description": "HealthHack ticket sales",
+                        "LineAmount": "3000.00",
+                        "Tracking": [{"Name": "Event", "Option": "HealthHack"}],
+                    },
+                    {"Description": "Community training program", "LineAmount": "2000.00"},
+                    {"Description": "Software build project", "LineAmount": "1000.00"},
+                ]
+            },
+        )
+        ExternalFinancialRecord.objects.create(
+            user=self.user,
+            organization=organization,
+            connection=connection,
+            provider=ExternalServiceProvider.XERO,
+            record_type=ExternalFinancialRecord.RECORD_XERO_BILL,
+            external_account_id=connection.external_account_id,
+            external_record_id="bill-april",
+            currency="AUD",
+            amount="1700.00",
+            direction="debit",
+            status="PAID",
+            transaction_date=date(2026, 4, 20),
+            raw_payload={
+                "LineItems": [
+                    {
+                        "AccountName": "Event catering",
+                        "LineAmount": "500.00",
+                        "Tracking": [{"Name": "Event", "Option": "HealthHack"}],
+                    },
+                    {"AccountName": "Software subscriptions", "LineAmount": "1200.00"},
+                ]
+            },
+        )
+        for key, value in (("revenue", "10000.00"), ("monthlyCosts", "7000.00"), ("netProfitLoss", "3000.00")):
+            StartupMetricObservation.objects.create(
+                organization=organization,
+                source_provider=ExternalServiceProvider.XERO,
+                metric_key=key,
+                metric_name=key,
+                value_text=f"AUD {value}",
+                value_number=Decimal(value),
+                unit="AUD",
+                period_month=date(2026, 4, 1),
+                confidence=1.0,
+            )
+
+        snapshot = build_monthly_financial_snapshot(
+            organization=organization,
+            target_month=date(2026, 4, 1),
+            as_of_date=date(2026, 4, 30),
+        )
+
+        self.assertIsNotNone(snapshot)
+        self.assertEqual(len(snapshot["performance"]), 12)
+        self.assertEqual(snapshot["performance"][-1]["income"], 10000.0)
+        self.assertEqual(snapshot["performance"][-1]["expenses"], 7000.0)
+        self.assertEqual(snapshot["performance"][-1]["net"], 3000.0)
+        april_mix = snapshot["revenue_mix"][-1]
+        self.assertEqual(sum(item["amount"] for item in april_mix["segments"]), 10000.0)
+        self.assertEqual(april_mix["segments"][0]["amount"], 4000.0)
+        self.assertEqual(snapshot["event_contribution"], [
+            {"label": "HealthHack", "income": 3000.0, "expenses": 500.0, "net": 2500.0},
+        ])
+        self.assertEqual(snapshot["overhead"], [
+            {"label": "Software subscriptions", "amount": 1200.0},
+        ])
+
+
+class LinearRecentActivitySelectionTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(email="linear-activity@example.com", role="participant")
+        self.organization = Organization.objects.create(name="Acme", domain="linear-activity.example")
+        self.connection = ExternalServiceConnection.objects.create(
+            provider=ExternalServiceProvider.LINEAR,
+            user=self.user,
+            organization=self.organization,
+            access_token="linear-token",
+            account_label="Acme Linear",
+            status=ExternalServiceConnectionStatus.CONNECTED,
+        )
+        self.reference = datetime(2026, 8, 13, 12, tzinfo=dt_timezone.utc)
+
+    def _project(self, project_id: str, *, updated_days_ago: int, **overrides) -> dict:
+        project = {
+            "id": project_id,
+            "name": project_id.replace("-", " ").title(),
+            "createdAt": (self.reference - timedelta(days=120)).isoformat(),
+            "updatedAt": (self.reference - timedelta(days=updated_days_ago)).isoformat(),
+            "status": {"name": "In progress", "type": "started"},
+            "issues": {"nodes": []},
+        }
+        project.update(overrides)
+        return project
+
+    def test_refresh_selects_only_projects_with_activity_in_last_30_days(self):
+        from integrations.services.external_connectors import refresh_linear_activity_selections
+
+        LinearProjectSelection.objects.create(
+            connection=self.connection,
+            user=self.user,
+            organization=self.organization,
+            linear_project_id="previous-manual-selection",
+            project_name="Previous manual selection",
+            selected=True,
+        )
+        payload = {
+            "projects": {
+                "nodes": [
+                    self._project("project-change", updated_days_ago=5),
+                    self._project(
+                        "project-update",
+                        updated_days_ago=90,
+                        lastUpdate={
+                            "id": "update-1",
+                            "createdAt": (self.reference - timedelta(days=10)).isoformat(),
+                            "updatedAt": (self.reference - timedelta(days=10)).isoformat(),
+                        },
+                    ),
+                    self._project(
+                        "issue-change",
+                        updated_days_ago=90,
+                        issues={
+                            "nodes": [
+                                {"updatedAt": (self.reference - timedelta(days=2)).isoformat()}
+                            ]
+                        },
+                    ),
+                    self._project(
+                        "recently-cancelled",
+                        updated_days_ago=90,
+                        canceledAt=(self.reference - timedelta(days=1)).isoformat(),
+                        status={"name": "Cancelled", "type": "canceled"},
+                    ),
+                    self._project("stale-project", updated_days_ago=31),
+                ],
+                "pageInfo": {"hasNextPage": False, "endCursor": None},
+            }
+        }
+
+        with patch(
+            "integrations.services.external_connectors._linear_graphql_request",
+            return_value=payload,
+        ):
+            selected = refresh_linear_activity_selections(
+                self.connection,
+                reference=self.reference,
+            )
+
+        self.assertEqual(
+            {selection.linear_project_id for selection in selected},
+            {"project-change", "project-update", "issue-change", "recently-cancelled"},
+        )
+        self.assertFalse(
+            LinearProjectSelection.objects.get(
+                connection=self.connection,
+                linear_project_id="previous-manual-selection",
+            ).selected
+        )
+        self.assertFalse(
+            LinearProjectSelection.objects.get(
+                connection=self.connection,
+                linear_project_id="stale-project",
+            ).selected
+        )
+        self.connection.refresh_from_db()
+        self.assertEqual(self.connection.provider_metadata["project_selection_mode"], "recent_activity")
+        self.assertEqual(self.connection.provider_metadata["project_activity_window_days"], 30)
+        self.assertEqual(self.connection.provider_metadata["recent_project_count"], 4)
+
+    def test_no_recent_projects_is_a_successful_empty_sync_and_preview(self):
+        from integrations.services.external_connectors import (
+            serialize_linear_preview,
+            sync_linear_connection_page,
+        )
+
+        LinearProjectArtifact.objects.create(
+            organization=self.organization,
+            connection=self.connection,
+            linear_project_id="stale-cached-project",
+            name="Stale cached project",
+        )
+
+        with patch("integrations.services.external_connectors._linear_graphql_request") as graphql_request:
+            result = sync_linear_connection_page(self.connection, run_id="run-with-no-activity")
+
+        graphql_request.assert_not_called()
+        self.assertEqual(result["status"], "synced")
+        self.assertEqual(result["projectsSynced"], 0)
+        preview = serialize_linear_preview(self.user)
+        self.assertEqual(preview["selectedProjects"], [])
+        self.assertEqual(preview["projects"], [])
+        self.assertEqual(preview["totalCachedProjects"], 0)
+        self.assertEqual(preview["warnings"], [])
+
+    def test_connected_linear_remains_selected_when_activity_window_is_empty(self):
+        from integrations.services.external_connectors import _serialize_external_source
+
+        source = _serialize_external_source(self.user, ExternalServiceProvider.LINEAR)
+
+        self.assertTrue(source["selected"])
+        self.assertEqual(source["selectedProjectCount"], 0)
+        self.assertEqual(source["projectSelectionMode"], "recent_activity")
+        self.assertEqual(source["activityWindowDays"], 30)
+        self.assertIsNone(source["warning"])
+
+    def test_monthly_update_preparation_only_refreshes_linear_activity_scope(self):
+        from vibe_raising.views import _sync_selected_connector_sources_for_draft
+
+        self.connection.last_synced_at = timezone.now()
+        self.connection.provider_metadata = {}
+        self.connection.save(update_fields=["last_synced_at", "provider_metadata", "updated_at"])
+
+        with patch("vibe_raising.views.refresh_linear_activity_selections") as refresh_scope, patch(
+            "vibe_raising.views.mark_sources_sync_requested"
+        ) as sync_requested:
+            warnings = _sync_selected_connector_sources_for_draft(self.user, ["linear"])
+
+        self.assertEqual(warnings, {})
+        refresh_scope.assert_called_once_with(self.connection)
+        sync_requested.assert_not_called()
 
 
 class LinearProjectArtifactUpsertTests(TestCase):

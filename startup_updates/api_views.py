@@ -142,7 +142,7 @@ EMAIL_DRAFT_DISPLAY_STAGES = {
     "slack_backfill": "Scanning selected Slack channels",
     "slack_relevance_classification": "Filtering Slack highlights",
     "slack_event_extraction": "Extracting Slack highlights",
-    "linear_backfill": "Scanning selected Linear projects",
+    "linear_backfill": "Scanning recently active Linear projects",
     "linear_relevance_classification": "Filtering Linear project context",
     "linear_event_extraction": "Extracting Linear project highlights",
     "notion_backfill": "Scanning selected Notion workspace",
@@ -676,6 +676,16 @@ def _structured_memo_section_text(structured_memo, key: str) -> str:
     return _join_text_items_with_newlines((structured_memo or {}).get(key))
 
 
+def _structured_memo_financial_snapshot(structured_memo) -> Optional[dict]:
+    value = (structured_memo or {}).get("financial_snapshot") or (structured_memo or {}).get("financialSnapshot")
+    return value if isinstance(value, dict) else None
+
+
+def _structured_memo_concise_analysis(structured_memo) -> Optional[dict]:
+    value = (structured_memo or {}).get("concise_analysis") or (structured_memo or {}).get("conciseAnalysis")
+    return value if isinstance(value, dict) else None
+
+
 def _structured_memo_with_xero_metrics(draft) -> dict:
     # Merges connector-backed metrics (Xero + Luma) into the draft's kpi_snapshot.
     structured_memo = draft.structured_memo or {}
@@ -713,6 +723,11 @@ def _serialize_draft_for_editor(draft) -> dict:
         "next30Days": _structured_memo_section_text(structured_memo, "next_30_days"),
         "metrics": _extract_form_metrics(structured_memo),
         "metricSuggestions": _extract_metric_suggestions(structured_memo),
+        "financialSnapshot": _structured_memo_financial_snapshot(structured_memo),
+        "conciseAnalysis": _structured_memo_concise_analysis(structured_memo),
+        "presentationMode": str(
+            structured_memo.get("presentation_mode") or structured_memo.get("presentationMode") or ""
+        ),
     }
 
 
@@ -726,6 +741,11 @@ def _serialize_email_draft_month(draft) -> dict:
         "year": month_value.year,
         "metrics": _extract_form_metrics(structured_memo),
         "metricSuggestions": _extract_metric_suggestions(structured_memo),
+        "financialSnapshot": _structured_memo_financial_snapshot(structured_memo),
+        "conciseAnalysis": _structured_memo_concise_analysis(structured_memo),
+        "presentationMode": str(
+            structured_memo.get("presentation_mode") or structured_memo.get("presentationMode") or ""
+        ),
         "highlights": _join_named_sections(structured_memo, _HIGHLIGHT_SECTIONS),
         "challenges": _join_text_items_with_newlines(structured_memo.get("lowlights")),
         "asks": _join_named_sections(structured_memo, [
