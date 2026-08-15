@@ -25,7 +25,7 @@ from integrations.services.community_bridge.slack import SlackBridgeClient
 
 logger = logging.getLogger(__name__)
 
-RECONCILIATION_VERSION = "slack-thread-reconcile-v1"
+RECONCILIATION_VERSION = "slack-thread-reconcile-v2"
 TERMINAL_STATUSES = {
     CommunityBridgeDeliveryStatus.COMPLETED,
     CommunityBridgeDeliveryStatus.DEAD,
@@ -165,6 +165,7 @@ class Command(BaseCommand):
             "roots_scanned": 0,
             "stale_links": 0,
             "wrong_broadcast": 0,
+            "wrong_created_at": 0,
             "wrong_parent": 0,
         }
         return {"apply": apply_changes, "channels": [], "totals": counters}
@@ -395,6 +396,7 @@ class Command(BaseCommand):
             str(message.get("subtype") or "").strip() == "thread_broadcast"
             or bool(message.get("reply_broadcast"))
         )
+        expected_created_at = int(message_id.split(".", 1)[0])
         active_link = bool(
             link
             and link.source_deleted_at is None
@@ -408,6 +410,7 @@ class Command(BaseCommand):
             for match in matches
             if match["parent_message_id"] == expected_parent_id
             and bool(match["broadcast"]) == expected_broadcast
+            and int(match["created_at"]) == expected_created_at
         ]
         chosen = next(
             (
@@ -460,6 +463,11 @@ class Command(BaseCommand):
                     for match in matches
                 ):
                     report["wrong_broadcast"] += 1
+                if any(
+                    int(match["created_at"]) != expected_created_at
+                    for match in matches
+                ):
+                    report["wrong_created_at"] += 1
 
         if message_mismatch:
             report["mismatches"] += 1
