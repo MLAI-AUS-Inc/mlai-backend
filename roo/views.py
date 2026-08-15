@@ -1,6 +1,7 @@
 import hashlib
 import hmac
 import json
+import re
 import time
 
 from django.core.exceptions import ValidationError
@@ -1198,6 +1199,146 @@ class CurrentUserBalanceView(APIView):
                 'expired_or_reversed_points': balance_data['expired_or_reversed_points'],
             },
             status=status.HTTP_200_OK,
+        )
+
+
+class KimiPromptUsageView(APIView):
+    """Atomically debit an MLAI account for one Kimi Code prompt.
+
+    Cloudflare Access supplies the developer email to the Kimi gateway. The
+    gateway calls this service endpoint with Roo's private API credential. The
+    caller controls only the identity and idempotency key; pricing remains a
+    backend setting so it cannot be reduced by a modified browser request.
+    """
+
+    permission_classes = [HasStrictRooApiKey]
+    IDEMPOTENCY_RE = re.compile(r'^[A-Za-z0-9._:-]{16,180}$')
+
+    @staticmethod
+    def _error(code: str, message: str, http_status: int) -> Response:
+        return Response(
+            {'code': code, 'message': message},
+            status=http_status,
+        )
+
+    @staticmethod
+    def _active_user(email_value):
+        email = User.objects.normalize_email(email_value)
+        if not email or len(email) > 254 or '@' not in email:
+            return email, None
+        return email, User.objects.filter(email__iexact=email, is_active=True).first()
+
+    def get(self, request):
+        email, user = self._active_user(request.query_params.get('email'))
+        if not email or user is None:
+            code = 'invalid_email' if not email or '@' not in email else 'account_not_found'
+            message = (
+                'A valid MLAI account email is required.'
+                if code == 'invalid_email'
+                else 'No active MLAI account is linked to this email.'
+            )
+            return self._error(
+                code,
+                message,
+                status.HTTP_400_BAD_REQUEST
+                if code == 'invalid_email'
+                else status.HTTP_404_NOT_FOUND,
+            )
+
+        balance = PointsService.get_balance(user)['balance']
+        return Response(
+            {
+                'balance': balance,
+                'prompt_cost_points': settings.KIMI_ROO_POINTS_PER_PROMPT,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    def post(self, request):
+        email, user = self._active_user(request.data.get('email'))
+        request_key = str(request.data.get('idempotency_key') or '').strip()
+        session_id = str(request.data.get('session_id') or '').strip()
+
+        if not email or len(email) > 254 or '@' not in email:
+            return self._error(
+                'invalid_email',
+                'A valid MLAI account email is required.',
+                status.HTTP_400_BAD_REQUEST,
+            )
+        if not self.IDEMPOTENCY_RE.fullmatch(request_key):
+            return self._error(
+                'invalid_idempotency_key',
+                'idempotency_key must contain 16-180 safe characters.',
+                status.HTTP_400_BAD_REQUEST,
+            )
+        if len(session_id) > 100:
+            return self._error(
+                'invalid_session_id',
+                'session_id must be 100 characters or fewer.',
+                status.HTTP_400_BAD_REQUEST,
+            )
+
+        if user is None:
+            return self._error(
+                'account_not_found',
+                'No active MLAI account is linked to this email.',
+                status.HTTP_404_NOT_FOUND,
+            )
+
+        points = settings.KIMI_ROO_POINTS_PER_PROMPT
+        ledger_key = f'kimi_prompt:{request_key}'
+        try:
+            ledger, created = PointsService.spend(
+                user=user,
+                delta=points,
+                source='TOOLS',
+                description='Kimi Code prompt',
+                created_by_slack_id='KIMI_CODE',
+                idempotency_key=ledger_key,
+                reference_type='KIMI_PROMPT',
+                reference_id=session_id or None,
+            )
+        except InsufficientBalanceError:
+            balance = PointsService.get_balance(user)['balance']
+            return Response(
+                {
+                    'code': 'insufficient_points',
+                    'message': f'{points} Roo Point is required for this prompt.'
+                    if points == 1
+                    else f'{points} Roo Points are required for this prompt.',
+                    'required_points': points,
+                    'balance': balance,
+                },
+                status=status.HTTP_402_PAYMENT_REQUIRED,
+            )
+
+        # PointsService is globally idempotent. Reject a key collision instead
+        # of treating another user's or another operation's ledger row as this
+        # request. This also covers the IntegrityError race path in spend().
+        if (
+            ledger.user_id != user.id
+            or ledger.kind != 'SPEND'
+            or ledger.source != 'TOOLS'
+            or ledger.reference_type != 'KIMI_PROMPT'
+            or ledger.delta != -points
+        ):
+            return self._error(
+                'idempotency_conflict',
+                'That idempotency key was already used for a different operation.',
+                status.HTTP_409_CONFLICT,
+            )
+
+        balance = PointsService.get_balance(user)['balance']
+        return Response(
+            {
+                'status': 'charged' if created else 'already_charged',
+                'charged': created,
+                'charged_points': points if created else 0,
+                'prompt_cost_points': points,
+                'balance': balance,
+                'ledger_entry_id': ledger.id,
+            },
+            status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
         )
 
 

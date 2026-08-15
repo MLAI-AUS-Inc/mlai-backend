@@ -819,6 +819,11 @@ ROO_SERVICE_URL = os.getenv('ROO_SERVICE_URL', '').rstrip('/')
 ROO_SIM_PATIENT_KEY = os.getenv('ROO_SIM_PATIENT_KEY', '').strip()
 HEALTH_HACK_API_KEY = os.getenv('HEALTH_HACK_API_KEY', '').strip()
 ROO_API_KEY = os.getenv('ROO_API_KEY', '').strip()
+KIMI_ROO_POINTS_PER_PROMPT = int(os.getenv('KIMI_ROO_POINTS_PER_PROMPT', '1'))
+if not 1 <= KIMI_ROO_POINTS_PER_PROMPT <= 100:
+    raise ImproperlyConfigured(
+        'KIMI_ROO_POINTS_PER_PROMPT must be between 1 and 100.'
+    )
 _validate_health_hack_service_secrets(
     health_hack_key=HEALTH_HACK_API_KEY,
     roo_sim_patient_key=ROO_SIM_PATIENT_KEY,
