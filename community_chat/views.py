@@ -5,11 +5,14 @@ import secrets
 import time
 import uuid
 from datetime import datetime, timedelta, timezone as datetime_timezone
+from urllib.parse import urlencode
 
 from django.conf import settings
 from django.contrib.auth.models import update_last_login
 from django.db import IntegrityError, transaction
 from django.db.models import Q
+from django.http import HttpResponse
+from django.urls import reverse
 from django.utils import timezone
 from django.utils.crypto import salted_hmac
 from rest_framework import status
@@ -71,6 +74,7 @@ from .email_codes import (
     consume_email_code,
     issue_email_code_challenge,
 )
+from .link_previews import LinkPreviewError, fetch_link_preview, fetch_preview_image
 from .serializers import (
     CommunityChatEmailCodeRequestSerializer,
     CommunityChatEmailCodeVerifySerializer,
@@ -652,6 +656,58 @@ class PublicProfileBatchView(APIView):
             public_key for public_key in public_keys if public_key not in profiles
         ]
         return Response({"profiles": profiles, "missing": missing})
+
+
+class LinkPreviewView(APIView):
+    """Return bounded Open Graph metadata through the authenticated API."""
+
+    authentication_classes = (CommunityChatAccountAuthentication,)
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [CommunityChatScopedThrottle]
+    community_chat_throttle_scope = "community_chat_link_preview"
+
+    def get(self, request):
+        raw_url = str(request.query_params.get("url") or "").strip()
+        try:
+            preview = fetch_link_preview(raw_url)
+        except LinkPreviewError as exc:
+            return Response(
+                {"error": "preview_unavailable", "detail": str(exc)},
+                status=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            )
+        payload = preview.as_payload()
+        if preview.image_url:
+            image_path = reverse("community_chat_link_preview_image")
+            payload["image_url"] = request.build_absolute_uri(
+                f"{image_path}?{urlencode({'url': preview.image_url})}"
+            )
+        response = Response(payload)
+        response["Cache-Control"] = "private, max-age=3600"
+        return response
+
+
+class LinkPreviewImageView(APIView):
+    """Proxy one validated preview image so MLAI Chat keeps a narrow CSP."""
+
+    authentication_classes = (CommunityChatAccountAuthentication,)
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [CommunityChatScopedThrottle]
+    community_chat_throttle_scope = "community_chat_link_preview"
+
+    def get(self, request):
+        try:
+            content_type, body = fetch_preview_image(
+                str(request.query_params.get("url") or "").strip()
+            )
+        except LinkPreviewError as exc:
+            return Response(
+                {"error": "preview_image_unavailable", "detail": str(exc)},
+                status=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            )
+        response = HttpResponse(body, content_type=content_type)
+        response["Cache-Control"] = "private, max-age=21600"
+        response["Cross-Origin-Resource-Policy"] = "same-site"
+        return response
 
 
 class DeviceAuthStartView(APIView):

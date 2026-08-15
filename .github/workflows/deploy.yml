@@ -162,6 +162,7 @@ jobs:
           content_factory.tests_admin_metrics \
           tests.test_community_bridge_adapter_url \
           community_chat.tests.test_account_sessions \
+          community_chat.tests.test_link_previews \
           integrations.tests_community_bridge \
           integrations.tests_community_bridge_avatar_backfill \
           integrations.tests_community_bridge_mention_backfill \

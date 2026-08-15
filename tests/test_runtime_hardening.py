@@ -168,7 +168,10 @@ class RuntimeHardeningConfigTests(SimpleTestCase):
         )
         self.assertIn("community-email-worker:", (ROOT / "docker-compose.yml").read_text())
         self.assertIn("run_email_code_worker", (ROOT / "docker-compose.yml").read_text())
-        self.assertIn('runtime_services+=(bridge-worker bridge-retention)', deploy)
+        self.assertIn(
+            'runtime_services+=(bridge-worker bridge-reconciler bridge-retention)',
+            deploy,
+        )
         self.assertIn(
             'COMMUNITY_BRIDGE_PRODUCTION_ENABLED="${COMMUNITY_BRIDGE_PRODUCTION_ENABLED:-false}"',
             deploy,
@@ -202,8 +205,12 @@ class RuntimeHardeningConfigTests(SimpleTestCase):
             '--destination-channel-id "$BUZZ_BRIDGE_DESTINATION_CHANNEL_ID"',
             deploy,
         )
-        self.assertIn('docker compose stop bridge-worker || true', deploy)
-        self.assertIn('docker compose rm -f bridge-worker || true', deploy)
+        self.assertIn(
+            'docker compose stop bridge-worker bridge-reconciler || true', deploy
+        )
+        self.assertIn(
+            'docker compose rm -f bridge-worker bridge-reconciler || true', deploy
+        )
         # deploy_postmigrate verifies migration readiness as its first step, so
         # the bridge mapping still cannot be written against a half-migrated
         # database.
