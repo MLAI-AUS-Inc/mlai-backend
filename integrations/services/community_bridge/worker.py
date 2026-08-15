@@ -507,20 +507,13 @@ class CommunityBridgeDiscordClient(discord.Client):
                     await asyncio.to_thread(complete_delivery, delivery_id=delivery["id"])
                     return
                 text = str(payload.get("text") or "").strip()
-            event_created_at = int(delivery["created_at"])
-            if (
-                operation == CommunityBridgeDeliveryType.CREATE
-                and provenance["source_created_at"]
-            ):
-                # Slack's timestamp is the canonical chronology for mirrored
-                # creates. Using the outbox insertion time here makes a
-                # historical repair look newer than live channel traffic and
-                # can displace the real head of a relay channel window.
-                event_created_at = provenance["source_created_at"]
             response = await asyncio.to_thread(
                 BuzzBridgeClient.deliver,
                 delivery_id=str(delivery["id"]),
-                created_at=event_created_at,
+                # Relay channel writes have a deliberate freshness floor. Keep
+                # the Nostr protocol timestamp fresh and carry Slack's trusted
+                # chronology in bridge-source-created-at instead.
+                created_at=int(delivery["created_at"]),
                 operation=operation,
                 channel_id=delivery["target_channel_id"],
                 text=text,

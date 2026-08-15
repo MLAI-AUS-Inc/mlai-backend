@@ -25,7 +25,7 @@ from integrations.services.community_bridge.slack import SlackBridgeClient
 
 logger = logging.getLogger(__name__)
 
-RECONCILIATION_VERSION = "slack-thread-reconcile-v2"
+RECONCILIATION_VERSION = "slack-thread-reconcile-v3"
 TERMINAL_STATUSES = {
     CommunityBridgeDeliveryStatus.COMPLETED,
     CommunityBridgeDeliveryStatus.DEAD,
@@ -165,7 +165,7 @@ class Command(BaseCommand):
             "roots_scanned": 0,
             "stale_links": 0,
             "wrong_broadcast": 0,
-            "wrong_created_at": 0,
+            "legacy_replay_order": 0,
             "wrong_parent": 0,
         }
         return {"apply": apply_changes, "channels": [], "totals": counters}
@@ -199,12 +199,24 @@ class Command(BaseCommand):
             for message in history
             if self._is_thread_root_summary(message)
         ][:maximum_roots]
+        next_latest = (
+            self._previous_slack_timestamp(str(roots[-1].get("ts") or ""))
+            if roots
+            else ""
+        )
+        # Slack history is newest-first. Applying one bounded page in reverse
+        # ensures relay insertion order follows Slack chronology. Operators
+        # process pagination pages from oldest to newest as documented by the
+        # workflow, so the relay's bounded top-level window finishes with the
+        # genuinely newest Slack roots.
+        if apply_changes:
+            roots = list(reversed(roots))
         for root_summary in roots:
             root_message_id = str(root_summary.get("ts") or "").strip()
             if not root_message_id:
                 continue
             report["roots_scanned"] += 1
-            report["next_latest"] = self._previous_slack_timestamp(root_message_id)
+            report["next_latest"] = next_latest
             try:
                 thread = SlackBridgeClient.get_thread_messages(
                     channel_id=channel.slack_channel_id,
@@ -396,7 +408,6 @@ class Command(BaseCommand):
             str(message.get("subtype") or "").strip() == "thread_broadcast"
             or bool(message.get("reply_broadcast"))
         )
-        expected_created_at = int(message_id.split(".", 1)[0])
         active_link = bool(
             link
             and link.source_deleted_at is None
@@ -405,21 +416,36 @@ class Command(BaseCommand):
         link_destination_id = (
             str(link.destination_message_id or "").strip() if active_link else ""
         )
-        correct_matches = [
+        link_repair_version = str(
+            ((link.source_payload or {}).get("metadata") or {}).get(
+                "backfill_version"
+            )
+            if link
+            else ""
+        ).strip()
+        requires_chronological_replay = bool(
+            active_link and link_repair_version != RECONCILIATION_VERSION
+        )
+        if requires_chronological_replay:
+            report["legacy_replay_order"] += 1
+        structurally_correct_matches = [
             match
             for match in matches
             if match["parent_message_id"] == expected_parent_id
             and bool(match["broadcast"]) == expected_broadcast
-            and int(match["created_at"]) == expected_created_at
         ]
-        chosen = next(
-            (
-                match
-                for match in correct_matches
-                if match["destination_message_id"] == link_destination_id
-            ),
-            correct_matches[0] if correct_matches else None,
-        )
+        chosen = None
+        if not requires_chronological_replay:
+            chosen = next(
+                (
+                    match
+                    for match in structurally_correct_matches
+                    if match["destination_message_id"] == link_destination_id
+                ),
+                structurally_correct_matches[0]
+                if structurally_correct_matches
+                else None,
+            )
         duplicate_matches = [match for match in matches if chosen and match != chosen]
         message_mismatch = bool(duplicate_matches or not chosen)
         if duplicate_matches:
@@ -463,12 +489,6 @@ class Command(BaseCommand):
                     for match in matches
                 ):
                     report["wrong_broadcast"] += 1
-                if any(
-                    int(match["created_at"]) != expected_created_at
-                    for match in matches
-                ):
-                    report["wrong_created_at"] += 1
-
         if message_mismatch:
             report["mismatches"] += 1
 
@@ -620,6 +640,14 @@ class Command(BaseCommand):
             raise CommandError(f"Reconciliation delivery {delivery.id} is dead")
         if delivery.status in TERMINAL_STATUSES:
             return
-        SingleThreadRepairCommand._wait_for_deliveries(
-            delivery_ids=[delivery.id], wait_seconds=wait_seconds
-        )
+        try:
+            SingleThreadRepairCommand._wait_for_deliveries(
+                delivery_ids=[delivery.id], wait_seconds=wait_seconds
+            )
+        except CommandError as exc:
+            delivery.refresh_from_db(fields=["status", "last_error"])
+            detail = str(delivery.last_error or "").strip()
+            raise CommandError(
+                f"Reconciliation delivery {delivery.id} failed"
+                + (f": {detail}" if detail else "")
+            ) from exc
