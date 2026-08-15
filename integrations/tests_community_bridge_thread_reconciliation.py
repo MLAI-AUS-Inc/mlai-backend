@@ -39,6 +39,7 @@ class CommunityBridgeThreadReconciliationTests(TestCase):
         self.history = [
             {
                 "ts": self.root_id,
+                "thread_ts": self.root_id,
                 "user": "UROOT",
                 "text": "Root",
                 "reply_count": 1,
@@ -119,6 +120,31 @@ class CommunityBridgeThreadReconciliationTests(TestCase):
         self.assertEqual(totals["mismatches"], 1)
         self.assertEqual(CommunityBridgeMessageLink.objects.count(), 1)
         self.assertEqual(result["resume"]["latest"], "1786660929.427978")
+
+    def test_dry_run_accepts_root_when_slack_omits_thread_timestamp(self):
+        self.history[0].pop("thread_ts")
+
+        result = self._run(
+            lookup_matches=[
+                {
+                    "source_message_id": self.root_id,
+                    "destination_message_id": self.root_event_id,
+                    "parent_message_id": "",
+                    "broadcast": False,
+                    "created_at": 1786660929,
+                },
+                {
+                    "source_message_id": self.reply_id,
+                    "destination_message_id": "c" * 64,
+                    "parent_message_id": self.root_event_id,
+                    "broadcast": False,
+                    "created_at": 1786666478,
+                },
+            ]
+        )
+
+        self.assertEqual(result["totals"]["roots_scanned"], 1)
+        self.assertEqual(result["totals"]["messages_scanned"], 2)
 
     def test_dry_run_identifies_missing_database_link_for_valid_reply(self):
         result = self._run(

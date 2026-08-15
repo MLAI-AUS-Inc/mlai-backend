@@ -87,14 +87,20 @@ jobs:
           MODE: ${{ inputs.mode }}
         run: |
           set -euo pipefail
+          channel_arg="${CHANNEL_ID:-__MLAI_EMPTY__}"
+          oldest_arg="${OLDEST:-__MLAI_EMPTY__}"
+          latest_arg="${LATEST:-__MLAI_EMPTY__}"
           ssh root@209.38.85.60 bash -s -- \
-            "$CHANNEL_ID" "$OLDEST" "$LATEST" "$MAX_ROOTS" "$MODE" <<'REMOTE'
+            "$channel_arg" "$oldest_arg" "$latest_arg" "$MAX_ROOTS" "$MODE" <<'REMOTE'
           set -euo pipefail
           channel_id="$1"
           oldest="$2"
           latest="$3"
           max_roots="$4"
           mode="$5"
+          [[ "$channel_id" != "__MLAI_EMPTY__" ]] || channel_id=""
+          [[ "$oldest" != "__MLAI_EMPTY__" ]] || oldest=""
+          [[ "$latest" != "__MLAI_EMPTY__" ]] || latest=""
           cd /root/mlai-backend
           args=(
             python manage.py reconcile_community_bridge_slack_threads
