@@ -193,6 +193,32 @@ class CommunityBridgeThreadReconciliationTests(TestCase):
         )
         self.assertEqual(result["totals"]["wrong_broadcast"], 0)
 
+    def test_dry_run_rejects_repair_timestamp_as_message_chronology(self):
+        repair_time = 1787000000
+        result = self._run(
+            lookup_matches=[
+                {
+                    "source_message_id": self.root_id,
+                    "destination_message_id": self.root_event_id,
+                    "parent_message_id": "",
+                    "broadcast": False,
+                    "created_at": repair_time,
+                },
+                {
+                    "source_message_id": self.reply_id,
+                    "destination_message_id": "c" * 64,
+                    "parent_message_id": self.root_event_id,
+                    "broadcast": False,
+                    "created_at": repair_time,
+                },
+            ]
+        )
+
+        totals = result["totals"]
+        self.assertEqual(totals["wrong_created_at"], 2)
+        self.assertEqual(totals["mismatches"], 2)
+        self.assertEqual(totals["correct"], 0)
+
     def test_dry_run_treats_reply_as_orphan_when_root_is_missing(self):
         CommunityBridgeMessageLink.objects.all().delete()
 

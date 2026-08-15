@@ -1654,7 +1654,7 @@ class BuzzCommunityBridgeWorkerTests(TransactionTestCase):
         self.assertEqual(kwargs["parent_message_id"], parent_event_id)
         self.assertIn("Alice (Slack)", kwargs["text"])
         self.assertIn("https://files.example/guide", kwargs["text"])
-        self.assertGreater(kwargs["created_at"], 0)
+        self.assertEqual(kwargs["created_at"], 1710000000)
         self.assertEqual(kwargs["source_workspace_id"], "T-MLAI")
         self.assertEqual(kwargs["source_channel_id"], self.channel.slack_channel_id)
         self.assertEqual(kwargs["source_message_id"], "1710000000.2000")
