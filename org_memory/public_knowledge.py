@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 import re
 from dataclasses import dataclass
 from typing import Optional, Sequence
 
+from django.conf import settings
 from django.contrib.postgres.search import SearchQuery, SearchRank, SearchVector
 from django.db import connection, transaction
 from django.db.models import F
@@ -15,8 +17,13 @@ from pgvector.django import CosineDistance
 from .models import PublicKnowledgeItem, PublicKnowledgeStatus
 
 
+logger = logging.getLogger(__name__)
+
 PUBLIC_VECTOR_DIMENSIONS = 1536
 RRF_K = 60
+# A title (300) plus a body (20,000) plus the blank line between them.
+PUBLIC_EMBEDDING_MAX_CHARS = 20_400
+PUBLIC_QUERY_MAX_CHARS = 500
 _WORD_RE = re.compile(r"[\w'-]+", re.UNICODE)
 
 
@@ -188,6 +195,88 @@ def store_public_knowledge_embedding(
     return item
 
 
+def public_embedding_text(item, *, max_chars: Optional[int] = None) -> str:
+    """The text a public item is embedded from: the title carries the topic."""
+
+    configured = int(getattr(settings, "ORG_MEMORY_EMBEDDING_MAX_CHARS", 24000))
+    limit = min(int(max_chars or PUBLIC_EMBEDDING_MAX_CHARS), configured)
+    title = str(getattr(item, "title", "") or "").strip()
+    body = str(getattr(item, "body", "") or "").strip()
+    return f"{title}\n\n{body}".strip()[: max(limit, 1)]
+
+
+def embed_public_knowledge_item(
+    *,
+    item,
+    provider=None,
+    model: Optional[str] = None,
+    version: Optional[str] = None,
+) -> PublicKnowledgeItem:
+    """Generate and store the vector for one active public item."""
+
+    from .embeddings import configured_embedding_target, generate_embedding
+
+    target = configured_embedding_target(model=model, version=version)
+    text = public_embedding_text(item)
+    if not text:
+        raise PublicKnowledgeError("Public knowledge requires text before embedding.")
+    vector = generate_embedding(text, target=target, provider=provider)
+    return store_public_knowledge_embedding(
+        item=item,
+        vector=vector,
+        model=target.model,
+        version=target.version,
+    )
+
+
+def generate_public_query_embedding(query: str, *, provider=None) -> Optional[list[float]]:
+    """Best-effort query vector; None degrades retrieval to the text lane."""
+
+    from .embeddings import configured_embedding_target, generate_embedding
+
+    try:
+        target = configured_embedding_target()
+        return generate_embedding(
+            str(query or "").strip()[:PUBLIC_QUERY_MAX_CHARS],
+            target=target,
+            provider=provider,
+        )
+    except Exception:
+        # A public answer must never fail because the embedding provider is
+        # unreachable or misconfigured; the caller reports the degraded lane.
+        logger.warning("public_query_embedding_unavailable", exc_info=True)
+        return None
+
+
+def schedule_public_knowledge_embedding(item, *, provider=None) -> None:
+    """Embed once the surrounding write commits.
+
+    Publication approval must not depend on the embedding provider: a failure
+    here leaves the item searchable through the text lane until a backfill run
+    (`embed_public_knowledge`) supplies the vector.
+    """
+
+    item_id = item.pk
+
+    def _embed_after_commit() -> None:
+        try:
+            fresh = PublicKnowledgeItem.objects.filter(
+                pk=item_id,
+                status=PublicKnowledgeStatus.ACTIVE,
+            ).first()
+            if fresh is None:
+                return
+            embed_public_knowledge_item(item=fresh, provider=provider)
+        except Exception:
+            logger.warning(
+                "public_knowledge_embedding_failed item_id=%s",
+                item_id,
+                exc_info=True,
+            )
+
+    transaction.on_commit(_embed_after_commit)
+
+
 def _vector_lane(rows, vector: Sequence[float], *, limit: int) -> list:
     normalized = _normalized_vector(vector)
     return list(
@@ -196,6 +285,15 @@ def _vector_lane(rows, vector: Sequence[float], *, limit: int) -> list:
         .order_by("_public_distance", "-published_at", "pk")
         .values_list("pk", flat=True)[:limit]
     )
+
+
+def validated_public_query(query: str) -> str:
+    query = str(query or "").strip()
+    if not query or len(query) > PUBLIC_QUERY_MAX_CHARS:
+        raise PublicKnowledgeError(
+            f"query must contain between 1 and {PUBLIC_QUERY_MAX_CHARS} characters."
+        )
+    return query
 
 
 def search_public_knowledge(
@@ -207,9 +305,7 @@ def search_public_knowledge(
     limit: int = 5,
     candidate_limit: int = 50,
 ) -> tuple[PublicKnowledgeHit, ...]:
-    query = str(query or "").strip()
-    if not query or len(query) > 500:
-        raise PublicKnowledgeError("query must contain between 1 and 500 characters.")
+    query = validated_public_query(query)
     limit = min(max(int(limit), 1), 20)
     candidate_limit = min(max(int(candidate_limit), limit), 200)
     rows = active_public_knowledge(
@@ -223,7 +319,7 @@ def search_public_knowledge(
     )
     vector_ids = (
         _vector_lane(rows, query_embedding, limit=candidate_limit)
-        if query_embedding is not None
+        if query_embedding is not None and connection.vendor == "postgresql"
         else []
     )
     text_ranks = {value: index for index, value in enumerate(text_ids, start=1)}
@@ -264,11 +360,24 @@ def answer_public_knowledge_query(
     organization_id=None,
     organization_domain=None,
     limit: int = 5,
+    embedding_provider=None,
+    semantic: bool = True,
 ) -> dict:
+    query = validated_public_query(query)
+    warnings: list[str] = []
+    query_embedding = None
+    if semantic and connection.vendor == "postgresql":
+        query_embedding = generate_public_query_embedding(
+            query,
+            provider=embedding_provider,
+        )
+        if query_embedding is None:
+            warnings.append("semantic_retrieval_unavailable")
     hits = search_public_knowledge(
         query=query,
         organization_id=organization_id,
         organization_domain=organization_domain,
+        query_embedding=query_embedding,
         limit=limit,
     )
     if not hits:
@@ -276,11 +385,13 @@ def answer_public_knowledge_query(
             "status": "abstained",
             "answer": "I don’t have published public knowledge that supports an answer to that question.",
             "citations": [],
+            "warnings": warnings,
         }
     answer = "\n\n".join(hit.item.body for hit in hits)
     return {
         "status": "answered",
         "answer": answer[:12000],
+        "warnings": warnings,
         "citations": [
             {
                 "item_id": str(hit.item.pk),
