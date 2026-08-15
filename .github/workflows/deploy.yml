@@ -261,6 +261,7 @@ jobs:
         python manage.py check_org_memory_search --require-vector --require-installed
         python manage.py test \
           org_memory.tests.test_search_postgres \
+          org_memory.tests.test_public_knowledge_embeddings \
           org_memory.tests.test_runtime_postgres \
           org_memory.tests.test_runtime.MemoryRuntimeTests.test_legacy_access_restored_dead_letters_get_version_pinned_replacements \
           org_memory.tests.test_consolidation.MemoryConsolidationTests.test_consolidation_work_payload_is_identifier_only_and_idempotent \
