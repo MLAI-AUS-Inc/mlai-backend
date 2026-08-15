@@ -165,6 +165,48 @@ class SlackBridgeClient:
             if len(messages) >= 1000:
                 raise RuntimeError("Slack thread exceeds the 1000-message repair limit")
 
+    @classmethod
+    def get_channel_history(
+        cls,
+        *,
+        channel_id: str,
+        oldest: str = "",
+        latest: str = "",
+        maximum_messages: int = 10_000,
+    ) -> list[dict]:
+        """Return paginated Slack channel history for bounded reconciliation."""
+
+        maximum = max(1, min(int(maximum_messages), 50_000))
+        messages: list[dict] = []
+        cursor = ""
+        while True:
+            payload = {
+                "channel": str(channel_id or "").strip(),
+                "inclusive": True,
+                "limit": min(200, maximum - len(messages)),
+            }
+            if oldest:
+                payload["oldest"] = str(oldest).strip()
+            if latest:
+                payload["latest"] = str(latest).strip()
+            if cursor:
+                payload["cursor"] = cursor
+            response = cls.get_client().conversations_history(**payload)
+            if not response.get("ok"):
+                raise SlackApiError("conversations.history failed", response)
+            messages.extend(
+                dict(message)
+                for message in (response.get("messages") or [])
+                if isinstance(message, dict)
+            )
+            if len(messages) >= maximum:
+                return messages[:maximum]
+            cursor = str(
+                (response.get("response_metadata") or {}).get("next_cursor") or ""
+            ).strip()
+            if not cursor:
+                return messages
+
     @staticmethod
     def _approved_avatar_url(profile: dict) -> str:
         for field_name in ("image_192", "image_512", "image_72", "image_48", "image_original"):

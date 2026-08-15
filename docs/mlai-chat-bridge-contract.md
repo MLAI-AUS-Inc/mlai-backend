@@ -31,6 +31,11 @@ Every verified provider event is normalized to:
   attachment links; and
 - non-secret adapter metadata.
 
+Slack creates also retain the source timestamp and whether Slack explicitly
+broadcast the reply into the channel. The adapter signs that timestamp into
+provenance while keeping the relay event's durable outbox timestamp unchanged,
+so historical repairs remain idempotent and clients can restore Slack ordering.
+
 Provider-specific payloads stay at the ingestion edge and are cleared under the
 raw-payload retention policy. The only provider markup copied into canonical
 metadata is the Slack message text needed for deferred user/channel resolution;
@@ -53,7 +58,10 @@ deliberately retain no message content.
 
 The backend reaches the Rust sidecar with `BUZZ_BRIDGE_ADAPTER_TOKEN`. When the
 backend and MLAI Chat share a private network, it uses the adapter's private
-`POST /v1/deliveries` endpoint on port 8090. The production cross-VPC deployment
+`POST /v1/deliveries` endpoint on port 8090. The authenticated
+`POST /v1/lookups` endpoint is restricted to the same mapped-channel allowlist
+and is used only to reconcile trusted events signed by the bridge key. The
+production cross-VPC deployment
 uses the exact TLS base `https://chat.mlai.au/_mlai/bridge`; Caddy strips that
 prefix and proxies to the same private adapter, which is not bound to a public
 port. No other public adapter host or path is accepted. The sidecar posts relay
@@ -146,6 +154,43 @@ python manage.py requeue_community_bridge_delivery 1234 \
 
 Never use timestamp refresh for an ambiguous timeout or after a destination
 link exists; normal retries retain the original timestamp and signed event ID.
+
+## Slack thread reconciliation
+
+Slack is authoritative for thread membership. Audit a controlled batch before
+applying any mutation:
+
+```sh
+python manage.py reconcile_community_bridge_slack_threads \
+  --slack-channel-id C0123456789 \
+  --max-roots 25
+```
+
+The JSON report identifies missing events, orphaned or incorrectly parented
+replies, incorrect broadcast state, duplicate bridge events, stale links, and
+links that can be restored without republishing. A multi-channel dry-run returns
+one cursor per channel in `resume.by_channel`; apply mode deliberately requires
+exactly one channel, whose cursor is also exposed as `resume.latest`. Continue
+older batches only with that channel's cursor. Apply after reviewing the
+mismatch rate and worker health:
+
+```sh
+python manage.py reconcile_community_bridge_slack_threads \
+  --slack-channel-id C0123456789 \
+  --latest <resume.latest> \
+  --max-roots 25 \
+  --apply \
+  --confirm-historical-repair \
+  --wait-seconds 120
+```
+
+Apply mode restores trustworthy database links, tombstones malformed or
+duplicate bridge events, recreates each source message once with its exact
+Slack parent and broadcast state, and waits for the durable worker after every
+step. Receipt keys include the reconciliation version, source ID, and target
+event ID, so repeating a completed batch is idempotent. The GitHub Actions
+workflow `Reconcile production Slack threads` exposes the same bounded,
+dry-run-first operation for production.
 
 Run the live staging matrix and capture durable, content-free evidence with
 [`mlai-chat-bridge-staging.md`](mlai-chat-bridge-staging.md). The final database

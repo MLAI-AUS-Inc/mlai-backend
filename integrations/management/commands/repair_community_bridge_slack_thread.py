@@ -256,12 +256,13 @@ class Command(BaseCommand):
         root_message_id,
         delivery_type,
         receipt_suffix,
+        repair_version=REPAIR_VERSION,
     ):
         message_id = str(message.get("ts") or "").strip()
         is_reply = message_id != root_message_id
         parent_message_id = root_message_id if is_reply else ""
         receipt_key = (
-            f"{REPAIR_VERSION}:{receipt_suffix}:{channel.slack_channel_id}:{message_id}"
+            f"{repair_version}:{receipt_suffix}:{channel.slack_channel_id}:{message_id}"
         )
         payload = cls._payload(
             message=message,
@@ -269,6 +270,7 @@ class Command(BaseCommand):
             receipt_key=receipt_key,
             parent_message_id=parent_message_id,
             delivery_type=delivery_type,
+            repair_version=repair_version,
         )
         now = timezone.now()
         with transaction.atomic():
@@ -277,7 +279,7 @@ class Command(BaseCommand):
                 receipt_key=receipt_key,
                 defaults={
                     "channel": channel,
-                    "event_type": REPAIR_VERSION,
+                    "event_type": repair_version,
                     "source_channel_id": channel.slack_channel_id,
                     "source_message_id": message_id,
                     "source_parent_message_id": parent_message_id,
@@ -307,7 +309,15 @@ class Command(BaseCommand):
         return delivery, True
 
     @staticmethod
-    def _payload(*, message, channel, receipt_key, parent_message_id, delivery_type):
+    def _payload(
+        *,
+        message,
+        channel,
+        receipt_key,
+        parent_message_id,
+        delivery_type,
+        repair_version=REPAIR_VERSION,
+    ):
         raw_text = str(message.get("text") or "")
         attachments = tuple(
             BridgeAttachment(title=item["title"], url=item["url"])
@@ -328,7 +338,13 @@ class Command(BaseCommand):
             text=raw_text,
             attachments=attachments,
             metadata={
-                "backfill_version": REPAIR_VERSION,
+                "backfill_version": repair_version,
+                "broadcast": bool(parent_message_id)
+                and (
+                    str(message.get("subtype") or "").strip()
+                    == "thread_broadcast"
+                    or bool(message.get("reply_broadcast"))
+                ),
                 "slack_created_at": int(str(message.get("ts") or "0").split(".", 1)[0]),
                 "slack_raw_text": raw_text,
             },

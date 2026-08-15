@@ -471,6 +471,7 @@ class CommunityBridgeDiscordClient(discord.Client):
             "source_author_display_name": author_display_name,
             "source_author_avatar_url": author_avatar_url,
             "linked_pubkey": str((identity or {}).get("buzz_pubkey") or ""),
+            "source_created_at": int(payload_metadata.get("slack_created_at") or 0),
         }
         text = ""
         if operation not in {
@@ -506,10 +507,20 @@ class CommunityBridgeDiscordClient(discord.Client):
                     await asyncio.to_thread(complete_delivery, delivery_id=delivery["id"])
                     return
                 text = str(payload.get("text") or "").strip()
+            event_created_at = int(delivery["created_at"])
+            if (
+                operation == CommunityBridgeDeliveryType.CREATE
+                and provenance["source_created_at"]
+            ):
+                # Slack's timestamp is the canonical chronology for mirrored
+                # creates. Using the outbox insertion time here makes a
+                # historical repair look newer than live channel traffic and
+                # can displace the real head of a relay channel window.
+                event_created_at = provenance["source_created_at"]
             response = await asyncio.to_thread(
                 BuzzBridgeClient.deliver,
                 delivery_id=str(delivery["id"]),
-                created_at=int(delivery["created_at"]),
+                created_at=event_created_at,
                 operation=operation,
                 channel_id=delivery["target_channel_id"],
                 text=text,
@@ -519,6 +530,9 @@ class CommunityBridgeDiscordClient(discord.Client):
                     if operation == CommunityBridgeDeliveryType.REACTION_ADD
                     else ""
                 ),
+                broadcast=bool(payload_metadata.get("broadcast"))
+                if operation == CommunityBridgeDeliveryType.CREATE
+                else False,
                 **provenance,
             )
             await asyncio.to_thread(
@@ -529,6 +543,27 @@ class CommunityBridgeDiscordClient(discord.Client):
                 destination_parent_message_id=parent_message_id,
                 destination_payload=response,
             )
+            return
+
+        override_target_message_id = str(
+            payload_metadata.get("destination_message_id_override") or ""
+        ).strip().lower()
+        if override_target_message_id:
+            if operation != CommunityBridgeDeliveryType.DELETE or not _is_buzz_event_id(
+                override_target_message_id
+            ):
+                raise RuntimeError("Invalid reconciliation destination override")
+            await asyncio.to_thread(
+                BuzzBridgeClient.deliver,
+                delivery_id=str(delivery["id"]),
+                created_at=int(delivery["created_at"]),
+                operation=operation,
+                channel_id=delivery["target_channel_id"],
+                text="",
+                target_message_id=override_target_message_id,
+                **provenance,
+            )
+            await asyncio.to_thread(complete_delivery, delivery_id=delivery["id"])
             return
 
         link = await asyncio.to_thread(
@@ -665,6 +700,12 @@ def run_bridge_worker() -> None:
     if not BuzzBridgeClient.is_configured():
         raise RuntimeError("configure either Discord or the MLAI Chat bridge adapter")
     asyncio.run(_run_headless_delivery_worker(client))
+
+
+def _is_buzz_event_id(value: str) -> bool:
+    return len(value) == 64 and all(
+        character.isdigit() or character in "abcdef" for character in value
+    )
 
 
 async def _run_headless_delivery_worker(client: CommunityBridgeDiscordClient) -> None:

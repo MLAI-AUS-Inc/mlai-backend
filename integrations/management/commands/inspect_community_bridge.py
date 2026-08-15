@@ -60,6 +60,16 @@ class Command(BaseCommand):
             source_channel_id=channel.slack_channel_id,
             created_at__gte=recent_cutoff,
         )
+        integrity_links = CommunityBridgeMessageLink.objects.filter(
+            channel=channel,
+            source_platform=CommunityBridgePlatform.SLACK,
+            destination_platform=CommunityBridgePlatform.BUZZ,
+            source_deleted_at__isnull=True,
+            destination_deleted_at__isnull=True,
+        )
+        if message_id:
+            integrity_links = integrity_links.filter(source_message_id=message_id)
+        integrity = self._thread_integrity(list(integrity_links))
 
         result = {
             "status": "found" if receipts.exists() else "not_found",
@@ -84,9 +94,10 @@ class Command(BaseCommand):
                     "event_type": receipt.event_type,
                     "status": receipt.status,
                     "queued_delivery_count": receipt.queued_delivery_count,
+                    "source_parent_message_id": receipt.source_parent_message_id,
                     "created_at": receipt.created_at.isoformat(),
                     "processed_at": receipt.processed_at.isoformat() if receipt.processed_at else None,
-                    "error_present": bool(receipt.error_text),
+                    "error_code": self._error_code(receipt.error_text),
                 }
                 for receipt in receipts.order_by("-created_at")[:20]
             ],
@@ -98,9 +109,11 @@ class Command(BaseCommand):
                     "target_platform": delivery.target_platform,
                     "attempts": delivery.attempts,
                     "max_attempts": delivery.max_attempts,
+                    "source_message_id": delivery.source_message_id,
+                    "source_parent_message_id": delivery.source_parent_message_id,
                     "created_at": delivery.created_at.isoformat(),
                     "completed_at": delivery.completed_at.isoformat() if delivery.completed_at else None,
-                    "error_present": bool(delivery.last_error),
+                    "error_code": self._error_code(delivery.last_error),
                 }
                 for delivery in deliveries.order_by("-created_at")[:20]
             ],
@@ -109,8 +122,12 @@ class Command(BaseCommand):
                     "id": link.id,
                     "source_platform": link.source_platform,
                     "source_message_id": link.source_message_id,
+                    "source_parent_message_id": link.source_parent_message_id,
                     "destination_platform": link.destination_platform,
                     "destination_message_id": link.destination_message_id,
+                    "destination_parent_message_id": link.destination_parent_message_id,
+                    "source_deleted": link.source_deleted_at is not None,
+                    "destination_deleted": link.destination_deleted_at is not None,
                     "created_at": link.created_at.isoformat(),
                 }
                 for link in links.order_by("-created_at")[:20]
@@ -129,9 +146,55 @@ class Command(BaseCommand):
                     .first()
                 ),
             },
+            "thread_integrity": integrity,
         }
         latest_created_at = result["recent_receipts"]["latest_created_at"]
         result["recent_receipts"]["latest_created_at"] = (
             latest_created_at.isoformat() if latest_created_at else None
         )
         self.stdout.write(json.dumps(result, sort_keys=True))
+
+    @staticmethod
+    def _error_code(value):
+        message = str(value or "")
+        if not message:
+            return ""
+        for code, marker in (
+            ("parent_not_ready", "CommunityBridgeParentNotReady"),
+            ("relay_timestamp_rejected", "timestamp too far from server time"),
+            ("adapter_rejected", "adapter rejected"),
+            ("adapter_unavailable", "adapter returned HTTP"),
+            ("slack_api_error", "SlackApiError"),
+        ):
+            if marker in message:
+                return code
+        return "other"
+
+    @staticmethod
+    def _thread_integrity(links):
+        root_destinations = {
+            link.source_message_id: link.destination_message_id
+            for link in links
+            if not str(link.source_parent_message_id or "").strip()
+        }
+        replies = [
+            link for link in links if str(link.source_parent_message_id or "").strip()
+        ]
+        missing_destination_parent = 0
+        wrong_destination_parent = 0
+        missing_root_link = 0
+        for link in replies:
+            expected_parent = root_destinations.get(link.source_parent_message_id)
+            if not expected_parent:
+                missing_root_link += 1
+            if not str(link.destination_parent_message_id or "").strip():
+                missing_destination_parent += 1
+            elif expected_parent and link.destination_parent_message_id != expected_parent:
+                wrong_destination_parent += 1
+        return {
+            "active_links": len(links),
+            "reply_links": len(replies),
+            "missing_root_link": missing_root_link,
+            "missing_destination_parent": missing_destination_parent,
+            "wrong_destination_parent": wrong_destination_parent,
+        }
