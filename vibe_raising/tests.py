@@ -1453,6 +1453,45 @@ class VibeRaisingApiTests(TestCase):
             },
         )
 
+    def test_monthly_update_save_round_trips_financial_brief(self):
+        self.client.force_authenticate(user=self.user)
+        self._create_founder_company(domain="financial-brief.example", registered=True)
+        snapshot = {
+            "schemaVersion": "1",
+            "targetMonth": "2026-03-01",
+            "currency": "AUD",
+            "performance": [
+                {"month": "2026-03-01", "income": 10000, "expenses": 7000, "net": 3000},
+            ],
+            "revenueMix": [],
+            "eventContribution": [],
+            "overhead": [],
+        }
+        analysis = {"headline": "We finished March in surplus.", "bullets": ["Income exceeded expenses."]}
+
+        response = self.client.post(
+            "/api/v1/vibe-raising/updates/",
+            {
+                "month": "March",
+                "year": 2026,
+                "financialSnapshot": snapshot,
+                "conciseAnalysis": analysis,
+                "presentationMode": "financial_charts_concise",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 201)
+        draft = MonthlyUpdateDraft.objects.get(
+            organization__domain="financial-brief.example",
+            month=date(2026, 3, 1),
+        )
+        self.assertEqual(draft.structured_memo["financial_snapshot"], snapshot)
+        self.assertEqual(draft.structured_memo["concise_analysis"], analysis)
+        self.assertEqual(draft.structured_memo["presentation_mode"], "financial_charts_concise")
+        self.assertEqual(response.data["update"]["financialSnapshot"], snapshot)
+        self.assertEqual(response.data["update"]["conciseAnalysis"], analysis)
+
     def test_monthly_update_post_preserves_display_config_when_omitted(self):
         self.client.force_authenticate(user=self.user)
         self._create_founder_company(domain="acme.com", registered=True)
