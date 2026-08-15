@@ -196,8 +196,7 @@ class Command(BaseCommand):
         roots = [
             message
             for message in history
-            if int(message.get("reply_count") or 0) > 0
-            and not str(message.get("thread_ts") or "").strip()
+            if self._is_thread_root_summary(message)
         ][:maximum_roots]
         for root_summary in roots:
             root_message_id = str(root_summary.get("ts") or "").strip()
@@ -260,6 +259,22 @@ class Command(BaseCommand):
                         f"{exc.__class__.__name__}"
                     ) from exc
         return report
+
+    @staticmethod
+    def _is_thread_root_summary(message):
+        """Return whether a Slack history item is a root with replies.
+
+        Slack may omit ``thread_ts`` on a root or set it to the root's own
+        ``ts``. Only a different ``thread_ts`` identifies a reply.
+        """
+
+        message_id = str(message.get("ts") or "").strip()
+        thread_id = str(message.get("thread_ts") or "").strip()
+        return bool(
+            message_id
+            and int(message.get("reply_count") or 0) > 0
+            and (not thread_id or thread_id == message_id)
+        )
 
     @staticmethod
     def _previous_slack_timestamp(value):
