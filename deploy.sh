@@ -657,7 +657,7 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
             || { env_has_value BUZZ_BRIDGE_ADAPTER_URL \
                 && env_has_value BUZZ_BRIDGE_ADAPTER_TOKEN \
                 && env_has_value BUZZ_BRIDGE_CALLBACK_SECRET; }; }; then
-        runtime_services+=(bridge-worker bridge-retention)
+        runtime_services+=(bridge-worker bridge-reconciler bridge-retention)
         bridge_worker_enabled=1
     else
         bridge_worker_enabled=0
@@ -898,9 +898,9 @@ PY
     docker compose up -d --force-recreate "\${runtime_services[@]}"
 
     if [ "\$bridge_worker_enabled" != "1" ]; then
-        echo "🧹 Stopping disabled bridge-worker service..."
-        docker compose stop bridge-worker || true
-        docker compose rm -f bridge-worker || true
+        echo "🧹 Stopping disabled community bridge services..."
+        docker compose stop bridge-worker bridge-reconciler || true
+        docker compose rm -f bridge-worker bridge-reconciler || true
     fi
 
     if [ "\$analytics_sync_enabled" != "1" ]; then

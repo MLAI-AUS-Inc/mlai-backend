@@ -130,6 +130,99 @@ class SlackBridgeClientProfileTests(TestCase):
             "Ask @user in #channel",
         )
 
+    @patch("integrations.services.community_bridge.slack.SlackBridgeClient.get_client")
+    def test_messages_from_chat_enable_native_slack_link_unfurls(self, mock_get_client):
+        mock_get_client.return_value.chat_postMessage.return_value = {
+            "channel": "C123",
+            "ts": "123.456",
+        }
+
+        SlackBridgeClient.post_message(
+            channel_id="C123",
+            text="Read https://example.com/article",
+        )
+        SlackBridgeClient.update_message(
+            channel_id="C123",
+            message_id="123.456",
+            text="Updated https://example.com/article",
+        )
+
+        mock_get_client.return_value.chat_postMessage.assert_called_once_with(
+            channel="C123",
+            text="Read https://example.com/article",
+            unfurl_links=True,
+            unfurl_media=True,
+        )
+        mock_get_client.return_value.chat_update.assert_called_once_with(
+            channel="C123",
+            ts="123.456",
+            text="Updated https://example.com/article",
+            unfurl_links=True,
+            unfurl_media=True,
+        )
+
+
+class RecentSlackBridgeReconciliationCommandTests(TestCase):
+    def setUp(self):
+        CommunityBridgeChannel.objects.create(
+            slack_workspace_id="T123",
+            slack_channel_id="C123",
+            slack_channel_name="general",
+            destination_platform=CommunityBridgePlatform.BUZZ,
+            destination_channel_id="relay-general",
+            destination_channel_name="general",
+            enabled=True,
+            sync_replies=True,
+            sync_deletes=True,
+        )
+
+    @patch(
+        "integrations.management.commands."
+        "reconcile_recent_community_bridge_slack.call_command"
+    )
+    def test_reconciles_each_enabled_mapping_with_bounded_apply(self, mock_reconcile):
+        def write_report(command_name, **kwargs):
+            self.assertEqual(
+                command_name, "reconcile_community_bridge_slack_threads"
+            )
+            kwargs["stdout"].write(
+                json.dumps(
+                    {
+                        "totals": {
+                            "errors": 0,
+                            "mismatches": 2,
+                            "repairs_enqueued": 2,
+                            "links_restored": 0,
+                        }
+                    }
+                )
+            )
+
+        mock_reconcile.side_effect = write_report
+        output = StringIO()
+
+        call_command(
+            "reconcile_recent_community_bridge_slack",
+            lookback_seconds=3600,
+            max_roots_per_channel=50,
+            maximum_history_messages=500,
+            wait_seconds=30,
+            stdout=output,
+        )
+
+        kwargs = mock_reconcile.call_args.kwargs
+        self.assertEqual(kwargs["slack_channel_id"], ["C123"])
+        self.assertTrue(kwargs["include_unthreaded"])
+        self.assertTrue(kwargs["apply"])
+        self.assertTrue(kwargs["confirm_historical_repair"])
+        self.assertEqual(kwargs["max_roots"], 50)
+        self.assertEqual(kwargs["maximum_history_messages"], 500)
+        self.assertEqual(kwargs["wait_seconds"], 30)
+        self.assertEqual(
+            json.loads(output.getvalue()),
+            {"channels": 1, "errors": 0, "mismatches": 2, "repairs": 2},
+        )
+
 
 class _FakeSentMessage:
     def __init__(self, *, channel_id: str, message_id: str):

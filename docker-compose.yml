@@ -208,6 +208,47 @@ services:
           - mlai-backend-bridge-worker
     restart: unless-stopped
 
+  bridge-reconciler:
+    build: .
+    command: >-
+      sh -ec '
+        until python manage.py migrate --check --noinput; do
+          echo "Waiting for migrations to complete...";
+          sleep 5;
+        done;
+        sleep "$${COMMUNITY_BRIDGE_RECONCILE_INITIAL_DELAY_SECONDS}";
+        while true; do
+          if ! python manage.py reconcile_recent_community_bridge_slack
+            --lookback-seconds "$${COMMUNITY_BRIDGE_RECONCILE_LOOKBACK_SECONDS}"
+            --max-roots-per-channel "$${COMMUNITY_BRIDGE_RECONCILE_MAX_ROOTS}"
+            --maximum-history-messages "$${COMMUNITY_BRIDGE_RECONCILE_MAX_HISTORY_MESSAGES}"
+            --wait-seconds "$${COMMUNITY_BRIDGE_RECONCILE_WAIT_SECONDS}"; then
+            echo "Community bridge gap reconciliation failed; the next bounded poll will retry" >&2;
+          fi;
+          sleep "$${COMMUNITY_BRIDGE_RECONCILE_POLL_SECONDS}";
+        done
+      '
+    environment:
+      APP_ENV: ${APP_ENV:-production}
+      COMMUNITY_BRIDGE_RECONCILE_INITIAL_DELAY_SECONDS: ${COMMUNITY_BRIDGE_RECONCILE_INITIAL_DELAY_SECONDS:-30}
+      COMMUNITY_BRIDGE_RECONCILE_LOOKBACK_SECONDS: ${COMMUNITY_BRIDGE_RECONCILE_LOOKBACK_SECONDS:-86400}
+      COMMUNITY_BRIDGE_RECONCILE_MAX_ROOTS: ${COMMUNITY_BRIDGE_RECONCILE_MAX_ROOTS:-100}
+      COMMUNITY_BRIDGE_RECONCILE_MAX_HISTORY_MESSAGES: ${COMMUNITY_BRIDGE_RECONCILE_MAX_HISTORY_MESSAGES:-1000}
+      COMMUNITY_BRIDGE_RECONCILE_WAIT_SECONDS: ${COMMUNITY_BRIDGE_RECONCILE_WAIT_SECONDS:-60}
+      COMMUNITY_BRIDGE_RECONCILE_POLL_SECONDS: ${COMMUNITY_BRIDGE_RECONCILE_POLL_SECONDS:-300}
+    env_file:
+      - .env
+    depends_on:
+      - db
+      - bridge-worker
+    networks:
+      default:
+      mlai-shared:
+        aliases:
+          - mlai-backend-bridge-reconciler
+    restart: unless-stopped
+    stop_grace_period: 30s
+
   bridge-retention:
     build: .
     command: >-

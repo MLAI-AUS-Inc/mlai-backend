@@ -240,8 +240,11 @@ class SlackBridgeClient:
         payload = {
             "channel": channel_id,
             "text": text,
-            "unfurl_links": False,
-            "unfurl_media": False,
+            # Let Slack build its native link cards for messages originating in
+            # MLAI Chat.  Slack still applies the workspace's unfurl policy and
+            # the destination page's robots/metadata rules.
+            "unfurl_links": True,
+            "unfurl_media": True,
         }
         if thread_ts:
             payload["thread_ts"] = thread_ts
@@ -259,8 +262,8 @@ class SlackBridgeClient:
             channel=channel_id,
             ts=message_id,
             text=text,
-            unfurl_links=False,
-            unfurl_media=False,
+            unfurl_links=True,
+            unfurl_media=True,
         )
 
     @classmethod

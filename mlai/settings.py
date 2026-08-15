@@ -455,6 +455,7 @@ REST_FRAMEWORK = {
         'auth_endpoint': None if _RUNNING_TESTS else os.getenv('AUTH_ENDPOINT_RATE', '20/minute'),
         'auth_magic_link': None if _RUNNING_TESTS else os.getenv('AUTH_MAGIC_LINK_RATE', '5/minute'),
         'community_chat_session': os.getenv('COMMUNITY_CHAT_SESSION_RATE', '120/minute'),
+        'community_chat_link_preview': os.getenv('COMMUNITY_CHAT_LINK_PREVIEW_RATE', '300/minute'),
         'community_chat_challenge': os.getenv('COMMUNITY_CHAT_CHALLENGE_RATE', '20/minute'),
         'community_chat_invite': os.getenv('COMMUNITY_CHAT_INVITE_RATE', '10/minute'),
         'community_chat_confirm': os.getenv('COMMUNITY_CHAT_CONFIRM_RATE', '30/minute'),
