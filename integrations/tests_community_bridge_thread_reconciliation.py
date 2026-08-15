@@ -1,6 +1,6 @@
 import json
 from io import StringIO
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from django.core.management import call_command
 from django.core.management.base import CommandError
@@ -95,6 +95,151 @@ class CommunityBridgeThreadReconciliationTests(TestCase):
                 stdout=output,
             )
         return json.loads(output.getvalue())
+
+    def test_full_channel_audits_threaded_and_unthreaded_roots(self):
+        unthreaded_id = "1786670000.100000"
+        reply_summary_id = "1786666478.295369"
+        self.history = [
+            {
+                "ts": unthreaded_id,
+                "user": "UTOPLEVEL",
+                "text": "Top-level without replies",
+            },
+            self.history[0],
+            {
+                "ts": reply_summary_id,
+                "thread_ts": self.root_id,
+                "user": "UREPLY",
+                "text": "Reply returned in history",
+            },
+            {
+                "ts": "1786650000.100000",
+                "subtype": "channel_join",
+                "user": "UJOIN",
+                "text": "joined the channel",
+            },
+        ]
+        output = StringIO()
+        seen_threads = []
+
+        def thread_messages(*, channel_id, root_message_id):
+            seen_threads.append(root_message_id)
+            return self.thread
+
+        def lookup_messages(**kwargs):
+            return [
+                {
+                    "source_message_id": message_id,
+                    "destination_message_id": (
+                        self.root_event_id if message_id == self.root_id else "d" * 64
+                    ),
+                    "parent_message_id": "",
+                    "broadcast": False,
+                    "created_at": 1786660929,
+                }
+                for message_id in kwargs["source_message_ids"]
+                if message_id != self.reply_id
+            ] + (
+                [
+                    {
+                        "source_message_id": self.reply_id,
+                        "destination_message_id": "c" * 64,
+                        "parent_message_id": self.root_event_id,
+                        "broadcast": False,
+                        "created_at": 1786666478,
+                    }
+                ]
+                if self.reply_id in kwargs["source_message_ids"]
+                else []
+            )
+
+        with patch(
+            "integrations.management.commands.reconcile_community_bridge_slack_threads."
+            "SlackBridgeClient.get_channel_history",
+            return_value=self.history,
+        ), patch(
+            "integrations.management.commands.reconcile_community_bridge_slack_threads."
+            "SlackBridgeClient.get_thread_messages",
+            side_effect=thread_messages,
+        ), patch(
+            "integrations.management.commands.reconcile_community_bridge_slack_threads."
+            "BuzzBridgeClient.lookup_messages",
+            side_effect=lookup_messages,
+        ):
+            call_command(
+                "reconcile_community_bridge_slack_threads",
+                slack_channel_id=[self.channel.slack_channel_id],
+                include_unthreaded=True,
+                max_roots=10,
+                stdout=output,
+            )
+
+        result = json.loads(output.getvalue())
+        self.assertEqual(result["resume"]["version"], "slack-channel-reconcile-v1")
+        self.assertEqual(result["totals"]["roots_scanned"], 2)
+        self.assertEqual(result["totals"]["messages_scanned"], 3)
+        self.assertEqual(seen_threads, [self.root_id])
+
+    def test_full_channel_repair_uses_fresh_idempotency_namespace(self):
+        unthreaded_id = "1786670000.100000"
+        self.history = [
+            {
+                "ts": unthreaded_id,
+                "user": "UTOPLEVEL",
+                "text": "Missing top-level message",
+            }
+        ]
+        enqueued_versions = []
+
+        def enqueue(**kwargs):
+            enqueued_versions.append(kwargs["repair_version"])
+            CommunityBridgeMessageLink.objects.update_or_create(
+                channel=self.channel,
+                source_platform=CommunityBridgePlatform.SLACK,
+                source_channel_id=self.channel.slack_channel_id,
+                source_message_id=unthreaded_id,
+                destination_platform=CommunityBridgePlatform.BUZZ,
+                defaults={
+                    "destination_channel_id": self.channel.destination_channel_id,
+                    "destination_message_id": "e" * 64,
+                    "source_payload": {
+                        "metadata": {"backfill_version": kwargs["repair_version"]}
+                    },
+                    "source_deleted_at": None,
+                    "destination_deleted_at": None,
+                },
+            )
+            return Mock(), True
+
+        output = StringIO()
+        with patch(
+            "integrations.management.commands.reconcile_community_bridge_slack_threads."
+            "SlackBridgeClient.get_channel_history",
+            return_value=self.history,
+        ), patch(
+            "integrations.management.commands.reconcile_community_bridge_slack_threads."
+            "BuzzBridgeClient.lookup_messages",
+            return_value=[],
+        ), patch(
+            "integrations.management.commands.reconcile_community_bridge_slack_threads."
+            "SingleThreadRepairCommand._enqueue",
+            side_effect=enqueue,
+        ), patch(
+            "integrations.management.commands.reconcile_community_bridge_slack_threads."
+            "Command._wait",
+        ):
+            call_command(
+                "reconcile_community_bridge_slack_threads",
+                slack_channel_id=[self.channel.slack_channel_id],
+                include_unthreaded=True,
+                max_roots=10,
+                apply=True,
+                confirm_historical_repair=True,
+                wait_seconds=1,
+                stdout=output,
+            )
+
+        self.assertEqual(enqueued_versions, ["slack-channel-reconcile-v1"])
 
     def test_dry_run_detects_orphan_without_mutating_links(self):
         result = self._run(
@@ -408,9 +553,7 @@ class CommunityBridgeThreadReconciliationTests(TestCase):
             source_message_id=self.reply_id
         )
         self.assertEqual(restored.destination_message_id, valid_reply_event_id)
-        self.assertEqual(
-            restored.destination_parent_message_id, self.root_event_id
-        )
+        self.assertEqual(restored.destination_parent_message_id, self.root_event_id)
         deletion = CommunityBridgeDelivery.objects.get(
             delivery_type=CommunityBridgeDeliveryType.DELETE,
             source_message_id=self.reply_id,

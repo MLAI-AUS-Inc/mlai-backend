@@ -22,10 +22,10 @@ from integrations.models import (
 from integrations.services.community_bridge.buzz import BuzzBridgeClient
 from integrations.services.community_bridge.slack import SlackBridgeClient
 
-
 logger = logging.getLogger(__name__)
 
 RECONCILIATION_VERSION = "slack-thread-reconcile-v3"
+CHANNEL_RECONCILIATION_VERSION = "slack-channel-reconcile-v1"
 LEGACY_REPLAY_VERSIONS = frozenset(
     {
         "slack-thread-repair-v1",
@@ -41,6 +41,9 @@ TERMINAL_STATUSES = {
 
 
 class Command(BaseCommand):
+    reconciliation_version = RECONCILIATION_VERSION
+    legacy_replay_versions = LEGACY_REPLAY_VERSIONS
+
     help = (
         "Audit Slack-authoritative thread structure against MLAI Chat and optionally "
         "repair missing, orphaned, incorrectly parented, broadcast, and duplicate events."
@@ -57,6 +60,14 @@ class Command(BaseCommand):
         parser.add_argument("--latest", default="")
         parser.add_argument("--max-roots", type=int, default=100)
         parser.add_argument("--maximum-history-messages", type=int, default=10_000)
+        parser.add_argument(
+            "--include-unthreaded",
+            action="store_true",
+            help=(
+                "Audit every bridgeable top-level Slack message, including roots "
+                "without replies, instead of only threaded roots."
+            ),
+        )
         parser.add_argument("--apply", action="store_true")
         parser.add_argument("--confirm-historical-repair", action="store_true")
         parser.add_argument("--wait-seconds", type=int, default=120)
@@ -68,6 +79,18 @@ class Command(BaseCommand):
         )
 
     def handle(self, *args, **options):
+        include_unthreaded = bool(options["include_unthreaded"])
+        self.reconciliation_version = (
+            CHANNEL_RECONCILIATION_VERSION
+            if include_unthreaded
+            else RECONCILIATION_VERSION
+        )
+        # The full-channel pass has its own fresh idempotency namespace, but it
+        # must not force already-correct thread repairs to replay merely because
+        # they were created by an older thread-only reconciliation.
+        self.legacy_replay_versions = (
+            frozenset() if include_unthreaded else LEGACY_REPLAY_VERSIONS
+        )
         apply_changes = bool(options["apply"])
         wait_seconds = int(options["wait_seconds"] or 0)
         max_roots = int(options["max_roots"] or 0)
@@ -76,9 +99,7 @@ class Command(BaseCommand):
         if max_roots < 1 or max_roots > 1000:
             raise CommandError("--max-roots must be between 1 and 1000")
         if maximum_history_messages < 1 or maximum_history_messages > 50_000:
-            raise CommandError(
-                "--maximum-history-messages must be between 1 and 50000"
-            )
+            raise CommandError("--maximum-history-messages must be between 1 and 50000")
         if wait_seconds < 0 or wait_seconds > 300:
             raise CommandError("--wait-seconds must be between 0 and 300")
         if apply_changes and wait_seconds < 1:
@@ -126,6 +147,7 @@ class Command(BaseCommand):
                 apply_changes=apply_changes,
                 wait_seconds=wait_seconds,
                 failure_threshold=failure_threshold,
+                include_unthreaded=include_unthreaded,
             )
             report["channels"].append(channel_report)
             remaining_roots -= channel_report["roots_scanned"]
@@ -138,11 +160,13 @@ class Command(BaseCommand):
             if item.get("next_latest")
         }
         report["resume"] = {
-            "latest": next(iter(resume_by_channel.values()), "")
-            if len(resume_by_channel) == 1
-            else "",
+            "latest": (
+                next(iter(resume_by_channel.values()), "")
+                if len(resume_by_channel) == 1
+                else ""
+            ),
             "by_channel": resume_by_channel,
-            "version": RECONCILIATION_VERSION,
+            "version": self.reconciliation_version,
         }
         logger.info(
             "community_bridge_thread_reconciliation_complete apply=%s channels=%s "
@@ -152,8 +176,7 @@ class Command(BaseCommand):
             report["totals"]["roots_scanned"],
             report["totals"]["messages_scanned"],
             report["totals"]["mismatches"],
-            report["totals"]["repairs_enqueued"]
-            + report["totals"]["links_restored"],
+            report["totals"]["repairs_enqueued"] + report["totals"]["links_restored"],
             report["totals"]["errors"],
         )
         self.stdout.write(json.dumps(report, sort_keys=True))
@@ -189,6 +212,7 @@ class Command(BaseCommand):
         apply_changes,
         wait_seconds,
         failure_threshold,
+        include_unthreaded,
     ):
         report = {
             **self._empty_report(apply_changes=apply_changes)["totals"],
@@ -205,7 +229,11 @@ class Command(BaseCommand):
         roots = [
             message
             for message in history
-            if self._is_thread_root_summary(message)
+            if (
+                self._is_bridgeable_root_summary(message)
+                if include_unthreaded
+                else self._is_thread_root_summary(message)
+            )
         ][:maximum_roots]
         next_latest = (
             self._previous_slack_timestamp(str(roots[-1].get("ts") or ""))
@@ -226,17 +254,19 @@ class Command(BaseCommand):
             report["roots_scanned"] += 1
             report["next_latest"] = next_latest
             try:
-                thread = SlackBridgeClient.get_thread_messages(
-                    channel_id=channel.slack_channel_id,
-                    root_message_id=root_message_id,
+                thread = (
+                    SlackBridgeClient.get_thread_messages(
+                        channel_id=channel.slack_channel_id,
+                        root_message_id=root_message_id,
+                    )
+                    if int(root_summary.get("reply_count") or 0) > 0
+                    else [root_summary]
                 )
                 root, replies = SingleThreadRepairCommand._validated_thread(
                     thread, root_message_id=root_message_id
                 )
                 if apply_changes:
-                    audit_report = {
-                        **self._empty_report(apply_changes=False)["totals"]
-                    }
+                    audit_report = {**self._empty_report(apply_changes=False)["totals"]}
                     self._reconcile_thread(
                         channel=channel,
                         root=root,
@@ -249,12 +279,9 @@ class Command(BaseCommand):
                         report["mismatches"] + audit_report["mismatches"]
                     )
                     projected_messages = (
-                        report["messages_scanned"]
-                        + audit_report["messages_scanned"]
+                        report["messages_scanned"] + audit_report["messages_scanned"]
                     )
-                    mismatch_rate = projected_mismatches / max(
-                        1, projected_messages
-                    )
+                    mismatch_rate = projected_mismatches / max(1, projected_messages)
                     if mismatch_rate > failure_threshold:
                         raise CommandError(
                             f"Mismatch rate {mismatch_rate:.3f} exceeded configured threshold"
@@ -294,6 +321,21 @@ class Command(BaseCommand):
         return bool(
             message_id
             and int(message.get("reply_count") or 0) > 0
+            and (not thread_id or thread_id == message_id)
+        )
+
+    @staticmethod
+    def _is_bridgeable_root_summary(message):
+        """Return whether history contains a top-level event the bridge mirrors."""
+
+        message_id = str(message.get("ts") or "").strip()
+        thread_id = str(message.get("thread_ts") or "").strip()
+        user_id = str(message.get("user") or "").strip()
+        subtype = str(message.get("subtype") or "").strip()
+        return bool(
+            message_id
+            and user_id[:1] in {"U", "W"}
+            and subtype in {"", "bot_message"}
             and (not thread_id or thread_id == message_id)
         )
 
@@ -353,7 +395,9 @@ class Command(BaseCommand):
             wait_seconds=wait_seconds,
         )
         if apply_changes and not root_destination_id:
-            raise CommandError("Root reconciliation completed without a destination mapping")
+            raise CommandError(
+                "Root reconciliation completed without a destination mapping"
+            )
         expected_reply_parent_id = (
             root_destination_id or f"missing-root:{root_message_id}"
         )
@@ -425,14 +469,12 @@ class Command(BaseCommand):
             str(link.destination_message_id or "").strip() if active_link else ""
         )
         link_repair_version = str(
-            ((link.source_payload or {}).get("metadata") or {}).get(
-                "backfill_version"
-            )
+            ((link.source_payload or {}).get("metadata") or {}).get("backfill_version")
             if link
             else ""
         ).strip()
         requires_chronological_replay = bool(
-            active_link and link_repair_version in LEGACY_REPLAY_VERSIONS
+            active_link and link_repair_version in self.legacy_replay_versions
         )
         if requires_chronological_replay:
             report["legacy_replay_order"] += 1
@@ -450,9 +492,11 @@ class Command(BaseCommand):
                     for match in structurally_correct_matches
                     if match["destination_message_id"] == link_destination_id
                 ),
-                structurally_correct_matches[0]
-                if structurally_correct_matches
-                else None,
+                (
+                    structurally_correct_matches[0]
+                    if structurally_correct_matches
+                    else None
+                ),
             )
         duplicate_matches = [match for match in matches if chosen and match != chosen]
         message_mismatch = bool(duplicate_matches or not chosen)
@@ -493,8 +537,7 @@ class Command(BaseCommand):
                 ):
                     report["wrong_parent"] += 1
                 if any(
-                    bool(match["broadcast"]) != expected_broadcast
-                    for match in matches
+                    bool(match["broadcast"]) != expected_broadcast for match in matches
                 ):
                     report["wrong_broadcast"] += 1
         if message_mismatch:
@@ -535,7 +578,7 @@ class Command(BaseCommand):
             root_message_id=root_message_id,
             delivery_type=CommunityBridgeDeliveryType.CREATE,
             receipt_suffix="create",
-            repair_version=RECONCILIATION_VERSION,
+            repair_version=self.reconciliation_version,
         )
         self._wait(delivery=delivery, wait_seconds=wait_seconds)
         report["repairs_enqueued"] += 1
@@ -549,17 +592,19 @@ class Command(BaseCommand):
         ).first()
         return str(getattr(refreshed, "destination_message_id", "") or "").strip()
 
-    @staticmethod
-    def _restore_link(*, channel, message, root_message_id, match):
+    def _restore_link(self, *, channel, message, root_message_id, match):
         message_id = str(message["ts"])
         parent_message_id = root_message_id if message_id != root_message_id else ""
         payload = SingleThreadRepairCommand._payload(
             message=message,
             channel=channel,
-            receipt_key=f"{RECONCILIATION_VERSION}:restore:{channel.slack_channel_id}:{message_id}",
+            receipt_key=(
+                f"{self.reconciliation_version}:restore:"
+                f"{channel.slack_channel_id}:{message_id}"
+            ),
             parent_message_id=parent_message_id,
             delivery_type=CommunityBridgeDeliveryType.CREATE,
-            repair_version=RECONCILIATION_VERSION,
+            repair_version=self.reconciliation_version,
         )
         link, _ = CommunityBridgeMessageLink.objects.update_or_create(
             source_platform=CommunityBridgePlatform.SLACK,
@@ -576,7 +621,7 @@ class Command(BaseCommand):
                 "source_payload": payload,
                 "destination_payload": {
                     "broadcast": bool(match["broadcast"]),
-                    "reconciled_by": RECONCILIATION_VERSION,
+                    "reconciled_by": self.reconciliation_version,
                 },
                 "source_deleted_at": None,
                 "destination_deleted_at": None,
@@ -584,13 +629,18 @@ class Command(BaseCommand):
         )
         return link
 
-    @staticmethod
     def _enqueue_override_delete(
-        *, channel, message, root_message_id, destination_message_id, wait_seconds
+        self,
+        *,
+        channel,
+        message,
+        root_message_id,
+        destination_message_id,
+        wait_seconds,
     ):
         message_id = str(message["ts"])
         receipt_key = (
-            f"{RECONCILIATION_VERSION}:delete:{channel.slack_channel_id}:"
+            f"{self.reconciliation_version}:delete:{channel.slack_channel_id}:"
             f"{message_id}:{destination_message_id}"
         )
         parent_message_id = root_message_id if message_id != root_message_id else ""
@@ -600,7 +650,7 @@ class Command(BaseCommand):
             receipt_key=receipt_key,
             parent_message_id=parent_message_id,
             delivery_type=CommunityBridgeDeliveryType.DELETE,
-            repair_version=RECONCILIATION_VERSION,
+            repair_version=self.reconciliation_version,
         )
         payload["metadata"]["destination_message_id_override"] = destination_message_id
         now = timezone.now()
@@ -610,7 +660,7 @@ class Command(BaseCommand):
                 receipt_key=receipt_key,
                 defaults={
                     "channel": channel,
-                    "event_type": RECONCILIATION_VERSION,
+                    "event_type": self.reconciliation_version,
                     "source_channel_id": channel.slack_channel_id,
                     "source_message_id": message_id,
                     "source_parent_message_id": parent_message_id,
@@ -638,7 +688,7 @@ class Command(BaseCommand):
                 )
             else:
                 delivery = receipt.deliveries.order_by("id").first()
-        Command._wait(delivery=delivery, wait_seconds=wait_seconds)
+        self._wait(delivery=delivery, wait_seconds=wait_seconds)
 
     @staticmethod
     def _wait(*, delivery, wait_seconds):

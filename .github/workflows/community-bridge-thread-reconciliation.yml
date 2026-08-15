@@ -1,4 +1,4 @@
-name: Reconcile production Slack threads
+name: Reconcile production Slack channel
 
 on:
   workflow_dispatch:
@@ -16,7 +16,7 @@ on:
         required: false
         type: string
       max_roots:
-        description: Maximum thread roots in this controlled batch
+        description: Maximum top-level messages in this controlled batch
         required: true
         default: "25"
         type: string
@@ -107,6 +107,7 @@ jobs:
             --max-roots "$max_roots"
             --maximum-history-messages 10000
             --fail-on-mismatch-rate 1
+            --include-unthreaded
           )
           [[ -z "$channel_id" ]] || args+=(--slack-channel-id "$channel_id")
           [[ -z "$oldest" ]] || args+=(--oldest "$oldest")
