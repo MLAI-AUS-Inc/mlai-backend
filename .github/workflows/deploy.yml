@@ -115,6 +115,7 @@ jobs:
       run: |
         python manage.py test \
           roo.tests_api.TaskViewSetTests \
+          roo.tests_kimi_usage \
           core.tests.test_auth_contract \
           core.tests.test_auth_session \
           core.tests.test_ops_domain_transition \
