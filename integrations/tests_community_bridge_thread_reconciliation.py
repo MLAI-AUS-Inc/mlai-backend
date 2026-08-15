@@ -245,6 +245,48 @@ class CommunityBridgeThreadReconciliationTests(TestCase):
         self.assertEqual(totals["mismatches"], 2)
         self.assertEqual(totals["correct"], 0)
 
+    def test_dry_run_does_not_replay_unversioned_live_links(self):
+        CommunityBridgeMessageLink.objects.filter(
+            source_message_id=self.root_id
+        ).update(source_payload={})
+        reply_event_id = "c" * 64
+        CommunityBridgeMessageLink.objects.create(
+            channel=self.channel,
+            source_platform=CommunityBridgePlatform.SLACK,
+            source_channel_id=self.channel.slack_channel_id,
+            source_message_id=self.reply_id,
+            source_parent_message_id=self.root_id,
+            destination_platform=CommunityBridgePlatform.BUZZ,
+            destination_channel_id=self.channel.destination_channel_id,
+            destination_message_id=reply_event_id,
+            destination_parent_message_id=self.root_event_id,
+            source_payload={},
+        )
+
+        result = self._run(
+            lookup_matches=[
+                {
+                    "source_message_id": self.root_id,
+                    "destination_message_id": self.root_event_id,
+                    "parent_message_id": "",
+                    "broadcast": False,
+                    "created_at": 1786660929,
+                },
+                {
+                    "source_message_id": self.reply_id,
+                    "destination_message_id": reply_event_id,
+                    "parent_message_id": self.root_event_id,
+                    "broadcast": False,
+                    "created_at": 1786666478,
+                },
+            ]
+        )
+
+        totals = result["totals"]
+        self.assertEqual(totals["legacy_replay_order"], 0)
+        self.assertEqual(totals["mismatches"], 0)
+        self.assertEqual(totals["correct"], 2)
+
     def test_apply_processes_each_slack_page_oldest_first(self):
         older_id = "1786650000.100000"
         newer_id = "1786670000.100000"

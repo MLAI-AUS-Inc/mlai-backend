@@ -26,6 +26,14 @@ from integrations.services.community_bridge.slack import SlackBridgeClient
 logger = logging.getLogger(__name__)
 
 RECONCILIATION_VERSION = "slack-thread-reconcile-v3"
+LEGACY_REPLAY_VERSIONS = frozenset(
+    {
+        "slack-thread-repair-v1",
+        "slack-thread-repair-v2",
+        "slack-thread-reconcile-v1",
+        "slack-thread-reconcile-v2",
+    }
+)
 TERMINAL_STATUSES = {
     CommunityBridgeDeliveryStatus.COMPLETED,
     CommunityBridgeDeliveryStatus.DEAD,
@@ -424,7 +432,7 @@ class Command(BaseCommand):
             else ""
         ).strip()
         requires_chronological_replay = bool(
-            active_link and link_repair_version != RECONCILIATION_VERSION
+            active_link and link_repair_version in LEGACY_REPLAY_VERSIONS
         )
         if requires_chronological_replay:
             report["legacy_replay_order"] += 1
