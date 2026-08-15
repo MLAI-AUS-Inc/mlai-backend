@@ -782,6 +782,16 @@ def _structured_memo_manual_documents(structured_memo):
     return documents if isinstance(documents, list) else []
 
 
+def _structured_memo_financial_snapshot(structured_memo):
+    snapshot = (structured_memo or {}).get("financial_snapshot") or (structured_memo or {}).get("financialSnapshot")
+    return snapshot if isinstance(snapshot, dict) else None
+
+
+def _structured_memo_concise_analysis(structured_memo):
+    analysis = (structured_memo or {}).get("concise_analysis") or (structured_memo or {}).get("conciseAnalysis")
+    return analysis if isinstance(analysis, dict) else None
+
+
 def _structured_memo_with_xero_metrics(draft):
     # Merges connector-backed metrics (Xero + Luma) into the draft's kpi_snapshot.
     structured_memo = draft.structured_memo or {}
@@ -829,6 +839,9 @@ def _serialize_draft_for_form(draft):
         "metrics": _extract_metrics(structured_memo),
         "metricSuggestions": _extract_metric_suggestions(structured_memo),
         "displayConfig": _extract_display_config(structured_memo),
+        "financialSnapshot": _structured_memo_financial_snapshot(structured_memo),
+        "conciseAnalysis": _structured_memo_concise_analysis(structured_memo),
+        "presentationMode": _structured_memo_text(structured_memo, "presentation_mode", "presentationMode"),
     }
 
 
@@ -942,6 +955,16 @@ def _build_manual_structured_memo(payload):
     if manual_documents:
         memo["manual_documents"] = list(manual_documents)
 
+    financial_snapshot = payload.get("financialSnapshot") or payload.get("financial_snapshot")
+    if isinstance(financial_snapshot, dict):
+        memo["financial_snapshot"] = financial_snapshot
+    concise_analysis = payload.get("conciseAnalysis") or payload.get("concise_analysis")
+    if isinstance(concise_analysis, dict):
+        memo["concise_analysis"] = concise_analysis
+    presentation_mode = _optional_text(payload.get("presentationMode") or payload.get("presentation_mode"))
+    if presentation_mode:
+        memo["presentation_mode"] = presentation_mode
+
     return memo
 
 
@@ -979,6 +1002,9 @@ def _serialize_monthly_update(draft, structured_memo=None):
         "learnings": _structured_memo_section_text(structured_memo, "learnings"),
         "next30Days": _structured_memo_section_text(structured_memo, "next_30_days"),
         "displayConfig": _extract_display_config(structured_memo),
+        "financialSnapshot": _structured_memo_financial_snapshot(structured_memo),
+        "conciseAnalysis": _structured_memo_concise_analysis(structured_memo),
+        "presentationMode": _structured_memo_text(structured_memo, "presentation_mode", "presentationMode"),
     }
 
 
@@ -2503,6 +2529,17 @@ class VibeRaisingMonthlyUpdateView(APIView):
                 display_config = normalize_vibe_raising_display_config(
                     (existing_draft.structured_memo or {}).get("display_config")
                 )
+        financial_snapshot = serializer.validated_data.get("financialSnapshot")
+        concise_analysis = serializer.validated_data.get("conciseAnalysis")
+        presentation_mode = serializer.validated_data.get("presentationMode")
+        if existing_draft:
+            existing_memo = existing_draft.structured_memo or {}
+            if financial_snapshot is None:
+                financial_snapshot = _structured_memo_financial_snapshot(existing_memo)
+            if concise_analysis is None:
+                concise_analysis = _structured_memo_concise_analysis(existing_memo)
+            if not presentation_mode:
+                presentation_mode = _structured_memo_text(existing_memo, "presentation_mode", "presentationMode")
         if "audienceVisibility" in serializer.validated_data:
             audience_visibility = serializer.validated_data["audienceVisibility"]
         elif existing_draft is not None:
@@ -2522,6 +2559,9 @@ class VibeRaisingMonthlyUpdateView(APIView):
         structured_payload = {
             **serializer.validated_data,
             "displayConfig": display_config,
+            "financialSnapshot": financial_snapshot,
+            "conciseAnalysis": concise_analysis,
+            "presentationMode": presentation_mode,
             "manualDocuments": [
                 _serialize_manual_document_for_memo(document)
                 for document in manual_documents

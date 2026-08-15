@@ -240,6 +240,9 @@ class VibeRaisingMonthlyUpdateUpsertSerializer(AliasInputSerializer):
         "metricSuggestions": ("metric_suggestions",),
         "next30Days": ("next_30_days",),
         "displayConfig": ("display_config",),
+        "financialSnapshot": ("financial_snapshot",),
+        "conciseAnalysis": ("concise_analysis",),
+        "presentationMode": ("presentation_mode",),
     }
 
     month = serializers.CharField()
@@ -279,6 +282,9 @@ class VibeRaisingMonthlyUpdateUpsertSerializer(AliasInputSerializer):
         default=list,
     )
     displayConfig = serializers.DictField(required=False, allow_null=True, default=None)
+    financialSnapshot = serializers.DictField(required=False, allow_null=True)
+    conciseAnalysis = serializers.DictField(required=False, allow_null=True)
+    presentationMode = serializers.CharField(required=False, allow_blank=True, allow_null=True)
 
     def validate(self, attrs):
         month_lookup = {

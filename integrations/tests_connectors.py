@@ -39,7 +39,7 @@ from startup_updates.models import (
     UserStartupBinding,
     StartupMetricObservation,
 )
-from startup_updates.services import publish_xero_metric_observations
+from startup_updates.services import build_monthly_financial_snapshot, publish_xero_metric_observations
 from workflow_runs.models import ContentFactoryRun, ContentFactoryRunStatus
 
 User = get_user_model()
@@ -2289,6 +2289,100 @@ class ConnectorEndpointTests(TestCase):
         )
         self.assertIn("invoiceRevenue", keys)
         self.assertNotIn("revenue", keys)
+
+    def test_monthly_financial_snapshot_uses_cached_totals_and_line_attribution(self):
+        organization = Organization.objects.create(name="Acme", domain="financial-brief.example")
+        connection = ExternalServiceConnection.objects.create(
+            user=self.user,
+            organization=organization,
+            provider=ExternalServiceProvider.XERO,
+            external_account_id="tenant-financial-brief",
+            account_label="Acme Xero",
+            status=ExternalServiceConnectionStatus.CONNECTED,
+        )
+        ExternalFinancialRecord.objects.create(
+            user=self.user,
+            organization=organization,
+            connection=connection,
+            provider=ExternalServiceProvider.XERO,
+            record_type=ExternalFinancialRecord.RECORD_XERO_INVOICE,
+            external_account_id=connection.external_account_id,
+            external_record_id="invoice-april",
+            currency="AUD",
+            amount="10000.00",
+            direction="credit",
+            status="PAID",
+            transaction_date=date(2026, 4, 15),
+            raw_payload={
+                "LineItems": [
+                    {"Description": "State innovation grant", "LineAmount": "4000.00"},
+                    {
+                        "Description": "HealthHack ticket sales",
+                        "LineAmount": "3000.00",
+                        "Tracking": [{"Name": "Event", "Option": "HealthHack"}],
+                    },
+                    {"Description": "Community training program", "LineAmount": "2000.00"},
+                    {"Description": "Software build project", "LineAmount": "1000.00"},
+                ]
+            },
+        )
+        ExternalFinancialRecord.objects.create(
+            user=self.user,
+            organization=organization,
+            connection=connection,
+            provider=ExternalServiceProvider.XERO,
+            record_type=ExternalFinancialRecord.RECORD_XERO_BILL,
+            external_account_id=connection.external_account_id,
+            external_record_id="bill-april",
+            currency="AUD",
+            amount="1700.00",
+            direction="debit",
+            status="PAID",
+            transaction_date=date(2026, 4, 20),
+            raw_payload={
+                "LineItems": [
+                    {
+                        "AccountName": "Event catering",
+                        "LineAmount": "500.00",
+                        "Tracking": [{"Name": "Event", "Option": "HealthHack"}],
+                    },
+                    {"AccountName": "Software subscriptions", "LineAmount": "1200.00"},
+                ]
+            },
+        )
+        for key, value in (("revenue", "10000.00"), ("monthlyCosts", "7000.00"), ("netProfitLoss", "3000.00")):
+            StartupMetricObservation.objects.create(
+                organization=organization,
+                source_provider=ExternalServiceProvider.XERO,
+                metric_key=key,
+                metric_name=key,
+                value_text=f"AUD {value}",
+                value_number=Decimal(value),
+                unit="AUD",
+                period_month=date(2026, 4, 1),
+                confidence=1.0,
+            )
+
+        snapshot = build_monthly_financial_snapshot(
+            organization=organization,
+            target_month=date(2026, 4, 1),
+            as_of_date=date(2026, 4, 30),
+        )
+
+        self.assertIsNotNone(snapshot)
+        self.assertEqual(len(snapshot["performance"]), 12)
+        self.assertEqual(snapshot["performance"][-1]["income"], 10000.0)
+        self.assertEqual(snapshot["performance"][-1]["expenses"], 7000.0)
+        self.assertEqual(snapshot["performance"][-1]["net"], 3000.0)
+        april_mix = snapshot["revenue_mix"][-1]
+        self.assertEqual(sum(item["amount"] for item in april_mix["segments"]), 10000.0)
+        self.assertEqual(april_mix["segments"][0]["amount"], 4000.0)
+        self.assertEqual(snapshot["event_contribution"], [
+            {"label": "HealthHack", "income": 3000.0, "expenses": 500.0, "net": 2500.0},
+        ])
+        self.assertEqual(snapshot["overhead"], [
+            {"label": "Software subscriptions", "amount": 1200.0},
+        ])
 
 
 class LinearRecentActivitySelectionTests(TestCase):
