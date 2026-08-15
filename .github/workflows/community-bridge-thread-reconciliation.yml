@@ -114,7 +114,9 @@ jobs:
           if [[ "$mode" == "apply" ]]; then
             args+=(--apply --confirm-historical-repair --wait-seconds 120)
           fi
-          docker compose exec -T web "${args[@]}" </dev/null
+          status=0
+          docker compose exec -T web "${args[@]}" </dev/null || status=$?
           docker compose ps web bridge-worker
           docker compose logs --since 10m --tail 200 bridge-worker
+          exit "$status"
           REMOTE
