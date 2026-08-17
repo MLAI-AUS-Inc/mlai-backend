@@ -4,6 +4,7 @@ Tests for the Points System.
 from datetime import date, timedelta
 from decimal import Decimal
 from typing import Optional
+from django.contrib.admin.sites import AdminSite
 from django.test import TestCase, override_settings
 from django.contrib.auth import get_user_model
 from django.db import IntegrityError
@@ -15,9 +16,11 @@ from .models import (
     CoworkingBooking, CoworkingDayCapacity, RewardsCatalog, RewardRedemption,
     PointsPurchase,
 )
+from .admin import LedgerAdmin, PointsAccountAdmin
 from .services import PointsService, PointsPurchaseService, CoworkingService, TaskService, RewardsService, StartupUpdateRewardService
 from .permissions import (
     can_generate_coworking_reports,
+    IdempotencyConflictError,
     is_points_admin,
     InsufficientBalanceError,
     PermissionDeniedError,
@@ -302,6 +305,230 @@ class PointsServiceTests(TestCase):
         # Balance should be 15 (20 - 5), not 10
         account = PointsAccount.objects.get(user=self.user)
         self.assertEqual(account.balance, 15)
+
+    def test_award_rejects_every_idempotency_identity_collision(self):
+        """An award key cannot be rebound across any mutation identity field."""
+        other_user = User.objects.create_user(
+            email='other-idempotency-user@example.com',
+            slack_id='UOTHERIDEMPOTENCY',
+        )
+        scenarios = (
+            ('user', {'user': other_user}),
+            ('amount', {'delta': 11}),
+            ('source', {'source': 'EVENT'}),
+            ('reference_type', {'reference_type': 'OTHER_REFERENCE'}),
+            ('reference_id', {'reference_id': 'other-id'}),
+        )
+
+        for index, (label, override) in enumerate(scenarios):
+            with self.subTest(field=label):
+                key = f'award-identity-collision-{index}'
+                PointsService.award(
+                    user=self.user,
+                    delta=10,
+                    source='TASK',
+                    description='Original award',
+                    created_by_slack_id=self.admin_slack_id,
+                    idempotency_key=key,
+                    reference_type='TASK_SUBMISSION',
+                    reference_id='submission-1',
+                )
+                replay = {
+                    'user': self.user,
+                    'delta': 10,
+                    'source': 'TASK',
+                    'description': 'Replay award',
+                    'created_by_slack_id': self.admin_slack_id,
+                    'idempotency_key': key,
+                    'reference_type': 'TASK_SUBMISSION',
+                    'reference_id': 'submission-1',
+                }
+                replay.update(override)
+                with self.assertRaises(IdempotencyConflictError):
+                    PointsService.award(**replay)
+
+    def test_legacy_operations_reject_cross_operation_and_payload_collisions(self):
+        PointsService.credit_purchased_topup(
+            user=self.user,
+            delta=10,
+            description='Original top-up',
+            idempotency_key='topup-reference-collision',
+            reference_type='POINTS_PURCHASE',
+            reference_id='purchase-1',
+        )
+        with self.assertRaises(IdempotencyConflictError):
+            PointsService.credit_purchased_topup(
+                user=self.user,
+                delta=10,
+                description='Colliding top-up',
+                idempotency_key='topup-reference-collision',
+                reference_type='POINTS_PURCHASE',
+                reference_id='purchase-2',
+            )
+
+        PointsService.spend(
+            user=self.user,
+            delta=2,
+            source='MERCH',
+            description='Original spend',
+            created_by_slack_id=self.admin_slack_id,
+            idempotency_key='spend-source-collision',
+            reference_type='REDEMPTION',
+            reference_id='redemption-1',
+        )
+        with self.assertRaises(IdempotencyConflictError):
+            PointsService.spend(
+                user=self.user,
+                delta=2,
+                source='COWORKING',
+                description='Colliding spend',
+                created_by_slack_id=self.admin_slack_id,
+                idempotency_key='spend-source-collision',
+                reference_type='REDEMPTION',
+                reference_id='redemption-1',
+            )
+
+        PointsService.refund(
+            user=self.user,
+            delta=2,
+            source='MERCH',
+            description='Original refund',
+            created_by_slack_id=self.admin_slack_id,
+            idempotency_key='refund-amount-collision',
+            reference_type='REDEMPTION',
+            reference_id='redemption-1',
+        )
+        with self.assertRaises(IdempotencyConflictError):
+            PointsService.refund(
+                user=self.user,
+                delta=3,
+                source='MERCH',
+                description='Colliding refund',
+                created_by_slack_id=self.admin_slack_id,
+                idempotency_key='refund-amount-collision',
+                reference_type='REDEMPTION',
+                reference_id='redemption-1',
+            )
+
+        PointsService.award(
+            user=self.user,
+            delta=2,
+            source='TASK',
+            description='Original earn',
+            created_by_slack_id=self.admin_slack_id,
+            idempotency_key='operation-kind-collision',
+        )
+        with self.assertRaises(IdempotencyConflictError):
+            PointsService.refund(
+                user=self.user,
+                delta=2,
+                source='TASK',
+                description='Colliding refund',
+                created_by_slack_id=self.admin_slack_id,
+                idempotency_key='operation-kind-collision',
+            )
+
+    def test_legacy_ledger_create_races_recover_inside_savepoint(self):
+        """The unique-key loser can query the winner without poisoning its transaction."""
+        PointsAccount.objects.create(
+            user=self.user,
+            balance=20,
+            earned_balance=20,
+            balance_microroo=20_000_000,
+            earned_balance_microroo=20_000_000,
+            microroo_initialized=True,
+        )
+        operations = (
+            (
+                'award-race',
+                {'delta': 3, 'delta_microroo': 3_000_000, 'kind': 'EARN', 'source': 'TASK'},
+                lambda key: PointsService.award(
+                    user=self.user, delta=3, source='TASK', description='race',
+                    created_by_slack_id=self.admin_slack_id, idempotency_key=key,
+                ),
+            ),
+            (
+                'topup-race',
+                {'delta': 3, 'delta_microroo': 3_000_000, 'kind': 'EARN', 'source': 'purchased_topup'},
+                lambda key: PointsService.credit_purchased_topup(
+                    user=self.user, delta=3, description='race', idempotency_key=key,
+                ),
+            ),
+            (
+                'spend-race',
+                {'delta': -3, 'delta_microroo': -3_000_000, 'kind': 'SPEND', 'source': 'MERCH'},
+                lambda key: PointsService.spend(
+                    user=self.user, delta=3, source='MERCH', description='race',
+                    created_by_slack_id=self.admin_slack_id, idempotency_key=key,
+                ),
+            ),
+            (
+                'refund-race',
+                {'delta': 3, 'delta_microroo': 3_000_000, 'kind': 'REFUND', 'source': 'MERCH'},
+                lambda key: PointsService.refund(
+                    user=self.user, delta=3, source='MERCH', description='race',
+                    created_by_slack_id=self.admin_slack_id, idempotency_key=key,
+                ),
+            ),
+        )
+
+        for key, ledger_fields, operation in operations:
+            with self.subTest(operation=key):
+                winner = Ledger.objects.create(
+                    user=self.user,
+                    description='concurrent winner',
+                    created_by_slack_id=self.admin_slack_id,
+                    idempotency_key=key,
+                    **ledger_fields,
+                )
+                account_before = PointsAccount.objects.get(user=self.user).balance_microroo
+
+                # Simulate a stale preflight read: the unique insert sees the
+                # concurrent winner even though the initial lookup did not.
+                with patch.object(Ledger.objects, 'filter') as ledger_filter:
+                    ledger_filter.return_value.first.return_value = None
+                    replay, created = operation(key)
+
+                self.assertFalse(created)
+                self.assertEqual(replay.id, winner.id)
+                self.assertEqual(
+                    PointsAccount.objects.get(user=self.user).balance_microroo,
+                    account_before,
+                )
+
+
+class PointsAccountAdminSafetyTests(TestCase):
+    def test_every_balance_projection_is_read_only(self):
+        model_admin = PointsAccountAdmin(PointsAccount, AdminSite())
+        readonly = set(model_admin.get_readonly_fields(request=None))
+        self.assertTrue(
+            {
+                'balance',
+                'earned_balance',
+                'purchased_topup_balance',
+                'lifetime_earned',
+                'lifetime_purchased_topup',
+                'lifetime_spent',
+                'expired_or_reversed_points',
+                'balance_microroo',
+                'earned_balance_microroo',
+                'purchased_topup_balance_microroo',
+                'lifetime_earned_microroo',
+                'lifetime_purchased_topup_microroo',
+                'lifetime_spent_microroo',
+                'expired_or_reversed_microroo',
+                'microroo_initialized',
+            }.issubset(readonly)
+        )
+
+
+class LedgerAdminSafetyTests(TestCase):
+    def test_every_append_only_ledger_field_is_read_only(self):
+        model_admin = LedgerAdmin(Ledger, AdminSite())
+        readonly = set(model_admin.get_readonly_fields(request=None))
+        self.assertEqual(readonly, {field.name for field in Ledger._meta.fields})
+        self.assertFalse(model_admin.has_add_permission(request=None))
+        self.assertFalse(model_admin.has_delete_permission(request=None))
 
 
 class PointsPurchaseModelTests(TestCase):
@@ -1114,15 +1341,19 @@ class LedgerIntegrityTests(TestCase):
             idempotency_key='unique_key_test'
         )
         
-        # Second award with same key should return existing
-        ledger, created = PointsService.award(
-            user=self.user,
-            delta=10,  # Different amount
-            source='TASK',
-            description='Second',
-            created_by_slack_id='UADMIN',
-            idempotency_key='unique_key_test'
+        # The key remains unique, but a different payload is a conflict rather
+        # than a successful replay of an operation that never happened.
+        with self.assertRaises(IdempotencyConflictError):
+            PointsService.award(
+                user=self.user,
+                delta=10,
+                source='TASK',
+                description='Second',
+                created_by_slack_id='UADMIN',
+                idempotency_key='unique_key_test'
+            )
+
+        self.assertEqual(
+            Ledger.objects.get(idempotency_key='unique_key_test').delta,
+            5,
         )
-        
-        self.assertFalse(created)
-        self.assertEqual(ledger.delta, 5)  # Original value

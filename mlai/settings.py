@@ -825,6 +825,43 @@ if not 1 <= KIMI_ROO_POINTS_PER_PROMPT <= 100:
     raise ImproperlyConfigured(
         'KIMI_ROO_POINTS_PER_PROMPT must be between 1 and 100.'
     )
+# MLAI Coding uses short-lived, device-scoped Ed25519 tickets.  Keys remain
+# optional at process startup so non-Coding environments can run normally; the
+# Coding endpoints fail closed with 503 until a valid signing key is supplied.
+MLAI_CODING_PILOT_USER_IDS = _env_list('MLAI_CODING_PILOT_USER_IDS', [])
+MLAI_CODING_PILOT_EMAILS = _env_list('MLAI_CODING_PILOT_EMAILS', [])
+MLAI_CODING_PRICING_VERSION = os.getenv(
+    'MLAI_CODING_PRICING_VERSION',
+    'do-kimi-k3-2026-08',
+).strip()
+MLAI_CODING_TICKET_PRIVATE_KEY = os.getenv('MLAI_CODING_TICKET_PRIVATE_KEY', '')
+MLAI_CODING_TICKET_PUBLIC_KEY = os.getenv('MLAI_CODING_TICKET_PUBLIC_KEY', '')
+MLAI_CODING_TICKET_KEY_ID = os.getenv(
+    'MLAI_CODING_TICKET_KEY_ID',
+    'coding-2026-08',
+).strip()
+MLAI_CODING_TICKET_ISSUER = os.getenv(
+    'MLAI_CODING_TICKET_ISSUER',
+    'api.mlai.au',
+).strip()
+MLAI_CODING_TICKET_AUDIENCE = os.getenv(
+    'MLAI_CODING_TICKET_AUDIENCE',
+    'mlai-kimi-inference',
+).strip()
+MLAI_CODING_TICKET_TTL_SECONDS = int(
+    os.getenv('MLAI_CODING_TICKET_TTL_SECONDS', '300')
+)
+MLAI_CODING_DISPATCH_LEASE_SECONDS = int(
+    os.getenv('MLAI_CODING_DISPATCH_LEASE_SECONDS', '120')
+)
+if not 30 <= MLAI_CODING_DISPATCH_LEASE_SECONDS <= 300:
+    raise ImproperlyConfigured(
+        'MLAI_CODING_DISPATCH_LEASE_SECONDS must be between 30 and 300.'
+    )
+MLAI_CODING_INFERENCE_BASE_URL = os.getenv(
+    'MLAI_CODING_INFERENCE_BASE_URL',
+    'https://inference.mlai.au/v1',
+).rstrip('/')
 _validate_health_hack_service_secrets(
     health_hack_key=HEALTH_HACK_API_KEY,
     roo_sim_patient_key=ROO_SIM_PATIENT_KEY,

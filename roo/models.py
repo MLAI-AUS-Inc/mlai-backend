@@ -14,6 +14,10 @@ def default_points_purchase_expires_at():
     return timezone.now() + timedelta(hours=POINTS_PURCHASE_EXPIRY_HOURS)
 
 
+def default_coding_turn_expires_at():
+    return timezone.now() + timedelta(hours=24)
+
+
 class PointsAdmin(models.Model):
     """
     Users authorized to mint and approve tasks.
@@ -76,6 +80,20 @@ class PointsAccount(models.Model):
     lifetime_purchased_topup = models.IntegerField(default=0, help_text="Total purchased top-up points ever credited")
     lifetime_spent = models.IntegerField(default=0, help_text="Total points ever spent")
     expired_or_reversed_points = models.IntegerField(default=0, help_text="Total points expired or reversed")
+    # Microroo fields are the precision-safe source of truth.  The historical
+    # integer fields above remain during the compatibility window and expose
+    # only whole, spendable Roo to older clients.
+    balance_microroo = models.BigIntegerField(default=0, help_text="Current spendable balance in microroo")
+    earned_balance_microroo = models.BigIntegerField(default=0, help_text="Earned balance in microroo")
+    purchased_topup_balance_microroo = models.BigIntegerField(default=0, help_text="Purchased balance in microroo")
+    lifetime_earned_microroo = models.BigIntegerField(default=0, help_text="Lifetime earned in microroo")
+    lifetime_purchased_topup_microroo = models.BigIntegerField(default=0, help_text="Lifetime purchased in microroo")
+    lifetime_spent_microroo = models.BigIntegerField(default=0, help_text="Lifetime spent in microroo")
+    expired_or_reversed_microroo = models.BigIntegerField(default=0, help_text="Expired or reversed amount in microroo")
+    microroo_initialized = models.BooleanField(
+        default=False,
+        help_text="Whether precision fields have been initialized from legacy whole Roo",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -85,6 +103,39 @@ class PointsAccount(models.Model):
 
     def __str__(self):
         return f"{self.user.email}: {self.balance} pts (earned: {self.lifetime_earned}, spent: {self.lifetime_spent})"
+
+    def save(self, *args, **kwargs):
+        """Mirror explicit legacy field updates during the transition window.
+
+        Existing code and operational tests sometimes use
+        ``save(update_fields=[...])`` to set a whole-Roo balance directly.  An
+        explicit update remains authoritative and is mirrored to microroo.
+        Normal service saves omit ``update_fields`` or update both projections,
+        so fractional precision is never rounded away accidentally.
+        """
+        requested = kwargs.get("update_fields")
+        if requested is not None:
+            update_fields = set(requested)
+            mapping = {
+                "balance": "balance_microroo",
+                "earned_balance": "earned_balance_microroo",
+                "purchased_topup_balance": "purchased_topup_balance_microroo",
+                "lifetime_earned": "lifetime_earned_microroo",
+                "lifetime_purchased_topup": "lifetime_purchased_topup_microroo",
+                "lifetime_spent": "lifetime_spent_microroo",
+                "expired_or_reversed_points": "expired_or_reversed_microroo",
+            }
+            mirrored = False
+            for legacy_field, micro_field in mapping.items():
+                if legacy_field in update_fields and micro_field not in update_fields:
+                    setattr(self, micro_field, getattr(self, legacy_field) * 1_000_000)
+                    update_fields.add(micro_field)
+                    mirrored = True
+            if mirrored:
+                self.microroo_initialized = True
+                update_fields.add("microroo_initialized")
+                kwargs["update_fields"] = tuple(update_fields)
+        super().save(*args, **kwargs)
 
 
 class PointsPurchase(models.Model):
@@ -477,6 +528,7 @@ class Ledger(models.Model):
     )
     # New structured fields - nullable for backwards compat
     delta = models.IntegerField(null=True, blank=True, help_text="Points change (positive=earn, negative=spend)")
+    delta_microroo = models.BigIntegerField(null=True, blank=True, help_text="Exact change in microroo")
     kind = models.CharField(max_length=10, choices=KIND_CHOICES, null=True, blank=True)
     source = models.CharField(max_length=20, choices=SOURCE_CHOICES, default='LEGACY')
     reference_type = models.CharField(max_length=50, blank=True, null=True, help_text="e.g. TASK_SUBMISSION, BOOKING")
@@ -490,6 +542,7 @@ class Ledger(models.Model):
     slack_user_id = models.CharField(max_length=50, blank=True, null=True, help_text="DEPRECATED: Use user FK instead")
     task = models.ForeignKey(Task, on_delete=models.SET_NULL, null=True, blank=True, related_name='legacy_ledger_entries')
     points_delta = models.IntegerField(null=True, blank=True, help_text="DEPRECATED: Use delta instead")
+    points_delta_microroo = models.BigIntegerField(null=True, blank=True, help_text="DEPRECATED exact legacy change in microroo")
     reason = models.TextField(blank=True, null=True, help_text="DEPRECATED: Use description instead")
     created_by_user_id = models.CharField(max_length=50, blank=True, null=True, help_text="DEPRECATED: Use created_by_slack_id instead")
 
@@ -511,11 +564,164 @@ class Ledger(models.Model):
         # Migrate legacy data on save
         if self.delta is None and self.points_delta is not None:
             self.delta = self.points_delta
+        if self.delta_microroo is None and self.delta is not None:
+            self.delta_microroo = self.delta * 1_000_000
+        if self.points_delta_microroo is None and self.points_delta is not None:
+            self.points_delta_microroo = self.points_delta * 1_000_000
         if not self.description and self.reason:
             self.description = self.reason
         if not self.created_by_slack_id and self.created_by_user_id:
             self.created_by_slack_id = self.created_by_user_id
         super().save(*args, **kwargs)
+
+
+class CodingPricingVersion(models.Model):
+    """Immutable pricing inputs used to settle Kimi inference calls."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    version = models.CharField(max_length=80, unique=True)
+    model = models.CharField(max_length=80, default="kimi-k3")
+    input_usd_per_million = models.DecimalField(max_digits=12, decimal_places=6)
+    cached_input_usd_per_million = models.DecimalField(max_digits=12, decimal_places=6)
+    output_usd_per_million = models.DecimalField(max_digits=12, decimal_places=6)
+    usd_aud_rate = models.DecimalField(max_digits=12, decimal_places=6)
+    margin_multiplier = models.DecimalField(max_digits=8, decimal_places=6, default="1.300000")
+    aud_per_roo = models.DecimalField(max_digits=12, decimal_places=6, default="1.000000")
+    is_active = models.BooleanField(default=True, db_index=True)
+    effective_at = models.DateTimeField(default=timezone.now)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ("-effective_at", "-created_at")
+
+    def __str__(self):
+        return f"{self.model}:{self.version}"
+
+
+class CodingTurn(models.Model):
+    """A locally executed coding turn with a server-side Roo reservation."""
+
+    class Status(models.TextChoices):
+        ACTIVE = "active", "Active"
+        RECONCILING = "reconciling", "Reconciling"
+        COMPLETED = "completed", "Completed"
+        CANCELLED = "cancelled", "Cancelled"
+        FAILED = "failed", "Failed"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="coding_turns",
+    )
+    account_session = models.ForeignKey(
+        "community_chat.CommunityChatAccountSession",
+        on_delete=models.PROTECT,
+        related_name="coding_turns",
+    )
+    device_id = models.UUIDField()
+    local_session_id = models.UUIDField()
+    idempotency_key = models.UUIDField()
+    model = models.CharField(max_length=80, default="kimi-k3")
+    pricing_version = models.ForeignKey(
+        CodingPricingVersion,
+        on_delete=models.PROTECT,
+        related_name="turns",
+    )
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.ACTIVE, db_index=True)
+    reserved_microroo = models.BigIntegerField(default=0)
+    settled_microroo = models.BigIntegerField(default=0)
+    released_microroo = models.BigIntegerField(default=0)
+    finalize_outcome = models.CharField(max_length=20, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    completed_at = models.DateTimeField(blank=True, null=True)
+    expires_at = models.DateTimeField(default=default_coding_turn_expires_at, db_index=True)
+
+    class Meta:
+        ordering = ("-created_at",)
+        constraints = [
+            models.UniqueConstraint(
+                fields=("user", "idempotency_key"),
+                name="roo_coding_turn_user_idem_uniq",
+            ),
+            models.UniqueConstraint(
+                fields=("user",),
+                condition=Q(status__in=("active", "reconciling")),
+                name="roo_coding_one_open_turn_user",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=("user", "status"), name="roo_coding_turn_usr_status_idx"),
+            models.Index(fields=("device_id", "status"), name="roo_coding_turn_device_idx"),
+        ]
+
+
+class CodingModelCall(models.Model):
+    """One independently metered provider request within a coding turn."""
+
+    class Status(models.TextChoices):
+        RESERVED = "reserved", "Reserved"
+        SETTLED = "settled", "Settled"
+        RELEASED = "released", "Released"
+        AMBIGUOUS = "ambiguous", "Ambiguous"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    turn = models.ForeignKey(CodingTurn, on_delete=models.PROTECT, related_name="model_calls")
+    call_id = models.UUIDField()
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.RESERVED, db_index=True)
+    estimated_input_tokens = models.PositiveBigIntegerField(default=0)
+    requested_output_tokens = models.PositiveBigIntegerField(default=0)
+    max_output_tokens = models.PositiveBigIntegerField(default=0)
+    reserved_microroo = models.BigIntegerField(default=0)
+    charged_microroo = models.BigIntegerField(default=0)
+    calculated_microroo = models.BigIntegerField(default=0)
+    pricing_version_snapshot = models.CharField(max_length=80, default="do-kimi-k3-2026-08")
+    input_usd_per_million = models.DecimalField(max_digits=12, decimal_places=6, default="3.000000")
+    cached_input_usd_per_million = models.DecimalField(max_digits=12, decimal_places=6, default="0.600000")
+    output_usd_per_million = models.DecimalField(max_digits=12, decimal_places=6, default="15.000000")
+    usd_aud_rate = models.DecimalField(max_digits=12, decimal_places=6, default="1.500000")
+    margin_multiplier = models.DecimalField(max_digits=8, decimal_places=6, default="1.300000")
+    aud_per_roo = models.DecimalField(max_digits=12, decimal_places=6, default="1.000000")
+    input_tokens = models.PositiveBigIntegerField(default=0)
+    cached_input_tokens = models.PositiveBigIntegerField(default=0)
+    output_tokens = models.PositiveBigIntegerField(default=0)
+    provider_request_id = models.CharField(max_length=255, blank=True)
+    trace_id = models.CharField(max_length=255, blank=True)
+    # Store only a one-way digest of the gateway-generated owner nonce. The
+    # nonce binds admission, dispatch-start, and every accounting report to the
+    # same request handler without becoming another reusable credential at rest.
+    dispatch_owner_hash = models.CharField(max_length=64)
+    dispatch_lease_expires_at = models.DateTimeField(db_index=True)
+    dispatch_started_at = models.DateTimeField(blank=True, null=True)
+    failure_reason = models.CharField(max_length=500, blank=True)
+    reconcile_after = models.DateTimeField(blank=True, null=True)
+    ledger_entry = models.OneToOneField(
+        Ledger,
+        on_delete=models.PROTECT,
+        related_name="coding_model_call",
+        blank=True,
+        null=True,
+    )
+    reserved_at = models.DateTimeField(auto_now_add=True)
+    settled_at = models.DateTimeField(blank=True, null=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ("reserved_at",)
+        constraints = [
+            models.UniqueConstraint(
+                fields=("turn", "call_id"),
+                name="roo_coding_call_turn_call_uniq",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=("status", "reconcile_after"), name="roo_coding_call_status_age_idx"),
+            models.Index(
+                fields=("status", "dispatch_lease_expires_at"),
+                name="roo_coding_call_dispatch_idx",
+            ),
+        ]
 
 
 class BoostPostAdmission(models.Model):

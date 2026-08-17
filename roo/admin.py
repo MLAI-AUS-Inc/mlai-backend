@@ -38,7 +38,31 @@ class PointsAccountAdmin(admin.ModelAdmin):
     )
     list_filter = ('updated_at',)
     search_fields = ('user__email', 'user__slack_id')
-    readonly_fields = ('user', 'created_at', 'updated_at')
+    # Balances are projections of the append-only ledger.  Editing either the
+    # legacy whole-Roo fields or the precision microroo fields here can make
+    # the two projections disagree and bypass PointsService locking and
+    # idempotency.  Operational adjustments must go through a service-backed
+    # admin action (or a management command), never a ModelForm save.
+    readonly_fields = (
+        'user',
+        'balance',
+        'earned_balance',
+        'purchased_topup_balance',
+        'lifetime_earned',
+        'lifetime_purchased_topup',
+        'lifetime_spent',
+        'expired_or_reversed_points',
+        'balance_microroo',
+        'earned_balance_microroo',
+        'purchased_topup_balance_microroo',
+        'lifetime_earned_microroo',
+        'lifetime_purchased_topup_microroo',
+        'lifetime_spent_microroo',
+        'expired_or_reversed_microroo',
+        'microroo_initialized',
+        'created_at',
+        'updated_at',
+    )
     ordering = ('-balance',)
 
 
@@ -124,9 +148,10 @@ class LedgerAdmin(admin.ModelAdmin):
     list_display = ('id', 'user', 'delta_display', 'kind', 'source', 'description_short', 'created_at')
     list_filter = ('kind', 'source', 'created_at')
     search_fields = ('user__email', 'description', 'idempotency_key')
-    readonly_fields = ('id', 'user', 'delta', 'kind', 'source', 'reference_type', 
-                       'reference_id', 'description', 'created_by_slack_id', 
-                       'idempotency_key', 'created_at')
+    # Ledger rows are append-only financial records. Keep both the exact
+    # microroo fields and every deprecated whole-Roo/legacy projection visible
+    # for audit, but never writable through a ModelForm.
+    readonly_fields = tuple(field.name for field in Ledger._meta.fields)
     ordering = ('-created_at',)
 
     def delta_display(self, obj):

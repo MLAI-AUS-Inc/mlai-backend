@@ -32,11 +32,13 @@ from .services import (
     BoostPostAdmissionService, BoostPostPayloadConflictError, InvalidBoostPostError,
     TaskService, RewardsService,
 )
+from .coding import roo_decimal_string
 from .permissions import (
     can_list_committee_candidate_emails,
     can_generate_coworking_reports,
     is_points_admin,
     is_points_super_admin,
+    IdempotencyConflictError,
     InsufficientBalanceError,
     PermissionDeniedError,
 )
@@ -44,6 +46,8 @@ from .committee_candidates import CommitteeCandidateEmailService
 from core.models import User
 from core.permissions import HasAPIKey, HasRooApiKey, HasStrictRooApiKey
 from integrations.services import SlackService
+from community_chat.authentication import CommunityChatAccountAuthentication
+from hospital.authentication import CustomJWTAuthentication
 
 # Additional imports for Activity & Quests
 import logging
@@ -1144,18 +1148,29 @@ class UserBalanceViewSet(viewsets.ViewSet):
         user = PointsService.get_user_by_slack_id(slack_user_id)
         if user:
             balance_data = PointsService.get_balance(user)
-            account = PointsService.get_or_create_account(user)
+            available_microroo = PointsService.get_available_microroo(user)
+            total_microroo = balance_data['balance_microroo']
+            reserved_microroo = max(total_microroo - available_microroo, 0)
             
             data = {
                 'slack_user_id': slack_user_id,
                 'email': user.email,
-                'balance': balance_data['balance'],
+                # Legacy callers have always treated ``balance`` as spendable.
+                # Coding reservations must therefore be deducted even though
+                # the underlying account total is not debited until settlement.
+                'balance': PointsService.microroo_to_legacy_whole(available_microroo),
                 'earned_balance': balance_data['earned_balance'],
                 'purchased_topup_balance': balance_data['purchased_topup_balance'],
                 'lifetime_earned': balance_data['lifetime_earned'],
                 'lifetime_purchased_topup': balance_data['lifetime_purchased_topup'],
                 'lifetime_spent': balance_data['lifetime_spent'],
                 'expired_or_reversed_points': balance_data['expired_or_reversed_points'],
+                'balance_microroo': str(available_microroo),
+                'balance_roo': roo_decimal_string(available_microroo),
+                'reserved_microroo': str(reserved_microroo),
+                'reserved_roo': roo_decimal_string(reserved_microroo),
+                'total_balance_microroo': str(total_microroo),
+                'total_balance_roo': roo_decimal_string(total_microroo),
                 'annual_balance': balance_data['lifetime_earned'],  # For backwards compat
                 'lifetime_balance': balance_data['lifetime_earned'],  # For backwards compat
             }
@@ -1185,18 +1200,27 @@ class CurrentUserBalanceView(APIView):
     def get(self, request):
         user = request.user
         balance_data = PointsService.get_balance(user)
+        available_microroo = PointsService.get_available_microroo(user)
+        total_microroo = balance_data['balance_microroo']
+        reserved_microroo = max(total_microroo - available_microroo, 0)
         return Response(
             {
                 'user_id': user.id,
                 'email': user.email,
                 'slack_user_id': user.slack_id,
-                'balance': balance_data['balance'],
+                'balance': PointsService.microroo_to_legacy_whole(available_microroo),
                 'earned_balance': balance_data['earned_balance'],
                 'purchased_topup_balance': balance_data['purchased_topup_balance'],
                 'lifetime_earned': balance_data['lifetime_earned'],
                 'lifetime_purchased_topup': balance_data['lifetime_purchased_topup'],
                 'lifetime_spent': balance_data['lifetime_spent'],
                 'expired_or_reversed_points': balance_data['expired_or_reversed_points'],
+                'balance_microroo': str(available_microroo),
+                'balance_roo': roo_decimal_string(available_microroo),
+                'reserved_microroo': str(reserved_microroo),
+                'reserved_roo': roo_decimal_string(reserved_microroo),
+                'total_balance_microroo': str(total_microroo),
+                'total_balance_roo': roo_decimal_string(total_microroo),
             },
             status=status.HTTP_200_OK,
         )
@@ -1310,6 +1334,12 @@ class KimiPromptUsageView(APIView):
                     'balance': balance,
                 },
                 status=status.HTTP_402_PAYMENT_REQUIRED,
+            )
+        except IdempotencyConflictError:
+            return self._error(
+                'idempotency_conflict',
+                'That idempotency key was already used for a different operation.',
+                status.HTTP_409_CONFLICT,
             )
 
         # PointsService is globally idempotent. Reject a key collision instead
@@ -2398,6 +2428,12 @@ class CurrentUserPurchaseView(APIView):
     /roo/topup/{id} review + Stripe Checkout flow.
     """
     permission_classes = [IsAuthenticated]
+    # Accept the Desktop/Community Chat account session as well as the existing
+    # website JWT.  In both cases identity comes only from request.user.
+    authentication_classes = (
+        CommunityChatAccountAuthentication,
+        CustomJWTAuthentication,
+    )
 
     def post(self, request):
         pack_id = (request.data.get('pack_id') or '').strip()
