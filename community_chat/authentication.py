@@ -6,7 +6,7 @@ from django.utils import timezone
 from rest_framework.authentication import BaseAuthentication
 from rest_framework.exceptions import AuthenticationFailed
 
-from .models import CommunityChatBootstrapToken
+from .models import CommunityChatBootstrapToken, TokenUsageAccount
 from .account_cookies import ACCESS_COOKIE
 from .account_sessions import (
     ACCESS_TOKEN_PREFIX,
@@ -16,6 +16,43 @@ from .account_sessions import (
 
 
 TOKEN_PREFIX = "mlai_chat_"
+USAGE_TOKEN_PREFIX = "mlai_usage_"
+
+
+class TokenUsageAuthentication(BaseAuthentication):
+    """Authenticate the reporter token a member mints for the leaderboard.
+
+    Deliberately narrow: this credential can only write that member's own
+    usage rows. It carries no account access, so a leaked token is a
+    leaderboard problem and never an MLAI account problem.
+    """
+
+    def authenticate(self, request):
+        header = request.headers.get("Authorization", "")
+        if not header.startswith("Bearer "):
+            return None
+        raw_token = header.removeprefix("Bearer ").strip()
+        # Returning None on a prefix miss lets DRF fall through to the other
+        # authenticators instead of rejecting an account session outright.
+        if not raw_token.startswith(USAGE_TOKEN_PREFIX):
+            return None
+
+        token_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+        account = (
+            TokenUsageAccount.objects.select_related("user")
+            .filter(token_hash=token_hash)
+            .first()
+        )
+        if account is None or not account.user.is_active:
+            raise AuthenticationFailed("Token usage credential is invalid.")
+        if not hmac.compare_digest(account.token_hash, token_hash):
+            raise AuthenticationFailed("Token usage credential is invalid.")
+
+        request.token_usage_account = account
+        return account.user, account
+
+    def authenticate_header(self, request):
+        return "Bearer"
 
 
 class CommunityChatBootstrapAuthentication(BaseAuthentication):

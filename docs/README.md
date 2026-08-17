@@ -4,6 +4,10 @@ Start with the repository [`README`](../README.md) and
 [`ARCHITECTURE`](../ARCHITECTURE.md). Use this index to find current
 subsystem-specific contracts and runbooks.
 
+## Community chat APIs
+
+- [`community-chat-home.md`](community-chat-home.md)
+
 ## Inactive Buzz / MLAI Chat experiment
 
 These documents describe integration work for the inactive experiment in

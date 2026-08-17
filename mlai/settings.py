@@ -471,12 +471,26 @@ REST_FRAMEWORK = {
         'community_chat_invite': os.getenv('COMMUNITY_CHAT_INVITE_RATE', '10/minute'),
         'community_chat_confirm': os.getenv('COMMUNITY_CHAT_CONFIRM_RATE', '30/minute'),
         'community_chat_revoke': os.getenv('COMMUNITY_CHAT_REVOKE_RATE', '10/minute'),
+        'token_usage_ingest': os.getenv('TOKEN_USAGE_INGEST_RATE', '120/minute'),
+        'token_usage_history': os.getenv('TOKEN_USAGE_HISTORY_RATE', '20/minute'),
+        'token_usage_token': os.getenv('TOKEN_USAGE_TOKEN_RATE', '10/minute'),
+        'token_usage_leaderboard': os.getenv('TOKEN_USAGE_LEADERBOARD_RATE', '60/minute'),
+        'community_chat_home': os.getenv('COMMUNITY_CHAT_HOME_RATE', '60/minute'),
     }
 }
 
 # MLAI Chat device bootstrap. The adapter URL is private service-to-service;
 # only the public relay/client URLs are returned to browsers.
 COMMUNITY_CHAT_RELAY_URL = os.getenv('COMMUNITY_CHAT_RELAY_URL', 'wss://chat.mlai.au')
+# Handed to members in the reporter setup snippet. The tokenmaxer CLI appends
+# "/api/ingest" and "/api/history" to this value verbatim.
+TOKEN_USAGE_API_BASE = os.getenv(
+    'TOKEN_USAGE_API_BASE', 'https://api.mlai.au/api/v1/community-chat/usage'
+)
+TOKEN_USAGE_TIME_ZONE = _validated_timezone_name(
+    os.getenv('TOKEN_USAGE_TIME_ZONE', 'Australia/Melbourne'),
+    'TOKEN_USAGE_TIME_ZONE',
+)
 COMMUNITY_CHAT_API_AUDIENCE = os.getenv('COMMUNITY_CHAT_API_AUDIENCE', 'https://api.mlai.au')
 COMMUNITY_CHAT_ADAPTER_URL = os.getenv(
     'COMMUNITY_CHAT_ADAPTER_URL', 'http://127.0.0.1:3100'
