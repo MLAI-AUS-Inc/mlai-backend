@@ -40,6 +40,7 @@ class SlackFounderLinkApiTests(APITestCase):
             email="founder-tools@example.com",
         )
         self.start_url = reverse("slack_founder_link_start")
+        self.status_url = reverse("slack_founder_link_status")
         self.preview_url = reverse("slack_founder_link_preview")
         self.complete_url = reverse("slack_founder_link_complete")
 
@@ -129,6 +130,58 @@ class SlackFounderLinkApiTests(APITestCase):
 
         self.assertEqual(preview.status_code, status.HTTP_401_UNAUTHORIZED)
         self.assertEqual(complete.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_status_requires_authenticated_user(self):
+        response = self.client.get(self.status_url)
+
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_status_reports_unconnected_founder_without_identity_details(self):
+        self.client.force_authenticate(self.founder_user)
+
+        response = self.client.get(self.status_url)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            response.data,
+            {
+                "status": "not_connected",
+                "connection_type": None,
+                "slack_display_name": None,
+                "verified_at": None,
+            },
+        )
+        self.assertNotIn("slack_id", response.data)
+        self.assertNotIn("email", response.data)
+
+    def test_status_treats_existing_same_account_identity_as_connected(self):
+        self.client.force_authenticate(self.slack_user)
+
+        response = self.client.get(self.status_url)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["status"], "connected")
+        self.assertEqual(response.data["connection_type"], "direct")
+        self.assertEqual(response.data["slack_display_name"], "Slack Founder")
+        self.assertIsNone(response.data["verified_at"])
+        self.assertNotIn("slack_id", response.data)
+
+    def test_status_reports_explicit_verified_connection(self):
+        link = SlackFounderAccountLink.objects.create(
+            slack_user=self.slack_user,
+            founder_user=self.founder_user,
+        )
+        self.client.force_authenticate(self.founder_user)
+
+        response = self.client.get(self.status_url)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["status"], "connected")
+        self.assertEqual(response.data["connection_type"], "explicit")
+        self.assertEqual(response.data["slack_display_name"], "Slack Founder")
+        self.assertEqual(response.data["verified_at"], link.verified_at.isoformat())
+        self.assertNotIn("slack_id", response.data)
+        self.assertNotIn("email", response.data)
 
     def test_malformed_token_is_rejected_before_lookup(self):
         self.client.force_authenticate(self.founder_user)

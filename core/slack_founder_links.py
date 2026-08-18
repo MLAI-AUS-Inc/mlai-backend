@@ -206,6 +206,43 @@ def founder_tools_account_linked(user: User) -> bool:
     return SlackFounderAccountLink.objects.filter(slack_user=user).exists()
 
 
+def founder_account_connection_status(founder_user: User) -> dict:
+    """Return the authenticated founder's Roo connection without exposing IDs."""
+    link = (
+        SlackFounderAccountLink.objects.select_related("slack_user")
+        .filter(founder_user=founder_user)
+        .first()
+    )
+    if link is not None:
+        return {
+            "status": "connected",
+            "connection_type": "explicit",
+            "slack_display_name": (
+                link.slack_user.full_name or "Your Roo Slack account"
+            ),
+            "verified_at": link.verified_at.isoformat(),
+        }
+
+    # Same-account users were already verified when their Slack identity was
+    # attached to this user, so they do not need an additional explicit link.
+    if founder_user.slack_id:
+        return {
+            "status": "connected",
+            "connection_type": "direct",
+            "slack_display_name": (
+                founder_user.full_name or "Your Roo Slack account"
+            ),
+            "verified_at": None,
+        }
+
+    return {
+        "status": "not_connected",
+        "connection_type": None,
+        "slack_display_name": None,
+        "verified_at": None,
+    }
+
+
 def coworking_eligibility_user(user: User) -> User:
     link = (
         SlackFounderAccountLink.objects.select_related("founder_user")

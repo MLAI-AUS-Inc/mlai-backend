@@ -52,6 +52,7 @@ from .slack_founder_links import (
     SlackFounderLinkError,
     complete_slack_founder_link,
     create_slack_founder_link_request,
+    founder_account_connection_status,
     preview_slack_founder_link,
 )
 from .throttles import AuthEndpointRateThrottle, MagicLinkSendRateThrottle
@@ -1114,6 +1115,16 @@ class SlackFounderLinkStartView(APIView):
                 "expires_at": link_request.expires_at.isoformat(),
             },
             status=status.HTTP_201_CREATED,
+        )
+
+
+class SlackFounderLinkStatusView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        return Response(
+            founder_account_connection_status(request.user),
+            status=status.HTTP_200_OK,
         )
 
 
