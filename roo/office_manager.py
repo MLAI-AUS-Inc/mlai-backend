@@ -27,6 +27,14 @@ logger = logging.getLogger(__name__)
 
 OFFICE_MANAGER_ACTION_ID = "office_manager_volunteer_today"
 NO_FOOD_REMINDER = "Reminder: no food is permitted in the coworking space."
+COWORKING_SELF_BOOK_REMINDER = (
+    "Using the coworking space today? Please book yourself by asking "
+    "`@Roo book me in today`."
+)
+OFFICE_MANAGER_BOOKING_RESPONSIBILITY = (
+    "Please remind anyone using the coworking space to book themselves "
+    "through Roo for today."
+)
 
 
 class OfficeManagerClaimError(ValueError):
@@ -97,13 +105,18 @@ def _announcement_text(day: OfficeManagerDay) -> str:
         if assignment and assignment.user.slack_id:
             return (
                 f"Office Manager of the Day: <@{assignment.user.slack_id}>. "
-                "Roo booked them in without deducting Roo points."
+                "Roo booked them in without deducting Roo points. "
+                f"{COWORKING_SELF_BOOK_REMINDER}"
             )
     if day.status == "closed":
-        return "The Office Manager volunteer window is closed for today."
+        return (
+            "The Office Manager volunteer window is closed for today. "
+            f"{COWORKING_SELF_BOOK_REMINDER}"
+        )
     return (
         "Volunteer to be today's Office Manager. "
-        "Roo will book the selected member in without deducting Roo points."
+        "Roo will book the selected member in without deducting Roo points. "
+        f"{COWORKING_SELF_BOOK_REMINDER}"
     )
 
 
@@ -131,6 +144,7 @@ def _announcement_blocks(day: OfficeManagerDay) -> list[dict]:
                     "text": (
                         f"{mention} is today's Office Manager.\n"
                         "They have been booked in without deducting Roo points."
+                        f"\n\n{COWORKING_SELF_BOOK_REMINDER}"
                     ),
                 },
             },
@@ -146,7 +160,10 @@ def _announcement_blocks(day: OfficeManagerDay) -> list[dict]:
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": "The volunteer window is closed for today.",
+                    "text": (
+                        "The volunteer window is closed for today."
+                        f"\n\n{COWORKING_SELF_BOOK_REMINDER}"
+                    ),
                 },
             },
             {
@@ -165,6 +182,7 @@ def _announcement_blocks(day: OfficeManagerDay) -> list[dict]:
                     "and reset the space before leaving.\n\n"
                     "Roo will book the selected member in for today without "
                     "deducting Roo points. No channel or thread reply is needed."
+                    f"\n\n{COWORKING_SELF_BOOK_REMINDER}"
                 ),
             },
         },
@@ -206,6 +224,7 @@ def _winner_dm_text(assignment: OfficeManagerAssignment) -> str:
         "Today's responsibilities:\n"
         "- Welcome new members and visitors.\n"
         "- Help people get settled and onboarded.\n"
+        f"- {OFFICE_MANAGER_BOOKING_RESPONSIBILITY}\n"
         "- Reset and tidy the space before leaving.\n\n"
         f"{NO_FOOD_REMINDER}"
     )
@@ -223,6 +242,7 @@ def _winner_channel_announcement_text(
         f"{mention} is today's *Office Manager of the Day*.\n"
         "Roo booked them in without deducting Roo points. Please say hello "
         "and reach out if you need help getting settled.\n\n"
+        f"{COWORKING_SELF_BOOK_REMINDER}\n\n"
         f"{NO_FOOD_REMINDER}"
     )
 

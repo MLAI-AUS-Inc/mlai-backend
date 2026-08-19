@@ -10,7 +10,7 @@ class Migration(migrations.Migration):
 
     dependencies = [
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
-        ('roo', '0028_pointspurchase_checkout_sessions'),
+        ('roo', '0029_boostpostadmission_and_more'),
     ]
 
     operations = [

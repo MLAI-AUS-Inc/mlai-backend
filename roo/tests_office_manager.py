@@ -21,7 +21,10 @@ from .models import (
     PointsAccount,
 )
 from .office_manager import (
+    COWORKING_SELF_BOOK_REMINDER,
     NO_FOOD_REMINDER,
+    OFFICE_MANAGER_ACTION_ID,
+    OFFICE_MANAGER_BOOKING_RESPONSIBILITY,
     OfficeManagerClaimError,
     OfficeManagerService,
     run_office_manager_scheduler,
@@ -320,6 +323,10 @@ class OfficeManagerServiceTests(TestCase):
             NO_FOOD_REMINDER,
             fake_client.chat_postMessage.call_args.kwargs["text"],
         )
+        self.assertIn(
+            OFFICE_MANAGER_BOOKING_RESPONSIBILITY,
+            fake_client.chat_postMessage.call_args.kwargs["text"],
+        )
         result.assignment.refresh_from_db()
         self.assertEqual(result.assignment.winner_dm_status, "sent")
 
@@ -351,12 +358,36 @@ class OfficeManagerServiceTests(TestCase):
         self.assertIn(f"<@{self.user.slack_id}>", payload["text"])
         self.assertIn("Office Manager of the Day", payload["text"])
         self.assertIn("without deducting Roo points", payload["text"])
+        self.assertIn(COWORKING_SELF_BOOK_REMINDER, payload["text"])
         self.assertIn(NO_FOOD_REMINDER, payload["text"])
         result.assignment.refresh_from_db()
         self.assertEqual(
             result.assignment.winner_channel_announcement_status,
             "sent",
         )
+
+    def test_claimed_announcement_includes_booking_reminder_without_action(self):
+        result = OfficeManagerService.claim(
+            slack_user_id=self.user.slack_id,
+            booking_date=self.now.date(),
+            now=self.now,
+        )
+
+        with patch(
+            "roo.office_manager.SlackService.update_message",
+            return_value=True,
+        ) as update_message:
+            updated = OfficeManagerService.reconcile_message(
+                result.assignment.day_id
+            )
+
+        self.assertTrue(updated)
+        update_message.assert_called_once()
+        fallback_text = update_message.call_args.args[2]
+        blocks_text = json_text(update_message.call_args.kwargs["blocks"])
+        self.assertIn(COWORKING_SELF_BOOK_REMINDER, fallback_text)
+        self.assertIn(COWORKING_SELF_BOOK_REMINDER, blocks_text)
+        self.assertNotIn(OFFICE_MANAGER_ACTION_ID, blocks_text)
 
     def test_stale_winner_dm_delivery_lease_is_retried(self):
         result = OfficeManagerService.claim(
@@ -466,6 +497,8 @@ class OfficeManagerSchedulerTests(TestCase):
         blocks_text = json_text(payload["blocks"])
         self.assertIn("Volunteer for today", blocks_text)
         self.assertIn("No channel or thread reply is needed", blocks_text)
+        self.assertIn(COWORKING_SELF_BOOK_REMINDER, payload["text"])
+        self.assertIn(COWORKING_SELF_BOOK_REMINDER, blocks_text)
         self.assertIn(NO_FOOD_REMINDER, blocks_text)
 
     def test_scheduler_skips_weekends_and_before_announcement(self):
@@ -502,6 +535,35 @@ class OfficeManagerSchedulerTests(TestCase):
         self.assertEqual(result["reason"], "volunteer_window_closed")
         self.assertFalse(OfficeManagerDay.objects.exists())
         fake_client.chat_postMessage.assert_not_called()
+
+    def test_scheduler_closes_existing_day_with_booking_reminder_and_no_action(self):
+        now = melbourne_at(2026, 8, 3, 10)
+        day = office_manager_day(now.date())
+        day.announcement_status = "sent"
+        day.slack_message_ts = "123.456"
+        day.save(
+            update_fields=[
+                "announcement_status",
+                "slack_message_ts",
+                "updated_at",
+            ]
+        )
+
+        with patch(
+            "roo.office_manager.SlackService.update_message",
+            return_value=True,
+        ) as update_message:
+            result = run_office_manager_scheduler(now=now)
+
+        day.refresh_from_db()
+        self.assertEqual(result["status"], "closed")
+        self.assertEqual(day.status, "closed")
+        update_message.assert_called_once()
+        fallback_text = update_message.call_args.args[2]
+        blocks_text = json_text(update_message.call_args.kwargs["blocks"])
+        self.assertIn(COWORKING_SELF_BOOK_REMINDER, fallback_text)
+        self.assertIn(COWORKING_SELF_BOOK_REMINDER, blocks_text)
+        self.assertNotIn(OFFICE_MANAGER_ACTION_ID, blocks_text)
 
     def test_existing_claimed_day_still_sends_reminder_if_capacity_is_zero(self):
         now = melbourne_at(2026, 8, 3, 16, 30)
