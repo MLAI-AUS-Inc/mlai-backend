@@ -2980,6 +2980,81 @@ class ReconciliationWorkflowApiTests(APITestCase):
         self.assertEqual(step.status, ContentFactoryStepStatus.COMPLETED)
 
     @patch("core.permissions.HasRooApiKey.has_permission", return_value=True)
+    def test_external_agent_reports_terminal_failure_idempotently(self, _permission):
+        line = import_xero_statement_lines(
+            organization=self.organization,
+            bank_account_id="bank-1",
+            expected_count=1,
+            requested_by="UADMIN",
+            lines=[{
+                "statement_line_id": "external-agent-failed-line",
+                "date": "20 Jul 2026",
+                "narration": "Transfer To CONTRACTOR ONE",
+                "direction": "debit",
+                "amount": "845.00",
+            }],
+        )[0]
+        started = self.client.post(
+            reverse("reconciliation_agent_runs"),
+            {
+                "slack_user_id": "UADMIN",
+                "domain": "mlai.au",
+                "analysis_mode": "external_agent",
+                "statement_line_ids": [line.statement_line_id],
+            },
+            format="json",
+        )
+        run_id = started.data["run_id"]
+
+        failed = self.client.post(
+            reverse("reconciliation_agent_run_fail", kwargs={"run_id": run_id}),
+            {
+                "slack_user_id": "UADMIN",
+                "domain": "mlai.au",
+                "confirm": True,
+                "failure_kind": "context_length_exceeded",
+                "error": "The provider rejected the oversized input.",
+            },
+            format="json",
+        )
+
+        self.assertEqual(failed.status_code, status.HTTP_200_OK)
+        self.assertEqual(failed.data["status"], ContentFactoryRunStatus.FAILED)
+        self.assertEqual(failed.data["analysis_mode"], "external_agent")
+        self.assertFalse(failed.data["idempotent"])
+        run = ContentFactoryRun.objects.get(run_id=run_id)
+        self.assertEqual(run.status, ContentFactoryRunStatus.FAILED)
+        self.assertEqual(run.current_step, "")
+        self.assertIn("context_length_exceeded", run.error)
+        self.assertEqual(
+            run.result["external_agent_failure"]["failure_kind"],
+            "context_length_exceeded",
+        )
+        step = ContentFactoryRunStep.objects.get(run=run)
+        self.assertEqual(step.status, ContentFactoryStepStatus.FAILED)
+
+        repeated = self.client.post(
+            reverse("reconciliation_agent_run_fail", kwargs={"run_id": run_id}),
+            {
+                "slack_user_id": "UADMIN",
+                "domain": "mlai.au",
+                "confirm": True,
+                "failure_kind": "context_length_exceeded",
+                "error": "The provider rejected the oversized input.",
+            },
+            format="json",
+        )
+        self.assertEqual(repeated.status_code, status.HTTP_200_OK)
+        self.assertTrue(repeated.data["idempotent"])
+
+        detail = self.client.get(
+            reverse("reconciliation_agent_run_detail", kwargs={"run_id": run_id}),
+            {"slack_user_id": "UADMIN", "domain": "mlai.au"},
+        )
+        self.assertEqual(detail.data["analysis_mode"], "external_agent")
+        self.assertEqual(detail.data["status"], ContentFactoryRunStatus.FAILED)
+
+    @patch("core.permissions.HasRooApiKey.has_permission", return_value=True)
     def test_external_agent_submission_rejects_missing_or_historical_lines(self, _permission):
         current_line = import_xero_statement_lines(
             organization=self.organization,
