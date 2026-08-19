@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from datetime import timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -48,6 +49,12 @@ def _stable_json(value: Any) -> str:
 
 def _hash_payload(value: Any) -> str:
     return hashlib.sha256(_stable_json(value).encode("utf-8")).hexdigest()
+
+
+def _normalized_xero_resource_id(value: Any) -> str:
+    """Compare UUID-shaped Xero IDs independently of casing and separators."""
+
+    return re.sub(r"[^0-9a-z]", "", str(value or "").strip().casefold())
 
 
 def _reference(line: XeroStatementLineSnapshot) -> str:
@@ -225,7 +232,9 @@ def build_statement_posting_preview(suggestion: XeroStatementSuggestion) -> dict
         errors.append("This suggestion needs review and cannot be posted automatically.")
     if not profile.xero_bank_account_id:
         errors.append("Configure the Xero bank account before posting.")
-    elif line.bank_account_id != profile.xero_bank_account_id:
+    elif _normalized_xero_resource_id(line.bank_account_id) != _normalized_xero_resource_id(
+        profile.xero_bank_account_id
+    ):
         errors.append("The statement line belongs to a different Xero bank account.")
     if operation == XeroStatementPosting.OPERATION_BANK_TRANSACTION:
         semantic_local_duplicate = XeroStatementPosting.objects.filter(
