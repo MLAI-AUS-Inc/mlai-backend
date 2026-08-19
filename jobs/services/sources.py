@@ -54,7 +54,8 @@ PHASE_1_SOURCES: tuple[SourceConfig, ...] = (
     SourceConfig("AI Jobs Australia", "ai_board", 0.86, True, ("AI", "machine learning", "data")),
     SourceConfig("ai-jobs.com.au", "ai_board", 0.86, True, ("AI", "machine learning", "data")),
     SourceConfig("Company Brew", "startup_board", 0.76, True, ("AI", "startup", "software")),
-    SourceConfig("Matchstiq", "startup_board", 0.76, True, ("AI", "startup", "software")),
+    # Matchstiq's authoritative nameservers currently refuse DNS queries.
+    SourceConfig("Matchstiq", "startup_board", 0.76, False, ("AI", "startup", "software")),
     SourceConfig("Himalayas", "remote_board", 0.82, True, ("AI", "machine learning", "startup")),
     # CareerOne has consistently rejected production scraper traffic with HTTP 403.
     SourceConfig("CareerOne", "broad_board", 0.56, False, ("AI", "startup", "machine learning")),
