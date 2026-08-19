@@ -1858,13 +1858,17 @@ class XeroReconciliationWorkflowTests(TestCase):
         self.profile.require_statement_tracking = True
         self.profile.default_project_tracking_option_name = "MLAI core"
         self.profile.default_project_tracking_option_id = "project-core"
+        self.profile.xero_bank_account_id = "feb39489-f354-4852-88df-266a69b627d7"
         self.profile.save(update_fields=[
             "require_statement_tracking",
             "default_project_tracking_option_name",
             "default_project_tracking_option_id",
+            "xero_bank_account_id",
             "updated_at",
         ])
         suggestion = self._statement_suggestion(line_id="core-fallback")
+        suggestion.statement_line.bank_account_id = "FEB39489F354485288DF266A69B627D7"
+        suggestion.statement_line.save(update_fields=["bank_account_id"])
         suggestion.allocation_mode = XeroStatementSuggestion.ALLOCATION_MLAI_CORE
         suggestion.identity_confidence = 0.99
         suggestion.accounting_confidence = 0.99
