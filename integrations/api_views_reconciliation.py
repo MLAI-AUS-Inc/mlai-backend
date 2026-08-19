@@ -1686,6 +1686,7 @@ class ReconciliationReadinessView(ReconciliationAdminView):
         )
         untracked_executable_count = XeroStatementSuggestion.objects.filter(
             organization=organization,
+            statement_line__active=True,
             status=XeroStatementSuggestion.STATUS_PROPOSED,
             execution_ready=True,
             allocation_mode=XeroStatementSuggestion.ALLOCATION_UNASSIGNED,

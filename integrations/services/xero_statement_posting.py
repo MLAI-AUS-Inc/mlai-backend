@@ -344,6 +344,7 @@ def build_statement_posting_preview(suggestion: XeroStatementSuggestion) -> dict
         "tracking_policy_ready": not effective_tracking_errors(profile, suggestion),
         "untracked_executable_count": XeroStatementSuggestion.objects.filter(
             organization=suggestion.organization,
+            statement_line__active=True,
             status=XeroStatementSuggestion.STATUS_PROPOSED,
             execution_ready=True,
             allocation_mode=XeroStatementSuggestion.ALLOCATION_UNASSIGNED,

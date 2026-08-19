@@ -1871,11 +1871,17 @@ class XeroReconciliationWorkflowTests(TestCase):
         suggestion.allocation_confidence = 1.0
         suggestion.execution_ready = True
         suggestion.save()
+        stale = self._statement_suggestion(line_id="core-fallback-stale")
+        stale.execution_ready = True
+        stale.save(update_fields=["execution_ready", "updated_at"])
+        stale.statement_line.active = False
+        stale.statement_line.save(update_fields=["active"])
 
         preview = build_statement_posting_preview(suggestion)
 
         self.assertTrue(preview["ready"])
         self.assertTrue(preview["tracking_policy_ready"])
+        self.assertEqual(preview["untracked_executable_count"], 0)
         self.assertEqual(preview["effective_tracking"]["option_name"], "MLAI core")
         self.assertTrue(preview["effective_tracking"]["default"])
         tracking = preview["xero_payload"]["LineItems"][0]["Tracking"]
@@ -2307,6 +2313,9 @@ class ReconciliationWorkflowApiTests(APITestCase):
             xero_bank_account_id="bank-1",
             event_tracking_category_id="event-category",
             project_tracking_category_id="project-category",
+            require_statement_tracking=True,
+            default_project_tracking_option_name="MLAI core",
+            default_project_tracking_option_id="project-core",
         )
         monthly_run = ContentFactoryRun.objects.create(
             run_id="monthly-readiness",
@@ -2314,6 +2323,29 @@ class ReconciliationWorkflowApiTests(APITestCase):
             domain=self.organization.domain,
             organization=self.organization,
             status=ContentFactoryRunStatus.COMPLETED,
+        )
+        stale_line = import_xero_statement_lines(
+            organization=self.organization,
+            bank_account_id="bank-1",
+            expected_count=1,
+            requested_by="UADMIN",
+            lines=[{
+                "statement_line_id": "readiness-stale-untracked",
+                "date": "19 Jul 2026",
+                "narration": "OLD ALREADY RECONCILED ROW",
+                "direction": "debit",
+                "amount": "10.00",
+            }],
+        )[0]
+        XeroStatementSuggestion.objects.create(
+            organization=self.organization,
+            statement_line=stale_line,
+            run_id="old-readiness-run",
+            proposed_action=XeroStatementSuggestion.ACTION_CREATE_BANK_TRANSACTION,
+            allocation_mode=XeroStatementSuggestion.ALLOCATION_UNASSIGNED,
+            execution_ready=True,
+            status=XeroStatementSuggestion.STATUS_PROPOSED,
+            source_hash=stale_line.source_hash,
         )
         line = import_xero_statement_lines(
             organization=self.organization,
@@ -2339,6 +2371,10 @@ class ReconciliationWorkflowApiTests(APITestCase):
         self.assertTrue(response.data["ready_to_execute_bank_transactions"])
         self.assertTrue(response.data["ready_to_execute_bill_payments"])
         self.assertTrue(response.data["tracking_ready"])
+        self.assertTrue(response.data["tracking_policy_ready"])
+        self.assertEqual(response.data["untracked_executable_count"], 0)
+        stale_line.refresh_from_db()
+        self.assertFalse(stale_line.active)
         self.assertEqual(response.data["latest_statement_scan"]["candidate_count"], 1)
         self.assertEqual(
             response.data["latest_statement_scan"]["id"],
