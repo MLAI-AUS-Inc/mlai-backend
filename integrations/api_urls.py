@@ -35,6 +35,7 @@ urlpatterns = [
     path('reconciliation/agent-runs', api_views_reconciliation.ReconciliationAgentRunView.as_view(), name='reconciliation_agent_runs'),
     path('reconciliation/agent-runs/<str:run_id>', api_views_reconciliation.ReconciliationAgentRunDetailView.as_view(), name='reconciliation_agent_run_detail'),
     path('reconciliation/agent-runs/<str:run_id>/retry', api_views_reconciliation.ReconciliationAgentRunRetryView.as_view(), name='reconciliation_agent_run_retry'),
+    path('reconciliation/agent-runs/<str:run_id>/fail', api_views_reconciliation.ReconciliationAgentRunFailureView.as_view(), name='reconciliation_agent_run_fail'),
     path('reconciliation/agent-runs/<str:run_id>/preview', api_views_reconciliation.ReconciliationAgentRunPreviewView.as_view(), name='reconciliation_agent_run_preview'),
     path('reconciliation/agent-runs/<str:run_id>/decisions', api_views_reconciliation.ReconciliationAgentRunDecisionView.as_view(), name='reconciliation_agent_run_decisions'),
     path('reconciliation/agent-runs/<str:run_id>/execute', api_views_reconciliation.ReconciliationAgentRunExecuteView.as_view(), name='reconciliation_agent_run_execute'),

@@ -2117,6 +2117,8 @@ class ReconciliationAgentRunDetailView(ReconciliationAdminView):
             "workflow": run.workflow,
             "status": run.status,
             "current_step": run.current_step,
+            "analysis_mode": str((run.run_request or {}).get("analysis_mode") or "valley"),
+            "base_monthly_run_id": str((run.run_request or {}).get("base_monthly_run_id") or ""),
             "error": run.error,
             "retry_available": bool(
                 run.resume_available
@@ -2133,6 +2135,112 @@ class ReconciliationAgentRunDetailView(ReconciliationAdminView):
                 (run.result or {}).get("deterministic_reconciliation") or {}
             ),
             "suggestions": [serialize_statement_suggestion(item) for item in suggestions],
+        })
+
+
+class ReconciliationAgentRunFailureView(ReconciliationAdminView):
+    """Let an external agent terminate a run that it could not complete."""
+
+    def post(self, request, run_id: str):
+        _, organization, error = self.context(request, from_body=True)
+        if error:
+            return error
+        if request.data.get("confirm") is not True:
+            return Response(
+                {"error": "confirm must be true to fail reconciliation analysis"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        run = ContentFactoryRun.objects.filter(
+            organization=organization,
+            workflow=RECONCILIATION_AGENT_WORKFLOW,
+            run_id=run_id,
+        ).first()
+        if run is None:
+            return Response(
+                {"error": "Reconciliation agent run was not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        request_payload = run.run_request if isinstance(run.run_request, dict) else {}
+        if request_payload.get("analysis_mode") != "external_agent":
+            return Response(
+                {"error": "Only an external reconciliation agent can report this failure."},
+                status=status.HTTP_409_CONFLICT,
+            )
+        if run.status == ContentFactoryRunStatus.COMPLETED:
+            return Response(
+                {"error": "A completed reconciliation run cannot be failed."},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        failure_kind = str(request.data.get("failure_kind") or "").strip()[:64]
+        failure_error = str(request.data.get("error") or "").strip()[:1500]
+        if not failure_kind or not failure_error:
+            return Response(
+                {"error": "failure_kind and error are required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        idempotent = run.status == ContentFactoryRunStatus.FAILED
+        if not idempotent and run.status not in {
+            ContentFactoryRunStatus.QUEUED,
+            ContentFactoryRunStatus.RUNNING,
+            ContentFactoryRunStatus.BLOCKED,
+        }:
+            return Response(
+                {"error": f"Reconciliation agent run cannot fail from {run.status}."},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        if not idempotent:
+            failed_at = datetime.now(timezone.utc)
+            with transaction.atomic():
+                run = ContentFactoryRun.objects.select_for_update().get(pk=run.pk)
+                if run.status == ContentFactoryRunStatus.COMPLETED:
+                    return Response(
+                        {"error": "A completed reconciliation run cannot be failed."},
+                        status=status.HTTP_409_CONFLICT,
+                    )
+                if run.status == ContentFactoryRunStatus.FAILED:
+                    idempotent = True
+                else:
+                    result = run.result if isinstance(run.result, dict) else {}
+                    run.result = {
+                        **result,
+                        "external_agent_failure": {
+                            "failure_kind": failure_kind,
+                            "error": failure_error,
+                            "failed_at": failed_at.isoformat(),
+                        },
+                    }
+                    run.status = ContentFactoryRunStatus.FAILED
+                    run.current_step = ""
+                    run.error = f"{failure_kind}: {failure_error}"[:4000]
+                    run.resume_available = False
+                    run.save(update_fields=[
+                        "result",
+                        "status",
+                        "current_step",
+                        "error",
+                        "resume_available",
+                        "updated_at",
+                    ])
+                    ContentFactoryRunStep.objects.filter(
+                        run=run,
+                        step_key=RECONCILIATION_AGENT_STEP_ORDER[0],
+                    ).update(
+                        status=ContentFactoryStepStatus.FAILED,
+                        completed_at=failed_at,
+                        error=failure_error,
+                        message="The external reconciliation agent failed before submitting suggestions.",
+                    )
+        return Response({
+            "run_id": run.run_id,
+            "workflow": run.workflow,
+            "status": run.status,
+            "current_step": run.current_step,
+            "analysis_mode": "external_agent",
+            "base_monthly_run_id": str(request_payload.get("base_monthly_run_id") or ""),
+            "retry_available": False,
+            "idempotent": idempotent,
         })
 
 
