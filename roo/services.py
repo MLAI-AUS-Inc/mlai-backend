@@ -986,15 +986,38 @@ class PointsService:
         idempotency_key: str,
         reference_type: Optional[str] = None,
         reference_id: Optional[str] = None,
+        purchased_delta: int = 0,
+        purchased_delta_microroo: Optional[int] = None,
+        reverse_lifetime_spent: bool = False,
     ) -> Tuple[Ledger, bool]:
         """
         Refund points to a user (restore previously spent points).
-        
+
+        ``purchased_delta_microroo`` preserves the exact original point buckets
+        when the caller recorded the spend allocation. ``purchased_delta`` is
+        retained for whole-Roo callers. ``reverse_lifetime_spent`` is reserved
+        for true reversals such as a pre-start booking cancellation.
         Similar to award but uses REFUND kind for audit trail clarity.
         """
         if delta <= 0:
             raise ValueError("Refund delta must be positive")
         delta_microroo = PointsService.roo_to_microroo(delta)
+
+        if purchased_delta_microroo is not None and purchased_delta:
+            raise ValueError(
+                "Specify either purchased_delta or purchased_delta_microroo, not both"
+            )
+        if purchased_delta_microroo is None:
+            purchased_delta_microroo = PointsService.roo_to_microroo(
+                purchased_delta
+            )
+        if (
+            purchased_delta_microroo < 0
+            or purchased_delta_microroo > delta_microroo
+        ):
+            raise ValueError(
+                "Purchased refund delta must be between zero and delta"
+            )
 
         def validate_existing(existing: Ledger) -> None:
             PointsService._validate_idempotent_ledger(
@@ -1039,9 +1062,16 @@ class PointsService:
             return existing, False
         
         account.balance_microroo += delta_microroo
-        account.earned_balance_microroo += delta_microroo
+        account.purchased_topup_balance_microroo += purchased_delta_microroo
+        account.earned_balance_microroo += (
+            delta_microroo - purchased_delta_microroo
+        )
+        if reverse_lifetime_spent:
+            account.lifetime_spent_microroo = max(
+                0,
+                account.lifetime_spent_microroo - delta_microroo,
+            )
         PointsService._sync_legacy_account(account)
-        # Note: Don't decrease lifetime_spent on refund - it's a historical record
         account.save()
         
         return ledger, True

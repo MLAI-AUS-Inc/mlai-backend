@@ -3,7 +3,7 @@ from datetime import timedelta, timezone as datetime_timezone
 
 from django.conf import settings
 from django.core.exceptions import ValidationError
-from django.db import models
+from django.db import models, transaction
 from django.db.models import Q
 from django.utils import timezone
 
@@ -896,6 +896,7 @@ class MeetingRoomBooking(models.Model):
     ends_at = models.DateTimeField()
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='booked')
     points_cost = models.PositiveIntegerField()
+    purchased_points_cost = models.PositiveIntegerField(blank=True, null=True)
     client_request_id = models.UUIDField(unique=True)
     ledger_entry = models.ForeignKey(
         Ledger,
@@ -932,6 +933,13 @@ class MeetingRoomBooking(models.Model):
             models.CheckConstraint(
                 check=models.Q(ends_at__gt=models.F('starts_at')),
                 name='meeting_room_booking_end_after_start',
+            ),
+            models.CheckConstraint(
+                check=(
+                    models.Q(purchased_points_cost__isnull=True)
+                    | models.Q(purchased_points_cost__lte=models.F('points_cost'))
+                ),
+                name='meeting_room_purchased_cost_lte_total',
             ),
         ]
 
@@ -988,6 +996,19 @@ class MeetingRoomBlock(models.Model):
             raise ValidationError(
                 'This block overlaps an active meeting-room booking.'
             )
+
+    def save(self, *args, **kwargs):
+        from .meeting_rooms import MeetingRoomService
+
+        self.full_clean()
+        with transaction.atomic():
+            MeetingRoomService.lock_room_interval(
+                room=self.room,
+                starts_at=self.starts_at,
+                ends_at=self.ends_at,
+            )
+            self.full_clean()
+            return super().save(*args, **kwargs)
 
     def __str__(self):
         return f"{self.room.name}: unavailable {self.starts_at} - {self.ends_at}"

@@ -5,12 +5,14 @@ from typing import Iterable, Optional
 from zoneinfo import ZoneInfo
 
 from django.conf import settings
+from django.core.exceptions import ValidationError
 from django.db import IntegrityError, connection, transaction
 from django.utils import timezone
 
 from core.models import User
 
 from .models import (
+    Ledger,
     MeetingRoom,
     MeetingRoomBlock,
     MeetingRoomBooking,
@@ -45,9 +47,7 @@ class MeetingRoomService:
 
     @staticmethod
     def _timezone() -> ZoneInfo:
-        return ZoneInfo(
-            getattr(settings, 'MEETING_ROOM_TIMEZONE', 'Australia/Melbourne')
-        )
+        return ZoneInfo(settings.MEETING_ROOM_TIMEZONE)
 
     @staticmethod
     def _ensure_enabled() -> None:
@@ -162,7 +162,10 @@ class MeetingRoomService:
         latest_date = current_time.astimezone(room_tz).date() + timedelta(
             days=advance_days
         )
-        if local_start.date() > latest_date:
+        last_occupied_date = (ends_at - timedelta(microseconds=1)).astimezone(
+            room_tz
+        ).date()
+        if local_start.date() > latest_date or last_occupied_date > latest_date:
             raise MeetingRoomError(
                 'invalid_time',
                 f'Meeting-room bookings can only be made {advance_days} days ahead',
@@ -410,16 +413,17 @@ class MeetingRoomService:
         room = cls._get_room(room_slug)
         requested_interval = None
         available = None
+        unavailable_reasons: list[str] = []
         points_cost = None
 
         if starts_at is not None or ends_at is not None:
             starts_at, ends_at, points_cost = cls.validate_interval(starts_at, ends_at)
             range_start, range_end = starts_at, ends_at
             local_dates = cls._local_dates(starts_at, ends_at)
-            available = not (
-                cls._room_has_booking(room, starts_at, ends_at)
-                or cls._room_has_block(room, starts_at, ends_at)
-            )
+            if cls._room_has_booking(room, starts_at, ends_at):
+                unavailable_reasons.append('booking_conflict')
+            if cls._room_has_block(room, starts_at, ends_at):
+                unavailable_reasons.append('room_blocked')
             room_tz = cls._timezone()
             requested_interval = {
                 'starts_at': starts_at.astimezone(room_tz).isoformat(),
@@ -441,13 +445,31 @@ class MeetingRoomService:
             range_start, range_end = cls._day_bounds(local_date)
             local_dates = [local_date]
 
+        remaining_daily_hours = cls._remaining_daily_hours(user, local_dates)
+        if requested_interval:
+            for local_date in local_dates:
+                day_start, day_end = cls._day_bounds(local_date)
+                requested_hours = cls._overlap_hours(
+                    starts_at,
+                    ends_at,
+                    day_start,
+                    day_end,
+                )
+                if requested_hours > remaining_daily_hours[local_date.isoformat()]:
+                    unavailable_reasons.append('daily_limit')
+                    break
+            if cls.current_balance(user) < points_cost:
+                unavailable_reasons.append('insufficient_balance')
+            available = not unavailable_reasons
+
         return {
             'timezone': str(cls._timezone()),
             'room': serialize_room(room),
             'requested_interval': requested_interval,
             'available': available,
+            'unavailable_reasons': unavailable_reasons,
             'points_cost': points_cost,
-            'remaining_daily_hours': cls._remaining_daily_hours(user, local_dates),
+            'remaining_daily_hours': remaining_daily_hours,
             'busy_intervals': cls._busy_intervals(room, range_start, range_end),
         }
 
@@ -470,6 +492,15 @@ class MeetingRoomService:
             raise MeetingRoomError(
                 'payload_conflict',
                 'client_request_id was already used for a different booking',
+                409,
+            )
+
+    @staticmethod
+    def _assert_active_replay(booking: MeetingRoomBooking) -> None:
+        if booking.status == 'cancelled':
+            raise MeetingRoomError(
+                'booking_cancelled',
+                'This booking confirmation belongs to a cancelled booking',
                 409,
             )
 
@@ -502,6 +533,7 @@ class MeetingRoomService:
                 starts_at=starts_at,
                 ends_at=ends_at,
             )
+            cls._assert_active_replay(existing)
             return existing, False
 
         room = cls._get_room(room_slug)
@@ -534,6 +566,7 @@ class MeetingRoomService:
                 starts_at=starts_at,
                 ends_at=ends_at,
             )
+            cls._assert_active_replay(existing)
             return existing, False
 
         if cls._room_has_block(room, starts_at, ends_at):
@@ -556,6 +589,13 @@ class MeetingRoomService:
 
         try:
             with transaction.atomic():
+                account = PointsAccount.objects.select_for_update().filter(
+                    user=user
+                ).first()
+                purchased_points_cost = min(
+                    account.purchased_topup_balance if account else 0,
+                    points_cost,
+                )
                 ledger, _ = PointsService.spend(
                     user=user,
                     delta=points_cost,
@@ -576,6 +616,7 @@ class MeetingRoomService:
                     ends_at=ends_at,
                     status='booked',
                     points_cost=points_cost,
+                    purchased_points_cost=purchased_points_cost,
                     client_request_id=request_id,
                     ledger_entry=ledger,
                     requested_by_slack_id=requested_by_slack_id,
@@ -594,12 +635,12 @@ class MeetingRoomService:
                 starts_at=starts_at,
                 ends_at=ends_at,
             )
+            cls._assert_active_replay(existing)
             return existing, False
         return booking, True
 
     @classmethod
     def my_bookings(cls, *, user: User) -> list[MeetingRoomBooking]:
-        cls._ensure_enabled()
         return list(
             MeetingRoomBooking.objects.filter(
                 user=user,
@@ -619,12 +660,11 @@ class MeetingRoomService:
         booking_id: str,
         requested_by_slack_id: str,
     ) -> tuple[MeetingRoomBooking, bool, bool]:
-        cls._ensure_enabled()
         try:
             booking = MeetingRoomBooking.objects.select_for_update().select_related(
                 'room'
             ).get(pk=booking_id)
-        except (MeetingRoomBooking.DoesNotExist, ValueError):
+        except (MeetingRoomBooking.DoesNotExist, ValidationError, ValueError):
             raise MeetingRoomError(
                 'booking_not_found',
                 'Meeting-room booking not found',
@@ -636,16 +676,35 @@ class MeetingRoomService:
                 'Members can only cancel their own meeting-room bookings',
                 403,
             )
-        if booking.status == 'cancelled':
-            return booking, False, booking.refund_ledger_entry_id is not None
-        if cls._now() >= booking.starts_at:
+        if booking.status == 'cancelled' and booking.refund_ledger_entry_id:
+            return booking, False, True
+        if booking.status == 'booked' and cls._now() >= booking.starts_at:
             raise MeetingRoomError(
                 'booking_started',
                 'Meeting-room bookings cannot be cancelled after they start',
                 409,
             )
 
-        ledger, _ = PointsService.refund(
+        charge_ledger = booking.ledger_entry
+        if charge_ledger is None:
+            charge_ledger = Ledger.objects.filter(
+                idempotency_key=(
+                    f'meeting_room_book:{booking.user_id}:'
+                    f'{booking.client_request_id}'
+                )
+            ).first()
+        if charge_ledger is None:
+            raise MeetingRoomError(
+                'refund_unavailable',
+                'The original meeting-room charge could not be verified',
+                409,
+            )
+
+        purchased_points_cost = min(
+            booking.purchased_points_cost or 0,
+            booking.points_cost,
+        )
+        ledger, refund_created = PointsService.refund(
             user=user,
             delta=booking.points_cost,
             source='MEETING_ROOM',
@@ -654,10 +713,13 @@ class MeetingRoomService:
             idempotency_key=f'meeting_room_refund:{booking.id}',
             reference_type='MEETING_ROOM_REFUND',
             reference_id=str(booking.id),
+            purchased_delta=purchased_points_cost,
+            reverse_lifetime_spent=True,
         )
+        was_booked = booking.status == 'booked'
         booking.status = 'cancelled'
         booking.refund_ledger_entry = ledger
-        booking.cancelled_at = cls._now()
+        booking.cancelled_at = booking.cancelled_at or cls._now()
         booking.save(
             update_fields=[
                 'status',
@@ -665,7 +727,7 @@ class MeetingRoomService:
                 'cancelled_at',
             ]
         )
-        return booking, True, True
+        return booking, was_booked or refund_created, True
 
     @classmethod
     def serialize_booking(cls, booking: MeetingRoomBooking) -> dict:

@@ -6,13 +6,15 @@ from unittest import skipUnless
 from zoneinfo import ZoneInfo
 
 from django.contrib.auth import get_user_model
-from django.core.exceptions import ValidationError
+from django.core.exceptions import ImproperlyConfigured, ValidationError
 from django.db import connection, connections, transaction
 from django.test import TransactionTestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
+
+from mlai.settings import _validated_timezone_name
 
 from .meeting_rooms import MeetingRoomError, MeetingRoomService
 from .models import Ledger, MeetingRoom, MeetingRoomBlock, MeetingRoomBooking, PointsAccount
@@ -120,6 +122,44 @@ class MeetingRoomApiTests(APITestCase):
 
         self.assertFalse(MeetingRoomBooking.objects.exists())
 
+    def test_invalid_calendar_values_return_invalid_time(self):
+        availability = self.client.post(
+            reverse('meeting-room-availability'),
+            {
+                'slack_user_id': self.user.slack_id,
+                'date': '2026-02-30',
+            },
+            format='json',
+        )
+        payload = self.book_payload(future_local(1, 9))
+        payload['starts_at'] = '2026-02-30T09:00:00+11:00'
+        invalid_booking = self.client.post(
+            reverse('meeting-room-book'),
+            payload,
+            format='json',
+        )
+
+        for response in (availability, invalid_booking):
+            self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+            self.assertEqual(response.data['code'], 'invalid_time')
+
+    def test_booking_cannot_spill_past_advance_window(self):
+        now = datetime(2026, 8, 21, 9, tzinfo=MELBOURNE)
+        starts_at = datetime(2026, 9, 20, 23, tzinfo=MELBOURNE)
+
+        with self.assertRaises(MeetingRoomError) as raised:
+            MeetingRoomService.validate_interval(
+                starts_at,
+                starts_at + timedelta(hours=2),
+                now=now,
+            )
+
+        self.assertEqual(raised.exception.code, 'invalid_time')
+
+    def test_invalid_meeting_room_timezone_is_rejected_during_configuration(self):
+        with self.assertRaises(ImproperlyConfigured):
+            _validated_timezone_name('Mars/Olympus_Mons', 'MEETING_ROOM_TIMEZONE')
+
     def test_cross_midnight_cost_and_daily_allowance_are_split(self):
         starts_at = future_local(1, 22)
         response = self.book(starts_at, 4)
@@ -216,14 +256,15 @@ class MeetingRoomApiTests(APITestCase):
     def test_block_validation_rejects_existing_active_booking(self):
         starts_at = future_local(1, 9)
         self.assertEqual(self.book(starts_at, 1).status_code, status.HTTP_201_CREATED)
-        block = MeetingRoomBlock(
-            room=self.room,
-            starts_at=starts_at,
-            ends_at=starts_at + timedelta(hours=1),
-        )
 
         with self.assertRaises(ValidationError):
-            block.full_clean()
+            MeetingRoomBlock.objects.create(
+                room=self.room,
+                starts_at=starts_at,
+                ends_at=starts_at + timedelta(hours=1),
+            )
+
+        self.assertFalse(MeetingRoomBlock.objects.exists())
 
     def test_availability_exposes_busy_times_without_member_identity(self):
         starts_at = future_local(1, 9)
@@ -244,6 +285,47 @@ class MeetingRoomApiTests(APITestCase):
         self.assertNotIn(self.user.email, serialized)
         self.assertNotIn(self.user.slack_id.lower(), serialized)
         self.assertNotIn('user', serialized)
+
+    def test_exact_availability_accounts_for_balance_and_daily_limit(self):
+        starts_at = future_local(2, 9)
+        account = self.user.points_account
+        account.balance = 0
+        account.earned_balance = 0
+        account.save(update_fields=['balance', 'earned_balance'])
+
+        insufficient = self.client.post(
+            reverse('meeting-room-availability'),
+            {
+                'slack_user_id': self.user.slack_id,
+                'starts_at': starts_at.isoformat(),
+                'ends_at': (starts_at + timedelta(hours=1)).isoformat(),
+            },
+            format='json',
+        )
+
+        self.assertFalse(insufficient.data['available'])
+        self.assertEqual(
+            insufficient.data['unavailable_reasons'],
+            ['insufficient_balance'],
+        )
+
+        account.balance = 10
+        account.earned_balance = 10
+        account.save(update_fields=['balance', 'earned_balance'])
+        self.assertEqual(self.book(starts_at, 4).status_code, status.HTTP_201_CREATED)
+        later = starts_at.replace(hour=14)
+        daily_limit = self.client.post(
+            reverse('meeting-room-availability'),
+            {
+                'slack_user_id': self.user.slack_id,
+                'starts_at': later.isoformat(),
+                'ends_at': (later + timedelta(hours=1)).isoformat(),
+            },
+            format='json',
+        )
+
+        self.assertFalse(daily_limit.data['available'])
+        self.assertEqual(daily_limit.data['unavailable_reasons'], ['daily_limit'])
 
     def test_unlinked_inactive_insufficient_and_targeted_requests_fail(self):
         starts_at = future_local(1, 9)
@@ -281,6 +363,31 @@ class MeetingRoomApiTests(APITestCase):
         )
         self.user.points_account.refresh_from_db()
         self.assertEqual(self.user.points_account.balance, 38)
+
+    def test_cancelled_booking_confirmation_cannot_report_already_booked(self):
+        payload = self.book_payload(future_local(1, 9), 1)
+        booked = self.client.post(
+            reverse('meeting-room-book'), payload, format='json'
+        )
+        self.client.post(
+            reverse('meeting-room-cancel'),
+            {
+                'slack_user_id': self.user.slack_id,
+                'booking_id': booked.data['booking']['id'],
+            },
+            format='json',
+        )
+
+        replay = self.client.post(
+            reverse('meeting-room-book'), payload, format='json'
+        )
+
+        self.assertEqual(replay.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(replay.data['code'], 'booking_cancelled')
+        self.assertEqual(
+            Ledger.objects.filter(user=self.user, source='MEETING_ROOM').count(),
+            2,
+        )
 
     def test_reused_request_id_with_different_payload_is_rejected(self):
         payload = self.book_payload(future_local(1, 9), 1)
@@ -328,6 +435,87 @@ class MeetingRoomApiTests(APITestCase):
         )
         self.user.points_account.refresh_from_db()
         self.assertEqual(self.user.points_account.balance, 40)
+
+    def test_cancellation_restores_original_point_buckets(self):
+        account = self.user.points_account
+        account.balance = 5
+        account.earned_balance = 3
+        account.purchased_topup_balance = 2
+        account.lifetime_spent = 0
+        account.save()
+        booked = self.book(future_local(1, 9), 3)
+        booking = MeetingRoomBooking.objects.get(pk=booked.data['booking']['id'])
+
+        self.assertEqual(booking.purchased_points_cost, 2)
+        account.refresh_from_db()
+        self.assertEqual(account.purchased_topup_balance, 0)
+        self.assertEqual(account.earned_balance, 2)
+        self.assertEqual(account.lifetime_spent, 3)
+
+        cancelled = self.client.post(
+            reverse('meeting-room-cancel'),
+            {
+                'slack_user_id': self.user.slack_id,
+                'booking_id': str(booking.id),
+            },
+            format='json',
+        )
+
+        self.assertTrue(cancelled.data['refunded'])
+        account.refresh_from_db()
+        self.assertEqual(account.balance, 5)
+        self.assertEqual(account.purchased_topup_balance, 2)
+        self.assertEqual(account.earned_balance, 3)
+        self.assertEqual(account.lifetime_spent, 0)
+
+    def test_cancelled_booking_without_refund_is_recovered_once(self):
+        booked = self.book(future_local(1, 9), 2)
+        booking = MeetingRoomBooking.objects.get(pk=booked.data['booking']['id'])
+        booking.status = 'cancelled'
+        booking.cancelled_at = timezone.now()
+        booking.save(update_fields=['status', 'cancelled_at'])
+
+        recovered = self.client.post(
+            reverse('meeting-room-cancel'),
+            {
+                'slack_user_id': self.user.slack_id,
+                'booking_id': str(booking.id),
+            },
+            format='json',
+        )
+        replay = self.client.post(
+            reverse('meeting-room-cancel'),
+            {
+                'slack_user_id': self.user.slack_id,
+                'booking_id': str(booking.id),
+            },
+            format='json',
+        )
+
+        self.assertTrue(recovered.data['cancelled'])
+        self.assertTrue(recovered.data['refunded'])
+        self.assertTrue(replay.data['refunded'])
+        self.assertEqual(
+            Ledger.objects.filter(user=self.user, source='MEETING_ROOM').count(),
+            2,
+        )
+        self.user.points_account.refresh_from_db()
+        self.assertEqual(self.user.points_account.balance, 40)
+
+    def test_invalid_or_missing_cancel_booking_id_returns_not_found(self):
+        for booking_id in ('', 'not-a-uuid'):
+            with self.subTest(booking_id=booking_id):
+                response = self.client.post(
+                    reverse('meeting-room-cancel'),
+                    {
+                        'slack_user_id': self.user.slack_id,
+                        'booking_id': booking_id,
+                    },
+                    format='json',
+                )
+
+                self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+                self.assertEqual(response.data['code'], 'booking_not_found')
 
     def test_started_booking_cannot_be_cancelled(self):
         booking = MeetingRoomBooking.objects.create(
@@ -378,6 +566,30 @@ class MeetingRoomApiTests(APITestCase):
             disabled = self.client.get(reverse('meeting-room-list'))
         self.assertEqual(disabled.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
         self.assertEqual(disabled.data['code'], 'feature_disabled')
+
+    def test_disabled_feature_still_allows_listing_and_cancelling_bookings(self):
+        booked = self.book(future_local(1, 9), 1)
+        booking_id = booked.data['booking']['id']
+
+        with override_settings(MEETING_ROOM_BOOKING_ENABLED=False):
+            listed = self.client.post(
+                reverse('meeting-room-my-bookings'),
+                {'slack_user_id': self.user.slack_id},
+                format='json',
+            )
+            cancelled = self.client.post(
+                reverse('meeting-room-cancel'),
+                {
+                    'slack_user_id': self.user.slack_id,
+                    'booking_id': booking_id,
+                },
+                format='json',
+            )
+
+        self.assertEqual(listed.status_code, status.HTTP_200_OK)
+        self.assertEqual(listed.data['bookings'][0]['id'], booking_id)
+        self.assertEqual(cancelled.status_code, status.HTTP_200_OK)
+        self.assertTrue(cancelled.data['refunded'])
 
 
 @skipUnless(connection.vendor == 'postgresql', 'PostgreSQL advisory lock test')

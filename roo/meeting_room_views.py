@@ -21,7 +21,10 @@ def _error_response(exc: MeetingRoomError) -> Response:
 
 
 def _parse_timestamp(value, field_name: str):
-    parsed = parse_datetime(str(value or '').strip())
+    try:
+        parsed = parse_datetime(str(value or '').strip())
+    except ValueError:
+        parsed = None
     if parsed is None:
         raise MeetingRoomError(
             'invalid_time',
@@ -31,7 +34,10 @@ def _parse_timestamp(value, field_name: str):
 
 
 def _parse_local_date(value) -> date:
-    parsed = parse_date(str(value or '').strip())
+    try:
+        parsed = parse_date(str(value or '').strip())
+    except ValueError:
+        parsed = None
     if parsed is None:
         raise MeetingRoomError(
             'invalid_time',

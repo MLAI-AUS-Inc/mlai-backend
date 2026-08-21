@@ -1,7 +1,7 @@
-from django.contrib import admin
-from django.db import transaction
+from django.contrib import admin, messages
+from django.core.exceptions import ValidationError
+from django.shortcuts import redirect
 from django.utils.html import format_html
-from .meeting_rooms import MeetingRoomService
 from .models import (
     PointsAdmin, Minter, Task, Ledger, PointsAccount, PointsPurchase, BoostPostAdmission,
     TaskSubmission, CoworkingBooking, CoworkingDayCapacity,
@@ -233,15 +233,27 @@ class MeetingRoomBlockAdmin(admin.ModelAdmin):
     readonly_fields = ('id', 'created_at', 'updated_at')
     ordering = ('starts_at',)
 
-    def save_model(self, request, obj, form, change):
-        with transaction.atomic():
-            MeetingRoomService.lock_room_interval(
-                room=obj.room,
-                starts_at=obj.starts_at,
-                ends_at=obj.ends_at,
+    def changeform_view(
+        self,
+        request,
+        object_id=None,
+        form_url='',
+        extra_context=None,
+    ):
+        try:
+            return super().changeform_view(
+                request,
+                object_id=object_id,
+                form_url=form_url,
+                extra_context=extra_context,
             )
-            obj.full_clean()
-            super().save_model(request, obj, form, change)
+        except ValidationError as exc:
+            self.message_user(
+                request,
+                '; '.join(exc.messages),
+                level=messages.ERROR,
+            )
+            return redirect(request.path)
 
 
 @admin.register(MeetingRoomBooking)

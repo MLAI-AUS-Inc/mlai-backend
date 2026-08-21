@@ -16,6 +16,7 @@ import json
 import os
 import subprocess
 import sys
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 # True when invoked via the Django test runner (`manage.py test ...`). Used to
 # relax rate throttles that would otherwise trip loop-heavy test suites.
@@ -34,6 +35,16 @@ def _env_is_true(name: str, default: bool) -> bool:
     if raw is None:
         return default
     return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _validated_timezone_name(value: str, setting_name: str) -> str:
+    try:
+        ZoneInfo(value)
+    except (ValueError, ZoneInfoNotFoundError) as exc:
+        raise ImproperlyConfigured(
+            f'{setting_name} must be a valid IANA timezone name'
+        ) from exc
+    return value
 
 
 def _resolve_app_env(*, debug: bool, raw_env: str = "") -> str:
@@ -1429,10 +1440,10 @@ MEETING_ROOM_MAX_BOOKING_HOURS = int(
 MEETING_ROOM_DAILY_MEMBER_HOURS = int(
     os.environ.get('MEETING_ROOM_DAILY_MEMBER_HOURS', 4)
 )
-MEETING_ROOM_TIMEZONE = os.environ.get(
+MEETING_ROOM_TIMEZONE = _validated_timezone_name(
+    os.environ.get('MEETING_ROOM_TIMEZONE', 'Australia/Melbourne').strip(),
     'MEETING_ROOM_TIMEZONE',
-    'Australia/Melbourne',
-).strip()
+)
 
 # Internal API Key for service-to-service auth (e.g. from Roo agent)
 MLAI_API_KEY = os.environ.get('MLAI_API_KEY')

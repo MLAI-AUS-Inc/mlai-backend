@@ -73,6 +73,7 @@ class Migration(migrations.Migration):
                 ('ends_at', models.DateTimeField()),
                 ('status', models.CharField(choices=[('booked', 'Booked'), ('cancelled', 'Cancelled')], default='booked', max_length=20)),
                 ('points_cost', models.PositiveIntegerField()),
+                ('purchased_points_cost', models.PositiveIntegerField(blank=True, null=True)),
                 ('client_request_id', models.UUIDField(unique=True)),
                 ('requested_by_slack_id', models.CharField(max_length=50)),
                 ('slack_channel_id', models.CharField(blank=True, max_length=50, null=True)),
@@ -91,6 +92,10 @@ class Migration(migrations.Migration):
         migrations.AddConstraint(
             model_name='meetingroombooking',
             constraint=models.CheckConstraint(check=models.Q(('ends_at__gt', models.F('starts_at'))), name='meeting_room_booking_end_after_start'),
+        ),
+        migrations.AddConstraint(
+            model_name='meetingroombooking',
+            constraint=models.CheckConstraint(check=models.Q(('purchased_points_cost__isnull', True), ('purchased_points_cost__lte', models.F('points_cost')), _connector='OR'), name='meeting_room_purchased_cost_lte_total'),
         ),
         migrations.AddIndex(
             model_name='meetingroomblock',
