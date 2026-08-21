@@ -57,7 +57,10 @@ class Migration(migrations.Migration):
                 ('winner_dm_last_error', models.TextField(blank=True, default='')),
                 ('winner_channel_announcement_status', models.CharField(choices=[('pending', 'Pending'), ('sending', 'Sending'), ('sent', 'Sent'), ('failed', 'Failed'), ('unknown', 'Unknown')], default='pending', max_length=20)),
                 ('winner_channel_announcement_sent_at', models.DateTimeField(blank=True, null=True)),
+                ('winner_channel_message_ts', models.CharField(blank=True, default='', max_length=50)),
                 ('winner_channel_announcement_last_error', models.TextField(blank=True, default='')),
+                ('winner_channel_retraction_pending', models.BooleanField(default=False)),
+                ('winner_channel_retraction_last_error', models.TextField(blank=True, default='')),
                 ('end_of_day_reminder_status', models.CharField(choices=[('pending', 'Pending'), ('sending', 'Sending'), ('sent', 'Sent'), ('failed', 'Failed'), ('unknown', 'Unknown')], default='pending', max_length=20)),
                 ('end_of_day_reminder_sent_at', models.DateTimeField(blank=True, null=True)),
                 ('end_of_day_reminder_last_error', models.TextField(blank=True, default='')),
@@ -67,6 +70,7 @@ class Migration(migrations.Migration):
                 ('booking', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='office_manager_assignments', to='roo.coworkingbooking')),
                 ('day', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='assignments', to='roo.officemanagerday')),
                 ('refund_ledger_entry', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='office_manager_refunds', to='roo.ledger')),
+                ('refund_reversal_ledger_entry', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='office_manager_refund_reversals', to='roo.ledger')),
                 ('user', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='office_manager_assignments', to=settings.AUTH_USER_MODEL)),
             ],
             options={

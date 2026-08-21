@@ -1865,6 +1865,22 @@ class CoworkingViewSet(viewsets.ViewSet):
 
         try:
             booking, refunded = CoworkingService.cancel(str(booking.id), slack_user_id)
+            office_manager_day_id = getattr(
+                booking,
+                '_office_manager_day_id',
+                None,
+            )
+            if office_manager_day_id:
+                OfficeManagerService.reconcile_message(office_manager_day_id)
+            office_manager_assignment_id = getattr(
+                booking,
+                '_office_manager_assignment_id',
+                None,
+            )
+            if office_manager_assignment_id:
+                OfficeManagerService.retract_winner_channel_announcement(
+                    office_manager_assignment_id
+                )
             return Response({
                 'booking': CoworkingBookingSerializer(booking).data,
                 'refunded': refunded,

@@ -948,9 +948,26 @@ class OfficeManagerAssignment(models.Model):
         blank=True,
         null=True,
     )
+    winner_channel_message_ts = models.CharField(
+        max_length=50,
+        blank=True,
+        default='',
+    )
     winner_channel_announcement_last_error = models.TextField(
         blank=True,
         default='',
+    )
+    winner_channel_retraction_pending = models.BooleanField(default=False)
+    winner_channel_retraction_last_error = models.TextField(
+        blank=True,
+        default='',
+    )
+    refund_reversal_ledger_entry = models.ForeignKey(
+        Ledger,
+        on_delete=models.SET_NULL,
+        blank=True,
+        null=True,
+        related_name='office_manager_refund_reversals',
     )
     end_of_day_reminder_status = models.CharField(
         max_length=20,

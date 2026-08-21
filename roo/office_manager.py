@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 from django.conf import settings
 from django.db import IntegrityError, transaction
+from django.db.models import Q
 from django.utils import timezone
 from slack_sdk.errors import SlackApiError
 
@@ -21,6 +23,7 @@ from .models import (
     OfficeManagerAssignment,
     OfficeManagerDay,
 )
+from .permissions import InsufficientBalanceError
 from .services import CoworkingService, PointsService
 
 logger = logging.getLogger(__name__)
@@ -89,25 +92,56 @@ def _configured_weekdays() -> set[int]:
     else:
         values = str(raw).split(",")
     weekdays = set()
+    invalid_values = []
     for value in values:
+        cleaned = str(value).strip()
+        if not cleaned:
+            continue
         try:
-            weekday = int(str(value).strip())
+            weekday = int(cleaned)
         except (TypeError, ValueError):
+            invalid_values.append(cleaned)
             continue
         if 0 <= weekday <= 6:
             weekdays.add(weekday)
-    return weekdays or {0, 1, 2, 3, 4}
+        else:
+            invalid_values.append(cleaned)
+    if invalid_values:
+        raise ValueError(
+            "OFFICE_MANAGER_WEEKDAYS must contain only integers from 0 to 6"
+        )
+    return weekdays
+
+
+def _format_local_time(value: datetime) -> str:
+    local_value = value.astimezone(_timezone())
+    hour = local_value.hour % 12 or 12
+    suffix = "AM" if local_value.hour < 12 else "PM"
+    return f"{hour}:{local_value.minute:02d} {suffix}"
+
+
+def _slack_client_msg_id(kind: str, object_id: object) -> str:
+    return str(
+        uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            f"https://mlai.au/roo/office-manager/{kind}/{object_id}",
+        )
+    )
 
 
 def _announcement_text(day: OfficeManagerDay) -> str:
     if day.status == "claimed":
         assignment = day.assignments.filter(status="active").select_related("user").first()
-        if assignment and assignment.user.slack_id:
-            return (
-                f"Office Manager of the Day: <@{assignment.user.slack_id}>. "
-                "Roo booked them in without deducting Roo points. "
-                f"{COWORKING_SELF_BOOK_REMINDER}"
-            )
+        mention = (
+            f"<@{assignment.user.slack_id}>"
+            if assignment and assignment.user.slack_id
+            else "A member"
+        )
+        return (
+            f"Office Manager of the Day: {mention}. "
+            "Roo booked them in without deducting Roo points. "
+            f"{COWORKING_SELF_BOOK_REMINDER}"
+        )
     if day.status == "closed":
         return (
             "The Office Manager volunteer window is closed for today. "
@@ -191,7 +225,10 @@ def _announcement_blocks(day: OfficeManagerDay) -> list[dict]:
             "elements": [
                 {
                     "type": "mrkdwn",
-                    "text": f"Volunteer before 10:00 AM. {NO_FOOD_REMINDER}",
+                    "text": (
+                        f"Volunteer before {_format_local_time(day.claim_cutoff_at)}. "
+                        f"{NO_FOOD_REMINDER}"
+                    ),
                 }
             ],
         },
@@ -242,6 +279,28 @@ def _winner_channel_announcement_text(
         f"{mention} is today's *Office Manager of the Day*.\n"
         "Roo booked them in without deducting Roo points. Please say hello "
         "and reach out if you need help getting settled.\n\n"
+        f"{COWORKING_SELF_BOOK_REMINDER}\n\n"
+        f"{NO_FOOD_REMINDER}"
+    )
+
+
+def _relinquished_winner_channel_text(
+    assignment: OfficeManagerAssignment,
+) -> str:
+    mention = (
+        f"<@{assignment.user.slack_id}>"
+        if assignment.user.slack_id
+        else "The previously selected member"
+    )
+    availability = (
+        "The volunteer position is open again; use the button in Roo's daily "
+        "Office Manager announcement."
+        if assignment.day.status == "open"
+        else "The volunteer window is now closed for today."
+    )
+    return (
+        f"{mention} is no longer today's *Office Manager of the Day*. "
+        f"{availability}\n\n"
         f"{COWORKING_SELF_BOOK_REMINDER}\n\n"
         f"{NO_FOOD_REMINDER}"
     )
@@ -305,26 +364,93 @@ class OfficeManagerService:
         )
         first_name, _, last_name = display_name.partition(" ")
         generated_email = f"slack+{cleaned.lower()}@users.mlai.internal"
-        try:
-            with transaction.atomic():
-                user, _ = User.objects.get_or_create(
-                    slack_id=cleaned,
-                    defaults={
-                        "email": generated_email,
-                        "first_name": first_name,
-                        "last_name": last_name,
-                        "avatar_url": profile.get("image_url"),
-                        "is_active": True,
-                    },
-                )
-        except IntegrityError:
-            user = User.objects.get(slack_id=cleaned)
-        if not user.is_active:
-            raise OfficeManagerClaimError(
-                "member_not_eligible",
-                "This member account is inactive",
+        profile_email = User.objects.normalize_email(
+            profile.get("email") or generated_email
+        )
+
+        def resolve_locked_candidates(candidates: list[User]) -> User | None:
+            by_slack = next(
+                (candidate for candidate in candidates if candidate.slack_id == cleaned),
+                None,
             )
-        return user
+            by_email = next(
+                (
+                    candidate
+                    for candidate in candidates
+                    if candidate.email.lower() == profile_email.lower()
+                ),
+                None,
+            )
+            if by_slack and by_email and by_slack.pk != by_email.pk:
+                raise OfficeManagerClaimError(
+                    "member_not_eligible",
+                    "This Slack identity conflicts with an existing MLAI account",
+                )
+
+            user = by_slack or by_email
+            if user is None:
+                return None
+            if by_email and by_email.slack_id not in {None, "", cleaned}:
+                raise OfficeManagerClaimError(
+                    "member_not_eligible",
+                    "This MLAI account is already linked to another Slack member",
+                )
+            if not user.is_active:
+                raise OfficeManagerClaimError(
+                    "member_not_eligible",
+                    "This member account is inactive",
+                )
+
+            update_fields = []
+            if not user.slack_id:
+                user.slack_id = cleaned
+                update_fields.append("slack_id")
+            if first_name and not user.first_name:
+                user.first_name = first_name
+                update_fields.append("first_name")
+            if last_name and not user.last_name:
+                user.last_name = last_name
+                update_fields.append("last_name")
+            if profile.get("image_url") and not user.avatar_url:
+                user.avatar_url = profile["image_url"]
+                update_fields.append("avatar_url")
+            if update_fields:
+                user.save(update_fields=update_fields)
+            return user
+
+        identity_query = Q(slack_id=cleaned) | Q(email__iexact=profile_email)
+        with transaction.atomic():
+            candidates = list(
+                User.objects.select_for_update()
+                .filter(identity_query)
+                .order_by("pk")
+            )
+            user = resolve_locked_candidates(candidates)
+            if user is not None:
+                return user
+
+            try:
+                with transaction.atomic():
+                    return User.objects.create_user(
+                        email=profile_email,
+                        slack_id=cleaned,
+                        first_name=first_name,
+                        last_name=last_name,
+                        avatar_url=profile.get("image_url"),
+                    )
+            except IntegrityError:
+                candidates = list(
+                    User.objects.select_for_update()
+                    .filter(identity_query)
+                    .order_by("pk")
+                )
+                user = resolve_locked_candidates(candidates)
+                if user is not None:
+                    return user
+                raise OfficeManagerClaimError(
+                    "member_not_eligible",
+                    "Roo could not safely link this Slack member",
+                )
 
     @staticmethod
     def claim(
@@ -342,6 +468,7 @@ class OfficeManagerService:
 
         user = OfficeManagerService.resolve_member(slack_user_id)
         with transaction.atomic():
+            CoworkingService._lock_booking_date(booking_date)
             try:
                 day = OfficeManagerDay.objects.select_for_update().get(date=booking_date)
             except OfficeManagerDay.DoesNotExist as exc:
@@ -384,7 +511,6 @@ class OfficeManagerService:
                     "Coworking is closed today",
                 )
 
-            CoworkingService._lock_booking_date(booking_date)
             booking = (
                 CoworkingBooking.objects.select_for_update()
                 .filter(user=user, date=booking_date, status="booked")
@@ -460,25 +586,87 @@ class OfficeManagerService:
         )
 
     @staticmethod
+    @transaction.atomic
     def relinquish_for_booking(
         booking: CoworkingBooking,
         *,
+        requester_slack_id: str,
+        locked_day: OfficeManagerDay | None = None,
         now: datetime | None = None,
-    ) -> tuple[bool, int | None]:
+    ) -> tuple[bool, int | None, int | None]:
+        assignment_day_id = (
+            OfficeManagerAssignment.objects.filter(
+                booking=booking,
+                status="active",
+            )
+            .values_list("day_id", flat=True)
+            .first()
+        )
+        if assignment_day_id is None:
+            return False, None, None
+
+        day = locked_day
+        if day is None:
+            day = OfficeManagerDay.objects.select_for_update().get(
+                pk=assignment_day_id
+            )
+        elif day.pk != assignment_day_id:
+            raise ValueError("Office Manager day lock does not match booking")
+
         assignment = (
             OfficeManagerAssignment.objects.select_for_update()
-            .filter(booking=booking, status="active")
-            .select_related("day")
+            .filter(booking=booking, day=day, status="active")
             .first()
         )
         if assignment is None:
-            return False, None
+            return False, None, None
 
-        day = OfficeManagerDay.objects.select_for_update().get(pk=assignment.day_id)
+        if assignment.points_refunded and not assignment.refund_reversal_ledger_entry_id:
+            try:
+                reversal_ledger, _ = PointsService.spend(
+                    user=booking.user,
+                    delta=assignment.points_refunded,
+                    source="COWORKING",
+                    description=(
+                        "Reversal of Office Manager refund for "
+                        f"{booking.date}"
+                    ),
+                    created_by_slack_id=requester_slack_id,
+                    idempotency_key=(
+                        f"office_manager_refund_reversal:{assignment.id}"
+                    ),
+                    reference_type="OFFICE_MANAGER_REFUND_REVERSAL",
+                    reference_id=str(assignment.id),
+                )
+            except InsufficientBalanceError as exc:
+                raise ValueError(
+                    "The Office Manager booking cannot be cancelled because "
+                    "the previously refunded Roo points are no longer available"
+                ) from exc
+            assignment.refund_reversal_ledger_entry = reversal_ledger
+            booking.points_cost = (
+                booking.original_points_cost or assignment.points_refunded
+            )
+            booking.booking_source = "points"
+            booking.save(update_fields=["points_cost", "booking_source"])
+
         local_now = _local_now(now)
         assignment.status = "relinquished"
         assignment.relinquished_at = timezone.now()
-        assignment.save(update_fields=["status", "relinquished_at"])
+        assignment.winner_channel_retraction_pending = bool(
+            assignment.winner_channel_message_ts
+            or assignment.winner_channel_announcement_status
+            in {"sending", "sent", "unknown"}
+        )
+        assignment.save(
+            update_fields=[
+                "status",
+                "relinquished_at",
+                "refund_reversal_ledger_entry",
+                "winner_channel_retraction_pending",
+                "updated_at",
+            ]
+        )
 
         reopened = (
             day.date == local_now.date()
@@ -495,7 +683,7 @@ class OfficeManagerService:
                 "updated_at",
             ]
         )
-        return reopened, day.id
+        return reopened, day.id, assignment.id
 
     @staticmethod
     def post_announcement(day_id: int) -> bool:
@@ -528,6 +716,7 @@ class OfficeManagerService:
                 channel=day.slack_channel_id,
                 text=_announcement_text(day),
                 blocks=_announcement_blocks(day),
+                client_msg_id=_slack_client_msg_id("daily", day.id),
                 unfurl_links=False,
                 unfurl_media=False,
             )
@@ -611,10 +800,12 @@ class OfficeManagerService:
             response = SlackService.get_client().chat_postMessage(
                 channel=assignment.day.slack_channel_id,
                 text=_winner_channel_announcement_text(assignment),
+                client_msg_id=_slack_client_msg_id("winner", assignment.id),
                 unfurl_links=False,
                 unfurl_media=False,
             )
-            if not response.get("ok"):
+            message_ts = str(response.get("ts") or "")
+            if not response.get("ok") or not message_ts:
                 raise SlackApiError("chat.postMessage failed", response)
         except SlackApiError as exc:
             OfficeManagerAssignment.objects.filter(pk=assignment_id).update(
@@ -629,12 +820,85 @@ class OfficeManagerService:
             )
             return False
 
-        OfficeManagerAssignment.objects.filter(pk=assignment_id).update(
-            winner_channel_announcement_status="sent",
-            winner_channel_announcement_sent_at=timezone.now(),
-            winner_channel_announcement_last_error="",
-        )
+        with transaction.atomic():
+            assignment = (
+                OfficeManagerAssignment.objects.select_for_update()
+                .select_related("day", "user")
+                .get(pk=assignment_id)
+            )
+            assignment.winner_channel_announcement_status = "sent"
+            assignment.winner_channel_announcement_sent_at = timezone.now()
+            assignment.winner_channel_message_ts = message_ts
+            assignment.winner_channel_announcement_last_error = ""
+            if assignment.status != "active":
+                assignment.winner_channel_retraction_pending = True
+            assignment.save(
+                update_fields=[
+                    "winner_channel_announcement_status",
+                    "winner_channel_announcement_sent_at",
+                    "winner_channel_message_ts",
+                    "winner_channel_announcement_last_error",
+                    "winner_channel_retraction_pending",
+                    "updated_at",
+                ]
+            )
+            should_retract = assignment.winner_channel_retraction_pending
+
+        if should_retract:
+            return OfficeManagerService.retract_winner_channel_announcement(
+                assignment_id
+            )
         return True
+
+    @staticmethod
+    def retract_winner_channel_announcement(assignment_id: int) -> bool:
+        with transaction.atomic():
+            assignment = (
+                OfficeManagerAssignment.objects.select_for_update()
+                .select_related("day", "user")
+                .get(pk=assignment_id)
+            )
+            if not assignment.winner_channel_retraction_pending:
+                return True
+            channel_id = assignment.day.slack_channel_id
+            message_ts = assignment.winner_channel_message_ts
+            text = _relinquished_winner_channel_text(assignment)
+
+        if not message_ts:
+            try:
+                response = SlackService.get_client().chat_postMessage(
+                    channel=channel_id,
+                    text=_winner_channel_announcement_text(assignment),
+                    client_msg_id=_slack_client_msg_id(
+                        "winner",
+                        assignment.id,
+                    ),
+                    unfurl_links=False,
+                    unfurl_media=False,
+                )
+                message_ts = str(response.get("ts") or "")
+                if not response.get("ok") or not message_ts:
+                    raise SlackApiError("chat.postMessage failed", response)
+            except Exception as exc:
+                OfficeManagerAssignment.objects.filter(pk=assignment_id).update(
+                    winner_channel_retraction_last_error=_safe_slack_error(exc),
+                )
+                return False
+            OfficeManagerAssignment.objects.filter(pk=assignment_id).update(
+                winner_channel_announcement_status="sent",
+                winner_channel_announcement_sent_at=timezone.now(),
+                winner_channel_message_ts=message_ts,
+                winner_channel_announcement_last_error="",
+            )
+
+        success = SlackService.update_message(channel_id, message_ts, text)
+        OfficeManagerAssignment.objects.filter(pk=assignment_id).update(
+            winner_channel_retraction_pending=not success,
+            winner_channel_retraction_last_error=(
+                "" if success else "slack_update_failed"
+            ),
+        )
+        return success
 
     @staticmethod
     def deliver_winner_dm(assignment_id: int) -> bool:
@@ -672,6 +936,7 @@ class OfficeManagerService:
             response = SlackService.get_client().chat_postMessage(
                 channel=dm_channel,
                 text=_winner_dm_text(assignment),
+                client_msg_id=_slack_client_msg_id("winner-dm", assignment.id),
                 unfurl_links=False,
                 unfurl_media=False,
             )
@@ -735,6 +1000,7 @@ class OfficeManagerService:
             response = SlackService.get_client().chat_postMessage(
                 channel=dm_channel,
                 text=_end_of_day_dm_text(),
+                client_msg_id=_slack_client_msg_id("end-of-day", assignment.id),
                 unfurl_links=False,
                 unfurl_media=False,
             )
@@ -771,7 +1037,16 @@ def run_office_manager_scheduler(
 
     local_now = _local_now(now)
     local_date = local_now.date()
-    if local_date.weekday() not in _configured_weekdays():
+    try:
+        configured_weekdays = _configured_weekdays()
+    except ValueError as exc:
+        logger.error("Invalid Office Manager weekday configuration: %s", exc)
+        return {
+            "status": "failed",
+            "reason": "invalid_weekday_configuration",
+            "local_date": local_date.isoformat(),
+        }
+    if local_date.weekday() not in configured_weekdays:
         return {
             "status": "skipped",
             "reason": "weekday_not_configured",
@@ -854,6 +1129,19 @@ def run_office_manager_scheduler(
     if day.message_update_pending and day.announcement_status == "sent":
         result["message_updated"] = OfficeManagerService.reconcile_message(day.id)
         day.refresh_from_db()
+
+    pending_retractions = list(
+        day.assignments.filter(winner_channel_retraction_pending=True)
+        .order_by("pk")
+        .values_list("pk", flat=True)
+    )
+    if pending_retractions:
+        result["winner_channel_retractions"] = [
+            OfficeManagerService.retract_winner_channel_announcement(
+                assignment_id
+            )
+            for assignment_id in pending_retractions
+        ]
 
     assignment = (
         day.assignments.filter(status="active").select_related("user").first()

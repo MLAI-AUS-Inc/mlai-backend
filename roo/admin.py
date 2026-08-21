@@ -334,8 +334,11 @@ class OfficeManagerAssignmentAdmin(admin.ModelAdmin):
         'day', 'user', 'booking', 'status', 'points_refunded',
         'refund_ledger_entry', 'winner_dm_status', 'winner_dm_sent_at',
         'winner_dm_last_error', 'winner_channel_announcement_status',
-        'winner_channel_announcement_sent_at',
-        'winner_channel_announcement_last_error', 'end_of_day_reminder_status',
+        'winner_channel_announcement_sent_at', 'winner_channel_message_ts',
+        'winner_channel_announcement_last_error',
+        'winner_channel_retraction_pending',
+        'winner_channel_retraction_last_error',
+        'refund_reversal_ledger_entry', 'end_of_day_reminder_status',
         'end_of_day_reminder_sent_at', 'end_of_day_reminder_last_error',
         'claimed_at', 'relinquished_at',
     )

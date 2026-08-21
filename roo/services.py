@@ -8,6 +8,7 @@ race conditions and duplicate transactions.
 import calendar
 import logging
 import re
+import uuid
 from collections import OrderedDict
 from datetime import date, datetime, timedelta
 from typing import Optional, Tuple
@@ -20,6 +21,7 @@ from django.utils import timezone
 from .models import (
     PointsAccount, Ledger, BoostPostAdmission, Task, TaskAssignment, TaskSubmission, TaskActivity,
     CoworkingBooking, CoworkingDayCapacity,
+    OfficeManagerAssignment, OfficeManagerDay,
     RewardsCatalog, RewardRedemption, PointsAdmin, PointsPurchase
 )
 from .permissions import (
@@ -1223,10 +1225,11 @@ class CoworkingService:
     
     @staticmethod
     def get_booked_count(booking_date: date) -> int:
-        """Get count of active bookings for a date."""
+        """Get active points-priced bookings that consume normal capacity."""
         return CoworkingBooking.objects.filter(
             date=booking_date,
-            status='booked'
+            status='booked',
+            booking_source='points',
         ).count()
     
     @staticmethod
@@ -1413,8 +1416,10 @@ class CoworkingService:
         # update for the booking's month)
         cost = CoworkingService.get_coworking_cost(user=user, booking_date=booking_date)
         
-        # Create idempotency key
-        idempotency_key = f"coworking_book:{user.id}:{booking_date}"
+        # A new booking after cancellation is a new charge. The active-booking
+        # check above still makes retries idempotent while the booking is live.
+        booking_id = uuid.uuid4()
+        idempotency_key = f"coworking_book:{booking_id}"
         
         # Spend points (this also validates balance)
         ledger, _ = PointsService.spend(
@@ -1430,6 +1435,7 @@ class CoworkingService:
         
         # Create booking
         booking = CoworkingBooking.objects.create(
+            id=booking_id,
             user=user,
             date=booking_date,
             status='booked',
@@ -1573,17 +1579,57 @@ class CoworkingService:
             ValueError: If booking not found or already cancelled
         """
         try:
-            booking = CoworkingBooking.objects.select_for_update().get(id=booking_id)
+            booking_date = CoworkingBooking.objects.values_list(
+                'date',
+                flat=True,
+            ).get(id=booking_id)
         except CoworkingBooking.DoesNotExist:
             raise ValueError(f"Booking {booking_id} not found")
+
+        CoworkingService._lock_booking_date(booking_date)
+
+        from .office_manager import OfficeManagerService
+
+        office_manager_day_id = (
+            OfficeManagerAssignment.objects.filter(
+                booking_id=booking_id,
+                status='active',
+            )
+            .values_list('day_id', flat=True)
+            .first()
+        )
+        locked_office_manager_day = None
+        if office_manager_day_id is not None:
+            locked_office_manager_day = (
+                OfficeManagerDay.objects.select_for_update().get(
+                    pk=office_manager_day_id
+                )
+            )
+
+        booking = CoworkingBooking.objects.select_for_update().get(id=booking_id)
         
         if booking.status == 'cancelled':
             raise ValueError("Booking is already cancelled")
         
+        refunded = False
+
+        booking._office_manager_day_reopened = False
+        booking._office_manager_day_id = None
+        booking._office_manager_assignment_id = None
+        if booking.booking_source == 'office_manager':
+            reopened, day_id, assignment_id = (
+                OfficeManagerService.relinquish_for_booking(
+                    booking,
+                    requester_slack_id=requester_slack_id,
+                    locked_day=locked_office_manager_day,
+                )
+            )
+            booking._office_manager_day_reopened = reopened
+            booking._office_manager_day_id = day_id
+            booking._office_manager_assignment_id = assignment_id
+
         booking.status = 'cancelled'
         booking.cancelled_at = timezone.now()
-        
-        refunded = False
         
         # Check if refund is applicable
         if booking.points_cost > 0 and CoworkingService.is_refundable(booking.date):
@@ -1604,15 +1650,6 @@ class CoworkingService:
             refunded = True
         
         booking.save()
-
-        booking._office_manager_day_reopened = False
-        booking._office_manager_day_id = None
-        if booking.booking_source == 'office_manager':
-            from .office_manager import OfficeManagerService
-
-            reopened, day_id = OfficeManagerService.relinquish_for_booking(booking)
-            booking._office_manager_day_reopened = reopened
-            booking._office_manager_day_id = day_id
         
         return booking, refunded
     
