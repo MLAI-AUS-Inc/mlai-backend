@@ -34,7 +34,7 @@ from .refresh_sessions import (
     issue_refresh_token,
     revoke_refresh_credential,
 )
-from .models import Hackathon, SlackFounderAccountLink
+from .models import Hackathon
 from .serializers import (
     HackathonSerializer,
     MyTokenObtainPairSerializer,
@@ -49,11 +49,13 @@ from .permissions import (
     IsOwnerOrTeammateOrSuperuser,
 )
 from .slack_founder_links import (
+    ConflictingSlackFounderLinkError,
     SlackFounderLinkError,
     complete_slack_founder_link,
-    create_slack_founder_link_request,
+    ensure_user_can_accept_direct_slack_identity,
     founder_account_connection_status,
     preview_slack_founder_link,
+    start_slack_founder_link,
 )
 from .throttles import AuthEndpointRateThrottle, MagicLinkSendRateThrottle
 from .user_compat import DEFAULT_USER_ROLE, get_compat_user_role, user_has_team
@@ -1096,13 +1098,17 @@ class SlackFounderLinkStartView(APIView):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
-        if SlackFounderAccountLink.objects.filter(slack_user=slack_user).exists():
+        link_start = start_slack_founder_link(slack_user)
+        if link_start.status == "already_linked":
             return Response(
                 {"status": "already_linked"},
                 status=status.HTTP_200_OK,
             )
 
-        link_request, raw_token = create_slack_founder_link_request(slack_user)
+        link_request = link_start.request
+        raw_token = link_start.raw_token
+        if link_request is None or raw_token is None:
+            raise RuntimeError("Link request creation returned no request token")
         base_url = _frontend_base_url("founder-tools").rstrip("/")
         link_url = (
             f"{base_url}/founder-tools/link-roo?"
@@ -1159,7 +1165,7 @@ class SlackFounderLinkCompleteView(APIView):
 
     def post(self, request):
         try:
-            _, created = complete_slack_founder_link(
+            completion = complete_slack_founder_link(
                 request.data.get("token"),
                 founder_user=request.user,
             )
@@ -1167,8 +1173,12 @@ class SlackFounderLinkCompleteView(APIView):
             return _slack_founder_link_error_response(exc)
 
         return Response(
-            {"status": "linked" if created else "already_linked"},
-            status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
+            {"status": completion.status},
+            status=(
+                status.HTTP_201_CREATED
+                if completion.created
+                else status.HTTP_200_OK
+            ),
         )
 
 
@@ -1241,6 +1251,8 @@ class GetOrCreateSlackUserView(APIView):
                 "linked": result.linked,
             }, status=status.HTTP_201_CREATED if result.created else status.HTTP_200_OK)
 
+        except ConflictingSlackFounderLinkError as exc:
+            return _slack_founder_link_error_response(exc)
         except Exception as e:
             logger.exception(f"Error creating user from Slack data: {str(e)}")
             return Response(

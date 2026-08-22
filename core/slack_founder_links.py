@@ -55,6 +55,23 @@ class SlackFounderLinkPreview:
     link: SlackFounderAccountLink | None
 
 
+@dataclass(frozen=True)
+class SlackFounderLinkStart:
+    status: str
+    request: SlackFounderLinkRequest | None = None
+    raw_token: str | None = None
+
+
+@dataclass(frozen=True)
+class SlackFounderLinkCompletion:
+    status: str
+    link: SlackFounderAccountLink | None = None
+
+    @property
+    def created(self) -> bool:
+        return self.status == "linked"
+
+
 def digest_link_token(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
@@ -70,7 +87,9 @@ def _link_request_for_token(
 
     queryset = SlackFounderLinkRequest.objects.select_related("slack_user")
     if for_update:
-        queryset = queryset.select_for_update()
+        # Lock only the request here. User rows are locked below in explicit,
+        # deterministic primary-key order.
+        queryset = queryset.select_for_update(of=("self",))
 
     request = queryset.filter(token_digest=digest_link_token(normalized_token)).first()
     if request is None or request.invalidated_at is not None:
@@ -94,7 +113,23 @@ def _link_status(
     )
     if for_update:
         links = links.select_for_update()
-    existing_links = list(links)
+    existing_links = list(links.order_by("pk"))
+
+    if slack_user.pk == founder_user.pk:
+        self_link = next(
+            (
+                link
+                for link in existing_links
+                if link.slack_user_id == slack_user.pk
+                and link.founder_user_id == founder_user.pk
+            ),
+            None,
+        )
+        if self_link is not None:
+            return "already_connected", self_link
+        if existing_links:
+            raise ConflictingSlackFounderLinkError()
+        return "already_connected", None
 
     same_link = next(
         (
@@ -120,13 +155,10 @@ def _link_status(
     return "ready", None
 
 
-@transaction.atomic
-def create_slack_founder_link_request(
-    slack_user: User,
+def _create_slack_founder_link_request_for_locked_user(
+    locked_user: User,
 ) -> tuple[SlackFounderLinkRequest, str]:
     now = timezone.now()
-    locked_user = User.objects.select_for_update().get(pk=slack_user.pk)
-
     SlackFounderLinkRequest.objects.filter(
         slack_user=locked_user,
         consumed_at__isnull=True,
@@ -148,6 +180,31 @@ def create_slack_founder_link_request(
     return request, raw_token
 
 
+@transaction.atomic
+def create_slack_founder_link_request(
+    slack_user: User,
+) -> tuple[SlackFounderLinkRequest, str]:
+    locked_user = User.objects.select_for_update().get(pk=slack_user.pk)
+    return _create_slack_founder_link_request_for_locked_user(locked_user)
+
+
+@transaction.atomic
+def start_slack_founder_link(slack_user: User) -> SlackFounderLinkStart:
+    """Decide and create a request while holding the Slack identity lock."""
+    locked_user = User.objects.select_for_update().get(pk=slack_user.pk)
+    if SlackFounderAccountLink.objects.filter(slack_user=locked_user).exists():
+        return SlackFounderLinkStart(status="already_linked")
+
+    request, raw_token = _create_slack_founder_link_request_for_locked_user(
+        locked_user
+    )
+    return SlackFounderLinkStart(
+        status="link_required",
+        request=request,
+        raw_token=raw_token,
+    )
+
+
 def preview_slack_founder_link(
     token: str,
     *,
@@ -167,15 +224,19 @@ def complete_slack_founder_link(
     token: str,
     *,
     founder_user: User,
-) -> tuple[SlackFounderAccountLink, bool]:
+) -> SlackFounderLinkCompletion:
+    # Resolve the request first without a lock to discover the Slack identity,
+    # then follow the same user-before-request lock order used by request
+    # creation. The request is reloaded and revalidated under its row lock.
+    candidate_request = _link_request_for_token(token, for_update=False)
+    user_ids = sorted({candidate_request.slack_user_id, founder_user.pk})
+    locked_user_rows = list(
+        User.objects.select_for_update()
+        .filter(pk__in=user_ids)
+        .order_by("pk")
+    )
+    locked_users = {user.pk: user for user in locked_user_rows}
     request = _link_request_for_token(token, for_update=True)
-
-    # Lock both identities in a stable order before evaluating uniqueness.
-    user_ids = sorted({request.slack_user_id, founder_user.pk})
-    locked_users = {
-        user.pk: user
-        for user in User.objects.select_for_update().filter(pk__in=user_ids)
-    }
     slack_user = locked_users[request.slack_user_id]
     locked_founder_user = locked_users[founder_user.pk]
 
@@ -184,7 +245,7 @@ def complete_slack_founder_link(
         founder_user=locked_founder_user,
         for_update=True,
     )
-    created = status != "already_linked"
+    created = status == "ready"
     if created:
         link = SlackFounderAccountLink.objects.create(
             slack_user=slack_user,
@@ -194,16 +255,36 @@ def complete_slack_founder_link(
     request.consumed_at = timezone.now()
     request.save(update_fields=["consumed_at", "updated_at"])
     logger.info(
-        "slack_founder_link_completed slack_user_pk=%s founder_user_pk=%s created=%s",
+        "slack_founder_link_completed slack_user_pk=%s founder_user_pk=%s status=%s",
         slack_user.pk,
         locked_founder_user.pk,
-        created,
+        "linked" if created else status,
     )
-    return link, created
+    return SlackFounderLinkCompletion(
+        status="linked" if created else status,
+        link=link,
+    )
 
 
-def founder_tools_account_linked(user: User) -> bool:
+def founder_tools_explicitly_linked(user: User) -> bool:
     return SlackFounderAccountLink.objects.filter(slack_user=user).exists()
+
+
+def founder_tools_connection_type(user: User) -> str | None:
+    if founder_tools_explicitly_linked(user):
+        return "explicit"
+    if user.slack_id:
+        return "direct"
+    return None
+
+
+def ensure_user_can_accept_direct_slack_identity(user: User) -> None:
+    """Prevent a linked Founder Tools identity becoming a second Roo user."""
+    if SlackFounderAccountLink.objects.filter(founder_user=user).exists():
+        raise ConflictingSlackFounderLinkError(
+            "This Founder Tools account is already connected to a separate Roo "
+            "Slack account. Contact MLAI support to change that connection."
+        )
 
 
 def founder_account_connection_status(founder_user: User) -> dict:
@@ -217,6 +298,7 @@ def founder_account_connection_status(founder_user: User) -> dict:
         return {
             "status": "connected",
             "connection_type": "explicit",
+            "can_link_separate_account": False,
             "slack_display_name": (
                 link.slack_user.full_name or "Your Roo Slack account"
             ),
@@ -224,11 +306,14 @@ def founder_account_connection_status(founder_user: User) -> dict:
         }
 
     # Same-account users were already verified when their Slack identity was
-    # attached to this user, so they do not need an additional explicit link.
+    # attached to this user. The API cannot prove whether a legacy direct ID is
+    # still the member's current external Slack identity, so clients must keep
+    # the separate-account linking path visible for direct connections.
     if founder_user.slack_id:
         return {
             "status": "connected",
             "connection_type": "direct",
+            "can_link_separate_account": True,
             "slack_display_name": (
                 founder_user.full_name or "Your Roo Slack account"
             ),
@@ -238,15 +323,20 @@ def founder_account_connection_status(founder_user: User) -> dict:
     return {
         "status": "not_connected",
         "connection_type": None,
+        "can_link_separate_account": True,
         "slack_display_name": None,
         "verified_at": None,
     }
 
 
-def coworking_eligibility_user(user: User) -> User:
-    link = (
-        SlackFounderAccountLink.objects.select_related("founder_user")
-        .filter(slack_user=user)
+def coworking_eligibility_user_ids(user: User) -> set[int]:
+    """Return all identities whose Founder Tools bindings may qualify user."""
+    user_ids = {user.pk}
+    founder_user_id = (
+        SlackFounderAccountLink.objects.filter(slack_user=user)
+        .values_list("founder_user_id", flat=True)
         .first()
     )
-    return link.founder_user if link else user
+    if founder_user_id is not None:
+        user_ids.add(founder_user_id)
+    return user_ids

@@ -8,6 +8,10 @@ from typing import Optional, Tuple
 from django.db import IntegrityError, transaction
 
 from .models import User
+from .slack_founder_links import (
+    ConflictingSlackFounderLinkError,
+    ensure_user_can_accept_direct_slack_identity,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +57,14 @@ def ensure_slack_user(
         return SlackUserRegistrationResult(user=user, created=False, linked=False)
 
     user = User.objects.filter(email__iexact=normalized_email).first()
+    if user and user.slack_id != slack_id:
+        try:
+            ensure_user_can_accept_direct_slack_identity(user)
+        except ConflictingSlackFounderLinkError:
+            # Preserve the explicit account boundary. Roo may still register
+            # this Slack identity as a separate placeholder user.
+            normalized_email = f"{slack_id}@slack.placeholder.com"
+            user = None
     if user:
         update_fields = []
         if user.slack_id != slack_id:
@@ -166,6 +178,11 @@ def resolve_existing_user_from_profile(
 
         if existing_slack_id == requested_slack_id:
             return user
+
+        try:
+            ensure_user_can_accept_direct_slack_identity(user)
+        except ConflictingSlackFounderLinkError:
+            return None
 
         user.slack_id = requested_slack_id
         try:

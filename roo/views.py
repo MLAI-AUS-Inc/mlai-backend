@@ -44,6 +44,11 @@ from .permissions import (
 )
 from .committee_candidates import CommitteeCandidateEmailService
 from core.models import SlackFounderAccountLink, User
+from core.slack_founder_links import (
+    ConflictingSlackFounderLinkError,
+    ensure_user_can_accept_direct_slack_identity,
+    founder_tools_connection_type,
+)
 from core.permissions import HasAPIKey, HasRooApiKey, HasStrictRooApiKey
 from core.slack_users import resolve_existing_user_from_profile
 from integrations.services import SlackService
@@ -125,12 +130,18 @@ def get_or_create_user_for_slack_id(slack_user_id: str) -> User:
         existing_user = User.objects.filter(email=email).first()
         if existing_user:
             if not existing_user.slack_id:
-                existing_user.slack_id = slack_user_id
-                existing_user.save(update_fields=['slack_id'])
-                return existing_user
+                try:
+                    ensure_user_can_accept_direct_slack_identity(existing_user)
+                except ConflictingSlackFounderLinkError:
+                    email = f"{slack_user_id}@slack.placeholder.com"
+                else:
+                    existing_user.slack_id = slack_user_id
+                    existing_user.save(update_fields=['slack_id'])
+                    return existing_user
             if existing_user.slack_id == slack_user_id:
                 return existing_user
-            email = f"{slack_user_id}@slack.placeholder.com"
+            else:
+                email = f"{slack_user_id}@slack.placeholder.com"
 
         return User.objects.create(
             email=email,
@@ -1699,9 +1710,13 @@ class CoworkingViewSet(viewsets.ViewSet):
             standard_cost = CoworkingService.get_standard_coworking_cost()
             response_data["standard_points_cost"] = standard_cost
             response_data["monthly_update_discount_applied"] = booking.points_cost < standard_cost
-            from core.slack_founder_links import founder_tools_account_linked
-            response_data["founder_tools_account_linked"] = founder_tools_account_linked(
-                booking.user
+            connection_type = founder_tools_connection_type(booking.user)
+            response_data["founder_tools_connection_type"] = connection_type
+            response_data["founder_tools_account_linked"] = (
+                connection_type is not None
+            )
+            response_data["founder_tools_explicitly_linked"] = (
+                connection_type == "explicit"
             )
             if not created:
                 response_data["already_booked"] = True
@@ -1844,7 +1859,13 @@ class CoworkingViewSet(viewsets.ViewSet):
                 'points_cost': booking.points_cost,
                 'standard_points_cost': standard_cost,
                 'monthly_update_discount_applied': booking.points_cost < standard_cost,
-                'founder_tools_account_linked': (
+                'founder_tools_connection_type': (
+                    'explicit'
+                    if booking.user_id in linked_slack_user_ids
+                    else 'direct'
+                ),
+                'founder_tools_account_linked': True,
+                'founder_tools_explicitly_linked': (
                     booking.user_id in linked_slack_user_ids
                 ),
             })

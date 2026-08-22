@@ -833,9 +833,14 @@ ESAFETY_URL = os.getenv('ESAFETY_URL') or DEFAULT_FRONTEND_URL
 WATT_THE_HACK_URL = os.getenv('WATT_THE_HACK_URL') or DEFAULT_FRONTEND_URL
 VIBE_RAISING_URL = os.getenv('VIBE_RAISING_URL') or DEFAULT_FRONTEND_URL
 FOUNDER_TOOLS_URL = os.getenv('FOUNDER_TOOLS_URL') or VIBE_RAISING_URL
-ROO_FOUNDER_LINK_TTL_SECONDS = int(
-    os.getenv('ROO_FOUNDER_LINK_TTL_SECONDS', '1800') or 1800
-)
+try:
+    ROO_FOUNDER_LINK_TTL_SECONDS = int(
+        os.getenv('ROO_FOUNDER_LINK_TTL_SECONDS', '1800') or 1800
+    )
+except ValueError as exc:
+    raise ImproperlyConfigured(
+        'ROO_FOUNDER_LINK_TTL_SECONDS must be an integer between 300 and 86400 seconds'
+    ) from exc
 if not 300 <= ROO_FOUNDER_LINK_TTL_SECONDS <= 86400:
     raise ImproperlyConfigured(
         'ROO_FOUNDER_LINK_TTL_SECONDS must be between 300 and 86400 seconds'
