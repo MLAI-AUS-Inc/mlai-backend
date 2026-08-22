@@ -55,9 +55,22 @@ def office_manager_day(day, *, status_value="open"):
     )
 
 
+def active_slack_profile(slack_user_id, **_kwargs):
+    return {
+        "slack_id": slack_user_id,
+        "real_name": "MLAI Member",
+        "email": f"{slack_user_id.lower()}@example.com",
+        "is_bot": False,
+        "deleted": False,
+        "is_restricted": False,
+        "is_ultra_restricted": False,
+    }
+
+
 @override_settings(
     OFFICE_MANAGER_ENABLED=True,
     OFFICE_MANAGER_SLACK_CHANNEL_ID="CCOWORK",
+    OFFICE_MANAGER_SLACK_BOT_TOKEN="office-manager-public-roo-test-token",
     OFFICE_MANAGER_TIMEZONE="Australia/Melbourne",
     OFFICE_MANAGER_WEEKDAYS="0,1,2,3,4",
     OFFICE_MANAGER_ANNOUNCEMENT_HOUR=8,
@@ -69,6 +82,12 @@ def office_manager_day(day, *, status_value="open"):
 )
 class OfficeManagerServiceTests(TestCase):
     def setUp(self):
+        self.profile_patcher = patch(
+            "roo.office_manager.SlackService.get_user_profile",
+            side_effect=active_slack_profile,
+        )
+        self.get_profile = self.profile_patcher.start()
+        self.addCleanup(self.profile_patcher.stop)
         self.now = melbourne_at(2026, 8, 3, 8, 45)
         self.day = office_manager_day(self.now.date())
         self.user = User.objects.create_user(
@@ -95,6 +114,20 @@ class OfficeManagerServiceTests(TestCase):
             OfficeManagerAssignment.objects.filter(status="active").count(),
             1,
         )
+
+    @override_settings(OFFICE_MANAGER_ENABLED=False)
+    def test_disabled_feature_rejects_claim_without_side_effects(self):
+        with self.assertRaises(OfficeManagerClaimError) as raised:
+            OfficeManagerService.claim(
+                slack_user_id=self.user.slack_id,
+                booking_date=self.now.date(),
+                now=self.now,
+            )
+
+        self.assertEqual(raised.exception.code, "feature_disabled")
+        self.get_profile.assert_not_called()
+        self.assertFalse(CoworkingBooking.objects.exists())
+        self.assertFalse(OfficeManagerAssignment.objects.exists())
 
     def test_same_member_claim_is_idempotent(self):
         first = OfficeManagerService.claim(
@@ -792,13 +825,125 @@ class OfficeManagerServiceTests(TestCase):
         self.assertEqual(raised.exception.code, "member_not_eligible")
         self.assertFalse(User.objects.filter(slack_id="UGUEST").exists())
 
+    @patch(
+        "roo.office_manager.SlackService.get_user_profile",
+        return_value={
+            "slack_id": "ULINKEDGUEST",
+            "real_name": "Linked Workspace Guest",
+            "is_restricted": True,
+        },
+    )
+    def test_prelinked_workspace_guest_is_reverified_and_rejected(self, get_profile):
+        user = User.objects.create_user(
+            email="linked-guest@example.com",
+            slack_id="ULINKEDGUEST",
+        )
+
+        with self.assertRaises(OfficeManagerClaimError) as raised:
+            OfficeManagerService.claim(
+                slack_user_id=user.slack_id,
+                booking_date=self.now.date(),
+                now=self.now,
+            )
+
+        self.assertEqual(raised.exception.code, "member_not_eligible")
+        get_profile.assert_called_once()
+        self.assertFalse(CoworkingBooking.objects.filter(user=user).exists())
+
+    def test_relinquished_assignment_does_not_receive_winner_dm(self):
+        result = OfficeManagerService.claim(
+            slack_user_id=self.user.slack_id,
+            booking_date=self.now.date(),
+            now=self.now,
+        )
+        OfficeManagerAssignment.objects.filter(pk=result.assignment.id).update(
+            status="relinquished"
+        )
+        fake_client = Mock()
+
+        with patch(
+            "roo.office_manager.SlackService.get_client",
+            return_value=fake_client,
+        ) as get_client:
+            delivered = OfficeManagerService.deliver_winner_dm(
+                result.assignment.id
+            )
+
+        self.assertFalse(delivered)
+        get_client.assert_not_called()
+        fake_client.chat_postMessage.assert_not_called()
+
+    def test_winner_dm_rechecks_assignment_after_opening_dm(self):
+        result = OfficeManagerService.claim(
+            slack_user_id=self.user.slack_id,
+            booking_date=self.now.date(),
+            now=self.now,
+        )
+        fake_client = Mock()
+
+        def relinquish_before_send(**_kwargs):
+            OfficeManagerAssignment.objects.filter(pk=result.assignment.id).update(
+                status="relinquished"
+            )
+            return {"ok": True, "channel": {"id": "DWINNER"}}
+
+        fake_client.conversations_open.side_effect = relinquish_before_send
+        with patch(
+            "roo.office_manager.SlackService.get_client",
+            return_value=fake_client,
+        ):
+            delivered = OfficeManagerService.deliver_winner_dm(
+                result.assignment.id
+            )
+
+        self.assertFalse(delivered)
+        fake_client.chat_postMessage.assert_not_called()
+        result.assignment.refresh_from_db()
+        self.assertEqual(result.assignment.winner_dm_status, "failed")
+
+    def test_reconcile_preserves_retry_when_state_changes_during_slack_update(self):
+        result = OfficeManagerService.claim(
+            slack_user_id=self.user.slack_id,
+            booking_date=self.now.date(),
+            now=self.now,
+        )
+
+        def reopen_during_update(*_args, **_kwargs):
+            OfficeManagerDay.objects.filter(pk=result.assignment.day_id).update(
+                status="open",
+                message_update_pending=True,
+            )
+            return True
+
+        with patch(
+            "roo.office_manager.SlackService.update_message",
+            side_effect=reopen_during_update,
+        ):
+            updated = OfficeManagerService.reconcile_message(
+                result.assignment.day_id
+            )
+
+        self.assertTrue(updated)
+        result.assignment.day.refresh_from_db()
+        self.assertEqual(result.assignment.day.status, "open")
+        self.assertTrue(result.assignment.day.message_update_pending)
+
 
 @override_settings(
     OFFICE_MANAGER_ENABLED=True,
     OFFICE_MANAGER_SLACK_CHANNEL_ID="CCOWORK",
+    OFFICE_MANAGER_SLACK_BOT_TOKEN="office-manager-public-roo-test-token",
     OFFICE_MANAGER_TIMEZONE="Australia/Melbourne",
 )
 class OfficeManagerSchedulerTests(TestCase):
+    def setUp(self):
+        self.profile_patcher = patch(
+            "roo.office_manager.SlackService.get_user_profile",
+            side_effect=active_slack_profile,
+        )
+        self.profile_patcher.start()
+        self.addCleanup(self.profile_patcher.stop)
+
     def test_scheduler_posts_once_with_button_and_no_reply_copy(self):
         now = melbourne_at(2026, 8, 3, 8, 30)
         fake_client = Mock()
@@ -810,7 +955,7 @@ class OfficeManagerSchedulerTests(TestCase):
         with patch(
             "roo.office_manager.SlackService.get_client",
             return_value=fake_client,
-        ):
+        ) as get_client:
             first = run_office_manager_scheduler(now=now)
             second = run_office_manager_scheduler(now=now)
 
@@ -829,6 +974,9 @@ class OfficeManagerSchedulerTests(TestCase):
         self.assertIn(COWORKING_SELF_BOOK_REMINDER, payload["text"])
         self.assertIn(COWORKING_SELF_BOOK_REMINDER, blocks_text)
         self.assertIn(NO_FOOD_REMINDER, blocks_text)
+        get_client.assert_called_once_with(
+            bot_token="office-manager-public-roo-test-token"
+        )
         action_block = next(
             block for block in payload["blocks"] if block["type"] == "actions"
         )
@@ -841,6 +989,92 @@ class OfficeManagerSchedulerTests(TestCase):
             json.loads(volunteer_button["value"]),
             {"date": "2026-08-03"},
         )
+
+    @override_settings(OFFICE_MANAGER_SLACK_BOT_TOKEN="")
+    def test_scheduler_fails_closed_without_public_roo_token(self):
+        result = run_office_manager_scheduler(now=melbourne_at(2026, 8, 3, 8, 30))
+
+        self.assertEqual(
+            result,
+            {
+                "status": "failed",
+                "reason": "slack_bot_token_not_configured",
+            },
+        )
+        self.assertFalse(OfficeManagerDay.objects.exists())
+
+    def test_scheduler_recovers_stale_sending_announcement(self):
+        now = melbourne_at(2026, 8, 3, 8, 30)
+        day = office_manager_day(now.date())
+        OfficeManagerDay.objects.filter(pk=day.pk).update(
+            announcement_status="sending",
+            slack_message_ts="",
+            updated_at=timezone.now() - timedelta(minutes=6),
+        )
+        fake_client = Mock()
+        fake_client.chat_postMessage.return_value = {
+            "ok": True,
+            "ts": "123.456",
+        }
+
+        with patch(
+            "roo.office_manager.SlackService.get_client",
+            return_value=fake_client,
+        ):
+            result = run_office_manager_scheduler(now=now)
+
+        self.assertTrue(result["announcement_sent"])
+        day.refresh_from_db()
+        self.assertEqual(day.announcement_status, "sent")
+        fake_client.chat_postMessage.assert_called_once()
+
+    def test_scheduler_reaches_all_stale_assignment_delivery_leases(self):
+        now = melbourne_at(2026, 8, 3, 16, 30)
+        day = office_manager_day(now.date(), status_value="claimed")
+        user = User.objects.create_user(
+            email="stale-delivery@example.com",
+            slack_id="USTALEDELIVERY",
+        )
+        booking = CoworkingBooking.objects.create(
+            user=user,
+            date=now.date(),
+            points_cost=0,
+            booking_source="office_manager",
+        )
+        assignment = OfficeManagerAssignment.objects.create(
+            day=day,
+            user=user,
+            booking=booking,
+            winner_channel_announcement_status="sending",
+            winner_dm_status="sending",
+            end_of_day_reminder_status="sending",
+        )
+        OfficeManagerAssignment.objects.filter(pk=assignment.pk).update(
+            updated_at=timezone.now() - timedelta(minutes=6)
+        )
+
+        with (
+            patch.object(
+                OfficeManagerService,
+                "deliver_winner_channel_announcement",
+                return_value=True,
+            ) as winner_channel,
+            patch.object(
+                OfficeManagerService,
+                "deliver_winner_dm",
+                return_value=True,
+            ) as winner_dm,
+            patch.object(
+                OfficeManagerService,
+                "deliver_end_of_day_reminder",
+                return_value=True,
+            ) as end_reminder,
+        ):
+            run_office_manager_scheduler(now=now)
+
+        winner_channel.assert_called_once_with(assignment.id)
+        winner_dm.assert_called_once_with(assignment.id)
+        end_reminder.assert_called_once_with(assignment.id)
 
     def test_stale_announcement_retry_reuses_slack_client_message_id(self):
         now = melbourne_at(2026, 8, 3, 8, 30)
@@ -1085,6 +1319,8 @@ def json_text(value):
 
 @override_settings(
     ROO_API_KEY="office-manager-test-key",
+    OFFICE_MANAGER_ENABLED=True,
+    OFFICE_MANAGER_SLACK_BOT_TOKEN="office-manager-public-roo-test-token",
     OFFICE_MANAGER_TIMEZONE="Australia/Melbourne",
 )
 class OfficeManagerClaimApiTests(APITestCase):
@@ -1108,6 +1344,7 @@ class OfficeManagerClaimApiTests(APITestCase):
     @patch("roo.views.OfficeManagerService.claim")
     def test_claim_rejection_code_contract(self, claim):
         cases = (
+            ("feature_disabled", status.HTTP_503_SERVICE_UNAVAILABLE),
             ("member_not_eligible", status.HTTP_403_FORBIDDEN),
             ("office_manager_day_not_found", status.HTTP_404_NOT_FOUND),
             ("already_claimed", status.HTTP_409_CONFLICT),
@@ -1272,9 +1509,21 @@ class OfficeManagerClaimApiTests(APITestCase):
     connection.vendor == "postgresql",
     "PostgreSQL row-lock behavior is not provided by SQLite",
 )
-@override_settings(OFFICE_MANAGER_TIMEZONE="Australia/Melbourne")
+@override_settings(
+    OFFICE_MANAGER_ENABLED=True,
+    OFFICE_MANAGER_SLACK_BOT_TOKEN="office-manager-public-roo-test-token",
+    OFFICE_MANAGER_TIMEZONE="Australia/Melbourne",
+)
 class OfficeManagerPostgresConcurrencyTests(TransactionTestCase):
     reset_sequences = True
+
+    def setUp(self):
+        self.profile_patcher = patch(
+            "roo.office_manager.SlackService.get_user_profile",
+            side_effect=active_slack_profile,
+        )
+        self.profile_patcher.start()
+        self.addCleanup(self.profile_patcher.stop)
 
     def test_two_simultaneous_claims_create_one_assignment(self):
         now = melbourne_at(2026, 8, 3, 8, 45)

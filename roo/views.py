@@ -1826,6 +1826,85 @@ class CoworkingViewSet(viewsets.ViewSet):
             status=status.HTTP_201_CREATED if created_count else status.HTTP_200_OK,
         )
 
+    @action(detail=False, methods=['post'], url_path='office-manager/claim')
+    def office_manager_claim(self, request):
+        """Atomically select and book today's first Office Manager volunteer."""
+        slack_user_id = clean_slack_id(request.data.get('slack_user_id'))
+        booking_date_raw = str(request.data.get('date') or '').strip()
+        if not slack_user_id or not booking_date_raw:
+            return Response(
+                {
+                    'code': 'invalid_request',
+                    'error': 'slack_user_id and date are required',
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            booking_date = date.fromisoformat(booking_date_raw)
+        except ValueError:
+            return Response(
+                {
+                    'code': 'invalid_request',
+                    'error': 'Invalid date format. Use YYYY-MM-DD',
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            result = OfficeManagerService.claim(
+                slack_user_id=slack_user_id,
+                booking_date=booking_date,
+            )
+        except OfficeManagerClaimError as exc:
+            if exc.code == 'claim_closed':
+                day = OfficeManagerDay.objects.filter(date=booking_date).first()
+                if day and day.message_update_pending:
+                    OfficeManagerService.reconcile_message(day.id)
+            status_by_code = {
+                'feature_disabled': status.HTTP_503_SERVICE_UNAVAILABLE,
+                'member_not_eligible': status.HTTP_403_FORBIDDEN,
+                'slack_profile_unavailable': status.HTTP_503_SERVICE_UNAVAILABLE,
+                'office_manager_day_not_found': status.HTTP_404_NOT_FOUND,
+                'already_claimed': status.HTTP_409_CONFLICT,
+                'claim_closed': status.HTTP_409_CONFLICT,
+            }
+            response_data = {'code': exc.code, 'error': str(exc)}
+            if exc.assignee_slack_user_id:
+                response_data['assignee_slack_user_id'] = (
+                    exc.assignee_slack_user_id
+                )
+            return Response(
+                response_data,
+                status=status_by_code.get(
+                    exc.code,
+                    status.HTTP_400_BAD_REQUEST,
+                ),
+            )
+
+        OfficeManagerService.reconcile_message(result.assignment.day_id)
+        OfficeManagerService.deliver_winner_channel_announcement(
+            result.assignment.id
+        )
+        OfficeManagerService.deliver_winner_dm(result.assignment.id)
+        response_data = {
+            'status': result.status,
+            'date': booking_date.isoformat(),
+            'office_manager_slack_user_id': slack_user_id,
+            'assignment_id': result.assignment.id,
+            'booking': CoworkingBookingSerializer(result.booking).data,
+            'points_charged': 0,
+            'points_refunded': result.assignment.points_refunded,
+            'existing_booking_converted': result.existing_booking_converted,
+            'monthly_update_discount_applied': False,
+            'office_manager_free_day': True,
+        }
+        response_status = (
+            status.HTTP_200_OK
+            if result.status == 'already_claimed_by_you'
+            else status.HTTP_201_CREATED
+        )
+        return Response(response_data, status=response_status)
+
     @action(detail=False, methods=['post'])
     def cancel(self, request):
         """Cancel a booking."""

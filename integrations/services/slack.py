@@ -14,7 +14,9 @@ class SlackService:
     _channel_name_cache: Dict[str, str] = {}
 
     @classmethod
-    def get_client(cls) -> WebClient:
+    def get_client(cls, *, bot_token: str | None = None) -> WebClient:
+        if bot_token is not None:
+            return WebClient(token=bot_token)
         if cls._client is None:
             token = (
                 os.environ.get('SLACK_BOT_TOKEN')
@@ -28,7 +30,12 @@ class SlackService:
         return cls._client
 
     @classmethod
-    def get_user_profile(cls, slack_user_id: str) -> Optional[Dict[str, Any]]:
+    def get_user_profile(
+        cls,
+        slack_user_id: str,
+        *,
+        client: WebClient | None = None,
+    ) -> Optional[Dict[str, Any]]:
         """
         Fetch user profile from Slack.
         
@@ -36,7 +43,7 @@ class SlackService:
             Dict containing 'real_name', 'email', 'image_512' etc.
             Returns None if user not found or API error.
         """
-        client = cls.get_client()
+        client = client or cls.get_client()
         try:
             response = client.users_info(user=slack_user_id)
             if response['ok']:
@@ -201,7 +208,15 @@ class SlackService:
             return False, None
 
     @classmethod
-    def update_message(cls, channel_id: str, ts: str, text: str, blocks: list = None) -> bool:
+    def update_message(
+        cls,
+        channel_id: str,
+        ts: str,
+        text: str,
+        blocks: list = None,
+        *,
+        client: WebClient | None = None,
+    ) -> bool:
         """
         Update an existing Slack message (e.g. to remove interactive buttons after click).
 
@@ -214,7 +229,7 @@ class SlackService:
         Returns:
             True if successful, False otherwise.
         """
-        client = cls.get_client()
+        client = client or cls.get_client()
         try:
             kwargs = {"channel": channel_id, "ts": ts, "text": text}
             if blocks is not None:
