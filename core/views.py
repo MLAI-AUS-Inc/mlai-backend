@@ -51,8 +51,8 @@ from .permissions import (
 from .slack_founder_links import (
     ConflictingSlackFounderLinkError,
     SlackFounderLinkError,
+    assign_direct_slack_identity,
     complete_slack_founder_link,
-    ensure_user_can_accept_direct_slack_identity,
     founder_account_connection_status,
     preview_slack_founder_link,
     start_slack_founder_link,

@@ -10,7 +10,7 @@ from django.db import IntegrityError, transaction
 from .models import User
 from .slack_founder_links import (
     ConflictingSlackFounderLinkError,
-    ensure_user_can_accept_direct_slack_identity,
+    assign_direct_slack_identity,
 )
 
 logger = logging.getLogger(__name__)
@@ -59,7 +59,7 @@ def ensure_slack_user(
     user = User.objects.filter(email__iexact=normalized_email).first()
     if user and user.slack_id != slack_id:
         try:
-            ensure_user_can_accept_direct_slack_identity(user)
+            user = assign_direct_slack_identity(user, slack_id)
         except ConflictingSlackFounderLinkError:
             # Preserve the explicit account boundary. Roo may still register
             # this Slack identity as a separate placeholder user.
@@ -67,9 +67,6 @@ def ensure_slack_user(
             user = None
     if user:
         update_fields = []
-        if user.slack_id != slack_id:
-            user.slack_id = slack_id
-            update_fields.append("slack_id")
         if first_name and not user.first_name:
             user.first_name = first_name
             update_fields.append("first_name")
@@ -180,16 +177,12 @@ def resolve_existing_user_from_profile(
             return user
 
         try:
-            ensure_user_can_accept_direct_slack_identity(user)
+            # Keep the assignment in a savepoint so a concurrent unique-key
+            # winner can be inspected without poisoning this transaction.
+            with transaction.atomic():
+                user = assign_direct_slack_identity(user, requested_slack_id)
         except ConflictingSlackFounderLinkError:
             return None
-
-        user.slack_id = requested_slack_id
-        try:
-            # Keep the IntegrityError inside a savepoint so a concurrent winner
-            # can be inspected without poisoning the outer transaction.
-            with transaction.atomic():
-                user.save(update_fields=["slack_id"])
         except IntegrityError:
             winner = User.objects.filter(slack_id=requested_slack_id).first()
             if winner and winner.pk == user.pk:

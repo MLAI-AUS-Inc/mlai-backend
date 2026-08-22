@@ -5,7 +5,7 @@ import logging
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from rest_framework import status as drf_status
 from rest_framework.exceptions import APIException
 
@@ -394,8 +394,15 @@ def reconcile_user_slack_id_from_email(user) -> bool:
     )
     if slack_backed_user is None:
         return False
-    user.slack_id = slack_backed_user.slack_id
-    user.save(update_fields=["slack_id"])
+    from core.slack_founder_links import (
+        ConflictingSlackFounderLinkError,
+        assign_direct_slack_identity,
+    )
+
+    try:
+        assign_direct_slack_identity(user, slack_backed_user.slack_id)
+    except (ConflictingSlackFounderLinkError, IntegrityError):
+        return False
     return True
 
 

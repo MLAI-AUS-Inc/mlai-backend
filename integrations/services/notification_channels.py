@@ -38,6 +38,10 @@ from integrations.services.notification_adapters import (
     send_whatsapp_template,
 )
 from integrations.services.slack import SlackService
+from core.slack_founder_links import (
+    ConflictingSlackFounderLinkError,
+    assign_direct_slack_identity,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -434,13 +438,12 @@ def link_slack_channel(*, organization, user, config=None) -> NotificationChanne
         )
 
     if user is not None and not getattr(user, "slack_id", None):
-        user.slack_id = slack_id
         try:
-            user.save(update_fields=["slack_id"])
-        except IntegrityError:
-            # Another account already owns this Slack ID; the channel link
-            # still works without persisting it on the user.
-            user.slack_id = None
+            user = assign_direct_slack_identity(user, slack_id)
+        except (ConflictingSlackFounderLinkError, IntegrityError):
+            # Explicit account links and existing identity ownership must stay
+            # unchanged. The notification route can still use this Slack ID.
+            pass
     if config is not None and not getattr(config, "connected_slack_user_id", None):
         config.connected_slack_user_id = slack_id
         config.save(update_fields=["connected_slack_user_id", "updated_at"])

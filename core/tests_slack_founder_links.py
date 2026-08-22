@@ -19,6 +19,7 @@ from core.slack_founder_links import (
     ConflictingSlackFounderLinkError,
     SlackFounderLinkError,
     UsedSlackFounderLinkError,
+    assign_direct_slack_identity,
     complete_slack_founder_link,
     create_slack_founder_link_request,
     digest_link_token,
@@ -188,6 +189,20 @@ class SlackFounderLinkApiTests(APITestCase):
         self.assertEqual(response.data["verified_at"], link.verified_at.isoformat())
         self.assertNotIn("slack_id", response.data)
         self.assertNotIn("email", response.data)
+
+    def test_status_does_not_offer_relinking_to_explicit_slack_side(self):
+        SlackFounderAccountLink.objects.create(
+            slack_user=self.slack_user,
+            founder_user=self.founder_user,
+        )
+        self.client.force_authenticate(self.slack_user)
+
+        response = self.client.get(self.status_url)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["connection_type"], "direct")
+        self.assertFalse(response.data["can_link_separate_account"])
+        self.assertEqual(self._start().data, {"status": "already_linked"})
 
     def test_malformed_token_is_rejected_before_lookup(self):
         self.client.force_authenticate(self.founder_user)
@@ -530,6 +545,27 @@ class SlackFounderLinkApiTests(APITestCase):
         self.founder_user.refresh_from_db()
         self.assertIsNone(self.founder_user.slack_id)
 
+    def test_legacy_link_slack_cannot_reassign_explicit_slack_side(self):
+        SlackFounderAccountLink.objects.create(
+            slack_user=self.slack_user,
+            founder_user=self.founder_user,
+        )
+
+        response = self.client.post(
+            reverse("link_slack"),
+            {
+                "slack_id": "UNEWSIDE12",
+                "email": self.slack_user.email,
+            },
+            format="json",
+            HTTP_X_API_KEY="roo-link-key",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(response.data["code"], "link_conflict")
+        self.slack_user.refresh_from_db()
+        self.assertEqual(self.slack_user.slack_id, "ULINK12345")
+
     def test_slack_registration_keeps_explicit_founder_as_a_separate_account(self):
         SlackFounderAccountLink.objects.create(
             slack_user=self.slack_user,
@@ -553,6 +589,55 @@ class SlackFounderLinkApiTests(APITestCase):
             "usecond123@slack.placeholder.com",
         )
         self.assertEqual(response.data["slack_id"], "USECOND123")
+        self.founder_user.refresh_from_db()
+        self.assertIsNone(self.founder_user.slack_id)
+
+    def test_slack_registration_cannot_reassign_explicit_slack_side(self):
+        from core.slack_users import ensure_slack_user
+
+        SlackFounderAccountLink.objects.create(
+            slack_user=self.slack_user,
+            founder_user=self.founder_user,
+        )
+
+        result = ensure_slack_user(
+            slack_id="UNEWSIDE12",
+            email=self.slack_user.email,
+            first_name="New",
+        )
+
+        self.assertNotEqual(result.user.pk, self.slack_user.pk)
+        self.assertEqual(result.user.email, "unewside12@slack.placeholder.com")
+        self.slack_user.refresh_from_db()
+        self.assertEqual(self.slack_user.slack_id, "ULINK12345")
+
+    def test_direct_identity_change_invalidates_unused_link_requests(self):
+        request, token = create_slack_founder_link_request(self.slack_user)
+
+        assign_direct_slack_identity(self.slack_user, "UNEWSIDE12")
+
+        request.refresh_from_db()
+        self.assertIsNotNone(request.invalidated_at)
+        self.client.force_authenticate(self.founder_user)
+        response = self.client.post(
+            self.preview_url,
+            {"token": token},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["code"], "invalid_token")
+
+    def test_content_factory_actor_does_not_persist_synthetic_slack_identity(self):
+        from integrations.api_views_content_factory_app import _ensure_actor_id
+
+        SlackFounderAccountLink.objects.create(
+            slack_user=self.slack_user,
+            founder_user=self.founder_user,
+        )
+
+        actor_id = _ensure_actor_id(self.founder_user)
+
+        self.assertEqual(actor_id, f"web_{self.founder_user.pk}")
         self.founder_user.refresh_from_db()
         self.assertIsNone(self.founder_user.slack_id)
 
@@ -981,3 +1066,55 @@ class SlackFounderLinkConcurrencyTests(TransactionTestCase):
                 ["start:link_required", "complete:invalid_token"],
             ],
         )
+
+    @skipUnlessDBFeature("has_select_for_update")
+    def test_completion_and_direct_identity_assignment_cannot_both_win(self):
+        slack_user = User.objects.create_user(
+            email="identity-race-slack@example.com",
+            slack_id="UIDRACESLK",
+        )
+        founder_user = User.objects.create_user(
+            email="identity-race-founder@example.com",
+        )
+        _, token = create_slack_founder_link_request(slack_user)
+        barrier = Barrier(2)
+
+        def complete():
+            close_old_connections()
+            barrier.wait()
+            try:
+                complete_slack_founder_link(token, founder_user=founder_user)
+                return "linked"
+            except ConflictingSlackFounderLinkError:
+                return "link_conflict"
+            finally:
+                close_old_connections()
+
+        def assign():
+            close_old_connections()
+            barrier.wait()
+            try:
+                assign_direct_slack_identity(founder_user, "UIDRACEWEB")
+                return "assigned"
+            except ConflictingSlackFounderLinkError:
+                return "assignment_conflict"
+            finally:
+                close_old_connections()
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [executor.submit(complete), executor.submit(assign)]
+            outcomes = [future.result(timeout=5) for future in futures]
+
+        founder_user.refresh_from_db()
+        link_exists = SlackFounderAccountLink.objects.filter(
+            slack_user=slack_user,
+            founder_user=founder_user,
+        ).exists()
+        self.assertIn(
+            outcomes,
+            [
+                ["linked", "assignment_conflict"],
+                ["link_conflict", "assigned"],
+            ],
+        )
+        self.assertEqual(link_exists, founder_user.slack_id is None)

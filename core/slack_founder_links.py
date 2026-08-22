@@ -279,12 +279,40 @@ def founder_tools_connection_type(user: User) -> str | None:
 
 
 def ensure_user_can_accept_direct_slack_identity(user: User) -> None:
-    """Prevent a linked Founder Tools identity becoming a second Roo user."""
-    if SlackFounderAccountLink.objects.filter(founder_user=user).exists():
+    """Prevent either side of an explicit link changing identity ownership."""
+    if SlackFounderAccountLink.objects.filter(
+        Q(slack_user=user) | Q(founder_user=user)
+    ).exists():
         raise ConflictingSlackFounderLinkError(
-            "This Founder Tools account is already connected to a separate Roo "
-            "Slack account. Contact MLAI support to change that connection."
+            "This account already participates in a verified Roo-Founder Tools "
+            "connection. Contact MLAI support to change that connection."
         )
+
+
+@transaction.atomic
+def assign_direct_slack_identity(user: User, slack_id: str) -> User:
+    """Atomically assign a direct Slack identity without crossing link boundaries."""
+    normalized_slack_id = str(slack_id or "").strip()
+    if not normalized_slack_id:
+        raise ValueError("slack_id is required")
+
+    locked_user = User.objects.select_for_update().get(pk=user.pk)
+    if locked_user.slack_id == normalized_slack_id:
+        return locked_user
+
+    ensure_user_can_accept_direct_slack_identity(locked_user)
+    locked_user.slack_id = normalized_slack_id
+    locked_user.save(update_fields=["slack_id", "updated_at"])
+
+    # A request is bound to the Slack identity that owned this user when the
+    # token was issued. Do not let an old token survive an identity change.
+    now = timezone.now()
+    SlackFounderLinkRequest.objects.filter(
+        slack_user=locked_user,
+        consumed_at__isnull=True,
+        invalidated_at__isnull=True,
+    ).update(invalidated_at=now, updated_at=now)
+    return locked_user
 
 
 def founder_account_connection_status(founder_user: User) -> dict:
@@ -306,14 +334,16 @@ def founder_account_connection_status(founder_user: User) -> dict:
         }
 
     # Same-account users were already verified when their Slack identity was
-    # attached to this user. The API cannot prove whether a legacy direct ID is
-    # still the member's current external Slack identity, so clients must keep
-    # the separate-account linking path visible for direct connections.
+    # attached to this user. Keep linking available for ordinary legacy direct
+    # connections, but not when this user already owns an explicit link.
     if founder_user.slack_id:
+        is_explicit_slack_side = SlackFounderAccountLink.objects.filter(
+            slack_user=founder_user
+        ).exists()
         return {
             "status": "connected",
             "connection_type": "direct",
-            "can_link_separate_account": True,
+            "can_link_separate_account": not is_explicit_slack_side,
             "slack_display_name": (
                 founder_user.full_name or "Your Roo Slack account"
             ),

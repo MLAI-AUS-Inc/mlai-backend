@@ -22,6 +22,7 @@ from content_factory.models import (
     ResearchAutomation,
     ResearchAutomationStatus,
 )
+from core.models import SlackFounderAccountLink
 from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
 from integrations.services.notification_channels import (
     ChannelActionError,
@@ -378,6 +379,36 @@ class SlackLinkTests(TestCase):
 
         self.assertEqual(channel.route_id, "U222")
         mock_lookup.assert_not_called()
+
+    @patch("integrations.services.notification_channels.SlackService.send_dm", return_value=(True, "1.0"))
+    @patch("integrations.services.notification_channels.SlackService.lookup_user_by_email")
+    def test_explicit_founder_link_does_not_gain_a_second_direct_identity(
+        self,
+        mock_lookup,
+        mock_dm,
+    ):
+        slack_user = User.objects.create_user(
+            email="roo-account@example.com",
+            slack_id="UROOACCOUNT",
+        )
+        SlackFounderAccountLink.objects.create(
+            slack_user=slack_user,
+            founder_user=self.user,
+        )
+        self.config.connected_slack_user_id = "UNOTIFY123"
+        self.config.save(update_fields=["connected_slack_user_id"])
+
+        channel = link_slack_channel(
+            organization=self.org,
+            user=self.user,
+            config=self.config,
+        )
+
+        self.assertEqual(channel.route_id, "UNOTIFY123")
+        self.user.refresh_from_db()
+        self.assertIsNone(self.user.slack_id)
+        mock_lookup.assert_not_called()
+        mock_dm.assert_called_once()
 
     @patch("integrations.services.notification_channels.SlackService.send_dm", return_value=(True, "1.0"))
     @patch(

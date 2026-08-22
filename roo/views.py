@@ -46,7 +46,7 @@ from .committee_candidates import CommitteeCandidateEmailService
 from core.models import SlackFounderAccountLink, User
 from core.slack_founder_links import (
     ConflictingSlackFounderLinkError,
-    ensure_user_can_accept_direct_slack_identity,
+    assign_direct_slack_identity,
     founder_tools_connection_type,
 )
 from core.permissions import HasAPIKey, HasRooApiKey, HasStrictRooApiKey
@@ -131,12 +131,13 @@ def get_or_create_user_for_slack_id(slack_user_id: str) -> User:
         if existing_user:
             if not existing_user.slack_id:
                 try:
-                    ensure_user_can_accept_direct_slack_identity(existing_user)
+                    existing_user = assign_direct_slack_identity(
+                        existing_user,
+                        slack_user_id,
+                    )
                 except ConflictingSlackFounderLinkError:
                     email = f"{slack_user_id}@slack.placeholder.com"
                 else:
-                    existing_user.slack_id = slack_user_id
-                    existing_user.save(update_fields=['slack_id'])
                     return existing_user
             if existing_user.slack_id == slack_user_id:
                 return existing_user

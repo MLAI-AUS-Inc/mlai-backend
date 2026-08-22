@@ -68,10 +68,8 @@ def _ensure_actor_id(user) -> str:
     if existing:
         return existing
 
-    actor_id = f"web_{user.pk}"
-    user.slack_id = actor_id
-    user.save(update_fields=["slack_id"])
-    return actor_id
+    # Web identities are stable internal actor IDs, not verified Slack IDs.
+    return f"web_{user.pk}"
 
 
 def _serialize_user(user, actor_id: str) -> dict:
