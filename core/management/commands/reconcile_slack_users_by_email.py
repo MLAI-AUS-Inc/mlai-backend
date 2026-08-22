@@ -8,6 +8,11 @@ from content_factory.models import OrganizationContentConfig
 from integrations.models import UserIntegration
 from integrations.services.slack import SlackService
 
+from core.slack_founder_links import (
+    invalidate_unused_slack_founder_link_requests,
+    user_participates_in_slack_founder_link,
+)
+
 
 class Command(BaseCommand):
     help = "Link Slack-era user ids to email-login users when Slack profile email matches."
@@ -57,12 +62,62 @@ class Command(BaseCommand):
             if email_user.slack_id:
                 self.stdout.write(self.style.WARNING(f"{slack_id}: {email} already has Slack id {email_user.slack_id}"))
                 continue
+            if user_participates_in_slack_founder_link(email_user) or (
+                slack_user is not None
+                and user_participates_in_slack_founder_link(slack_user)
+            ):
+                self.stdout.write(
+                    self.style.WARNING(
+                        f"{slack_id}: explicit Roo-Founder Tools link exists; manual support required"
+                    )
+                )
+                continue
             self.stdout.write(f"{slack_id}: link to {email}")
             if not commit:
                 continue
             with transaction.atomic():
-                if slack_user and slack_user.pk != email_user.pk:
-                    slack_user.slack_id = None
-                    slack_user.save(update_fields=["slack_id"])
-                email_user.slack_id = slack_id
-                email_user.save(update_fields=["slack_id"])
+                user_ids = {email_user.pk}
+                if slack_user is not None:
+                    user_ids.add(slack_user.pk)
+                locked_users = {
+                    user.pk: user
+                    for user in User.objects.select_for_update()
+                    .filter(pk__in=sorted(user_ids))
+                    .order_by("pk")
+                }
+                locked_email_user = locked_users[email_user.pk]
+                locked_slack_user = (
+                    locked_users.get(slack_user.pk)
+                    if slack_user is not None
+                    else None
+                )
+                if user_participates_in_slack_founder_link(
+                    locked_email_user
+                ) or (
+                    locked_slack_user is not None
+                    and user_participates_in_slack_founder_link(
+                        locked_slack_user
+                    )
+                ):
+                    self.stdout.write(
+                        self.style.WARNING(
+                            f"{slack_id}: explicit Roo-Founder Tools link appeared; manual support required"
+                        )
+                    )
+                    continue
+                if (
+                    locked_slack_user is not None
+                    and locked_slack_user.pk != locked_email_user.pk
+                ):
+                    invalidate_unused_slack_founder_link_requests(
+                        locked_slack_user,
+                        locked_email_user,
+                    )
+                    locked_slack_user.slack_id = None
+                    locked_slack_user.save(update_fields=["slack_id"])
+                else:
+                    invalidate_unused_slack_founder_link_requests(
+                        locked_email_user
+                    )
+                locked_email_user.slack_id = slack_id
+                locked_email_user.save(update_fields=["slack_id"])

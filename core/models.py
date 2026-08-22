@@ -178,6 +178,12 @@ class SlackFounderAccountLink(models.Model):
 
     class Meta:
         db_table = "core_slackfounderaccountlink"
+        constraints = [
+            models.CheckConstraint(
+                check=~models.Q(slack_user=models.F("founder_user")),
+                name="core_sfal_distinct_users",
+            ),
+        ]
 
     def __str__(self):
         return f"Slack user {self.slack_user_id} -> Founder user {self.founder_user_id}"

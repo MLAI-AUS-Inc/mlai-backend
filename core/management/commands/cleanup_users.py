@@ -1,7 +1,11 @@
 import logging
-from django.core.management.base import BaseCommand
+from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction, IntegrityError
 from core.models import User
+from core.slack_founder_links import (
+    invalidate_unused_slack_founder_link_requests,
+    user_participates_in_slack_founder_link,
+)
 from roo.models import (
     PointsAccount, Ledger, Task, TaskSubmission, 
     CoworkingBooking, RewardRedemption, PointsAdmin
@@ -35,6 +39,15 @@ class Command(BaseCommand):
         for slack_user in slack_users:
             slack_id = slack_user.slack_id
             current_email = slack_user.email
+
+            if user_participates_in_slack_founder_link(slack_user):
+                self.stdout.write(
+                    self.style.WARNING(
+                        f"Skipping linked account {slack_user.pk}; manual support required."
+                    )
+                )
+                skipped_count += 1
+                continue
             
             try:
                 # Fetch profile from Slack
@@ -66,8 +79,22 @@ class Command(BaseCommand):
                     old_email = slack_user.email
                     self.stdout.write(f"UPDATE EMAIL: SlackUser({slack_id}) {old_email} -> {real_email}")
                     if commit:
-                        slack_user.email = real_email
-                        slack_user.save()
+                        with transaction.atomic():
+                            locked_slack_user = User.objects.select_for_update().get(
+                                pk=slack_user.pk
+                            )
+                            if user_participates_in_slack_founder_link(
+                                locked_slack_user
+                            ):
+                                self.stdout.write(
+                                    self.style.WARNING(
+                                        f"Skipping linked account {slack_user.pk}; manual support required."
+                                    )
+                                )
+                                skipped_count += 1
+                                continue
+                            locked_slack_user.email = real_email
+                            locked_slack_user.save(update_fields=["email"])
                     updated_count += 1
                     continue
                 
@@ -100,6 +127,23 @@ class Command(BaseCommand):
         source is deleted.
         """
         
+        locked_users = {
+            user.pk: user
+            for user in User.objects.select_for_update()
+            .filter(pk__in=sorted({source.pk, target.pk}))
+            .order_by("pk")
+        }
+        source = locked_users[source.pk]
+        target = locked_users[target.pk]
+        if user_participates_in_slack_founder_link(
+            source
+        ) or user_participates_in_slack_founder_link(target):
+            raise CommandError(
+                "Cannot merge an account with an explicit Roo-Founder Tools link; "
+                "manual support is required."
+            )
+        invalidate_unused_slack_founder_link_requests(source, target)
+
         # 1. Update Basic Info on Target
         if not target.slack_id:
             target.slack_id = source.slack_id

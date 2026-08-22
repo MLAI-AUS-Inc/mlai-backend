@@ -51,8 +51,11 @@ from .permissions import (
 from .slack_founder_links import (
     ConflictingSlackFounderLinkError,
     SlackFounderLinkError,
+    SlackFounderLinkUserNotFoundError,
+    UsedSlackFounderLinkError,
     assign_direct_slack_identity,
     complete_slack_founder_link,
+    consumed_link_matches_founder_user,
     founder_account_connection_status,
     preview_slack_founder_link,
     start_slack_founder_link,
@@ -1065,10 +1068,10 @@ class LinkSlackView(APIView):
         )
 
 
-def _slack_founder_link_error_response(exc):
+def _slack_founder_link_error_response(exc, **details):
     logger.info("slack_founder_link_rejected code=%s", exc.code)
     return Response(
-        {"code": exc.code, "error": str(exc)},
+        {"code": exc.code, "error": str(exc), **details},
         status=exc.status_code,
     )
 
@@ -1088,17 +1091,19 @@ class SlackFounderLinkStartView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        slack_user = User.objects.filter(slack_id=slack_user_id).first()
+        slack_user = User.objects.filter(
+            slack_id=slack_user_id,
+            is_active=True,
+        ).first()
         if slack_user is None:
-            return Response(
-                {
-                    "code": "slack_user_not_found",
-                    "error": "Ask Roo to register your Slack account before linking.",
-                },
-                status=status.HTTP_404_NOT_FOUND,
+            return _slack_founder_link_error_response(
+                SlackFounderLinkUserNotFoundError()
             )
 
-        link_start = start_slack_founder_link(slack_user)
+        try:
+            link_start = start_slack_founder_link(slack_user)
+        except SlackFounderLinkError as exc:
+            return _slack_founder_link_error_response(exc)
         if link_start.status == "already_linked":
             return Response(
                 {"status": "already_linked"},
@@ -1143,6 +1148,16 @@ class SlackFounderLinkPreviewView(APIView):
                 request.data.get("token"),
                 founder_user=request.user,
             )
+        except UsedSlackFounderLinkError as exc:
+            return _slack_founder_link_error_response(
+                exc,
+                connection_matches_requesting_user=(
+                    consumed_link_matches_founder_user(
+                        request.data.get("token"),
+                        request.user,
+                    )
+                ),
+            )
         except SlackFounderLinkError as exc:
             return _slack_founder_link_error_response(exc)
 
@@ -1168,6 +1183,16 @@ class SlackFounderLinkCompleteView(APIView):
             completion = complete_slack_founder_link(
                 request.data.get("token"),
                 founder_user=request.user,
+            )
+        except UsedSlackFounderLinkError as exc:
+            return _slack_founder_link_error_response(
+                exc,
+                connection_matches_requesting_user=(
+                    consumed_link_matches_founder_user(
+                        request.data.get("token"),
+                        request.user,
+                    )
+                ),
             )
         except SlackFounderLinkError as exc:
             return _slack_founder_link_error_response(exc)

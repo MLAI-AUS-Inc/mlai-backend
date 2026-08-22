@@ -1,14 +1,19 @@
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, timedelta
+from io import StringIO
 from threading import Barrier
+from unittest.mock import patch
 from urllib.parse import parse_qs, urlparse
 
+from django.core.management import call_command
+from django.core.management.base import CommandError
 from django.db import IntegrityError, close_old_connections, transaction
 from django.test import TransactionTestCase, override_settings, skipUnlessDBFeature
 from django.urls import reverse
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
+from rest_framework_simplejwt.tokens import AccessToken
 
 from core.models import (
     SlackFounderAccountLink,
@@ -18,6 +23,7 @@ from core.models import (
 from core.slack_founder_links import (
     ConflictingSlackFounderLinkError,
     SlackFounderLinkError,
+    SlackFounderLinkUserNotFoundError,
     UsedSlackFounderLinkError,
     assign_direct_slack_identity,
     complete_slack_founder_link,
@@ -27,10 +33,96 @@ from core.slack_founder_links import (
 )
 
 
+class SlackFounderLinkLegacyCommandTests(TransactionTestCase):
+    def setUp(self):
+        self.slack_user = User.objects.create_user(
+            email="slack-placeholder@example.com",
+            slack_id="ULEGACY123",
+        )
+        self.founder_user = User.objects.create_user(
+            email="founder@example.com",
+        )
+        SlackFounderAccountLink.objects.create(
+            slack_user=self.slack_user,
+            founder_user=self.founder_user,
+        )
+
+    @patch(
+        "core.management.commands.reconcile_slack_users_by_email.SlackService"
+    )
+    def test_email_reconciliation_does_not_move_a_linked_slack_identity(
+        self,
+        slack_service_class,
+    ):
+        slack_service_class.return_value.get_user_profile.return_value = {
+            "email": self.founder_user.email
+        }
+        output = StringIO()
+
+        call_command(
+            "reconcile_slack_users_by_email",
+            "--commit",
+            stdout=output,
+        )
+
+        self.slack_user.refresh_from_db()
+        self.founder_user.refresh_from_db()
+        self.assertEqual(self.slack_user.slack_id, "ULEGACY123")
+        self.assertIsNone(self.founder_user.slack_id)
+        self.assertIn("manual support required", output.getvalue())
+
+    def test_cleanup_merge_refuses_accounts_with_an_explicit_link(self):
+        from core.management.commands.cleanup_users import Command
+
+        command = Command(stdout=StringIO(), stderr=StringIO())
+
+        with self.assertRaisesMessage(
+            CommandError,
+            "explicit Roo-Founder Tools link",
+        ):
+            command.merge_users(self.slack_user, self.founder_user)
+
+        self.assertTrue(User.objects.filter(pk=self.slack_user.pk).exists())
+        self.assertTrue(User.objects.filter(pk=self.founder_user.pk).exists())
+        self.assertTrue(
+            SlackFounderAccountLink.objects.filter(
+                slack_user=self.slack_user,
+                founder_user=self.founder_user,
+            ).exists()
+        )
+
+    @patch(
+        "core.management.commands.reconcile_slack_users_by_email.SlackService"
+    )
+    def test_reconciliation_invalidates_a_pending_link_before_identity_transfer(
+        self,
+        slack_service_class,
+    ):
+        SlackFounderAccountLink.objects.all().delete()
+        request, _ = create_slack_founder_link_request(self.slack_user)
+        slack_service_class.return_value.get_user_profile.return_value = {
+            "email": self.founder_user.email
+        }
+
+        call_command(
+            "reconcile_slack_users_by_email",
+            "--commit",
+            stdout=StringIO(),
+        )
+
+        request.refresh_from_db()
+        self.slack_user.refresh_from_db()
+        self.founder_user.refresh_from_db()
+        self.assertIsNotNone(request.invalidated_at)
+        self.assertIsNone(self.slack_user.slack_id)
+        self.assertEqual(self.founder_user.slack_id, "ULEGACY123")
+
+
 @override_settings(
     ROO_API_KEY="roo-link-key",
     FOUNDER_TOOLS_URL="https://mlai.test",
     ROO_FOUNDER_LINK_TTL_SECONDS=1800,
+    CSRF_TRUSTED_ORIGINS=["https://mlai.test"],
 )
 class SlackFounderLinkApiTests(APITestCase):
     def setUp(self):
@@ -117,6 +209,25 @@ class SlackFounderLinkApiTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
         self.assertEqual(response.data["code"], "slack_user_not_found")
 
+    def test_start_rejects_an_inactive_slack_account(self):
+        self.slack_user.is_active = False
+        self.slack_user.save(update_fields=["is_active"])
+
+        response = self._start()
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(response.data["code"], "slack_user_not_found")
+        self.assertFalse(SlackFounderLinkRequest.objects.exists())
+
+    def test_start_rechecks_slack_identity_after_acquiring_the_user_lock(self):
+        stale_slack_user = User.objects.get(pk=self.slack_user.pk)
+        User.objects.filter(pk=self.slack_user.pk).update(slack_id="UREASSIGN1")
+
+        with self.assertRaises(SlackFounderLinkUserNotFoundError):
+            start_slack_founder_link(stale_slack_user)
+
+        self.assertFalse(SlackFounderLinkRequest.objects.exists())
+
     def test_preview_and_complete_require_authenticated_user(self):
         response = self._start()
         token = self._token_from_response(response)
@@ -134,6 +245,36 @@ class SlackFounderLinkApiTests(APITestCase):
 
         self.assertEqual(preview.status_code, status.HTTP_401_UNAUTHORIZED)
         self.assertEqual(complete.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_cookie_authenticated_preview_requires_exact_trusted_origin(self):
+        response = self._start()
+        token = self._token_from_response(response)
+        self.client.cookies["access_token"] = str(
+            AccessToken.for_user(self.founder_user)
+        )
+
+        missing_origin = self.client.post(
+            self.preview_url,
+            {"token": token},
+            format="json",
+        )
+        untrusted_origin = self.client.post(
+            self.preview_url,
+            {"token": token},
+            format="json",
+            HTTP_ORIGIN="https://evil.example",
+        )
+        trusted_origin = self.client.post(
+            self.preview_url,
+            {"token": token},
+            format="json",
+            HTTP_ORIGIN="https://mlai.test",
+        )
+
+        self.assertEqual(missing_origin.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(untrusted_origin.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(trusted_origin.status_code, status.HTTP_200_OK)
+        self.assertEqual(trusted_origin.data["status"], "ready")
 
     def test_status_requires_authenticated_user(self):
         response = self.client.get(self.status_url)
@@ -355,6 +496,46 @@ class SlackFounderLinkApiTests(APITestCase):
         self.assertEqual(first.status_code, status.HTTP_201_CREATED)
         self.assertEqual(second.status_code, status.HTTP_409_CONFLICT)
         self.assertEqual(second.data["code"], "token_already_used")
+        self.assertIs(
+            second.data["connection_matches_requesting_user"],
+            True,
+        )
+
+        preview = self.client.post(
+            self.preview_url,
+            {"token": token},
+            format="json",
+        )
+        self.assertEqual(preview.status_code, status.HTTP_409_CONFLICT)
+        self.assertIs(
+            preview.data["connection_matches_requesting_user"],
+            True,
+        )
+
+    def test_consumed_token_does_not_confirm_a_different_founder_user(self):
+        response = self._start()
+        token = self._token_from_response(response)
+        self.client.force_authenticate(self.founder_user)
+        self.client.post(
+            self.complete_url,
+            {"token": token},
+            format="json",
+        )
+        other_founder = User.objects.create_user(email="other@example.com")
+        self.client.force_authenticate(other_founder)
+
+        replay = self.client.post(
+            self.complete_url,
+            {"token": token},
+            format="json",
+        )
+
+        self.assertEqual(replay.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(replay.data["code"], "token_already_used")
+        self.assertIs(
+            replay.data["connection_matches_requesting_user"],
+            False,
+        )
 
     def test_expired_token_is_rejected(self):
         response = self._start()
@@ -524,6 +705,15 @@ class SlackFounderLinkApiTests(APITestCase):
 
         self.assertEqual(SlackFounderAccountLink.objects.get(), link)
 
+    def test_database_rejects_self_links(self):
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            SlackFounderAccountLink.objects.create(
+                slack_user=self.slack_user,
+                founder_user=self.slack_user,
+            )
+
+        self.assertFalse(SlackFounderAccountLink.objects.exists())
+
     def test_legacy_link_slack_cannot_add_a_second_identity_to_linked_founder(self):
         SlackFounderAccountLink.objects.create(
             slack_user=self.slack_user,
@@ -610,6 +800,26 @@ class SlackFounderLinkApiTests(APITestCase):
         self.assertEqual(result.user.email, "unewside12@slack.placeholder.com")
         self.slack_user.refresh_from_db()
         self.assertEqual(self.slack_user.slack_id, "ULINK12345")
+
+    def test_existing_explicit_slack_side_does_not_adopt_founder_email(self):
+        from core.slack_users import ensure_slack_user
+
+        SlackFounderAccountLink.objects.create(
+            slack_user=self.slack_user,
+            founder_user=self.founder_user,
+        )
+
+        result = ensure_slack_user(
+            slack_id=self.slack_user.slack_id,
+            email=self.founder_user.email,
+            first_name="Updated",
+        )
+
+        self.assertEqual(result.user.pk, self.slack_user.pk)
+        self.slack_user.refresh_from_db()
+        self.founder_user.refresh_from_db()
+        self.assertEqual(self.slack_user.email, "slack-account@example.com")
+        self.assertEqual(self.founder_user.email, "founder-tools@example.com")
 
     def test_direct_identity_change_invalidates_unused_link_requests(self):
         request, token = create_slack_founder_link_request(self.slack_user)

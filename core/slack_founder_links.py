@@ -48,6 +48,12 @@ class ConflictingSlackFounderLinkError(SlackFounderLinkError):
     )
 
 
+class SlackFounderLinkUserNotFoundError(SlackFounderLinkError):
+    code = "slack_user_not_found"
+    status_code = 404
+    default_message = "Ask Roo to register your Slack account before linking."
+
+
 @dataclass(frozen=True)
 class SlackFounderLinkPreview:
     request: SlackFounderLinkRequest
@@ -74,6 +80,31 @@ class SlackFounderLinkCompletion:
 
 def digest_link_token(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def consumed_link_matches_founder_user(token: str, founder_user: User) -> bool:
+    """Confirm a consumed capability completed for this authenticated user."""
+    normalized_token = str(token or "").strip()
+    if not LINK_TOKEN_PATTERN.fullmatch(normalized_token):
+        return False
+
+    request = (
+        SlackFounderLinkRequest.objects.filter(
+            token_digest=digest_link_token(normalized_token),
+            consumed_at__isnull=False,
+            invalidated_at__isnull=True,
+        )
+        .only("slack_user_id")
+        .first()
+    )
+    if request is None:
+        return False
+    if request.slack_user_id == founder_user.pk:
+        return True
+    return SlackFounderAccountLink.objects.filter(
+        slack_user_id=request.slack_user_id,
+        founder_user=founder_user,
+    ).exists()
 
 
 def _link_request_for_token(
@@ -191,7 +222,14 @@ def create_slack_founder_link_request(
 @transaction.atomic
 def start_slack_founder_link(slack_user: User) -> SlackFounderLinkStart:
     """Decide and create a request while holding the Slack identity lock."""
+    expected_slack_id = str(slack_user.slack_id or "").strip()
     locked_user = User.objects.select_for_update().get(pk=slack_user.pk)
+    if (
+        not expected_slack_id
+        or locked_user.slack_id != expected_slack_id
+        or not locked_user.is_active
+    ):
+        raise SlackFounderLinkUserNotFoundError()
     if SlackFounderAccountLink.objects.filter(slack_user=locked_user).exists():
         return SlackFounderLinkStart(status="already_linked")
 
@@ -270,6 +308,24 @@ def founder_tools_explicitly_linked(user: User) -> bool:
     return SlackFounderAccountLink.objects.filter(slack_user=user).exists()
 
 
+def user_participates_in_slack_founder_link(user: User) -> bool:
+    return SlackFounderAccountLink.objects.filter(
+        Q(slack_user=user) | Q(founder_user=user)
+    ).exists()
+
+
+def invalidate_unused_slack_founder_link_requests(*users: User) -> int:
+    user_ids = {user.pk for user in users if user is not None}
+    if not user_ids:
+        return 0
+    now = timezone.now()
+    return SlackFounderLinkRequest.objects.filter(
+        slack_user_id__in=user_ids,
+        consumed_at__isnull=True,
+        invalidated_at__isnull=True,
+    ).update(invalidated_at=now, updated_at=now)
+
+
 def founder_tools_connection_type(user: User) -> str | None:
     if founder_tools_explicitly_linked(user):
         return "explicit"
@@ -280,9 +336,7 @@ def founder_tools_connection_type(user: User) -> str | None:
 
 def ensure_user_can_accept_direct_slack_identity(user: User) -> None:
     """Prevent either side of an explicit link changing identity ownership."""
-    if SlackFounderAccountLink.objects.filter(
-        Q(slack_user=user) | Q(founder_user=user)
-    ).exists():
+    if user_participates_in_slack_founder_link(user):
         raise ConflictingSlackFounderLinkError(
             "This account already participates in a verified Roo-Founder Tools "
             "connection. Contact MLAI support to change that connection."
@@ -306,12 +360,7 @@ def assign_direct_slack_identity(user: User, slack_id: str) -> User:
 
     # A request is bound to the Slack identity that owned this user when the
     # token was issued. Do not let an old token survive an identity change.
-    now = timezone.now()
-    SlackFounderLinkRequest.objects.filter(
-        slack_user=locked_user,
-        consumed_at__isnull=True,
-        invalidated_at__isnull=True,
-    ).update(invalidated_at=now, updated_at=now)
+    invalidate_unused_slack_founder_link_requests(locked_user)
     return locked_user
 
 

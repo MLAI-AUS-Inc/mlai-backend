@@ -11,6 +11,7 @@ from .models import User
 from .slack_founder_links import (
     ConflictingSlackFounderLinkError,
     assign_direct_slack_identity,
+    user_participates_in_slack_founder_link,
 )
 
 logger = logging.getLogger(__name__)
@@ -40,7 +41,10 @@ def ensure_slack_user(
     user = User.objects.filter(slack_id=slack_id).first()
     if user:
         update_fields = []
-        if user.email.lower() != normalized_email:
+        if (
+            user.email.lower() != normalized_email
+            and not user_participates_in_slack_founder_link(user)
+        ):
             user.email = normalized_email
             update_fields.append("email")
         if first_name and not user.first_name:
