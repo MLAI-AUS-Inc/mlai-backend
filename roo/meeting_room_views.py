@@ -8,7 +8,7 @@ from rest_framework.views import APIView
 from core.permissions import HasStrictRooApiKey
 
 from .meeting_rooms import DEFAULT_ROOM_SLUG, MeetingRoomError, MeetingRoomService
-from .permissions import InsufficientBalanceError
+from .permissions import InsufficientBalanceError, is_points_admin
 from .services import PointsService
 from .views import clean_slack_id
 
@@ -46,12 +46,15 @@ def _parse_local_date(value) -> date:
     return parsed
 
 
-def _request_user(request):
-    slack_user_id = clean_slack_id(request.data.get('slack_user_id'))
+def _active_user_for_slack_id(slack_user_id: str, *, target: bool = False):
     if not slack_user_id:
         raise MeetingRoomError(
             'unlinked_user',
-            'A linked Slack member account is required',
+            (
+                'The tagged member does not have a linked MLAI account'
+                if target
+                else 'A linked Slack member account is required'
+            ),
             status.HTTP_404_NOT_FOUND,
         )
     user = PointsService.get_user_by_slack_id(slack_user_id)
@@ -64,10 +67,67 @@ def _request_user(request):
     if not user.is_active:
         raise MeetingRoomError(
             'inactive_user',
-            'This MLAI member account is inactive',
+            (
+                'The tagged MLAI member account is inactive'
+                if target
+                else 'This MLAI member account is inactive'
+            ),
             status.HTTP_403_FORBIDDEN,
         )
-    return user, slack_user_id
+    return user
+
+
+def _request_user(request):
+    slack_user_id = clean_slack_id(request.data.get('slack_user_id'))
+    return _active_user_for_slack_id(slack_user_id), slack_user_id
+
+
+def _booking_user(request):
+    requester_slack_user_id = clean_slack_id(request.data.get('slack_user_id'))
+    target_slack_user_id = clean_slack_id(
+        request.data.get('target_slack_user_id')
+    )
+    if target_slack_user_id and target_slack_user_id != requester_slack_user_id:
+        if not is_points_admin(requester_slack_user_id):
+            raise MeetingRoomError(
+                'admin_required',
+                'Only full Roo Points Admins can book the meeting room for another member',
+                status.HTTP_403_FORBIDDEN,
+            )
+        return (
+            _active_user_for_slack_id(target_slack_user_id, target=True),
+            requester_slack_user_id,
+            target_slack_user_id,
+            True,
+        )
+
+    user = _active_user_for_slack_id(requester_slack_user_id)
+    return user, requester_slack_user_id, requester_slack_user_id, False
+
+
+def _optional_points_cost(value):
+    if value in (None, ''):
+        return None
+    if isinstance(value, bool):
+        raise MeetingRoomError(
+            'invalid_request',
+            'expected_points_cost must be a whole number',
+        )
+    try:
+        parsed = int(value)
+        if float(value) != parsed:
+            raise ValueError
+    except (TypeError, ValueError, OverflowError):
+        raise MeetingRoomError(
+            'invalid_request',
+            'expected_points_cost must be a whole number',
+        )
+    if parsed < 0:
+        raise MeetingRoomError(
+            'invalid_request',
+            'expected_points_cost must not be negative',
+        )
+    return parsed
 
 
 class MeetingRoomAPIView(APIView):
@@ -91,7 +151,7 @@ class MeetingRoomListView(MeetingRoomAPIView):
 
 class MeetingRoomAvailabilityView(MeetingRoomAPIView):
     def post(self, request):
-        user, _ = _request_user(request)
+        user, _, _, admin_booking = _booking_user(request)
         room_slug = str(request.data.get('room_slug') or DEFAULT_ROOM_SLUG).strip()
         raw_date = request.data.get('date')
         raw_start = request.data.get('starts_at')
@@ -125,22 +185,22 @@ class MeetingRoomAvailabilityView(MeetingRoomAPIView):
                 'invalid_request',
                 'Provide a date or an exact start and end time',
             )
-        return Response(result)
+        return Response({**result, 'admin_booking': admin_booking})
 
 
 class MeetingRoomBookView(MeetingRoomAPIView):
-    UNSUPPORTED_TARGET_FIELDS = ('target_slack_user_id', 'target_user_id')
-
     def post(self, request):
-        if any(request.data.get(field) for field in self.UNSUPPORTED_TARGET_FIELDS):
+        if request.data.get('target_user_id'):
             raise MeetingRoomError(
                 'unsupported_target',
-                'Members can only book the meeting room for themselves',
+                'Use target_slack_user_id when booking for another member',
             )
-        user, slack_user_id = _request_user(request)
+        user, requester_slack_user_id, target_slack_user_id, admin_booking = (
+            _booking_user(request)
+        )
         booking, created = MeetingRoomService.book(
             user=user,
-            requested_by_slack_id=slack_user_id,
+            requested_by_slack_id=requester_slack_user_id,
             room_slug=str(
                 request.data.get('room_slug') or DEFAULT_ROOM_SLUG
             ).strip(),
@@ -154,6 +214,9 @@ class MeetingRoomBookView(MeetingRoomAPIView):
             slack_channel_id=str(
                 request.data.get('slack_channel_id') or ''
             ).strip() or None,
+            expected_points_cost=_optional_points_cost(
+                request.data.get('expected_points_cost')
+            ),
         )
         return Response(
             {
@@ -162,6 +225,8 @@ class MeetingRoomBookView(MeetingRoomAPIView):
                 'booking': MeetingRoomService.serialize_booking(booking),
                 'points_cost': booking.points_cost,
                 'remaining_balance': MeetingRoomService.current_balance(user),
+                'admin_booking': admin_booking,
+                'booked_for_slack_user_id': target_slack_user_id,
             },
             status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
         )

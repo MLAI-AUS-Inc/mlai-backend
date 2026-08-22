@@ -125,10 +125,10 @@ class MeetingRoomService:
         local_start = starts_at.astimezone(room_tz)
         local_end = ends_at.astimezone(room_tz)
         for value in (local_start, local_end):
-            if value.minute or value.second or value.microsecond:
+            if value.minute not in (0, 30) or value.second or value.microsecond:
                 raise MeetingRoomError(
                     'invalid_time',
-                    'Meeting-room bookings must start and end on the hour',
+                    'Meeting-room bookings must start and end on the hour or half-hour',
                 )
         utc_start = starts_at.astimezone(datetime_timezone.utc)
         utc_end = ends_at.astimezone(datetime_timezone.utc)
@@ -139,17 +139,20 @@ class MeetingRoomService:
             )
 
         duration_seconds = (utc_end - utc_start).total_seconds()
-        if duration_seconds % 3600:
+        if duration_seconds % 1800:
             raise MeetingRoomError(
                 'invalid_time',
-                'Meeting-room duration must use whole hours',
+                'Meeting-room duration must use 30-minute increments',
             )
-        duration_hours = int(duration_seconds // 3600)
-        max_hours = getattr(settings, 'MEETING_ROOM_MAX_BOOKING_HOURS', 4)
-        if duration_hours < 1 or duration_hours > max_hours:
+        duration_half_hours = int(duration_seconds // 1800)
+        max_hours = getattr(settings, 'MEETING_ROOM_MAX_BOOKING_HOURS', 2)
+        if duration_half_hours < 2 or duration_half_hours > max_hours * 2:
             raise MeetingRoomError(
                 'invalid_time',
-                f'Meeting-room bookings must be between 1 and {max_hours} hours',
+                (
+                    f'Meeting-room bookings must be between 1 and {max_hours} '
+                    'hours in 30-minute increments'
+                ),
             )
 
         current_time = now or cls._now()
@@ -170,7 +173,9 @@ class MeetingRoomService:
                 'invalid_time',
                 f'Meeting-room bookings can only be made {advance_days} days ahead',
             )
-        return starts_at, ends_at, duration_hours
+        # Roo Points are integer-valued, so each started hour costs one point.
+        points_cost = (duration_half_hours + 1) // 2
+        return starts_at, ends_at, points_cost
 
     @staticmethod
     def validate_client_request_id(value: str) -> uuid.UUID:
@@ -517,6 +522,7 @@ class MeetingRoomService:
         client_request_id: str,
         confirmation_expires_at: datetime,
         slack_channel_id: Optional[str] = None,
+        expected_points_cost: Optional[int] = None,
     ) -> tuple[MeetingRoomBooking, bool]:
         cls._ensure_enabled()
         request_id = cls.validate_client_request_id(client_request_id)
@@ -538,6 +544,12 @@ class MeetingRoomService:
 
         room = cls._get_room(room_slug)
         starts_at, ends_at, points_cost = cls.validate_interval(starts_at, ends_at)
+        if expected_points_cost is not None and expected_points_cost != points_cost:
+            raise MeetingRoomError(
+                'price_changed',
+                'The meeting-room price changed after the booking preview',
+                409,
+            )
         cls.validate_confirmation_expiry(confirmation_expires_at)
         local_dates = cls._local_dates(starts_at, ends_at)
         cls._lock_booking_scope(
