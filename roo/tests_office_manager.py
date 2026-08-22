@@ -1,5 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
+import json
 from threading import Barrier
 from unittest import skipUnless
 from unittest.mock import Mock, patch
@@ -828,6 +829,18 @@ class OfficeManagerSchedulerTests(TestCase):
         self.assertIn(COWORKING_SELF_BOOK_REMINDER, payload["text"])
         self.assertIn(COWORKING_SELF_BOOK_REMINDER, blocks_text)
         self.assertIn(NO_FOOD_REMINDER, blocks_text)
+        action_block = next(
+            block for block in payload["blocks"] if block["type"] == "actions"
+        )
+        volunteer_button = action_block["elements"][0]
+        self.assertEqual(
+            volunteer_button["action_id"],
+            OFFICE_MANAGER_ACTION_ID,
+        )
+        self.assertEqual(
+            json.loads(volunteer_button["value"]),
+            {"date": "2026-08-03"},
+        )
 
     def test_stale_announcement_retry_reuses_slack_client_message_id(self):
         now = melbourne_at(2026, 8, 3, 8, 30)
@@ -1092,6 +1105,31 @@ class OfficeManagerClaimApiTests(APITestCase):
         )
         self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
 
+    @patch("roo.views.OfficeManagerService.claim")
+    def test_claim_rejection_code_contract(self, claim):
+        cases = (
+            ("member_not_eligible", status.HTTP_403_FORBIDDEN),
+            ("office_manager_day_not_found", status.HTTP_404_NOT_FOUND),
+            ("already_claimed", status.HTTP_409_CONFLICT),
+            ("claim_closed", status.HTTP_409_CONFLICT),
+        )
+
+        for code, expected_status in cases:
+            with self.subTest(code=code):
+                claim.side_effect = OfficeManagerClaimError(code, "claim rejected")
+                response = self.client.post(
+                    self.url,
+                    {
+                        "slack_user_id": self.user.slack_id,
+                        "date": self.now.date(),
+                    },
+                    format="json",
+                    HTTP_X_API_KEY="office-manager-test-key",
+                )
+
+                self.assertEqual(response.status_code, expected_status)
+                self.assertEqual(response.data["code"], code)
+
     @patch("roo.views.OfficeManagerService.retract_winner_channel_announcement")
     @patch("roo.views.OfficeManagerService.reconcile_message")
     @patch("roo.views.CoworkingService.cancel")
@@ -1182,6 +1220,52 @@ class OfficeManagerClaimApiTests(APITestCase):
         _deliver_winner_channel_announcement.assert_called_once_with(
             assignment.id
         )
+
+    @patch(
+        "roo.views.OfficeManagerService.deliver_winner_channel_announcement",
+        return_value=True,
+    )
+    @patch("roo.views.OfficeManagerService.deliver_winner_dm", return_value=True)
+    @patch("roo.views.OfficeManagerService.reconcile_message", return_value=True)
+    @patch("roo.views.OfficeManagerService.claim")
+    def test_idempotent_claim_response_contract(
+        self,
+        claim,
+        _reconcile_message,
+        _deliver_winner_dm,
+        _deliver_winner_channel_announcement,
+    ):
+        booking = CoworkingBooking.objects.create(
+            user=self.user,
+            date=self.now.date(),
+            points_cost=0,
+            booking_source="office_manager",
+        )
+        assignment = OfficeManagerAssignment.objects.create(
+            day=self.day,
+            user=self.user,
+            booking=booking,
+            points_refunded=4,
+        )
+        from .office_manager import OfficeManagerClaimResult
+
+        claim.return_value = OfficeManagerClaimResult(
+            assignment=assignment,
+            booking=booking,
+            status="already_claimed_by_you",
+            existing_booking_converted=True,
+        )
+
+        response = self.client.post(
+            self.url,
+            {"slack_user_id": self.user.slack_id, "date": self.now.date()},
+            format="json",
+            HTTP_X_API_KEY="office-manager-test-key",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["status"], "already_claimed_by_you")
+        self.assertEqual(response.data["points_refunded"], 4)
 
 
 @skipUnless(
