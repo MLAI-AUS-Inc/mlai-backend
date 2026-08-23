@@ -1,6 +1,9 @@
+import uuid
+
 from django.conf import settings
 from django.core.validators import RegexValidator
 from django.db import models
+
 from .fields import EncryptedTextField
 
 
@@ -1736,3 +1739,115 @@ class LinearIssueCreationReceipt(models.Model):
 
     def __str__(self):
         return f"{self.idempotency_key}:{self.status}"
+
+
+class LinearProjectSizingRun(models.Model):
+    """Durable, requester-bound preview/apply run for Linear effort labels."""
+
+    class Mode(models.TextChoices):
+        MISSING_ONLY = "missing_only", "Only issues without an effort label"
+        REPLACE_EXISTING = "replace_existing", "Replace existing effort labels"
+
+    class Status(models.TextChoices):
+        PREVIEW = "preview", "Preview"
+        APPLYING = "applying", "Applying"
+        COMPLETED = "completed", "Completed"
+        CANCELLED = "cancelled", "Cancelled"
+        EXPIRED = "expired", "Expired"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    idempotency_key = models.CharField(max_length=64, unique=True, db_index=True)
+    project_id = models.CharField(max_length=255, db_index=True)
+    project_name = models.CharField(max_length=500)
+    requested_by_slack_user_id = models.CharField(max_length=255, db_index=True)
+    requested_by_linear_user_id = models.CharField(max_length=255)
+    mode = models.CharField(
+        max_length=32,
+        choices=Mode.choices,
+        default=Mode.MISSING_ONLY,
+    )
+    status = models.CharField(
+        max_length=24,
+        choices=Status.choices,
+        default=Status.PREVIEW,
+        db_index=True,
+    )
+    model_name = models.CharField(max_length=100)
+    rubric_version = models.CharField(max_length=100)
+    project_context = models.JSONField(default=dict, blank=True)
+    source_snapshot_at = models.DateTimeField()
+    expires_at = models.DateTimeField(db_index=True)
+    last_error = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "linear_project_sizing_run"
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(
+                fields=["project_id", "status"],
+                name="linear_size_run_project_idx",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.project_name}:{self.status}"
+
+
+class LinearProjectSizingItem(models.Model):
+    """One proposed or applied effort-label change within a sizing run."""
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        PROCESSING = "processing", "Processing"
+        APPLIED = "applied", "Applied"
+        ALREADY_SIZED = "already_sized", "Already sized"
+        SKIPPED_TERMINAL = "skipped_terminal", "Skipped terminal"
+        CONFLICT = "conflict", "Conflict"
+        FAILED = "failed", "Failed"
+
+    run = models.ForeignKey(
+        LinearProjectSizingRun,
+        on_delete=models.CASCADE,
+        related_name="items",
+    )
+    issue_id = models.CharField(max_length=255)
+    identifier = models.CharField(max_length=100, blank=True, default="")
+    title = models.CharField(max_length=500)
+    team_id = models.CharField(max_length=255)
+    expected_updated_at = models.CharField(max_length=100)
+    original_labels = models.JSONField(default=list, blank=True)
+    effort_label_name = models.CharField(max_length=100)
+    effort_label_id = models.CharField(max_length=255)
+    rationale = models.CharField(max_length=280)
+    sizing_metadata = models.JSONField(default=dict, blank=True)
+    status = models.CharField(
+        max_length=32,
+        choices=Status.choices,
+        default=Status.PENDING,
+        db_index=True,
+    )
+    result_payload = models.JSONField(default=dict, blank=True)
+    last_error = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "linear_project_sizing_item"
+        ordering = ["id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["run", "issue_id"],
+                name="linear_size_run_issue_uniq",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=["run", "status"],
+                name="linear_size_item_status_idx",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.identifier or self.issue_id}:{self.status}"

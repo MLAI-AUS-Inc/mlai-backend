@@ -39,11 +39,17 @@ from integrations.services.linear_meeting_actions import (
     LinearMeetingIdempotencyConflictError,
     LinearMeetingRateLimitError,
     LinearMeetingSizingConflictError,
+    apply_linear_project_sizing_run,
+    cancel_linear_project_sizing_run,
     create_linear_meeting_issue,
     create_linear_meeting_project_update,
+    create_linear_project_sizing_run,
     get_linear_issue_receipt,
     get_linear_meeting_context,
+    get_linear_project_issue_page,
     get_linear_project_sizing_context,
+    get_linear_project_sizing_run,
+    get_linear_project_update_page,
 )
 from startup_updates.data_deletion import disconnect_gmail_for_user
 
@@ -68,6 +74,7 @@ def _linear_meeting_error_response(exc):
         return Response(
             {
                 "detail": str(exc),
+                # Kept for older Roo deployments while the setting and UI copy migrate.
                 "code": "linear_studio_sizing_stale",
             },
             status=status.HTTP_409_CONFLICT,
@@ -784,6 +791,115 @@ class LinearProjectSizingContextView(APIView):
             LinearMeetingGraphQLError,
             ValueError,
         ) as exc:
+            return _linear_meeting_error_response(exc)
+        return Response(payload, status=status.HTTP_200_OK)
+
+
+class LinearProjectIssueInventoryView(APIView):
+    permission_classes = [HasRooApiKey]
+
+    def get(self, request, project_id):
+        try:
+            payload = get_linear_project_issue_page(
+                project_id,
+                after=request.query_params.get("after"),
+                limit=request.query_params.get("limit") or 50,
+            )
+        except (
+            LinearMeetingConfigurationError,
+            LinearMeetingRateLimitError,
+            LinearMeetingGraphQLError,
+            ValueError,
+        ) as exc:
+            return _linear_meeting_error_response(exc)
+        return Response(payload, status=status.HTTP_200_OK)
+
+
+class LinearProjectUpdateInventoryView(APIView):
+    permission_classes = [HasRooApiKey]
+
+    def get(self, request, project_id):
+        try:
+            payload = get_linear_project_update_page(
+                project_id,
+                after=request.query_params.get("after"),
+                limit=request.query_params.get("limit") or 25,
+            )
+        except (
+            LinearMeetingConfigurationError,
+            LinearMeetingRateLimitError,
+            LinearMeetingGraphQLError,
+            ValueError,
+        ) as exc:
+            return _linear_meeting_error_response(exc)
+        return Response(payload, status=status.HTTP_200_OK)
+
+
+class LinearProjectSizingRunCreateView(APIView):
+    permission_classes = [HasRooApiKey]
+
+    def post(self, request, project_id):
+        try:
+            payload = create_linear_project_sizing_run(
+                {**request.data, "project_id": project_id}
+            )
+        except (
+            LinearMeetingConfigurationError,
+            LinearMeetingRateLimitError,
+            LinearMeetingGraphQLError,
+            LinearMeetingIdempotencyConflictError,
+            LinearMeetingSizingConflictError,
+            ValueError,
+        ) as exc:
+            return _linear_meeting_error_response(exc)
+        return Response(payload, status=status.HTTP_201_CREATED)
+
+
+class LinearProjectSizingRunDetailView(APIView):
+    permission_classes = [HasRooApiKey]
+
+    def get(self, request, run_id):
+        try:
+            payload = get_linear_project_sizing_run(run_id)
+        except ValueError as exc:
+            return _linear_meeting_error_response(exc)
+        return Response(payload, status=status.HTTP_200_OK)
+
+
+class LinearProjectSizingRunApplyView(APIView):
+    permission_classes = [HasRooApiKey]
+
+    def post(self, request, run_id):
+        try:
+            payload = apply_linear_project_sizing_run(
+                run_id,
+                requested_by_slack_user_id=request.data.get(
+                    "requested_by_slack_user_id"
+                ),
+                limit=request.data.get("limit") or 20,
+            )
+        except (
+            LinearMeetingConfigurationError,
+            LinearMeetingRateLimitError,
+            LinearMeetingGraphQLError,
+            ValueError,
+        ) as exc:
+            return _linear_meeting_error_response(exc)
+        return Response(payload, status=status.HTTP_200_OK)
+
+
+class LinearProjectSizingRunCancelView(APIView):
+    permission_classes = [HasRooApiKey]
+
+    def post(self, request, run_id):
+        try:
+            payload = cancel_linear_project_sizing_run(
+                run_id,
+                requested_by_slack_user_id=request.data.get(
+                    "requested_by_slack_user_id"
+                ),
+            )
+        except (LinearMeetingSizingConflictError, ValueError) as exc:
             return _linear_meeting_error_response(exc)
         return Response(payload, status=status.HTTP_200_OK)
 

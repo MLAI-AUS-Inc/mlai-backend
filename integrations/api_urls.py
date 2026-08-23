@@ -245,6 +245,36 @@ urlpatterns = [
         name='linear_project_sizing_context',
     ),
     path(
+        'linear/projects/<str:project_id>/issues',
+        api_views_connectors.LinearProjectIssueInventoryView.as_view(),
+        name='linear_project_issue_inventory',
+    ),
+    path(
+        'linear/projects/<str:project_id>/updates',
+        api_views_connectors.LinearProjectUpdateInventoryView.as_view(),
+        name='linear_project_update_inventory',
+    ),
+    path(
+        'linear/projects/<str:project_id>/sizing-runs',
+        api_views_connectors.LinearProjectSizingRunCreateView.as_view(),
+        name='linear_project_sizing_run_create',
+    ),
+    path(
+        'linear/project-sizing-runs/<uuid:run_id>',
+        api_views_connectors.LinearProjectSizingRunDetailView.as_view(),
+        name='linear_project_sizing_run_detail',
+    ),
+    path(
+        'linear/project-sizing-runs/<uuid:run_id>/apply',
+        api_views_connectors.LinearProjectSizingRunApplyView.as_view(),
+        name='linear_project_sizing_run_apply',
+    ),
+    path(
+        'linear/project-sizing-runs/<uuid:run_id>/cancel',
+        api_views_connectors.LinearProjectSizingRunCancelView.as_view(),
+        name='linear_project_sizing_run_cancel',
+    ),
+    path(
         'linear/project-updates',
         api_views_connectors.LinearMeetingProjectUpdateCreateView.as_view(),
         name='linear_meeting_project_update_create',

@@ -869,3 +869,317 @@ class LinearProjectSizingContextApiTests(SimpleTestCase):
                 "Extra Large (XL)",
             ],
         )
+
+
+@override_settings(
+    LINEAR_API_KEY="lin-api-key",
+    LINEAR_TASK_SIZING_ENFORCEMENT_MODE="required",
+    LINEAR_PROJECT_SIZING_RUN_TTL_SECONDS=86400,
+)
+class LinearProjectSizingRunTests(TestCase):
+    def _labels(self):
+        names = (
+            "Extra Small (XS)",
+            "Small (S)",
+            "Medium (M)",
+            "Large (L)",
+            "Extra Large (XL)",
+        )
+        return [
+            {"id": f"effort-{index}", "name": name, "team": None}
+            for index, name in enumerate(names)
+        ]
+
+    def _run_payload(self, *, mode="missing_only", original_labels=None):
+        return {
+            "project_id": "project-1",
+            "project_name": "Aaron AI",
+            "requested_by_slack_user_id": "USAM",
+            "requested_by_linear_user_id": "linear-sam",
+            "mode": mode,
+            "model": "gpt-5.6-sol",
+            "rubric_version": "project-effort-v2",
+            "source_snapshot_at": "2026-08-23T01:00:00Z",
+            "idempotency_key": "a" * 64,
+            "items": [
+                {
+                    "issue_id": "issue-1",
+                    "identifier": "ENG-1",
+                    "title": "Send the interview invite",
+                    "team_id": "team-1",
+                    "expected_updated_at": "2026-08-23T00:00:00.000Z",
+                    "original_labels": original_labels
+                    if original_labels is not None
+                    else [{"id": "meeting", "name": "meeting-action"}],
+                    "effort_label": "Small (S)",
+                    "rationale": "The scoped invitation should take about 45 minutes.",
+                    "sizing_metadata": {
+                        "project_id": "project-1",
+                        "effort_label": "Small (S)",
+                        "rationale": "The scoped invitation should take about 45 minutes.",
+                    },
+                }
+            ],
+        }
+
+    @patch("integrations.services.linear_meeting_actions.list_issue_labels")
+    @patch("integrations.services.linear_meeting_actions._get_linear_project_identity")
+    def test_required_creation_sizing_applies_to_non_studio_projects(
+        self,
+        mock_project,
+        mock_labels,
+    ):
+        from integrations.services.linear_meeting_actions import (
+            _enforce_project_sizing,
+        )
+
+        mock_project.return_value = {"id": "project-1", "name": "Aaron AI"}
+        mock_labels.return_value = self._labels()
+        result = _enforce_project_sizing(
+            {
+                "project_id": "project-1",
+                "team_id": "team-1",
+                "idempotency_key": "z" * 64,
+                "label_ids": ["effort-1"],
+                "sizing_metadata": {
+                    "projectId": "project-1",
+                    "projectNameAtAssessment": "Aaron AI",
+                    "rubricVersion": "project-effort-v2",
+                    "effortLabel": "Small (S)",
+                    "rationale": "The scoped task should take about 45 minutes.",
+                },
+            }
+        )
+
+        self.assertTrue(result["projectIssue"])
+        self.assertTrue(result["valid"])
+
+    @patch("integrations.services.linear_meeting_actions.list_issue_labels")
+    @patch(
+        "integrations.services.linear_meeting_actions._get_linear_project_sizing_authorization"
+    )
+    def test_preview_then_apply_preserves_unrelated_labels_and_replays(
+        self,
+        mock_project,
+        mock_labels,
+    ):
+        from integrations.services.linear_meeting_actions import (
+            apply_linear_project_sizing_run,
+            create_linear_project_sizing_run,
+        )
+
+        mock_project.return_value = {
+            "id": "project-1",
+            "name": "Aaron AI",
+            "lead": {"id": "linear-sam"},
+            "members": {"nodes": [], "pageInfo": {"hasNextPage": False}},
+        }
+        mock_labels.return_value = self._labels()
+        run = create_linear_project_sizing_run(self._run_payload())
+
+        live_issue = {
+            "id": "issue-1",
+            "identifier": "ENG-1",
+            "title": "Send the interview invite",
+            "updatedAt": "2026-08-23T00:00:00.000Z",
+            "project": {"id": "project-1"},
+            "team": {"id": "team-1"},
+            "state": {"type": "started"},
+            "labels": {
+                "nodes": [{"id": "meeting", "name": "meeting-action"}],
+                "pageInfo": {"hasNextPage": False},
+            },
+        }
+        with patch(
+            "integrations.services.linear_meeting_actions._get_linear_issue_for_sizing",
+            return_value=live_issue,
+        ), patch(
+            "integrations.services.linear_meeting_actions._update_linear_issue_labels",
+            return_value={"id": "issue-1", "identifier": "ENG-1"},
+        ) as mock_update:
+            applied = apply_linear_project_sizing_run(
+                run["id"],
+                requested_by_slack_user_id="USAM",
+            )
+            replay = apply_linear_project_sizing_run(
+                run["id"],
+                requested_by_slack_user_id="USAM",
+            )
+
+        self.assertEqual(applied["status"], "completed")
+        self.assertEqual(applied["counts"]["applied"], 1)
+        self.assertEqual(replay["counts"]["applied"], 1)
+        mock_update.assert_called_once_with(
+            "issue-1",
+            ["meeting", "effort-1"],
+        )
+
+    @patch("integrations.services.linear_meeting_actions.list_issue_labels")
+    @patch(
+        "integrations.services.linear_meeting_actions._get_linear_project_sizing_authorization"
+    )
+    def test_missing_only_repairs_multiple_effort_labels(
+        self,
+        mock_project,
+        mock_labels,
+    ):
+        from integrations.services.linear_meeting_actions import (
+            apply_linear_project_sizing_run,
+            create_linear_project_sizing_run,
+        )
+
+        mock_project.return_value = {
+            "id": "project-1",
+            "name": "Aaron AI",
+            "lead": {"id": "linear-sam"},
+            "members": {"nodes": [], "pageInfo": {"hasNextPage": False}},
+        }
+        mock_labels.return_value = self._labels()
+        original = [
+            {"id": "meeting", "name": "meeting-action"},
+            {"id": "old-xs", "name": "Extra Small (XS)"},
+            {"id": "old-xl", "name": "Extra Large (XL)"},
+        ]
+        run = create_linear_project_sizing_run(
+            self._run_payload(original_labels=original)
+        )
+        live_issue = {
+            "id": "issue-1",
+            "updatedAt": "2026-08-23T00:00:00.000Z",
+            "project": {"id": "project-1"},
+            "team": {"id": "team-1"},
+            "state": {"type": "started"},
+            "labels": {
+                "nodes": original,
+                "pageInfo": {"hasNextPage": False},
+            },
+        }
+        with patch(
+            "integrations.services.linear_meeting_actions._get_linear_issue_for_sizing",
+            return_value=live_issue,
+        ), patch(
+            "integrations.services.linear_meeting_actions._update_linear_issue_labels",
+            return_value={"id": "issue-1"},
+        ) as mock_update:
+            result = apply_linear_project_sizing_run(
+                run["id"],
+                requested_by_slack_user_id="USAM",
+            )
+
+        self.assertEqual(result["counts"]["applied"], 1)
+        mock_update.assert_called_once_with(
+            "issue-1",
+            ["meeting", "effort-1"],
+        )
+
+    @patch("integrations.services.linear_meeting_actions.list_issue_labels")
+    @patch(
+        "integrations.services.linear_meeting_actions._get_linear_project_sizing_authorization"
+    )
+    def test_apply_skips_terminal_race_without_mutation(
+        self,
+        mock_project,
+        mock_labels,
+    ):
+        from integrations.services.linear_meeting_actions import (
+            apply_linear_project_sizing_run,
+            create_linear_project_sizing_run,
+        )
+
+        mock_project.return_value = {
+            "id": "project-1",
+            "name": "Aaron AI",
+            "lead": {"id": "linear-sam"},
+            "members": {"nodes": [], "pageInfo": {"hasNextPage": False}},
+        }
+        mock_labels.return_value = self._labels()
+        run = create_linear_project_sizing_run(self._run_payload())
+        with patch(
+            "integrations.services.linear_meeting_actions._get_linear_issue_for_sizing",
+            return_value={
+                "id": "issue-1",
+                "project": {"id": "project-1"},
+                "team": {"id": "team-1"},
+                "state": {"type": "completed"},
+                "labels": {"nodes": [], "pageInfo": {"hasNextPage": False}},
+            },
+        ), patch(
+            "integrations.services.linear_meeting_actions._update_linear_issue_labels"
+        ) as mock_update:
+            result = apply_linear_project_sizing_run(
+                run["id"],
+                requested_by_slack_user_id="USAM",
+            )
+
+        self.assertEqual(result["counts"]["skipped_terminal"], 1)
+        mock_update.assert_not_called()
+
+
+@override_settings(LINEAR_API_KEY="lin-api-key")
+class LinearProjectSizingInventoryTests(SimpleTestCase):
+    @patch("integrations.services.linear_meeting_actions._graphql")
+    def test_issue_inventory_forwards_cursor_and_returns_page_metadata(
+        self,
+        mock_graphql,
+    ):
+        from integrations.services.linear_meeting_actions import (
+            get_linear_project_issue_page,
+        )
+
+        mock_graphql.return_value = {
+            "project": {
+                "id": "project-1",
+                "name": "Aaron AI",
+                "issues": {
+                    "nodes": [{"id": "issue-101", "title": "Page two"}],
+                    "pageInfo": {
+                        "hasNextPage": True,
+                        "endCursor": "cursor-2",
+                    },
+                },
+            }
+        }
+        payload = get_linear_project_issue_page(
+            "project-1",
+            after="cursor-1",
+            limit=50,
+        )
+
+        query = mock_graphql.call_args.args[0]
+        variables = mock_graphql.call_args.args[1]
+        self.assertIn("orderBy: createdAt", query)
+        self.assertEqual(variables["after"], "cursor-1")
+        self.assertEqual(payload["nodes"][0]["id"], "issue-101")
+        self.assertTrue(payload["pageInfo"]["hasNextPage"])
+        self.assertEqual(
+            payload["terminalStateTypes"],
+            ["canceled", "cancelled", "completed", "duplicate"],
+        )
+
+    @patch("integrations.services.linear_meeting_actions._graphql")
+    def test_project_update_inventory_is_cursor_paginated(self, mock_graphql):
+        from integrations.services.linear_meeting_actions import (
+            get_linear_project_update_page,
+        )
+
+        mock_graphql.return_value = {
+            "project": {
+                "id": "project-1",
+                "name": "Aaron AI",
+                "projectUpdates": {
+                    "nodes": [{"id": "update-26", "body": "More context"}],
+                    "pageInfo": {"hasNextPage": False, "endCursor": None},
+                },
+            }
+        }
+        payload = get_linear_project_update_page(
+            "project-1",
+            after="update-cursor-1",
+            limit=25,
+        )
+
+        query = mock_graphql.call_args.args[0]
+        variables = mock_graphql.call_args.args[1]
+        self.assertIn("orderBy: createdAt", query)
+        self.assertEqual(variables["after"], "update-cursor-1")
+        self.assertEqual(payload["nodes"][0]["id"], "update-26")
