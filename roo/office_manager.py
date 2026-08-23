@@ -492,12 +492,64 @@ class OfficeManagerService:
                 )
 
     @staticmethod
+    def _recover_existing_claim(
+        *,
+        slack_user_id: str,
+        booking_date: date,
+    ) -> OfficeManagerClaimResult | None:
+        """Recover a committed claim before applying gates for a new claim.
+
+        A Roo retry can arrive after midnight, after the rollout flag is disabled,
+        or after member-profile lookup becomes unavailable. Those changes must not
+        hide a result that this endpoint already committed for the same Slack actor.
+        """
+        cleaned_slack_user_id = str(slack_user_id or "").strip()
+        if not cleaned_slack_user_id:
+            return None
+
+        with transaction.atomic():
+            day = (
+                OfficeManagerDay.objects.select_for_update()
+                .filter(date=booking_date)
+                .first()
+            )
+            if day is None:
+                return None
+            active_assignment = (
+                OfficeManagerAssignment.objects.select_for_update()
+                .filter(
+                    day=day,
+                    status="active",
+                    user__slack_id=cleaned_slack_user_id,
+                )
+                .select_related("booking")
+                .first()
+            )
+            if active_assignment is None:
+                return None
+            return OfficeManagerClaimResult(
+                assignment=active_assignment,
+                booking=active_assignment.booking,
+                status="already_claimed_by_you",
+                existing_booking_converted=bool(
+                    active_assignment.booking.ledger_entry_id
+                ),
+            )
+
+    @staticmethod
     def claim(
         *,
         slack_user_id: str,
         booking_date: date,
         now: datetime | None = None,
     ) -> OfficeManagerClaimResult:
+        existing_claim = OfficeManagerService._recover_existing_claim(
+            slack_user_id=slack_user_id,
+            booking_date=booking_date,
+        )
+        if existing_claim is not None:
+            return existing_claim
+
         if not _office_manager_enabled():
             raise OfficeManagerClaimError(
                 "feature_disabled",

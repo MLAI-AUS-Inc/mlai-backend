@@ -145,6 +145,71 @@ class OfficeManagerServiceTests(TestCase):
         self.assertEqual(first.assignment.id, second.assignment.id)
         self.assertEqual(CoworkingBooking.objects.count(), 1)
 
+    def test_committed_claim_is_recovered_after_midnight(self):
+        first = OfficeManagerService.claim(
+            slack_user_id=self.user.slack_id,
+            booking_date=self.now.date(),
+            now=self.now,
+        )
+
+        replay = OfficeManagerService.claim(
+            slack_user_id=self.user.slack_id,
+            booking_date=self.now.date(),
+            now=melbourne_at(2026, 8, 4, 0, 1),
+        )
+
+        self.assertEqual(replay.status, "already_claimed_by_you")
+        self.assertEqual(replay.assignment.id, first.assignment.id)
+        self.assertEqual(CoworkingBooking.objects.count(), 1)
+        self.assertEqual(OfficeManagerAssignment.objects.count(), 1)
+
+    def test_uncommitted_stale_claim_remains_closed(self):
+        with self.assertRaises(OfficeManagerClaimError) as raised:
+            OfficeManagerService.claim(
+                slack_user_id=self.user.slack_id,
+                booking_date=self.now.date(),
+                now=melbourne_at(2026, 8, 4, 0, 1),
+            )
+
+        self.assertEqual(raised.exception.code, "claim_closed")
+        self.assertFalse(OfficeManagerAssignment.objects.exists())
+
+    def test_committed_claim_is_recovered_after_feature_is_disabled(self):
+        first = OfficeManagerService.claim(
+            slack_user_id=self.user.slack_id,
+            booking_date=self.now.date(),
+            now=self.now,
+        )
+
+        with override_settings(OFFICE_MANAGER_ENABLED=False):
+            replay = OfficeManagerService.claim(
+                slack_user_id=self.user.slack_id,
+                booking_date=self.now.date(),
+                now=self.now,
+            )
+
+        self.assertEqual(replay.status, "already_claimed_by_you")
+        self.assertEqual(replay.assignment.id, first.assignment.id)
+
+    def test_committed_claim_replay_skips_member_profile_lookup(self):
+        first = OfficeManagerService.claim(
+            slack_user_id=self.user.slack_id,
+            booking_date=self.now.date(),
+            now=self.now,
+        )
+        self.get_profile.reset_mock()
+        self.get_profile.side_effect = RuntimeError("Slack unavailable")
+
+        replay = OfficeManagerService.claim(
+            slack_user_id=self.user.slack_id,
+            booking_date=self.now.date(),
+            now=self.now,
+        )
+
+        self.assertEqual(replay.status, "already_claimed_by_you")
+        self.assertEqual(replay.assignment.id, first.assignment.id)
+        self.get_profile.assert_not_called()
+
     def test_second_member_cannot_claim(self):
         other = User.objects.create_user(
             email="other@example.com",
