@@ -8,20 +8,26 @@ from typing import Any
 from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 
 from integrations import http_client as http_requests
-from integrations.models import LinearIssueCreationReceipt
+from integrations.models import (
+    LinearIssueCreationReceipt,
+    LinearProjectSizingItem,
+    LinearProjectSizingRun,
+)
 
 
 LINEAR_GRAPHQL_URL = "https://api.linear.app/graphql"
-STUDIO_PROJECT_PREFIX = "[Studio]"
-STUDIO_EFFORT_LABELS = (
+EFFORT_LABELS = (
     "Extra Small (XS)",
     "Small (S)",
     "Medium (M)",
     "Large (L)",
     "Extra Large (XL)",
 )
+# Backwards-compatible import for older callers while the feature is renamed.
+STUDIO_EFFORT_LABELS = EFFORT_LABELS
 TERMINAL_WORKFLOW_TYPES = {"completed", "canceled", "cancelled", "duplicate"}
 logger = logging.getLogger(__name__)
 
@@ -74,7 +80,7 @@ def get_linear_project_sizing_context(
     terminal_issue_limit: int = 10,
     precedent_limit: int = 20,
 ) -> dict[str, Any]:
-    """Return bounded project evidence for Roo's Studio effort estimator."""
+    """Return bounded project evidence for Roo's project effort estimator."""
     project_id = str(project_id or "").strip()
     if not project_id:
         raise ValueError("project_id is required.")
@@ -104,7 +110,7 @@ def get_linear_project_sizing_context(
         effort_labels = [
             label
             for label in _connection_nodes(issue.get("labels"))
-            if str(label.get("name") or "") in STUDIO_EFFORT_LABELS
+            if str(label.get("name") or "") in EFFORT_LABELS
         ]
         if workflow_type in TERMINAL_WORKFLOW_TYPES:
             if len(terminal_issues) < terminal_issue_limit:
@@ -119,7 +125,7 @@ def get_linear_project_sizing_context(
     issue_source_truncated = bool(issue_page_info.get("hasNextPage")) or len(raw_issues) >= issue_limit
     label_registry = list_issue_labels()
     effort_label_registry = [
-        label for label in label_registry if str(label.get("name") or "") in STUDIO_EFFORT_LABELS
+        label for label in label_registry if str(label.get("name") or "") in EFFORT_LABELS
     ]
     return {
         "project": {
@@ -157,11 +163,122 @@ def get_linear_project_sizing_context(
         "effortLabelRegistry": {
             "nodes": effort_label_registry,
             "returned": len(effort_label_registry),
-            "expectedNames": list(STUDIO_EFFORT_LABELS),
+            "expectedNames": list(EFFORT_LABELS),
             "complete": {str(item.get("name") or "") for item in effort_label_registry}
-            == set(STUDIO_EFFORT_LABELS),
+            == set(EFFORT_LABELS),
         },
         "relationsAvailable": relations_available,
+    }
+
+
+def get_linear_project_issue_page(
+    project_id: str,
+    *,
+    after: str | None = None,
+    limit: int = 50,
+) -> dict[str, Any]:
+    """Return one cursor page of live project issues without a total-result cap."""
+
+    project_id = str(project_id or "").strip()
+    if not project_id:
+        raise ValueError("project_id is required.")
+    page_size = _bounded_limit(limit, default=50, maximum=100)
+    cursor = str(after or "").strip() or None
+    query = """
+    query LinearProjectIssueInventory($id: String!, $first: Int!, $after: String) {
+      project(id: $id) {
+        id name description content createdAt updatedAt startDate targetDate
+        startedAt completedAt canceledAt priority health progress scope url
+        status { name type }
+        lead { id name displayName email }
+        teams(first: 20) { nodes { id key name } }
+        members(first: 100) {
+          nodes { id name displayName email active }
+          pageInfo { hasNextPage endCursor }
+        }
+        issues(first: $first, after: $after, orderBy: createdAt) {
+          nodes {
+            id identifier title description priority priorityLabel estimate dueDate
+            createdAt updatedAt startedAt completedAt canceledAt url
+            state { id name type }
+            team { id key name }
+            assignee { id name displayName email }
+            labels(first: 100) {
+              nodes { id name team { id key name } }
+              pageInfo { hasNextPage endCursor }
+            }
+          }
+          pageInfo { hasNextPage endCursor }
+        }
+      }
+    }
+    """
+    data = _graphql(
+        query,
+        {"id": project_id, "first": page_size, "after": cursor},
+        operation_name="LinearProjectIssueInventory",
+    )
+    project = data.get("project")
+    if not isinstance(project, dict):
+        raise ValueError("Linear project was not found.")
+    issue_connection = project.get("issues")
+    return {
+        "project": {key: value for key, value in project.items() if key != "issues"},
+        "nodes": _connection_nodes(issue_connection),
+        "pageInfo": _page_info(issue_connection),
+        "snapshotAt": timezone.now().isoformat(),
+        "terminalStateTypes": sorted(TERMINAL_WORKFLOW_TYPES),
+        "orderBy": "createdAt",
+    }
+
+
+def get_linear_project_update_page(
+    project_id: str,
+    *,
+    after: str | None = None,
+    limit: int = 25,
+) -> dict[str, Any]:
+    """Return one cursor page of project updates plus the current project brief."""
+
+    project_id = str(project_id or "").strip()
+    if not project_id:
+        raise ValueError("project_id is required.")
+    page_size = _bounded_limit(limit, default=25, maximum=100)
+    cursor = str(after or "").strip() or None
+    query = """
+    query LinearProjectUpdateInventory($id: String!, $first: Int!, $after: String) {
+      project(id: $id) {
+        id name description content createdAt updatedAt startDate targetDate
+        startedAt completedAt canceledAt priority health progress scope url
+        status { name type }
+        lead { id name displayName email }
+        projectUpdates(first: $first, after: $after, orderBy: createdAt) {
+          nodes {
+            id body health createdAt updatedAt url
+            user { id name displayName email }
+          }
+          pageInfo { hasNextPage endCursor }
+        }
+      }
+    }
+    """
+    data = _graphql(
+        query,
+        {"id": project_id, "first": page_size, "after": cursor},
+        operation_name="LinearProjectUpdateInventory",
+    )
+    project = data.get("project")
+    if not isinstance(project, dict):
+        raise ValueError("Linear project was not found.")
+    update_connection = project.get("projectUpdates")
+    return {
+        "project": {
+            key: value for key, value in project.items() if key != "projectUpdates"
+        },
+        "nodes": _connection_nodes(update_connection),
+        "pageInfo": _page_info(update_connection),
+        "snapshotAt": timezone.now().isoformat(),
+        "orderBy": "createdAt",
     }
 
 
@@ -449,7 +566,7 @@ def create_linear_meeting_issue(payload: dict[str, Any]) -> dict[str, Any]:
         if not title or not team_id:
             raise ValueError("Stored idempotent Linear issue payload is invalid.")
 
-        enforcement = _enforce_studio_sizing(payload)
+        enforcement = _enforce_project_sizing(payload)
         input_data: dict[str, Any] = {
             "title": title,
             "teamId": team_id,
@@ -549,32 +666,39 @@ def get_linear_issue_receipt(idempotency_key: str) -> dict[str, Any]:
     }
 
 
-def _enforce_studio_sizing(payload: dict[str, Any]) -> dict[str, Any] | None:
-    mode = str(
-        getattr(settings, "LINEAR_STUDIO_SIZING_ENFORCEMENT_MODE", "off") or "off"
-    ).strip().lower()
+def _task_sizing_enforcement_mode() -> str:
+    configured = getattr(settings, "LINEAR_TASK_SIZING_ENFORCEMENT_MODE", None)
+    if configured in (None, ""):
+        configured = getattr(settings, "LINEAR_STUDIO_SIZING_ENFORCEMENT_MODE", "off")
+    return str(configured or "off").strip().lower()
+
+
+def _enforce_project_sizing(payload: dict[str, Any]) -> dict[str, Any] | None:
+    """Require one valid effort label for every Roo-created project issue."""
+
+    mode = _task_sizing_enforcement_mode()
     if mode not in {"off", "audit", "required"}:
-        logger.error("linear_studio_sizing_invalid_enforcement_mode mode=%s", mode)
+        logger.error("linear_task_sizing_invalid_enforcement_mode mode=%s", mode)
         mode = "off"
     if mode == "off":
         return None
 
     project_id = str(payload.get("project_id") or "").strip()
     if not project_id:
-        return {"mode": mode, "studioProject": False, "valid": True}
+        return {"mode": mode, "projectIssue": False, "valid": True}
     try:
         project = _get_linear_project_identity(project_id)
     except Exception as exc:
         if mode == "required":
             raise
         logger.warning(
-            "linear_studio_sizing_audit project_lookup_failed=true project_id=%s detail=%s",
+            "linear_task_sizing_audit project_lookup_failed=true project_id=%s detail=%s",
             project_id,
             str(exc),
         )
         return {
             "mode": mode,
-            "studioProject": None,
+            "projectIssue": None,
             "valid": False,
             "violations": ["Current project metadata could not be verified."],
         }
@@ -582,12 +706,12 @@ def _enforce_studio_sizing(payload: dict[str, Any]) -> dict[str, Any] | None:
         if mode == "required":
             raise ValueError("Linear project was not found.")
         logger.warning(
-            "linear_studio_sizing_audit project_not_found=true project_id=%s",
+            "linear_task_sizing_audit project_not_found=true project_id=%s",
             project_id,
         )
         return {
             "mode": mode,
-            "studioProject": None,
+            "projectIssue": None,
             "valid": False,
             "violations": ["Current project metadata could not be found."],
         }
@@ -604,28 +728,11 @@ def _enforce_studio_sizing(payload: dict[str, Any]) -> dict[str, Any] | None:
         or sizing_metadata.get("project_id")
         or ""
     )
-    was_studio = assessed_project_name.startswith(STUDIO_PROJECT_PREFIX)
-    is_studio = current_project_name.startswith(STUDIO_PROJECT_PREFIX)
-    if was_studio and not is_studio:
-        conflict = LinearMeetingSizingConflictError(
-            "The project changed after the Studio effort preview; rerun the Slack command."
-        )
-        if mode == "required":
-            raise conflict
-        logger.warning(
-            "linear_studio_sizing_audit stale_preview=true project_id=%s assessed_name=%r current_name=%r",
-            project_id,
-            assessed_project_name,
-            current_project_name,
-        )
-    if not is_studio:
-        return {"mode": mode, "studioProject": False, "valid": not was_studio}
-
     violations: list[str] = []
     if not str(payload.get("idempotency_key") or "").strip():
-        violations.append("Studio issues require an idempotency_key.")
+        violations.append("Project issues require an idempotency_key.")
     if not sizing_metadata:
-        violations.append("Studio issues require sizing_metadata.")
+        violations.append("Project issues require sizing_metadata.")
     if not assessed_project_id:
         violations.append("sizing_metadata must identify the assessed project.")
     elif assessed_project_id != project_id:
@@ -633,7 +740,12 @@ def _enforce_studio_sizing(payload: dict[str, Any]) -> dict[str, Any] | None:
     if not assessed_project_name:
         violations.append("sizing_metadata must include the assessed project name.")
     elif assessed_project_name != current_project_name:
-        violations.append("The Studio project name changed after the effort assessment.")
+        conflict = LinearMeetingSizingConflictError(
+            "The project changed after the effort preview; rerun the Slack command."
+        )
+        if mode == "required":
+            raise conflict
+        violations.append("The project name changed after the effort assessment.")
     if not str(
         sizing_metadata.get("rubricVersion")
         or sizing_metadata.get("rubric_version")
@@ -647,7 +759,7 @@ def _enforce_studio_sizing(payload: dict[str, Any]) -> dict[str, Any] | None:
         or ""
     )
     rationale = str(sizing_metadata.get("rationale") or "").strip()
-    if effort_label not in STUDIO_EFFORT_LABELS:
+    if effort_label not in EFFORT_LABELS:
         violations.append("sizing_metadata must contain one valid effort label.")
     if not _valid_effort_rationale(rationale):
         violations.append("sizing_metadata rationale must be one sentence of at most 280 characters.")
@@ -658,13 +770,13 @@ def _enforce_studio_sizing(payload: dict[str, Any]) -> dict[str, Any] | None:
         if mode == "required":
             raise
         logger.warning(
-            "linear_studio_sizing_audit label_lookup_failed=true project_id=%s detail=%s",
+            "linear_task_sizing_audit label_lookup_failed=true project_id=%s detail=%s",
             project_id,
             str(exc),
         )
         return {
             "mode": mode,
-            "studioProject": True,
+            "projectIssue": True,
             "valid": False,
             "violations": [
                 *violations,
@@ -679,10 +791,10 @@ def _enforce_studio_sizing(payload: dict[str, Any]) -> dict[str, Any] | None:
         label
         for label in labels
         if str(label.get("id") or "") in label_ids
-        and str(label.get("name") or "") in STUDIO_EFFORT_LABELS
+        and str(label.get("name") or "") in EFFORT_LABELS
     ]
     if len(selected_effort_labels) != 1:
-        violations.append("Studio issues must include exactly one effort label.")
+        violations.append("Project issues must include exactly one effort label.")
     elif str(selected_effort_labels[0].get("name") or "") != effort_label:
         violations.append("The applied effort label does not match sizing_metadata.")
     elif not _label_is_compatible_with_team(
@@ -696,17 +808,21 @@ def _enforce_studio_sizing(payload: dict[str, Any]) -> dict[str, Any] | None:
         if mode == "required":
             raise ValueError(detail)
         logger.warning(
-            "linear_studio_sizing_audit valid=false project_id=%s detail=%s",
+            "linear_task_sizing_audit valid=false project_id=%s detail=%s",
             project_id,
             detail,
         )
         return {
             "mode": mode,
-            "studioProject": True,
+            "projectIssue": True,
             "valid": False,
             "violations": violations,
         }
-    return {"mode": mode, "studioProject": True, "valid": True}
+    return {"mode": mode, "projectIssue": True, "valid": True}
+
+
+# Compatibility for imports/tests written before sizing became project-wide.
+_enforce_studio_sizing = _enforce_project_sizing
 
 
 def _get_linear_project_identity(project_id: str) -> dict[str, Any]:
@@ -795,6 +911,621 @@ def create_linear_meeting_project_update(payload: dict[str, Any]) -> dict[str, A
         )
     project_update = result.get("projectUpdate")
     return project_update if isinstance(project_update, dict) else {}
+
+
+def create_linear_project_sizing_run(payload: dict[str, Any]) -> dict[str, Any]:
+    """Persist a no-write preview that can later be applied idempotently."""
+
+    project_id = str(payload.get("project_id") or "").strip()
+    requester_slack_id = str(payload.get("requested_by_slack_user_id") or "").strip()
+    requester_linear_id = str(payload.get("requested_by_linear_user_id") or "").strip()
+    idempotency_key = str(payload.get("idempotency_key") or "").strip()
+    mode = str(payload.get("mode") or LinearProjectSizingRun.Mode.MISSING_ONLY).strip()
+    model_name = str(payload.get("model") or "").strip()
+    rubric_version = str(payload.get("rubric_version") or "").strip()
+    raw_items = payload.get("items")
+    if not project_id:
+        raise ValueError("project_id is required.")
+    if not requester_slack_id or not requester_linear_id:
+        raise ValueError("Both Slack and Linear requester identities are required.")
+    if not re.fullmatch(r"[A-Za-z0-9:_-]{16,64}", idempotency_key):
+        raise ValueError("idempotency_key must be 16-64 safe characters.")
+    if mode not in LinearProjectSizingRun.Mode.values:
+        raise ValueError("mode must be missing_only or replace_existing.")
+    if not model_name or not rubric_version:
+        raise ValueError("model and rubric_version are required.")
+    if not isinstance(raw_items, list) or not raw_items:
+        raise ValueError("items must contain at least one sizing proposal.")
+    max_items = max(
+        1,
+        int(getattr(settings, "LINEAR_PROJECT_SIZING_MAX_ISSUES", 500) or 500),
+    )
+    if len(raw_items) > max_items:
+        raise ValueError(f"A sizing run may contain at most {max_items} issues.")
+
+    project = _get_linear_project_sizing_authorization(project_id)
+    if not project:
+        raise ValueError("Linear project was not found.")
+    _authorize_linear_project_sizing(project, requester_linear_id)
+    project_name = str(project.get("name") or "")
+    assessed_project_name = str(payload.get("project_name") or "").strip()
+    if assessed_project_name and assessed_project_name != project_name:
+        raise LinearMeetingSizingConflictError(
+            "The project changed after the effort preview; rerun the Slack command."
+        )
+
+    source_snapshot_at = _parse_required_datetime(
+        payload.get("source_snapshot_at"),
+        field_name="source_snapshot_at",
+    )
+    labels = list_issue_labels()
+    team_ids = {
+        str(item.get("team_id") or "").strip()
+        for item in raw_items
+        if isinstance(item, dict)
+    }
+    if "" in team_ids:
+        raise ValueError("Every sizing item must include team_id.")
+    resolved_labels: dict[tuple[str, str], dict[str, Any]] = {}
+    for team_id in sorted(team_ids):
+        for label_name in EFFORT_LABELS:
+            resolved_labels[(team_id, label_name)] = _resolve_effort_label(
+                labels,
+                label_name=label_name,
+                team_id=team_id,
+            )
+
+    normalized_items: list[dict[str, Any]] = []
+    seen_issue_ids: set[str] = set()
+    for raw_item in raw_items:
+        if not isinstance(raw_item, dict):
+            raise ValueError("Every sizing item must be an object.")
+        issue_id = str(raw_item.get("issue_id") or "").strip()
+        title = str(raw_item.get("title") or "").strip()
+        team_id = str(raw_item.get("team_id") or "").strip()
+        expected_updated_at = str(raw_item.get("expected_updated_at") or "").strip()
+        effort_label_name = str(raw_item.get("effort_label") or "").strip()
+        rationale = str(raw_item.get("rationale") or "").strip()
+        sizing_metadata = raw_item.get("sizing_metadata")
+        original_labels = raw_item.get("original_labels") or []
+        if not issue_id or issue_id in seen_issue_ids:
+            raise ValueError("Sizing item issue_id values must be present and unique.")
+        if not title or not expected_updated_at:
+            raise ValueError("Every sizing item must include title and expected_updated_at.")
+        if effort_label_name not in EFFORT_LABELS:
+            raise ValueError("Every sizing item must use one valid effort label.")
+        if not _valid_effort_rationale(rationale):
+            raise ValueError("Every sizing rationale must be one sentence of at most 280 characters.")
+        if not isinstance(original_labels, list):
+            raise ValueError("original_labels must be a list.")
+        if not isinstance(sizing_metadata, dict):
+            raise ValueError("Every sizing item must include sizing_metadata.")
+        if str(
+            sizing_metadata.get("project_id")
+            or sizing_metadata.get("projectId")
+            or ""
+        ) != project_id:
+            raise ValueError("A sizing assessment belongs to a different project.")
+        original_effort_labels = [
+            label
+            for label in original_labels
+            if isinstance(label, dict)
+            and str(label.get("name") or "") in EFFORT_LABELS
+        ]
+        if (
+            mode == LinearProjectSizingRun.Mode.MISSING_ONLY
+            and len(original_effort_labels) == 1
+        ):
+            raise ValueError(
+                "missing_only runs may not include issues with exactly one effort label."
+            )
+        selected_label = resolved_labels[(team_id, effort_label_name)]
+        normalized_items.append(
+            {
+                "issue_id": issue_id,
+                "identifier": str(raw_item.get("identifier") or "")[:100],
+                "title": title[:500],
+                "team_id": team_id,
+                "expected_updated_at": expected_updated_at[:100],
+                "original_labels": original_labels,
+                "effort_label_name": effort_label_name,
+                "effort_label_id": str(selected_label.get("id") or ""),
+                "rationale": rationale,
+                "sizing_metadata": dict(sizing_metadata),
+            }
+        )
+        seen_issue_ids.add(issue_id)
+
+    ttl_seconds = max(
+        60,
+        int(getattr(settings, "LINEAR_PROJECT_SIZING_RUN_TTL_SECONDS", 86400) or 86400),
+    )
+    with transaction.atomic():
+        existing = LinearProjectSizingRun.objects.select_for_update().filter(
+            idempotency_key=idempotency_key
+        ).first()
+        if existing:
+            if (
+                existing.project_id != project_id
+                or existing.requested_by_slack_user_id != requester_slack_id
+            ):
+                raise LinearMeetingIdempotencyConflictError(
+                    "That sizing idempotency key belongs to another request."
+                )
+            return serialize_linear_project_sizing_run(existing, replay=True)
+        run = LinearProjectSizingRun.objects.create(
+            idempotency_key=idempotency_key,
+            project_id=project_id,
+            project_name=project_name,
+            requested_by_slack_user_id=requester_slack_id,
+            requested_by_linear_user_id=requester_linear_id,
+            mode=mode,
+            status=LinearProjectSizingRun.Status.PREVIEW,
+            model_name=model_name,
+            rubric_version=rubric_version,
+            project_context=(
+                dict(payload.get("project_context"))
+                if isinstance(payload.get("project_context"), dict)
+                else {}
+            ),
+            source_snapshot_at=source_snapshot_at,
+            expires_at=timezone.now() + timedelta(seconds=ttl_seconds),
+        )
+        LinearProjectSizingItem.objects.bulk_create(
+            [LinearProjectSizingItem(run=run, **item) for item in normalized_items]
+        )
+    return serialize_linear_project_sizing_run(run)
+
+
+def get_linear_project_sizing_run(run_id: Any) -> dict[str, Any]:
+    try:
+        run = LinearProjectSizingRun.objects.get(pk=run_id)
+    except (LinearProjectSizingRun.DoesNotExist, ValueError, TypeError):
+        raise ValueError("Linear project sizing run was not found.")
+    _expire_linear_project_sizing_run(run)
+    return serialize_linear_project_sizing_run(run)
+
+
+def cancel_linear_project_sizing_run(
+    run_id: Any,
+    *,
+    requested_by_slack_user_id: str,
+) -> dict[str, Any]:
+    with transaction.atomic():
+        try:
+            run = LinearProjectSizingRun.objects.select_for_update().get(pk=run_id)
+        except (LinearProjectSizingRun.DoesNotExist, ValueError, TypeError):
+            raise ValueError("Linear project sizing run was not found.")
+        _require_sizing_run_requester(run, requested_by_slack_user_id)
+        _expire_linear_project_sizing_run(run)
+        if run.status in {
+            LinearProjectSizingRun.Status.COMPLETED,
+            LinearProjectSizingRun.Status.EXPIRED,
+        }:
+            return serialize_linear_project_sizing_run(run)
+        if run.status == LinearProjectSizingRun.Status.APPLYING:
+            raise LinearMeetingSizingConflictError(
+                "This sizing run is already applying and can no longer be cancelled."
+            )
+        run.status = LinearProjectSizingRun.Status.CANCELLED
+        run.save(update_fields=["status", "updated_at"])
+    return serialize_linear_project_sizing_run(run)
+
+
+def apply_linear_project_sizing_run(
+    run_id: Any,
+    *,
+    requested_by_slack_user_id: str,
+    limit: int = 20,
+) -> dict[str, Any]:
+    """Claim and apply a bounded page of a durable run."""
+
+    page_size = _bounded_limit(limit, default=20, maximum=25)
+    processing_ttl = max(
+        30,
+        int(getattr(settings, "LINEAR_PROJECT_SIZING_PROCESSING_TTL_SECONDS", 300) or 300),
+    )
+    with transaction.atomic():
+        try:
+            run = LinearProjectSizingRun.objects.select_for_update().get(pk=run_id)
+        except (LinearProjectSizingRun.DoesNotExist, ValueError, TypeError):
+            raise ValueError("Linear project sizing run was not found.")
+        _require_sizing_run_requester(run, requested_by_slack_user_id)
+        _expire_linear_project_sizing_run(run)
+        if run.status in {
+            LinearProjectSizingRun.Status.COMPLETED,
+            LinearProjectSizingRun.Status.CANCELLED,
+            LinearProjectSizingRun.Status.EXPIRED,
+        }:
+            return serialize_linear_project_sizing_run(run)
+        stale_processing_before = timezone.now() - timedelta(seconds=processing_ttl)
+        run.items.filter(
+            status=LinearProjectSizingItem.Status.PROCESSING,
+            updated_at__lt=stale_processing_before,
+        ).update(status=LinearProjectSizingItem.Status.PENDING)
+        claimed = list(
+            run.items.select_for_update()
+            .filter(status=LinearProjectSizingItem.Status.PENDING)
+            .order_by("id")[:page_size]
+        )
+        if claimed:
+            LinearProjectSizingItem.objects.filter(
+                pk__in=[item.pk for item in claimed]
+            ).update(status=LinearProjectSizingItem.Status.PROCESSING)
+            run.status = LinearProjectSizingRun.Status.APPLYING
+            run.save(update_fields=["status", "updated_at"])
+
+    labels = list_issue_labels() if claimed else []
+    for item in claimed:
+        try:
+            _apply_linear_project_sizing_item(run, item, labels=labels)
+        except Exception as exc:
+            LinearProjectSizingItem.objects.filter(pk=item.pk).update(
+                status=LinearProjectSizingItem.Status.FAILED,
+                last_error=f"{exc.__class__.__name__}: {exc}"[:2000],
+                updated_at=timezone.now(),
+            )
+
+    with transaction.atomic():
+        run = LinearProjectSizingRun.objects.select_for_update().get(pk=run.pk)
+        remaining = run.items.filter(
+            status__in=[
+                LinearProjectSizingItem.Status.PENDING,
+                LinearProjectSizingItem.Status.PROCESSING,
+            ]
+        ).exists()
+        if not remaining:
+            run.status = LinearProjectSizingRun.Status.COMPLETED
+            run.save(update_fields=["status", "updated_at"])
+    return serialize_linear_project_sizing_run(run)
+
+
+def serialize_linear_project_sizing_run(
+    run: LinearProjectSizingRun,
+    *,
+    replay: bool = False,
+) -> dict[str, Any]:
+    items = list(run.items.all().order_by("id"))
+    counts: dict[str, int] = {choice: 0 for choice in LinearProjectSizingItem.Status.values}
+    for item in items:
+        counts[item.status] = counts.get(item.status, 0) + 1
+    return {
+        "id": str(run.id),
+        "idempotencyKey": run.idempotency_key,
+        "idempotentReplay": replay,
+        "project": {"id": run.project_id, "name": run.project_name},
+        "requestedBySlackUserId": run.requested_by_slack_user_id,
+        "mode": run.mode,
+        "status": run.status,
+        "model": run.model_name,
+        "rubricVersion": run.rubric_version,
+        "sourceSnapshotAt": run.source_snapshot_at.isoformat(),
+        "expiresAt": run.expires_at.isoformat(),
+        "counts": {"total": len(items), **counts},
+        "items": [
+            {
+                "issueId": item.issue_id,
+                "identifier": item.identifier,
+                "title": item.title,
+                "teamId": item.team_id,
+                "expectedUpdatedAt": item.expected_updated_at,
+                "effortLabel": item.effort_label_name,
+                "rationale": item.rationale,
+                "status": item.status,
+                "result": item.result_payload,
+                "error": item.last_error,
+            }
+            for item in items
+        ],
+    }
+
+
+def _parse_required_datetime(value: Any, *, field_name: str):
+    parsed = parse_datetime(str(value or "").strip())
+    if parsed is None:
+        raise ValueError(f"{field_name} must be an ISO-8601 datetime.")
+    if timezone.is_naive(parsed):
+        parsed = timezone.make_aware(parsed, timezone.get_current_timezone())
+    return parsed
+
+
+def _get_linear_project_sizing_authorization(project_id: str) -> dict[str, Any]:
+    query = """
+    query LinearProjectSizingAuthorization($id: String!) {
+      project(id: $id) {
+        id name
+        lead { id name displayName email }
+        teams(first: 20) { nodes { id key name } }
+        members(first: 100) {
+          nodes { id name displayName email active }
+          pageInfo { hasNextPage endCursor }
+        }
+      }
+    }
+    """
+    try:
+        data = _graphql(
+            query,
+            {"id": project_id},
+            operation_name="LinearProjectSizingAuthorization",
+        )
+        project = data.get("project")
+        return project if isinstance(project, dict) else {}
+    except LinearMeetingGraphQLError as exc:
+        if not _team_members_query_unsupported(exc):
+            raise
+        logger.warning(
+            "linear_project_sizing_members_unavailable detail=%s",
+            str(exc),
+        )
+
+    fallback_query = """
+    query LinearProjectSizingAuthorizationBasic($id: String!) {
+      project(id: $id) {
+        id name
+        lead { id name displayName email }
+        teams(first: 20) { nodes { id key name } }
+      }
+    }
+    """
+    data = _graphql(
+        fallback_query,
+        {"id": project_id},
+        operation_name="LinearProjectSizingAuthorizationBasic",
+    )
+    project = data.get("project")
+    if not isinstance(project, dict):
+        return {}
+    team_ids = {
+        str(team.get("id") or "")
+        for team in _connection_nodes(project.get("teams"))
+        if team.get("id")
+    }
+    fallback_members: list[dict[str, Any]] = []
+    for team in list_teams():
+        if str(team.get("id") or "") in team_ids:
+            fallback_members.extend(_connection_nodes(team.get("members")))
+    project["members"] = {
+        "nodes": _dedupe_users(fallback_members),
+        "pageInfo": {"hasNextPage": False, "endCursor": None},
+    }
+    return project
+
+
+def _authorize_linear_project_sizing(
+    project: dict[str, Any],
+    requester_linear_user_id: str,
+) -> None:
+    if _page_info(project.get("members")).get("hasNextPage"):
+        raise ValueError(
+            "Project membership exceeds the authorization page limit; configure an admin override."
+        )
+    configured_admins = getattr(
+        settings,
+        "LINEAR_PROJECT_SIZING_ADMIN_LINEAR_USER_IDS",
+        "",
+    )
+    if isinstance(configured_admins, str):
+        admin_ids = {
+            item.strip() for item in configured_admins.split(",") if item.strip()
+        }
+    else:
+        admin_ids = {str(item).strip() for item in configured_admins or [] if str(item).strip()}
+    if requester_linear_user_id in admin_ids:
+        return
+    allowed_ids = {
+        str(member.get("id") or "")
+        for member in _connection_nodes(project.get("members"))
+        if member.get("active") is not False
+    }
+    lead = project.get("lead")
+    if isinstance(lead, dict) and lead.get("id"):
+        allowed_ids.add(str(lead["id"]))
+    if requester_linear_user_id not in allowed_ids:
+        raise ValueError(
+            "Only a current Linear project member, project lead, or configured admin may size this project."
+        )
+
+
+def _resolve_effort_label(
+    labels: list[dict[str, Any]],
+    *,
+    label_name: str,
+    team_id: str,
+) -> dict[str, Any]:
+    exact = [
+        label
+        for label in labels
+        if str(label.get("name") or "") == label_name and not label.get("archivedAt")
+    ]
+    team_scoped = [
+        label
+        for label in exact
+        if str(((label.get("team") or {}).get("id")) or "") == team_id
+    ]
+    global_labels = [
+        label
+        for label in exact
+        if not str(((label.get("team") or {}).get("id")) or "")
+    ]
+    preferred = team_scoped if team_scoped else global_labels
+    if len(preferred) != 1:
+        raise ValueError(
+            f"Expected exactly one compatible Linear label named {label_name!r} "
+            f"for team {team_id!r}; found {len(preferred)}."
+        )
+    return preferred[0]
+
+
+def _require_sizing_run_requester(
+    run: LinearProjectSizingRun,
+    requested_by_slack_user_id: str,
+) -> None:
+    if str(requested_by_slack_user_id or "").strip() != run.requested_by_slack_user_id:
+        raise ValueError("Only the person who requested this sizing run may apply or cancel it.")
+
+
+def _expire_linear_project_sizing_run(run: LinearProjectSizingRun) -> None:
+    if (
+        run.status
+        in {LinearProjectSizingRun.Status.PREVIEW, LinearProjectSizingRun.Status.APPLYING}
+        and run.expires_at <= timezone.now()
+    ):
+        run.status = LinearProjectSizingRun.Status.EXPIRED
+        run.save(update_fields=["status", "updated_at"])
+
+
+def _apply_linear_project_sizing_item(
+    run: LinearProjectSizingRun,
+    item: LinearProjectSizingItem,
+    *,
+    labels: list[dict[str, Any]],
+) -> None:
+    issue = _get_linear_issue_for_sizing(item.issue_id)
+    if not issue:
+        _finish_sizing_item(
+            item,
+            status=LinearProjectSizingItem.Status.CONFLICT,
+            error="Linear issue was not found.",
+        )
+        return
+    workflow_type = str(((issue.get("state") or {}).get("type")) or "").lower()
+    if workflow_type in TERMINAL_WORKFLOW_TYPES:
+        _finish_sizing_item(
+            item,
+            status=LinearProjectSizingItem.Status.SKIPPED_TERMINAL,
+            result={"stateType": workflow_type},
+        )
+        return
+    live_project_id = str(((issue.get("project") or {}).get("id")) or "")
+    live_team_id = str(((issue.get("team") or {}).get("id")) or "")
+    if live_project_id != run.project_id or live_team_id != item.team_id:
+        _finish_sizing_item(
+            item,
+            status=LinearProjectSizingItem.Status.CONFLICT,
+            error="The issue project or team changed after preview.",
+        )
+        return
+
+    live_labels = _connection_nodes(issue.get("labels"))
+    effort_labels = [
+        label for label in live_labels if str(label.get("name") or "") in EFFORT_LABELS
+    ]
+    desired = _resolve_effort_label(
+        labels,
+        label_name=item.effort_label_name,
+        team_id=live_team_id,
+    )
+    desired_id = str(desired.get("id") or "")
+    if len(effort_labels) == 1 and str(effort_labels[0].get("id") or "") == desired_id:
+        _finish_sizing_item(
+            item,
+            status=LinearProjectSizingItem.Status.ALREADY_SIZED,
+            result={"issue": issue, "idempotentReplay": True},
+        )
+        return
+    if (
+        run.mode == LinearProjectSizingRun.Mode.MISSING_ONLY
+        and len(effort_labels) == 1
+    ):
+        _finish_sizing_item(
+            item,
+            status=LinearProjectSizingItem.Status.ALREADY_SIZED,
+            result={"issue": issue, "preservedExistingEffortLabel": True},
+        )
+        return
+    if str(issue.get("updatedAt") or "") != item.expected_updated_at:
+        _finish_sizing_item(
+            item,
+            status=LinearProjectSizingItem.Status.CONFLICT,
+            error="The issue changed after preview; rerun project sizing.",
+        )
+        return
+    preserved_ids = [
+        str(label.get("id") or "")
+        for label in live_labels
+        if label.get("id") and str(label.get("name") or "") not in EFFORT_LABELS
+    ]
+    label_ids = list(dict.fromkeys([*preserved_ids, desired_id]))
+    updated_issue = _update_linear_issue_labels(item.issue_id, label_ids)
+    _finish_sizing_item(
+        item,
+        status=LinearProjectSizingItem.Status.APPLIED,
+        result={"issue": updated_issue},
+    )
+
+
+def _get_linear_issue_for_sizing(issue_id: str) -> dict[str, Any]:
+    query = """
+    query LinearIssueForEffortSizing($id: String!) {
+      issue(id: $id) {
+        id identifier title updatedAt url
+        state { id name type }
+        project { id name }
+        team { id key name }
+        labels(first: 100) {
+          nodes { id name team { id key name } }
+          pageInfo { hasNextPage endCursor }
+        }
+      }
+    }
+    """
+    data = _graphql(
+        query,
+        {"id": issue_id},
+        operation_name="LinearIssueForEffortSizing",
+    )
+    issue = data.get("issue")
+    if not isinstance(issue, dict):
+        return {}
+    if _page_info(issue.get("labels")).get("hasNextPage"):
+        raise LinearMeetingGraphQLError(
+            "Issue has more than 100 labels; refusing a lossy effort-label update.",
+            operation="LinearIssueForEffortSizing",
+        )
+    return issue
+
+
+def _update_linear_issue_labels(issue_id: str, label_ids: list[str]) -> dict[str, Any]:
+    mutation = """
+    mutation UpdateLinearIssueEffortLabel($id: String!, $input: IssueUpdateInput!) {
+      issueUpdate(id: $id, input: $input) {
+        success
+        issue {
+          id identifier title updatedAt url
+          labels(first: 100) { nodes { id name } }
+        }
+      }
+    }
+    """
+    data = _graphql(
+        mutation,
+        {"id": issue_id, "input": {"labelIds": label_ids}},
+        operation_name="UpdateLinearIssueEffortLabel",
+    )
+    result = data.get("issueUpdate") if isinstance(data.get("issueUpdate"), dict) else {}
+    if not result.get("success"):
+        raise LinearMeetingGraphQLError(
+            "Linear issueUpdate returned success=false.",
+            operation="UpdateLinearIssueEffortLabel",
+        )
+    issue = result.get("issue")
+    return issue if isinstance(issue, dict) else {}
+
+
+def _finish_sizing_item(
+    item: LinearProjectSizingItem,
+    *,
+    status: str,
+    result: dict[str, Any] | None = None,
+    error: str = "",
+) -> None:
+    LinearProjectSizingItem.objects.filter(pk=item.pk).update(
+        status=status,
+        result_payload=result or {},
+        last_error=str(error or "")[:2000],
+        updated_at=timezone.now(),
+    )
 
 
 def _fetch_linear_project_sizing_detail(
