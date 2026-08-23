@@ -2,7 +2,7 @@
 
 The Django API and background-work service for the MLAI platform. It owns
 shared identity, persistent product data, integrations, scheduled work, and API
-contracts consumed by the MLAI website, Roo, and MLAI Chat.
+contracts consumed by the MLAI website and Roo.
 
 For the cross-repository system map, start with
 [`mlai-engineering`](https://github.com/MLAI-AUS-Inc/mlai-engineering). AI
@@ -14,7 +14,8 @@ coding agents must also read [`AGENTS.md`](AGENTS.md).
 - Founder Tools, startup updates, content workflows, and integrations
 - Hackathon APIs for eSafety, Watt The Hack, HealthHack, and MedHack
 - Roo points and internal service endpoints
-- MLAI Chat account, membership, and bridge integration APIs
+- Dormant account, membership, and bridge APIs created for the inactive
+  Buzz/MLAI Chat deployment experiment
 - Organisational memory ingestion, retrieval, review, and publication services
 - Scheduled jobs and background workers
 
@@ -102,7 +103,7 @@ The root URL map is [`mlai/urls.py`](mlai/urls.py). Major route families include
 | `/api/v1/auth/` | Core authentication |
 | `/api/v1/founder-tools/` | Founder Tools |
 | `/api/v1/hackathons/` | Hackathon APIs |
-| `/api/v1/community-chat/` | MLAI Chat integration |
+| `/api/v1/community-chat/` | Dormant Buzz/MLAI Chat experiment integration |
 | `/api/v1/org-memory/` | Private organisational memory |
 | `/api/v1/public-brain/` | Reviewed public memory |
 | `/api/v1/jobs/` | Jobs and scheduled-work APIs |
@@ -125,3 +126,7 @@ the relevant runbook in `docs/` for subsystem operations.
 Architecture and operational documents describe current behavior. Files under
 `plans/`, dated audits, and implementation plans are historical context unless
 another current document explicitly adopts them.
+
+The `community_chat` application and its runbooks were created for the inactive
+Buzz/MLAI Chat deployment experiment. Their presence in the codebase does not
+identify an active or supported MLAI product surface.

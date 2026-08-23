@@ -4,7 +4,12 @@ Start with the repository [`README`](../README.md) and
 [`ARCHITECTURE`](../ARCHITECTURE.md). Use this index to find current
 subsystem-specific contracts and runbooks.
 
-## MLAI Chat
+## Inactive Buzz / MLAI Chat experiment
+
+These documents describe integration work for the inactive experiment in
+deploying the open-source Buzz platform. Retain them as historical technical
+context; they are not current production runbooks or evidence of an active MLAI
+Chat service.
 
 - [`mlai-chat-bridge-contract.md`](mlai-chat-bridge-contract.md)
 - [`mlai-chat-bridge-staging.md`](mlai-chat-bridge-staging.md)
