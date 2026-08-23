@@ -47,10 +47,8 @@ def future_local(day_offset=1, hour=9):
 class MeetingRoomApiTests(APITestCase):
     def setUp(self):
         self.client.credentials(HTTP_X_API_KEY=TEST_SETTINGS['ROO_API_KEY'])
-        self.room, _ = MeetingRoom.objects.get_or_create(
-            slug='meeting-room',
-            defaults={'name': 'Meeting Room'},
-        )
+        self.room = MeetingRoom.objects.get(slug='small-meeting-room')
+        self.big_room = MeetingRoom.objects.get(slug='big-meeting-room')
         self.user = self.create_member('UROOMMEMBER', balance=40)
 
     def create_member(self, slack_id, *, balance=10, active=True):
@@ -91,12 +89,152 @@ class MeetingRoomApiTests(APITestCase):
             format='json',
         )
 
-    def test_seeded_room_is_listed_without_private_data(self):
+    def test_two_seeded_rooms_are_listed_without_private_data(self):
         response = self.client.get(reverse('meeting-room-list'))
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data['rooms'][0]['slug'], 'meeting-room')
-        self.assertEqual(set(response.data['rooms'][0]), {'id', 'slug', 'name'})
+        self.assertEqual(
+            {(room['slug'], room['name']) for room in response.data['rooms']},
+            {
+                ('small-meeting-room', 'Small Meeting Room'),
+                ('big-meeting-room', 'Big Meeting Room'),
+            },
+        )
+        self.assertTrue(
+            all(set(room) == {'id', 'slug', 'name'} for room in response.data['rooms'])
+        )
+        self.assertFalse(MeetingRoom.objects.get(slug='meeting-room').is_active)
+
+    def test_two_room_migration_deactivates_other_active_rooms(self):
+        from importlib import import_module
+
+        from django.apps import apps
+
+        other = MeetingRoom.objects.create(
+            slug='temporary-room',
+            name='Temporary Room',
+            is_active=True,
+        )
+
+        migration = import_module('roo.migrations.0031_small_and_big_meeting_rooms')
+        migration.configure_two_meeting_rooms(apps, None)
+
+        other.refresh_from_db()
+        self.assertFalse(other.is_active)
+        self.assertEqual(
+            set(
+                MeetingRoom.objects.filter(is_active=True).values_list(
+                    'slug',
+                    flat=True,
+                )
+            ),
+            {'small-meeting-room', 'big-meeting-room'},
+        )
+
+    def test_historical_generic_room_booking_can_be_listed_and_cancelled(self):
+        generic_room = MeetingRoom.objects.get(slug='meeting-room')
+        generic_room.is_active = True
+        generic_room.save(update_fields=['is_active'])
+        booked = self.book(future_local(1, 9), room_slug=generic_room.slug)
+        generic_room.is_active = False
+        generic_room.save(update_fields=['is_active'])
+
+        listed = self.client.post(
+            reverse('meeting-room-my-bookings'),
+            {'slack_user_id': self.user.slack_id},
+            format='json',
+        )
+        cancelled = self.client.post(
+            reverse('meeting-room-cancel'),
+            {
+                'slack_user_id': self.user.slack_id,
+                'booking_id': booked.data['booking']['id'],
+            },
+            format='json',
+        )
+
+        self.assertEqual(booked.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(listed.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            listed.data['bookings'][0]['room']['slug'],
+            'meeting-room',
+        )
+        self.assertEqual(cancelled.status_code, status.HTTP_200_OK)
+        self.assertTrue(cancelled.data['cancelled'])
+        self.assertTrue(cancelled.data['refunded'])
+        self.user.points_account.refresh_from_db()
+        self.assertEqual(self.user.points_account.balance, 40)
+
+    def test_room_slug_is_required_and_unknown_rooms_are_rejected(self):
+        starts_at = future_local(1, 9)
+        missing_availability = self.client.post(
+            reverse('meeting-room-availability'),
+            {
+                'slack_user_id': self.user.slack_id,
+                'starts_at': starts_at.isoformat(),
+                'ends_at': (starts_at + timedelta(hours=1)).isoformat(),
+            },
+            format='json',
+        )
+        missing_booking_payload = self.book_payload(starts_at)
+        missing_booking_payload.pop('room_slug')
+        missing_booking = self.client.post(
+            reverse('meeting-room-book'),
+            missing_booking_payload,
+            format='json',
+        )
+        unknown = self.book(starts_at, room_slug='unknown-room')
+
+        for response in (missing_availability, missing_booking):
+            self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+            self.assertEqual(response.data['code'], 'invalid_request')
+        self.assertEqual(unknown.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(unknown.data['code'], 'room_not_found')
+
+    def test_rooms_have_independent_availability_for_different_members(self):
+        starts_at = future_local(1, 9)
+        other_user = self.create_member('UROOMOTHER')
+
+        small = self.book(starts_at, room_slug=self.room.slug)
+        big = self.book(
+            starts_at,
+            slack_user_id=other_user.slack_id,
+            room_slug=self.big_room.slug,
+        )
+
+        self.assertEqual(small.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(big.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(MeetingRoomBooking.objects.filter(status='booked').count(), 2)
+
+    def test_member_cannot_hold_overlapping_bookings_across_rooms(self):
+        starts_at = future_local(1, 9)
+        self.assertEqual(
+            self.book(starts_at, room_slug=self.room.slug).status_code,
+            status.HTTP_201_CREATED,
+        )
+
+        availability = self.client.post(
+            reverse('meeting-room-availability'),
+            {
+                'slack_user_id': self.user.slack_id,
+                'room_slug': self.big_room.slug,
+                'starts_at': starts_at.isoformat(),
+                'ends_at': (starts_at + timedelta(hours=1)).isoformat(),
+            },
+            format='json',
+        )
+        second = self.book(starts_at, room_slug=self.big_room.slug)
+
+        self.assertEqual(availability.status_code, status.HTTP_200_OK)
+        self.assertFalse(availability.data['available'])
+        self.assertIn(
+            'user_booking_conflict',
+            availability.data['unavailable_reasons'],
+        )
+        self.assertEqual(second.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(second.data['code'], 'user_booking_conflict')
+        self.user.points_account.refresh_from_db()
+        self.assertEqual(self.user.points_account.balance, 39)
 
     def test_half_hour_increments_charge_each_started_hour(self):
         cases = ((1, 1), (1.5, 2), (2, 2))
@@ -140,6 +278,7 @@ class MeetingRoomApiTests(APITestCase):
             reverse('meeting-room-availability'),
             {
                 'slack_user_id': self.user.slack_id,
+                'room_slug': self.room.slug,
                 'date': '2026-02-30',
             },
             format='json',
@@ -183,6 +322,7 @@ class MeetingRoomApiTests(APITestCase):
             reverse('meeting-room-availability'),
             {
                 'slack_user_id': self.user.slack_id,
+                'room_slug': self.room.slug,
                 'starts_at': starts_at.isoformat(),
                 'ends_at': (starts_at + timedelta(hours=1.5)).isoformat(),
             },
@@ -220,7 +360,11 @@ class MeetingRoomApiTests(APITestCase):
         day = future_local(1, 8)
         self.assertEqual(self.book(day, 2).status_code, status.HTTP_201_CREATED)
         self.assertEqual(
-            self.book(day.replace(hour=11), 2).status_code,
+            self.book(
+                day.replace(hour=11),
+                2,
+                room_slug=self.big_room.slug,
+            ).status_code,
             status.HTTP_201_CREATED,
         )
 
@@ -251,6 +395,7 @@ class MeetingRoomApiTests(APITestCase):
 
     def test_room_blocks_and_inactive_rooms_prevent_booking(self):
         starts_at = future_local(1, 9)
+        other_user = self.create_member('UROOMBLOCKOTHER')
         MeetingRoomBlock.objects.create(
             room=self.room,
             starts_at=starts_at,
@@ -258,8 +403,15 @@ class MeetingRoomApiTests(APITestCase):
             reason='Maintenance',
         )
         blocked = self.book(starts_at, 1)
+        other_room = self.book(
+            starts_at,
+            1,
+            slack_user_id=other_user.slack_id,
+            room_slug=self.big_room.slug,
+        )
         self.assertEqual(blocked.status_code, status.HTTP_409_CONFLICT)
         self.assertEqual(blocked.data['code'], 'room_blocked')
+        self.assertEqual(other_room.status_code, status.HTTP_201_CREATED)
 
         self.room.is_active = False
         self.room.save(update_fields=['is_active'])
@@ -288,6 +440,7 @@ class MeetingRoomApiTests(APITestCase):
             reverse('meeting-room-availability'),
             {
                 'slack_user_id': self.user.slack_id,
+                'room_slug': self.room.slug,
                 'date': starts_at.date().isoformat(),
             },
             format='json',
@@ -311,6 +464,7 @@ class MeetingRoomApiTests(APITestCase):
             reverse('meeting-room-availability'),
             {
                 'slack_user_id': self.user.slack_id,
+                'room_slug': self.room.slug,
                 'starts_at': starts_at.isoformat(),
                 'ends_at': (starts_at + timedelta(hours=1)).isoformat(),
             },
@@ -336,6 +490,7 @@ class MeetingRoomApiTests(APITestCase):
             reverse('meeting-room-availability'),
             {
                 'slack_user_id': self.user.slack_id,
+                'room_slug': self.room.slug,
                 'starts_at': later.isoformat(),
                 'ends_at': (later + timedelta(hours=1)).isoformat(),
             },
@@ -356,6 +511,7 @@ class MeetingRoomApiTests(APITestCase):
             reverse('meeting-room-availability'),
             {
                 'slack_user_id': self.user.slack_id,
+                'room_slug': self.room.slug,
                 'starts_at': starts_at.isoformat(),
                 'ends_at': (starts_at + timedelta(hours=4)).isoformat(),
             },
@@ -378,6 +534,7 @@ class MeetingRoomApiTests(APITestCase):
             reverse('meeting-room-availability'),
             {
                 'slack_user_id': self.user.slack_id,
+                'room_slug': self.room.slug,
                 'starts_at': starts_at.isoformat(),
                 'ends_at': (starts_at + timedelta(hours=4)).isoformat(),
             },
@@ -394,6 +551,7 @@ class MeetingRoomApiTests(APITestCase):
             reverse('meeting-room-availability'),
             {
                 'slack_user_id': self.user.slack_id,
+                'room_slug': self.room.slug,
                 'starts_at': starts_at.isoformat(),
                 'ends_at': (starts_at + timedelta(minutes=30)).isoformat(),
             },
@@ -412,6 +570,7 @@ class MeetingRoomApiTests(APITestCase):
             reverse('meeting-room-availability'),
             {
                 'slack_user_id': self.user.slack_id,
+                'room_slug': self.room.slug,
                 'starts_at': starts_at.isoformat(),
                 'ends_at': (starts_at + timedelta(hours=24, minutes=30)).isoformat(),
             },
@@ -524,6 +683,7 @@ class MeetingRoomApiTests(APITestCase):
             {
                 'slack_user_id': 'UROOMADMINONLY',
                 'target_slack_user_id': self.user.slack_id,
+                'room_slug': self.room.slug,
                 'starts_at': starts_at.isoformat(),
                 'ends_at': (starts_at + timedelta(hours=1.5)).isoformat(),
             },
@@ -838,8 +998,12 @@ class MeetingRoomConcurrencyTests(TransactionTestCase):
 
     def setUp(self):
         self.room, _ = MeetingRoom.objects.get_or_create(
-            slug='meeting-room',
-            defaults={'name': 'Meeting Room'},
+            slug='small-meeting-room',
+            defaults={'name': 'Small Meeting Room'},
+        )
+        self.big_room, _ = MeetingRoom.objects.get_or_create(
+            slug='big-meeting-room',
+            defaults={'name': 'Big Meeting Room'},
         )
         self.users = []
         for number in range(2):
@@ -890,6 +1054,48 @@ class MeetingRoomConcurrencyTests(TransactionTestCase):
             thread.join(timeout=10)
 
         self.assertEqual(sorted(results), ['booking_conflict', 'created'])
+        self.assertEqual(MeetingRoomBooking.objects.filter(status='booked').count(), 1)
+        self.assertEqual(Ledger.objects.filter(source='MEETING_ROOM').count(), 1)
+
+    def test_concurrent_cross_room_requests_cannot_overlap_for_one_member(self):
+        user = self.users[0]
+        starts_at = future_local(2, 9)
+        barrier = threading.Barrier(2)
+        results = []
+
+        def attempt(room_id):
+            connections.close_all()
+            member = User.objects.get(pk=user.pk)
+            room = MeetingRoom.objects.get(pk=room_id)
+            barrier.wait()
+            try:
+                MeetingRoomService.book(
+                    user=member,
+                    requested_by_slack_id=member.slack_id,
+                    room_slug=room.slug,
+                    starts_at=starts_at,
+                    ends_at=starts_at + timedelta(hours=1),
+                    client_request_id=str(uuid.uuid4()),
+                    confirmation_expires_at=(
+                        timezone.now() + timedelta(minutes=10)
+                    ),
+                )
+                results.append('created')
+            except MeetingRoomError as exc:
+                results.append(exc.code)
+            finally:
+                connections.close_all()
+
+        threads = [
+            threading.Thread(target=attempt, args=(room.pk,))
+            for room in (self.room, self.big_room)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+
+        self.assertEqual(sorted(results), ['created', 'user_booking_conflict'])
         self.assertEqual(MeetingRoomBooking.objects.filter(status='booked').count(), 1)
         self.assertEqual(Ledger.objects.filter(source='MEETING_ROOM').count(), 1)
 

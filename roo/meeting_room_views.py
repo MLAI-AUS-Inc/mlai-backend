@@ -7,7 +7,7 @@ from rest_framework.views import APIView
 
 from core.permissions import HasStrictRooApiKey
 
-from .meeting_rooms import DEFAULT_ROOM_SLUG, MeetingRoomError, MeetingRoomService
+from .meeting_rooms import MeetingRoomError, MeetingRoomService
 from .permissions import InsufficientBalanceError, is_points_admin
 from .services import PointsService
 from .views import clean_slack_id
@@ -130,6 +130,16 @@ def _optional_points_cost(value):
     return parsed
 
 
+def _required_room_slug(request) -> str:
+    value = request.data.get('room_slug')
+    if not isinstance(value, str) or not value.strip():
+        raise MeetingRoomError(
+            'invalid_request',
+            'room_slug is required',
+        )
+    return value.strip()
+
+
 class MeetingRoomAPIView(APIView):
     permission_classes = [HasStrictRooApiKey]
 
@@ -152,7 +162,7 @@ class MeetingRoomListView(MeetingRoomAPIView):
 class MeetingRoomAvailabilityView(MeetingRoomAPIView):
     def post(self, request):
         user, _, _, admin_booking = _booking_user(request)
-        room_slug = str(request.data.get('room_slug') or DEFAULT_ROOM_SLUG).strip()
+        room_slug = _required_room_slug(request)
         raw_date = request.data.get('date')
         raw_start = request.data.get('starts_at')
         raw_end = request.data.get('ends_at')
@@ -201,9 +211,7 @@ class MeetingRoomBookView(MeetingRoomAPIView):
         booking, created = MeetingRoomService.book(
             user=user,
             requested_by_slack_id=requester_slack_user_id,
-            room_slug=str(
-                request.data.get('room_slug') or DEFAULT_ROOM_SLUG
-            ).strip(),
+            room_slug=_required_room_slug(request),
             starts_at=_parse_timestamp(request.data.get('starts_at'), 'starts_at'),
             ends_at=_parse_timestamp(request.data.get('ends_at'), 'ends_at'),
             client_request_id=request.data.get('client_request_id'),

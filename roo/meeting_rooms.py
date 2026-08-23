@@ -21,7 +21,6 @@ from .models import (
 from .services import PointsService
 
 
-DEFAULT_ROOM_SLUG = 'meeting-room'
 ROOM_LOCK_SCOPE = 'meeting-room'
 USER_LOCK_SCOPE = 'meeting-room-user'
 
@@ -425,6 +424,19 @@ class MeetingRoomService:
         ).exists()
 
     @staticmethod
+    def _user_has_booking(
+        user: User,
+        starts_at: datetime,
+        ends_at: datetime,
+    ) -> bool:
+        return MeetingRoomBooking.objects.filter(
+            user=user,
+            status='booked',
+            starts_at__lt=ends_at,
+            ends_at__gt=starts_at,
+        ).exists()
+
+    @staticmethod
     def _room_has_block(
         room: MeetingRoom,
         starts_at: datetime,
@@ -481,7 +493,7 @@ class MeetingRoomService:
         cls,
         *,
         user: User,
-        room_slug: str = DEFAULT_ROOM_SLUG,
+        room_slug: str,
         local_date: Optional[date] = None,
         starts_at: Optional[datetime] = None,
         ends_at: Optional[datetime] = None,
@@ -531,6 +543,8 @@ class MeetingRoomService:
         remaining_daily_hours = cls._remaining_daily_hours(user, local_dates)
         if requested_interval:
             if bookable:
+                if cls._user_has_booking(user, starts_at, ends_at):
+                    unavailable_reasons.append('user_booking_conflict')
                 for local_date in local_dates:
                     day_start, day_end = cls._day_bounds(local_date)
                     requested_hours = cls._overlap_hours(
@@ -671,6 +685,12 @@ class MeetingRoomService:
             raise MeetingRoomError(
                 'booking_conflict',
                 'The meeting room has already been booked during that time',
+                409,
+            )
+        if cls._user_has_booking(user, starts_at, ends_at):
+            raise MeetingRoomError(
+                'user_booking_conflict',
+                'Members can only hold one meeting-room booking at a time',
                 409,
             )
         cls._validate_daily_limit(
