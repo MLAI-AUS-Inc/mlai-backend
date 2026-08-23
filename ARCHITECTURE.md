@@ -10,7 +10,6 @@ scheduled work.
 ```text
 mlai-au --------------------+
 roo ------------------------+--> Django API --> PostgreSQL
-mlai-chat integration ------+        |          Redis/Valkey
 external webhooks ----------+        +--------> external providers
                                       |
                                       +--------> schedulers and workers
@@ -38,7 +37,7 @@ the relevant deployment runbook, not in this document.
 | `founder_tools`, `startup_updates`, `vibe_raising` | Founder-facing product data and workflows |
 | `content_factory`, `content_analytics` | Content generation contracts, delivery, and analytics |
 | `integrations` | OAuth and external connector surfaces |
-| `community_chat` | MLAI Chat identity, membership, and bridge APIs |
+| `community_chat` | Dormant identity, membership, and bridge code for the inactive Buzz/MLAI Chat experiment |
 | `org_memory` | Governed organisational memory ingestion and retrieval |
 | `roo` | Points and Roo-facing backend APIs |
 | `jobs` | Job discovery and scheduled job operations |
@@ -53,8 +52,10 @@ package and its tests before changing a contract.
 
 The deployed and full local topologies contain more than the web server. They
 include schedulers and workers for discovery, analytics, organisational memory,
-password email, and community bridging. All share Django configuration and may
-share the same database and cache.
+and password email. The repository also contains community-bridge workers from
+the inactive Buzz/MLAI Chat experiment; code presence does not establish that
+they are deployed. These processes share Django configuration and may share the
+same database and cache when enabled.
 
 Consequences for changes:
 
@@ -70,8 +71,8 @@ Consequences for changes:
 - External webhooks must be authenticated, bounded, and replay-resistant.
 - Organisation-memory providers require deployment enablement plus
   organisation-level governance approval.
-- `admin.mlai.au` is a Plane trust boundary and must not receive MLAI browser
-  authority.
+- Historical Plane experiment configuration must not be treated as a current
+  browser-origin or trust-boundary requirement.
 
 Detailed security rules live beside each subsystem's implementation and
 runbook. Preserve the existing fail-closed behavior when documentation and code
