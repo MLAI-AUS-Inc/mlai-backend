@@ -1095,6 +1095,35 @@ CONTENT_ANALYTICS_REPORT_NOTIFICATIONS_ENABLED = _env_is_true(
 # Customer.io transactional template for the report email; inline HTML is the
 # fallback when unset (and Resend below that).
 CUSTOMERIO_REPORT_TEMPLATE_ID = os.environ.get("CUSTOMERIO_REPORT_TEMPLATE_ID", "").strip()
+
+# Content islands (the topic graph on founder-tools.marketing). Storage lives
+# here; content-factory computes the clusters and syncs them through
+# /api/seo/islands/. Off until the mlai.au pilot passes.
+CONTENT_ISLANDS_ENABLED = _env_is_true("CONTENT_ISLANDS_ENABLED", False)
+# Daily per-org refresh dispatcher inside the multi-runner tick.
+CONTENT_ISLANDS_SCHEDULER_ENABLED = _env_is_true("CONTENT_ISLANDS_SCHEDULER_ENABLED", False)
+CONTENT_ISLANDS_REFRESH_LOCAL_HOUR = int(
+    os.environ.get("CONTENT_ISLANDS_REFRESH_LOCAL_HOUR", "6") or 6
+)
+CONTENT_ISLANDS_REFRESH_MAX_PER_TICK = int(
+    os.environ.get("CONTENT_ISLANDS_REFRESH_MAX_PER_TICK", "3") or 3
+)
+# An emerging island becomes visible only once it carries this much demand.
+CONTENT_ISLANDS_PROMOTION_MIN_KEYWORDS = int(
+    os.environ.get("CONTENT_ISLANDS_PROMOTION_MIN_KEYWORDS", "5") or 5
+)
+CONTENT_ISLANDS_PROMOTION_MIN_VOLUME = int(
+    os.environ.get("CONTENT_ISLANDS_PROMOTION_MIN_VOLUME", "200") or 200
+)
+# Legibility cap on the graph; extra qualifiers stay emerging until a slot frees.
+CONTENT_ISLANDS_MAX_VISIBLE = int(os.environ.get("CONTENT_ISLANDS_MAX_VISIBLE", "12") or 12)
+# Distinct days an island may fail to re-form before it archives. Islands with
+# written articles are exempt.
+CONTENT_ISLANDS_ARCHIVE_AFTER_MISSES = int(
+    os.environ.get("CONTENT_ISLANDS_ARCHIVE_AFTER_MISSES", "5") or 5
+)
+CONTENT_ISLANDS_NEW_BADGE_DAYS = int(os.environ.get("CONTENT_ISLANDS_NEW_BADGE_DAYS", "7") or 7)
+
 GOOGLE_SEARCH_CONSOLE_SERVICE_ACCOUNT_JSON = os.environ.get(
     "GOOGLE_SEARCH_CONSOLE_SERVICE_ACCOUNT_JSON",
     "",

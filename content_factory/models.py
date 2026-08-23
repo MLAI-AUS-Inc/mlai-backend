@@ -1212,6 +1212,22 @@ class ResearchedKeyword(models.Model):
     related_keywords = models.JSONField(default=list, blank=True)
     monthly_searches = models.JSONField(default=list, blank=True)
 
+    # AI-search (GEO) metrics. Only populated where content-factory runs with
+    # GEO_ENABLE_AI_SEARCH_VOLUME / GEO_ENABLE_VISIBILITY_ANALYSIS on, and only
+    # for the top candidates of a run - null means "not measured", not zero.
+    ai_search_volume = models.IntegerField(
+        null=True,
+        blank=True,
+        help_text="Monthly AI-assistant search volume, when measured"
+    )
+    ai_monthly_searches = models.JSONField(default=list, blank=True)
+    aeo_score = models.FloatField(
+        null=True,
+        blank=True,
+        help_text="Answer-engine visibility score, when measured"
+    )
+    query_type = models.CharField(max_length=32, blank=True, default="")
+
     # Writing status
     status = models.CharField(
         max_length=20,
@@ -1572,6 +1588,238 @@ class ClusterMembership(models.Model):
     def __str__(self):
         pillar_marker = " (PILLAR)" if self.is_pillar else ""
         return f"{self.keyword.keyword} -> {self.cluster.pillar_keyword}{pillar_marker}"
+
+
+class ContentIslandStatus(models.TextChoices):
+    """Lifecycle of a content island on the founder-facing topic graph."""
+    EMERGING = "emerging", "Emerging"
+    VISIBLE = "visible", "Visible"
+    ARCHIVED = "archived", "Archived"
+
+
+class ContentIslandOrigin(models.TextChoices):
+    """How an island first came into existence."""
+    PILLAR_STRATEGY_SEED = "pillar_strategy_seed", "Pillar Strategy Seed"
+    CLUSTER_BIRTH = "cluster_birth", "Cluster Birth"
+    MANUAL = "manual", "Manual"
+
+
+class ContentIsland(models.Model):
+    """
+    A durable topic island for an organization.
+
+    Unlike SemanticCluster (per-session integer key, overwritten every research
+    run) an island keeps a stable per-org slug and its persisted centroid
+    embedding, so content-factory can re-match it run after run and the graph
+    grows instead of being regenerated.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    organization = models.ForeignKey(
+        Organization,
+        on_delete=models.CASCADE,
+        related_name='content_islands',
+        db_index=True
+    )
+
+    # Stable identity - the slug is never re-slugged once assigned.
+    slug = models.SlugField(max_length=80)
+    name = models.CharField(max_length=160)
+    description = models.TextField(blank=True, default="")
+    pillar_keyword = models.CharField(
+        max_length=200,
+        help_text="Centroid keyword; the island-scoped discovery dispatch keyword"
+    )
+
+    # Visuals are stamped once at creation and never reassigned (positional
+    # assignment is what made pillar colors shift between reads).
+    icon_key = models.CharField(max_length=32, default="default")
+    color_key = models.CharField(max_length=32, default="purple")
+
+    status = models.CharField(
+        max_length=20,
+        choices=ContentIslandStatus.choices,
+        default=ContentIslandStatus.EMERGING,
+        db_index=True
+    )
+    origin = models.CharField(
+        max_length=32,
+        choices=ContentIslandOrigin.choices,
+        default=ContentIslandOrigin.CLUSTER_BIRTH
+    )
+
+    # text-embedding-3-small centroid; required non-empty for a birth.
+    centroid_embedding = models.JSONField(default=list, blank=True)
+
+    # Metrics, recomputed by content-factory each refresh.
+    keyword_count = models.IntegerField(default=0)
+    total_volume = models.IntegerField(default=0)
+    avg_difficulty = models.FloatField(default=0.0)
+    opportunity_score = models.FloatField(default=0.0, db_index=True)
+    ai_search_volume = models.IntegerField(default=0)
+    articles_written = models.IntegerField(default=0)
+
+    # Decay bookkeeping. A miss counts at most once per calendar day.
+    consecutive_misses = models.IntegerField(default=0)
+    last_missed_on = models.DateField(null=True, blank=True)
+    last_matched_at = models.DateTimeField(null=True, blank=True)
+    last_expanded_on = models.DateField(null=True, blank=True)
+
+    first_seen_at = models.DateTimeField(default=timezone.now)
+    promoted_at = models.DateTimeField(null=True, blank=True)
+    archived_at = models.DateTimeField(null=True, blank=True)
+    last_refreshed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'seo_content_island'
+        unique_together = ['organization', 'slug']
+        ordering = ['-opportunity_score', 'slug']
+        indexes = [
+            models.Index(fields=['organization', 'status'], name='seo_island_org_status_idx'),
+            models.Index(fields=['organization', '-opportunity_score'], name='seo_island_org_opp_idx'),
+        ]
+
+    def __str__(self):
+        return f"{self.name} ({self.organization.domain}) - {self.status}"
+
+
+class ContentIslandKeyword(models.Model):
+    """Membership of a researched keyword in an island."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    island = models.ForeignKey(
+        ContentIsland,
+        on_delete=models.CASCADE,
+        related_name='memberships'
+    )
+    keyword = models.ForeignKey(
+        ResearchedKeyword,
+        on_delete=models.CASCADE,
+        related_name='island_memberships'
+    )
+    similarity_score = models.FloatField(default=0.0)
+    is_centroid = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'seo_content_island_keyword'
+        unique_together = ['island', 'keyword']
+        indexes = [
+            models.Index(fields=['island', 'is_centroid'], name='seo_island_kw_centroid_idx'),
+        ]
+
+    def __str__(self):
+        centroid_marker = " (CENTROID)" if self.is_centroid else ""
+        return f"{self.keyword.keyword} -> {self.island.slug}{centroid_marker}"
+
+
+class ContentIslandEdge(models.Model):
+    """
+    Similarity edge between two islands of the same organization.
+
+    Recomputed server-side from stored centroids on every sync; ``island_a.slug``
+    always sorts before ``island_b.slug`` so a pair has one canonical row.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    organization = models.ForeignKey(
+        Organization,
+        on_delete=models.CASCADE,
+        related_name='content_island_edges',
+        db_index=True
+    )
+    island_a = models.ForeignKey(
+        ContentIsland,
+        on_delete=models.CASCADE,
+        related_name='edges_out'
+    )
+    island_b = models.ForeignKey(
+        ContentIsland,
+        on_delete=models.CASCADE,
+        related_name='edges_in'
+    )
+    similarity = models.FloatField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'seo_content_island_edge'
+        unique_together = ['island_a', 'island_b']
+        ordering = ['-similarity']
+        indexes = [
+            models.Index(fields=['organization', '-similarity'], name='seo_island_edge_org_sim_idx'),
+        ]
+
+    def __str__(self):
+        return f"{self.island_a.slug} ~ {self.island_b.slug} ({self.similarity:.2f})"
+
+
+class ContentIslandSnapshot(models.Model):
+    """Daily as-of metrics for an island, one row per island per capture date."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    island = models.ForeignKey(
+        ContentIsland,
+        on_delete=models.CASCADE,
+        related_name='snapshots'
+    )
+    captured_on = models.DateField(db_index=True)
+    keyword_count = models.IntegerField(default=0)
+    total_volume = models.IntegerField(default=0)
+    avg_difficulty = models.FloatField(default=0.0)
+    opportunity_score = models.FloatField(default=0.0)
+    ai_search_volume = models.IntegerField(default=0)
+    status = models.CharField(
+        max_length=20,
+        choices=ContentIslandStatus.choices,
+        default=ContentIslandStatus.EMERGING
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'seo_content_island_snapshot'
+        unique_together = ['island', 'captured_on']
+        ordering = ['-captured_on']
+
+    def __str__(self):
+        return f"{self.island.slug} @ {self.captured_on}"
+
+
+class ContentIslandRefreshDispatchStatus(models.TextChoices):
+    QUEUED = "queued", "Queued"
+    COMPLETED = "completed", "Completed"
+    FAILED = "failed", "Failed"
+
+
+class ContentIslandRefreshDispatch(models.Model):
+    """One island-refresh attempt per organization per org-local date."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    organization = models.ForeignKey(
+        Organization,
+        on_delete=models.CASCADE,
+        related_name='content_island_refresh_dispatches',
+        db_index=True
+    )
+    local_date = models.DateField(db_index=True)
+    status = models.CharField(
+        max_length=20,
+        choices=ContentIslandRefreshDispatchStatus.choices,
+        default=ContentIslandRefreshDispatchStatus.QUEUED,
+        db_index=True
+    )
+    content_factory_run_id = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    idempotency_key = models.CharField(max_length=100, unique=True)
+    last_error = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'seo_content_island_refresh_dispatch'
+        unique_together = ['organization', 'local_date']
+        ordering = ['-local_date', '-updated_at']
+        indexes = [
+            models.Index(fields=['status', 'updated_at'], name='seo_island_disp_state_idx'),
+        ]
+
+    def __str__(self):
+        return f"{self.organization.domain}/{self.local_date} ({self.status})"
 
 
 class TopicMap(models.Model):
