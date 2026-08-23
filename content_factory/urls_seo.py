@@ -12,6 +12,10 @@ urlpatterns = [
     path('keywords/<uuid:pk>/status/', views.SEOKeywordStatusUpdateView.as_view(), name='seo_keyword_status_update'),
     path('clusters/', views.SEOClusterListView.as_view(), name='seo_cluster_list'),
     path('clusters/bulk/', views.SEOClusterBulkUpsertView.as_view(), name='seo_cluster_bulk_upsert'),
+    path('islands/', views.SEOContentIslandListView.as_view(), name='seo_content_island_list'),
+    path('islands', views.SEOContentIslandListView.as_view(), name='seo_content_island_list_no_slash'),
+    path('islands/bulk/', views.SEOContentIslandBulkSyncView.as_view(), name='seo_content_island_bulk_sync'),
+    path('islands/bulk', views.SEOContentIslandBulkSyncView.as_view(), name='seo_content_island_bulk_sync_no_slash'),
     path('articles/', views.SEOWrittenArticleCreateView.as_view(), name='seo_article_create'),
     path('dashboard/', views.SEODashboardView.as_view(), name='seo_dashboard'),
 ]

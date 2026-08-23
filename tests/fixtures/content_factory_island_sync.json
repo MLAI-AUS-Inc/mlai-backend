@@ -1,0 +1,98 @@
+{
+  "captured_on": "2026-08-23",
+  "domain": "contract-check.example",
+  "expanded_slugs": [
+    "seeded-island"
+  ],
+  "islands": [
+    {
+      "centroid_embedding": [
+        -0.4305065906109375,
+        0.0017566444552962654,
+        0.4743988836051878,
+        -0.04448025242277139,
+        -0.5757752405639569,
+        0.3681213297500019,
+        0.05749177048098668,
+        0.3424798552950693
+      ],
+      "color_key": "blue",
+      "description": "from pillar strategy",
+      "icon_key": "rocket",
+      "matched": true,
+      "members": [
+        {
+          "is_centroid": true,
+          "keyword_normalized": "fundraising seed round",
+          "similarity_score": 1.0
+        },
+        {
+          "is_centroid": false,
+          "keyword_normalized": "fundraising pitch deck",
+          "similarity_score": 1.0
+        },
+        {
+          "is_centroid": false,
+          "keyword_normalized": "fundraising investor update",
+          "similarity_score": 1.0
+        }
+      ],
+      "metrics": {
+        "ai_search_volume": 80,
+        "avg_difficulty": 25.0,
+        "keyword_count": 3,
+        "opportunity_score": 3100.0,
+        "total_volume": 2000
+      },
+      "name": "Seeded Island",
+      "origin": "pillar_strategy_seed",
+      "pillar_keyword": "fundraising seed round",
+      "slug": "seeded-island"
+    },
+    {
+      "centroid_embedding": [
+        0.48825125945675324,
+        -0.07199307123034651,
+        -0.4776358187287137,
+        0.14242088652806292,
+        0.45663573561581955,
+        -0.20975222137581784,
+        -0.4257075888441029,
+        0.2725231741864865
+      ],
+      "color_key": "green",
+      "description": "generated",
+      "icon_key": "chart",
+      "matched": false,
+      "members": [
+        {
+          "is_centroid": true,
+          "keyword_normalized": "healthcare ai triage",
+          "similarity_score": 1.0
+        },
+        {
+          "is_centroid": false,
+          "keyword_normalized": "healthcare ai imaging",
+          "similarity_score": 1.0
+        },
+        {
+          "is_centroid": false,
+          "keyword_normalized": "healthcare ai records",
+          "similarity_score": 1.0
+        }
+      ],
+      "metrics": {
+        "ai_search_volume": 85,
+        "avg_difficulty": 40.0,
+        "keyword_count": 3,
+        "opportunity_score": 2150.0,
+        "total_volume": 1400
+      },
+      "name": "Island 0: healthcare ai triage",
+      "origin": "cluster_birth",
+      "pillar_keyword": "healthcare ai triage",
+      "slug": null
+    }
+  ],
+  "run_id": "run-contract-check"
+}

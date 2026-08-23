@@ -1,6 +1,8 @@
 from .service_views import (
     SEOClusterBulkUpsertView,
     SEOClusterListView,
+    SEOContentIslandBulkSyncView,
+    SEOContentIslandListView,
     SEODashboardView,
     SEOKeywordBulkUpsertView,
     SEOKeywordDetailView,

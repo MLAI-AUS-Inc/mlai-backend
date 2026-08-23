@@ -77,6 +77,10 @@ from content_factory.models import (
     ContentFactoryHealingRecord,
     AISaturation,
     ClusterMembership,
+    ContentIsland,
+    ContentIslandEdge,
+    ContentIslandKeyword,
+    ContentIslandStatus,
     GeneratedComponent,
     KeywordStatus,
     KeywordVelocity,
@@ -90,6 +94,7 @@ from content_factory.models import (
     WebsiteBaselineSnapshot,
     WrittenArticle,
 )
+from content_factory.serializers import ContentIslandGraphSerializer
 from content_factory.topic_feedback import (
     list_topic_feedback,
     normalize_topic_feedback_keyword,
@@ -1433,6 +1438,28 @@ def _content_island_metadata_from_mapping(mapping):
     }
 
 
+def _run_content_island_payload(run):
+    """The island a run was dispatched for, or None for a non-island run.
+
+    The frontend restores island identity from this after navigation; without it a
+    recovered island-scoped run always reads back as "custom / your topic".
+    """
+    metadata = _content_island_metadata_from_mapping(getattr(run, "run_request", None) or {})
+    if not any(metadata.values()):
+        return None
+    icon_key = metadata.get("pillarIconKey") or ""
+    color_key = metadata.get("pillarColorKey") or ""
+    return {
+        "slug": metadata.get("pillarSlug") or "",
+        "name": metadata.get("pillarName") or "",
+        "keyword": metadata.get("pillarKeyword") or "",
+        "iconKey": icon_key,
+        "icon_key": icon_key,
+        "colorKey": color_key,
+        "color_key": color_key,
+    }
+
+
 def _extract_topic_candidates_from_result(result):
     if not isinstance(result, dict):
         return []
@@ -2062,7 +2089,89 @@ def _topic_pillars_from_clusters(organization, config, *, declined_keyword_keys=
     return pillars
 
 
+def _content_islands_enabled():
+    return bool(getattr(settings, "CONTENT_ISLANDS_ENABLED", False))
+
+
+def _visible_islands_for_pillars(organization):
+    memberships_queryset = (
+        ContentIslandKeyword.objects.select_related("keyword", "keyword__written_article")
+        .prefetch_related(
+            Prefetch("keyword__velocity_snapshots", queryset=KeywordVelocity.objects.order_by("-captured_at")),
+            Prefetch("keyword__ai_saturation_snapshots", queryset=AISaturation.objects.order_by("-captured_at")),
+            Prefetch("keyword__paa_questions", queryset=PAQuestion.objects.order_by("depth", "order")),
+            Prefetch(
+                "keyword__cluster_memberships",
+                queryset=ClusterMembership.objects.select_related("cluster"),
+            ),
+        )
+        .order_by("-is_centroid", "-keyword__opportunity_index", "-keyword__volume", "keyword__keyword")
+    )
+    return (
+        ContentIsland.objects.filter(organization=organization, status=ContentIslandStatus.VISIBLE)
+        .prefetch_related(Prefetch("memberships", queryset=memberships_queryset))
+        .order_by("-opportunity_score", "slug")
+    )
+
+
+def _topic_pillars_from_islands(organization, config, *, declined_keyword_keys=None, coverage_memory=None, compact=False):
+    declined_keyword_keys = declined_keyword_keys or set()
+    if coverage_memory is None:
+        coverage_memory = build_topic_coverage_memory(organization)
+    candidate_limit = 8 if compact else 30
+    pillars = []
+    for island in _visible_islands_for_pillars(organization):
+        seen_keywords = set()
+        candidates = []
+        for membership in island.memberships.all():
+            keyword = membership.keyword
+            keyword_key = normalize_topic_feedback_keyword(keyword.keyword)
+            if not keyword_key or keyword_key in seen_keywords or keyword_key in declined_keyword_keys:
+                continue
+            seen_keywords.add(keyword_key)
+            coverage_match = match_covered_topic(keyword=keyword.keyword, memory=coverage_memory)
+            if not _keyword_is_available_for_topic_picker(keyword, coverage_memory=coverage_memory):
+                continue
+            candidate = _apply_topic_coverage_to_candidate(_topic_candidate_from_keyword(keyword), coverage_match)
+            candidates.append(
+                {
+                    **candidate,
+                    "pillarSlug": island.slug,
+                    "pillarName": island.name,
+                    "pillarKeyword": island.pillar_keyword,
+                }
+            )
+        # Unlike the cluster path, an island with zero available candidates is still
+        # emitted: the discovery route action resolves a clicked graph node's slug
+        # against topicPillars, so a missing entry makes Generate fail outright.
+        pillars.append(
+            {
+                "id": f"island:{island.slug}",
+                "slug": island.slug,
+                "name": island.name,
+                "description": island.description or _derive_pillar_description(island.name, candidates),
+                "ideaCount": len(candidates),
+                "iconKey": island.icon_key,
+                "colorKey": island.color_key,
+                "source": "content_island",
+                "pillarKeyword": island.pillar_keyword,
+                "topicCandidates": candidates[:candidate_limit],
+            }
+        )
+    return pillars
+
+
 def _topic_pillars_for_bootstrap(organization, config, *, declined_keyword_keys=None, coverage_memory=None, compact=False):
+    if _content_islands_enabled():
+        island_pillars = _topic_pillars_from_islands(
+            organization,
+            config,
+            declined_keyword_keys=declined_keyword_keys,
+            coverage_memory=coverage_memory,
+            compact=compact,
+        )
+        if island_pillars:
+            return island_pillars
     cluster_pillars = _topic_pillars_from_clusters(
         organization,
         config,
@@ -2073,6 +2182,49 @@ def _topic_pillars_for_bootstrap(organization, config, *, declined_keyword_keys=
     if cluster_pillars:
         return cluster_pillars
     return _topic_pillars_from_strategy(config, compact=compact)
+
+
+def _island_graph_for_bootstrap(organization, topic_pillars):
+    """Nodes + edges for the founder-facing island graph, or None when there is none.
+
+    Emitted in both the full and the summary bootstrap view (the dashboard loader only
+    ever asks for the summary), and deliberately lean: no embeddings, no snapshots, no
+    candidates. ``ideaCount`` is read off the pillar the same island produced so the
+    graph and the topic list can never disagree.
+    """
+    if not _content_islands_enabled():
+        return None
+    islands = list(
+        ContentIsland.objects.filter(
+            organization=organization, status=ContentIslandStatus.VISIBLE
+        ).order_by("-opportunity_score", "slug")
+    )
+    if not islands:
+        return None
+    visible_slugs = {island.slug for island in islands}
+    edges = [
+        edge
+        for edge in ContentIslandEdge.objects.filter(organization=organization)
+        .select_related("island_a", "island_b")
+        .order_by("-similarity", "island_a__slug", "island_b__slug")
+        if edge.island_a.slug in visible_slugs and edge.island_b.slug in visible_slugs
+    ]
+    idea_counts = {
+        str(pillar.get("slug") or ""): int(pillar.get("ideaCount") or 0)
+        for pillar in topic_pillars or []
+        if isinstance(pillar, dict)
+    }
+    return ContentIslandGraphSerializer(
+        {
+            "updated_at": max((island.updated_at for island in islands), default=None),
+            "emerging_count": ContentIsland.objects.filter(
+                organization=organization, status=ContentIslandStatus.EMERGING
+            ).count(),
+            "islands": islands,
+            "edges": edges,
+        },
+        context={"idea_counts": idea_counts},
+    ).data
 
 
 def _serialize_topic_coverage_match(match):
@@ -10172,6 +10324,7 @@ def _serialize_run(run, *, context=None, latest_runs=None, checks=None, mode="fu
         generation_ready=(checks or {}).get("scaffold", {}).get("generationReady") if checks else None,
     )
     scan_progress, scan_progress_snake = _scan_progress_payloads(run)
+    content_island = _run_content_island_payload(run)
     if compact:
         return {
             "runId": run.run_id,
@@ -10215,6 +10368,7 @@ def _serialize_run(run, *, context=None, latest_runs=None, checks=None, mode="fu
             "article_setup_state": article_setup_state,
             "scanProgress": scan_progress,
             "scan_progress": scan_progress_snake,
+            **({"contentIsland": content_island, "content_island": content_island} if content_island else {}),
             "workflowProgress": _workflow_progress(context=context, run=run, latest_runs=latest_runs, checks=checks),
             "result": _strip_missing_setup_run_refs(_compact_result_for_run(run)),
         }
@@ -10264,6 +10418,7 @@ def _serialize_run(run, *, context=None, latest_runs=None, checks=None, mode="fu
         "article_setup_state": article_setup_state,
         "scanProgress": scan_progress,
         "scan_progress": scan_progress_snake,
+        **({"contentIsland": content_island, "content_island": content_island} if content_island else {}),
         "componentFeedback": _component_feedback_from_run(run),
         "workflowProgress": _workflow_progress(context=context, run=run, latest_runs=latest_runs, checks=checks),
         "result": _strip_missing_setup_run_refs(result),
@@ -10513,6 +10668,16 @@ def _bootstrap_state_fingerprint(organization, company, config) -> str:
     from content_factory.models import NotificationChannel as _NotificationChannel
 
     channels = _NotificationChannel.objects.filter(organization=organization).aggregate(c=Count("id"), m=Max("updated_at"))
+    # A daily island refresh writes no ResearchedKeyword rows at all, so without
+    # these two terms the graph would sit behind the TTL until an unrelated write
+    # happened to shift the fingerprint.
+    islands = {"c": None, "m": None}
+    island_members = {"c": None, "m": None}
+    if _content_islands_enabled():
+        islands = ContentIsland.objects.filter(organization=organization).aggregate(c=Count("id"), m=Max("updated_at"))
+        island_members = ContentIslandKeyword.objects.filter(island__organization=organization).aggregate(
+            c=Count("id"), m=Max("created_at")
+        )
     parts = (
         getattr(config, "updated_at", None),
         runs["c"], runs["m"],
@@ -10520,6 +10685,8 @@ def _bootstrap_state_fingerprint(organization, company, config) -> str:
         feedback["c"], feedback["m"],
         articles["c"], articles["m"],
         channels["c"], channels["m"],
+        islands["c"], islands["m"],
+        island_members["c"], island_members["m"],
         baseline_updated,
         # Already-loaded identity fields (no extra query) so company/profile edits —
         # including the endpoints that mutate then return bootstrap in the same
@@ -10672,6 +10839,7 @@ def _compute_bootstrap_payload(context, request=None, *, view="full", config=Non
         compact=compact,
     )
     topic_pillars = _canonicalize_topic_pillars(topic_pillars)
+    island_graph = _island_graph_for_bootstrap(context.organization, topic_pillars)
     baseline_snapshot = _latest_baseline_snapshot(context.organization)
     checks = _profile_checks(context.organization, config, latest_runs, baseline_snapshot)
     article_setup_state = _article_setup_state_for_config(
@@ -10742,6 +10910,7 @@ def _compute_bootstrap_payload(context, request=None, *, view="full", config=Non
         "latestRunsByWorkflow": latest_runs_by_workflow,
         "topicCandidates": topic_candidates,
         "topicPillars": topic_pillars,
+        **({"islandGraph": island_graph} if island_graph is not None else {}),
         "hiddenTopicCandidates": hidden_topic_candidates,
         "declinedTopicFeedback": [serialize_topic_feedback(item) for item in declined_topic_feedback],
         "draftArticles": _recent_article_drafts(context.organization, scan_limit=20 if compact else 50),
