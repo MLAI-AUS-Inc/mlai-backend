@@ -345,6 +345,82 @@ class MeetingRoomApiTests(APITestCase):
         self.assertFalse(daily_limit.data['available'])
         self.assertEqual(daily_limit.data['unavailable_reasons'], ['daily_limit'])
 
+    def test_long_availability_window_reports_room_state_without_booking_price(self):
+        starts_at = future_local(3, 9)
+        account = self.user.points_account
+        account.balance = 0
+        account.earned_balance = 0
+        account.save(update_fields=['balance', 'earned_balance'])
+
+        response = self.client.post(
+            reverse('meeting-room-availability'),
+            {
+                'slack_user_id': self.user.slack_id,
+                'starts_at': starts_at.isoformat(),
+                'ends_at': (starts_at + timedelta(hours=4)).isoformat(),
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data['available'])
+        self.assertFalse(response.data['bookable'])
+        self.assertIsNone(response.data['points_cost'])
+        self.assertEqual(response.data['unavailable_reasons'], [])
+
+        MeetingRoomBlock.objects.create(
+            room=self.room,
+            starts_at=starts_at + timedelta(hours=2),
+            ends_at=starts_at + timedelta(hours=3),
+            reason='Maintenance',
+        )
+        blocked = self.client.post(
+            reverse('meeting-room-availability'),
+            {
+                'slack_user_id': self.user.slack_id,
+                'starts_at': starts_at.isoformat(),
+                'ends_at': (starts_at + timedelta(hours=4)).isoformat(),
+            },
+            format='json',
+        )
+
+        self.assertFalse(blocked.data['available'])
+        self.assertEqual(blocked.data['unavailable_reasons'], ['room_blocked'])
+
+    def test_half_hour_availability_is_allowed_but_not_bookable(self):
+        starts_at = future_local(4, 9)
+
+        response = self.client.post(
+            reverse('meeting-room-availability'),
+            {
+                'slack_user_id': self.user.slack_id,
+                'starts_at': starts_at.isoformat(),
+                'ends_at': (starts_at + timedelta(minutes=30)).isoformat(),
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data['available'])
+        self.assertFalse(response.data['bookable'])
+        self.assertIsNone(response.data['points_cost'])
+
+    def test_availability_window_cannot_exceed_twenty_four_hours(self):
+        starts_at = future_local(5, 9)
+
+        response = self.client.post(
+            reverse('meeting-room-availability'),
+            {
+                'slack_user_id': self.user.slack_id,
+                'starts_at': starts_at.isoformat(),
+                'ends_at': (starts_at + timedelta(hours=24, minutes=30)).isoformat(),
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data['code'], 'invalid_time')
+
     def test_unlinked_inactive_insufficient_and_non_admin_targeted_requests_fail(self):
         starts_at = future_local(1, 9)
         unlinked = self.book(starts_at, 1, slack_user_id='UMISSING')

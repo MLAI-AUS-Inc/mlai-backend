@@ -103,13 +103,16 @@ class MeetingRoomService:
         ).total_seconds() / 3600
 
     @classmethod
-    def validate_interval(
+    def _validate_time_window(
         cls,
         starts_at: datetime,
         ends_at: datetime,
         *,
+        minimum_half_hours: int,
+        maximum_half_hours: int,
+        availability: bool,
         now: Optional[datetime] = None,
-    ) -> tuple[datetime, datetime, int]:
+    ) -> int:
         if not starts_at or not ends_at:
             raise MeetingRoomError(
                 'invalid_time',
@@ -128,38 +131,63 @@ class MeetingRoomService:
             if value.minute not in (0, 30) or value.second or value.microsecond:
                 raise MeetingRoomError(
                     'invalid_time',
-                    'Meeting-room bookings must start and end on the hour or half-hour',
+                    (
+                        'Availability checks must start and end on the hour or half-hour'
+                        if availability
+                        else 'Meeting-room bookings must start and end on the hour or half-hour'
+                    ),
                 )
         utc_start = starts_at.astimezone(datetime_timezone.utc)
         utc_end = ends_at.astimezone(datetime_timezone.utc)
         if utc_end <= utc_start:
             raise MeetingRoomError(
                 'invalid_time',
-                'Meeting-room end time must be after start time',
+                (
+                    'Availability end time must be after start time'
+                    if availability
+                    else 'Meeting-room end time must be after start time'
+                ),
             )
 
         duration_seconds = (utc_end - utc_start).total_seconds()
         if duration_seconds % 1800:
             raise MeetingRoomError(
                 'invalid_time',
-                'Meeting-room duration must use 30-minute increments',
+                (
+                    'Availability checks must use 30-minute increments'
+                    if availability
+                    else 'Meeting-room duration must use 30-minute increments'
+                ),
             )
         duration_half_hours = int(duration_seconds // 1800)
-        max_hours = getattr(settings, 'MEETING_ROOM_MAX_BOOKING_HOURS', 2)
-        if duration_half_hours < 2 or duration_half_hours > max_hours * 2:
-            raise MeetingRoomError(
-                'invalid_time',
-                (
+        if (
+            duration_half_hours < minimum_half_hours
+            or duration_half_hours > maximum_half_hours
+        ):
+            if availability:
+                duration_message = (
+                    'Availability checks must be between 30 minutes and 24 hours'
+                )
+            else:
+                max_hours = maximum_half_hours // 2
+                duration_message = (
                     f'Meeting-room bookings must be between 1 and {max_hours} '
                     'hours in 30-minute increments'
-                ),
+                )
+            raise MeetingRoomError(
+                'invalid_time',
+                duration_message,
             )
 
         current_time = now or cls._now()
         if starts_at <= current_time:
             raise MeetingRoomError(
                 'invalid_time',
-                'Meeting-room bookings must start in the future',
+                (
+                    'Meeting-room availability can only be checked for a future time'
+                    if availability
+                    else 'Meeting-room bookings must start in the future'
+                ),
             )
         advance_days = getattr(settings, 'MEETING_ROOM_BOOKING_ADVANCE_DAYS', 30)
         latest_date = current_time.astimezone(room_tz).date() + timedelta(
@@ -171,11 +199,55 @@ class MeetingRoomService:
         if local_start.date() > latest_date or last_occupied_date > latest_date:
             raise MeetingRoomError(
                 'invalid_time',
-                f'Meeting-room bookings can only be made {advance_days} days ahead',
+                (
+                    f'Meeting-room availability can only be checked {advance_days} days ahead'
+                    if availability
+                    else f'Meeting-room bookings can only be made {advance_days} days ahead'
+                ),
             )
+        return duration_half_hours
+
+    @classmethod
+    def validate_interval(
+        cls,
+        starts_at: datetime,
+        ends_at: datetime,
+        *,
+        now: Optional[datetime] = None,
+    ) -> tuple[datetime, datetime, int]:
+        max_hours = getattr(settings, 'MEETING_ROOM_MAX_BOOKING_HOURS', 2)
+        duration_half_hours = cls._validate_time_window(
+            starts_at,
+            ends_at,
+            minimum_half_hours=2,
+            maximum_half_hours=max_hours * 2,
+            availability=False,
+            now=now,
+        )
         # Roo Points are integer-valued, so each started hour costs one point.
         points_cost = (duration_half_hours + 1) // 2
         return starts_at, ends_at, points_cost
+
+    @classmethod
+    def validate_availability_interval(
+        cls,
+        starts_at: datetime,
+        ends_at: datetime,
+        *,
+        now: Optional[datetime] = None,
+    ) -> tuple[datetime, datetime, Optional[int], bool]:
+        duration_half_hours = cls._validate_time_window(
+            starts_at,
+            ends_at,
+            minimum_half_hours=1,
+            maximum_half_hours=48,
+            availability=True,
+            now=now,
+        )
+        max_booking_hours = getattr(settings, 'MEETING_ROOM_MAX_BOOKING_HOURS', 2)
+        bookable = 2 <= duration_half_hours <= max_booking_hours * 2
+        points_cost = (duration_half_hours + 1) // 2 if bookable else None
+        return starts_at, ends_at, points_cost, bookable
 
     @staticmethod
     def validate_client_request_id(value: str) -> uuid.UUID:
@@ -420,9 +492,15 @@ class MeetingRoomService:
         available = None
         unavailable_reasons: list[str] = []
         points_cost = None
+        bookable = None
 
         if starts_at is not None or ends_at is not None:
-            starts_at, ends_at, points_cost = cls.validate_interval(starts_at, ends_at)
+            (
+                starts_at,
+                ends_at,
+                points_cost,
+                bookable,
+            ) = cls.validate_availability_interval(starts_at, ends_at)
             range_start, range_end = starts_at, ends_at
             local_dates = cls._local_dates(starts_at, ends_at)
             if cls._room_has_booking(room, starts_at, ends_at):
@@ -452,19 +530,20 @@ class MeetingRoomService:
 
         remaining_daily_hours = cls._remaining_daily_hours(user, local_dates)
         if requested_interval:
-            for local_date in local_dates:
-                day_start, day_end = cls._day_bounds(local_date)
-                requested_hours = cls._overlap_hours(
-                    starts_at,
-                    ends_at,
-                    day_start,
-                    day_end,
-                )
-                if requested_hours > remaining_daily_hours[local_date.isoformat()]:
-                    unavailable_reasons.append('daily_limit')
-                    break
-            if cls.current_balance(user) < points_cost:
-                unavailable_reasons.append('insufficient_balance')
+            if bookable:
+                for local_date in local_dates:
+                    day_start, day_end = cls._day_bounds(local_date)
+                    requested_hours = cls._overlap_hours(
+                        starts_at,
+                        ends_at,
+                        day_start,
+                        day_end,
+                    )
+                    if requested_hours > remaining_daily_hours[local_date.isoformat()]:
+                        unavailable_reasons.append('daily_limit')
+                        break
+                if cls.current_balance(user) < points_cost:
+                    unavailable_reasons.append('insufficient_balance')
             available = not unavailable_reasons
 
         return {
@@ -472,6 +551,7 @@ class MeetingRoomService:
             'room': serialize_room(room),
             'requested_interval': requested_interval,
             'available': available,
+            'bookable': bookable,
             'unavailable_reasons': unavailable_reasons,
             'points_cost': points_cost,
             'remaining_daily_hours': remaining_daily_hours,
