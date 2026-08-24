@@ -1964,6 +1964,16 @@ class CoworkingViewSet(viewsets.ViewSet):
                 'booking': CoworkingBookingSerializer(booking).data,
                 'refunded': refunded,
                 'refund_amount': booking.points_cost if refunded else 0,
+                'already_cancelled': bool(
+                    getattr(booking, '_already_cancelled', False)
+                ),
+                'office_manager_day_reopened': bool(
+                    getattr(
+                        booking,
+                        '_office_manager_day_reopened',
+                        False,
+                    )
+                ),
             })
         except ValueError as e:
             return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)

@@ -910,7 +910,7 @@ class OfficeManagerAssignment(models.Model):
 
     day = models.ForeignKey(
         OfficeManagerDay,
-        on_delete=models.CASCADE,
+        on_delete=models.PROTECT,
         related_name='assignments',
     )
     user = models.ForeignKey(

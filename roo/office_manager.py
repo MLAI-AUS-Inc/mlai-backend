@@ -352,6 +352,7 @@ def _open_dm_channel(slack_client, slack_user_id: str) -> str:
 
 class OfficeManagerService:
     DELIVERY_LEASE_SECONDS = 300
+    PENDING_RETRACTION_SWEEP_LIMIT = 100
 
     @staticmethod
     def resolve_member(slack_user_id: str) -> User:
@@ -1007,6 +1008,7 @@ class OfficeManagerService:
             except Exception as exc:
                 OfficeManagerAssignment.objects.filter(pk=assignment_id).update(
                     winner_channel_retraction_last_error=_safe_slack_error(exc),
+                    updated_at=timezone.now(),
                 )
                 return False
             OfficeManagerAssignment.objects.filter(pk=assignment_id).update(
@@ -1014,6 +1016,7 @@ class OfficeManagerService:
                 winner_channel_announcement_sent_at=timezone.now(),
                 winner_channel_message_ts=message_ts,
                 winner_channel_announcement_last_error="",
+                updated_at=timezone.now(),
             )
 
         try:
@@ -1021,6 +1024,7 @@ class OfficeManagerService:
         except OfficeManagerConfigurationError as exc:
             OfficeManagerAssignment.objects.filter(pk=assignment_id).update(
                 winner_channel_retraction_last_error=_safe_slack_error(exc),
+                updated_at=timezone.now(),
             )
             return False
         success = SlackService.update_message(
@@ -1034,8 +1038,33 @@ class OfficeManagerService:
             winner_channel_retraction_last_error=(
                 "" if success else "slack_update_failed"
             ),
+            updated_at=timezone.now(),
         )
         return success
+
+    @staticmethod
+    def retry_pending_winner_retractions(
+        *,
+        limit: int | None = None,
+    ) -> list[bool]:
+        sweep_limit = (
+            OfficeManagerService.PENDING_RETRACTION_SWEEP_LIMIT
+            if limit is None
+            else max(0, int(limit))
+        )
+        assignment_ids = list(
+            OfficeManagerAssignment.objects.filter(
+                winner_channel_retraction_pending=True,
+            )
+            .order_by("updated_at", "pk")
+            .values_list("pk", flat=True)[:sweep_limit]
+        )
+        return [
+            OfficeManagerService.retract_winner_channel_announcement(
+                assignment_id
+            )
+            for assignment_id in assignment_ids
+        ]
 
     @staticmethod
     def deliver_winner_dm(assignment_id: int) -> bool:
@@ -1254,23 +1283,34 @@ def run_office_manager_scheduler(
                 "reason": "slack_bot_token_not_configured",
             }
 
+    winner_channel_retractions = (
+        []
+        if dry_run
+        else OfficeManagerService.retry_pending_winner_retractions()
+    )
+
+    def scheduler_result(payload: dict) -> dict:
+        if winner_channel_retractions:
+            payload["winner_channel_retractions"] = winner_channel_retractions
+        return payload
+
     local_now = _local_now(now)
     local_date = local_now.date()
     try:
         configured_weekdays = _configured_weekdays()
     except ValueError as exc:
         logger.error("Invalid Office Manager weekday configuration: %s", exc)
-        return {
+        return scheduler_result({
             "status": "failed",
             "reason": "invalid_weekday_configuration",
             "local_date": local_date.isoformat(),
-        }
+        })
     if local_date.weekday() not in configured_weekdays:
-        return {
+        return scheduler_result({
             "status": "skipped",
             "reason": "weekday_not_configured",
             "local_date": local_date.isoformat(),
-        }
+        })
 
     announcement_time = _setting_time(
         "OFFICE_MANAGER_ANNOUNCEMENT_HOUR",
@@ -1279,39 +1319,41 @@ def run_office_manager_scheduler(
         30,
     )
     if local_now.time().replace(tzinfo=None) < announcement_time:
-        return {
+        return scheduler_result({
             "status": "skipped",
             "reason": "before_announcement",
             "local_date": local_date.isoformat(),
-        }
+        })
 
     channel_id = str(getattr(settings, "OFFICE_MANAGER_SLACK_CHANNEL_ID", "") or "").strip()
     if not channel_id:
-        return {"status": "failed", "reason": "channel_not_configured"}
+        return scheduler_result(
+            {"status": "failed", "reason": "channel_not_configured"}
+        )
 
     existing_day = OfficeManagerDay.objects.filter(date=local_date).first()
     if existing_day is None and CoworkingService.get_capacity(local_date) <= 0:
-        return {
+        return scheduler_result({
             "status": "skipped",
             "reason": "coworking_closed",
             "local_date": local_date.isoformat(),
-        }
+        })
 
     if dry_run:
-        return {
+        return scheduler_result({
             "status": "preview",
             "local_date": local_date.isoformat(),
             "channel_id": channel_id,
             "claim_cutoff_at": _claim_cutoff(local_date).isoformat(),
-        }
+        })
 
     cutoff_at = _claim_cutoff(local_date)
     if existing_day is None and local_now >= cutoff_at:
-        return {
+        return scheduler_result({
             "status": "skipped",
             "reason": "volunteer_window_closed",
             "local_date": local_date.isoformat(),
-        }
+        })
 
     day, _ = OfficeManagerDay.objects.get_or_create(
         date=local_date,
@@ -1321,8 +1363,11 @@ def run_office_manager_scheduler(
         },
     )
     if day.slack_channel_id != channel_id:
-        day.slack_channel_id = channel_id
-        day.save(update_fields=["slack_channel_id", "updated_at"])
+        logger.warning(
+            "Office Manager channel configuration changed after day creation; "
+            "preserving the original channel for day_id=%s",
+            day.id,
+        )
 
     result = {
         "status": day.status,
@@ -1353,18 +1398,8 @@ def run_office_manager_scheduler(
         result["message_updated"] = OfficeManagerService.reconcile_message(day.id)
         day.refresh_from_db()
 
-    pending_retractions = list(
-        day.assignments.filter(winner_channel_retraction_pending=True)
-        .order_by("pk")
-        .values_list("pk", flat=True)
-    )
-    if pending_retractions:
-        result["winner_channel_retractions"] = [
-            OfficeManagerService.retract_winner_channel_announcement(
-                assignment_id
-            )
-            for assignment_id in pending_retractions
-        ]
+    if winner_channel_retractions:
+        result["winner_channel_retractions"] = winner_channel_retractions
 
     assignment = (
         day.assignments.filter(status="active").select_related("user").first()

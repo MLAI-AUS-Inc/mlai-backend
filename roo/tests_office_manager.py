@@ -1,12 +1,18 @@
+from contextlib import ExitStack
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
+import io
 import json
 from threading import Barrier
 from unittest import skipUnless
 from unittest.mock import Mock, patch
 from zoneinfo import ZoneInfo
 
+from django.contrib.admin.sites import AdminSite
+from django.core.management import call_command
+from django.core.management.base import CommandError
 from django.db import IntegrityError, close_old_connections, connection
+from django.db.models.deletion import ProtectedError
 from django.test import TestCase, TransactionTestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
@@ -15,6 +21,7 @@ from rest_framework.test import APITestCase
 
 from core.models import User
 
+from .admin import OfficeManagerDayAdmin
 from .models import (
     CoworkingBooking,
     CoworkingDayCapacity,
@@ -113,6 +120,30 @@ class OfficeManagerServiceTests(TestCase):
         self.assertEqual(
             OfficeManagerAssignment.objects.filter(status="active").count(),
             1,
+        )
+
+    def test_claimed_day_and_assignment_provenance_cannot_be_deleted(self):
+        result = OfficeManagerService.claim(
+            slack_user_id=self.user.slack_id,
+            booking_date=self.now.date(),
+            now=self.now,
+        )
+
+        with self.assertRaises(ProtectedError):
+            self.day.delete()
+
+        self.assertTrue(OfficeManagerDay.objects.filter(pk=self.day.pk).exists())
+        self.assertTrue(
+            OfficeManagerAssignment.objects.filter(pk=result.assignment.pk).exists()
+        )
+        self.assertTrue(
+            CoworkingBooking.objects.filter(pk=result.booking.pk).exists()
+        )
+        day_admin = OfficeManagerDayAdmin(OfficeManagerDay, AdminSite())
+        self.assertFalse(day_admin.has_delete_permission(None, self.day))
+        self.assertIn(
+            'slack_channel_id',
+            day_admin.get_readonly_fields(None, self.day),
         )
 
     @override_settings(OFFICE_MANAGER_ENABLED=False)
@@ -1375,6 +1406,154 @@ class OfficeManagerSchedulerTests(TestCase):
         assignment.refresh_from_db()
         self.assertFalse(assignment.winner_channel_retraction_pending)
 
+    def test_scheduler_retries_prior_day_retraction_before_daily_time_gate(self):
+        now = melbourne_at(2026, 8, 3, 8, 29)
+        prior_day = office_manager_day(now.date() - timedelta(days=1))
+        user = User.objects.create_user(
+            email="prior-day-relinquished@example.com",
+            slack_id="UPRIORDAY",
+        )
+        booking = CoworkingBooking.objects.create(
+            user=user,
+            date=prior_day.date,
+            status="cancelled",
+            points_cost=0,
+            booking_source="office_manager",
+        )
+        assignment = OfficeManagerAssignment.objects.create(
+            day=prior_day,
+            user=user,
+            booking=booking,
+            status="relinquished",
+            winner_channel_announcement_status="sent",
+            winner_channel_message_ts="prior.123",
+            winner_channel_retraction_pending=True,
+        )
+
+        with patch(
+            "roo.office_manager.SlackService.update_message",
+            return_value=True,
+        ) as update_message:
+            result = run_office_manager_scheduler(now=now)
+
+        self.assertEqual(result["reason"], "before_announcement")
+        self.assertEqual(result["winner_channel_retractions"], [True])
+        update_message.assert_called_once()
+        self.assertEqual(update_message.call_args.args[:2], ("CCOWORK", "prior.123"))
+        assignment.refresh_from_db()
+        self.assertFalse(assignment.winner_channel_retraction_pending)
+
+    def test_bounded_retraction_sweep_rotates_failed_assignments(self):
+        assignments = []
+        for offset, suffix in enumerate(("OLD", "NEXT"), start=1):
+            day = office_manager_day(
+                melbourne_at(2026, 8, offset, 9).date()
+            )
+            user = User.objects.create_user(
+                email=f"retraction-{suffix.lower()}@example.com",
+                slack_id=f"URETRACTION{suffix}",
+            )
+            booking = CoworkingBooking.objects.create(
+                user=user,
+                date=day.date,
+                status="cancelled",
+                points_cost=0,
+                booking_source="office_manager",
+            )
+            assignment = OfficeManagerAssignment.objects.create(
+                day=day,
+                user=user,
+                booking=booking,
+                status="relinquished",
+                winner_channel_announcement_status="sent",
+                winner_channel_message_ts=f"retraction.{offset}",
+                winner_channel_retraction_pending=True,
+            )
+            assignments.append(assignment)
+
+        old_timestamp = timezone.now() - timedelta(days=2)
+        OfficeManagerAssignment.objects.filter(pk=assignments[0].pk).update(
+            updated_at=old_timestamp,
+        )
+        OfficeManagerAssignment.objects.filter(pk=assignments[1].pk).update(
+            updated_at=old_timestamp + timedelta(minutes=1),
+        )
+
+        with patch(
+            "roo.office_manager.SlackService.update_message",
+            return_value=False,
+        ) as update_message:
+            first = OfficeManagerService.retry_pending_winner_retractions(limit=1)
+            second = OfficeManagerService.retry_pending_winner_retractions(limit=1)
+
+        self.assertEqual(first, [False])
+        self.assertEqual(second, [False])
+        self.assertEqual(
+            [call.args[1] for call in update_message.call_args_list],
+            ["retraction.1", "retraction.2"],
+        )
+
+    @override_settings(OFFICE_MANAGER_SLACK_CHANNEL_ID="CNEWCHANNEL")
+    def test_existing_day_keeps_original_channel_after_configuration_change(self):
+        now = melbourne_at(2026, 8, 3, 9)
+        day = office_manager_day(now.date())
+        OfficeManagerDay.objects.filter(pk=day.pk).update(
+            slack_channel_id="CORIGINAL",
+            message_update_pending=True,
+        )
+
+        with patch(
+            "roo.office_manager.SlackService.update_message",
+            return_value=True,
+        ) as update_message:
+            result = run_office_manager_scheduler(now=now)
+
+        self.assertTrue(result["message_updated"])
+        day.refresh_from_db()
+        self.assertEqual(day.slack_channel_id, "CORIGINAL")
+        update_message.assert_called_once()
+        self.assertEqual(update_message.call_args.args[:2], ("CORIGINAL", "123.456"))
+
+    def test_fatal_office_manager_result_fails_scheduled_command(self):
+        runner_names = (
+            "run_daily_discovery_scheduler",
+            "run_daily_jobs_scheduler",
+            "run_research_automation_scheduler",
+            "run_content_factory_reconciliation_sweep",
+            "run_github_installation_reconciliation_sweep",
+            "run_daily_payout_reconciliation",
+            "run_scheduled_sim_conversation_cleanup",
+            "run_daily_article_report_scheduler",
+            "run_monthly_update_reminder_scheduler",
+            "run_office_manager_scheduler",
+        )
+        command_module = "core.management.commands.run_scheduled_discovery"
+        stdout = io.StringIO()
+
+        with ExitStack() as stack:
+            runners = {
+                name: stack.enter_context(
+                    patch(
+                        f"{command_module}.{name}",
+                        return_value={"status": "skipped"},
+                    )
+                )
+                for name in runner_names
+            }
+            runners["run_office_manager_scheduler"].return_value = {
+                "status": "failed",
+                "reason": "channel_not_configured",
+            }
+
+            with self.assertRaisesMessage(CommandError, "office_manager"):
+                call_command("run_scheduled_discovery", stdout=stdout)
+
+        self.assertIn(
+            '"office_manager": {"reason": "channel_not_configured", '
+            '"status": "failed"}',
+            stdout.getvalue(),
+        )
+
 
 def json_text(value):
     import json
@@ -1466,6 +1645,93 @@ class OfficeManagerClaimApiTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         reconcile_message.assert_called_once_with(self.day.id)
         retract_winner.assert_called_once_with(4242)
+
+    @patch("roo.views.OfficeManagerService.retract_winner_channel_announcement")
+    @patch("roo.views.OfficeManagerService.reconcile_message")
+    def test_cancel_replay_repairs_messages_after_committed_response_loss(
+        self,
+        reconcile_message,
+        retract_winner,
+    ):
+        booking = CoworkingBooking.objects.create(
+            user=self.user,
+            date=self.now.date(),
+            status="cancelled",
+            points_cost=0,
+            booking_source="office_manager",
+            cancelled_at=self.now,
+        )
+        assignment = OfficeManagerAssignment.objects.create(
+            day=self.day,
+            user=self.user,
+            booking=booking,
+            status="relinquished",
+            relinquished_at=self.now,
+            winner_channel_announcement_status="sent",
+            winner_channel_message_ts="winner.456",
+            winner_channel_retraction_pending=True,
+        )
+        ledger_count = Ledger.objects.count()
+
+        response = self.client.post(
+            reverse("coworking-cancel"),
+            {
+                "slack_user_id": self.user.slack_id,
+                "booking_id": str(booking.id),
+            },
+            format="json",
+            HTTP_X_API_KEY="office-manager-test-key",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data["already_cancelled"])
+        self.assertFalse(response.data["refunded"])
+        self.assertEqual(Ledger.objects.count(), ledger_count)
+        reconcile_message.assert_called_once_with(self.day.id)
+        retract_winner.assert_called_once_with(assignment.id)
+
+    def test_cancel_replay_does_not_duplicate_standard_refund(self):
+        booking = CoworkingBooking.objects.create(
+            user=self.user,
+            date=timezone.localdate() + timedelta(days=7),
+            points_cost=4,
+            booking_source="points",
+        )
+        request_data = {
+            "slack_user_id": self.user.slack_id,
+            "booking_id": str(booking.id),
+        }
+
+        first = self.client.post(
+            reverse("coworking-cancel"),
+            request_data,
+            format="json",
+            HTTP_X_API_KEY="office-manager-test-key",
+        )
+        balance_after_first = PointsAccount.objects.get(user=self.user).balance
+        second = self.client.post(
+            reverse("coworking-cancel"),
+            request_data,
+            format="json",
+            HTTP_X_API_KEY="office-manager-test-key",
+        )
+
+        self.assertEqual(first.status_code, status.HTTP_200_OK)
+        self.assertTrue(first.data["refunded"])
+        self.assertFalse(first.data["already_cancelled"])
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
+        self.assertTrue(second.data["refunded"])
+        self.assertTrue(second.data["already_cancelled"])
+        self.assertEqual(
+            PointsAccount.objects.get(user=self.user).balance,
+            balance_after_first,
+        )
+        self.assertEqual(
+            Ledger.objects.filter(
+                idempotency_key=f"coworking_refund:{booking.id}"
+            ).count(),
+            1,
+        )
 
     @patch(
         "roo.views.OfficeManagerService.deliver_winner_channel_announcement",

@@ -1576,7 +1576,7 @@ class CoworkingService:
             Tuple of (booking, refunded: bool)
             
         Raises:
-            ValueError: If booking not found or already cancelled
+            ValueError: If booking not found
         """
         try:
             booking_date = CoworkingBooking.objects.values_list(
@@ -1590,32 +1590,55 @@ class CoworkingService:
 
         from .office_manager import OfficeManagerService
 
-        office_manager_day_id = (
+        office_manager_assignment_ref = (
             OfficeManagerAssignment.objects.filter(
                 booking_id=booking_id,
-                status='active',
             )
-            .values_list('day_id', flat=True)
+            .order_by('-claimed_at', '-pk')
+            .values('id', 'day_id')
             .first()
         )
         locked_office_manager_day = None
-        if office_manager_day_id is not None:
+        if office_manager_assignment_ref is not None:
             locked_office_manager_day = (
                 OfficeManagerDay.objects.select_for_update().get(
-                    pk=office_manager_day_id
+                    pk=office_manager_assignment_ref['day_id']
                 )
             )
 
-        booking = CoworkingBooking.objects.select_for_update().get(id=booking_id)
-        
-        if booking.status == 'cancelled':
-            raise ValueError("Booking is already cancelled")
-        
-        refunded = False
+        booking = (
+            CoworkingBooking.objects.select_for_update()
+            .select_related('refund_ledger_entry')
+            .get(id=booking_id)
+        )
 
+        booking._already_cancelled = booking.status == 'cancelled'
         booking._office_manager_day_reopened = False
         booking._office_manager_day_id = None
         booking._office_manager_assignment_id = None
+        if booking.status == 'cancelled':
+            if office_manager_assignment_ref is not None:
+                assignment = (
+                    OfficeManagerAssignment.objects.select_for_update()
+                    .filter(pk=office_manager_assignment_ref['id'])
+                    .first()
+                )
+                if assignment is not None:
+                    booking._office_manager_day_id = assignment.day_id
+                    booking._office_manager_assignment_id = assignment.id
+                    booking._office_manager_day_reopened = bool(
+                        locked_office_manager_day
+                        and locked_office_manager_day.status == 'open'
+                    )
+            cancellation_refunded = bool(
+                booking.refund_ledger_entry_id
+                and booking.refund_ledger_entry.reference_type
+                == 'COWORKING_REFUND'
+            )
+            return booking, cancellation_refunded
+
+        refunded = False
+
         if booking.booking_source == 'office_manager':
             reopened, day_id, assignment_id = (
                 OfficeManagerService.relinquish_for_booking(

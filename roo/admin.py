@@ -291,6 +291,15 @@ class OfficeManagerDayAdmin(admin.ModelAdmin):
     )
     actions = ('close_open_days', 'reopen_closed_days')
 
+    def get_readonly_fields(self, request, obj=None):
+        fields = list(super().get_readonly_fields(request, obj))
+        if obj is not None:
+            fields.append('slack_channel_id')
+        return fields
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
     @admin.action(description='Close selected open Office Manager days')
     def close_open_days(self, request, queryset):
         updated = queryset.filter(status='open').update(

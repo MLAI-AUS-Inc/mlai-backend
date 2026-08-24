@@ -119,6 +119,12 @@ class Command(BaseCommand):
         ):
             try:
                 results[name] = runner()
+                if (
+                    name == "office_manager"
+                    and isinstance(results[name], dict)
+                    and results[name].get("status") == "failed"
+                ):
+                    failures.append(name)
             except Exception as exc:
                 logger.exception("Scheduled %s runner failed.", name)
                 results[name] = {"status": "failed", "error": str(exc)}
