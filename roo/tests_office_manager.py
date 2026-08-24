@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 from django.contrib.admin.sites import AdminSite
 from django.core.management import call_command
 from django.core.management.base import CommandError
-from django.db import IntegrityError, close_old_connections, connection
+from django.db import IntegrityError, close_old_connections, connection, connections
 from django.db.models.deletion import ProtectedError
 from django.test import TestCase, TransactionTestCase, override_settings
 from django.urls import reverse
@@ -1880,7 +1880,7 @@ class OfficeManagerPostgresConcurrencyTests(TransactionTestCase):
             except OfficeManagerClaimError as exc:
                 return exc.code
             finally:
-                close_old_connections()
+                connections.close_all()
 
         with ThreadPoolExecutor(max_workers=2) as executor:
             outcomes = list(executor.map(claim, [user.id for user in users]))
@@ -1911,7 +1911,7 @@ class OfficeManagerPostgresConcurrencyTests(TransactionTestCase):
                 barrier.wait()
                 return OfficeManagerService.resolve_member("UCONCURRENT").id
             finally:
-                close_old_connections()
+                connections.close_all()
 
         with ThreadPoolExecutor(max_workers=2) as executor:
             user_ids = list(executor.map(lambda _: resolve_member(), range(2)))
@@ -1954,7 +1954,7 @@ class OfficeManagerPostgresConcurrencyTests(TransactionTestCase):
                 )
                 return "cancelled"
             finally:
-                close_old_connections()
+                connections.close_all()
 
         def claim_next():
             close_old_connections()
@@ -1970,7 +1970,7 @@ class OfficeManagerPostgresConcurrencyTests(TransactionTestCase):
                 except OfficeManagerClaimError as exc:
                     return exc.code
             finally:
-                close_old_connections()
+                connections.close_all()
 
         with patch("roo.office_manager._local_now", return_value=now):
             with ThreadPoolExecutor(max_workers=2) as executor:
