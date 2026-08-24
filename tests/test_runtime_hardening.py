@@ -246,6 +246,34 @@ class RuntimeHardeningConfigTests(SimpleTestCase):
             workflow,
         )
 
+    def test_meeting_room_feature_flag_is_deployment_managed_and_smoke_tested(self):
+        workflow = (ROOT / ".github" / "workflows" / "deploy.yml").read_text()
+        deploy = (ROOT / "deploy.sh").read_text()
+
+        self.assertIn(
+            "MEETING_ROOM_BOOKING_ENABLED: "
+            "${{ vars.MEETING_ROOM_BOOKING_ENABLED || 'false' }}",
+            workflow,
+        )
+        self.assertIn(
+            'MEETING_ROOM_BOOKING_ENABLED="${MEETING_ROOM_BOOKING_ENABLED:-false}"',
+            deploy,
+        )
+        self.assertIn(
+            'upsert_env_value MEETING_ROOM_BOOKING_ENABLED '
+            '"\\$meeting_room_booking_enabled"',
+            deploy,
+        )
+        self.assertIn(
+            "https://api.mlai.au/api/v1/points/meeting-rooms/rooms/",
+            deploy,
+        )
+        self.assertIn('expected = {"small-meeting-room", "big-meeting-room"}', deploy)
+        self.assertLess(
+            deploy.index("upsert_env_value MEETING_ROOM_BOOKING_ENABLED"),
+            deploy.index("compose_run_web python manage.py migrate --noinput"),
+        )
+
     def test_deploy_compose_run_does_not_consume_ssh_stdin(self):
         deploy = (ROOT / "deploy.sh").read_text()
 

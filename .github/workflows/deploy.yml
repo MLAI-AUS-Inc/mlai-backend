@@ -374,6 +374,7 @@ jobs:
         BUZZ_BRIDGE_DESTINATION_WORKSPACE_ID: ${{ vars.BUZZ_BRIDGE_DESTINATION_WORKSPACE_ID }}
         BUZZ_BRIDGE_DESTINATION_CHANNEL_ID: ${{ vars.BUZZ_BRIDGE_DESTINATION_CHANNEL_ID }}
         BUZZ_BRIDGE_DESTINATION_CHANNEL_NAME: ${{ vars.BUZZ_BRIDGE_DESTINATION_CHANNEL_NAME }}
+        MEETING_ROOM_BOOKING_ENABLED: ${{ vars.MEETING_ROOM_BOOKING_ENABLED || 'false' }}
         COMMUNITY_BRIDGE_PRODUCTION_ENABLED: ${{ vars.COMMUNITY_BRIDGE_PRODUCTION_ENABLED || 'false' }}
         ORG_MEMORY_PRODUCTION_DEPLOY_ENABLED: ${{ vars.ORG_MEMORY_PRODUCTION_DEPLOY_ENABLED || 'false' }}
         ORG_MEMORY_PRODUCTION_PUBLIC_CHANNEL_ADMIN_SCOPE_APPROVED: ${{ vars.ORG_MEMORY_PRODUCTION_PUBLIC_CHANNEL_ADMIN_SCOPE_APPROVED || 'false' }}
@@ -431,6 +432,15 @@ jobs:
           echo "::error::Required repository variable COMMUNITY_CHAT_ADAPTER_URL is not configured"
           exit 1
         fi
+        case "$MEETING_ROOM_BOOKING_ENABLED" in
+          true|TRUE|True|1|yes|YES|Yes|on|ON|On) MEETING_ROOM_BOOKING_ENABLED=true ;;
+          false|FALSE|False|0|no|NO|No|off|OFF|Off|"") MEETING_ROOM_BOOKING_ENABLED=false ;;
+          *)
+            echo "::error::MEETING_ROOM_BOOKING_ENABLED must be true or false"
+            exit 1
+            ;;
+        esac
+        export MEETING_ROOM_BOOKING_ENABLED
         case "$COMMUNITY_BRIDGE_PRODUCTION_ENABLED" in
           true|TRUE|True|1|yes|YES|Yes|on|ON|On) COMMUNITY_BRIDGE_PRODUCTION_ENABLED=true ;;
           false|FALSE|False|0|no|NO|No|off|OFF|Off|"") COMMUNITY_BRIDGE_PRODUCTION_ENABLED=false ;;
