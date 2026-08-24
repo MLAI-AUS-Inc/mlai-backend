@@ -16,6 +16,7 @@ import json
 import os
 import subprocess
 import sys
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 # True when invoked via the Django test runner (`manage.py test ...`). Used to
 # relax rate throttles that would otherwise trip loop-heavy test suites.
@@ -34,6 +35,16 @@ def _env_is_true(name: str, default: bool) -> bool:
     if raw is None:
         return default
     return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _validated_timezone_name(value: str, setting_name: str) -> str:
+    try:
+        ZoneInfo(value)
+    except (ValueError, ZoneInfoNotFoundError) as exc:
+        raise ImproperlyConfigured(
+            f'{setting_name} must be a valid IANA timezone name'
+        ) from exc
+    return value
 
 
 def _resolve_app_env(*, debug: bool, raw_env: str = "") -> str:
@@ -1416,6 +1427,23 @@ COWORKING_DAY_COST_POINTS = int(os.getenv('COWORKING_DAY_COST_POINTS', '8'))
 COWORKING_DAY_DISCOUNT_COST_POINTS = int(os.getenv('COWORKING_DAY_DISCOUNT_COST_POINTS', '4'))
 COWORKING_REFUND_CUTOFF_HOURS = int(os.getenv('COWORKING_REFUND_CUTOFF_HOURS', '18'))  # 6pm prev day
 COWORKING_BOOKING_ADVANCE_DAYS = int(os.environ.get('COWORKING_BOOKING_ADVANCE_DAYS', 30))
+
+# Roo meeting-room booking. Deploy the backend and Roo support first, then
+# enable this flag once the seeded room has been verified in production.
+MEETING_ROOM_BOOKING_ENABLED = _env_is_true('MEETING_ROOM_BOOKING_ENABLED', False)
+MEETING_ROOM_BOOKING_ADVANCE_DAYS = int(
+    os.environ.get('MEETING_ROOM_BOOKING_ADVANCE_DAYS', 30)
+)
+MEETING_ROOM_MAX_BOOKING_HOURS = int(
+    os.environ.get('MEETING_ROOM_MAX_BOOKING_HOURS', 2)
+)
+MEETING_ROOM_DAILY_MEMBER_HOURS = int(
+    os.environ.get('MEETING_ROOM_DAILY_MEMBER_HOURS', 4)
+)
+MEETING_ROOM_TIMEZONE = _validated_timezone_name(
+    os.environ.get('MEETING_ROOM_TIMEZONE', 'Australia/Melbourne').strip(),
+    'MEETING_ROOM_TIMEZONE',
+)
 
 # Internal API Key for service-to-service auth (e.g. from Roo agent)
 MLAI_API_KEY = os.environ.get('MLAI_API_KEY')

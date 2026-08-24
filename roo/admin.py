@@ -1,8 +1,11 @@
-from django.contrib import admin
+from django.contrib import admin, messages
+from django.core.exceptions import ValidationError
+from django.shortcuts import redirect
 from django.utils.html import format_html
 from .models import (
     PointsAdmin, Minter, Task, Ledger, PointsAccount, PointsPurchase, BoostPostAdmission,
     TaskSubmission, CoworkingBooking, CoworkingDayCapacity,
+    MeetingRoom, MeetingRoomBlock, MeetingRoomBooking,
     RewardsCatalog, RewardRedemption, TaskTemplate, QuestProgress,
 )
 
@@ -211,6 +214,66 @@ class CoworkingBookingAdmin(admin.ModelAdmin):
     search_fields = ('user__email', 'user__slack_id')
     readonly_fields = ('id', 'created_at', 'ledger_entry', 'refund_ledger_entry')
     ordering = ('-date',)
+
+
+@admin.register(MeetingRoom)
+class MeetingRoomAdmin(admin.ModelAdmin):
+    list_display = ('name', 'slug', 'is_active', 'updated_at')
+    list_editable = ('is_active',)
+    search_fields = ('name', 'slug')
+    readonly_fields = ('id', 'created_at', 'updated_at')
+    ordering = ('name',)
+
+
+@admin.register(MeetingRoomBlock)
+class MeetingRoomBlockAdmin(admin.ModelAdmin):
+    list_display = ('room', 'starts_at', 'ends_at', 'reason', 'created_at')
+    list_filter = ('room', 'starts_at')
+    search_fields = ('room__name', 'reason')
+    readonly_fields = ('id', 'created_at', 'updated_at')
+    ordering = ('starts_at',)
+
+    def changeform_view(
+        self,
+        request,
+        object_id=None,
+        form_url='',
+        extra_context=None,
+    ):
+        try:
+            return super().changeform_view(
+                request,
+                object_id=object_id,
+                form_url=form_url,
+                extra_context=extra_context,
+            )
+        except ValidationError as exc:
+            self.message_user(
+                request,
+                '; '.join(exc.messages),
+                level=messages.ERROR,
+            )
+            return redirect(request.path)
+
+
+@admin.register(MeetingRoomBooking)
+class MeetingRoomBookingAdmin(admin.ModelAdmin):
+    list_display = (
+        'id', 'room', 'user', 'starts_at', 'ends_at', 'status',
+        'points_cost', 'created_at',
+    )
+    list_filter = ('room', 'status', 'starts_at')
+    search_fields = (
+        'id', 'client_request_id', 'user__email', 'user__slack_id',
+    )
+    readonly_fields = [field.name for field in MeetingRoomBooking._meta.fields]
+    ordering = ('-starts_at',)
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
 
 
 @admin.register(TaskTemplate)

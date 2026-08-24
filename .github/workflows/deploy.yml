@@ -142,6 +142,7 @@ jobs:
         python manage.py test \
           roo.tests_api.TaskViewSetTests \
           roo.tests_kimi_usage \
+          roo.tests_meeting_rooms \
           core.tests.test_auth_contract \
           core.tests.test_auth_session \
           core.tests.test_ops_domain_transition \
@@ -280,6 +281,9 @@ jobs:
           org_memory.tests.test_pilot_readiness.PilotReadinessTests.test_fresh_completed_daily_report_remains_valid_while_next_report_runs \
           org_memory.tests.test_drive_processing.DriveProcessingTests.test_unchanged_accessible_version_restores_policy_revoked_chunks \
           --verbosity 2
+
+    - name: Run meeting-room PostgreSQL tests
+      run: python manage.py test roo.tests_meeting_rooms --verbosity 2
 
   # org_memory.tests.test_migrations rewinds the org_memory graph to 0001 and
   # replays it, which costs ~116s of migration operations. That is the same on
