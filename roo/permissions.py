@@ -181,3 +181,8 @@ class PermissionDeniedError(Exception):
 class InsufficientBalanceError(Exception):
     """Raised when a user doesn't have enough points for an operation."""
     pass
+
+
+class IdempotencyConflictError(Exception):
+    """Raised when a transaction key is reused for a different operation."""
+    pass

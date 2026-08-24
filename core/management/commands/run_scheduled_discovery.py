@@ -18,6 +18,7 @@ from integrations.services.research_automations import run_research_automation_s
 from integrations.services.xero_reconciliation import run_daily_payout_reconciliation
 from jobs.services.job_pipeline import run_daily_jobs_scheduler
 from hospital.sim_retention import run_scheduled_sim_conversation_cleanup
+from roo.coding import reconcile_coding_reservations
 from startup_updates.monthly_update_reminders import run_monthly_update_reminder_scheduler
 
 logger = logging.getLogger(__name__)
@@ -106,6 +107,11 @@ class Command(BaseCommand):
             # Feature-gated, scheduled in Melbourne time, and idempotent per
             # recipient/reminder/date so the minute loop cannot double-send.
             ("monthly_update_reminders", run_monthly_update_reminder_scheduler),
+            # Releases expired, undispatched MLAI Coding reservations and
+            # resolves calls whose provider usage could not be confirmed.
+            # Authenticated request paths only reconcile their own account;
+            # this production scheduler is the sole global sweep.
+            ("coding_reconciliation", reconcile_coding_reservations),
         ):
             try:
                 results[name] = runner()

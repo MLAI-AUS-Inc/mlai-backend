@@ -6,6 +6,7 @@ from roo.models import (
     PointsAccount, Ledger, Task, TaskSubmission, 
     CoworkingBooking, RewardRedemption, PointsAdmin
 )
+from roo.services import PointsService
 from integrations.services import SlackService
 
 logger = logging.getLogger(__name__)
@@ -121,10 +122,17 @@ class Command(BaseCommand):
             source_account = PointsAccount.objects.get(user=source)
             target_account, created = PointsAccount.objects.get_or_create(user=target)
             
-            # Add balances
-            target_account.balance += source_account.balance
-            target_account.lifetime_earned += source_account.lifetime_earned
-            target_account.lifetime_spent += source_account.lifetime_spent
+            # Add exact balances; legacy whole-Roo projections are derived.
+            PointsService._ensure_microroo_account(source_account)
+            PointsService._ensure_microroo_account(target_account)
+            target_account.balance_microroo += source_account.balance_microroo
+            target_account.earned_balance_microroo += source_account.earned_balance_microroo
+            target_account.purchased_topup_balance_microroo += source_account.purchased_topup_balance_microroo
+            target_account.lifetime_earned_microroo += source_account.lifetime_earned_microroo
+            target_account.lifetime_purchased_topup_microroo += source_account.lifetime_purchased_topup_microroo
+            target_account.lifetime_spent_microroo += source_account.lifetime_spent_microroo
+            target_account.expired_or_reversed_microroo += source_account.expired_or_reversed_microroo
+            PointsService._sync_legacy_account(target_account)
             target_account.save()
             
             self.stdout.write(f"  Merged PointsAccount: +{source_account.balance} pts to target. New balance: {target_account.balance}")

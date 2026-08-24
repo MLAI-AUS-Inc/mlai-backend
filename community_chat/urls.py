@@ -19,9 +19,37 @@ from .views import (
     PublicProfileBatchView,
     SessionView,
 )
+from .coding_views import (
+    CodingEntitlementView,
+    CodingJwksView,
+    CodingTurnCreateView,
+    CodingTurnFinalizeView,
+    CodingTurnTicketRefreshView,
+)
 
 
 urlpatterns = [
+    path("coding/jwks/", CodingJwksView.as_view(), name="community_chat_coding_jwks"),
+    path(
+        "coding/entitlement/",
+        CodingEntitlementView.as_view(),
+        name="community_chat_coding_entitlement",
+    ),
+    path(
+        "coding/turns/",
+        CodingTurnCreateView.as_view(),
+        name="community_chat_coding_turn_create",
+    ),
+    path(
+        "coding/turns/<uuid:turn_id>/ticket/refresh/",
+        CodingTurnTicketRefreshView.as_view(),
+        name="community_chat_coding_turn_ticket_refresh",
+    ),
+    path(
+        "coding/turns/<uuid:turn_id>/finalize/",
+        CodingTurnFinalizeView.as_view(),
+        name="community_chat_coding_turn_finalize",
+    ),
     path("account/", AccountView.as_view(), name="community_chat_account"),
     path(
         "profiles/batch/",

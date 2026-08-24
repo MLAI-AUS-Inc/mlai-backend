@@ -15,6 +15,12 @@ from .views import (
     QuestProgressView, UserQuestProgressView, QuestIncrementView,
     QuestCompleteView, QuestCompletionStatusView,
 )
+from .coding_views import (
+    CodingCallAdmitView,
+    CodingCallDispatchView,
+    CodingCallFailView,
+    CodingCallSettleView,
+)
 
 router = DefaultRouter()
 router.register(r'admins', PointsAdminViewSet, basename='points-admin')
@@ -25,6 +31,10 @@ router.register(r'requests', PointsRequestViewSet, basename='points-request')
 router.register(r'purchases', PointsPurchaseViewSet, basename='points-purchase')
 
 urlpatterns = [
+    path('kimi/calls/admit/', CodingCallAdmitView.as_view(), name='kimi-call-admit'),
+    path('kimi/calls/dispatch/', CodingCallDispatchView.as_view(), name='kimi-call-dispatch'),
+    path('kimi/calls/settle/', CodingCallSettleView.as_view(), name='kimi-call-settle'),
+    path('kimi/calls/fail/', CodingCallFailView.as_view(), name='kimi-call-fail'),
     path('stripe/webhook/', StripeWebhookView.as_view(), name='points-stripe-webhook'),
     path('boost-posts/admissions/', BoostPostAdmissionView.as_view(), name='boost-post-admission'),
     path('', include(router.urls)),
