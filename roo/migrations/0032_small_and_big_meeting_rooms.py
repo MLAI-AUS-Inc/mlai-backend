@@ -33,7 +33,7 @@ def restore_generic_meeting_room(apps, schema_editor):
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('roo', '0030_meeting_room_booking'),
+        ('roo', '0031_meeting_room_booking'),
     ]
 
     operations = [

@@ -556,7 +556,10 @@ class MeetingRoomService:
                     if requested_hours > remaining_daily_hours[local_date.isoformat()]:
                         unavailable_reasons.append('daily_limit')
                         break
-                if cls.current_balance(user) < points_cost:
+                if (
+                    PointsService.get_available_microroo(user)
+                    < PointsService.roo_to_microroo(points_cost)
+                ):
                     unavailable_reasons.append('insufficient_balance')
             available = not unavailable_reasons
 
@@ -704,9 +707,16 @@ class MeetingRoomService:
                 account = PointsAccount.objects.select_for_update().filter(
                     user=user
                 ).first()
-                purchased_points_cost = min(
-                    account.purchased_topup_balance if account else 0,
-                    points_cost,
+                if account is not None:
+                    PointsService._ensure_microroo_account(account)
+                purchased_points_cost_microroo = min(
+                    account.purchased_topup_balance_microroo if account else 0,
+                    PointsService.roo_to_microroo(points_cost),
+                )
+                purchased_points_cost = (
+                    PointsService.microroo_to_legacy_whole(
+                        purchased_points_cost_microroo
+                    )
                 )
                 ledger, _ = PointsService.spend(
                     user=user,
@@ -729,6 +739,9 @@ class MeetingRoomService:
                     status='booked',
                     points_cost=points_cost,
                     purchased_points_cost=purchased_points_cost,
+                    purchased_points_cost_microroo=(
+                        purchased_points_cost_microroo
+                    ),
                     client_request_id=request_id,
                     ledger_entry=ledger,
                     requested_by_slack_id=requested_by_slack_id,
@@ -812,9 +825,9 @@ class MeetingRoomService:
                 409,
             )
 
-        purchased_points_cost = min(
-            booking.purchased_points_cost or 0,
-            booking.points_cost,
+        purchased_points_cost_microroo = min(
+            booking.purchased_points_cost_microroo,
+            PointsService.roo_to_microroo(booking.points_cost),
         )
         ledger, refund_created = PointsService.refund(
             user=user,
@@ -825,7 +838,7 @@ class MeetingRoomService:
             idempotency_key=f'meeting_room_refund:{booking.id}',
             reference_type='MEETING_ROOM_REFUND',
             reference_id=str(booking.id),
-            purchased_delta=purchased_points_cost,
+            purchased_delta_microroo=purchased_points_cost_microroo,
             reverse_lifetime_spent=True,
         )
         was_booked = booking.status == 'booked'
@@ -862,5 +875,6 @@ class MeetingRoomService:
 
     @staticmethod
     def current_balance(user: User) -> int:
-        account = PointsAccount.objects.filter(user=user).only('balance').first()
-        return account.balance if account else 0
+        return PointsService.microroo_to_legacy_whole(
+            PointsService.get_available_microroo(user)
+        )

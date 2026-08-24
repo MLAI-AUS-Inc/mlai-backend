@@ -897,6 +897,7 @@ class MeetingRoomBooking(models.Model):
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='booked')
     points_cost = models.PositiveIntegerField()
     purchased_points_cost = models.PositiveIntegerField(blank=True, null=True)
+    purchased_points_cost_microroo = models.PositiveBigIntegerField(default=0)
     client_request_id = models.UUIDField(unique=True)
     ledger_entry = models.ForeignKey(
         Ledger,
@@ -940,6 +941,14 @@ class MeetingRoomBooking(models.Model):
                     | models.Q(purchased_points_cost__lte=models.F('points_cost'))
                 ),
                 name='meeting_room_purchased_cost_lte_total',
+            ),
+            models.CheckConstraint(
+                check=models.Q(
+                    purchased_points_cost_microroo__lte=(
+                        models.F('points_cost') * 1_000_000
+                    )
+                ),
+                name='meeting_room_purchased_micro_lte_total',
             ),
         ]
 

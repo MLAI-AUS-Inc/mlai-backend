@@ -7,17 +7,20 @@ from zoneinfo import ZoneInfo
 
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ImproperlyConfigured, ValidationError
-from django.db import connection, connections, transaction
+from django.db import IntegrityError, connection, connections, transaction
 from django.test import TransactionTestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
 
+from community_chat.models import CommunityChatAccountSession
 from mlai.settings import _validated_timezone_name
 
 from .meeting_rooms import MeetingRoomError, MeetingRoomService
 from .models import (
+    CodingPricingVersion,
+    CodingTurn,
     Ledger,
     MeetingRoom,
     MeetingRoomBlock,
@@ -116,7 +119,7 @@ class MeetingRoomApiTests(APITestCase):
             is_active=True,
         )
 
-        migration = import_module('roo.migrations.0031_small_and_big_meeting_rooms')
+        migration = import_module('roo.migrations.0032_small_and_big_meeting_rooms')
         migration.configure_two_meeting_rooms(apps, None)
 
         other.refresh_from_db()
@@ -130,6 +133,48 @@ class MeetingRoomApiTests(APITestCase):
             ),
             {'small-meeting-room', 'big-meeting-room'},
         )
+
+    def test_purchased_cost_migration_backfills_existing_bookings(self):
+        from importlib import import_module
+
+        from django.apps import apps
+
+        starts_at = future_local(1, 9)
+        booking = MeetingRoomBooking.objects.create(
+            room=self.room,
+            user=self.user,
+            starts_at=starts_at,
+            ends_at=starts_at + timedelta(hours=2),
+            points_cost=2,
+            purchased_points_cost=1,
+            purchased_points_cost_microroo=0,
+            client_request_id=uuid.uuid4(),
+            requested_by_slack_id=self.user.slack_id,
+        )
+
+        migration = import_module(
+            'roo.migrations.0033_meeting_room_purchased_cost_microroo'
+        )
+        migration.backfill_purchased_cost_microroo(apps, None)
+
+        booking.refresh_from_db()
+        self.assertEqual(booking.purchased_points_cost_microroo, 1_000_000)
+
+    def test_purchased_cost_microroo_cannot_exceed_total_cost(self):
+        starts_at = future_local(1, 9)
+
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            MeetingRoomBooking.objects.create(
+                room=self.room,
+                user=self.user,
+                starts_at=starts_at,
+                ends_at=starts_at + timedelta(hours=1),
+                points_cost=1,
+                purchased_points_cost=1,
+                purchased_points_cost_microroo=1_000_001,
+                client_request_id=uuid.uuid4(),
+                requested_by_slack_id=self.user.slack_id,
+            )
 
     def test_historical_generic_room_booking_can_be_listed_and_cancelled(self):
         generic_room = MeetingRoom.objects.get(slug='meeting-room')
@@ -500,6 +545,85 @@ class MeetingRoomApiTests(APITestCase):
         self.assertFalse(daily_limit.data['available'])
         self.assertEqual(daily_limit.data['unavailable_reasons'], ['daily_limit'])
 
+    def test_coding_reservation_reduces_available_booking_balance(self):
+        starts_at = future_local(2, 9)
+        account = self.user.points_account
+        account.balance = 2
+        account.earned_balance = 2
+        account.purchased_topup_balance = 0
+        account.balance_microroo = 2_000_000
+        account.earned_balance_microroo = 2_000_000
+        account.purchased_topup_balance_microroo = 0
+        account.microroo_initialized = True
+        account.save(
+            update_fields=[
+                'balance',
+                'earned_balance',
+                'purchased_topup_balance',
+                'balance_microroo',
+                'earned_balance_microroo',
+                'purchased_topup_balance_microroo',
+                'microroo_initialized',
+            ]
+        )
+        pricing, _ = CodingPricingVersion.objects.update_or_create(
+            version='meeting-room-reservation-test',
+            defaults={
+                'model': 'kimi-k3',
+                'input_usd_per_million': '3.000000',
+                'cached_input_usd_per_million': '0.600000',
+                'output_usd_per_million': '15.000000',
+                'usd_aud_rate': '1.500000',
+                'margin_multiplier': '1.300000',
+                'aud_per_roo': '1.000000',
+                'is_active': True,
+            },
+        )
+        session = CommunityChatAccountSession.objects.create(
+            user=self.user,
+            public_key=uuid.uuid4().hex * 2,
+            installation_id=uuid.uuid4(),
+            client_id='meeting-room-test',
+            origin='tauri://localhost',
+            platform='macos',
+            access_token_hash=uuid.uuid4().hex * 2,
+            refresh_token_hash=uuid.uuid4().hex * 2,
+            auth_version=self.user.auth_version,
+            access_expires_at=timezone.now() + timedelta(minutes=15),
+            expires_at=timezone.now() + timedelta(days=30),
+        )
+        CodingTurn.objects.create(
+            user=self.user,
+            account_session=session,
+            device_id=session.installation_id,
+            local_session_id=uuid.uuid4(),
+            idempotency_key=uuid.uuid4(),
+            pricing_version=pricing,
+            reserved_microroo=1_500_000,
+        )
+
+        availability = self.client.post(
+            reverse('meeting-room-availability'),
+            {
+                'slack_user_id': self.user.slack_id,
+                'room_slug': self.room.slug,
+                'starts_at': starts_at.isoformat(),
+                'ends_at': (starts_at + timedelta(hours=1)).isoformat(),
+            },
+            format='json',
+        )
+        booking = self.book(starts_at, 1)
+
+        self.assertEqual(availability.status_code, status.HTTP_200_OK)
+        self.assertFalse(availability.data['available'])
+        self.assertEqual(
+            availability.data['unavailable_reasons'],
+            ['insufficient_balance'],
+        )
+        self.assertEqual(booking.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(booking.data['code'], 'insufficient_balance')
+        self.assertFalse(MeetingRoomBooking.objects.exists())
+
     def test_long_availability_window_reports_room_state_without_booking_price(self):
         starts_at = future_local(3, 9)
         account = self.user.points_account
@@ -846,6 +970,7 @@ class MeetingRoomApiTests(APITestCase):
         booking = MeetingRoomBooking.objects.get(pk=booked.data['booking']['id'])
 
         self.assertEqual(booking.purchased_points_cost, 2)
+        self.assertEqual(booking.purchased_points_cost_microroo, 2_000_000)
         account.refresh_from_db()
         self.assertEqual(account.purchased_topup_balance, 0)
         self.assertEqual(account.earned_balance, 3)
@@ -866,6 +991,73 @@ class MeetingRoomApiTests(APITestCase):
         self.assertEqual(account.purchased_topup_balance, 2)
         self.assertEqual(account.earned_balance, 3)
         self.assertEqual(account.lifetime_spent, 0)
+
+    def test_cancellation_restores_fractional_purchased_bucket_exactly(self):
+        account = self.user.points_account
+        account.balance = 2
+        account.earned_balance = 1
+        account.purchased_topup_balance = 0
+        account.lifetime_spent = 0
+        account.balance_microroo = 2_000_000
+        account.earned_balance_microroo = 1_500_000
+        account.purchased_topup_balance_microroo = 500_000
+        account.lifetime_spent_microroo = 0
+        account.microroo_initialized = True
+        account.save(
+            update_fields=[
+                'balance',
+                'earned_balance',
+                'purchased_topup_balance',
+                'lifetime_spent',
+                'balance_microroo',
+                'earned_balance_microroo',
+                'purchased_topup_balance_microroo',
+                'lifetime_spent_microroo',
+                'microroo_initialized',
+            ]
+        )
+
+        booked = self.book(future_local(1, 9), 1)
+        booking = MeetingRoomBooking.objects.get(pk=booked.data['booking']['id'])
+
+        self.assertEqual(booked.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(booking.purchased_points_cost, 0)
+        self.assertEqual(booking.purchased_points_cost_microroo, 500_000)
+        account.refresh_from_db()
+        self.assertEqual(account.balance_microroo, 1_000_000)
+        self.assertEqual(account.purchased_topup_balance_microroo, 0)
+        self.assertEqual(account.earned_balance_microroo, 1_000_000)
+        self.assertEqual(account.lifetime_spent_microroo, 1_000_000)
+
+        cancelled = self.client.post(
+            reverse('meeting-room-cancel'),
+            {
+                'slack_user_id': self.user.slack_id,
+                'booking_id': str(booking.id),
+            },
+            format='json',
+        )
+        replay = self.client.post(
+            reverse('meeting-room-cancel'),
+            {
+                'slack_user_id': self.user.slack_id,
+                'booking_id': str(booking.id),
+            },
+            format='json',
+        )
+
+        self.assertTrue(cancelled.data['refunded'])
+        self.assertTrue(replay.data['already_cancelled'])
+        self.assertTrue(replay.data['refunded'])
+        self.assertEqual(
+            Ledger.objects.filter(user=self.user, source='MEETING_ROOM').count(),
+            2,
+        )
+        account.refresh_from_db()
+        self.assertEqual(account.balance_microroo, 2_000_000)
+        self.assertEqual(account.purchased_topup_balance_microroo, 500_000)
+        self.assertEqual(account.earned_balance_microroo, 1_500_000)
+        self.assertEqual(account.lifetime_spent_microroo, 0)
 
     def test_cancelled_booking_without_refund_is_recovered_once(self):
         booked = self.book(future_local(1, 9), 2)
