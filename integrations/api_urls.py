@@ -230,6 +230,11 @@ urlpatterns = [
         name='linear_meeting_context',
     ),
     path(
+        'linear/projects/resolve',
+        api_views_connectors.LinearProjectResolveView.as_view(),
+        name='linear_project_resolve',
+    ),
+    path(
         'linear/issues',
         api_views_connectors.LinearMeetingIssueCreateView.as_view(),
         name='linear_meeting_issue_create',

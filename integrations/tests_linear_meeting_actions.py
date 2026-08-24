@@ -36,6 +36,105 @@ class LinearMeetingActionsApiTests(SimpleTestCase):
 
         self.assertEqual(response.status_code, 401)
 
+    def test_project_resolve_rejects_requests_without_roo_api_key(self):
+        response = self.client.get(
+            "/api/v1/integrations/linear/projects/resolve",
+            {"query": "[Studio] Studynash"},
+        )
+
+        self.assertEqual(response.status_code, 401)
+
+    @patch("integrations.services.linear_meeting_actions.http_requests.post")
+    def test_project_resolve_finds_normalized_inactive_project(self, mock_post):
+        mock_post.return_value = FakeLinearResponse(
+            {
+                "data": {
+                    "projects": {
+                        "nodes": [
+                            {
+                                "id": "project-study-nash",
+                                "name": "[Studio] Study Nash",
+                                "slugId": "studio-study-nash",
+                                "completedAt": "2026-08-20T00:00:00Z",
+                                "canceledAt": None,
+                                "status": {"name": "Completed", "type": "completed"},
+                                "teams": {
+                                    "nodes": [
+                                        {
+                                            "id": "team-1",
+                                            "key": "ENG",
+                                            "name": "Engineering",
+                                        }
+                                    ]
+                                },
+                                "members": {"nodes": []},
+                            },
+                            {
+                                "id": "project-other",
+                                "name": "[Studio] Aaron AI",
+                                "slugId": "studio-aaron-ai",
+                                "status": {"name": "Started", "type": "started"},
+                                "teams": {"nodes": [{"id": "team-1"}]},
+                                "members": {"nodes": []},
+                            },
+                        ],
+                        "pageInfo": {"hasNextPage": False, "endCursor": None},
+                    }
+                }
+            }
+        )
+
+        response = self.client.get(
+            "/api/v1/integrations/linear/projects/resolve",
+            {"query": "[Studio] Studynash"},
+            **self.auth_headers,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "matched")
+        self.assertEqual(response.json()["project"]["id"], "project-study-nash")
+        self.assertEqual(response.json()["confidence"], 1.0)
+        self.assertTrue(response.json()["isInactive"])
+        request_payload = mock_post.call_args.kwargs["json"]
+        self.assertEqual(request_payload["operationName"], "LinearProjects")
+
+    @patch("integrations.services.linear_meeting_actions.http_requests.post")
+    def test_project_resolve_fails_closed_on_ambiguous_containment(self, mock_post):
+        mock_post.return_value = FakeLinearResponse(
+            {
+                "data": {
+                    "projects": {
+                        "nodes": [
+                            {
+                                "id": "project-crm",
+                                "name": "[Studio] Study Nash CRM",
+                                "teams": {"nodes": []},
+                                "members": {"nodes": []},
+                            },
+                            {
+                                "id": "project-app",
+                                "name": "[Studio] Study Nash App",
+                                "teams": {"nodes": []},
+                                "members": {"nodes": []},
+                            },
+                        ],
+                        "pageInfo": {"hasNextPage": False, "endCursor": None},
+                    }
+                }
+            }
+        )
+
+        response = self.client.get(
+            "/api/v1/integrations/linear/projects/resolve",
+            {"query": "[Studio] Study Nash"},
+            **self.auth_headers,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "ambiguous")
+        self.assertIsNone(response.json()["project"])
+        self.assertEqual(response.json()["candidateCount"], 2)
+
     @override_settings(LINEAR_API_KEY="")
     def test_missing_linear_api_key_returns_503(self):
         response = self.client.get(
