@@ -1606,11 +1606,7 @@ class CoworkingService:
                 )
             )
 
-        booking = (
-            CoworkingBooking.objects.select_for_update()
-            .select_related('refund_ledger_entry')
-            .get(id=booking_id)
-        )
+        booking = CoworkingBooking.objects.select_for_update().get(id=booking_id)
 
         booking._already_cancelled = booking.status == 'cancelled'
         booking._office_manager_day_reopened = False
