@@ -533,6 +533,11 @@ def _list_projects(
         cursor = str(page_info.get("endCursor") or "").strip() or None
         if not page_info.get("hasNextPage") or not cursor:
             break
+    else:
+        raise LinearMeetingGraphQLError(
+            "Linear project catalogue exceeded the 20-page safety limit.",
+            operation="LinearProjectsBasic" if use_basic_query else "LinearProjects",
+        )
     inactive_states = {"completed", "canceled", "cancelled", "archived"}
     selected_projects = (
         projects
