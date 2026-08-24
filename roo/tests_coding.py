@@ -1,4 +1,5 @@
 import hashlib
+import inspect
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -1172,6 +1173,17 @@ class CodingInternalCallApiTests(APITestCase):
         self.assertEqual(call.status, CodingModelCall.Status.RELEASED)
         self.assertEqual(self.turn.status, CodingTurn.Status.FAILED)
         self.assertEqual(self.turn.released_microroo, 2_000_000)
+
+
+class CodingSchedulerRegistrationTests(TestCase):
+    def test_global_reconciliation_runs_from_the_production_scheduler(self):
+        from core.management.commands.run_scheduled_discovery import Command
+
+        source = inspect.getsource(Command.handle)
+        self.assertIn(
+            '("coding_reconciliation", reconcile_coding_reservations)',
+            source,
+        )
 
 
 @override_settings(**CODING_SETTINGS)
