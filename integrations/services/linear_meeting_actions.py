@@ -448,8 +448,8 @@ def _list_projects(
 ) -> list[dict[str, Any]]:
     page_size = _bounded_limit(limit, default=100, maximum=100)
     query = """
-    query LinearProjects($first: Int!, $after: String) {
-      projects(first: $first, after: $after) {
+    query LinearProjects($first: Int!, $after: String, $includeArchived: Boolean!) {
+      projects(first: $first, after: $after, includeArchived: $includeArchived) {
         nodes {
           id
           name
@@ -509,7 +509,11 @@ def _list_projects(
     cursor: str | None = None
     use_basic_query = False
     for _page_number in range(20):
-        variables = {"first": page_size, "after": cursor}
+        variables = {
+            "first": page_size,
+            "after": cursor,
+            "includeArchived": include_inactive,
+        }
         try:
             data = _graphql(
                 _basic_projects_query() if use_basic_query else query,
@@ -1897,8 +1901,8 @@ def _project_context_query_unsupported(exc: LinearMeetingGraphQLError) -> bool:
 
 def _basic_projects_query() -> str:
     return """
-    query LinearProjectsBasic($first: Int!, $after: String) {
-      projects(first: $first, after: $after) {
+    query LinearProjectsBasic($first: Int!, $after: String, $includeArchived: Boolean!) {
+      projects(first: $first, after: $after, includeArchived: $includeArchived) {
         nodes {
           id
           name

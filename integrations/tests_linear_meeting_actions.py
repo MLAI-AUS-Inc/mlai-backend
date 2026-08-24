@@ -97,6 +97,7 @@ class LinearMeetingActionsApiTests(SimpleTestCase):
         self.assertTrue(response.json()["isInactive"])
         request_payload = mock_post.call_args.kwargs["json"]
         self.assertEqual(request_payload["operationName"], "LinearProjects")
+        self.assertTrue(request_payload["variables"]["includeArchived"])
 
     @patch("integrations.services.linear_meeting_actions.http_requests.post")
     def test_project_resolve_fails_closed_on_ambiguous_containment(self, mock_post):
