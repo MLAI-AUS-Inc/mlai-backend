@@ -75,6 +75,11 @@ from .email_codes import (
     issue_email_code_challenge,
 )
 from .link_previews import LinkPreviewError, fetch_link_preview, fetch_preview_image
+from .slack_file_previews import (
+    SlackFilePreviewError,
+    fetch_slack_file_image,
+    fetch_slack_file_preview,
+)
 from .serializers import (
     CommunityChatEmailCodeRequestSerializer,
     CommunityChatEmailCodeVerifySerializer,
@@ -669,14 +674,20 @@ class LinkPreviewView(APIView):
     def get(self, request):
         raw_url = str(request.query_params.get("url") or "").strip()
         try:
-            preview = fetch_link_preview(raw_url)
-        except LinkPreviewError as exc:
+            slack_preview = fetch_slack_file_preview(raw_url)
+            preview = slack_preview or fetch_link_preview(raw_url)
+        except (LinkPreviewError, SlackFilePreviewError) as exc:
             return Response(
                 {"error": "preview_unavailable", "detail": str(exc)},
                 status=status.HTTP_422_UNPROCESSABLE_ENTITY,
             )
         payload = preview.as_payload()
-        if preview.image_url:
+        if slack_preview and slack_preview.is_image:
+            image_path = reverse("community_chat_link_preview_image")
+            payload["image_url"] = request.build_absolute_uri(
+                f"{image_path}?{urlencode({'slack_file': slack_preview.file_id})}"
+            )
+        elif preview.image_url:
             image_path = reverse("community_chat_link_preview_image")
             payload["image_url"] = request.build_absolute_uri(
                 f"{image_path}?{urlencode({'url': preview.image_url})}"
@@ -696,10 +707,14 @@ class LinkPreviewImageView(APIView):
 
     def get(self, request):
         try:
-            content_type, body = fetch_preview_image(
-                str(request.query_params.get("url") or "").strip()
-            )
-        except LinkPreviewError as exc:
+            slack_file_id = str(request.query_params.get("slack_file") or "").strip()
+            if slack_file_id:
+                content_type, body = fetch_slack_file_image(slack_file_id)
+            else:
+                content_type, body = fetch_preview_image(
+                    str(request.query_params.get("url") or "").strip()
+                )
+        except (LinkPreviewError, SlackFilePreviewError) as exc:
             return Response(
                 {"error": "preview_image_unavailable", "detail": str(exc)},
                 status=status.HTTP_422_UNPROCESSABLE_ENTITY,

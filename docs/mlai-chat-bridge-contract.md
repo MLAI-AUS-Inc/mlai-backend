@@ -14,8 +14,13 @@ MLAI Chat is another client surface, not a one-time data migration.
   retained Slack receipts still contain resolvable user/channel references.
 - Direct messages, private channels, huddles, workflow payloads, ephemeral
   messages, and Slack Connect channels fail closed unless separately approved.
-- Attachments are represented as safe provider-hosted links. The bridge does
-  not copy or fetch arbitrary files during MVP.
+- Attachments remain represented as safe provider-hosted links in the durable
+  bridge event. For Slack image links, the authenticated MLAI Chat preview API
+  may fetch the image on demand with the bridge bot and return a bounded,
+  private-cache response. The proxy permits only supported image types shared
+  in enabled, public Slack channels mapped to MLAI Chat; it does not expose the
+  Slack token, store image bytes in bridge records/the database, or fetch
+  private/unmapped-channel files.
 - Mirrored messages are visibly attributed to the source author and platform,
   but are signed/sent by a dedicated MLAI bridge identity.
 
