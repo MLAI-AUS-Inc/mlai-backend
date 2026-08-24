@@ -11,9 +11,20 @@ DEPLOY_SSH_TARGET="${DEPLOY_SSH_TARGET:-root@$DROPLET_IP}"
 PROJECT_DIR="/root/mlai-backend"
 APP_RELEASE="${APP_RELEASE:-$(git rev-parse --short=12 HEAD 2>/dev/null || date +%Y%m%d%H%M)}"
 APP_RELEASE_SHORT="${APP_RELEASE:0:12}"
+MEETING_ROOM_BOOKING_ENABLED="${MEETING_ROOM_BOOKING_ENABLED:-false}"
 COMMUNITY_BRIDGE_PRODUCTION_ENABLED="${COMMUNITY_BRIDGE_PRODUCTION_ENABLED:-false}"
 ORG_MEMORY_PRODUCTION_DEPLOY_ENABLED="${ORG_MEMORY_PRODUCTION_DEPLOY_ENABLED:-false}"
 ORG_MEMORY_PRODUCTION_PUBLIC_CHANNEL_ADMIN_SCOPE_APPROVED="${ORG_MEMORY_PRODUCTION_PUBLIC_CHANNEL_ADMIN_SCOPE_APPROVED:-false}"
+
+case "$MEETING_ROOM_BOOKING_ENABLED" in
+    true|TRUE|True|1|yes|YES|Yes|on|ON|On) MEETING_ROOM_BOOKING_ENABLED=true ;;
+    false|FALSE|False|0|no|NO|No|off|OFF|Off|"") MEETING_ROOM_BOOKING_ENABLED=false ;;
+    *)
+        echo "❌ MEETING_ROOM_BOOKING_ENABLED must be true or false."
+        exit 1
+        ;;
+esac
+export MEETING_ROOM_BOOKING_ENABLED
 
 case "$COMMUNITY_BRIDGE_PRODUCTION_ENABLED" in
     true|TRUE|True|1|yes|YES|Yes|on|ON|On) COMMUNITY_BRIDGE_PRODUCTION_ENABLED=true ;;
@@ -515,6 +526,7 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     fi
 
     cd $PROJECT_DIR
+    meeting_room_booking_enabled="$MEETING_ROOM_BOOKING_ENABLED"
     community_bridge_production_enabled="$COMMUNITY_BRIDGE_PRODUCTION_ENABLED"
     org_memory_production_deploy_enabled="$ORG_MEMORY_PRODUCTION_DEPLOY_ENABLED"
 
@@ -548,6 +560,7 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     upsert_env_value COMMUNITY_CHAT_DEVICE_AUTH_ENABLED "false"
     upsert_env_value CUSTOMERIO_COMMUNITY_CHAT_CODE_MESSAGE_ID "mlai_chat_sign_in_code"
     upsert_env_value COMMUNITY_CHAT_ALLOWED_ORIGINS "https://chat.mlai.au,tauri://localhost,http://tauri.localhost,mlaichat://callback"
+    upsert_env_value MEETING_ROOM_BOOKING_ENABLED "\$meeting_room_booking_enabled"
     upsert_env_value COMMUNITY_BRIDGE_PRODUCTION_ENABLED "\$community_bridge_production_enabled"
     if [ "$bridge_present" -gt 0 ]; then
         upsert_env_value SLACK_BRIDGE_BOT_USER_ID "$SLACK_BRIDGE_BOT_USER_ID"
@@ -930,6 +943,29 @@ PY
         echo "Expected /healthz/ready to report release $APP_RELEASE_SHORT for $APP_RELEASE"
         echo "\$health_body"
         exit 1
+    fi
+
+    if [ "\$meeting_room_booking_enabled" = "true" ]; then
+        echo "🏢 Verifying the enabled meeting-room API and active room catalogue..."
+        meeting_room_api_key=\$(read_env_value ROO_API_KEY)
+        meeting_rooms_body=\$(curl -fsS --max-time 10 \
+            -H "X-API-Key: \$meeting_room_api_key" \
+            https://api.mlai.au/api/v1/points/meeting-rooms/rooms/)
+        printf '%s' "\$meeting_rooms_body" | python3 -c '
+import json
+import sys
+
+payload = json.load(sys.stdin)
+slugs = {
+    str(room.get("slug") or "")
+    for room in payload.get("rooms", [])
+    if isinstance(room, dict)
+}
+expected = {"small-meeting-room", "big-meeting-room"}
+if slugs != expected:
+    raise SystemExit(f"Expected active meeting rooms {sorted(expected)}, got {sorted(slugs)}")
+'
+        unset meeting_room_api_key meeting_rooms_body
     fi
 
     echo "🛠️ Verifying external Django admin assets..."
