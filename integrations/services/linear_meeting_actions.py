@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import re
 from datetime import timedelta
+from difflib import SequenceMatcher
 from typing import Any
 
 from django.conf import settings
@@ -354,10 +355,101 @@ def list_users(limit: int = 250) -> list[dict[str, Any]]:
 
 
 def list_active_projects(limit: int = 100, teams: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+    return _list_projects(limit=limit, teams=teams, include_inactive=False)
+
+
+def resolve_linear_project(query: str, *, limit: int = 100) -> dict[str, Any]:
+    """Resolve an explicit Roo project hint against every Linear project."""
+
+    query = str(query or "").strip()
+    normalized_query = _normalize_project_lookup_value(query)
+    if len(normalized_query) < 3:
+        raise ValueError("A specific Linear project query is required.")
+
+    projects = _list_projects(limit=limit, teams=[], include_inactive=True)
+    ranked: list[tuple[float, dict[str, Any], str]] = []
+    for project in projects:
+        best_score = 0.0
+        best_reason = ""
+        for field, value in (
+            ("name", project.get("name")),
+            ("slug", project.get("slugId")),
+        ):
+            normalized_value = _normalize_project_lookup_value(value)
+            if not normalized_value:
+                continue
+            if normalized_query == normalized_value:
+                score = 1.0 if field == "name" else 0.99
+                reason = f"Matched project by exact normalized {field}"
+            elif (
+                len(normalized_query) >= 6
+                and (
+                    normalized_query in normalized_value
+                    or normalized_value in normalized_query
+                )
+            ):
+                score = 0.94
+                reason = f"Matched project by {field} containment"
+            else:
+                similarity = SequenceMatcher(
+                    None,
+                    normalized_query,
+                    normalized_value,
+                ).ratio()
+                score = min(similarity, 0.90) if similarity >= 0.82 else 0.0
+                reason = f"Matched project by {field} similarity" if score else ""
+            if score > best_score:
+                best_score = score
+                best_reason = reason
+        if best_score:
+            ranked.append((best_score, project, best_reason))
+
+    ranked.sort(key=lambda item: item[0], reverse=True)
+    if not ranked or ranked[0][0] < 0.82:
+        return {
+            "status": "not_found",
+            "project": None,
+            "confidence": 0.0,
+            "reason": "No Linear project matched the explicit query.",
+            "candidateCount": 0,
+        }
+
+    best_score, best_project, best_reason = ranked[0]
+    second_score = ranked[1][0] if len(ranked) > 1 else 0.0
+    if second_score >= 0.82 and best_score - second_score < 0.05:
+        return {
+            "status": "ambiguous",
+            "project": None,
+            "confidence": 0.0,
+            "reason": "Multiple Linear projects matched the explicit query.",
+            "candidateCount": len(ranked),
+            "candidates": [
+                _project_lookup_summary(project, score=score)
+                for score, project, _reason in ranked[:5]
+            ],
+        }
+
+    inactive_states = {"completed", "canceled", "cancelled", "archived"}
+    return {
+        "status": "matched",
+        "project": best_project,
+        "confidence": best_score,
+        "reason": best_reason,
+        "candidateCount": len(ranked),
+        "isInactive": _project_is_inactive(best_project, inactive_states),
+    }
+
+
+def _list_projects(
+    limit: int = 100,
+    teams: list[dict[str, Any]] | None = None,
+    *,
+    include_inactive: bool,
+) -> list[dict[str, Any]]:
     page_size = _bounded_limit(limit, default=100, maximum=100)
     query = """
-    query LinearProjects($first: Int!, $after: String) {
-      projects(first: $first, after: $after) {
+    query LinearProjects($first: Int!, $after: String, $includeArchived: Boolean!) {
+      projects(first: $first, after: $after, includeArchived: $includeArchived) {
         nodes {
           id
           name
@@ -417,7 +509,11 @@ def list_active_projects(limit: int = 100, teams: list[dict[str, Any]] | None = 
     cursor: str | None = None
     use_basic_query = False
     for _page_number in range(20):
-        variables = {"first": page_size, "after": cursor}
+        variables = {
+            "first": page_size,
+            "after": cursor,
+            "includeArchived": include_inactive,
+        }
         try:
             data = _graphql(
                 _basic_projects_query() if use_basic_query else query,
@@ -441,13 +537,22 @@ def list_active_projects(limit: int = 100, teams: list[dict[str, Any]] | None = 
         cursor = str(page_info.get("endCursor") or "").strip() or None
         if not page_info.get("hasNextPage") or not cursor:
             break
+    else:
+        raise LinearMeetingGraphQLError(
+            "Linear project catalogue exceeded the 20-page safety limit.",
+            operation="LinearProjectsBasic" if use_basic_query else "LinearProjects",
+        )
     inactive_states = {"completed", "canceled", "cancelled", "archived"}
-    active_projects = [
-        project
-        for project in projects
-        if not _project_is_inactive(project, inactive_states)
-    ]
-    return _enrich_projects_with_members(active_projects, teams or [])
+    selected_projects = (
+        projects
+        if include_inactive
+        else [
+            project
+            for project in projects
+            if not _project_is_inactive(project, inactive_states)
+        ]
+    )
+    return _enrich_projects_with_members(selected_projects, teams or [])
 
 
 def list_issue_labels(limit: int = 100) -> list[dict[str, Any]]:
@@ -1796,8 +1901,8 @@ def _project_context_query_unsupported(exc: LinearMeetingGraphQLError) -> bool:
 
 def _basic_projects_query() -> str:
     return """
-    query LinearProjectsBasic($first: Int!, $after: String) {
-      projects(first: $first, after: $after) {
+    query LinearProjectsBasic($first: Int!, $after: String, $includeArchived: Boolean!) {
+      projects(first: $first, after: $after, includeArchived: $includeArchived) {
         nodes {
           id
           name
@@ -1826,6 +1931,25 @@ def _project_is_inactive(project: dict[str, Any], inactive_states: set[str]) -> 
     status_name = str(status_data.get("name") or "").lower()
     status_type = str(status_data.get("type") or "").lower()
     return status_name in inactive_states or status_type in inactive_states
+
+
+def _normalize_project_lookup_value(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
+
+
+def _project_lookup_summary(
+    project: dict[str, Any],
+    *,
+    score: float,
+) -> dict[str, Any]:
+    inactive_states = {"completed", "canceled", "cancelled", "archived"}
+    return {
+        "id": project.get("id"),
+        "name": project.get("name"),
+        "slugId": project.get("slugId"),
+        "confidence": score,
+        "isInactive": _project_is_inactive(project, inactive_states),
+    }
 
 
 def _enrich_projects_with_members(

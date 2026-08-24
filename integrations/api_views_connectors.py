@@ -50,6 +50,7 @@ from integrations.services.linear_meeting_actions import (
     get_linear_project_sizing_context,
     get_linear_project_sizing_run,
     get_linear_project_update_page,
+    resolve_linear_project,
 )
 from startup_updates.data_deletion import disconnect_gmail_for_user
 
@@ -749,6 +750,22 @@ class LinearMeetingContextView(APIView):
             LinearMeetingRateLimitError,
             LinearMeetingGraphQLError,
             LinearMeetingIdempotencyConflictError,
+            ValueError,
+        ) as exc:
+            return _linear_meeting_error_response(exc)
+        return Response(payload, status=status.HTTP_200_OK)
+
+
+class LinearProjectResolveView(APIView):
+    permission_classes = [HasRooApiKey]
+
+    def get(self, request):
+        try:
+            payload = resolve_linear_project(request.query_params.get("query") or "")
+        except (
+            LinearMeetingConfigurationError,
+            LinearMeetingRateLimitError,
+            LinearMeetingGraphQLError,
             ValueError,
         ) as exc:
             return _linear_meeting_error_response(exc)
