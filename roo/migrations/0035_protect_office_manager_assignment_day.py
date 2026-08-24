@@ -7,7 +7,7 @@ import django.db.models.deletion
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('roo', '0030_officemanagerday_coworkingbooking_booking_source_and_more'),
+        ('roo', '0034_officemanagerday_coworkingbooking_booking_source_and_more'),
     ]
 
     operations = [

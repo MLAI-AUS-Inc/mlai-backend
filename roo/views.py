@@ -24,7 +24,8 @@ from typing import Optional, Tuple
 from .models import (
     PointsAdmin, Minter, Task, Ledger, PointsAccount, BoostPostAdmission,
     TaskAssignment, TaskSubmission, CoworkingBooking, CoworkingDayCapacity,
-    RewardsCatalog, RewardRedemption, TaskTemplate, PointsRequest, PointsPurchase,
+    OfficeManagerDay, RewardsCatalog, RewardRedemption, TaskTemplate,
+    PointsRequest, PointsPurchase,
 )
 
 from .services import (

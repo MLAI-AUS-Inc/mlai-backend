@@ -815,12 +815,22 @@ class CoworkingBooking(models.Model):
         ('booked', 'Booked'),
         ('cancelled', 'Cancelled'),
     )
+    SOURCE_CHOICES = (
+        ('points', 'Roo Points'),
+        ('office_manager', 'Office Manager of the Day'),
+    )
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='coworking_bookings')
     date = models.DateField()
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='booked')
     points_cost = models.IntegerField()
+    booking_source = models.CharField(
+        max_length=30,
+        choices=SOURCE_CHOICES,
+        default='points',
+    )
+    original_points_cost = models.IntegerField(blank=True, null=True)
     ledger_entry = models.ForeignKey(
         Ledger, 
         on_delete=models.SET_NULL, 
