@@ -2092,6 +2092,198 @@ class CoworkingViewSetTests(APITestCase):
         self.assertFalse(response.data['monthly_update_discount_applied'])
 
     @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
+    @patch('roo.views.SlackService.get_user_profile')
+    def test_book_auto_links_existing_account_by_verified_slack_email(
+        self,
+        mock_get_profile,
+        mock_permission,
+    ):
+        unlinked_user = User.objects.create_user(email='autolink@example.com')
+        PointsService.award(
+            user=unlinked_user,
+            delta=10,
+            source='MANUAL',
+            description='Coworking auto-link setup',
+            created_by_slack_id='UADMIN',
+            idempotency_key='coworking_auto_link_setup',
+        )
+        mock_get_profile.return_value = {
+            'slack_id': 'UCOAUTOLINK',
+            'email': 'AUTOLINK@example.com',
+            'is_bot': False,
+            'deleted': False,
+        }
+        booking_date = (date.today() + timedelta(days=1)).isoformat()
+
+        response = self.client.post(
+            self.url,
+            {'slack_user_id': '<@UCOAUTOLINK>', 'date': booking_date},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        unlinked_user.refresh_from_db()
+        self.assertEqual(unlinked_user.slack_id, 'UCOAUTOLINK')
+        self.assertEqual(PointsAccount.objects.get(user=unlinked_user).balance, 2)
+        self.assertTrue(
+            CoworkingBooking.objects.filter(
+                user=unlinked_user,
+                date=booking_date,
+                status='booked',
+            ).exists()
+        )
+        mock_get_profile.assert_called_once_with('UCOAUTOLINK')
+
+    @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
+    @patch('roo.views.SlackService.get_user_profile')
+    def test_auto_linked_booking_retry_does_not_charge_twice_or_refetch_profile(
+        self,
+        mock_get_profile,
+        mock_permission,
+    ):
+        unlinked_user = User.objects.create_user(email='autolink-retry@example.com')
+        PointsService.award(
+            user=unlinked_user,
+            delta=10,
+            source='MANUAL',
+            description='Coworking auto-link retry setup',
+            created_by_slack_id='UADMIN',
+            idempotency_key='coworking_auto_link_retry_setup',
+        )
+        mock_get_profile.return_value = {
+            'slack_id': 'UCOAUTORETRY',
+            'email': 'autolink-retry@example.com',
+            'is_bot': False,
+            'deleted': False,
+        }
+        payload = {
+            'slack_user_id': 'UCOAUTORETRY',
+            'date': (date.today() + timedelta(days=1)).isoformat(),
+        }
+
+        first_response = self.client.post(self.url, payload, format='json')
+        second_response = self.client.post(self.url, payload, format='json')
+
+        self.assertEqual(first_response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(second_response.status_code, status.HTTP_200_OK)
+        self.assertTrue(second_response.data['idempotent'])
+        self.assertEqual(PointsAccount.objects.get(user=unlinked_user).balance, 2)
+        self.assertEqual(
+            Ledger.objects.filter(user=unlinked_user, source='COWORKING').count(),
+            1,
+        )
+        mock_get_profile.assert_called_once_with('UCOAUTORETRY')
+
+    @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
+    @patch('roo.views.SlackService.get_user_profile', return_value=None)
+    def test_book_returns_retryable_error_when_slack_identity_lookup_is_unavailable(
+        self,
+        mock_get_profile,
+        mock_permission,
+    ):
+        booking_date = (date.today() + timedelta(days=1)).isoformat()
+
+        response = self.client.post(
+            self.url,
+            {'slack_user_id': 'UCOSLACKDOWN', 'date': booking_date},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
+        self.assertEqual(response.data['code'], 'slack_identity_unavailable')
+        self.assertFalse(User.objects.filter(slack_id='UCOSLACKDOWN').exists())
+        self.assertFalse(CoworkingBooking.objects.filter(date=booking_date).exists())
+
+    @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
+    @patch('roo.views.SlackService.get_user_profile')
+    def test_book_does_not_create_account_when_slack_email_has_no_match(
+        self,
+        mock_get_profile,
+        mock_permission,
+    ):
+        mock_get_profile.return_value = {
+            'slack_id': 'UCONOMATCH',
+            'email': 'no-mlai-account@example.com',
+            'is_bot': False,
+            'deleted': False,
+        }
+
+        response = self.client.post(
+            self.url,
+            {
+                'slack_user_id': 'UCONOMATCH',
+                'date': (date.today() + timedelta(days=1)).isoformat(),
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data['code'], 'slack_account_not_linked')
+        self.assertFalse(User.objects.filter(email='no-mlai-account@example.com').exists())
+
+    @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
+    @patch('roo.views.SlackService.get_user_profile')
+    def test_book_refuses_to_move_account_to_a_different_slack_identity(
+        self,
+        mock_get_profile,
+        mock_permission,
+    ):
+        linked_user = self._create_member_with_points(
+            'UCOORIGINAL',
+            email='already-linked@example.com',
+            balance=10,
+        )
+        mock_get_profile.return_value = {
+            'slack_id': 'UCOIMPOSTER',
+            'email': 'already-linked@example.com',
+            'is_bot': False,
+            'deleted': False,
+        }
+
+        response = self.client.post(
+            self.url,
+            {
+                'slack_user_id': 'UCOIMPOSTER',
+                'date': (date.today() + timedelta(days=1)).isoformat(),
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        linked_user.refresh_from_db()
+        self.assertEqual(linked_user.slack_id, 'UCOORIGINAL')
+        self.assertEqual(PointsAccount.objects.get(user=linked_user).balance, 10)
+        self.assertFalse(CoworkingBooking.objects.filter(user=linked_user).exists())
+
+    @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
+    @patch('roo.views.SlackService.get_user_profile')
+    def test_book_refuses_bot_profile_even_when_email_matches(
+        self,
+        mock_get_profile,
+        mock_permission,
+    ):
+        unlinked_user = User.objects.create_user(email='bot-match@example.com')
+        mock_get_profile.return_value = {
+            'slack_id': 'UCOBOTUSER',
+            'email': 'bot-match@example.com',
+            'is_bot': True,
+            'deleted': False,
+        }
+
+        response = self.client.post(
+            self.url,
+            {
+                'slack_user_id': 'UCOBOTUSER',
+                'date': (date.today() + timedelta(days=1)).isoformat(),
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        unlinked_user.refresh_from_db()
+        self.assertIsNone(unlinked_user.slack_id)
+
+    @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
     def test_book_response_flags_discount_when_monthly_update_ready(self, mock_permission):
         from organizations.models import Organization
         from startup_updates.models import (

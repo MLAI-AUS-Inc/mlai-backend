@@ -5,6 +5,8 @@ import re
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
+from django.db import IntegrityError, transaction
+
 from .models import User
 
 logger = logging.getLogger(__name__)
@@ -104,6 +106,81 @@ def _slack_profile(slack_user_id: str) -> Optional[dict]:
         return None
 
 
+def resolve_existing_user_from_profile(
+    *,
+    slack_user_id: str,
+    profile: dict,
+) -> Optional[User]:
+    """Link a verified Slack profile to an existing MLAI user.
+
+    The caller owns fetching the profile from Slack. This helper never creates
+    a user and never moves an MLAI account from one Slack identity to another.
+    Concurrent attempts are serialized on the matching user row; the unique
+    ``slack_id`` constraint remains the final guard against conflicting links.
+    """
+    requested_slack_id = str(slack_user_id or "").strip()
+    if not requested_slack_id or not isinstance(profile, dict):
+        return None
+
+    profile_slack_id = str(profile.get("slack_id") or "").strip()
+    if profile_slack_id and profile_slack_id != requested_slack_id:
+        logger.warning(
+            "Refusing Slack profile mismatch: requested=%s returned=%s",
+            requested_slack_id,
+            profile_slack_id,
+        )
+        return None
+    if profile.get("is_bot") or profile.get("deleted"):
+        return None
+
+    normalized_email = User.objects.normalize_email(profile.get("email"))
+    if not normalized_email:
+        return None
+
+    with transaction.atomic():
+        already_linked = (
+            User.objects.select_for_update()
+            .filter(slack_id=requested_slack_id)
+            .first()
+        )
+        if already_linked:
+            return already_linked
+
+        user = (
+            User.objects.select_for_update()
+            .filter(email__iexact=normalized_email)
+            .first()
+        )
+        if not user:
+            return None
+
+        existing_slack_id = str(user.slack_id or "").strip()
+        if existing_slack_id and existing_slack_id != requested_slack_id:
+            logger.warning(
+                "Refusing to relink MLAI user %s from Slack %s to %s",
+                user.pk,
+                existing_slack_id,
+                requested_slack_id,
+            )
+            return None
+
+        if existing_slack_id == requested_slack_id:
+            return user
+
+        user.slack_id = requested_slack_id
+        try:
+            # Keep the IntegrityError inside a savepoint so a concurrent winner
+            # can be inspected without poisoning the outer transaction.
+            with transaction.atomic():
+                user.save(update_fields=["slack_id"])
+        except IntegrityError:
+            winner = User.objects.filter(slack_id=requested_slack_id).first()
+            if winner and winner.pk == user.pk:
+                return winner
+            return None
+        return user
+
+
 def resolve_existing_user(slack_user_id: str) -> Optional[User]:
     """Resolve a Slack ID to an *existing* Django user without creating one.
 
@@ -123,15 +200,10 @@ def resolve_existing_user(slack_user_id: str) -> Optional[User]:
     if not profile:
         return None
 
-    email = profile.get('email')
-    if not email:
-        return None
-
-    user = User.objects.filter(email__iexact=email).first()
-    if user and not user.slack_id:
-        user.slack_id = slack_user_id
-        user.save(update_fields=['slack_id'])
-    return user
+    return resolve_existing_user_from_profile(
+        slack_user_id=slack_user_id,
+        profile=profile,
+    )
 
 
 def resolve_or_create_user(slack_user_id: str) -> Optional[User]:
