@@ -23,9 +23,11 @@ returns terminal code `slack_account_not_linked`.
 
 Roo's self-service `link` command uses the authenticated
 `POST /api/v1/users/link-slack/` service endpoint with the email Roo has just
-read from the exact Slack member profile. Replays are idempotent. An existing
-Slack link is authoritative, and an MLAI account already linked to a different
-Slack identity returns `slack_identity_conflict` instead of being reassigned.
+read from the exact Slack member profile. The endpoint accepts only Roo's
+dedicated service key, not the broader legacy internal key. Replays are
+idempotent. An existing Slack link is authoritative, and an MLAI account
+already linked to a different Slack identity returns `slack_identity_conflict`
+instead of being reassigned.
 
 Linking is a durable identity update. If linking succeeds but the booking is
 rejected (for example, because the account has insufficient points), a later

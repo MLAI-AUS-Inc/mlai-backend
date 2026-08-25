@@ -279,3 +279,18 @@ class LinkSlackUserTests(TestCase):
         self.assertEqual(response.status_code, 404)
         self.assertEqual(response.json()['code'], 'slack_account_not_found')
         self.assertFalse(User.objects.filter(email='missing@example.com').exists())
+
+    @override_settings(INTERNAL_API_KEY='general-internal-key')
+    def test_general_internal_key_cannot_mutate_slack_links(self):
+        user = User.objects.create_user(email='strict-roo@example.com')
+
+        response = self.client.post(
+            self.url,
+            {'slack_id': 'USTRICT123', 'email': user.email},
+            format='json',
+            HTTP_X_API_KEY='general-internal-key',
+        )
+
+        self.assertEqual(response.status_code, 403)
+        user.refresh_from_db()
+        self.assertIsNone(user.slack_id)

@@ -42,7 +42,12 @@ from .serializers import (
     UserSerializer,
 )
 from rest_framework.generics import ListAPIView, RetrieveAPIView, RetrieveUpdateAPIView
-from .permissions import IsOwnerOrTeammateOrSuperuser, HasAPIKey, HasRooApiKey
+from .permissions import (
+    HasAPIKey,
+    HasRooApiKey,
+    HasStrictRooApiKey,
+    IsOwnerOrTeammateOrSuperuser,
+)
 from .throttles import AuthEndpointRateThrottle, MagicLinkSendRateThrottle
 from .user_compat import DEFAULT_USER_ROLE, get_compat_user_role, user_has_team
 from .slack_users import resolve_existing_user_from_profile
@@ -999,7 +1004,7 @@ class LinkSlackView(APIView):
     Link a Slack ID to an existing user found by email.
     Path: POST /api/v1/users/link-slack/
     """
-    permission_classes = [HasRooApiKey]
+    permission_classes = [HasStrictRooApiKey]
 
     def post(self, request):
         slack_id = str(request.data.get('slack_id') or '').strip()
