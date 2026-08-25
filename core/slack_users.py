@@ -11,6 +11,7 @@ from .models import User
 from .slack_founder_links import (
     ConflictingSlackFounderLinkError,
     assign_direct_slack_identity,
+    ensure_user_can_accept_direct_slack_identity,
     user_participates_in_slack_founder_link,
 )
 
@@ -38,27 +39,36 @@ def ensure_slack_user(
     if not slack_id or not normalized_email:
         raise ValueError("slack_id and email are required")
 
-    user = User.objects.filter(slack_id=slack_id).first()
-    if user:
-        update_fields = []
-        if (
-            user.email.lower() != normalized_email
-            and not user_participates_in_slack_founder_link(user)
-        ):
-            user.email = normalized_email
-            update_fields.append("email")
-        if first_name and not user.first_name:
-            user.first_name = first_name
-            update_fields.append("first_name")
-        if last_name and not user.last_name:
-            user.last_name = last_name
-            update_fields.append("last_name")
-        if avatar_url and not user.avatar_url:
-            user.avatar_url = avatar_url
-            update_fields.append("avatar_url")
-        if update_fields:
-            user.save(update_fields=update_fields)
-        return SlackUserRegistrationResult(user=user, created=False, linked=False)
+    with transaction.atomic():
+        user = (
+            User.objects.select_for_update()
+            .filter(slack_id=slack_id)
+            .first()
+        )
+        if user:
+            update_fields = []
+            if (
+                user.email.lower() != normalized_email
+                and not user_participates_in_slack_founder_link(user)
+            ):
+                user.email = normalized_email
+                update_fields.append("email")
+            if first_name and not user.first_name:
+                user.first_name = first_name
+                update_fields.append("first_name")
+            if last_name and not user.last_name:
+                user.last_name = last_name
+                update_fields.append("last_name")
+            if avatar_url and not user.avatar_url:
+                user.avatar_url = avatar_url
+                update_fields.append("avatar_url")
+            if update_fields:
+                user.save(update_fields=update_fields)
+            return SlackUserRegistrationResult(
+                user=user,
+                created=False,
+                linked=False,
+            )
 
     user = User.objects.filter(email__iexact=normalized_email).first()
     if user and user.slack_id != slack_id:
@@ -115,7 +125,10 @@ def _slack_profile(slack_user_id: str) -> Optional[dict]:
         from integrations.services.slack import SlackService
         return SlackService.get_user_profile(slack_user_id)
     except Exception as exc:  # pragma: no cover - network / credential issues
-        logger.warning("Slack profile lookup failed for %s: %s", slack_user_id, exc)
+        logger.warning(
+            "slack_profile_lookup_failed reason=%s",
+            type(exc).__name__,
+        )
         return None
 
 
@@ -123,6 +136,7 @@ def resolve_existing_user_from_profile(
     *,
     slack_user_id: str,
     profile: dict,
+    raise_link_conflict: bool = False,
 ) -> Optional[User]:
     """Link a verified Slack profile to an existing MLAI user.
 
@@ -137,11 +151,7 @@ def resolve_existing_user_from_profile(
 
     profile_slack_id = str(profile.get("slack_id") or "").strip()
     if profile_slack_id and profile_slack_id != requested_slack_id:
-        logger.warning(
-            "Refusing Slack profile mismatch: requested=%s returned=%s",
-            requested_slack_id,
-            profile_slack_id,
-        )
+        logger.warning("slack_profile_identity_mismatch")
         return None
     if profile.get("is_bot") or profile.get("deleted"):
         return None
@@ -169,11 +179,11 @@ def resolve_existing_user_from_profile(
 
         existing_slack_id = str(user.slack_id or "").strip()
         if existing_slack_id and existing_slack_id != requested_slack_id:
+            if raise_link_conflict:
+                ensure_user_can_accept_direct_slack_identity(user)
             logger.warning(
-                "Refusing to relink MLAI user %s from Slack %s to %s",
+                "slack_identity_reassignment_rejected user_pk=%s",
                 user.pk,
-                existing_slack_id,
-                requested_slack_id,
             )
             return None
 
@@ -186,6 +196,8 @@ def resolve_existing_user_from_profile(
             with transaction.atomic():
                 user = assign_direct_slack_identity(user, requested_slack_id)
         except ConflictingSlackFounderLinkError:
+            if raise_link_conflict:
+                raise
             return None
         except IntegrityError:
             winner = User.objects.filter(slack_id=requested_slack_id).first()

@@ -94,10 +94,10 @@ def consumed_link_matches_founder_user(token: str, founder_user: User) -> bool:
             consumed_at__isnull=False,
             invalidated_at__isnull=True,
         )
-        .only("slack_user_id")
+        .only("slack_user_id", "consumed_by_user_id")
         .first()
     )
-    if request is None:
+    if request is None or request.consumed_by_user_id != founder_user.pk:
         return False
     if request.slack_user_id == founder_user.pk:
         return True
@@ -138,6 +138,13 @@ def _link_status(
     founder_user: User,
     for_update: bool,
 ) -> tuple[str, SlackFounderAccountLink | None]:
+    if not slack_user.is_active or not str(slack_user.slack_id or "").strip():
+        raise SlackFounderLinkUserNotFoundError()
+    if not founder_user.is_active:
+        raise ConflictingSlackFounderLinkError(
+            "The Founder Tools account is not active. Contact MLAI support."
+        )
+
     user_ids = {slack_user.pk, founder_user.pk}
     links = SlackFounderAccountLink.objects.filter(
         Q(slack_user_id__in=user_ids) | Q(founder_user_id__in=user_ids)
@@ -275,8 +282,14 @@ def complete_slack_founder_link(
     )
     locked_users = {user.pk: user for user in locked_user_rows}
     request = _link_request_for_token(token, for_update=True)
-    slack_user = locked_users[request.slack_user_id]
-    locked_founder_user = locked_users[founder_user.pk]
+    slack_user = locked_users.get(request.slack_user_id)
+    locked_founder_user = locked_users.get(founder_user.pk)
+    if slack_user is None:
+        raise SlackFounderLinkUserNotFoundError()
+    if locked_founder_user is None:
+        raise ConflictingSlackFounderLinkError(
+            "The Founder Tools account is unavailable. Contact MLAI support."
+        )
 
     status, link = _link_status(
         slack_user=slack_user,
@@ -291,7 +304,10 @@ def complete_slack_founder_link(
         )
 
     request.consumed_at = timezone.now()
-    request.save(update_fields=["consumed_at", "updated_at"])
+    request.consumed_by_user = locked_founder_user
+    request.save(
+        update_fields=["consumed_at", "consumed_by_user", "updated_at"]
+    )
     logger.info(
         "slack_founder_link_completed slack_user_pk=%s founder_user_pk=%s status=%s",
         slack_user.pk,
@@ -344,7 +360,12 @@ def ensure_user_can_accept_direct_slack_identity(user: User) -> None:
 
 
 @transaction.atomic
-def assign_direct_slack_identity(user: User, slack_id: str) -> User:
+def assign_direct_slack_identity(
+    user: User,
+    slack_id: str,
+    *,
+    allow_reassignment: bool = False,
+) -> User:
     """Atomically assign a direct Slack identity without crossing link boundaries."""
     normalized_slack_id = str(slack_id or "").strip()
     if not normalized_slack_id:
@@ -355,6 +376,11 @@ def assign_direct_slack_identity(user: User, slack_id: str) -> User:
         return locked_user
 
     ensure_user_can_accept_direct_slack_identity(locked_user)
+    if locked_user.slack_id and not allow_reassignment:
+        raise ConflictingSlackFounderLinkError(
+            "This account is already connected to a different Slack identity. "
+            "Contact MLAI support to change that connection."
+        )
     locked_user.slack_id = normalized_slack_id
     locked_user.save(update_fields=["slack_id", "updated_at"])
 
@@ -409,13 +435,14 @@ def founder_account_connection_status(founder_user: User) -> dict:
 
 
 def coworking_eligibility_user_ids(user: User) -> set[int]:
-    """Return all identities whose Founder Tools bindings may qualify user."""
-    user_ids = {user.pk}
-    founder_user_id = (
-        SlackFounderAccountLink.objects.filter(slack_user=user)
-        .values_list("founder_user_id", flat=True)
+    """Return the single Founder Tools identity used for eligibility checks."""
+    link = (
+        SlackFounderAccountLink.objects.select_related("founder_user")
+        .filter(slack_user=user)
         .first()
     )
-    if founder_user_id is not None:
-        user_ids.add(founder_user_id)
-    return user_ids
+    if link is None:
+        return {user.pk}
+    if not link.founder_user.is_active:
+        return set()
+    return {link.founder_user_id}

@@ -145,6 +145,7 @@ jobs:
           roo.tests_meeting_rooms \
           core.tests.test_auth_contract \
           core.tests.test_auth_session \
+          core.test_slack_user_creation \
           core.tests_slack_founder_links \
           core.tests.test_ops_domain_transition \
           core.tests.test_request_logging \

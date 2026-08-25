@@ -35,7 +35,16 @@ class UserAdmin(BaseUserAdmin):
         }),
     )
     
-    readonly_fields = ('avatar_preview', 'updated_at', 'password_set_at', 'community_chat_profile_id')
+    # Slack identity changes must pass through the transactional linking
+    # services so pending capabilities are invalidated and explicit account
+    # boundaries cannot be bypassed from Django Admin.
+    readonly_fields = (
+        'avatar_preview',
+        'updated_at',
+        'password_set_at',
+        'community_chat_profile_id',
+        'slack_id',
+    )
 
     def avatar_preview(self, obj):
         if obj.avatar_url:

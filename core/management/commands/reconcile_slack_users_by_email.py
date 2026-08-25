@@ -105,6 +105,34 @@ class Command(BaseCommand):
                         )
                     )
                     continue
+                current_target_slack_id = str(
+                    locked_email_user.slack_id or ""
+                ).strip()
+                if current_target_slack_id:
+                    if current_target_slack_id == slack_id:
+                        self.stdout.write(
+                            f"{slack_id}: already linked while reconciliation was running"
+                        )
+                    else:
+                        self.stdout.write(
+                            self.style.WARNING(
+                                f"{slack_id}: target gained another Slack identity; "
+                                "manual support required"
+                            )
+                        )
+                    continue
+                if (
+                    locked_slack_user is not None
+                    and str(locked_slack_user.slack_id or "").strip()
+                    != slack_id
+                ):
+                    self.stdout.write(
+                        self.style.WARNING(
+                            f"{slack_id}: source Slack identity changed while "
+                            "reconciliation was running; manual support required"
+                        )
+                    )
+                    continue
                 if (
                     locked_slack_user is not None
                     and locked_slack_user.pk != locked_email_user.pk

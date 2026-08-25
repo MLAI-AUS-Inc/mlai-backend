@@ -2114,7 +2114,10 @@ class CoworkingViewSetTests(APITestCase):
 
         self.assertEqual(award_response.status_code, status.HTTP_200_OK)
         points_user = User.objects.get(slack_id=slack_id)
-        self.assertEqual(points_user.email, f'{slack_id}@slack.placeholder.com')
+        self.assertEqual(
+            points_user.email,
+            f'{slack_id.lower()}@slack.placeholder.com',
+        )
         self.assertEqual(PointsAccount.objects.get(user=points_user).balance, 10)
         mock_get_profile.assert_called_once_with(slack_id)
 

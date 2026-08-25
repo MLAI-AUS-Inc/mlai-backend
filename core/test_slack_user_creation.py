@@ -1,6 +1,8 @@
 """
 Tests for GetOrCreateSlackUserView endpoint.
 """
+from unittest.mock import patch
+
 from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
 from core.models import User
@@ -45,6 +47,52 @@ class GetOrCreateSlackUserTests(TestCase):
         self.assertEqual(user.last_name, 'Doe')
         self.assertEqual(user.avatar_url, 'https://example.com/avatar.jpg')
         self.assertTrue(user.is_active)  # Auto-activated
+
+    @patch('core.views.logger')
+    def test_slack_registration_logs_only_internal_identity(self, mock_logger):
+        slack_id = 'ULOGSAFE12'
+        email = 'private-member@example.com'
+
+        response = self.client.post(
+            self.url,
+            {'slack_id': slack_id, 'email': email},
+            **self.headers,
+        )
+
+        self.assertEqual(response.status_code, 201)
+        logged = repr(mock_logger.method_calls)
+        self.assertNotIn(slack_id, logged)
+        self.assertNotIn(email, logged)
+        mock_logger.info.assert_called_once_with(
+            'slack_backed_user_created user_pk=%s',
+            response.json()['user_id'],
+        )
+
+    def test_slack_registration_failure_log_omits_identity_and_exception_text(self):
+        slack_id = 'ULOGFAIL12'
+        email = 'private-failure@example.com'
+
+        with (
+            patch(
+                'core.slack_users.ensure_slack_user',
+                side_effect=RuntimeError(f'{slack_id} {email}'),
+            ),
+            patch('core.views.logger') as mock_logger,
+        ):
+            response = self.client.post(
+                self.url,
+                {'slack_id': slack_id, 'email': email},
+                **self.headers,
+            )
+
+        self.assertEqual(response.status_code, 500)
+        logged = repr(mock_logger.method_calls)
+        self.assertNotIn(slack_id, logged)
+        self.assertNotIn(email, logged)
+        mock_logger.error.assert_called_once_with(
+            'slack_user_creation_failed reason=%s',
+            'RuntimeError',
+        )
 
     def test_get_existing_user_by_slack_id(self):
         """Test getting an existing user by Slack ID."""
@@ -106,6 +154,31 @@ class GetOrCreateSlackUserTests(TestCase):
         # Verify slack_id was added
         user.refresh_from_db()
         self.assertEqual(user.slack_id, 'UNEW12345')
+
+    def test_existing_direct_slack_identity_is_not_reassigned_by_email(self):
+        existing = User.objects.create_user(
+            email='claimed@example.com',
+            slack_id='UCLAIMED12',
+        )
+
+        response = self.client.post(
+            self.url,
+            {
+                'slack_id': 'UNEWUSER12',
+                'email': existing.email,
+                'first_name': 'New',
+            },
+            **self.headers,
+        )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertNotEqual(response.json()['user_id'], existing.pk)
+        self.assertEqual(
+            response.json()['email'],
+            'unewuser12@slack.placeholder.com',
+        )
+        existing.refresh_from_db()
+        self.assertEqual(existing.slack_id, 'UCLAIMED12')
 
     def test_missing_required_fields(self):
         """Test that missing slack_id or email returns 400."""
@@ -291,6 +364,6 @@ class LinkSlackUserTests(TestCase):
             HTTP_X_API_KEY='general-internal-key',
         )
 
-        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.status_code, 401)
         user.refresh_from_db()
         self.assertIsNone(user.slack_id)

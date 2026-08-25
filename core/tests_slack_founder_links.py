@@ -7,7 +7,8 @@ from urllib.parse import parse_qs, urlparse
 
 from django.core.management import call_command
 from django.core.management.base import CommandError
-from django.db import IntegrityError, close_old_connections, transaction
+from django.db import IntegrityError, close_old_connections, connection, transaction
+from django.db.migrations.executor import MigrationExecutor
 from django.test import TransactionTestCase, override_settings, skipUnlessDBFeature
 from django.urls import reverse
 from django.utils import timezone
@@ -31,6 +32,59 @@ from core.slack_founder_links import (
     digest_link_token,
     start_slack_founder_link,
 )
+from core.slack_users import resolve_existing_user_from_profile
+
+
+class SlackFounderSyntheticIdentityMigrationTests(TransactionTestCase):
+    migrate_from = [("core", "0060_slackfounderlinkrequest_consumed_by_user")]
+    migrate_to = [("core", "0061_clear_synthetic_web_slack_ids")]
+
+    def setUp(self):
+        super().setUp()
+        executor = MigrationExecutor(connection)
+        executor.migrate(self.migrate_from)
+        old_apps = executor.loader.project_state(self.migrate_from).apps
+        OldUser = old_apps.get_model("core", "User")
+
+        canonical = OldUser.objects.create(email="canonical-web@example.com")
+        canonical.slack_id = f"web_{canonical.pk}"
+        canonical.save(update_fields=["slack_id"])
+        self.canonical_pk = canonical.pk
+
+        noncanonical = OldUser.objects.create(
+            email="noncanonical-web@example.com",
+            slack_id="web_unrelated",
+        )
+        self.noncanonical_pk = noncanonical.pk
+        real = OldUser.objects.create(
+            email="real-slack@example.com",
+            slack_id="UREAL12345",
+        )
+        self.real_pk = real.pk
+
+        executor = MigrationExecutor(connection)
+        executor.migrate(self.migrate_to)
+        self.apps = executor.loader.project_state(self.migrate_to).apps
+
+    def tearDown(self):
+        executor = MigrationExecutor(connection)
+        executor.migrate(executor.loader.graph.leaf_nodes())
+        super().tearDown()
+
+    def test_only_canonical_synthetic_web_identity_is_cleared(self):
+        MigratedUser = self.apps.get_model("core", "User")
+
+        self.assertIsNone(
+            MigratedUser.objects.get(pk=self.canonical_pk).slack_id
+        )
+        self.assertEqual(
+            MigratedUser.objects.get(pk=self.noncanonical_pk).slack_id,
+            "web_unrelated",
+        )
+        self.assertEqual(
+            MigratedUser.objects.get(pk=self.real_pk).slack_id,
+            "UREAL12345",
+        )
 
 
 class SlackFounderLinkLegacyCommandTests(TransactionTestCase):
@@ -117,6 +171,66 @@ class SlackFounderLinkLegacyCommandTests(TransactionTestCase):
         self.assertIsNone(self.slack_user.slack_id)
         self.assertEqual(self.founder_user.slack_id, "ULEGACY123")
 
+    @patch(
+        "core.management.commands.reconcile_slack_users_by_email.SlackService"
+    )
+    def test_reconciliation_does_not_overwrite_identity_added_before_transfer(
+        self,
+        slack_service_class,
+    ):
+        SlackFounderAccountLink.objects.all().delete()
+        slack_service_class.return_value.get_user_profile.return_value = {
+            "email": self.founder_user.email
+        }
+        participation_checks = 0
+
+        def add_identity_after_locked_rows_are_loaded(user):
+            nonlocal participation_checks
+            participation_checks += 1
+            if participation_checks == 3:
+                user.slack_id = "UCONCURRENT"
+                user.save(update_fields=["slack_id"])
+            return False
+
+        output = StringIO()
+        with patch(
+            "core.management.commands.reconcile_slack_users_by_email."
+            "user_participates_in_slack_founder_link",
+            side_effect=add_identity_after_locked_rows_are_loaded,
+        ):
+            call_command(
+                "reconcile_slack_users_by_email",
+                "--commit",
+                stdout=output,
+            )
+
+        self.slack_user.refresh_from_db()
+        self.founder_user.refresh_from_db()
+        self.assertEqual(self.slack_user.slack_id, "ULEGACY123")
+        self.assertEqual(self.founder_user.slack_id, "UCONCURRENT")
+        self.assertIn("target gained another Slack identity", output.getvalue())
+
+
+class SlackIdentityLogPrivacyTests(TransactionTestCase):
+    def test_profile_mismatch_log_omits_slack_identifiers(self):
+        requested_slack_id = "UREQUEST12"
+        returned_slack_id = "URETURN123"
+
+        with self.assertLogs("core.slack_users", level="WARNING") as logs:
+            result = resolve_existing_user_from_profile(
+                slack_user_id=requested_slack_id,
+                profile={
+                    "slack_id": returned_slack_id,
+                    "email": "private@example.com",
+                },
+            )
+
+        self.assertIsNone(result)
+        output = "\n".join(logs.output)
+        self.assertNotIn(requested_slack_id, output)
+        self.assertNotIn(returned_slack_id, output)
+        self.assertNotIn("private@example.com", output)
+
 
 @override_settings(
     ROO_API_KEY="roo-link-key",
@@ -163,6 +277,8 @@ class SlackFounderLinkApiTests(APITestCase):
         response = self._start()
 
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response["Cache-Control"], "no-store")
+        self.assertEqual(response["Pragma"], "no-cache")
         self.assertEqual(response.data["status"], "link_required")
         self.assertTrue(
             response.data["link_url"].startswith(
@@ -199,6 +315,26 @@ class SlackFounderLinkApiTests(APITestCase):
         self.assertEqual(preview.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(preview.data["code"], "invalid_token")
 
+    def test_failed_replacement_rolls_back_previous_request_invalidation(self):
+        first = self._start()
+        first_token = self._token_from_response(first)
+
+        with (
+            patch.object(
+                SlackFounderLinkRequest.objects,
+                "create",
+                side_effect=RuntimeError("injected persistence failure"),
+            ),
+            self.assertRaises(RuntimeError),
+        ):
+            start_slack_founder_link(self.slack_user)
+
+        first_request = SlackFounderLinkRequest.objects.get(
+            token_digest=digest_link_token(first_token)
+        )
+        self.assertIsNone(first_request.invalidated_at)
+        self.assertIsNone(first_request.consumed_at)
+
     def test_start_returns_not_found_for_unregistered_slack_user(self):
         response = self.client.post(
             self.start_url,
@@ -218,6 +354,40 @@ class SlackFounderLinkApiTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
         self.assertEqual(response.data["code"], "slack_user_not_found")
         self.assertFalse(SlackFounderLinkRequest.objects.exists())
+
+    def test_complete_rejects_slack_account_deactivated_after_start(self):
+        response = self._start()
+        token = self._token_from_response(response)
+        self.slack_user.is_active = False
+        self.slack_user.save(update_fields=["is_active"])
+        self.client.force_authenticate(self.founder_user)
+
+        complete = self.client.post(
+            self.complete_url,
+            {"token": token},
+            format="json",
+        )
+
+        self.assertEqual(complete.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(complete.data["code"], "slack_user_not_found")
+        self.assertFalse(SlackFounderAccountLink.objects.exists())
+
+    def test_complete_rejects_founder_account_deactivated_after_start(self):
+        response = self._start()
+        token = self._token_from_response(response)
+        self.founder_user.is_active = False
+        self.founder_user.save(update_fields=["is_active"])
+        self.client.force_authenticate(self.founder_user)
+
+        complete = self.client.post(
+            self.complete_url,
+            {"token": token},
+            format="json",
+        )
+
+        self.assertEqual(complete.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(complete.data["code"], "link_conflict")
+        self.assertFalse(SlackFounderAccountLink.objects.exists())
 
     def test_start_rechecks_slack_identity_after_acquiring_the_user_lock(self):
         stale_slack_user = User.objects.get(pk=self.slack_user.pk)
@@ -287,6 +457,7 @@ class SlackFounderLinkApiTests(APITestCase):
         response = self.client.get(self.status_url)
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response["Cache-Control"], "no-store")
         self.assertEqual(
             response.data,
             {
@@ -382,6 +553,36 @@ class SlackFounderLinkApiTests(APITestCase):
         self.assertEqual(link.slack_user, self.slack_user)
         self.assertEqual(link.founder_user, self.founder_user)
 
+    def test_failed_completion_rolls_back_link_and_token_consumption(self):
+        response = self._start()
+        token = self._token_from_response(response)
+
+        with (
+            patch.object(
+                SlackFounderLinkRequest,
+                "save",
+                side_effect=RuntimeError("injected persistence failure"),
+            ),
+            self.assertRaises(RuntimeError),
+        ):
+            complete_slack_founder_link(
+                token,
+                founder_user=self.founder_user,
+            )
+
+        request = SlackFounderLinkRequest.objects.get(
+            token_digest=digest_link_token(token)
+        )
+        self.assertIsNone(request.consumed_at)
+        self.assertIsNone(request.consumed_by_user_id)
+        self.assertFalse(SlackFounderAccountLink.objects.exists())
+
+        completion = complete_slack_founder_link(
+            token,
+            founder_user=self.founder_user,
+        )
+        self.assertEqual(completion.status, "linked")
+
     def test_same_account_completion_is_a_noop_without_creating_a_trapping_link(self):
         response = self._start()
         token = self._token_from_response(response)
@@ -403,8 +604,19 @@ class SlackFounderLinkApiTests(APITestCase):
         self.assertEqual(complete.status_code, status.HTTP_200_OK)
         self.assertEqual(complete.data, {"status": "already_connected"})
         self.assertFalse(SlackFounderAccountLink.objects.exists())
-        self.assertIsNotNone(
-            SlackFounderLinkRequest.objects.get().consumed_at
+        consumed_request = SlackFounderLinkRequest.objects.get()
+        self.assertIsNotNone(consumed_request.consumed_at)
+        self.assertEqual(consumed_request.consumed_by_user, self.slack_user)
+
+        replay = self.client.post(
+            self.complete_url,
+            {"token": token},
+            format="json",
+        )
+        self.assertEqual(replay.status_code, status.HTTP_409_CONFLICT)
+        self.assertIs(
+            replay.data["connection_matches_requesting_user"],
+            True,
         )
 
         # A no-op same-account confirmation must not prevent a later request
@@ -512,6 +724,33 @@ class SlackFounderLinkApiTests(APITestCase):
             True,
         )
 
+    def test_consumed_token_recovery_remains_truthful_after_original_expiry(self):
+        response = self._start()
+        token = self._token_from_response(response)
+        self.client.force_authenticate(self.founder_user)
+        complete = self.client.post(
+            self.complete_url,
+            {"token": token},
+            format="json",
+        )
+        SlackFounderLinkRequest.objects.update(
+            expires_at=timezone.now() - timedelta(days=1)
+        )
+
+        replay = self.client.post(
+            self.complete_url,
+            {"token": token},
+            format="json",
+        )
+
+        self.assertEqual(complete.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(replay.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(replay.data["code"], "token_already_used")
+        self.assertIs(
+            replay.data["connection_matches_requesting_user"],
+            True,
+        )
+
     def test_consumed_token_does_not_confirm_a_different_founder_user(self):
         response = self._start()
         token = self._token_from_response(response)
@@ -524,6 +763,31 @@ class SlackFounderLinkApiTests(APITestCase):
         other_founder = User.objects.create_user(email="other@example.com")
         self.client.force_authenticate(other_founder)
 
+        replay = self.client.post(
+            self.complete_url,
+            {"token": token},
+            format="json",
+        )
+
+        self.assertEqual(replay.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(replay.data["code"], "token_already_used")
+        self.assertIs(
+            replay.data["connection_matches_requesting_user"],
+            False,
+        )
+
+    def test_consumed_token_does_not_confirm_the_slack_user_after_other_founder_linked(self):
+        response = self._start()
+        token = self._token_from_response(response)
+        self.client.force_authenticate(self.founder_user)
+        complete = self.client.post(
+            self.complete_url,
+            {"token": token},
+            format="json",
+        )
+        self.assertEqual(complete.status_code, status.HTTP_201_CREATED)
+
+        self.client.force_authenticate(self.slack_user)
         replay = self.client.post(
             self.complete_url,
             {"token": token},
@@ -824,7 +1088,11 @@ class SlackFounderLinkApiTests(APITestCase):
     def test_direct_identity_change_invalidates_unused_link_requests(self):
         request, token = create_slack_founder_link_request(self.slack_user)
 
-        assign_direct_slack_identity(self.slack_user, "UNEWSIDE12")
+        assign_direct_slack_identity(
+            self.slack_user,
+            "UNEWSIDE12",
+            allow_reassignment=True,
+        )
 
         request.refresh_from_db()
         self.assertIsNotNone(request.invalidated_at)
@@ -931,6 +1199,43 @@ class LinkedCoworkingEligibilityTests(APITestCase):
             founder_user=self.founder_user,
         )
 
+    def _add_slack_side_eligibility(self, *, suffix: str):
+        from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
+        from organizations.models import Organization
+        from startup_updates.models import (
+            MonthlyUpdateDraft,
+            MonthlyUpdateDraftStatus,
+            UserStartupBinding,
+        )
+
+        organization = Organization.objects.create(
+            name=f"Slack Account Founder {suffix}",
+            domain=f"slack-account-founder-{suffix}.example",
+        )
+        profile = VibeRaisingProfile.objects.create(
+            user=self.slack_user,
+            role=VibeRaisingProfile.ROLE_FOUNDER,
+        )
+        VibeRaisingCompany.objects.create(
+            profile=profile,
+            organization=organization,
+            name=f"Slack Account Founder {suffix}",
+            registered=True,
+            abn="89000000020",
+            acn="000000020",
+            abr_verified_at=timezone.now(),
+        )
+        UserStartupBinding.objects.create(
+            user=self.slack_user,
+            organization=organization,
+            coworking_discount_eligible=True,
+        )
+        MonthlyUpdateDraft.objects.create(
+            organization=organization,
+            month=self.booking_date.replace(day=1),
+            status=MonthlyUpdateDraftStatus.READY,
+        )
+
     def test_linked_founder_eligibility_discounts_without_moving_points(self):
         from roo.models import Ledger, PointsAccount
         from roo.services import CoworkingService
@@ -956,6 +1261,21 @@ class LinkedCoworkingEligibilityTests(APITestCase):
         self.assertEqual(
             PointsAccount.objects.get(user=self.founder_user).balance,
             99,
+        )
+
+    def test_inactive_linked_founder_does_not_confer_discount_eligibility(self):
+        from roo.services import CoworkingService
+
+        self._add_slack_side_eligibility(suffix="inactive-link")
+        self.founder_user.is_active = False
+        self.founder_user.save(update_fields=["is_active"])
+
+        self.assertEqual(
+            CoworkingService.get_coworking_cost(
+                user=self.slack_user,
+                booking_date=self.booking_date,
+            ),
+            8,
         )
 
     def test_availability_and_booking_api_use_linked_eligibility(self):
@@ -990,55 +1310,23 @@ class LinkedCoworkingEligibilityTests(APITestCase):
         self.assertTrue(booking.data["founder_tools_account_linked"])
         self.assertTrue(booking.data["founder_tools_explicitly_linked"])
 
-    def test_linking_adds_founder_eligibility_without_removing_slack_user_eligibility(self):
-        from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
-        from organizations.models import Organization
+    def test_explicit_link_replaces_slack_side_eligibility_fallback(self):
         from roo.services import CoworkingService
-        from startup_updates.models import (
-            MonthlyUpdateDraft,
-            MonthlyUpdateDraftStatus,
-            UserStartupBinding,
-        )
+        from startup_updates.models import UserStartupBinding
 
         # Remove the linked founder's eligibility so only the Slack-side
-        # account can qualify for the discount.
+        # account could qualify if the legacy fallback were still considered.
         UserStartupBinding.objects.filter(user=self.founder_user).update(
             coworking_discount_eligible=False
         )
-        organization = Organization.objects.create(
-            name="Slack Account Founder Pty Ltd",
-            domain="slack-account-founder.example",
-        )
-        profile = VibeRaisingProfile.objects.create(
-            user=self.slack_user,
-            role=VibeRaisingProfile.ROLE_FOUNDER,
-        )
-        VibeRaisingCompany.objects.create(
-            profile=profile,
-            organization=organization,
-            name="Slack Account Founder Pty Ltd",
-            registered=True,
-            abn="89000000020",
-            acn="000000020",
-            abr_verified_at=timezone.now(),
-        )
-        UserStartupBinding.objects.create(
-            user=self.slack_user,
-            organization=organization,
-            coworking_discount_eligible=True,
-        )
-        MonthlyUpdateDraft.objects.create(
-            organization=organization,
-            month=self.booking_date.replace(day=1),
-            status=MonthlyUpdateDraftStatus.READY,
-        )
+        self._add_slack_side_eligibility(suffix="explicit-link")
 
         self.assertEqual(
             CoworkingService.get_coworking_cost(
                 user=self.slack_user,
                 booking_date=self.booking_date,
             ),
-            4,
+            8,
         )
 
     def test_existing_booking_is_not_repriced_after_linking(self):

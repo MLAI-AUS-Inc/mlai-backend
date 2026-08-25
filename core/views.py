@@ -53,7 +53,6 @@ from .slack_founder_links import (
     SlackFounderLinkError,
     SlackFounderLinkUserNotFoundError,
     UsedSlackFounderLinkError,
-    assign_direct_slack_identity,
     complete_slack_founder_link,
     consumed_link_matches_founder_user,
     founder_account_connection_status,
@@ -1040,10 +1039,14 @@ class LinkSlackView(APIView):
                 status=status.HTTP_200_OK,
             )
 
-        user = resolve_existing_user_from_profile(
-            slack_user_id=slack_id,
-            profile={"slack_id": slack_id, "email": email},
-        )
+        try:
+            user = resolve_existing_user_from_profile(
+                slack_user_id=slack_id,
+                profile={"slack_id": slack_id, "email": email},
+                raise_link_conflict=True,
+            )
+        except ConflictingSlackFounderLinkError as exc:
+            return _slack_founder_link_error_response(exc)
         if user:
             return Response(
                 {"user_id": user.id, "linked": True},
@@ -1076,7 +1079,15 @@ def _slack_founder_link_error_response(exc, **details):
     )
 
 
-class SlackFounderLinkStartView(APIView):
+class SlackFounderLinkNoStoreMixin:
+    def finalize_response(self, request, response, *args, **kwargs):
+        response = super().finalize_response(request, response, *args, **kwargs)
+        response["Cache-Control"] = "no-store"
+        response["Pragma"] = "no-cache"
+        return response
+
+
+class SlackFounderLinkStartView(SlackFounderLinkNoStoreMixin, APIView):
     authentication_classes = []
     permission_classes = [HasStrictRooApiKey]
 
@@ -1129,7 +1140,7 @@ class SlackFounderLinkStartView(APIView):
         )
 
 
-class SlackFounderLinkStatusView(APIView):
+class SlackFounderLinkStatusView(SlackFounderLinkNoStoreMixin, APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
@@ -1139,7 +1150,7 @@ class SlackFounderLinkStatusView(APIView):
         )
 
 
-class SlackFounderLinkPreviewView(APIView):
+class SlackFounderLinkPreviewView(SlackFounderLinkNoStoreMixin, APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
@@ -1175,7 +1186,7 @@ class SlackFounderLinkPreviewView(APIView):
         )
 
 
-class SlackFounderLinkCompleteView(APIView):
+class SlackFounderLinkCompleteView(SlackFounderLinkNoStoreMixin, APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
@@ -1262,9 +1273,15 @@ class GetOrCreateSlackUserView(APIView):
             user = result.user
 
             if result.linked:
-                logger.info(f"Linked Slack ID {slack_id} to existing user {email}")
+                logger.info(
+                    "slack_identity_linked_to_existing_user user_pk=%s",
+                    result.user.pk,
+                )
             elif result.created:
-                logger.info(f"Auto-created user from Slack: {email} (Slack ID: {slack_id})")
+                logger.info(
+                    "slack_backed_user_created user_pk=%s",
+                    result.user.pk,
+                )
 
             return Response({
                 "user_id": user.id,
@@ -1278,8 +1295,11 @@ class GetOrCreateSlackUserView(APIView):
 
         except ConflictingSlackFounderLinkError as exc:
             return _slack_founder_link_error_response(exc)
-        except Exception as e:
-            logger.exception(f"Error creating user from Slack data: {str(e)}")
+        except Exception as exc:
+            logger.error(
+                "slack_user_creation_failed reason=%s",
+                type(exc).__name__,
+            )
             return Response(
                 {"error": "Failed to create user"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR

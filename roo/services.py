@@ -1122,9 +1122,9 @@ class CoworkingService:
         re-approving an old draft cannot renew the window.
         """
         # Imported lazily to avoid hard app dependencies at module load time.
-        # A verified explicit link adds the Founder Tools identity whose
-        # bindings are checked; it never removes the Slack-side user's own
-        # eligibility. Points and bookings continue to use ``user``.
+        # A verified explicit link selects the Founder Tools identity whose
+        # bindings are checked. Without one, the Slack-side user remains the
+        # legacy fallback. Points and bookings always continue to use ``user``.
         from core.slack_founder_links import coworking_eligibility_user_ids
         from founder_tools.models import VibeRaisingCompany
         from startup_updates.models import (

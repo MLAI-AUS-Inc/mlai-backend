@@ -200,6 +200,13 @@ class SlackFounderLinkRequest(models.Model):
     token_digest = models.CharField(max_length=64, unique=True)
     expires_at = models.DateTimeField(db_index=True)
     consumed_at = models.DateTimeField(null=True, blank=True)
+    consumed_by_user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="consumed_slack_founder_link_requests",
+    )
     invalidated_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -210,6 +217,21 @@ class SlackFounderLinkRequest(models.Model):
             models.Index(
                 fields=["slack_user", "expires_at"],
                 name="core_sflr_user_exp_idx",
+            ),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                check=(
+                    models.Q(
+                        consumed_at__isnull=True,
+                        consumed_by_user__isnull=True,
+                    )
+                    | models.Q(
+                        consumed_at__isnull=False,
+                        consumed_by_user__isnull=False,
+                    )
+                ),
+                name="core_sflr_consumed_actor",
             ),
         ]
 
