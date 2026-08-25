@@ -1657,6 +1657,9 @@ class CoworkingViewSet(viewsets.ViewSet):
             )
 
         slack_user_id = clean_slack_id(slack_user_id)
+        # Points Admin awards create a Slack-scoped points owner immediately,
+        # even when the member has never run the account-link flow. Resolve
+        # that owner first so their granted balance remains directly usable.
         user = PointsService.get_user_by_slack_id(slack_user_id)
         if not user:
             profile = SlackService.get_user_profile(slack_user_id)
