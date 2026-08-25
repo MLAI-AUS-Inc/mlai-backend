@@ -78,6 +78,7 @@ cookies.txt
 /docs/*.md
 /docs/**/*.md
 !/docs/mlai-coding-billing-contract.md
+!/docs/coworking-booking.md
 !/docs/org-memory-service-identity.md
 !/docs/org-memory-source-control.md
 !/docs/org-memory-evidence-kernel.md

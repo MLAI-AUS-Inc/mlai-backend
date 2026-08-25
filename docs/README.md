@@ -31,6 +31,10 @@ rollout sequence.
 - [`reconciliation-knowledge-export.md`](reconciliation-knowledge-export.md)
 - [`monthly-update-reminders.md`](monthly-update-reminders.md)
 
+## Roo
+
+- [`coworking-booking.md`](coworking-booking.md)
+
 ## Document status
 
 Documents in this directory are subsystem references, not a replacement for

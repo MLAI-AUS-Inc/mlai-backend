@@ -45,6 +45,7 @@ from .permissions import (
 from .committee_candidates import CommitteeCandidateEmailService
 from core.models import User
 from core.permissions import HasAPIKey, HasRooApiKey, HasStrictRooApiKey
+from core.slack_users import resolve_existing_user_from_profile
 from integrations.services import SlackService
 from community_chat.authentication import CommunityChatAccountAuthentication
 from hospital.authentication import CustomJWTAuthentication
@@ -1655,10 +1656,32 @@ class CoworkingViewSet(viewsets.ViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
+        slack_user_id = clean_slack_id(slack_user_id)
+        # Points Admin awards create a Slack-scoped points owner immediately,
+        # even when the member has never run the account-link flow. Resolve
+        # that owner first so their granted balance remains directly usable.
         user = PointsService.get_user_by_slack_id(slack_user_id)
         if not user:
+            profile = SlackService.get_user_profile(slack_user_id)
+            if profile is None:
+                return Response(
+                    {
+                        'code': 'slack_identity_unavailable',
+                        'error': 'Could not verify your Slack account right now. Please try again.',
+                    },
+                    status=status.HTTP_503_SERVICE_UNAVAILABLE,
+                )
+
+            user = resolve_existing_user_from_profile(
+                slack_user_id=slack_user_id,
+                profile=profile,
+            )
+        if not user:
             return Response(
-                {'error': 'Please link your Slack account first'},
+                {
+                    'code': 'slack_account_not_linked',
+                    'error': 'Please link your Slack account first',
+                },
                 status=status.HTTP_400_BAD_REQUEST
             )
 

@@ -42,9 +42,15 @@ from .serializers import (
     UserSerializer,
 )
 from rest_framework.generics import ListAPIView, RetrieveAPIView, RetrieveUpdateAPIView
-from .permissions import IsOwnerOrTeammateOrSuperuser, HasAPIKey, HasRooApiKey
+from .permissions import (
+    HasAPIKey,
+    HasRooApiKey,
+    HasStrictRooApiKey,
+    IsOwnerOrTeammateOrSuperuser,
+)
 from .throttles import AuthEndpointRateThrottle, MagicLinkSendRateThrottle
 from .user_compat import DEFAULT_USER_ROLE, get_compat_user_role, user_has_team
+from .slack_users import resolve_existing_user_from_profile
 
 User = get_user_model()
 logger = logging.getLogger(__name__)
@@ -998,23 +1004,56 @@ class LinkSlackView(APIView):
     Link a Slack ID to an existing user found by email.
     Path: POST /api/v1/users/link-slack/
     """
-    permission_classes = [HasRooApiKey]
+    permission_classes = [HasStrictRooApiKey]
 
     def post(self, request):
-        slack_id = request.data.get('slack_id')
-        email = request.data.get('email')
+        slack_id = str(request.data.get('slack_id') or '').strip()
+        email = User.objects.normalize_email(request.data.get('email'))
 
         if not slack_id or not email:
-            return Response({"error": "slack_id and email are required"}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {
+                    "code": "invalid_slack_link_request",
+                    "error": "slack_id and email are required",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
-        # Case-insensitive lookup
-        try:
-            user = User.objects.get(email__iexact=email)
-            user.slack_id = slack_id
-            user.save()
-            return Response({"user_id": user.id, "linked": True}, status=status.HTTP_200_OK)
-        except User.DoesNotExist:
-            return Response({"error": "User not found by email"}, status=status.HTTP_404_NOT_FOUND)
+        # An existing Slack link is authoritative and idempotent. Never move
+        # that Slack identity to a different account based on a later email.
+        user = User.objects.filter(slack_id=slack_id).first()
+        if user:
+            return Response(
+                {"user_id": user.id, "linked": True, "already_linked": True},
+                status=status.HTTP_200_OK,
+            )
+
+        user = resolve_existing_user_from_profile(
+            slack_user_id=slack_id,
+            profile={"slack_id": slack_id, "email": email},
+        )
+        if user:
+            return Response(
+                {"user_id": user.id, "linked": True},
+                status=status.HTTP_200_OK,
+            )
+
+        if not User.objects.filter(email__iexact=email).exists():
+            return Response(
+                {
+                    "code": "slack_account_not_found",
+                    "error": "User not found by email",
+                },
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        return Response(
+            {
+                "code": "slack_identity_conflict",
+                "error": "That MLAI account is already linked to another Slack identity",
+            },
+            status=status.HTTP_409_CONFLICT,
+        )
 
 
 class GetOrCreateSlackUserView(APIView):
