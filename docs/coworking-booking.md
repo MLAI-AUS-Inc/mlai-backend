@@ -21,6 +21,12 @@ email-less profiles fail closed. A failed Slack lookup returns retryable code
 `slack_identity_unavailable`; a verified profile without a safe existing match
 returns terminal code `slack_account_not_linked`.
 
+An account created earlier by a Points Admin award is already bound to the
+target Slack member ID, even when it uses a placeholder email and the member
+has never run `link`. Coworking booking reuses that points owner directly and
+charges its existing balance. It does not require email linking or create a
+second account.
+
 Roo's self-service `link` command uses the authenticated
 `POST /api/v1/users/link-slack/` service endpoint with the email Roo has just
 read from the exact Slack member profile. The endpoint accepts only Roo's

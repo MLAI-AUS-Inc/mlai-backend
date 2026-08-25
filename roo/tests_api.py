@@ -2091,6 +2091,55 @@ class CoworkingViewSetTests(APITestCase):
         self.assertEqual(response.data['standard_points_cost'], 8)
         self.assertFalse(response.data['monthly_update_discount_applied'])
 
+    @patch('core.permissions.HasRooApiKey.has_permission', return_value=True)
+    @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
+    @patch('roo.views.SlackService.get_user_profile', return_value=None)
+    def test_member_given_points_can_book_without_running_link(
+        self,
+        mock_get_profile,
+        mock_booking_permission,
+        mock_award_permission,
+    ):
+        slack_id = 'UCOPOINTSONLY'
+        award_response = self.client.post(
+            reverse('manual-award'),
+            {
+                'slack_user_id': self.admin_slack_id,
+                'target_slack_id': slack_id,
+                'points': 10,
+                'reason': 'Coworking access',
+            },
+            format='json',
+        )
+
+        self.assertEqual(award_response.status_code, status.HTTP_200_OK)
+        points_user = User.objects.get(slack_id=slack_id)
+        self.assertEqual(points_user.email, f'{slack_id}@slack.placeholder.com')
+        self.assertEqual(PointsAccount.objects.get(user=points_user).balance, 10)
+        mock_get_profile.assert_called_once_with(slack_id)
+
+        # Booking must reuse the Slack-scoped points owner directly. It must
+        # not require a verified email or a separate self-link operation.
+        mock_get_profile.reset_mock()
+        booking_date = (date.today() + timedelta(days=1)).isoformat()
+        booking_response = self.client.post(
+            self.url,
+            {'slack_user_id': slack_id, 'date': booking_date},
+            format='json',
+        )
+
+        self.assertEqual(booking_response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(booking_response.data['points_cost'], 8)
+        self.assertEqual(PointsAccount.objects.get(user=points_user).balance, 2)
+        self.assertTrue(
+            CoworkingBooking.objects.filter(
+                user=points_user,
+                date=booking_date,
+                status='booked',
+            ).exists()
+        )
+        mock_get_profile.assert_not_called()
+
     @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
     @patch('roo.views.SlackService.get_user_profile')
     def test_book_auto_links_existing_account_by_verified_slack_email(
