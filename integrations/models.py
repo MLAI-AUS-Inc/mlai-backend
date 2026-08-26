@@ -1741,6 +1741,80 @@ class LinearIssueCreationReceipt(models.Model):
         return f"{self.idempotency_key}:{self.status}"
 
 
+class LinearMeetingActionBatch(models.Model):
+    """Requester-bound, restart-safe review batch for extracted Linear work."""
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        PROCESSING = "processing", "Processing"
+        PARTIAL = "partial", "Partially completed"
+        COMPLETED = "completed", "Completed"
+        REJECTED = "rejected", "Rejected"
+        EXPIRED = "expired", "Expired"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    requested_by_slack_user_id = models.CharField(max_length=255, db_index=True)
+    slack_channel_id = models.CharField(max_length=255, blank=True, default="")
+    slack_thread_ts = models.CharField(max_length=255, blank=True, default="")
+    source_fingerprint = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    status = models.CharField(
+        max_length=24,
+        choices=Status.choices,
+        default=Status.PENDING,
+        db_index=True,
+    )
+    expires_at = models.DateTimeField(db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "linear_meeting_action_batch"
+        ordering = ["-created_at"]
+
+
+class LinearMeetingActionItem(models.Model):
+    """One durable proposal within a meeting-action batch."""
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        PROCESSING = "processing", "Processing"
+        APPROVED = "approved", "Approved"
+        REJECTED = "rejected", "Rejected"
+        FAILED = "failed", "Failed"
+        EXPIRED = "expired", "Expired"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    batch = models.ForeignKey(
+        LinearMeetingActionBatch,
+        on_delete=models.CASCADE,
+        related_name="items",
+    )
+    position = models.PositiveSmallIntegerField()
+    issue_input = models.JSONField(default=dict)
+    display = models.JSONField(default=dict, blank=True)
+    reason = models.TextField(blank=True, default="")
+    status = models.CharField(
+        max_length=24,
+        choices=Status.choices,
+        default=Status.PENDING,
+        db_index=True,
+    )
+    linear_issue_payload = models.JSONField(default=dict, blank=True)
+    last_error = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "linear_meeting_action_item"
+        ordering = ["position", "created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["batch", "position"],
+                name="linear_meeting_batch_position_uniq",
+            ),
+        ]
+
+
 class LinearProjectSizingRun(models.Model):
     """Durable, requester-bound preview/apply run for Linear effort labels."""
 

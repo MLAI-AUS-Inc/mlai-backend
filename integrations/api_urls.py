@@ -245,6 +245,21 @@ urlpatterns = [
         name='linear_meeting_issue_receipt',
     ),
     path(
+        'linear/action-batches',
+        api_views_connectors.LinearMeetingActionBatchCreateView.as_view(),
+        name='linear_meeting_action_batch_create',
+    ),
+    path(
+        'linear/action-batches/<uuid:batch_id>',
+        api_views_connectors.LinearMeetingActionBatchDetailView.as_view(),
+        name='linear_meeting_action_batch_detail',
+    ),
+    path(
+        'linear/action-batches/<uuid:batch_id>/decisions',
+        api_views_connectors.LinearMeetingActionBatchDecisionView.as_view(),
+        name='linear_meeting_action_batch_decision',
+    ),
+    path(
         'linear/projects/<str:project_id>/sizing-context',
         api_views_connectors.LinearProjectSizingContextView.as_view(),
         name='linear_project_sizing_context',
