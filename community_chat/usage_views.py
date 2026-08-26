@@ -251,26 +251,30 @@ class TokenUsageLeaderboardView(APIView):
             **{field: Sum(field) for field in TOKEN_FIELDS}
         )
 
-        # A reporting member should not disappear merely because they have not
-        # emitted a positive delta inside the selected daily window.  Keep every
-        # public account that has reported at least one session on the board and
-        # fill the selected window with zeroes when it has no matching buckets.
-        # This makes Today/7d/30d useful as slices of the same contributor set
-        # instead of looking like the user's connected peers have vanished.
-        contributor_account_ids = set(
+        # An opted-in member should not disappear merely because they have not
+        # emitted a positive delta inside the selected window. Keep every public
+        # reporter account on the board and fill the selected window with zeroes
+        # when it has no matching buckets. `has_reported` distinguishes an
+        # installed-but-silent reporter from a historical contributor who is
+        # simply inactive in this period.
+        public_accounts = list(
+            TokenUsageAccount.objects.filter(is_public=True).select_related("user")
+        )
+        reported_account_ids = set(
             TokenUsageSession.objects.filter(
                 account__is_public=True,
                 started_at__lte=now,
             ).values_list("account_id", flat=True)
         )
         entries_by_account = {
-            account_id: {
-                "account_id": account_id,
+            account.id: {
+                "account_id": account.id,
                 "sessions": 0,
                 "grand_total": 0,
+                "has_reported": account.id in reported_account_ids,
                 **{field: 0 for field in TOKEN_FIELDS},
             }
-            for account_id in contributor_account_ids
+            for account in public_accounts
         }
         for group in grouped:
             totals = {field: int(group[field] or 0) for field in TOKEN_FIELDS}
@@ -278,6 +282,7 @@ class TokenUsageLeaderboardView(APIView):
                 "account_id": group["account_id"],
                 "sessions": group["sessions"],
                 "grand_total": sum(totals.values()),
+                "has_reported": True,
                 **totals,
             }
         entries = list(entries_by_account.values())
@@ -311,21 +316,24 @@ class TokenUsageLeaderboardView(APIView):
                     "account_id": own.id,
                     "sessions": own_group["sessions"],
                     "grand_total": sum(own_totals.values()),
+                    "has_reported": True,
                     **own_totals,
+                }
+            else:
+                hidden_own_entry = {
+                    "account_id": own.id,
+                    "sessions": 0,
+                    "grand_total": 0,
+                    "has_reported": False,
+                    **{field: 0 for field in TOKEN_FIELDS},
                 }
         entries.sort(
             key=lambda entry: (-entry["grand_total"], str(entry["account_id"]))
         )
 
-        accounts = {
-            account.id: account
-            for account in TokenUsageAccount.objects.filter(
-                id__in=[
-                    *[entry["account_id"] for entry in entries],
-                    *([own.id] if hidden_own_entry is not None else []),
-                ]
-            ).select_related("user")
-        }
+        accounts = {account.id: account for account in public_accounts}
+        if own is not None and own.id not in accounts:
+            accounts[own.id] = own
 
         own_account_id = None
         if own is not None:

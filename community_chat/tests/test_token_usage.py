@@ -94,9 +94,15 @@ class TokenUsageIngestTests(APITestCase):
 
         bucket = TokenUsageDailyBucket.objects.get()
         self.assertEqual(bucket.usage_date, local_usage_date())
-        self.assertEqual(bucket.input_tokens, 1400)
-        self.assertEqual(bucket.output_tokens, 75)
+        self.assertEqual(bucket.input_tokens, 400)
+        self.assertEqual(bucket.output_tokens, 25)
         self.assertEqual(TokenUsageSession.objects.get().input_tokens, 1400)
+
+    def test_first_live_snapshot_establishes_a_baseline_without_daily_usage(self):
+        self.ingest([session_row(input_tokens=5_000_000_000)])
+
+        self.assertEqual(TokenUsageSession.objects.get().input_tokens, 5_000_000_000)
+        self.assertFalse(TokenUsageDailyBucket.objects.exists())
 
     def test_session_growth_after_melbourne_midnight_uses_the_new_day(self):
         melbourne_now = timezone.now().astimezone(ZoneInfo("Australia/Melbourne"))
@@ -111,14 +117,9 @@ class TokenUsageIngestTests(APITestCase):
         with patch("community_chat.usage_views.timezone.now", return_value=second_report):
             self.ingest([session_row(input_tokens=175)])
 
-        buckets = list(TokenUsageDailyBucket.objects.order_by("usage_date"))
-        self.assertEqual(len(buckets), 2)
-        self.assertEqual(buckets[0].input_tokens, 100)
-        self.assertEqual(buckets[1].input_tokens, 75)
-        self.assertEqual(
-            buckets[1].usage_date,
-            buckets[0].usage_date + timedelta(days=1),
-        )
+        bucket = TokenUsageDailyBucket.objects.get()
+        self.assertEqual(bucket.input_tokens, 75)
+        self.assertEqual(bucket.usage_date, local_usage_date(second_report))
 
     def test_history_establishes_a_baseline_without_inventing_daily_usage(self):
         self.ingest(
@@ -440,15 +441,19 @@ class TokenUsageLeaderboardTests(APITestCase):
 
         self.assertEqual(len(entries), 2)
         self.assertEqual(entries[0]["grand_total"], 100)
+        self.assertTrue(entries[0]["has_reported"])
         self.assertEqual(entries[1]["grand_total"], 0)
         self.assertEqual(entries[1]["sessions"], 0)
+        self.assertTrue(entries[1]["has_reported"])
 
-    def test_connected_account_without_reported_sessions_is_not_listed(self):
+    def test_connected_account_without_reported_sessions_remains_visible(self):
         self.account_for(self.rival)
 
         response = self.client.get(self.url, {"window": "today"})
 
-        self.assertEqual(response.data["entries"], [])
+        self.assertEqual(len(response.data["entries"]), 1)
+        self.assertEqual(response.data["entries"][0]["grand_total"], 0)
+        self.assertFalse(response.data["entries"][0]["has_reported"])
 
     @override_settings(TOKEN_USAGE_TIME_ZONE="Australia/Melbourne")
     def test_daily_window_uses_calendar_anchor_and_returns_metadata(self):

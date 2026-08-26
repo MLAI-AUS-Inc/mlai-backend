@@ -254,7 +254,13 @@ def upsert_sessions(
             field: max(int(row[field]) - previous[field], 0)
             for field in TOKEN_FIELDS
         }
-        if attribute_daily and any(delta.values()):
+        # An unseen cumulative snapshot is a baseline, not evidence that every
+        # token in it was consumed today.  This matters when a member enables
+        # live hooks before running the optional history backfill: treating a
+        # first report as growth would dump their entire coding history into a
+        # single Melbourne day.  Once the baseline exists, later positive
+        # growth is safe to attribute to its report-arrival day.
+        if attribute_daily and snapshot is not None and any(delta.values()):
             deltas[key] = delta
 
         if snapshot is None:
