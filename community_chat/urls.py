@@ -26,9 +26,17 @@ from .coding_views import (
     CodingTurnFinalizeView,
     CodingTurnTicketRefreshView,
 )
+from .home_views import CommunityHomeView
+from .usage_views import (
+    TokenUsageHistoryView,
+    TokenUsageIngestView,
+    TokenUsageLeaderboardView,
+    TokenUsageTokenView,
+)
 
 
 urlpatterns = [
+    path("home/", CommunityHomeView.as_view(), name="community_chat_home"),
     path("coding/jwks/", CodingJwksView.as_view(), name="community_chat_coding_jwks"),
     path(
         "coding/entitlement/",
@@ -83,4 +91,16 @@ urlpatterns = [
     path("bootstrap/invite/", InviteView.as_view(), name="community_chat_invite"),
     path("bootstrap/confirm/", ConfirmView.as_view(), name="community_chat_confirm"),
     path("devices/<str:public_key>/", DeviceView.as_view(), name="community_chat_device"),
+    # The tokenmaxer reporter builds "{apiBase}/api/ingest" by plain string
+    # concatenation, so these two paths must match literally — no trailing
+    # slash, or APPEND_SLASH would 301 the POST and the reporter would record
+    # a silent failure.
+    path("usage/api/ingest", TokenUsageIngestView.as_view(), name="token_usage_ingest"),
+    path("usage/api/history", TokenUsageHistoryView.as_view(), name="token_usage_history"),
+    path("usage/token/", TokenUsageTokenView.as_view(), name="token_usage_token"),
+    path(
+        "usage/leaderboard/",
+        TokenUsageLeaderboardView.as_view(),
+        name="token_usage_leaderboard",
+    ),
 ]
