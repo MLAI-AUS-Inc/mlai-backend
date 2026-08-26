@@ -587,6 +587,55 @@ class TokenUsageLeaderboardTests(APITestCase):
             "https://tokenmaxer.quest/u/jackmcpickle",
         )
         self.assertEqual(response.data["you"]["rank"], 2)
+        self.assertEqual(response.data["scope"], "australia")
+
+    @patch("community_chat.usage_views.fetch_public_tokenmaxer_entries")
+    def test_mlai_scope_returns_only_member_rows_with_local_ranks(
+        self, fetch_entries
+    ):
+        fetch_entries.return_value = [
+            {
+                "external_id": "tokenmaxer:leader",
+                "display_name": "Australia leader",
+                "profile_url": "https://tokenmaxer.quest/u/leader",
+                "sessions": 20,
+                "grand_total": 10_000,
+                "input_tokens": 9_000,
+                "output_tokens": 1_000,
+                "cache_read_tokens": 0,
+                "cache_creation_tokens": 0,
+                "reasoning_tokens": 0,
+            }
+        ]
+        self.add_usage(self.account_for(self.user), 100)
+        self.add_usage(self.account_for(self.rival), 900)
+
+        response = self.client.get(
+            self.url,
+            {"scope": "mlai", "window": "all"},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["scope"], "mlai")
+        self.assertEqual(
+            [entry["origin"] for entry in response.data["entries"]],
+            ["mlai", "mlai"],
+        )
+        self.assertEqual(
+            [entry["rank"] for entry in response.data["entries"]],
+            [1, 2],
+        )
+        self.assertEqual(response.data["you"]["rank"], 2)
+        fetch_entries.assert_not_called()
+
+    def test_invalid_scope_is_rejected(self):
+        response = self.client.get(self.url, {"scope": "world"})
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            response.data["error"],
+            "scope must be one of: mlai, australia",
+        )
 
     def test_caller_outside_the_cut_still_sees_their_own_rank(self):
         self.add_usage(self.account_for(self.user), 1)

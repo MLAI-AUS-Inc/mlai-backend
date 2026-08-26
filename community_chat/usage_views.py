@@ -65,6 +65,10 @@ TOKEN_FIELDS = (
 
 WINDOWS = ("today", "7d", "30d", "all")
 DEFAULT_WINDOW = "today"
+SCOPES = ("mlai", "australia")
+# Preserve the existing no-parameter contract for older clients. MLAI Chat
+# sends its explicit, user-selected scope and defaults that selection to MLAI.
+DEFAULT_SCOPE = "australia"
 DEFAULT_LIMIT = 100
 MAX_LIMIT = 200
 
@@ -282,6 +286,12 @@ class TokenUsageLeaderboardView(APIView):
                 {"error": "window must be one of: " + ", ".join(WINDOWS)},
                 status=400,
             )
+        scope = request.query_params.get("scope", DEFAULT_SCOPE)
+        if scope not in SCOPES:
+            return Response(
+                {"error": "scope must be one of: " + ", ".join(SCOPES)},
+                status=400,
+            )
         try:
             limit = int(request.query_params.get("limit", DEFAULT_LIMIT))
         except (TypeError, ValueError):
@@ -392,7 +402,7 @@ class TokenUsageLeaderboardView(APIView):
         # The upstream API can only describe its current windows. Historical
         # anchor queries remain local rather than presenting mismatched dates.
         external_payloads = []
-        if anchor == leaderboard_today:
+        if scope == "australia" and anchor == leaderboard_today:
             external_payloads = [
                 _external_payload(entry)
                 for entry in fetch_public_tokenmaxer_entries(window)
@@ -451,6 +461,7 @@ class TokenUsageLeaderboardView(APIView):
         return Response(
             {
                 "window": window,
+                "scope": scope,
                 "timezone": settings.TOKEN_USAGE_LEADERBOARD_TIME_ZONE,
                 "window_basis": "session_started_at",
                 "total_basis": "source_normalized",
