@@ -839,11 +839,11 @@ try:
     )
 except ValueError as exc:
     raise ImproperlyConfigured(
-        'ROO_FOUNDER_LINK_TTL_SECONDS must be an integer between 300 and 86400 seconds'
+        'ROO_FOUNDER_LINK_TTL_SECONDS must be an integer between 300 and 1800 seconds'
     ) from exc
-if not 300 <= ROO_FOUNDER_LINK_TTL_SECONDS <= 86400:
+if not 300 <= ROO_FOUNDER_LINK_TTL_SECONDS <= 1800:
     raise ImproperlyConfigured(
-        'ROO_FOUNDER_LINK_TTL_SECONDS must be between 300 and 86400 seconds'
+        'ROO_FOUNDER_LINK_TTL_SECONDS must be between 300 and 1800 seconds'
     )
 try:
     ROO_FOUNDER_LINK_ISSUE_LIMIT = int(

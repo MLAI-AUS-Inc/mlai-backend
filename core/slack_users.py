@@ -6,6 +6,11 @@ from dataclasses import dataclass
 from typing import Optional, Tuple
 
 from django.db import IntegrityError, transaction
+from integrations.services.slack import (
+    SlackService,
+    SlackUserLookupUnavailableError,
+    SlackUserNotFoundError,
+)
 
 from .models import User
 from .slack_founder_links import (
@@ -51,7 +56,7 @@ def register_slack_side_user_for_founder_link(
 
     profile = _slack_profile(normalized_slack_id)
     if profile is None:
-        raise SlackProfileUnavailableError()
+        return None
     if (
         str(profile.get("slack_id") or "").strip() != normalized_slack_id
         or profile.get("is_bot")
@@ -203,16 +208,19 @@ def validate_slack_id(slack_id: Optional[str]) -> Tuple[bool, str]:
 
 
 def _slack_profile(slack_user_id: str) -> Optional[dict]:
-    """Fetch a Slack profile, returning None on any failure."""
+    """Fetch a Slack profile while preserving not-found versus unavailable."""
     try:
-        from integrations.services.slack import SlackService
-        return SlackService.get_user_profile(slack_user_id)
-    except Exception as exc:  # pragma: no cover - network / credential issues
+        return SlackService.get_user_profile_strict(slack_user_id)
+    except SlackUserNotFoundError:
+        return None
+    except SlackUserLookupUnavailableError as exc:
+        raise SlackProfileUnavailableError() from exc
+    except Exception as exc:  # pragma: no cover - defensive dependency boundary
         logger.warning(
             "slack_profile_lookup_failed reason=%s",
             type(exc).__name__,
         )
-        return None
+        raise SlackProfileUnavailableError() from exc
 
 
 def resolve_existing_user_from_profile(

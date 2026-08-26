@@ -1,6 +1,10 @@
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, timedelta
 from io import StringIO
+import os
+from pathlib import Path
+import subprocess
+import sys
 from threading import Barrier
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlparse
@@ -10,7 +14,12 @@ from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.db import IntegrityError, close_old_connections, connection, transaction
 from django.db.migrations.executor import MigrationExecutor
-from django.test import TransactionTestCase, override_settings, skipUnlessDBFeature
+from django.test import (
+    SimpleTestCase,
+    TransactionTestCase,
+    override_settings,
+    skipUnlessDBFeature,
+)
 from django.urls import reverse
 from django.utils import timezone
 from rest_framework import status
@@ -37,9 +46,118 @@ from core.slack_founder_link_retention import (
     run_scheduled_slack_founder_link_request_cleanup,
 )
 from core.slack_users import (
+    SlackProfileUnavailableError,
     register_slack_side_user_for_founder_link,
     resolve_existing_user_from_profile,
 )
+from integrations.services.slack import (
+    SlackService,
+    SlackUserLookupUnavailableError,
+    SlackUserNotFoundError,
+)
+
+
+class SlackFounderLinkSettingsTests(SimpleTestCase):
+    def test_token_ttl_cannot_exceed_frontend_cookie_lifetime(self):
+        environment = os.environ.copy()
+        environment["ROO_FOUNDER_LINK_TTL_SECONDS"] = "1801"
+        result = subprocess.run(
+            [sys.executable, "-c", "import mlai.settings"],
+            cwd=Path(__file__).resolve().parents[1],
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "ROO_FOUNDER_LINK_TTL_SECONDS must be between 300 and 1800 seconds",
+            result.stdout + result.stderr,
+        )
+
+
+class SlackServiceStrictUserLookupTests(SimpleTestCase):
+    @patch.object(
+        SlackService,
+        "get_client",
+        side_effect=RuntimeError("token setup failed for UPRIVATE1"),
+    )
+    def test_client_initialization_failure_is_typed_and_sanitized(self, _get_client):
+        with self.assertLogs(
+            "integrations.services.slack",
+            level="WARNING",
+        ) as captured:
+            with self.assertRaises(SlackUserLookupUnavailableError):
+                SlackService.get_user_profile_strict("UPRIVATE1")
+
+        output = "\n".join(captured.output)
+        self.assertNotIn("UPRIVATE1", output)
+        self.assertIn("reason_code=RuntimeError", output)
+
+    @patch.object(SlackService, "get_client")
+    def test_not_found_is_typed_and_logs_no_slack_id(self, get_client):
+        get_client.return_value.users_info.return_value = {
+            "ok": False,
+            "error": "user_not_found",
+        }
+
+        with self.assertLogs(
+            "integrations.services.slack",
+            level="INFO",
+        ) as captured:
+            with self.assertRaises(SlackUserNotFoundError):
+                SlackService.get_user_profile_strict("UMISSING1")
+
+        self.assertNotIn("UMISSING1", "\n".join(captured.output))
+        self.assertIn("reason_code=user_not_found", "\n".join(captured.output))
+
+    @patch.object(SlackService, "get_client")
+    def test_outage_is_typed_and_logs_no_slack_id(self, get_client):
+        get_client.return_value.users_info.return_value = {
+            "ok": False,
+            "error": "team_access_not_granted",
+        }
+
+        with self.assertLogs(
+            "integrations.services.slack",
+            level="WARNING",
+        ) as captured:
+            with self.assertRaises(SlackUserLookupUnavailableError):
+                SlackService.get_user_profile_strict("UPRIVATE1")
+
+        self.assertNotIn("UPRIVATE1", "\n".join(captured.output))
+        self.assertIn(
+            "reason_code=team_access_not_granted",
+            "\n".join(captured.output),
+        )
+
+    @patch.object(SlackService, "get_client")
+    def test_malformed_profile_is_typed_and_logs_no_slack_id(self, get_client):
+        get_client.return_value.users_info.return_value = {
+            "ok": True,
+            "user": {"id": "UPRIVATE1", "profile": None},
+        }
+
+        with self.assertLogs(
+            "integrations.services.slack",
+            level="WARNING",
+        ) as captured:
+            with self.assertRaises(SlackUserLookupUnavailableError):
+                SlackService.get_user_profile_strict("UPRIVATE1")
+
+        output = "\n".join(captured.output)
+        self.assertNotIn("UPRIVATE1", output)
+        self.assertIn("reason_code=malformed_success", output)
+
+    @patch.object(SlackService, "get_client")
+    def test_legacy_lookup_remains_nullable(self, get_client):
+        get_client.return_value.users_info.return_value = {
+            "ok": False,
+            "error": "user_not_found",
+        }
+
+        self.assertIsNone(SlackService.get_user_profile("UMISSING1"))
 
 
 class SlackFounderSyntheticIdentityMigrationTests(TransactionTestCase):
@@ -375,7 +493,10 @@ class SlackFounderLinkApiTests(APITestCase):
         self.founder_user.refresh_from_db()
         self.assertIsNone(self.founder_user.slack_id)
 
-    @patch("core.slack_users._slack_profile", return_value=None)
+    @patch(
+        "core.slack_users._slack_profile",
+        side_effect=SlackProfileUnavailableError,
+    )
     def test_start_returns_retryable_error_when_slack_cannot_be_verified(
         self,
         _slack_profile,
@@ -388,6 +509,23 @@ class SlackFounderLinkApiTests(APITestCase):
         )
         self.assertEqual(response.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
         self.assertEqual(response.data["code"], "slack_identity_unavailable")
+        self.assertFalse(User.objects.filter(slack_id="UMISSING1").exists())
+        self.assertFalse(SlackFounderLinkRequest.objects.exists())
+
+    @patch("core.slack_users._slack_profile", return_value=None)
+    def test_start_returns_not_found_when_slack_confirms_user_is_missing(
+        self,
+        _slack_profile,
+    ):
+        response = self.client.post(
+            self.start_url,
+            {"slack_user_id": "UMISSING1"},
+            format="json",
+            HTTP_X_API_KEY="roo-link-key",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(response.data["code"], "slack_user_not_found")
         self.assertFalse(User.objects.filter(slack_id="UMISSING1").exists())
         self.assertFalse(SlackFounderLinkRequest.objects.exists())
 
