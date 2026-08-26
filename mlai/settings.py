@@ -491,6 +491,26 @@ TOKEN_USAGE_TIME_ZONE = _validated_timezone_name(
     os.getenv('TOKEN_USAGE_TIME_ZONE', 'Australia/Melbourne'),
     'TOKEN_USAGE_TIME_ZONE',
 )
+# The public Tokenmaxer board slices sessions by their UTC start date.  Keep
+# the federated board on the same calendar so local and upstream rows are
+# comparable instead of silently mixing two definitions of "Today".
+TOKEN_USAGE_LEADERBOARD_TIME_ZONE = _validated_timezone_name(
+    os.getenv('TOKEN_USAGE_LEADERBOARD_TIME_ZONE', 'UTC'),
+    'TOKEN_USAGE_LEADERBOARD_TIME_ZONE',
+)
+TOKENMAXER_FEDERATION_ENABLED = _env_is_true(
+    'TOKENMAXER_FEDERATION_ENABLED',
+    not _RUNNING_TESTS,
+)
+TOKENMAXER_PUBLIC_API_BASE = os.getenv(
+    'TOKENMAXER_PUBLIC_API_BASE', 'https://tokenmaxer.quest'
+).rstrip('/')
+TOKENMAXER_FEDERATION_TIMEOUT_SECONDS = float(
+    os.getenv('TOKENMAXER_FEDERATION_TIMEOUT_SECONDS', '3')
+)
+TOKENMAXER_FEDERATION_CACHE_SECONDS = int(
+    os.getenv('TOKENMAXER_FEDERATION_CACHE_SECONDS', '600')
+)
 COMMUNITY_CHAT_API_AUDIENCE = os.getenv('COMMUNITY_CHAT_API_AUDIENCE', 'https://api.mlai.au')
 COMMUNITY_CHAT_ADAPTER_URL = os.getenv(
     'COMMUNITY_CHAT_ADAPTER_URL', 'http://127.0.0.1:3100'

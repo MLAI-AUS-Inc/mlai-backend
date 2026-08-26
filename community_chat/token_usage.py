@@ -64,6 +64,32 @@ TOKEN_FIELDS = (
     "reasoning_tokens",
 )
 
+# Codex and pi expose cached input as a subset of ``input_tokens``.  Claude,
+# Cursor and opencode expose cache buckets separately.  A blanket sum of every
+# field therefore double-counts cache-heavy Codex/pi sessions.
+INPUT_INCLUDES_CACHE_SOURCES = frozenset({"codex", "pi"})
+
+
+def normalized_token_total(source, totals):
+    """Return comparable processed tokens without double-counting cache.
+
+    ``totals`` may be a model, an annotated mapping, or a plain dictionary.
+    The individual categories stay in the API for transparency; this function
+    defines only the headline/ranking number.
+    """
+
+    def value(field):
+        if isinstance(totals, dict):
+            return int(totals.get(field) or 0)
+        return int(getattr(totals, field, 0) or 0)
+
+    total = value("input_tokens") + value("output_tokens") + value(
+        "reasoning_tokens"
+    )
+    if source not in INPUT_INCLUDES_CACHE_SOURCES:
+        total += value("cache_read_tokens") + value("cache_creation_tokens")
+    return total
+
 
 class IngestError(ValueError):
     """The request is malformed as a whole and no row can be salvaged."""

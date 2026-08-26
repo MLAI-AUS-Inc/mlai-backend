@@ -165,6 +165,7 @@ jobs:
           community_chat.tests.test_account_sessions \
           community_chat.tests.test_link_previews \
           community_chat.tests.test_token_usage \
+          community_chat.tests.test_tokenmaxer_federation \
           community_chat.tests.test_home \
           integrations.tests_community_bridge \
           integrations.tests_community_bridge_avatar_backfill \
