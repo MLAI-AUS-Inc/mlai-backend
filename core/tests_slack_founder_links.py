@@ -5,6 +5,7 @@ from threading import Barrier
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlparse
 
+from django.core.cache import cache
 from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.db import IntegrityError, close_old_connections, connection, transaction
@@ -32,7 +33,13 @@ from core.slack_founder_links import (
     digest_link_token,
     start_slack_founder_link,
 )
-from core.slack_users import resolve_existing_user_from_profile
+from core.slack_founder_link_retention import (
+    run_scheduled_slack_founder_link_request_cleanup,
+)
+from core.slack_users import (
+    register_slack_side_user_for_founder_link,
+    resolve_existing_user_from_profile,
+)
 
 
 class SlackFounderSyntheticIdentityMigrationTests(TransactionTestCase):
@@ -335,7 +342,91 @@ class SlackFounderLinkApiTests(APITestCase):
         self.assertIsNone(first_request.invalidated_at)
         self.assertIsNone(first_request.consumed_at)
 
-    def test_start_returns_not_found_for_unregistered_slack_user(self):
+    @patch("core.slack_users._slack_profile")
+    def test_start_registers_slack_side_without_matching_profile_email(
+        self,
+        slack_profile,
+    ):
+        slack_profile.return_value = {
+            "slack_id": "UNEWLINK12",
+            "email": self.founder_user.email,
+            "real_name": "Separate Slack Member",
+            "image_url": "https://example.com/avatar.png",
+            "is_bot": False,
+            "deleted": False,
+        }
+
+        response = self.client.post(
+            self.start_url,
+            {"slack_user_id": "UNEWLINK12"},
+            format="json",
+            HTTP_X_API_KEY="roo-link-key",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        slack_user = User.objects.get(slack_id="UNEWLINK12")
+        self.assertNotEqual(slack_user.pk, self.founder_user.pk)
+        self.assertEqual(slack_user.email, "unewlink12@slack.placeholder.com")
+        self.assertEqual(slack_user.full_name, "Separate Slack Member")
+        self.assertEqual(
+            SlackFounderLinkRequest.objects.get().slack_user,
+            slack_user,
+        )
+        self.founder_user.refresh_from_db()
+        self.assertIsNone(self.founder_user.slack_id)
+
+    @patch("core.slack_users._slack_profile", return_value=None)
+    def test_start_returns_retryable_error_when_slack_cannot_be_verified(
+        self,
+        _slack_profile,
+    ):
+        response = self.client.post(
+            self.start_url,
+            {"slack_user_id": "UMISSING1"},
+            format="json",
+            HTTP_X_API_KEY="roo-link-key",
+        )
+        self.assertEqual(response.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
+        self.assertEqual(response.data["code"], "slack_identity_unavailable")
+        self.assertFalse(User.objects.filter(slack_id="UMISSING1").exists())
+        self.assertFalse(SlackFounderLinkRequest.objects.exists())
+
+    @patch("core.slack_users._slack_profile")
+    def test_start_does_not_adopt_preexisting_placeholder_email(self, slack_profile):
+        collision = User.objects.create_user(
+            email="ucollision1@slack.placeholder.com",
+            role="participant",
+        )
+        slack_profile.return_value = {
+            "slack_id": "UCOLLISION1",
+            "email": "untrusted-profile@example.com",
+            "real_name": "Collision Member",
+            "is_bot": False,
+            "deleted": False,
+        }
+
+        response = self.client.post(
+            self.start_url,
+            {"slack_user_id": "UCOLLISION1"},
+            format="json",
+            HTTP_X_API_KEY="roo-link-key",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        collision.refresh_from_db()
+        self.assertIsNone(collision.slack_id)
+        self.assertFalse(SlackFounderLinkRequest.objects.exists())
+
+    @patch("core.slack_users._slack_profile")
+    def test_start_returns_not_found_for_ineligible_slack_identity(
+        self,
+        slack_profile,
+    ):
+        slack_profile.return_value = {
+            "slack_id": "UMISSING1",
+            "deleted": True,
+            "is_bot": False,
+        }
         response = self.client.post(
             self.start_url,
             {"slack_user_id": "UMISSING1"},
@@ -344,6 +435,128 @@ class SlackFounderLinkApiTests(APITestCase):
         )
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
         self.assertEqual(response.data["code"], "slack_user_not_found")
+
+    @override_settings(
+        ROO_FOUNDER_LINK_ISSUE_LIMIT=2,
+        ROO_FOUNDER_LINK_ISSUE_WINDOW_SECONDS=600,
+    )
+    def test_start_rate_limit_preserves_latest_valid_request(self):
+        first = self._start()
+        second = self._start()
+        second_token = self._token_from_response(second)
+
+        limited = self._start()
+
+        self.assertEqual(first.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(second.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(limited.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
+        self.assertEqual(limited.data["code"], "link_rate_limited")
+        self.assertGreaterEqual(limited.data["retry_after_seconds"], 1)
+        self.assertEqual(
+            limited["Retry-After"],
+            str(limited.data["retry_after_seconds"]),
+        )
+        latest = SlackFounderLinkRequest.objects.get(
+            token_digest=digest_link_token(second_token)
+        )
+        self.assertIsNone(latest.invalidated_at)
+        self.assertEqual(SlackFounderLinkRequest.objects.count(), 2)
+
+    def test_retention_cleanup_deletes_only_old_terminal_requests(self):
+        now = timezone.now()
+        stale_invalidated = SlackFounderLinkRequest.objects.create(
+            slack_user=self.slack_user,
+            token_digest=digest_link_token("A" * 43),
+            expires_at=now - timedelta(days=8),
+            invalidated_at=now - timedelta(days=8),
+        )
+        stale_expired = SlackFounderLinkRequest.objects.create(
+            slack_user=self.slack_user,
+            token_digest=digest_link_token("B" * 43),
+            expires_at=now - timedelta(days=8),
+        )
+        recent_terminal = SlackFounderLinkRequest.objects.create(
+            slack_user=self.slack_user,
+            token_digest=digest_link_token("C" * 43),
+            expires_at=now + timedelta(minutes=30),
+            invalidated_at=now,
+        )
+        old_active = SlackFounderLinkRequest.objects.create(
+            slack_user=self.slack_user,
+            token_digest=digest_link_token("D" * 43),
+            expires_at=now + timedelta(days=1),
+        )
+        SlackFounderLinkRequest.objects.filter(
+            pk__in=[stale_invalidated.pk, stale_expired.pk, old_active.pk]
+        ).update(created_at=now - timedelta(days=8))
+
+        output = StringIO()
+        call_command(
+            "purge_slack_founder_link_requests",
+            "--retention-days",
+            "7",
+            stdout=output,
+        )
+
+        self.assertEqual(
+            set(SlackFounderLinkRequest.objects.values_list("pk", flat=True)),
+            {recent_terminal.pk, old_active.pk},
+        )
+        self.assertIn(
+            "Deleted 2 stale Slack-Founder link request(s).",
+            output.getvalue(),
+        )
+
+    def test_retention_cleanup_rejects_invalid_window(self):
+        with self.assertRaises(CommandError):
+            call_command(
+                "purge_slack_founder_link_requests",
+                "--retention-days",
+                "0",
+            )
+
+    @patch(
+        "core.slack_founder_link_retention."
+        "purge_stale_slack_founder_link_requests"
+    )
+    def test_scheduled_retention_runs_once_per_local_day(self, purge):
+        cache.clear()
+        self.addCleanup(cache.clear)
+        purge.return_value = 3
+        now = timezone.now()
+
+        first = run_scheduled_slack_founder_link_request_cleanup(now=now)
+        second = run_scheduled_slack_founder_link_request_cleanup(now=now)
+
+        self.assertEqual(first["status"], "completed")
+        self.assertEqual(first["deleted"], 3)
+        self.assertEqual(
+            second,
+            {
+                "status": "skipped",
+                "reason": "already_completed",
+                "date": first["date"],
+            },
+        )
+        purge.assert_called_once_with(now=now)
+
+    @patch(
+        "core.slack_founder_link_retention."
+        "purge_stale_slack_founder_link_requests"
+    )
+    def test_failed_scheduled_retention_can_retry(self, purge):
+        cache.clear()
+        self.addCleanup(cache.clear)
+        purge.side_effect = [RuntimeError("database busy"), 1]
+        now = timezone.now()
+
+        with self.assertRaises(RuntimeError):
+            run_scheduled_slack_founder_link_request_cleanup(now=now)
+        result = run_scheduled_slack_founder_link_request_cleanup(now=now)
+
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["deleted"], 1)
+        self.assertEqual(purge.call_count, 2)
 
     def test_start_rejects_an_inactive_slack_account(self):
         self.slack_user.is_active = False
@@ -1450,6 +1663,40 @@ class SlackFounderLinkConcurrencyTests(TransactionTestCase):
     reset_sequences = True
 
     @skipUnlessDBFeature("has_select_for_update")
+    def test_concurrent_link_start_registration_creates_one_slack_side_user(self):
+        slack_user_id = "URACENEW12"
+        profile = {
+            "slack_id": slack_user_id,
+            "email": "founder-email-must-not-match@example.com",
+            "real_name": "Concurrent Member",
+            "is_bot": False,
+            "deleted": False,
+        }
+        barrier = Barrier(2)
+
+        def register():
+            close_old_connections()
+            barrier.wait()
+            try:
+                user = register_slack_side_user_for_founder_link(slack_user_id)
+                return user.pk if user is not None else None
+            finally:
+                connection.close()
+
+        with (
+            patch("core.slack_users._slack_profile", return_value=profile),
+            ThreadPoolExecutor(max_workers=2) as executor,
+        ):
+            outcomes = list(executor.map(lambda _item: register(), range(2)))
+
+        self.assertEqual(outcomes[0], outcomes[1])
+        self.assertEqual(User.objects.filter(slack_id=slack_user_id).count(), 1)
+        self.assertEqual(
+            User.objects.get(slack_id=slack_user_id).email,
+            "uracenew12@slack.placeholder.com",
+        )
+
+    @skipUnlessDBFeature("has_select_for_update")
     def test_concurrent_completion_creates_one_link_and_rejects_replay(self):
         slack_user = User.objects.create_user(
             email="concurrent-slack@example.com",
@@ -1473,7 +1720,7 @@ class SlackFounderLinkConcurrencyTests(TransactionTestCase):
             except UsedSlackFounderLinkError:
                 return "used"
             finally:
-                close_old_connections()
+                connection.close()
 
         with ThreadPoolExecutor(max_workers=2) as executor:
             outcomes = list(executor.map(lambda _: complete(), range(2)))
@@ -1507,7 +1754,7 @@ class SlackFounderLinkConcurrencyTests(TransactionTestCase):
             except ConflictingSlackFounderLinkError:
                 return "conflict"
             finally:
-                close_old_connections()
+                connection.close()
 
         with ThreadPoolExecutor(max_workers=2) as executor:
             futures = [
@@ -1537,7 +1784,7 @@ class SlackFounderLinkConcurrencyTests(TransactionTestCase):
             try:
                 return f"start:{start_slack_founder_link(slack_user).status}"
             finally:
-                close_old_connections()
+                connection.close()
 
         def complete():
             close_old_connections()
@@ -1551,7 +1798,7 @@ class SlackFounderLinkConcurrencyTests(TransactionTestCase):
             except SlackFounderLinkError as exc:
                 return f"complete:{exc.code}"
             finally:
-                close_old_connections()
+                connection.close()
 
         with ThreadPoolExecutor(max_workers=2) as executor:
             futures = [executor.submit(start), executor.submit(complete)]
@@ -1586,7 +1833,7 @@ class SlackFounderLinkConcurrencyTests(TransactionTestCase):
             except ConflictingSlackFounderLinkError:
                 return "link_conflict"
             finally:
-                close_old_connections()
+                connection.close()
 
         def assign():
             close_old_connections()
@@ -1597,7 +1844,7 @@ class SlackFounderLinkConcurrencyTests(TransactionTestCase):
             except ConflictingSlackFounderLinkError:
                 return "assignment_conflict"
             finally:
-                close_old_connections()
+                connection.close()
 
         with ThreadPoolExecutor(max_workers=2) as executor:
             futures = [executor.submit(complete), executor.submit(assign)]

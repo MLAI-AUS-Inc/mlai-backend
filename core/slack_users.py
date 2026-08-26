@@ -27,6 +27,89 @@ class SlackUserRegistrationResult:
     linked: bool = False
 
 
+class SlackProfileUnavailableError(RuntimeError):
+    """Raised when a new Slack identity cannot be verified with Slack."""
+
+
+def register_slack_side_user_for_founder_link(
+    slack_user_id: str,
+) -> Optional[User]:
+    """Create the Slack-owned side of an explicit Founder Tools link.
+
+    This deliberately ignores the profile email. The authenticated Founder
+    Tools account is selected later by the token holder, so matching here by
+    email would bypass the explicit verification flow.
+    """
+    normalized_slack_id = str(slack_user_id or "").strip()
+    is_valid, _error = validate_slack_id(normalized_slack_id)
+    if not is_valid:
+        return None
+
+    existing = User.objects.filter(slack_id=normalized_slack_id).first()
+    if existing is not None:
+        return existing if existing.is_active else None
+
+    profile = _slack_profile(normalized_slack_id)
+    if profile is None:
+        raise SlackProfileUnavailableError()
+    if (
+        str(profile.get("slack_id") or "").strip() != normalized_slack_id
+        or profile.get("is_bot")
+        or profile.get("deleted")
+    ):
+        return None
+
+    real_name = str(
+        profile.get("real_name")
+        or profile.get("display_name")
+        or profile.get("name")
+        or "Slack member"
+    ).strip()
+    name_parts = real_name.split()
+    placeholder_email = f"{normalized_slack_id.lower()}@slack.placeholder.com"
+
+    with transaction.atomic():
+        existing = (
+            User.objects.select_for_update()
+            .filter(slack_id=normalized_slack_id)
+            .first()
+        )
+        if existing is not None:
+            return existing if existing.is_active else None
+
+        placeholder_user = (
+            User.objects.select_for_update()
+            .filter(email__iexact=placeholder_email)
+            .first()
+        )
+        if placeholder_user is not None:
+            # Never adopt an existing account by email, even on the reserved
+            # placeholder domain. A legitimate concurrent creator is recovered
+            # through the slack_id uniqueness winner below.
+            return None
+
+        try:
+            with transaction.atomic():
+                user = User.objects.create_user(
+                    email=placeholder_email,
+                    role="participant",
+                    first_name=name_parts[0] if name_parts else "Slack",
+                    last_name=" ".join(name_parts[1:]) if len(name_parts) > 1 else "",
+                    slack_id=normalized_slack_id,
+                )
+                user.is_active = True
+                avatar_url = profile.get("image_url")
+                if avatar_url:
+                    user.avatar_url = avatar_url
+                user.save()
+        except IntegrityError:
+            winner = User.objects.filter(slack_id=normalized_slack_id).first()
+            return winner if winner is not None and winner.is_active else None
+
+    logger.info("slack_founder_link_user_registered user_pk=%s", user.pk)
+    return user
+
+
 def ensure_slack_user(
     *,
     slack_id: str,

@@ -51,6 +51,7 @@ from .permissions import (
 from .slack_founder_links import (
     ConflictingSlackFounderLinkError,
     SlackFounderLinkError,
+    SlackFounderLinkRateLimitedError,
     SlackFounderLinkUserNotFoundError,
     UsedSlackFounderLinkError,
     complete_slack_founder_link,
@@ -61,7 +62,11 @@ from .slack_founder_links import (
 )
 from .throttles import AuthEndpointRateThrottle, MagicLinkSendRateThrottle
 from .user_compat import DEFAULT_USER_ROLE, get_compat_user_role, user_has_team
-from .slack_users import resolve_existing_user_from_profile
+from .slack_users import (
+    SlackProfileUnavailableError,
+    register_slack_side_user_for_founder_link,
+    resolve_existing_user_from_profile,
+)
 
 User = get_user_model()
 logger = logging.getLogger(__name__)
@@ -1073,10 +1078,16 @@ class LinkSlackView(APIView):
 
 def _slack_founder_link_error_response(exc, **details):
     logger.info("slack_founder_link_rejected code=%s", exc.code)
-    return Response(
+    retry_after_seconds = getattr(exc, "retry_after_seconds", None)
+    if retry_after_seconds is not None:
+        details["retry_after_seconds"] = retry_after_seconds
+    response = Response(
         {"code": exc.code, "error": str(exc), **details},
         status=exc.status_code,
     )
+    if retry_after_seconds is not None:
+        response["Retry-After"] = str(retry_after_seconds)
+    return response
 
 
 class SlackFounderLinkNoStoreMixin:
@@ -1107,12 +1118,30 @@ class SlackFounderLinkStartView(SlackFounderLinkNoStoreMixin, APIView):
             is_active=True,
         ).first()
         if slack_user is None:
+            try:
+                slack_user = register_slack_side_user_for_founder_link(
+                    slack_user_id
+                )
+            except SlackProfileUnavailableError:
+                return Response(
+                    {
+                        "code": "slack_identity_unavailable",
+                        "error": (
+                            "Roo could not verify this Slack account right now. "
+                            "Please try again."
+                        ),
+                    },
+                    status=status.HTTP_503_SERVICE_UNAVAILABLE,
+                )
+        if slack_user is None:
             return _slack_founder_link_error_response(
                 SlackFounderLinkUserNotFoundError()
             )
 
         try:
             link_start = start_slack_founder_link(slack_user)
+        except SlackFounderLinkRateLimitedError as exc:
+            return _slack_founder_link_error_response(exc)
         except SlackFounderLinkError as exc:
             return _slack_founder_link_error_response(exc)
         if link_start.status == "already_linked":

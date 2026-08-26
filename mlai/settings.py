@@ -845,6 +845,32 @@ if not 300 <= ROO_FOUNDER_LINK_TTL_SECONDS <= 86400:
     raise ImproperlyConfigured(
         'ROO_FOUNDER_LINK_TTL_SECONDS must be between 300 and 86400 seconds'
     )
+try:
+    ROO_FOUNDER_LINK_ISSUE_LIMIT = int(
+        os.getenv('ROO_FOUNDER_LINK_ISSUE_LIMIT', '5') or 5
+    )
+    ROO_FOUNDER_LINK_ISSUE_WINDOW_SECONDS = int(
+        os.getenv('ROO_FOUNDER_LINK_ISSUE_WINDOW_SECONDS', '600') or 600
+    )
+    ROO_FOUNDER_LINK_REQUEST_RETENTION_DAYS = int(
+        os.getenv('ROO_FOUNDER_LINK_REQUEST_RETENTION_DAYS', '7') or 7
+    )
+except ValueError as exc:
+    raise ImproperlyConfigured(
+        'Roo Founder link issuance and retention settings must be integers'
+    ) from exc
+if not 1 <= ROO_FOUNDER_LINK_ISSUE_LIMIT <= 100:
+    raise ImproperlyConfigured(
+        'ROO_FOUNDER_LINK_ISSUE_LIMIT must be between 1 and 100'
+    )
+if not 60 <= ROO_FOUNDER_LINK_ISSUE_WINDOW_SECONDS <= 86400:
+    raise ImproperlyConfigured(
+        'ROO_FOUNDER_LINK_ISSUE_WINDOW_SECONDS must be between 60 and 86400'
+    )
+if not 1 <= ROO_FOUNDER_LINK_REQUEST_RETENTION_DAYS <= 365:
+    raise ImproperlyConfigured(
+        'ROO_FOUNDER_LINK_REQUEST_RETENTION_DAYS must be between 1 and 365'
+    )
 CONTENT_FACTORY_FRONTEND_URL = os.getenv('CONTENT_FACTORY_FRONTEND_URL') or DEFAULT_FRONTEND_URL
 CONTENT_FACTORY_URL = os.getenv('CONTENT_FACTORY_URL') or (
     'http://localhost:8001' if IS_LOCAL_ENV else ''

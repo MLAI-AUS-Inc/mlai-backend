@@ -218,6 +218,14 @@ class SlackFounderLinkRequest(models.Model):
                 fields=["slack_user", "expires_at"],
                 name="core_sflr_user_exp_idx",
             ),
+            models.Index(
+                fields=["slack_user", "created_at"],
+                name="core_sflr_user_created_idx",
+            ),
+            models.Index(
+                fields=["created_at"],
+                name="core_sflr_created_idx",
+            ),
         ]
         constraints = [
             models.CheckConstraint(

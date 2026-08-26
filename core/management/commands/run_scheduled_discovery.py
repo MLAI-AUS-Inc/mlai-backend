@@ -4,6 +4,9 @@ from datetime import date as calendar_date
 
 from django.core.management.base import BaseCommand, CommandError
 
+from core.slack_founder_link_retention import (
+    run_scheduled_slack_founder_link_request_cleanup,
+)
 from content_analytics.services.report_scheduler import run_daily_article_report_scheduler
 from content_factory.reconciliation import run_content_factory_reconciliation_sweep
 from content_factory.services.island_refresh_scheduler import run_island_refresh_scheduler
@@ -92,6 +95,12 @@ class Command(BaseCommand):
             # Enforces the configured raw-dialogue retention window once per
             # local day. Its cache marker makes the minute scheduler tick cheap.
             ("health_hack_conversation_retention", run_scheduled_sim_conversation_cleanup),
+            # Bounds terminal Roo-Founder link-request storage. The runner is
+            # cache-locked and executes once per Melbourne-local day.
+            (
+                "slack_founder_link_request_retention",
+                run_scheduled_slack_founder_link_request_cleanup,
+            ),
             # Generates each analytics-enabled org's immutable daily article
             # performance brief once per org-local date after the configured
             # local hour. Gated by CONTENT_ANALYTICS_REPORTS_ENABLED; the

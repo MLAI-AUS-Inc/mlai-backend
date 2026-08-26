@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import math
 import re
 import secrets
 from dataclasses import dataclass
@@ -52,6 +53,16 @@ class SlackFounderLinkUserNotFoundError(SlackFounderLinkError):
     code = "slack_user_not_found"
     status_code = 404
     default_message = "Ask Roo to register your Slack account before linking."
+
+
+class SlackFounderLinkRateLimitedError(SlackFounderLinkError):
+    code = "link_rate_limited"
+    status_code = 429
+    default_message = "Too many account-link requests. Please wait before trying again."
+
+    def __init__(self, retry_after_seconds: int):
+        super().__init__()
+        self.retry_after_seconds = max(1, int(retry_after_seconds))
 
 
 @dataclass(frozen=True)
@@ -197,6 +208,36 @@ def _create_slack_founder_link_request_for_locked_user(
     locked_user: User,
 ) -> tuple[SlackFounderLinkRequest, str]:
     now = timezone.now()
+    retention_cutoff = now - timedelta(
+        days=settings.ROO_FOUNDER_LINK_REQUEST_RETENTION_DAYS
+    )
+    SlackFounderLinkRequest.objects.filter(
+        slack_user=locked_user,
+        created_at__lt=retention_cutoff,
+    ).filter(
+        Q(consumed_at__isnull=False)
+        | Q(invalidated_at__isnull=False)
+        | Q(expires_at__lte=now)
+    ).delete()
+
+    issuance_window = timedelta(
+        seconds=settings.ROO_FOUNDER_LINK_ISSUE_WINDOW_SECONDS
+    )
+    recent_requests = SlackFounderLinkRequest.objects.filter(
+        slack_user=locked_user,
+        created_at__gte=now - issuance_window,
+    ).order_by("created_at")
+    if recent_requests.count() >= settings.ROO_FOUNDER_LINK_ISSUE_LIMIT:
+        oldest_created_at = recent_requests.values_list(
+            "created_at",
+            flat=True,
+        ).first()
+        retry_after = max(
+            1,
+            math.ceil((oldest_created_at + issuance_window - now).total_seconds()),
+        )
+        raise SlackFounderLinkRateLimitedError(retry_after)
+
     SlackFounderLinkRequest.objects.filter(
         slack_user=locked_user,
         consumed_at__isnull=True,
@@ -216,6 +257,31 @@ def _create_slack_founder_link_request_for_locked_user(
         request.pk,
     )
     return request, raw_token
+
+
+def purge_stale_slack_founder_link_requests(
+    *,
+    now=None,
+    retention_days: int | None = None,
+) -> int:
+    """Delete terminal link requests after the configured audit window."""
+    current_time = now or timezone.now()
+    days = (
+        settings.ROO_FOUNDER_LINK_REQUEST_RETENTION_DAYS
+        if retention_days is None
+        else int(retention_days)
+    )
+    if days < 1:
+        raise ValueError("retention_days must be at least 1")
+    cutoff = current_time - timedelta(days=days)
+    deleted, _details = SlackFounderLinkRequest.objects.filter(
+        created_at__lt=cutoff,
+    ).filter(
+        Q(consumed_at__isnull=False)
+        | Q(invalidated_at__isnull=False)
+        | Q(expires_at__lte=current_time)
+    ).delete()
+    return deleted
 
 
 @transaction.atomic
