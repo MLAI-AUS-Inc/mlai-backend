@@ -1,11 +1,14 @@
 import hashlib
 import secrets
 from datetime import timedelta, timezone as datetime_timezone
+from io import StringIO
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
+from django.core.management import call_command
+from django.core.management.base import CommandError
 from django.test import override_settings
 from django.urls import reverse
 from django.utils import timezone
@@ -94,9 +97,15 @@ class TokenUsageIngestTests(APITestCase):
 
         bucket = TokenUsageDailyBucket.objects.get()
         self.assertEqual(bucket.usage_date, local_usage_date())
-        self.assertEqual(bucket.input_tokens, 1400)
-        self.assertEqual(bucket.output_tokens, 75)
+        self.assertEqual(bucket.input_tokens, 400)
+        self.assertEqual(bucket.output_tokens, 25)
         self.assertEqual(TokenUsageSession.objects.get().input_tokens, 1400)
+
+    def test_first_live_snapshot_establishes_a_baseline_without_daily_usage(self):
+        self.ingest([session_row(input_tokens=5_000_000_000)])
+
+        self.assertEqual(TokenUsageSession.objects.get().input_tokens, 5_000_000_000)
+        self.assertFalse(TokenUsageDailyBucket.objects.exists())
 
     def test_session_growth_after_melbourne_midnight_uses_the_new_day(self):
         melbourne_now = timezone.now().astimezone(ZoneInfo("Australia/Melbourne"))
@@ -111,14 +120,9 @@ class TokenUsageIngestTests(APITestCase):
         with patch("community_chat.usage_views.timezone.now", return_value=second_report):
             self.ingest([session_row(input_tokens=175)])
 
-        buckets = list(TokenUsageDailyBucket.objects.order_by("usage_date"))
-        self.assertEqual(len(buckets), 2)
-        self.assertEqual(buckets[0].input_tokens, 100)
-        self.assertEqual(buckets[1].input_tokens, 75)
-        self.assertEqual(
-            buckets[1].usage_date,
-            buckets[0].usage_date + timedelta(days=1),
-        )
+        bucket = TokenUsageDailyBucket.objects.get()
+        self.assertEqual(bucket.input_tokens, 75)
+        self.assertEqual(bucket.usage_date, local_usage_date(second_report))
 
     def test_history_establishes_a_baseline_without_inventing_daily_usage(self):
         self.ingest(
@@ -421,8 +425,38 @@ class TokenUsageLeaderboardTests(APITestCase):
             usage_date=local_usage_date() - timedelta(days=40),
         )
 
-        self.assertEqual(self.client.get(self.url, {"window": "7d"}).data["entries"], [])
+        entry = self.client.get(self.url, {"window": "7d"}).data["entries"][0]
+        self.assertEqual(entry["grand_total"], 0)
+        self.assertEqual(entry["sessions"], 0)
         self.assertEqual(len(self.client.get(self.url, {"window": "all"}).data["entries"]), 1)
+
+    def test_daily_window_keeps_other_historical_contributors_visible(self):
+        self.add_usage(self.account_for(self.user), 100)
+        rival = self.account_for(self.rival)
+        self.add_usage(
+            rival,
+            900,
+            started_at=timezone.now() - timezone.timedelta(days=40),
+            session_id=OTHER_UUID,
+        )
+
+        entries = self.client.get(self.url, {"window": "today"}).data["entries"]
+
+        self.assertEqual(len(entries), 2)
+        self.assertEqual(entries[0]["grand_total"], 100)
+        self.assertTrue(entries[0]["has_reported"])
+        self.assertEqual(entries[1]["grand_total"], 0)
+        self.assertEqual(entries[1]["sessions"], 0)
+        self.assertTrue(entries[1]["has_reported"])
+
+    def test_connected_account_without_reported_sessions_remains_visible(self):
+        self.account_for(self.rival)
+
+        response = self.client.get(self.url, {"window": "today"})
+
+        self.assertEqual(len(response.data["entries"]), 1)
+        self.assertEqual(response.data["entries"][0]["grand_total"], 0)
+        self.assertFalse(response.data["entries"][0]["has_reported"])
 
     @override_settings(TOKEN_USAGE_TIME_ZONE="Australia/Melbourne")
     def test_daily_window_uses_calendar_anchor_and_returns_metadata(self):
@@ -523,3 +557,76 @@ class TokenUsageLeaderboardTests(APITestCase):
             response.status_code,
             (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN),
         )
+
+
+class TokenUsageDailyCorrectionCommandTests(APITestCase):
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(email="member@example.com")
+        self.account = TokenUsageAccount.objects.create(
+            user=self.user,
+            token_hash=hashlib.sha256(self.user.email.encode()).hexdigest(),
+        )
+        self.bucket = TokenUsageDailyBucket.objects.create(
+            account=self.account,
+            usage_date=local_usage_date(),
+            source="claude_code",
+            session_id=SESSION_UUID,
+            model="claude-opus-5",
+            input_tokens=5_000_000_000,
+        )
+        self.session = TokenUsageSession.objects.create(
+            account=self.account,
+            source="claude_code",
+            session_id=SESSION_UUID,
+            model="claude-opus-5",
+            input_tokens=5_000_000_000,
+            started_at=timezone.now(),
+        )
+
+    def command_args(self):
+        return (
+            "correct_token_usage_daily_buckets",
+            "--email",
+            self.user.email,
+            "--usage-date",
+            local_usage_date().isoformat(),
+        )
+
+    def test_dry_run_reports_without_deleting(self):
+        output = StringIO()
+
+        call_command(*self.command_args(), stdout=output)
+
+        self.assertIn('"daily_bucket_rows": 1', output.getvalue())
+        self.assertIn('"input_tokens": 5000000000', output.getvalue())
+        self.assertTrue(TokenUsageDailyBucket.objects.filter(pk=self.bucket.pk).exists())
+        self.assertTrue(TokenUsageSession.objects.filter(pk=self.session.pk).exists())
+
+    def test_apply_deletes_only_daily_buckets_and_preserves_sessions(self):
+        output = StringIO()
+
+        call_command(
+            *self.command_args(),
+            "--apply",
+            "--confirm-email",
+            self.user.email,
+            stdout=output,
+        )
+
+        self.assertIn('"remaining_daily_bucket_rows": 0', output.getvalue())
+        self.assertFalse(TokenUsageDailyBucket.objects.filter(pk=self.bucket.pk).exists())
+        self.assertTrue(TokenUsageSession.objects.filter(pk=self.session.pk).exists())
+
+    def test_apply_requires_matching_confirmation(self):
+        with self.assertRaisesMessage(CommandError, "--confirm-email must exactly match"):
+            call_command(*self.command_args(), "--apply")
+
+    def test_unknown_account_is_rejected(self):
+        with self.assertRaisesMessage(CommandError, "No token-usage account"):
+            call_command(
+                "correct_token_usage_daily_buckets",
+                "--email",
+                "missing@example.com",
+                "--usage-date",
+                local_usage_date().isoformat(),
+            )

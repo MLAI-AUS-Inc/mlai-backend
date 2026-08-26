@@ -1,5 +1,28 @@
 # Community Home and token usage API
 
+## Correcting an invalid daily baseline
+
+An operator can remove a single opted-in member's invalid daily delta without
+changing their cumulative session history or all-time leaderboard total. The
+command is a read-only preview unless `--apply` and an exact email confirmation
+are both supplied:
+
+```bash
+python manage.py correct_token_usage_daily_buckets \
+  --email member@example.com \
+  --usage-date 2026-08-26
+
+python manage.py correct_token_usage_daily_buckets \
+  --email member@example.com \
+  --usage-date 2026-08-26 \
+  --apply \
+  --confirm-email member@example.com
+```
+
+Production execution is exposed through the manually dispatched
+`Correct production token usage daily buckets` workflow. Apply mode requires
+the separate confirmation checkbox and accepts only one account and one date.
+
 This document is the current backend contract for MLAI Chat's Community Home.
 The endpoints live below `/api/v1/community-chat/`.
 
@@ -46,12 +69,14 @@ billing records or a basis for prizes.
 
 Each reporter row is a cumulative `(source, session_id, model)` snapshot.
 All-time totals come from the latest monotonic snapshot. Live ingest adds only
-positive growth since the prior snapshot to the configured calendar day on
-which that report arrives. This is report-arrival attribution, not the
-session's start date or an estimate of when each token was consumed. Repeating
-the same snapshot adds zero, and growth reported after Melbourne midnight is
-credited to the new day. History backfill updates all-time totals only: it
-establishes cumulative baselines but does not invent historical daily
+positive growth since a prior snapshot to the configured calendar day on which
+that report arrives. An unseen live snapshot establishes a baseline and adds
+nothing to the daily window; otherwise a member's entire cumulative history
+could be mislabelled as today's usage. This is report-arrival attribution, not
+the session's start date or an estimate of when each token was consumed.
+Repeating the same snapshot adds zero, and growth reported after Melbourne
+midnight is credited to the new day. History backfill updates all-time totals
+only: it establishes cumulative baselines but does not invent historical daily
 attribution. The next live report credits only growth beyond that backfilled
 baseline to its own arrival day.
 
@@ -68,4 +93,7 @@ set both dates to null. Daily history begins when live delta buckets are first
 collected. Bucket dates always mean the live report-arrival date in the
 configured timezone; a history backfill improves all-time totals but
 deliberately does not populate any daily window or fabricate past daily
-rankings.
+rankings. Every public opted-in reporter account remains visible in every
+window. Rows include `has_reported`: false means the member connected but the
+backend has not accepted a session yet; true with zero window totals means the
+member has history but no matching live delta in that period.
