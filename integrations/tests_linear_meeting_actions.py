@@ -386,6 +386,82 @@ class LinearMeetingActionsApiTests(SimpleTestCase):
         )
 
     @patch("integrations.services.linear_meeting_actions.http_requests.post")
+    def test_context_paginates_every_accessible_team(self, mock_post):
+        mock_post.side_effect = [
+            FakeLinearResponse(
+                {
+                    "data": {
+                        "teams": {
+                            "nodes": [
+                                {
+                                    "id": "team-mlai",
+                                    "key": "MLA",
+                                    "name": "MLAI",
+                                    "members": {"nodes": []},
+                                }
+                            ],
+                            "pageInfo": {"hasNextPage": True, "endCursor": "team-cursor-1"},
+                        }
+                    }
+                }
+            ),
+            FakeLinearResponse(
+                {
+                    "data": {
+                        "teams": {
+                            "nodes": [
+                                {
+                                    "id": "team-studio",
+                                    "key": "STU",
+                                    "name": "Studio",
+                                    "members": {"nodes": []},
+                                }
+                            ],
+                            "pageInfo": {"hasNextPage": False, "endCursor": None},
+                        }
+                    }
+                }
+            ),
+            FakeLinearResponse({"data": {"users": {"nodes": []}}}),
+            FakeLinearResponse(
+                {
+                    "data": {
+                        "projects": {
+                            "nodes": [],
+                            "pageInfo": {"hasNextPage": False, "endCursor": None},
+                        }
+                    }
+                }
+            ),
+            FakeLinearResponse(
+                {
+                    "data": {
+                        "issueLabels": {
+                            "nodes": [],
+                            "pageInfo": {"hasNextPage": False, "endCursor": None},
+                        }
+                    }
+                }
+            ),
+            FakeLinearResponse({"data": {"issues": {"nodes": []}}}),
+        ]
+
+        response = self.client.get(
+            "/api/v1/integrations/linear/meeting-context",
+            **self.auth_headers,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            [(team["id"], team["key"]) for team in response.json()["teams"]],
+            [("team-mlai", "MLA"), ("team-studio", "STU")],
+        )
+        first_team_request = mock_post.call_args_list[0].kwargs["json"]
+        second_team_request = mock_post.call_args_list[1].kwargs["json"]
+        self.assertIsNone(first_team_request["variables"]["after"])
+        self.assertEqual(second_team_request["variables"]["after"], "team-cursor-1")
+
+    @patch("integrations.services.linear_meeting_actions.http_requests.post")
     def test_create_issue_translates_snake_case_payload_to_linear_input(self, mock_post):
         mock_post.return_value = FakeLinearResponse(
             {
