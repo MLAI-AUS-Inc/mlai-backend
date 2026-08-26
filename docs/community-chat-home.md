@@ -68,4 +68,6 @@ set both dates to null. Daily history begins when live delta buckets are first
 collected. Bucket dates always mean the live report-arrival date in the
 configured timezone; a history backfill improves all-time totals but
 deliberately does not populate any daily window or fabricate past daily
-rankings.
+rankings. Public contributors with reported session history remain visible in
+every window; when they have no matching live delta, that window returns zero
+tokens and zero sessions for their row instead of removing them from the board.

@@ -251,17 +251,36 @@ class TokenUsageLeaderboardView(APIView):
             **{field: Sum(field) for field in TOKEN_FIELDS}
         )
 
-        entries = []
+        # A reporting member should not disappear merely because they have not
+        # emitted a positive delta inside the selected daily window.  Keep every
+        # public account that has reported at least one session on the board and
+        # fill the selected window with zeroes when it has no matching buckets.
+        # This makes Today/7d/30d useful as slices of the same contributor set
+        # instead of looking like the user's connected peers have vanished.
+        contributor_account_ids = set(
+            TokenUsageSession.objects.filter(
+                account__is_public=True,
+                started_at__lte=now,
+            ).values_list("account_id", flat=True)
+        )
+        entries_by_account = {
+            account_id: {
+                "account_id": account_id,
+                "sessions": 0,
+                "grand_total": 0,
+                **{field: 0 for field in TOKEN_FIELDS},
+            }
+            for account_id in contributor_account_ids
+        }
         for group in grouped:
             totals = {field: int(group[field] or 0) for field in TOKEN_FIELDS}
-            entries.append(
-                {
-                    "account_id": group["account_id"],
-                    "sessions": group["sessions"],
-                    "grand_total": sum(totals.values()),
-                    **totals,
-                }
-            )
+            entries_by_account[group["account_id"]] = {
+                "account_id": group["account_id"],
+                "sessions": group["sessions"],
+                "grand_total": sum(totals.values()),
+                **totals,
+            }
+        entries = list(entries_by_account.values())
 
         own = TokenUsageAccount.objects.filter(user=request.user).first()
         hidden_own_entry = None
@@ -283,7 +302,11 @@ class TokenUsageLeaderboardView(APIView):
             own_totals = {
                 field: int(own_group[field] or 0) for field in TOKEN_FIELDS
             }
-            if any(own_totals.values()):
+            has_reported = TokenUsageSession.objects.filter(
+                account=own,
+                started_at__lte=now,
+            ).exists()
+            if has_reported:
                 hidden_own_entry = {
                     "account_id": own.id,
                     "sessions": own_group["sessions"],

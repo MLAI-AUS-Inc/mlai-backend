@@ -421,8 +421,34 @@ class TokenUsageLeaderboardTests(APITestCase):
             usage_date=local_usage_date() - timedelta(days=40),
         )
 
-        self.assertEqual(self.client.get(self.url, {"window": "7d"}).data["entries"], [])
+        entry = self.client.get(self.url, {"window": "7d"}).data["entries"][0]
+        self.assertEqual(entry["grand_total"], 0)
+        self.assertEqual(entry["sessions"], 0)
         self.assertEqual(len(self.client.get(self.url, {"window": "all"}).data["entries"]), 1)
+
+    def test_daily_window_keeps_other_historical_contributors_visible(self):
+        self.add_usage(self.account_for(self.user), 100)
+        rival = self.account_for(self.rival)
+        self.add_usage(
+            rival,
+            900,
+            started_at=timezone.now() - timezone.timedelta(days=40),
+            session_id=OTHER_UUID,
+        )
+
+        entries = self.client.get(self.url, {"window": "today"}).data["entries"]
+
+        self.assertEqual(len(entries), 2)
+        self.assertEqual(entries[0]["grand_total"], 100)
+        self.assertEqual(entries[1]["grand_total"], 0)
+        self.assertEqual(entries[1]["sessions"], 0)
+
+    def test_connected_account_without_reported_sessions_is_not_listed(self):
+        self.account_for(self.rival)
+
+        response = self.client.get(self.url, {"window": "today"})
+
+        self.assertEqual(response.data["entries"], [])
 
     @override_settings(TOKEN_USAGE_TIME_ZONE="Australia/Melbourne")
     def test_daily_window_uses_calendar_anchor_and_returns_metadata(self):
