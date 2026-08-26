@@ -1,0 +1,85 @@
+name: Correct production token usage daily buckets
+
+on:
+  workflow_dispatch:
+    inputs:
+      email:
+        description: Exact email of the opted-in token reporter
+        required: true
+        type: string
+      usage_date:
+        description: Melbourne reporting date (YYYY-MM-DD)
+        required: true
+        type: string
+      mode:
+        description: Preview or apply the correction
+        required: true
+        default: dry_run
+        type: choice
+        options:
+          - dry_run
+          - apply
+      confirm_data_correction:
+        description: Required when mode is apply
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-token-usage-daily-correction
+  cancel-in-progress: false
+
+jobs:
+  correct:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate inputs
+        env:
+          EMAIL: ${{ inputs.email }}
+          USAGE_DATE: ${{ inputs.usage_date }}
+          MODE: ${{ inputs.mode }}
+          CONFIRM: ${{ inputs.confirm_data_correction }}
+        run: |
+          set -euo pipefail
+          [[ "$EMAIL" =~ ^[^[:space:]@]+@[^[:space:]@]+\.[^[:space:]@]+$ ]]
+          [[ "$USAGE_DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]
+          [[ "$MODE" == "dry_run" || "$MODE" == "apply" ]]
+          if [[ "$MODE" == "apply" && "$CONFIRM" != "true" ]]; then
+            echo "::error::confirm_data_correction must be selected"
+            exit 1
+          fi
+
+      - name: Install SSH key
+        uses: webfactory/ssh-agent@v0.10.0
+        with:
+          ssh-private-key: ${{ secrets.DO_SSH_KEY }}
+
+      - name: Add known host
+        run: ssh-keyscan -H 209.38.85.60 >> ~/.ssh/known_hosts
+
+      - name: Correct selected daily buckets
+        env:
+          EMAIL: ${{ inputs.email }}
+          USAGE_DATE: ${{ inputs.usage_date }}
+          MODE: ${{ inputs.mode }}
+        run: |
+          set -euo pipefail
+          ssh root@209.38.85.60 bash -s -- "$EMAIL" "$USAGE_DATE" "$MODE" <<'REMOTE'
+          set -euo pipefail
+          email="$1"
+          usage_date="$2"
+          mode="$3"
+          cd /root/mlai-backend
+          args=(
+            python manage.py correct_token_usage_daily_buckets
+            --email "$email"
+            --usage-date "$usage_date"
+          )
+          if [[ "$mode" == "apply" ]]; then
+            args+=(--apply --confirm-email "$email")
+          fi
+          docker compose exec -T web "${args[@]}" </dev/null
+          REMOTE

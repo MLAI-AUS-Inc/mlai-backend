@@ -1,5 +1,28 @@
 # Community Home and token usage API
 
+## Correcting an invalid daily baseline
+
+An operator can remove a single opted-in member's invalid daily delta without
+changing their cumulative session history or all-time leaderboard total. The
+command is a read-only preview unless `--apply` and an exact email confirmation
+are both supplied:
+
+```bash
+python manage.py correct_token_usage_daily_buckets \
+  --email member@example.com \
+  --usage-date 2026-08-26
+
+python manage.py correct_token_usage_daily_buckets \
+  --email member@example.com \
+  --usage-date 2026-08-26 \
+  --apply \
+  --confirm-email member@example.com
+```
+
+Production execution is exposed through the manually dispatched
+`Correct production token usage daily buckets` workflow. Apply mode requires
+the separate confirmation checkbox and accepts only one account and one date.
+
 This document is the current backend contract for MLAI Chat's Community Home.
 The endpoints live below `/api/v1/community-chat/`.
 

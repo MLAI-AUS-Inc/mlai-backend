@@ -1,11 +1,14 @@
 import hashlib
 import secrets
 from datetime import timedelta, timezone as datetime_timezone
+from io import StringIO
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
+from django.core.management import call_command
+from django.core.management.base import CommandError
 from django.test import override_settings
 from django.urls import reverse
 from django.utils import timezone
@@ -554,3 +557,76 @@ class TokenUsageLeaderboardTests(APITestCase):
             response.status_code,
             (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN),
         )
+
+
+class TokenUsageDailyCorrectionCommandTests(APITestCase):
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(email="member@example.com")
+        self.account = TokenUsageAccount.objects.create(
+            user=self.user,
+            token_hash=hashlib.sha256(self.user.email.encode()).hexdigest(),
+        )
+        self.bucket = TokenUsageDailyBucket.objects.create(
+            account=self.account,
+            usage_date=local_usage_date(),
+            source="claude_code",
+            session_id=SESSION_UUID,
+            model="claude-opus-5",
+            input_tokens=5_000_000_000,
+        )
+        self.session = TokenUsageSession.objects.create(
+            account=self.account,
+            source="claude_code",
+            session_id=SESSION_UUID,
+            model="claude-opus-5",
+            input_tokens=5_000_000_000,
+            started_at=timezone.now(),
+        )
+
+    def command_args(self):
+        return (
+            "correct_token_usage_daily_buckets",
+            "--email",
+            self.user.email,
+            "--usage-date",
+            local_usage_date().isoformat(),
+        )
+
+    def test_dry_run_reports_without_deleting(self):
+        output = StringIO()
+
+        call_command(*self.command_args(), stdout=output)
+
+        self.assertIn('"daily_bucket_rows": 1', output.getvalue())
+        self.assertIn('"input_tokens": 5000000000', output.getvalue())
+        self.assertTrue(TokenUsageDailyBucket.objects.filter(pk=self.bucket.pk).exists())
+        self.assertTrue(TokenUsageSession.objects.filter(pk=self.session.pk).exists())
+
+    def test_apply_deletes_only_daily_buckets_and_preserves_sessions(self):
+        output = StringIO()
+
+        call_command(
+            *self.command_args(),
+            "--apply",
+            "--confirm-email",
+            self.user.email,
+            stdout=output,
+        )
+
+        self.assertIn('"remaining_daily_bucket_rows": 0', output.getvalue())
+        self.assertFalse(TokenUsageDailyBucket.objects.filter(pk=self.bucket.pk).exists())
+        self.assertTrue(TokenUsageSession.objects.filter(pk=self.session.pk).exists())
+
+    def test_apply_requires_matching_confirmation(self):
+        with self.assertRaisesMessage(CommandError, "--confirm-email must exactly match"):
+            call_command(*self.command_args(), "--apply")
+
+    def test_unknown_account_is_rejected(self):
+        with self.assertRaisesMessage(CommandError, "No token-usage account"):
+            call_command(
+                "correct_token_usage_daily_buckets",
+                "--email",
+                "missing@example.com",
+                "--usage-date",
+                local_usage_date().isoformat(),
+            )
