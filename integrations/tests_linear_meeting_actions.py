@@ -1359,3 +1359,150 @@ class LinearProjectSizingInventoryTests(SimpleTestCase):
         self.assertIn("orderBy: createdAt", query)
         self.assertEqual(variables["after"], "update-cursor-1")
         self.assertEqual(payload["nodes"][0]["id"], "update-26")
+
+
+@override_settings(
+    LINEAR_API_KEY="lin-api-key",
+    ROO_API_KEY="roo-api-key",
+    INTERNAL_API_KEY="",
+    MLAI_API_KEY="",
+)
+class LinearMeetingActionBatchTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.auth_headers = {"HTTP_X_API_KEY": "roo-api-key"}
+        self.payload = {
+            "requested_by_slack_user_id": "UDANIEL",
+            "slack_channel_id": "C1",
+            "slack_thread_ts": "1.1",
+            "source_fingerprint": "a" * 64,
+            "items": [
+                {
+                    "issue_input": {
+                        "title": "Compare Apollo and Firmable",
+                        "team_id": "team-1",
+                        "project_id": "project-1",
+                        "idempotency_key": "b" * 64,
+                    },
+                    "display": {
+                        "title": "Compare Apollo and Firmable",
+                        "project": "[Studio] Project Acquire",
+                        "assignee": "callumpholt",
+                    },
+                    "reason": "Needs approval",
+                }
+            ],
+        }
+
+    def test_batch_survives_database_reload_and_approval_is_idempotent(self):
+        created = self.client.post(
+            "/api/v1/integrations/linear/action-batches",
+            self.payload,
+            format="json",
+            **self.auth_headers,
+        )
+        self.assertEqual(created.status_code, 201)
+        batch_id = created.json()["id"]
+        item_id = created.json()["items"][0]["id"]
+
+        detail = self.client.get(
+            f"/api/v1/integrations/linear/action-batches/{batch_id}",
+            **self.auth_headers,
+        )
+        self.assertEqual(detail.status_code, 200)
+        self.assertEqual(detail.json()["items"][0]["status"], "pending")
+
+        with patch(
+            "integrations.services.linear_meeting_actions.create_linear_meeting_issue",
+            return_value={
+                "id": "issue-1",
+                "identifier": "MLA-1",
+                "url": "https://linear.app/issue/MLA-1",
+            },
+        ) as create_issue:
+            decision = self.client.post(
+                f"/api/v1/integrations/linear/action-batches/{batch_id}/decisions",
+                {
+                    "requested_by_slack_user_id": "UDANIEL",
+                    "decision": "approve",
+                    "item_ids": [item_id],
+                },
+                format="json",
+                **self.auth_headers,
+            )
+            replay = self.client.post(
+                f"/api/v1/integrations/linear/action-batches/{batch_id}/decisions",
+                {
+                    "requested_by_slack_user_id": "UDANIEL",
+                    "decision": "approve",
+                    "item_ids": [item_id],
+                },
+                format="json",
+                **self.auth_headers,
+            )
+
+        self.assertEqual(decision.status_code, 200)
+        self.assertEqual(replay.status_code, 200)
+        self.assertEqual(decision.json()["items"][0]["status"], "approved")
+        self.assertEqual(replay.json()["items"][0]["status"], "approved")
+        create_issue.assert_called_once()
+
+    def test_identical_pending_batch_creation_reuses_the_durable_batch(self):
+        first = self.client.post(
+            "/api/v1/integrations/linear/action-batches",
+            self.payload,
+            format="json",
+            **self.auth_headers,
+        )
+        replay = self.client.post(
+            "/api/v1/integrations/linear/action-batches",
+            self.payload,
+            format="json",
+            **self.auth_headers,
+        )
+
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual(replay.status_code, 201)
+        self.assertEqual(first.json()["id"], replay.json()["id"])
+        self.assertEqual(first.json()["items"][0]["id"], replay.json()["items"][0]["id"])
+
+    def test_batch_rejects_a_different_slack_user(self):
+        created = self.client.post(
+            "/api/v1/integrations/linear/action-batches",
+            self.payload,
+            format="json",
+            **self.auth_headers,
+        ).json()
+        response = self.client.post(
+            f"/api/v1/integrations/linear/action-batches/{created['id']}/decisions",
+            {
+                "requested_by_slack_user_id": "UOTHER",
+                "decision": "approve",
+            },
+            format="json",
+            **self.auth_headers,
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["code"], "linear_meeting_action_conflict")
+
+    def test_reject_all_closes_the_batch_without_creating_issues(self):
+        created = self.client.post(
+            "/api/v1/integrations/linear/action-batches",
+            self.payload,
+            format="json",
+            **self.auth_headers,
+        ).json()
+        response = self.client.post(
+            f"/api/v1/integrations/linear/action-batches/{created['id']}/decisions",
+            {
+                "requested_by_slack_user_id": "UDANIEL",
+                "decision": "reject",
+            },
+            format="json",
+            **self.auth_headers,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "rejected")
+        self.assertEqual(response.json()["items"][0]["status"], "rejected")

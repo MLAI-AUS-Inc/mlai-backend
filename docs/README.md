@@ -39,6 +39,14 @@ rollout sequence.
 
 - [`coworking-booking.md`](coworking-booking.md)
 
+Linear meeting-action reviews are stored by the internal, Roo-authenticated
+`/api/v1/integrations/linear/action-batches` endpoints. Batches contain 1–20
+requester-bound proposals, expire after
+`LINEAR_MEETING_ACTION_BATCH_TTL_SECONDS` (24 hours by default), and delegate
+approved work to the existing idempotent Linear issue writer. Deploy migration
+`integrations.0042_linear_meeting_action_batches` and these endpoints before
+the Roo release that renders durable review buttons.
+
 ## Document status
 
 Documents in this directory are subsystem references, not a replacement for
