@@ -25,6 +25,8 @@ from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
 from rest_framework_simplejwt.tokens import AccessToken
+from slack_sdk.errors import SlackApiError
+from slack_sdk.web.slack_response import SlackResponse
 
 from core.models import (
     SlackFounderAccountLink,
@@ -114,9 +116,10 @@ class SlackServiceStrictUserLookupTests(SimpleTestCase):
 
     @patch.object(SlackService, "get_client")
     def test_outage_is_typed_and_logs_no_slack_id(self, get_client):
+        untrusted_error = "team_access_not_granted UPRIVATE1 private@example.com\nforged"
         get_client.return_value.users_info.return_value = {
             "ok": False,
-            "error": "team_access_not_granted",
+            "error": untrusted_error,
         }
 
         with self.assertLogs(
@@ -126,11 +129,106 @@ class SlackServiceStrictUserLookupTests(SimpleTestCase):
             with self.assertRaises(SlackUserLookupUnavailableError):
                 SlackService.get_user_profile_strict("UPRIVATE1")
 
-        self.assertNotIn("UPRIVATE1", "\n".join(captured.output))
-        self.assertIn(
-            "reason_code=team_access_not_granted",
-            "\n".join(captured.output),
+        output = "\n".join(captured.output)
+        self.assertNotIn("UPRIVATE1", output)
+        self.assertNotIn("private@example.com", output)
+        self.assertNotIn("team_access_not_granted", output)
+        self.assertNotIn("forged", output)
+        self.assertIn("reason_code=slack_api_error", output)
+
+    @patch.object(SlackService, "get_client")
+    def test_sdk_error_payload_is_not_logged(self, get_client):
+        response = SlackResponse(
+            client=None,
+            http_verb="POST",
+            api_url="https://slack.com/api/users.info",
+            req_args={},
+            data={
+                "ok": False,
+                "error": "ratelimited UPRIVATE1 private@example.com\nforged",
+            },
+            headers={},
+            status_code=429,
         )
+        get_client.return_value.users_info.side_effect = SlackApiError(
+            "untrusted SDK message UPRIVATE1",
+            response,
+        )
+
+        with self.assertLogs(
+            "integrations.services.slack",
+            level="WARNING",
+        ) as captured:
+            with self.assertRaises(SlackUserLookupUnavailableError):
+                SlackService.get_user_profile_strict("UPRIVATE1")
+
+        output = "\n".join(captured.output)
+        self.assertNotIn("UPRIVATE1", output)
+        self.assertNotIn("private@example.com", output)
+        self.assertNotIn("ratelimited", output)
+        self.assertNotIn("forged", output)
+        self.assertIn("reason_code=slack_api_error", output)
+
+    @patch.object(SlackService, "get_client")
+    def test_sdk_not_found_is_typed_and_sanitized(self, get_client):
+        response = SlackResponse(
+            client=None,
+            http_verb="POST",
+            api_url="https://slack.com/api/users.info",
+            req_args={},
+            data={"ok": False, "error": "user_not_found"},
+            headers={},
+            status_code=200,
+        )
+        get_client.return_value.users_info.side_effect = SlackApiError(
+            "untrusted SDK message UMISSING1",
+            response,
+        )
+
+        with self.assertLogs(
+            "integrations.services.slack",
+            level="INFO",
+        ) as captured:
+            with self.assertRaises(SlackUserNotFoundError):
+                SlackService.get_user_profile_strict("UMISSING1")
+
+        output = "\n".join(captured.output)
+        self.assertNotIn("UMISSING1", output)
+        self.assertIn("reason_code=user_not_found", output)
+
+    @patch.object(SlackService, "get_client")
+    def test_malformed_sdk_error_response_remains_typed(self, get_client):
+        get_client.return_value.users_info.side_effect = SlackApiError(
+            "untrusted SDK message UPRIVATE1 private@example.com",
+            None,
+        )
+
+        with self.assertLogs(
+            "integrations.services.slack",
+            level="WARNING",
+        ) as captured:
+            with self.assertRaises(SlackUserLookupUnavailableError):
+                SlackService.get_user_profile_strict("UPRIVATE1")
+
+        output = "\n".join(captured.output)
+        self.assertNotIn("UPRIVATE1", output)
+        self.assertNotIn("private@example.com", output)
+        self.assertIn("reason_code=slack_api_error", output)
+
+    @patch.object(SlackService, "get_client")
+    def test_malformed_success_container_remains_typed(self, get_client):
+        get_client.return_value.users_info.return_value = object()
+
+        with self.assertLogs(
+            "integrations.services.slack",
+            level="WARNING",
+        ) as captured:
+            with self.assertRaises(SlackUserLookupUnavailableError):
+                SlackService.get_user_profile_strict("UPRIVATE1")
+
+        output = "\n".join(captured.output)
+        self.assertNotIn("UPRIVATE1", output)
+        self.assertIn("reason_code=slack_api_error", output)
 
     @patch.object(SlackService, "get_client")
     def test_malformed_profile_is_typed_and_logs_no_slack_id(self, get_client):

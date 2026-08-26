@@ -7,6 +7,16 @@ from django.conf import settings
 
 logger = logging.getLogger(__name__)
 
+_SLACK_USER_NOT_FOUND_ERRORS = frozenset({"user_not_found", "users_not_found"})
+
+
+def _response_value(response: Any, key: str) -> Any:
+    """Read an untrusted Slack response without allowing shape errors to escape."""
+    try:
+        return response.get(key)
+    except (AttributeError, TypeError):
+        return None
+
 
 class SlackUserLookupError(RuntimeError):
     """Base error for strict Slack user-profile lookup."""
@@ -47,16 +57,14 @@ class SlackService:
             client = cls.get_client()
             response = client.users_info(user=slack_user_id)
         except SlackApiError as exc:
-            error_code = str(exc.response.get('error') or 'slack_api_error')
-            if error_code in {'user_not_found', 'users_not_found'}:
+            error_code = str(_response_value(exc.response, 'error') or '')
+            if error_code in _SLACK_USER_NOT_FOUND_ERRORS:
                 logger.info(
-                    "slack_user_lookup_not_found reason_code=%s",
-                    error_code,
+                    "slack_user_lookup_not_found reason_code=user_not_found"
                 )
                 raise SlackUserNotFoundError("Slack user was not found") from exc
             logger.warning(
-                "slack_user_lookup_unavailable reason_code=%s",
-                error_code,
+                "slack_user_lookup_unavailable reason_code=slack_api_error"
             )
             raise SlackUserLookupUnavailableError(
                 "Slack user lookup is temporarily unavailable"
@@ -70,23 +78,21 @@ class SlackService:
                 "Slack user lookup is temporarily unavailable"
             ) from exc
 
-        if not response.get('ok'):
-            error_code = str(response.get('error') or 'slack_api_error')
-            if error_code in {'user_not_found', 'users_not_found'}:
+        if _response_value(response, 'ok') is not True:
+            error_code = str(_response_value(response, 'error') or '')
+            if error_code in _SLACK_USER_NOT_FOUND_ERRORS:
                 logger.info(
-                    "slack_user_lookup_not_found reason_code=%s",
-                    error_code,
+                    "slack_user_lookup_not_found reason_code=user_not_found"
                 )
                 raise SlackUserNotFoundError("Slack user was not found")
             logger.warning(
-                "slack_user_lookup_unavailable reason_code=%s",
-                error_code,
+                "slack_user_lookup_unavailable reason_code=slack_api_error"
             )
             raise SlackUserLookupUnavailableError(
                 "Slack user lookup is temporarily unavailable"
             )
 
-        user = response.get('user')
+        user = _response_value(response, 'user')
         if not isinstance(user, dict) or not user.get('id'):
             logger.warning(
                 "slack_user_lookup_unavailable reason_code=malformed_success"
