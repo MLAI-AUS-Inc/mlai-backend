@@ -284,10 +284,11 @@ def get_linear_project_update_page(
 
 
 def list_teams(limit: int = 100, member_limit: int = 50) -> list[dict[str, Any]]:
+    page_size = _bounded_limit(limit, default=100, maximum=100)
     member_limit = max(min(int(member_limit or 50), 50), 1)
-    query = """
-    query LinearTeamsWithMembers($first: Int!, $memberFirst: Int!) {
-      teams(first: $first) {
+    rich_query = """
+    query LinearTeamsWithMembers($first: Int!, $after: String, $memberFirst: Int!) {
+      teams(first: $first, after: $after) {
         nodes {
           id
           key
@@ -302,38 +303,61 @@ def list_teams(limit: int = 100, member_limit: int = 50) -> list[dict[str, Any]]
             }
           }
         }
+        pageInfo { hasNextPage endCursor }
       }
     }
     """
-    try:
-        data = _graphql(
-            query,
-            {"first": limit, "memberFirst": member_limit},
-            operation_name="LinearTeamsWithMembers",
-        )
-        return _nodes(data, "teams")
-    except LinearMeetingGraphQLError as exc:
-        if not _team_members_query_unsupported(exc):
-            raise
-        logger.warning(
-            "linear_meeting_actions_team_members_unavailable operation=%s detail=%s",
-            exc.operation,
-            str(exc),
-        )
-
-    query = """
-    query LinearTeams($first: Int!) {
-      teams(first: $first) {
+    basic_query = """
+    query LinearTeams($first: Int!, $after: String) {
+      teams(first: $first, after: $after) {
         nodes {
           id
           key
           name
         }
+        pageInfo { hasNextPage endCursor }
       }
     }
     """
-    data = _graphql(query, {"first": limit}, operation_name="LinearTeams")
-    return _nodes(data, "teams")
+    teams: list[dict[str, Any]] = []
+    cursor: str | None = None
+    use_basic_query = False
+    for _page_number in range(20):
+        operation_name = "LinearTeams" if use_basic_query else "LinearTeamsWithMembers"
+        variables: dict[str, Any] = {"first": page_size, "after": cursor}
+        if not use_basic_query:
+            variables["memberFirst"] = member_limit
+        try:
+            data = _graphql(
+                basic_query if use_basic_query else rich_query,
+                variables,
+                operation_name=operation_name,
+            )
+        except LinearMeetingGraphQLError as exc:
+            if use_basic_query or not _team_members_query_unsupported(exc):
+                raise
+            logger.warning(
+                "linear_meeting_actions_team_members_unavailable operation=%s detail=%s",
+                exc.operation,
+                str(exc),
+            )
+            # Restart from page one so the fallback response is complete and does
+            # not mix rich and basic team records.
+            use_basic_query = True
+            cursor = None
+            teams = []
+            continue
+
+        teams.extend(_nodes(data, "teams"))
+        page_info = _page_info(data.get("teams"))
+        cursor = str(page_info.get("endCursor") or "").strip() or None
+        if not page_info.get("hasNextPage") or not cursor:
+            return teams
+
+    raise LinearMeetingGraphQLError(
+        "Linear team catalogue exceeded the 20-page safety limit.",
+        operation="LinearTeams" if use_basic_query else "LinearTeamsWithMembers",
+    )
 
 
 def list_users(limit: int = 250) -> list[dict[str, Any]]:
