@@ -408,10 +408,17 @@ def invalidate_unused_slack_founder_link_requests(*users: User) -> int:
     ).update(invalidated_at=now, updated_at=now)
 
 
-def founder_tools_connection_type(user: User) -> str | None:
-    if founder_tools_explicitly_linked(user):
+def founder_tools_connection_type(
+    user: User,
+    *,
+    explicitly_linked: bool | None = None,
+) -> str | None:
+    if explicitly_linked is None:
+        explicitly_linked = founder_tools_explicitly_linked(user)
+    if explicitly_linked:
         return "explicit"
-    if user.slack_id:
+    email = str(getattr(user, "email", "") or "").strip().lower()
+    if user.slack_id and not email.endswith("@slack.placeholder.com"):
         return "direct"
     return None
 

@@ -9,6 +9,12 @@ from django.db import IntegrityError, transaction
 from rest_framework import status as drf_status
 from rest_framework.exceptions import APIException
 
+from core.actor_ids import (
+    actor_ids_for_user as shared_actor_ids_for_user,
+    is_internal_actor_id,
+    preferred_actor_id_for_user,
+    synthetic_actor_id_for_user_id,
+)
 from integrations.utils import normalize_domain
 from organizations.models import Organization
 
@@ -362,24 +368,19 @@ def normalize_company_linkedin_url(value: str | None) -> str:
 
 
 def synthetic_actor_id_for_user(user) -> str:
-    return f"mlai_user:{user.id}"
+    return synthetic_actor_id_for_user_id(user.id)
 
 
 def actor_ids_for_user(user) -> list[str]:
-    actor_ids = []
-    slack_id = str(getattr(user, "slack_id", "") or "").strip()
-    if slack_id:
-        actor_ids.append(slack_id)
-    actor_ids.append(synthetic_actor_id_for_user(user))
-    return list(dict.fromkeys(actor_ids))
+    return shared_actor_ids_for_user(user)
 
 
 def founder_actor_id_for_user(user) -> str:
-    return actor_ids_for_user(user)[0]
+    return preferred_actor_id_for_user(user)
 
 
 def _is_synthetic_actor_id(value: str | None) -> bool:
-    return str(value or "").strip().startswith("mlai_user:")
+    return is_internal_actor_id(value)
 
 
 def reconcile_user_slack_id_from_email(user) -> bool:

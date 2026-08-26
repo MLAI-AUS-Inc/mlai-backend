@@ -1841,7 +1841,7 @@ class CoworkingViewSet(viewsets.ViewSet):
             return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
         standard_cost = CoworkingService.get_standard_coworking_cost()
-        linked_slack_user_ids = set(
+        explicitly_linked_user_ids = set(
             SlackFounderAccountLink.objects.filter(
                 slack_user_id__in=[
                     booking.user_id for booking, _created in booking_results
@@ -1852,6 +1852,12 @@ class CoworkingViewSet(viewsets.ViewSet):
         created_count = 0
         for booking, created in booking_results:
             created_count += 1 if created else 0
+            connection_type = founder_tools_connection_type(
+                booking.user,
+                explicitly_linked=(
+                    booking.user_id in explicitly_linked_user_ids
+                ),
+            )
             results.append({
                 'slack_user_id': booking.user.slack_id,
                 'created': created,
@@ -1860,15 +1866,9 @@ class CoworkingViewSet(viewsets.ViewSet):
                 'points_cost': booking.points_cost,
                 'standard_points_cost': standard_cost,
                 'monthly_update_discount_applied': booking.points_cost < standard_cost,
-                'founder_tools_connection_type': (
-                    'explicit'
-                    if booking.user_id in linked_slack_user_ids
-                    else 'direct'
-                ),
-                'founder_tools_account_linked': True,
-                'founder_tools_explicitly_linked': (
-                    booking.user_id in linked_slack_user_ids
-                ),
+                'founder_tools_connection_type': connection_type,
+                'founder_tools_account_linked': connection_type is not None,
+                'founder_tools_explicitly_linked': connection_type == 'explicit',
             })
 
         return Response(

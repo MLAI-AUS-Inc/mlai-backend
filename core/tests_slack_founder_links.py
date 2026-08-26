@@ -310,6 +310,227 @@ class SlackFounderSyntheticIdentityMigrationTests(TransactionTestCase):
         )
 
 
+class SlackFounderActorReferenceMigrationTests(TransactionTestCase):
+    migrate_from = [
+        ("core", "0062_slackfounderlinkrequest_created_index"),
+        ("content_factory", "0037_content_islands"),
+        ("integrations", "0041_linear_project_sizing_runs"),
+        ("workflow_runs", "0005_contentfactoryrun_reconciled_at"),
+    ]
+    migrate_to = [
+        ("core", "0063_canonicalize_legacy_content_factory_actor_ids")
+    ]
+
+    def setUp(self):
+        super().setUp()
+        executor = MigrationExecutor(connection)
+        executor.migrate(self.migrate_from)
+        old_apps = executor.loader.project_state(self.migrate_from).apps
+        OldUser = old_apps.get_model("core", "User")
+        OldOrganization = old_apps.get_model("organizations", "Organization")
+        OldOrganizationContentConfig = old_apps.get_model(
+            "content_factory", "OrganizationContentConfig"
+        )
+        OldContentFactoryJob = old_apps.get_model(
+            "content_factory", "ContentFactoryJob"
+        )
+        OldScheduledDiscoveryDispatch = old_apps.get_model(
+            "content_factory", "ScheduledDiscoveryDispatch"
+        )
+        OldContentFactoryRun = old_apps.get_model(
+            "workflow_runs", "ContentFactoryRun"
+        )
+        OldUserIntegration = old_apps.get_model(
+            "integrations", "UserIntegration"
+        )
+        OldGitHubInstallation = old_apps.get_model(
+            "integrations", "GitHubInstallation"
+        )
+
+        user = OldUser.objects.create(email="legacy-owner@example.com")
+        self.user_pk = user.pk
+        self.legacy_actor_id = f"web_{user.pk}"
+        self.canonical_actor_id = f"mlai_user:{user.pk}"
+
+        organization = OldOrganization.objects.create(
+            name="Legacy Actor Company",
+            domain="legacy-actor.example",
+        )
+        config = OldOrganizationContentConfig.objects.create(
+            organization=organization,
+            connected_slack_user_id=self.legacy_actor_id,
+        )
+        self.config_pk = config.pk
+        unknown_organization = OldOrganization.objects.create(
+            name="Unknown Legacy Actor Company",
+            domain="unknown-legacy-actor.example",
+        )
+        unknown_config = OldOrganizationContentConfig.objects.create(
+            organization=unknown_organization,
+            connected_slack_user_id="web_999999999",
+        )
+        self.unknown_config_pk = unknown_config.pk
+
+        job = OldContentFactoryJob.objects.create(
+            job_id="legacy-actor-job",
+            slack_user_id="UREALOUTER1",
+            domain=organization.domain,
+            request_meta={
+                "requested_by_slack_user_id": self.legacy_actor_id,
+                "nested": {"actors": [self.legacy_actor_id]},
+            },
+        )
+        self.job_pk = job.pk
+        dispatch = OldScheduledDiscoveryDispatch.objects.create(
+            slack_user_id=self.legacy_actor_id,
+            domain=organization.domain,
+            local_date=date.today(),
+        )
+        self.dispatch_pk = dispatch.pk
+        run = OldContentFactoryRun.objects.create(
+            run_id="legacy-actor-run",
+            workflow="repo_scan",
+            domain=organization.domain,
+            slack_user_id=self.legacy_actor_id,
+            run_request={
+                "requested_by_slack_user_id": self.legacy_actor_id,
+            },
+        )
+        self.run_pk = run.pk
+        OldUserIntegration.objects.create(
+            slack_user_id=self.legacy_actor_id,
+            github_repo="legacy-owner/repository",
+            project_scanned=True,
+        )
+        installation = OldGitHubInstallation.objects.create(
+            user=user,
+            installation_id="1758001",
+            account_login="legacy-founder",
+        )
+        self.installation_pk = installation.pk
+
+        collision_user = OldUser.objects.create(email="collision@example.com")
+        self.collision_legacy_actor_id = f"web_{collision_user.pk}"
+        self.collision_actor_id = f"mlai_user:{collision_user.pk}"
+        OldUserIntegration.objects.create(
+            slack_user_id=self.collision_actor_id,
+            github_user_name="canonical-owner",
+        )
+        OldUserIntegration.objects.create(
+            slack_user_id=self.collision_legacy_actor_id,
+            github_repo="legacy-owner/collision-repository",
+            project_scanned=True,
+        )
+
+        executor = MigrationExecutor(connection)
+        executor.migrate(self.migrate_to)
+        self.apps = executor.loader.project_state(self.migrate_to).apps
+
+    def tearDown(self):
+        executor = MigrationExecutor(connection)
+        executor.migrate(executor.loader.graph.leaf_nodes())
+        super().tearDown()
+
+    def test_legacy_actor_graph_is_migrated_without_losing_ownership(self):
+        MigratedConfig = self.apps.get_model(
+            "content_factory", "OrganizationContentConfig"
+        )
+        MigratedJob = self.apps.get_model("content_factory", "ContentFactoryJob")
+        MigratedDispatch = self.apps.get_model(
+            "content_factory", "ScheduledDiscoveryDispatch"
+        )
+        MigratedRun = self.apps.get_model("workflow_runs", "ContentFactoryRun")
+        MigratedUserIntegration = self.apps.get_model(
+            "integrations", "UserIntegration"
+        )
+        MigratedInstallation = self.apps.get_model(
+            "integrations", "GitHubInstallation"
+        )
+
+        config = MigratedConfig.objects.get(pk=self.config_pk)
+        job = MigratedJob.objects.get(pk=self.job_pk)
+        dispatch = MigratedDispatch.objects.get(pk=self.dispatch_pk)
+        run = MigratedRun.objects.get(pk=self.run_pk)
+
+        self.assertEqual(config.connected_slack_user_id, self.canonical_actor_id)
+        self.assertEqual(job.slack_user_id, "UREALOUTER1")
+        self.assertEqual(
+            job.request_meta["requested_by_slack_user_id"],
+            self.canonical_actor_id,
+        )
+        self.assertEqual(
+            job.request_meta["nested"]["actors"],
+            [self.canonical_actor_id],
+        )
+        self.assertEqual(dispatch.slack_user_id, self.canonical_actor_id)
+        self.assertEqual(run.slack_user_id, self.canonical_actor_id)
+        self.assertEqual(
+            run.run_request["requested_by_slack_user_id"],
+            self.canonical_actor_id,
+        )
+        self.assertTrue(
+            MigratedUserIntegration.objects.filter(
+                pk=self.canonical_actor_id
+            ).exists()
+        )
+        integration = MigratedUserIntegration.objects.get(
+            pk=self.canonical_actor_id
+        )
+        self.assertEqual(integration.github_repo, "legacy-owner/repository")
+        self.assertTrue(integration.project_scanned)
+        self.assertEqual(
+            MigratedInstallation.objects.get(pk=self.installation_pk).user_id,
+            self.user_pk,
+        )
+
+        from integrations.services.github_connections import get_owned_org_configs
+        from integrations.services.github_installations import (
+            resolve_user_for_actor_id,
+        )
+
+        self.assertEqual(
+            resolve_user_for_actor_id(self.legacy_actor_id).pk,
+            self.user_pk,
+        )
+        self.assertEqual(
+            resolve_user_for_actor_id(self.canonical_actor_id).pk,
+            self.user_pk,
+        )
+        self.assertEqual(
+            list(
+                get_owned_org_configs(
+                    [self.legacy_actor_id, self.canonical_actor_id]
+                ).values_list("pk", flat=True)
+            ),
+            [self.config_pk],
+        )
+        self.assertEqual(
+            MigratedConfig.objects.get(
+                pk=self.unknown_config_pk
+            ).connected_slack_user_id,
+            "web_999999999",
+        )
+        canonical = MigratedUserIntegration.objects.get(pk=self.collision_actor_id)
+        self.assertEqual(canonical.github_user_name, "canonical-owner")
+        self.assertEqual(
+            canonical.github_repo,
+            "legacy-owner/collision-repository",
+        )
+        self.assertTrue(canonical.project_scanned)
+        self.assertTrue(
+            MigratedUserIntegration.objects.filter(
+                pk=self.collision_legacy_actor_id
+            ).exists()
+        )
+        legacy = MigratedUserIntegration.objects.get(
+            pk=self.collision_legacy_actor_id
+        )
+        self.assertEqual(
+            legacy.github_repo,
+            "legacy-owner/collision-repository",
+        )
+
+
 class SlackFounderLinkLegacyCommandTests(TransactionTestCase):
     def setUp(self):
         self.slack_user = User.objects.create_user(
@@ -1557,16 +1778,48 @@ class SlackFounderLinkApiTests(APITestCase):
     def test_content_factory_actor_does_not_persist_synthetic_slack_identity(self):
         from integrations.api_views_content_factory_app import _ensure_actor_id
 
-        SlackFounderAccountLink.objects.create(
-            slack_user=self.slack_user,
-            founder_user=self.founder_user,
-        )
+        self.founder_user.slack_id = "UFOUNDER123"
+        self.founder_user.save(update_fields=["slack_id"])
 
         actor_id = _ensure_actor_id(self.founder_user)
 
-        self.assertEqual(actor_id, f"web_{self.founder_user.pk}")
+        self.assertEqual(actor_id, f"mlai_user:{self.founder_user.pk}")
         self.founder_user.refresh_from_db()
-        self.assertIsNone(self.founder_user.slack_id)
+        self.assertEqual(self.founder_user.slack_id, "UFOUNDER123")
+
+    def test_content_factory_access_accepts_all_actor_id_generations(self):
+        from content_factory.models import OrganizationContentConfig
+        from core.actor_ids import actor_ids_for_user
+        from integrations.api_views_content_factory_app import _assert_domain_access
+        from organizations.models import Organization
+
+        self.founder_user.slack_id = "UFOUNDER123"
+        self.founder_user.save(update_fields=["slack_id"])
+        actor_ids = actor_ids_for_user(self.founder_user)
+        owners = (
+            "UFOUNDER123",
+            f"mlai_user:{self.founder_user.pk}",
+            f"web_{self.founder_user.pk}",
+        )
+
+        for index, owner in enumerate(owners):
+            domain = f"actor-generation-{index}.example"
+            organization = Organization.objects.create(
+                name=f"Actor Generation {index}",
+                domain=domain,
+            )
+            OrganizationContentConfig.objects.create(
+                organization=organization,
+                connected_slack_user_id=owner,
+            )
+
+            access_error, normalized_domain = _assert_domain_access(
+                actor_ids,
+                domain,
+            )
+
+            self.assertIsNone(access_error)
+            self.assertEqual(normalized_domain, domain)
 
 
 @override_settings(
@@ -1870,6 +2123,48 @@ class LinkedCoworkingEligibilityTests(APITestCase):
         self.assertEqual(response.data["founder_tools_connection_type"], "direct")
         self.assertTrue(response.data["founder_tools_account_linked"])
         self.assertFalse(response.data["founder_tools_explicitly_linked"])
+
+    def test_slack_only_placeholder_is_not_reported_as_founder_tools_linked(self):
+        SlackFounderAccountLink.objects.all().delete()
+        self.slack_user.email = "ucowlink12@slack.placeholder.com"
+        self.slack_user.save(update_fields=["email"])
+
+        response = self.client.post(
+            reverse("coworking-book"),
+            {
+                "slack_user_id": self.slack_user.slack_id,
+                "date": self.booking_date.isoformat(),
+            },
+            format="json",
+            HTTP_X_API_KEY="internal-key",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertIsNone(response.data["founder_tools_connection_type"])
+        self.assertFalse(response.data["founder_tools_account_linked"])
+        self.assertFalse(response.data["founder_tools_explicitly_linked"])
+
+    def test_admin_batch_does_not_report_placeholder_target_as_linked(self):
+        SlackFounderAccountLink.objects.all().delete()
+        self.slack_user.email = "ucowlink12@slack.placeholder.com"
+        self.slack_user.save(update_fields=["email"])
+
+        response = self.client.post(
+            reverse("coworking-book-many"),
+            {
+                "admin_slack_user_id": self.admin_user.slack_id,
+                "target_slack_user_ids": [self.slack_user.slack_id],
+                "date": self.booking_date.isoformat(),
+            },
+            format="json",
+            HTTP_X_API_KEY="roo-link-key",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        result = response.data["results"][0]
+        self.assertIsNone(result["founder_tools_connection_type"])
+        self.assertFalse(result["founder_tools_account_linked"])
+        self.assertFalse(result["founder_tools_explicitly_linked"])
 
     def test_linked_update_cannot_discount_a_second_slack_identity(self):
         from core.slack_users import ensure_slack_user
