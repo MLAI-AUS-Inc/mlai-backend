@@ -356,14 +356,23 @@ class TokenUsageLeaderboardTests(APITestCase):
             user=user, token_hash=hashlib.sha256(user.email.encode()).hexdigest()
         )
 
-    def add_usage(self, account, total, started_at=None, session_id=SESSION_UUID):
+    def add_usage(
+        self,
+        account,
+        total,
+        started_at=None,
+        session_id=SESSION_UUID,
+        source="claude_code",
+        **token_overrides,
+    ):
         session = TokenUsageSession.objects.create(
             account=account,
-            source="claude_code",
+            source=source,
             session_id=session_id,
             model="claude-opus-5",
             input_tokens=total,
             started_at=started_at or timezone.now(),
+            **token_overrides,
         )
         if started_at is None:
             self.add_daily_usage(account, total, session_id=session_id)
@@ -430,6 +439,19 @@ class TokenUsageLeaderboardTests(APITestCase):
         self.assertEqual(entry["sessions"], 0)
         self.assertEqual(len(self.client.get(self.url, {"window": "all"}).data["entries"]), 1)
 
+    def test_history_sessions_use_their_start_date_in_recent_windows(self):
+        account = self.account_for(self.user)
+        self.add_usage(
+            account,
+            250,
+            started_at=timezone.now() - timedelta(days=3),
+        )
+
+        entry = self.client.get(self.url, {"window": "7d"}).data["entries"][0]
+
+        self.assertEqual(entry["grand_total"], 250)
+        self.assertEqual(entry["sessions"], 1)
+
     def test_daily_window_keeps_other_historical_contributors_visible(self):
         self.add_usage(self.account_for(self.user), 100)
         rival = self.account_for(self.rival)
@@ -458,15 +480,15 @@ class TokenUsageLeaderboardTests(APITestCase):
         self.assertEqual(response.data["entries"][0]["grand_total"], 0)
         self.assertFalse(response.data["entries"][0]["has_reported"])
 
-    @override_settings(TOKEN_USAGE_TIME_ZONE="Australia/Melbourne")
-    def test_daily_window_uses_calendar_anchor_and_returns_metadata(self):
+    @override_settings(TOKEN_USAGE_LEADERBOARD_TIME_ZONE="UTC")
+    def test_window_uses_session_start_calendar_and_returns_metadata(self):
         account = self.account_for(self.user)
-        anchor = local_usage_date()
-        self.add_daily_usage(account, 300, usage_date=anchor)
-        self.add_daily_usage(
+        anchor = timezone.now().date()
+        self.add_usage(account, 300, started_at=timezone.now())
+        self.add_usage(
             account,
             700,
-            usage_date=anchor - timedelta(days=1),
+            started_at=timezone.now() - timedelta(days=1),
             session_id=OTHER_UUID,
         )
 
@@ -476,13 +498,15 @@ class TokenUsageLeaderboardTests(APITestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data["timezone"], "Australia/Melbourne")
+        self.assertEqual(response.data["timezone"], "UTC")
+        self.assertEqual(response.data["window_basis"], "session_started_at")
+        self.assertEqual(response.data["total_basis"], "source_normalized")
         self.assertEqual(response.data["date_from"], anchor.isoformat())
         self.assertEqual(response.data["date_to"], anchor.isoformat())
         self.assertEqual(response.data["entries"][0]["grand_total"], 300)
 
     def test_future_or_invalid_calendar_anchor_is_rejected(self):
-        future = local_usage_date() + timedelta(days=1)
+        future = timezone.now().date() + timedelta(days=1)
 
         invalid = self.client.get(self.url, {"window": "today", "date": "nope"})
         future_response = self.client.get(
@@ -500,13 +524,69 @@ class TokenUsageLeaderboardTests(APITestCase):
 
     def test_daily_sessions_are_distinct_across_sources(self):
         account = self.account_for(self.user)
-        self.add_daily_usage(account, 100, source="claude_code")
-        self.add_daily_usage(account, 200, source="codex")
+        self.add_usage(account, 100, source="claude_code")
+        self.add_usage(
+            account,
+            200,
+            source="codex",
+            session_id=OTHER_UUID,
+        )
 
         entry = self.client.get(self.url, {"window": "today"}).data["entries"][0]
 
         self.assertEqual(entry["sessions"], 2)
         self.assertEqual(entry["grand_total"], 300)
+
+    def test_codex_cache_is_not_double_counted_in_headline_total(self):
+        account = self.account_for(self.user)
+        self.add_usage(
+            account,
+            1_000,
+            source="codex",
+            output_tokens=100,
+            cache_read_tokens=800,
+            reasoning_tokens=20,
+        )
+
+        entry = self.client.get(self.url, {"window": "all"}).data["entries"][0]
+
+        self.assertEqual(entry["grand_total"], 1_120)
+        self.assertEqual(entry["cache_read_tokens"], 800)
+
+    @patch("community_chat.usage_views.fetch_public_tokenmaxer_entries")
+    def test_federates_public_tokenmaxer_contributors_without_claiming_membership(
+        self, fetch_entries
+    ):
+        fetch_entries.return_value = [
+            {
+                "external_id": "tokenmaxer:jackmcpickle",
+                "display_name": "jackmcpickle",
+                "profile_url": "https://tokenmaxer.quest/u/jackmcpickle",
+                "sessions": 12,
+                "grand_total": 900,
+                "input_tokens": 800,
+                "output_tokens": 100,
+                "cache_read_tokens": 700,
+                "cache_creation_tokens": 0,
+                "reasoning_tokens": 0,
+            }
+        ]
+        self.add_usage(self.account_for(self.user), 100)
+
+        response = self.client.get(self.url, {"window": "all"})
+
+        self.assertEqual([entry["origin"] for entry in response.data["entries"]], [
+            "tokenmaxer",
+            "mlai",
+        ])
+        external = response.data["entries"][0]
+        self.assertEqual(external["display_name"], "jackmcpickle")
+        self.assertIsNone(external["public_key"])
+        self.assertEqual(
+            external["profile_url"],
+            "https://tokenmaxer.quest/u/jackmcpickle",
+        )
+        self.assertEqual(response.data["you"]["rank"], 2)
 
     def test_caller_outside_the_cut_still_sees_their_own_rank(self):
         self.add_usage(self.account_for(self.user), 1)
