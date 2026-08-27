@@ -230,6 +230,16 @@ urlpatterns = [
         name='linear_meeting_context',
     ),
     path(
+        'linear/channel-issues/list',
+        api_views_connectors.LinearChannelIssueListView.as_view(),
+        name='linear_channel_issue_list',
+    ),
+    path(
+        'linear/channel-issues/detail',
+        api_views_connectors.LinearChannelIssueDetailView.as_view(),
+        name='linear_channel_issue_detail',
+    ),
+    path(
         'linear/projects/resolve',
         api_views_connectors.LinearProjectResolveView.as_view(),
         name='linear_project_resolve',

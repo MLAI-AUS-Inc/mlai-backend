@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import re
 from datetime import timedelta
@@ -61,6 +62,283 @@ class LinearMeetingSizingConflictError(Exception):
 
 class LinearMeetingActionConflictError(Exception):
     pass
+
+
+class LinearChannelIssueAccessError(Exception):
+    pass
+
+
+def list_linear_channel_issues(payload: dict[str, Any]) -> dict[str, Any]:
+    """Return a bounded live Linear issue index for an approved Slack channel."""
+
+    binding = _linear_channel_issue_binding(payload)
+    page_size = _bounded_limit(payload.get("limit"), default=50, maximum=100)
+    cursor = str(payload.get("after") or "").strip() or None
+    query = """
+    query LinearChannelIssueList(
+      $teamId: ID!,
+      $stateId: ID!,
+      $first: Int!,
+      $after: String
+    ) {
+      issues(
+        first: $first,
+        after: $after,
+        orderBy: updatedAt,
+        filter: {
+          team: { id: { eq: $teamId } },
+          state: { id: { eq: $stateId } }
+        }
+      ) {
+        nodes {
+          id identifier title url priority priorityLabel dueDate updatedAt
+          state { id name type }
+          team { id key name }
+          assignee { id name displayName }
+          project { id name }
+        }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+    """
+    data = _graphql(
+        query,
+        {
+            "teamId": binding["linear_team_id"],
+            "stateId": binding["linear_state_id"],
+            "first": page_size,
+            "after": cursor,
+        },
+        operation_name="LinearChannelIssueList",
+    )
+    connection = data.get("issues") if isinstance(data.get("issues"), dict) else {}
+    issues = []
+    for issue in _connection_nodes(connection):
+        team = issue.get("team") if isinstance(issue.get("team"), dict) else {}
+        state = issue.get("state") if isinstance(issue.get("state"), dict) else {}
+        if (
+            str(team.get("id") or "") != binding["linear_team_id"]
+            or str(state.get("id") or "") != binding["linear_state_id"]
+        ):
+            logger.warning(
+                "linear_channel_issue_list_dropped_out_of_scope_issue identifier=%s",
+                issue.get("identifier"),
+            )
+            continue
+        issues.append(issue)
+    return {
+        "list": _linear_channel_issue_list_metadata(binding),
+        "issues": issues,
+        "pageInfo": _page_info(connection),
+        "snapshotAt": timezone.now().isoformat(),
+    }
+
+
+def get_linear_channel_issue(payload: dict[str, Any]) -> dict[str, Any]:
+    """Return one approved issue plus every bounded comment page."""
+
+    binding = _linear_channel_issue_binding(payload)
+    issue_reference = str(
+        payload.get("issue_identifier") or payload.get("issue_id") or ""
+    ).strip()
+    if not issue_reference:
+        raise ValueError("issue_identifier is required.")
+
+    issue = _fetch_linear_channel_issue_detail(issue_reference)
+    if not issue:
+        raise ValueError("Linear issue was not found.")
+    team = issue.get("team") if isinstance(issue.get("team"), dict) else {}
+    if str(team.get("id") or "") != binding["linear_team_id"]:
+        raise LinearChannelIssueAccessError(
+            "That Linear issue is not available from this Slack channel."
+        )
+
+    comments: list[dict[str, Any]] = []
+    comments_truncated = False
+    if payload.get("include_comments") is not False:
+        comments, comments_truncated = _list_linear_issue_comments(issue_reference)
+    return {
+        "list": _linear_channel_issue_list_metadata(binding),
+        "issue": _normalize_linear_channel_issue_detail(issue),
+        "comments": comments,
+        "commentsTruncated": comments_truncated,
+        "snapshotAt": timezone.now().isoformat(),
+    }
+
+
+def _linear_channel_issue_binding(payload: dict[str, Any]) -> dict[str, str]:
+    if not isinstance(payload, dict):
+        raise ValueError("Request payload must be an object.")
+    workspace_id = str(payload.get("slack_workspace_id") or "").strip()
+    channel_id = str(payload.get("slack_channel_id") or "").strip()
+    requester_id = str(payload.get("requester_slack_id") or "").strip()
+    if not workspace_id or not channel_id or not requester_id:
+        raise ValueError(
+            "slack_workspace_id, slack_channel_id, and requester_slack_id are required."
+        )
+
+    raw_bindings = str(
+        getattr(settings, "LINEAR_CHANNEL_ISSUE_BINDINGS_JSON", "") or ""
+    ).strip()
+    if not raw_bindings:
+        raise LinearMeetingConfigurationError(
+            "Linear channel issue reading is not configured."
+        )
+    try:
+        configured = json.loads(raw_bindings)
+    except (TypeError, ValueError) as exc:
+        raise LinearMeetingConfigurationError(
+            "LINEAR_CHANNEL_ISSUE_BINDINGS_JSON is invalid."
+        ) from exc
+    if not isinstance(configured, dict):
+        raise LinearMeetingConfigurationError(
+            "LINEAR_CHANNEL_ISSUE_BINDINGS_JSON must be an object."
+        )
+
+    raw_binding = configured.get(f"{workspace_id}:{channel_id}")
+    if not isinstance(raw_binding, dict):
+        raise LinearChannelIssueAccessError(
+            "This Slack channel is not connected to a Linear issue list."
+        )
+    team_id = str(raw_binding.get("linear_team_id") or "").strip()
+    state_id = str(raw_binding.get("linear_state_id") or "").strip()
+    if not team_id or not state_id:
+        raise LinearMeetingConfigurationError(
+            "The Linear channel issue binding is incomplete."
+        )
+    return {
+        "slack_workspace_id": workspace_id,
+        "slack_channel_id": channel_id,
+        "linear_team_id": team_id,
+        "linear_state_id": state_id,
+        "display_name": str(raw_binding.get("display_name") or "Linear issues").strip(),
+        "team_name": str(raw_binding.get("team_name") or "").strip(),
+        "state_name": str(raw_binding.get("state_name") or "").strip(),
+    }
+
+
+def _linear_channel_issue_list_metadata(binding: dict[str, str]) -> dict[str, str]:
+    return {
+        "displayName": binding["display_name"],
+        "teamId": binding["linear_team_id"],
+        "teamName": binding["team_name"],
+        "stateId": binding["linear_state_id"],
+        "stateName": binding["state_name"],
+    }
+
+
+def _fetch_linear_channel_issue_detail(issue_reference: str) -> dict[str, Any]:
+    query = """
+    query LinearChannelIssueDetail($id: String!) {
+      issue(id: $id) {
+        id identifier title description url priority priorityLabel estimate dueDate
+        createdAt updatedAt startedAt completedAt canceledAt archivedAt
+        state { id name type }
+        team { id key name }
+        assignee { id name displayName }
+        creator { id name displayName }
+        project { id name }
+        cycle { id name number }
+        labels(first: 100) { nodes { id name color } }
+        attachments(first: 100) {
+          nodes { id title subtitle url }
+          pageInfo { hasNextPage endCursor }
+        }
+        relations(first: 50) {
+          nodes {
+            type
+            issue { id identifier title state { id name type } }
+            relatedIssue { id identifier title state { id name type } }
+          }
+          pageInfo { hasNextPage endCursor }
+        }
+        inverseRelations(first: 50) {
+          nodes {
+            type
+            issue { id identifier title state { id name type } }
+            relatedIssue { id identifier title state { id name type } }
+          }
+          pageInfo { hasNextPage endCursor }
+        }
+      }
+    }
+    """
+    data = _graphql(
+        query,
+        {"id": issue_reference},
+        operation_name="LinearChannelIssueDetail",
+    )
+    issue = data.get("issue")
+    return issue if isinstance(issue, dict) else {}
+
+
+def _list_linear_issue_comments(issue_reference: str) -> tuple[list[dict[str, Any]], bool]:
+    page_size = 50
+    maximum = max(
+        1,
+        min(
+            int(
+                getattr(settings, "LINEAR_CHANNEL_ISSUE_MAX_COMMENTS", 250)
+                or 250
+            ),
+            500,
+        ),
+    )
+    query = """
+    query LinearChannelIssueComments($id: String!, $first: Int!, $after: String) {
+      issue(id: $id) {
+        comments(first: $first, after: $after, orderBy: createdAt) {
+          nodes {
+            id body createdAt updatedAt resolvedAt quotedText
+            parent { id }
+            user { id name displayName }
+            onBehalfOf { id name displayName }
+          }
+          pageInfo { hasNextPage endCursor }
+        }
+      }
+    }
+    """
+    comments: list[dict[str, Any]] = []
+    cursor: str | None = None
+    seen_cursors: set[str] = set()
+    while len(comments) < maximum:
+        data = _graphql(
+            query,
+            {
+                "id": issue_reference,
+                "first": min(page_size, maximum - len(comments)),
+                "after": cursor,
+            },
+            operation_name="LinearChannelIssueComments",
+        )
+        issue = data.get("issue") if isinstance(data.get("issue"), dict) else {}
+        connection = issue.get("comments") if isinstance(issue.get("comments"), dict) else {}
+        comments.extend(_connection_nodes(connection))
+        page_info = _page_info(connection)
+        if not page_info.get("hasNextPage"):
+            return comments, False
+        next_cursor = str(page_info.get("endCursor") or "").strip()
+        if not next_cursor or next_cursor in seen_cursors:
+            raise LinearMeetingGraphQLError(
+                "Linear comment pagination did not advance safely.",
+                operation="LinearChannelIssueComments",
+            )
+        seen_cursors.add(next_cursor)
+        cursor = next_cursor
+    return comments, True
+
+
+def _normalize_linear_channel_issue_detail(issue: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(issue)
+    normalized["labels"] = _connection_nodes(issue.get("labels"))
+    attachments = issue.get("attachments")
+    normalized["attachments"] = _connection_nodes(attachments)
+    normalized["attachmentsTruncated"] = bool(
+        _page_info(attachments).get("hasNextPage")
+    )
+    normalized = _normalize_sizing_issue(normalized, relations_available=True)
+    return normalized
 
 
 def get_linear_meeting_context() -> dict[str, Any]:

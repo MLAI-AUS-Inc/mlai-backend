@@ -34,6 +34,7 @@ from integrations.services.external_connectors import (
     update_slack_channel_selections,
 )
 from integrations.services.linear_meeting_actions import (
+    LinearChannelIssueAccessError,
     LinearMeetingActionConflictError,
     LinearMeetingConfigurationError,
     LinearMeetingGraphQLError,
@@ -49,11 +50,13 @@ from integrations.services.linear_meeting_actions import (
     decide_linear_meeting_action_batch,
     get_linear_meeting_action_batch,
     get_linear_issue_receipt,
+    get_linear_channel_issue,
     get_linear_meeting_context,
     get_linear_project_issue_page,
     get_linear_project_sizing_context,
     get_linear_project_sizing_run,
     get_linear_project_update_page,
+    list_linear_channel_issues,
     resolve_linear_project,
 )
 from startup_updates.data_deletion import disconnect_gmail_for_user
@@ -67,6 +70,14 @@ logger = logging.getLogger(__name__)
 
 
 def _linear_meeting_error_response(exc):
+    if isinstance(exc, LinearChannelIssueAccessError):
+        return Response(
+            {
+                "detail": str(exc),
+                "code": "linear_channel_issue_access_denied",
+            },
+            status=status.HTTP_403_FORBIDDEN,
+        )
     if isinstance(exc, LinearMeetingActionConflictError):
         return Response(
             {
@@ -762,6 +773,40 @@ class LinearMeetingContextView(APIView):
             LinearMeetingRateLimitError,
             LinearMeetingGraphQLError,
             LinearMeetingIdempotencyConflictError,
+            ValueError,
+        ) as exc:
+            return _linear_meeting_error_response(exc)
+        return Response(payload, status=status.HTTP_200_OK)
+
+
+class LinearChannelIssueListView(APIView):
+    permission_classes = [HasRooApiKey]
+
+    def post(self, request):
+        try:
+            payload = list_linear_channel_issues(request.data)
+        except (
+            LinearChannelIssueAccessError,
+            LinearMeetingConfigurationError,
+            LinearMeetingRateLimitError,
+            LinearMeetingGraphQLError,
+            ValueError,
+        ) as exc:
+            return _linear_meeting_error_response(exc)
+        return Response(payload, status=status.HTTP_200_OK)
+
+
+class LinearChannelIssueDetailView(APIView):
+    permission_classes = [HasRooApiKey]
+
+    def post(self, request):
+        try:
+            payload = get_linear_channel_issue(request.data)
+        except (
+            LinearChannelIssueAccessError,
+            LinearMeetingConfigurationError,
+            LinearMeetingRateLimitError,
+            LinearMeetingGraphQLError,
             ValueError,
         ) as exc:
             return _linear_meeting_error_response(exc)
