@@ -35,6 +35,11 @@ rollout sequence.
 - [`reconciliation-knowledge-export.md`](reconciliation-knowledge-export.md)
 - [`monthly-update-reminders.md`](monthly-update-reminders.md)
 
+## HealthHack
+
+- [`healthhack-scoring-data.md`](healthhack-scoring-data.md) documents the
+  private scoring-data boundary and runtime provisioning contract.
+
 ## Roo
 
 - [`coworking-booking.md`](coworking-booking.md)

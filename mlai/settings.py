@@ -600,6 +600,10 @@ PASSWORD_RESET_DELIVERY_SECRET = os.getenv(
 )
 
 HEALTH_HACK_ACTIVE_CASE_ID = int(os.getenv('HEALTH_HACK_ACTIVE_CASE_ID', '1'))
+# Scoring truth is intentionally stored outside this public repository. The
+# configured file must use the ID,predicted_label,Usage contract validated by
+# hospital.views.load_ground_truth.
+HEALTH_HACK_SOLUTION_PATH = os.getenv('HEALTH_HACK_SOLUTION_PATH', '').strip()
 HEALTH_HACK_AI_BODY_MAX_BYTES = int(os.getenv('HEALTH_HACK_AI_BODY_MAX_BYTES', str(16 * 1024)))
 HEALTH_HACK_AI_UPSTREAM_MAX_BYTES = int(
     os.getenv('HEALTH_HACK_AI_UPSTREAM_MAX_BYTES', str(32 * 1024))
