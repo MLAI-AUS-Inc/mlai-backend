@@ -170,7 +170,38 @@ class LinearMeetingActionsApiTests(SimpleTestCase):
                                 "pageInfo": {"hasNextPage": False},
                             },
                             "relations": {
-                                "nodes": [],
+                                "nodes": [
+                                    {
+                                        "type": "blocks",
+                                        "relatedIssue": {
+                                            "id": "issue-17",
+                                            "identifier": "TECH-17",
+                                            "title": "Allowed relation",
+                                            "state": {"id": "state-todo", "name": "Todo"},
+                                            "team": {"id": "team-tech", "name": "MLAI_TECH"},
+                                        },
+                                    },
+                                    {
+                                        "type": "related",
+                                        "relatedIssue": {
+                                            "id": "issue-18",
+                                            "identifier": "TECH-18",
+                                            "title": "Wrong state relation",
+                                            "state": {"id": "state-progress", "name": "In Progress"},
+                                            "team": {"id": "team-tech", "name": "MLAI_TECH"},
+                                        },
+                                    },
+                                    {
+                                        "type": "related",
+                                        "relatedIssue": {
+                                            "id": "issue-other",
+                                            "identifier": "MLAI-1",
+                                            "title": "Wrong team relation",
+                                            "state": {"id": "state-todo", "name": "Todo"},
+                                            "team": {"id": "team-other", "name": "MLAI"},
+                                        },
+                                    },
+                                ],
                                 "pageInfo": {"hasNextPage": False},
                             },
                             "inverseRelations": {
@@ -223,6 +254,11 @@ class LinearMeetingActionsApiTests(SimpleTestCase):
         self.assertEqual(payload["issue"]["description"], "Full issue description")
         self.assertEqual(payload["issue"]["labels"][0]["name"], "Bug")
         self.assertEqual(payload["issue"]["attachments"][0]["title"], "GitHub issue")
+        self.assertEqual(
+            [edge["issue"]["identifier"] for edge in payload["issue"]["relations"]["edges"]],
+            ["TECH-17"],
+        )
+        self.assertEqual(payload["issue"]["relations"]["returned"], 1)
         self.assertEqual(payload["comments"][0]["body"], "First comment")
         self.assertFalse(payload["commentsTruncated"])
         self.assertEqual(
@@ -252,6 +288,38 @@ class LinearMeetingActionsApiTests(SimpleTestCase):
                 "slack_channel_id": "CTECH",
                 "requester_slack_id": "U123",
                 "issue_identifier": "MLAI-1",
+            },
+            format="json",
+            **self.auth_headers,
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(mock_post.call_count, 1)
+
+    @patch("integrations.services.linear_meeting_actions.http_requests.post")
+    def test_channel_issue_detail_rejects_issue_outside_bound_state(self, mock_post):
+        mock_post.return_value = FakeLinearResponse(
+            {
+                "data": {
+                    "issue": {
+                        "id": "issue-16",
+                        "identifier": "TECH-16",
+                        "title": "Already in progress",
+                        "state": {"id": "state-progress", "name": "In Progress"},
+                        "team": {"id": "team-tech", "name": "MLAI_TECH"},
+                    }
+                }
+            }
+        )
+
+        response = self.client.post(
+            "/api/v1/integrations/linear/channel-issues/detail",
+            {
+                "slack_workspace_id": "TMLAI",
+                "slack_channel_id": "CTECH",
+                "requester_slack_id": "U123",
+                "issue_identifier": "TECH-16",
+                "include_comments": True,
             },
             format="json",
             **self.auth_headers,

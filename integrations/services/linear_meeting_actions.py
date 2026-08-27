@@ -114,12 +114,7 @@ def list_linear_channel_issues(payload: dict[str, Any]) -> dict[str, Any]:
     connection = data.get("issues") if isinstance(data.get("issues"), dict) else {}
     issues = []
     for issue in _connection_nodes(connection):
-        team = issue.get("team") if isinstance(issue.get("team"), dict) else {}
-        state = issue.get("state") if isinstance(issue.get("state"), dict) else {}
-        if (
-            str(team.get("id") or "") != binding["linear_team_id"]
-            or str(state.get("id") or "") != binding["linear_state_id"]
-        ):
+        if not _linear_issue_matches_binding(issue, binding):
             logger.warning(
                 "linear_channel_issue_list_dropped_out_of_scope_issue identifier=%s",
                 issue.get("identifier"),
@@ -147,8 +142,7 @@ def get_linear_channel_issue(payload: dict[str, Any]) -> dict[str, Any]:
     issue = _fetch_linear_channel_issue_detail(issue_reference)
     if not issue:
         raise ValueError("Linear issue was not found.")
-    team = issue.get("team") if isinstance(issue.get("team"), dict) else {}
-    if str(team.get("id") or "") != binding["linear_team_id"]:
+    if not _linear_issue_matches_binding(issue, binding):
         raise LinearChannelIssueAccessError(
             "That Linear issue is not available from this Slack channel."
         )
@@ -159,7 +153,7 @@ def get_linear_channel_issue(payload: dict[str, Any]) -> dict[str, Any]:
         comments, comments_truncated = _list_linear_issue_comments(issue_reference)
     return {
         "list": _linear_channel_issue_list_metadata(binding),
-        "issue": _normalize_linear_channel_issue_detail(issue),
+        "issue": _normalize_linear_channel_issue_detail(issue, binding),
         "comments": comments,
         "commentsTruncated": comments_truncated,
         "snapshotAt": timezone.now().isoformat(),
@@ -227,6 +221,18 @@ def _linear_channel_issue_list_metadata(binding: dict[str, str]) -> dict[str, st
     }
 
 
+def _linear_issue_matches_binding(
+    issue: dict[str, Any],
+    binding: dict[str, str],
+) -> bool:
+    team = issue.get("team") if isinstance(issue.get("team"), dict) else {}
+    state = issue.get("state") if isinstance(issue.get("state"), dict) else {}
+    return (
+        str(team.get("id") or "") == binding["linear_team_id"]
+        and str(state.get("id") or "") == binding["linear_state_id"]
+    )
+
+
 def _fetch_linear_channel_issue_detail(issue_reference: str) -> dict[str, Any]:
     query = """
     query LinearChannelIssueDetail($id: String!) {
@@ -247,16 +253,16 @@ def _fetch_linear_channel_issue_detail(issue_reference: str) -> dict[str, Any]:
         relations(first: 50) {
           nodes {
             type
-            issue { id identifier title state { id name type } }
-            relatedIssue { id identifier title state { id name type } }
+            issue { id identifier title state { id name type } team { id key name } }
+            relatedIssue { id identifier title state { id name type } team { id key name } }
           }
           pageInfo { hasNextPage endCursor }
         }
         inverseRelations(first: 50) {
           nodes {
             type
-            issue { id identifier title state { id name type } }
-            relatedIssue { id identifier title state { id name type } }
+            issue { id identifier title state { id name type } team { id key name } }
+            relatedIssue { id identifier title state { id name type } team { id key name } }
           }
           pageInfo { hasNextPage endCursor }
         }
@@ -329,7 +335,10 @@ def _list_linear_issue_comments(issue_reference: str) -> tuple[list[dict[str, An
     return comments, True
 
 
-def _normalize_linear_channel_issue_detail(issue: dict[str, Any]) -> dict[str, Any]:
+def _normalize_linear_channel_issue_detail(
+    issue: dict[str, Any],
+    binding: dict[str, str],
+) -> dict[str, Any]:
     normalized = dict(issue)
     normalized["labels"] = _connection_nodes(issue.get("labels"))
     attachments = issue.get("attachments")
@@ -338,6 +347,17 @@ def _normalize_linear_channel_issue_detail(issue: dict[str, Any]) -> dict[str, A
         _page_info(attachments).get("hasNextPage")
     )
     normalized = _normalize_sizing_issue(normalized, relations_available=True)
+    relation_summary = normalized.get("relations")
+    if isinstance(relation_summary, dict):
+        edges = [
+            edge
+            for edge in relation_summary.get("edges", [])
+            if isinstance(edge, dict)
+            and isinstance(edge.get("issue"), dict)
+            and _linear_issue_matches_binding(edge["issue"], binding)
+        ]
+        relation_summary["edges"] = edges
+        relation_summary["returned"] = len(edges)
     return normalized
 
 
