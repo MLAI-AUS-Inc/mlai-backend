@@ -125,12 +125,26 @@ class BuzzBridgeClient:
         }
 
     @classmethod
-    def provision_private_conversation(cls, participant_pubkeys: list[str]) -> dict:
+    def provision_private_conversation(
+        cls,
+        participant_pubkeys: list[str],
+        *,
+        conversation_name: str = "",
+    ) -> dict:
         """Idempotently provision an exact-participant private MLAI DM."""
         pubkeys = sorted({str(value or "").strip().lower() for value in participant_pubkeys})
         if len(pubkeys) < 2 or len(pubkeys) > 9 or any(not EVENT_ID_RE.fullmatch(value) for value in pubkeys):
             raise BuzzBridgePermanentError("Private conversations require 2-9 valid public keys")
-        result = cls._post_adapter("v1/private-conversations", {"participant_pubkeys": pubkeys})
+        name = str(conversation_name or "").strip()
+        if len(name) > 255 or any(character.isprintable() is False for character in name):
+            raise BuzzBridgePermanentError("Private conversation name is invalid")
+        result = cls._post_adapter(
+            "v1/private-conversations",
+            {
+                "participant_pubkeys": pubkeys,
+                "conversation_name": name or None,
+            },
+        )
         channel_id = str(result.get("channel_id") or "").strip()
         try:
             uuid.UUID(channel_id)
@@ -155,6 +169,8 @@ class BuzzBridgeClient:
         source_channel_id: str,
         source_message_id: str,
         source_author_id: str,
+        source_author_display_name: str,
+        source_author_avatar_url: str,
         linked_pubkey: str,
     ) -> dict:
         result = cls._post_adapter(
@@ -170,6 +186,8 @@ class BuzzBridgeClient:
                 "source_channel_id": str(source_channel_id),
                 "source_message_id": str(source_message_id),
                 "source_author_id": str(source_author_id),
+                "source_author_display_name": str(source_author_display_name or "") or None,
+                "source_author_avatar_url": str(source_author_avatar_url or "") or None,
                 "linked_pubkey": str(linked_pubkey),
             },
         )

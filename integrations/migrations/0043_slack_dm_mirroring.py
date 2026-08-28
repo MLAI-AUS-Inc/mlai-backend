@@ -14,33 +14,13 @@ class Migration(migrations.Migration):
 
     operations = [
         migrations.CreateModel(
-            name="SlackDmMirrorConversation",
-            fields=[
-                ("id", models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name="ID")),
-                ("slack_workspace_id", models.CharField(db_index=True, max_length=100)),
-                ("slack_conversation_id", models.CharField(max_length=100)),
-                ("participant_slack_ids", models.JSONField(default=list)),
-                ("participant_buzz_pubkeys", models.JSONField(default=list)),
-                ("participant_hash", models.CharField(blank=True, db_index=True, default="", max_length=64)),
-                ("mlai_channel_id", models.UUIDField(blank=True, null=True, unique=True)),
-                ("status", models.CharField(choices=[("awaiting_consent", "Awaiting participant consent"), ("provisioning", "Provisioning"), ("live", "Live"), ("paused", "Paused"), ("error", "Error")], db_index=True, default="awaiting_consent", max_length=24)),
-                ("oldest_synced_ts", models.CharField(blank=True, default="", max_length=32)),
-                ("latest_synced_ts", models.CharField(blank=True, default="", max_length=32)),
-                ("last_synced_at", models.DateTimeField(blank=True, null=True)),
-                ("last_error", models.TextField(blank=True, default="")),
-                ("created_at", models.DateTimeField(auto_now_add=True)),
-                ("updated_at", models.DateTimeField(auto_now=True)),
-            ],
-            options={"db_table": "slack_dm_mirror_conversation"},
-        ),
-        migrations.CreateModel(
             name="SlackDmMirrorGrant",
             fields=[
                 ("id", models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name="ID")),
                 ("slack_workspace_id", models.CharField(db_index=True, max_length=100)),
                 ("slack_user_id", models.CharField(db_index=True, max_length=100)),
                 ("status", models.CharField(choices=[("active", "Active"), ("paused", "Paused"), ("error", "Error"), ("revoked", "Revoked")], db_index=True, default="active", max_length=24)),
-                ("consent_version", models.CharField(default="slack-dm-mirror-v1", max_length=64)),
+                ("consent_version", models.CharField(default="slack-dm-mirror-v2-owner", max_length=64)),
                 ("history_days", models.PositiveSmallIntegerField(default=30)),
                 ("consented_at", models.DateTimeField()),
                 ("paused_at", models.DateTimeField(blank=True, null=True)),
@@ -54,6 +34,29 @@ class Migration(migrations.Migration):
                 ("user", models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name="slack_dm_mirror_grants", to=settings.AUTH_USER_MODEL)),
             ],
             options={"db_table": "slack_dm_mirror_grant"},
+        ),
+        migrations.CreateModel(
+            name="SlackDmMirrorConversation",
+            fields=[
+                ("id", models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name="ID")),
+                ("slack_workspace_id", models.CharField(db_index=True, max_length=100)),
+                ("slack_conversation_id", models.CharField(max_length=100)),
+                ("participant_slack_ids", models.JSONField(default=list)),
+                ("participant_buzz_pubkeys", models.JSONField(default=list)),
+                ("participant_identity_map", models.JSONField(default=dict)),
+                ("participant_profiles", models.JSONField(default=dict)),
+                ("participant_hash", models.CharField(blank=True, db_index=True, default="", max_length=64)),
+                ("mlai_channel_id", models.UUIDField(blank=True, null=True, unique=True)),
+                ("status", models.CharField(choices=[("awaiting_setup", "Awaiting owner setup"), ("provisioning", "Provisioning"), ("live", "Live"), ("paused", "Paused"), ("error", "Error")], db_index=True, default="awaiting_setup", max_length=24)),
+                ("oldest_synced_ts", models.CharField(blank=True, default="", max_length=32)),
+                ("latest_synced_ts", models.CharField(blank=True, default="", max_length=32)),
+                ("last_synced_at", models.DateTimeField(blank=True, null=True)),
+                ("last_error", models.TextField(blank=True, default="")),
+                ("created_at", models.DateTimeField(auto_now_add=True)),
+                ("updated_at", models.DateTimeField(auto_now=True)),
+                ("grant", models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name="conversations", to="integrations.slackdmmirrorgrant")),
+            ],
+            options={"db_table": "slack_dm_mirror_conversation"},
         ),
         migrations.CreateModel(
             name="SlackDmMirrorDelivery",
@@ -90,7 +93,7 @@ class Migration(migrations.Migration):
         ),
         migrations.AddConstraint(
             model_name="slackdmmirrorconversation",
-            constraint=models.UniqueConstraint(fields=("slack_workspace_id", "slack_conversation_id"), name="slack_dm_conv_ws_chan_uniq"),
+            constraint=models.UniqueConstraint(fields=("grant", "slack_conversation_id"), name="slack_dm_conv_grant_chan_uniq"),
         ),
         migrations.AddConstraint(
             model_name="slackdmmirrordelivery",

@@ -30,8 +30,13 @@ class SlackDmMirrorGrantAdmin(admin.ModelAdmin):
 
 @admin.register(SlackDmMirrorConversation)
 class SlackDmMirrorConversationAdmin(admin.ModelAdmin):
-    list_display = ("slack_conversation_id", "slack_workspace_id", "mlai_channel_id", "status")
-    search_fields = ("slack_conversation_id", "slack_workspace_id", "mlai_channel_id")
+    list_display = ("slack_conversation_id", "grant", "slack_workspace_id", "mlai_channel_id", "status")
+    search_fields = (
+        "slack_conversation_id",
+        "slack_workspace_id",
+        "mlai_channel_id",
+        "grant__user__email",
+    )
     list_filter = ("status",)
     readonly_fields = ("created_at", "updated_at")
 

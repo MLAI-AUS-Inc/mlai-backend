@@ -23,7 +23,11 @@ from integrations.models import (
     SlackDmMirrorDelivery,
     SlackDmMirrorGrant,
 )
-from integrations.services.slack_dm_mirror import activate_connection, process_ready_deliveries
+from integrations.services.slack_dm_mirror import (
+    activate_connection,
+    ingest_slack_dm_event,
+    process_ready_deliveries,
+)
 
 
 SCOPES = ["im:read", "im:history", "im:write", "chat:write", "users:read"]
@@ -77,8 +81,9 @@ class SlackDmMirrorApiTests(APITestCase):
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.data["authorization_url"].startswith("http"))
         self.assertIn("/integrations/connect/slack?", response.data["authorization_url"])
-        self.assertIn("slack-dm-mirror-v1", response.data["consent"]["version"])
-        self.assertTrue(response.data["privacy"]["requires_both_participants"])
+        self.assertIn("slack-dm-mirror-v2-owner", response.data["consent"]["version"])
+        self.assertFalse(response.data["privacy"]["requires_both_participants"])
+        self.assertTrue(response.data["privacy"]["owner_controlled"])
         self.assertFalse(response.data["privacy"]["included_in_roo"])
 
     @override_settings(
@@ -133,7 +138,7 @@ class SlackDmMirrorApiTests(APITestCase):
         self.assertEqual(connection.access_token, "")
 
 
-class SlackDmMirrorConsentTests(APITestCase):
+class SlackDmMirrorOwnerTests(APITestCase):
     def setUp(self):
         self.first = get_user_model().objects.create_user(email="first@example.com")
         self.second = get_user_model().objects.create_user(email="second@example.com")
@@ -150,7 +155,7 @@ class SlackDmMirrorConsentTests(APITestCase):
     @patch("integrations.services.slack_dm_mirror.BuzzBridgeClient.provision_private_conversation")
     @patch("integrations.services.slack_dm_mirror.BuzzBridgeClient.deliver_private")
     @patch("integrations.services.slack_dm_mirror.WebClient")
-    def test_dm_stays_waiting_until_both_people_link_then_backfills_in_timestamp_order(
+    def test_one_link_provisions_owner_only_mirror_and_backfills_in_timestamp_order(
         self,
         web_client,
         deliver_private,
@@ -161,37 +166,49 @@ class SlackDmMirrorConsentTests(APITestCase):
             "channels": [{"id": "DONE", "user": "UTWO"}],
             "response_metadata": {"next_cursor": ""},
         }
-        second_client = MagicMock()
-        second_client.conversations_list.return_value = {
-            "channels": [{"id": "DONE", "user": "UONE"}],
-            "response_metadata": {"next_cursor": ""},
+        first_client.users_info.side_effect = lambda *, user: {
+            "user": {
+                "id": user,
+                "name": user.lower(),
+                "profile": {
+                    "display_name": "First person" if user == "UONE" else "Second person",
+                    "image_192": f"https://avatars.slack-edge.com/{user}.png",
+                },
+            }
         }
-        history_client = MagicMock()
-        history_client.conversations_history.return_value = {
+        first_client.conversations_history.return_value = {
             "messages": [
                 {"ts": "1787900001.000200", "user": "UTWO", "text": "private second"},
                 {"ts": "1787900000.000100", "user": "UONE", "text": "private first"},
             ],
             "response_metadata": {"next_cursor": ""},
         }
-        web_client.side_effect = [first_client, second_client, history_client]
-        provision.return_value = {
-            "channel_id": str(uuid.uuid4()),
-            "participant_pubkeys": ["1" * 64, "2" * 64],
+        web_client.return_value = first_client
+        channel_id = str(uuid.uuid4())
+        provision.side_effect = lambda pubkeys, **_: {
+            "channel_id": channel_id,
+            "participant_pubkeys": pubkeys,
         }
 
         activate_connection(self.first_connection)
         conversation = SlackDmMirrorConversation.objects.get(slack_conversation_id="DONE")
-        self.assertEqual(conversation.status, SlackDmMirrorConversationStatus.AWAITING_CONSENT)
-        provision.assert_not_called()
-
-        activate_connection(self.second_connection)
-        conversation.refresh_from_db()
         self.assertEqual(conversation.status, SlackDmMirrorConversationStatus.LIVE)
         self.assertIsNotNone(conversation.mlai_channel_id)
+        self.assertEqual(conversation.grant.slack_user_id, "UONE")
+        identity_map = conversation.participant_identity_map
+        self.assertEqual(identity_map["UONE"], "1" * 64)
+        self.assertEqual(len(identity_map["UTWO"]), 64)
+        self.assertNotEqual(identity_map["UTWO"], "2" * 64)
+        self.assertEqual(
+            conversation.participant_profiles["UTWO"]["display_name"],
+            "Second person",
+        )
         queued = list(SlackDmMirrorDelivery.objects.filter(conversation=conversation).order_by("id"))
         self.assertEqual([item.encrypted_text for item in queued], ["private first", "private second"])
-        provision.assert_called_once_with(["1" * 64, "2" * 64])
+        provision.assert_called_once_with(
+            conversation.participant_buzz_pubkeys,
+            conversation_name="Second person",
+        )
 
         self.assertEqual(process_ready_deliveries(limit=10), 2)
         self.assertEqual(process_ready_deliveries(limit=10), 0)
@@ -199,9 +216,89 @@ class SlackDmMirrorConsentTests(APITestCase):
             call.kwargs["created_at"] for call in deliver_private.call_args_list
         ]
         self.assertEqual(delivered_times, [1787900000, 1787900001])
+        self.assertEqual(
+            [call.kwargs["source_author_display_name"] for call in deliver_private.call_args_list],
+            ["First person", "Second person"],
+        )
+        self.assertEqual(
+            deliver_private.call_args_list[1].kwargs["source_author_avatar_url"],
+            "https://avatars.slack-edge.com/UTWO.png",
+        )
         self.assertFalse(
             SlackDmMirrorDelivery.objects.filter(
                 conversation=conversation,
                 encrypted_text__gt="",
             ).exists()
         )
+
+    def test_live_slack_event_fans_out_to_each_independent_owner_mirror(self):
+        first_grant = SlackDmMirrorGrant.objects.create(
+            user=self.first,
+            connection=self.first_connection,
+            slack_workspace_id="TMLAI",
+            slack_user_id="UONE",
+            consented_at=timezone.now(),
+        )
+        second_grant = SlackDmMirrorGrant.objects.create(
+            user=self.second,
+            connection=self.second_connection,
+            slack_workspace_id="TMLAI",
+            slack_user_id="UTWO",
+            consented_at=timezone.now(),
+        )
+        for grant, identity_map in (
+            (first_grant, {"UONE": "1" * 64, "UTWO": "3" * 64}),
+            (second_grant, {"UONE": "4" * 64, "UTWO": "2" * 64}),
+        ):
+            SlackDmMirrorConversation.objects.create(
+                grant=grant,
+                slack_workspace_id="TMLAI",
+                slack_conversation_id="DONE",
+                participant_slack_ids=["UONE", "UTWO"],
+                participant_buzz_pubkeys=sorted(identity_map.values()),
+                participant_identity_map=identity_map,
+                mlai_channel_id=uuid.uuid4(),
+                status=SlackDmMirrorConversationStatus.LIVE,
+            )
+
+        result = ingest_slack_dm_event(
+            {
+                "team_id": "TMLAI",
+                "event": {
+                    "channel": "DONE",
+                    "ts": "1787900100.000100",
+                    "user": "UONE",
+                    "text": "visible in each owner's private copy",
+                },
+            }
+        )
+
+        self.assertEqual(result["status"], "enqueued")
+        self.assertEqual(len(result["delivery_ids"]), 2)
+        self.assertEqual(SlackDmMirrorDelivery.objects.count(), 2)
+
+    def test_unknown_dm_event_queues_owner_grants_for_immediate_rediscovery(self):
+        grant = SlackDmMirrorGrant.objects.create(
+            user=self.first,
+            connection=self.first_connection,
+            slack_workspace_id="TMLAI",
+            slack_user_id="UONE",
+            consented_at=timezone.now(),
+            last_discovery_at=timezone.now(),
+        )
+
+        result = ingest_slack_dm_event(
+            {
+                "team_id": "TMLAI",
+                "event": {
+                    "channel": "DNEW",
+                    "ts": "1787900200.000100",
+                    "user": "UTWO",
+                    "text": "first message in a newly opened DM",
+                },
+            }
+        )
+
+        self.assertEqual(result["status"], "discovery_queued")
+        grant.refresh_from_db()
+        self.assertIsNone(grant.last_discovery_at)

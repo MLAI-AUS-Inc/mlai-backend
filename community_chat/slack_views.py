@@ -61,10 +61,11 @@ class SlackDmMirrorView(APIView):
         payload["consent"] = {
             "version": SlackDmMirrorGrant.CONSENT_VERSION,
             "summary": (
-                "Mirror eligible one-to-one Slack DMs into MLAI Chat. A DM starts "
-                "only after both participants link Slack. Up to 30 days of history "
-                "is imported; DMs are excluded from Roo, organization memory, public "
-                "search, and analytics."
+                "Mirror all one-to-one Slack DMs visible to your Slack account into "
+                "private, owner-controlled conversations in MLAI Chat. The other person "
+                "does not need to link Slack and cannot see your imported copy unless "
+                "they link independently. Up to 30 days of history is imported; DMs are "
+                "excluded from Roo, organization memory, public search, and analytics."
             ),
         }
         return Response(payload, status=status.HTTP_200_OK)

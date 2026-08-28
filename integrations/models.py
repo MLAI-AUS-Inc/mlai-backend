@@ -50,7 +50,7 @@ class SlackDmMirrorGrantStatus(models.TextChoices):
 
 
 class SlackDmMirrorConversationStatus(models.TextChoices):
-    AWAITING_CONSENT = "awaiting_consent", "Awaiting participant consent"
+    AWAITING_SETUP = "awaiting_setup", "Awaiting owner setup"
     PROVISIONING = "provisioning", "Provisioning"
     LIVE = "live", "Live"
     PAUSED = "paused", "Paused"
@@ -171,7 +171,7 @@ class ExternalServiceConnection(models.Model):
 class SlackDmMirrorGrant(models.Model):
     """A member's explicit consent to mirror Slack DMs into MLAI Chat."""
 
-    CONSENT_VERSION = "slack-dm-mirror-v1"
+    CONSENT_VERSION = "slack-dm-mirror-v2-owner"
 
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -222,18 +222,25 @@ class SlackDmMirrorGrant(models.Model):
 
 
 class SlackDmMirrorConversation(models.Model):
-    """Consent and cursor state for one Slack IM and its exact MLAI DM."""
+    """One member-owned mirror of a Slack IM and its private MLAI conversation."""
 
+    grant = models.ForeignKey(
+        SlackDmMirrorGrant,
+        on_delete=models.CASCADE,
+        related_name="conversations",
+    )
     slack_workspace_id = models.CharField(max_length=100, db_index=True)
     slack_conversation_id = models.CharField(max_length=100)
     participant_slack_ids = models.JSONField(default=list)
     participant_buzz_pubkeys = models.JSONField(default=list)
+    participant_identity_map = models.JSONField(default=dict)
+    participant_profiles = models.JSONField(default=dict)
     participant_hash = models.CharField(max_length=64, blank=True, default="", db_index=True)
     mlai_channel_id = models.UUIDField(null=True, blank=True, unique=True)
     status = models.CharField(
         max_length=24,
         choices=SlackDmMirrorConversationStatus.choices,
-        default=SlackDmMirrorConversationStatus.AWAITING_CONSENT,
+        default=SlackDmMirrorConversationStatus.AWAITING_SETUP,
         db_index=True,
     )
     oldest_synced_ts = models.CharField(max_length=32, blank=True, default="")
@@ -247,8 +254,8 @@ class SlackDmMirrorConversation(models.Model):
         db_table = "slack_dm_mirror_conversation"
         constraints = [
             models.UniqueConstraint(
-                fields=("slack_workspace_id", "slack_conversation_id"),
-                name="slack_dm_conv_ws_chan_uniq",
+                fields=("grant", "slack_conversation_id"),
+                name="slack_dm_conv_grant_chan_uniq",
             ),
         ]
         indexes = [

@@ -130,6 +130,7 @@ BUZZ_BRIDGE_ADAPTER_TOKEN=...
 BUZZ_BRIDGE_CALLBACK_SECRET=...
 SLACK_OAUTH_USER_SCOPES=channels:history,channels:read,groups:history,groups:read,im:history,im:read,im:write,chat:write,team:read,users:read
 SLACK_DM_MIRROR_HISTORY_DAYS=30
+SLACK_DM_MIRROR_SHADOW_SECRET=replace-with-a-long-random-secret
 ```
 
 For one-click DM linking, add `message.im` under **Subscribe to events on behalf
@@ -137,6 +138,12 @@ of users** in the Slack app and keep the same signed request URL used by the
 bridge. Existing users who authorized before these scopes were added must use
 the app's **Re-authorize Slack** action once. The OAuth callback automatically
 activates DM discovery after the new user token is stored.
+
+Each linked member receives an independent, owner-controlled mirror of every
+one-to-one Slack DM visible to their user token. The Slack counterpart is
+represented by a deterministic shadow key, so linking never gives an
+unconsenting counterpart access to imported history. If both people link, each
+has an independent mirror and Slack remains the transport between them.
 
 Create each public-channel mapping with:
 
