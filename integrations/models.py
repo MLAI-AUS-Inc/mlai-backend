@@ -42,6 +42,21 @@ class CommunityBridgeIdentityVerificationMethod(models.TextChoices):
     ACCOUNT_CHALLENGE = "account_challenge", "Account and key challenge"
 
 
+class SlackDmMirrorGrantStatus(models.TextChoices):
+    ACTIVE = "active", "Active"
+    PAUSED = "paused", "Paused"
+    ERROR = "error", "Error"
+    REVOKED = "revoked", "Revoked"
+
+
+class SlackDmMirrorConversationStatus(models.TextChoices):
+    AWAITING_CONSENT = "awaiting_consent", "Awaiting participant consent"
+    PROVISIONING = "provisioning", "Provisioning"
+    LIVE = "live", "Live"
+    PAUSED = "paused", "Paused"
+    ERROR = "error", "Error"
+
+
 class ExternalServiceProvider(models.TextChoices):
     STRIPE = "stripe", "Stripe"
     HUMANITIX = "humanitix", "Humanitix"
@@ -151,6 +166,143 @@ class ExternalServiceConnection(models.Model):
     def __str__(self):
         account = self.account_label or self.external_account_id or "unknown"
         return f"{self.get_provider_display()} connection for {self.user_id} ({account})"
+
+
+class SlackDmMirrorGrant(models.Model):
+    """A member's explicit consent to mirror Slack DMs into MLAI Chat."""
+
+    CONSENT_VERSION = "slack-dm-mirror-v1"
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="slack_dm_mirror_grants",
+    )
+    connection = models.OneToOneField(
+        ExternalServiceConnection,
+        on_delete=models.CASCADE,
+        related_name="slack_dm_mirror_grant",
+    )
+    slack_workspace_id = models.CharField(max_length=100, db_index=True)
+    slack_user_id = models.CharField(max_length=100, db_index=True)
+    status = models.CharField(
+        max_length=24,
+        choices=SlackDmMirrorGrantStatus.choices,
+        default=SlackDmMirrorGrantStatus.ACTIVE,
+        db_index=True,
+    )
+    consent_version = models.CharField(max_length=64, default=CONSENT_VERSION)
+    history_days = models.PositiveSmallIntegerField(default=30)
+    consented_at = models.DateTimeField()
+    paused_at = models.DateTimeField(null=True, blank=True)
+    revoked_at = models.DateTimeField(null=True, blank=True)
+    last_discovery_at = models.DateTimeField(null=True, blank=True)
+    last_synced_at = models.DateTimeField(null=True, blank=True)
+    last_error = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "slack_dm_mirror_grant"
+        constraints = [
+            models.UniqueConstraint(
+                fields=("slack_workspace_id", "slack_user_id"),
+                name="slack_dm_grant_workspace_user_unique",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=("slack_workspace_id", "status"),
+                name="slack_dm_grant_ws_status_idx",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.slack_workspace_id}:{self.slack_user_id} ({self.status})"
+
+
+class SlackDmMirrorConversation(models.Model):
+    """Consent and cursor state for one Slack IM and its exact MLAI DM."""
+
+    slack_workspace_id = models.CharField(max_length=100, db_index=True)
+    slack_conversation_id = models.CharField(max_length=100)
+    participant_slack_ids = models.JSONField(default=list)
+    participant_buzz_pubkeys = models.JSONField(default=list)
+    participant_hash = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    mlai_channel_id = models.UUIDField(null=True, blank=True, unique=True)
+    status = models.CharField(
+        max_length=24,
+        choices=SlackDmMirrorConversationStatus.choices,
+        default=SlackDmMirrorConversationStatus.AWAITING_CONSENT,
+        db_index=True,
+    )
+    oldest_synced_ts = models.CharField(max_length=32, blank=True, default="")
+    latest_synced_ts = models.CharField(max_length=32, blank=True, default="")
+    last_synced_at = models.DateTimeField(null=True, blank=True)
+    last_error = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "slack_dm_mirror_conversation"
+        constraints = [
+            models.UniqueConstraint(
+                fields=("slack_workspace_id", "slack_conversation_id"),
+                name="slack_dm_conv_ws_chan_uniq",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=("slack_workspace_id", "status"),
+                name="slack_dm_conv_ws_status_idx",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.slack_conversation_id} -> {self.mlai_channel_id or self.status}"
+
+
+class SlackDmMirrorDelivery(models.Model):
+    """Short-lived encrypted queue item; DM bodies never enter public bridge tables."""
+
+    conversation = models.ForeignKey(
+        SlackDmMirrorConversation,
+        on_delete=models.CASCADE,
+        related_name="deliveries",
+    )
+    source_platform = models.CharField(max_length=20, choices=CommunityBridgePlatform.choices)
+    source_message_id = models.CharField(max_length=100)
+    source_author_id = models.CharField(max_length=100)
+    operation = models.CharField(max_length=20, choices=CommunityBridgeDeliveryType.choices)
+    encrypted_text = EncryptedTextField(blank=True, default="")
+    metadata = models.JSONField(default=dict, blank=True)
+    status = models.CharField(
+        max_length=20,
+        choices=CommunityBridgeDeliveryStatus.choices,
+        default=CommunityBridgeDeliveryStatus.PENDING,
+        db_index=True,
+    )
+    attempts = models.PositiveSmallIntegerField(default=0)
+    available_at = models.DateTimeField(db_index=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    last_error = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "slack_dm_mirror_delivery"
+        constraints = [
+            models.UniqueConstraint(
+                fields=("conversation", "source_platform", "source_message_id", "operation"),
+                name="slack_dm_delivery_source_operation_unique",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=("status", "available_at"),
+                name="slack_dm_delivery_ready_idx",
+            ),
+        ]
 
 
 class FinancialAccount(models.Model):

@@ -101,10 +101,17 @@ grant only `channels:history`, `channels:read`, `chat:write`, `files:read`,
 `SLACK_BRIDGE_BOT_USER_ID` so its messages and reactions are discarded for loop
 prevention.
 
-Direct messages, private channels, and payloads marked as shared/external are
-ignored in normalization. Operators must also confirm that every mapped channel
-is not a Slack Connect channel before enabling it. Rotate the Slack signing
-secret, adapter token, callback secret, and bridge Nostr key independently.
+The public-channel normalizer continues to ignore direct messages, private
+channels, and payloads marked as shared/external. A separate consent-gated DM
+path handles one-to-one Slack IMs only: both human participants must link Slack,
+both must have verified MLAI Chat keys, and the exact participant set determines
+the destination DM. Group DMs and Slack Connect conversations are excluded.
+Private message bodies use a dedicated encrypted queue and are erased after
+delivery; they never enter public bridge receipts, Roo, organization memory,
+search, or analytics. Operators must also confirm that every public mapped
+channel is not a Slack Connect channel before enabling it. Rotate the Slack
+signing secret, adapter token, callback secret, and bridge Nostr key
+independently.
 
 The bridge Nostr public key is intentionally non-secret. Configure that same
 lowercase 64-character value as `MLAI_BRIDGE_PUBKEY` in browser, desktop, and
@@ -121,7 +128,15 @@ SLACK_BRIDGE_BOT_USER_ID=U...
 BUZZ_BRIDGE_ADAPTER_URL=https://chat.mlai.au/_mlai/bridge
 BUZZ_BRIDGE_ADAPTER_TOKEN=...
 BUZZ_BRIDGE_CALLBACK_SECRET=...
+SLACK_OAUTH_USER_SCOPES=channels:history,channels:read,groups:history,groups:read,im:history,im:read,im:write,chat:write,team:read,users:read
+SLACK_DM_MIRROR_HISTORY_DAYS=30
 ```
+
+For one-click DM linking, add `message.im` under **Subscribe to events on behalf
+of users** in the Slack app and keep the same signed request URL used by the
+bridge. Existing users who authorized before these scopes were added must use
+the app's **Re-authorize Slack** action once. The OAuth callback automatically
+activates DM discovery after the new user token is stored.
 
 Create each public-channel mapping with:
 

@@ -33,6 +33,7 @@ from integrations.services.community_bridge.store import (
     resolve_mapped_message,
     resolve_message_link,
 )
+from integrations.services.slack_dm_mirror import process_ready_deliveries as process_slack_dm_deliveries
 
 
 logger = logging.getLogger(__name__)
@@ -151,6 +152,7 @@ class CommunityBridgeDiscordClient(discord.Client):
         await self.process_pending_deliveries_once(limit=10)
 
     async def process_pending_deliveries_once(self, limit: int = 10) -> None:
+        await asyncio.to_thread(process_slack_dm_deliveries, limit)
         deliveries = await asyncio.to_thread(claim_ready_deliveries, limit)
         for delivery in deliveries:
             try:
