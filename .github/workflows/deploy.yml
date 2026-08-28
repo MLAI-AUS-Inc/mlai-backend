@@ -360,6 +360,9 @@ jobs:
         REDIS_URL: ${{ secrets.REDIS_URL }}
         XERO_OAUTH_SCOPES: ${{ vars.XERO_OAUTH_SCOPES || '' }}
         ROO_SIM_PATIENT_KEY: ${{ secrets.ROO_SIM_PATIENT_KEY }}
+        LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+        LINEAR_CHANNEL_ISSUE_BINDINGS_JSON: ${{ vars.LINEAR_CHANNEL_ISSUE_BINDINGS_JSON }}
+        LINEAR_CHANNEL_ISSUE_MAX_COMMENTS: ${{ vars.LINEAR_CHANNEL_ISSUE_MAX_COMMENTS || '250' }}
         VICTOR_AI_ROO_SIGNING_SECRET: ${{ secrets.VICTOR_AI_ROO_SIGNING_SECRET }}
         COMMUNITY_CHAT_EMAIL_CODE_PEPPER: ${{ secrets.COMMUNITY_CHAT_EMAIL_CODE_PEPPER }}
         COMMUNITY_CHAT_EMAIL_CODE_DELIVERY_SECRET: ${{ secrets.COMMUNITY_CHAT_EMAIL_CODE_DELIVERY_SECRET }}
@@ -412,6 +415,7 @@ jobs:
           echo "::error::Required repository secret ROO_SIM_PATIENT_KEY is not configured"
           exit 1
         fi
+        python scripts/validate_linear_channel_issue_deploy_config.py
         if [ "${#VICTOR_AI_ROO_SIGNING_SECRET}" -lt 32 ]; then
           echo "::error::Required repository secret VICTOR_AI_ROO_SIGNING_SECRET is missing or shorter than 32 characters"
           exit 1

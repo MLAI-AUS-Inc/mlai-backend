@@ -37,6 +37,18 @@ contain both entries; production should keep only the production entry.
 Do not put the Slack bot token, signing secret, or Linear API key in source
 control. No database migration is required for this feature.
 
+## Production deployment configuration
+
+The backend deployment reads `LINEAR_API_KEY` from a GitHub Actions repository
+secret. It reads `LINEAR_CHANNEL_ISSUE_BINDINGS_JSON` and
+`LINEAR_CHANNEL_ISSUE_MAX_COMMENTS` from repository variables. The deployment
+validates all three values before connecting to the production host, then
+installs them into the host `.env` over SSH stdin before recreating services.
+
+Adding the GitHub settings does not deploy the feature by itself. The normal
+reviewed deployment workflow consumes them only after this deployment wiring
+has reached `main`.
+
 ## API contract
 
 Both endpoints require Roo service authentication (`HasRooApiKey`). The caller
