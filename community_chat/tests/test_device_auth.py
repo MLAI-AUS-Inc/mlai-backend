@@ -7,6 +7,7 @@ from unittest.mock import patch
 from coincurve import PrivateKey
 from django.contrib.auth import get_user_model
 from django.core import signing
+from django.core.cache import cache
 from django.test import override_settings
 from django.urls import reverse
 from django.utils import timezone
@@ -53,6 +54,7 @@ def _challenge(verifier):
 )
 class CommunityChatDeviceAuthTests(APITestCase):
     def setUp(self):
+        cache.clear()
         self.user = get_user_model().objects.create_user(email="device-auth@example.com")
         self.other_user = get_user_model().objects.create_user(email="other-device-auth@example.com")
         self.public_key = _public_key(7)
