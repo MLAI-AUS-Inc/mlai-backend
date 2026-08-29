@@ -241,6 +241,7 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    'core.middleware.DesktopAuthCorsMiddleware',
     'corsheaders.middleware.CorsMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
@@ -467,6 +468,8 @@ REST_FRAMEWORK = {
         'auth_magic_link': None if _RUNNING_TESTS else os.getenv('AUTH_MAGIC_LINK_RATE', '5/minute'),
         'community_chat_session': os.getenv('COMMUNITY_CHAT_SESSION_RATE', '120/minute'),
         'community_chat_link_preview': os.getenv('COMMUNITY_CHAT_LINK_PREVIEW_RATE', '300/minute'),
+        'community_chat_home': os.getenv('COMMUNITY_CHAT_HOME_RATE', '60/minute'),
+        'community_chat_upcoming_events': os.getenv('COMMUNITY_CHAT_UPCOMING_EVENTS_RATE', '60/minute'),
         'community_chat_challenge': os.getenv('COMMUNITY_CHAT_CHALLENGE_RATE', '20/minute'),
         'community_chat_invite': os.getenv('COMMUNITY_CHAT_INVITE_RATE', '10/minute'),
         'community_chat_confirm': os.getenv('COMMUNITY_CHAT_CONFIRM_RATE', '30/minute'),
@@ -589,6 +592,10 @@ COMMUNITY_CHAT_ALLOWED_ORIGINS = _env_list(
 COMMUNITY_CHAT_PASSWORD_RESET_URL = os.getenv(
     'COMMUNITY_CHAT_PASSWORD_RESET_URL',
     'http://localhost:3001/#/reset-password' if DEBUG else 'https://chat.mlai.au/#/reset-password',
+)
+MEETING_ROOM_BOOKING_ENABLED = _env_is_true(
+    'MEETING_ROOM_BOOKING_ENABLED',
+    False,
 )
 PASSWORD_RESET_TTL_SECONDS = int(os.getenv('PASSWORD_RESET_TTL_SECONDS', '3600'))
 PASSWORD_RESET_MIN_RESPONSE_SECONDS = float(
@@ -1931,6 +1938,18 @@ if VICTOR_AI_ROO_ENABLED:
         )
 LUMA_API_KEY = os.environ.get('LUMA_API_KEY')
 LUMA_BASE_URL = os.environ.get('LUMA_BASE_URL', 'https://public-api.luma.com')
+LUMA_CALENDAR_URL = os.environ.get(
+    'LUMA_CALENDAR_URL',
+    'https://luma.com/mlai_au',
+).strip() or 'https://luma.com/mlai_au'
+LUMA_API_TIMEOUT_SECONDS = max(
+    0.1,
+    float(os.environ.get('LUMA_API_TIMEOUT_SECONDS', '5')),
+)
+LUMA_UPCOMING_EVENTS_CACHE_SECONDS = max(
+    0,
+    int(os.environ.get('LUMA_UPCOMING_EVENTS_CACHE_SECONDS', '300')),
+)
 HUMANITIX_API_BASE_URL = os.environ.get(
     'HUMANITIX_API_BASE_URL',
     'https://api.humanitix.com/v1',

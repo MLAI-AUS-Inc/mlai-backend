@@ -108,7 +108,7 @@ jobs:
         COMMUNITY_CHAT_ADAPTER_URL: http://10.126.0.9:3100
         COMMUNITY_CHAT_EMAIL_CODE_AUTH_ENABLED: "true"
         COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED: "false"
-        COMMUNITY_CHAT_DEVICE_AUTH_ENABLED: "false"
+        COMMUNITY_CHAT_DEVICE_AUTH_ENABLED: "true"
         CUSTOMERIO_COMMUNITY_CHAT_CODE_MESSAGE_ID: mlai_chat_sign_in_code
         CUSTOMERIO_API_KEY: ci-customerio-api-key-placeholder
         COMMUNITY_CHAT_EMAIL_CODE_PEPPER: ci-chat-code-pepper-independent-value
@@ -163,6 +163,8 @@ jobs:
           content_factory.tests_admin_metrics \
           tests.test_community_bridge_adapter_url \
           community_chat.tests.test_account_sessions \
+          community_chat.tests.test_device_auth \
+          community_chat.tests.test_throttles \
           community_chat.tests.test_link_previews \
           community_chat.tests.test_token_usage \
           community_chat.tests.test_tokenmaxer_federation \

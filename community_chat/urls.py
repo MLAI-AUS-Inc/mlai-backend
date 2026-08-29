@@ -12,12 +12,14 @@ from .views import (
     EmailCodeRequestView,
     EmailCodeVerifyView,
     DeviceView,
+    HomeView,
     InviteView,
     LinkPreviewImageView,
     LinkPreviewView,
     PasswordAuthView,
     PublicProfileBatchView,
     SessionView,
+    UpcomingEventsView,
 )
 from .coding_views import (
     CodingEntitlementView,
@@ -61,6 +63,12 @@ urlpatterns = [
         name="community_chat_coding_turn_finalize",
     ),
     path("account/", AccountView.as_view(), name="community_chat_account"),
+    path("home/", HomeView.as_view(), name="community_chat_home"),
+    path(
+        "upcoming-events/",
+        UpcomingEventsView.as_view(),
+        name="community_chat_upcoming_events",
+    ),
     path(
         "profiles/batch/",
         PublicProfileBatchView.as_view(),

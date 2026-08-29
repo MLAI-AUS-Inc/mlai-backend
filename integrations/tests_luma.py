@@ -15,7 +15,10 @@ from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
 
-from integrations.services.luma import LumaAttendeeReportService
+from integrations.services.luma import (
+    LumaAttendeeReportService,
+    LumaConfigurationError,
+)
 from roo.models import PointsAdmin
 
 
@@ -112,6 +115,103 @@ class LumaAttendeeReportServiceTests(SimpleTestCase):
                 for call in session.calls
             )
         )
+
+    def test_lists_only_allowlisted_public_upcoming_events(self):
+        def handler(path, params):
+            self.assertEqual(path, "/v1/calendar/list-events")
+            if params.get("pagination_cursor") == "page-2":
+                return {
+                    "entries": [
+                        {
+                            "id": "evt-later",
+                            "name": "Later event",
+                            "url": "https://lu.ma/later",
+                            "start_at": "2026-05-08T08:00:00Z",
+                            "end_at": "2026-05-08T10:00:00Z",
+                            "timezone": "Australia/Melbourne",
+                            "visibility": "public",
+                            "meeting_url": "https://meet.example/private",
+                            "registration_questions": [{"label": "Private"}],
+                        },
+                        {
+                            "id": "evt-sooner",
+                            "name": "Sooner event",
+                            "url": "https://lu.ma/sooner",
+                            "start_at": "2026-05-06T08:00:00Z",
+                            "end_at": "2026-05-06T09:00:00Z",
+                            "timezone": "Australia/Melbourne",
+                            "visibility": "public",
+                            "geo_address_json": {"address": "Hidden"},
+                        },
+                    ],
+                    "has_more": False,
+                }
+            return {
+                "entries": [
+                    {
+                        "id": "evt-private",
+                        "name": "Private event",
+                        "url": "https://lu.ma/private",
+                        "start_at": "2026-05-05T08:00:00Z",
+                        "end_at": "2026-05-05T09:00:00Z",
+                        "timezone": "Australia/Melbourne",
+                        "visibility": "private",
+                    },
+                    {
+                        "id": "evt-insecure",
+                        "name": "Insecure event",
+                        "url": "http://example.com/event",
+                        "start_at": "2026-05-05T08:00:00Z",
+                        "end_at": "2026-05-05T09:00:00Z",
+                        "timezone": "Australia/Melbourne",
+                        "visibility": "public",
+                    },
+                ],
+                "has_more": True,
+                "next_cursor": "page-2",
+            }
+
+        session = FakeSession(handler)
+        service = LumaAttendeeReportService(
+            api_key="key",
+            base_url="https://luma.test",
+            session=session,
+        )
+        now = datetime(2026, 5, 4, 12, 0, tzinfo=ZoneInfo("Australia/Melbourne"))
+
+        events = service.list_upcoming_events(now=now, limit=2)
+
+        self.assertEqual(
+            events,
+            [
+                {
+                    "id": "evt-sooner",
+                    "name": "Sooner event",
+                    "url": "https://lu.ma/sooner",
+                    "start_at": "2026-05-06T08:00:00Z",
+                    "end_at": "2026-05-06T09:00:00Z",
+                    "timezone": "Australia/Melbourne",
+                },
+                {
+                    "id": "evt-later",
+                    "name": "Later event",
+                    "url": "https://lu.ma/later",
+                    "start_at": "2026-05-08T08:00:00Z",
+                    "end_at": "2026-05-08T10:00:00Z",
+                    "timezone": "Australia/Melbourne",
+                },
+            ],
+        )
+        self.assertEqual(session.calls[0]["params"]["sort_direction"], "asc")
+        self.assertEqual(session.calls[0]["params"]["status"], "approved")
+        self.assertIn("after", session.calls[0]["params"])
+        self.assertEqual(session.calls[1]["params"]["pagination_cursor"], "page-2")
+
+    def test_upcoming_events_requires_a_configured_key(self):
+        service = LumaAttendeeReportService(api_key="")
+
+        with self.assertRaisesRegex(LumaConfigurationError, "LUMA_API_KEY"):
+            service.list_upcoming_events()
 
     def test_selects_ended_events_for_melbourne_date(self):
         def handler(path, params):

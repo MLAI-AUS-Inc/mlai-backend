@@ -33,13 +33,16 @@ def enforce_dimension_limit(*, action, dimension, value, limit, window_seconds):
 
 def enforce_bootstrap_limits(request, *, action, public_key, user_limit, key_limit, ip_limit):
     window = 600
-    enforce_dimension_limit(
-        action=action,
-        dimension="user",
-        value=request.user.pk,
-        limit=user_limit,
-        window_seconds=window,
-    )
+    user = getattr(request, "user", None)
+    user_id = getattr(user, "pk", None)
+    if user_id is not None and bool(getattr(user, "is_authenticated", False)):
+        enforce_dimension_limit(
+            action=action,
+            dimension="user",
+            value=user_id,
+            limit=user_limit,
+            window_seconds=window,
+        )
     enforce_dimension_limit(
         action=action,
         dimension="public-key",
@@ -54,4 +57,3 @@ def enforce_bootstrap_limits(request, *, action, public_key, user_limit, key_lim
         limit=ip_limit,
         window_seconds=window,
     )
-
