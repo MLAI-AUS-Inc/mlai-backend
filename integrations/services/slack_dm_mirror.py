@@ -571,59 +571,101 @@ def backfill_grant(
 
 
 def revoke_grant(grant: SlackDmMirrorGrant) -> None:
-    connection = grant.connection
+    now = timezone.now()
+    with transaction.atomic():
+        grant = (
+            SlackDmMirrorGrant.objects.select_for_update()
+            .select_related("connection")
+            .get(pk=grant.pk)
+        )
+        connection = grant.connection
+        access_token = str(connection.access_token or "").strip()
+        channel_ids = list(
+            grant.conversations.exclude(mlai_channel_id__isnull=True)
+            .order_by("mlai_channel_id")
+            .values_list("mlai_channel_id", flat=True)
+        )
+        grant.status = SlackDmMirrorGrantStatus.REVOKED
+        grant.revoked_at = now
+        grant.last_error = ""
+        grant.save(
+            update_fields=("status", "revoked_at", "last_error", "updated_at")
+        )
+        CommunityBridgeIdentityLink.objects.filter(
+            slack_workspace_id=grant.slack_workspace_id,
+            slack_user_id=grant.slack_user_id,
+            revoked_at__isnull=True,
+        ).update(
+            revoked_at=now,
+            revocation_reason="Slack DM mirroring disconnected",
+        )
+        conversation_ids = list(grant.conversations.values_list("id", flat=True))
+        grant.conversations.update(
+            status=SlackDmMirrorConversationStatus.PAUSED,
+            updated_at=now,
+        )
+        private_deliveries = SlackDmMirrorDelivery.objects.filter(
+            conversation_id__in=conversation_ids,
+        )
+        private_deliveries.update(encrypted_text="", updated_at=now)
+        private_deliveries.filter(
+            status__in=(
+                CommunityBridgeDeliveryStatus.PENDING,
+                CommunityBridgeDeliveryStatus.PROCESSING,
+                CommunityBridgeDeliveryStatus.FAILED,
+            ),
+        ).update(
+            status=CommunityBridgeDeliveryStatus.DEAD,
+            last_error="Consent revoked",
+            updated_at=now,
+        )
+        connection.status = ExternalServiceConnectionStatus.DISCONNECTED
+        connection.access_token = ""
+        connection.refresh_token = ""
+        connection.last_error = ""
+        connection.provider_metadata = {}
+        connection.sync_cursor = {}
+        connection.save(
+            update_fields=(
+                "status",
+                "access_token",
+                "refresh_token",
+                "last_error",
+                "provider_metadata",
+                "sync_cursor",
+                "updated_at",
+            )
+        )
+
+    if access_token:
+        try:
+            WebClient(token=access_token).auth_revoke()
+        except Exception as exc:
+            # Local revocation is the privacy boundary. Slack may already have
+            # revoked the token, so a remote error must not retain local access.
+            logger.warning(
+                "slack_dm_mirror_remote_revoke_failed connection_id=%s error=%s",
+                connection.pk,
+                exc.__class__.__name__,
+            )
+
     try:
-        WebClient(token=connection.access_token).auth_revoke()
+        for channel_id in channel_ids:
+            BuzzBridgeClient.unregister_private_conversation(str(channel_id))
     except Exception as exc:
-        # Local revocation is the privacy boundary. Slack may already have
-        # revoked the token, so a remote error must not retain local access.
+        # Local authority and credentials are already revoked, but the request
+        # must fail until the adapter's durable registration is also gone. A
+        # retry is safe because adapter unregistration is idempotent.
+        SlackDmMirrorGrant.objects.filter(pk=grant.pk).update(
+            last_error="MLAI Chat private registration revocation is pending",
+            updated_at=timezone.now(),
+        )
         logger.warning(
-            "slack_dm_mirror_remote_revoke_failed connection_id=%s error=%s",
-            connection.pk,
+            "slack_dm_mirror_adapter_unregister_failed grant_id=%s error=%s",
+            grant.pk,
             exc.__class__.__name__,
         )
-    now = timezone.now()
-    grant.status = SlackDmMirrorGrantStatus.REVOKED
-    grant.revoked_at = now
-    grant.save(update_fields=("status", "revoked_at", "updated_at"))
-    CommunityBridgeIdentityLink.objects.filter(
-        slack_workspace_id=grant.slack_workspace_id,
-        slack_user_id=grant.slack_user_id,
-        revoked_at__isnull=True,
-    ).update(revoked_at=now, revocation_reason="Slack DM mirroring disconnected")
-    conversation_ids = list(grant.conversations.values_list("id", flat=True))
-    grant.conversations.update(
-        status=SlackDmMirrorConversationStatus.PAUSED,
-        updated_at=now,
-    )
-    private_deliveries = SlackDmMirrorDelivery.objects.filter(
-        conversation_id__in=conversation_ids,
-    )
-    private_deliveries.update(encrypted_text="", updated_at=now)
-    private_deliveries.filter(
-        status__in=(
-            CommunityBridgeDeliveryStatus.PENDING,
-            CommunityBridgeDeliveryStatus.PROCESSING,
-            CommunityBridgeDeliveryStatus.FAILED,
-        ),
-    ).update(
-        status=CommunityBridgeDeliveryStatus.DEAD,
-        last_error="Consent revoked",
-        updated_at=now,
-    )
-    connection.status = ExternalServiceConnectionStatus.DISCONNECTED
-    connection.access_token = ""
-    connection.refresh_token = ""
-    connection.last_error = ""
-    connection.save(
-        update_fields=(
-            "status",
-            "access_token",
-            "refresh_token",
-            "last_error",
-            "updated_at",
-        )
-    )
+        raise
 
 
 def discover_conversations(

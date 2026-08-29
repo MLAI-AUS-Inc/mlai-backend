@@ -22,6 +22,7 @@ from integrations.models import (
     CommunityBridgeIdentityVerificationMethod,
     CommunityBridgePlatform,
     ExternalServiceConnection,
+    ExternalServiceConnectionStatus,
     ExternalServiceProvider,
     SlackDmMirrorConversation,
     SlackDmMirrorConversationStatus,
@@ -191,24 +192,138 @@ class SlackDmMirrorApiTests(APITestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn("Re-authorize Slack", str(response.data))
 
+    @patch(
+        "integrations.services.slack_dm_mirror.BuzzBridgeClient.unregister_private_conversation"
+    )
     @patch("integrations.services.slack_dm_mirror.WebClient")
-    def test_disconnect_revokes_and_clears_the_local_slack_token(self, web_client):
+    def test_disconnect_revokes_adapter_registration_and_clears_the_local_token(
+        self,
+        web_client,
+        unregister_private_conversation,
+    ):
         connection = _slack_connection(self.user, "UREVOKE")
-        SlackDmMirrorGrant.objects.create(
+        grant = SlackDmMirrorGrant.objects.create(
             user=self.user,
             connection=connection,
             slack_workspace_id="TMLAI",
             slack_user_id="UREVOKE",
             consented_at=timezone.now(),
         )
+        channel_id = uuid.uuid4()
+        SlackDmMirrorConversation.objects.create(
+            grant=grant,
+            slack_workspace_id="TMLAI",
+            slack_conversation_id="DREVOKE",
+            mlai_channel_id=channel_id,
+            status=SlackDmMirrorConversationStatus.LIVE,
+        )
 
         response = self.client.delete(self.url)
 
         self.assertEqual(response.status_code, 204)
+        unregister_private_conversation.assert_called_once_with(str(channel_id))
         web_client.return_value.auth_revoke.assert_called_once_with()
         connection.refresh_from_db()
         self.assertEqual(connection.status, "disconnected")
         self.assertEqual(connection.access_token, "")
+
+    @patch(
+        "integrations.services.slack_dm_mirror.BuzzBridgeClient.unregister_private_conversation"
+    )
+    @patch("integrations.services.slack_dm_mirror.WebClient")
+    def test_adapter_outage_revokes_locally_but_requires_a_successful_retry(
+        self,
+        web_client,
+        unregister_private_conversation,
+    ):
+        connection = _slack_connection(self.user, "URETRY")
+        grant = SlackDmMirrorGrant.objects.create(
+            user=self.user,
+            connection=connection,
+            slack_workspace_id="TMLAI",
+            slack_user_id="URETRY",
+            consented_at=timezone.now(),
+        )
+        channel_id = uuid.uuid4()
+        conversation = SlackDmMirrorConversation.objects.create(
+            grant=grant,
+            slack_workspace_id="TMLAI",
+            slack_conversation_id="DRETRY",
+            mlai_channel_id=channel_id,
+            status=SlackDmMirrorConversationStatus.LIVE,
+        )
+        unregister_private_conversation.side_effect = RuntimeError(
+            "adapter unavailable"
+        )
+        self.client.raise_request_exception = False
+
+        failed_response = self.client.delete(self.url)
+
+        self.assertEqual(failed_response.status_code, 500)
+        grant.refresh_from_db()
+        connection.refresh_from_db()
+        conversation.refresh_from_db()
+        self.assertEqual(grant.status, SlackDmMirrorGrantStatus.REVOKED)
+        self.assertIn("revocation is pending", grant.last_error)
+        self.assertEqual(connection.status, ExternalServiceConnectionStatus.DISCONNECTED)
+        self.assertEqual(connection.access_token, "")
+        self.assertEqual(
+            conversation.status,
+            SlackDmMirrorConversationStatus.PAUSED,
+        )
+        web_client.return_value.auth_revoke.assert_called_once_with()
+
+        unregister_private_conversation.side_effect = None
+        retry_response = self.client.delete(self.url)
+
+        self.assertEqual(retry_response.status_code, 204)
+        self.assertEqual(unregister_private_conversation.call_count, 2)
+        web_client.return_value.auth_revoke.assert_called_once_with()
+        grant.refresh_from_db()
+        self.assertEqual(grant.last_error, "")
+
+    @patch(
+        "integrations.services.slack_dm_mirror.BuzzBridgeClient.unregister_private_conversation"
+    )
+    @patch("integrations.services.slack_dm_mirror.WebClient")
+    def test_generic_connector_disconnect_also_revokes_private_registration(
+        self,
+        web_client,
+        unregister_private_conversation,
+    ):
+        connection = _slack_connection(self.user, "UGENERIC")
+        grant = SlackDmMirrorGrant.objects.create(
+            user=self.user,
+            connection=connection,
+            slack_workspace_id="TMLAI",
+            slack_user_id="UGENERIC",
+            consented_at=timezone.now(),
+        )
+        channel_id = uuid.uuid4()
+        SlackDmMirrorConversation.objects.create(
+            grant=grant,
+            slack_workspace_id="TMLAI",
+            slack_conversation_id="DGENERIC",
+            mlai_channel_id=channel_id,
+            status=SlackDmMirrorConversationStatus.LIVE,
+        )
+        self.client.credentials()
+        self.client.force_authenticate(self.user)
+
+        response = self.client.delete(
+            f"/api/v1/integrations/sources/connections/{connection.id}"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        unregister_private_conversation.assert_called_once_with(str(channel_id))
+        web_client.return_value.auth_revoke.assert_called_once_with()
+        grant.refresh_from_db()
+        connection.refresh_from_db()
+        self.assertEqual(grant.status, SlackDmMirrorGrantStatus.REVOKED)
+        self.assertEqual(connection.status, ExternalServiceConnectionStatus.DISCONNECTED)
+        self.assertEqual(connection.access_token, "")
+        self.assertEqual(connection.provider_metadata, {})
+        self.assertEqual(connection.sync_cursor, {})
 
     @patch("integrations.services.slack_dm_mirror.WebClient")
     def test_user_directory_filters_non_humans_external_users_and_emails(

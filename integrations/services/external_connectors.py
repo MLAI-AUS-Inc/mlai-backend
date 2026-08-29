@@ -5879,6 +5879,14 @@ def disconnect_external_connection(user, connection_id: int) -> bool:
     connection = ExternalServiceConnection.objects.filter(user=user, id=connection_id).first()
     if not connection:
         return False
+    if connection.provider == ExternalServiceProvider.SLACK:
+        from integrations.models import SlackDmMirrorGrant
+        from integrations.services.slack_dm_mirror import revoke_grant
+
+        grant = SlackDmMirrorGrant.objects.filter(connection=connection).first()
+        if grant is not None:
+            revoke_grant(grant)
+            return True
     connection.status = ExternalServiceConnectionStatus.DISCONNECTED
     connection.access_token = ""
     connection.refresh_token = ""

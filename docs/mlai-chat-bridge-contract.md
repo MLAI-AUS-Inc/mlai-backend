@@ -171,8 +171,9 @@ worker discovery), marks every destination participant set due for
 re-provisioning, and requeues Slack history for the new private destination.
 Private registration sends these included owner-device keys separately as
 `callback_author_pubkeys`; every callback author must also be a conversation
-participant. The adapter can therefore poll one compact union of authorized
-human authors instead of querying every private channel independently.
+participant. The adapter polls each private channel only for that registration's
+callback-author keys, so one owner's device authorization cannot broaden
+another channel's callback scope.
 
 Community Chat exposes these owner-authenticated endpoints:
 
@@ -188,6 +189,12 @@ Community Chat exposes these owner-authenticated endpoints:
   verified Community Chat device; body-supplied owner keys are ignored.
 - `PATCH /api/v1/community-chat/slack/` accepts `pause`, `resume`, `backfill`,
   and the explicit unbounded `backfill_all` action.
+- `DELETE /api/v1/community-chat/slack/` revokes local consent and Slack token
+  access, then calls the adapter's authenticated, idempotent
+  `DELETE /v1/private-conversations/{channel_id}` for every provisioned mirror.
+  A caller receives success only after those durable registrations are gone;
+  adapter failure leaves local access revoked and makes a retry complete the
+  remaining cleanup without revoking Slack twice.
 
 Private delivery retries are direction-specific: Slack-origin rows retry only
 through MLAI Chat, while MLAI-origin rows retry only through Slack with a stable
