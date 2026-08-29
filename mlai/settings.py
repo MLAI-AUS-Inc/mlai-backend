@@ -1383,6 +1383,10 @@ SLACK_OAUTH_SCOPES = _env_list(
         "channels:read",
         "groups:history",
         "groups:read",
+        "im:history",
+        "im:read",
+        "im:write",
+        "chat:write",
         "team:read",
         "users:read",
     ],
@@ -1394,6 +1398,10 @@ SLACK_SYNC_HISTORY_PAGE_LIMIT = int(os.environ.get("SLACK_SYNC_HISTORY_PAGE_LIMI
 SLACK_SYNC_HISTORY_MAX_PAGES = int(os.environ.get("SLACK_SYNC_HISTORY_MAX_PAGES", "5") or 5)
 SLACK_SYNC_REPLY_MAX_PAGES = int(os.environ.get("SLACK_SYNC_REPLY_MAX_PAGES", "3") or 3)
 SLACK_SYNC_REPLY_PAGE_BUDGET = int(os.environ.get("SLACK_SYNC_REPLY_PAGE_BUDGET", "2") or 2)
+SLACK_DM_MIRROR_HISTORY_DAYS = max(
+    0, min(int(os.environ.get("SLACK_DM_MIRROR_HISTORY_DAYS", "30") or 30), 90)
+)
+SLACK_DM_MIRROR_SHADOW_SECRET = os.environ.get("SLACK_DM_MIRROR_SHADOW_SECRET", "")
 SLACK_API_CONNECT_TIMEOUT_SECONDS = float(os.environ.get("SLACK_API_CONNECT_TIMEOUT_SECONDS", "3") or 3)
 SLACK_API_READ_TIMEOUT_SECONDS = float(os.environ.get("SLACK_API_READ_TIMEOUT_SECONDS", "8") or 8)
 

@@ -2,6 +2,7 @@ import hashlib
 import hmac
 import re
 import time
+import uuid
 from typing import List, Optional
 from urllib.parse import urljoin, urlparse
 
@@ -122,6 +123,109 @@ class BuzzBridgeClient:
             "message_id": message_id,
             "parent_message_id": str(result.get("parent_message_id") or "").strip(),
         }
+
+    @classmethod
+    def provision_private_conversation(
+        cls,
+        participant_pubkeys: list[str],
+        *,
+        conversation_name: str = "",
+    ) -> dict:
+        """Idempotently provision an exact-participant private MLAI DM."""
+        pubkeys = sorted({str(value or "").strip().lower() for value in participant_pubkeys})
+        if len(pubkeys) < 2 or len(pubkeys) > 9 or any(not EVENT_ID_RE.fullmatch(value) for value in pubkeys):
+            raise BuzzBridgePermanentError("Private conversations require 2-9 valid public keys")
+        name = str(conversation_name or "").strip()
+        if len(name) > 255 or any(character.isprintable() is False for character in name):
+            raise BuzzBridgePermanentError("Private conversation name is invalid")
+        result = cls._post_adapter(
+            "v1/private-conversations",
+            {
+                "participant_pubkeys": pubkeys,
+                "conversation_name": name or None,
+            },
+        )
+        channel_id = str(result.get("channel_id") or "").strip()
+        try:
+            uuid.UUID(channel_id)
+        except (ValueError, TypeError) as exc:
+            raise BuzzBridgeError("MLAI Chat adapter returned an invalid private channel") from exc
+        returned = sorted(str(value or "").strip().lower() for value in result.get("participant_pubkeys") or [])
+        if returned != pubkeys:
+            raise BuzzBridgeError("MLAI Chat adapter returned the wrong private participants")
+        return {"channel_id": channel_id, "participant_pubkeys": returned}
+
+    @classmethod
+    def deliver_private(
+        cls,
+        *,
+        delivery_id: str,
+        created_at: int,
+        operation: str,
+        channel_id: str,
+        participant_pubkeys: list[str],
+        text: str,
+        source_workspace_id: str,
+        source_channel_id: str,
+        source_message_id: str,
+        source_author_id: str,
+        source_author_display_name: str,
+        source_author_avatar_url: str,
+        linked_pubkey: str,
+    ) -> dict:
+        result = cls._post_adapter(
+            "v1/private-deliveries",
+            {
+                "delivery_id": str(delivery_id),
+                "created_at": int(created_at),
+                "operation": str(operation),
+                "channel_id": str(channel_id),
+                "participant_pubkeys": sorted(participant_pubkeys),
+                "text": str(text or ""),
+                "source_workspace_id": str(source_workspace_id),
+                "source_channel_id": str(source_channel_id),
+                "source_message_id": str(source_message_id),
+                "source_author_id": str(source_author_id),
+                "source_author_display_name": str(source_author_display_name or "") or None,
+                "source_author_avatar_url": str(source_author_avatar_url or "") or None,
+                "linked_pubkey": str(linked_pubkey),
+            },
+        )
+        returned_channel = str(result.get("channel_id") or "").strip()
+        message_id = str(result.get("message_id") or "").strip().lower()
+        if returned_channel != str(channel_id) or not EVENT_ID_RE.fullmatch(message_id):
+            raise BuzzBridgeError("MLAI Chat adapter returned an invalid private delivery")
+        return {"channel_id": returned_channel, "message_id": message_id}
+
+    @classmethod
+    def _post_adapter(cls, path: str, payload: dict) -> dict:
+        adapter_url = cls._validated_adapter_url()
+        api_token = cls._api_token()
+        if not api_token:
+            raise BuzzBridgePermanentError("BUZZ_BRIDGE_ADAPTER_TOKEN is not configured")
+        timeout = max(1, min(int(getattr(settings, "BUZZ_BRIDGE_ADAPTER_TIMEOUT_SECONDS", 15)), 60))
+        try:
+            response = requests.post(
+                urljoin(adapter_url, path),
+                headers={"Authorization": f"Bearer {api_token}", "Content-Type": "application/json"},
+                json=payload,
+                timeout=timeout,
+            )
+        except requests.RequestException as exc:
+            raise BuzzBridgeError(f"MLAI Chat adapter request failed: {exc.__class__.__name__}") from exc
+        if 400 <= response.status_code < 500 and response.status_code not in {408, 429}:
+            raise BuzzBridgePermanentError(
+                f"MLAI Chat adapter rejected request with HTTP {response.status_code}"
+            )
+        if not response.ok:
+            raise BuzzBridgeError(f"MLAI Chat adapter returned HTTP {response.status_code}")
+        try:
+            result = response.json()
+        except ValueError as exc:
+            raise BuzzBridgeError("MLAI Chat adapter returned invalid JSON") from exc
+        if not isinstance(result, dict):
+            raise BuzzBridgeError("MLAI Chat adapter returned invalid JSON")
+        return result
 
     @classmethod
     def lookup_messages(
