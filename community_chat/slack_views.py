@@ -16,6 +16,7 @@ from integrations.services.slack_dm_mirror import (
     REQUIRED_SCOPES,
     SlackDmMirrorError,
     activate_connection,
+    backfill_grant,
     pause_grant,
     resume_grant,
     revoke_grant,
@@ -61,10 +62,10 @@ class SlackDmMirrorView(APIView):
         payload["consent"] = {
             "version": SlackDmMirrorGrant.CONSENT_VERSION,
             "summary": (
-                "Mirror all one-to-one Slack DMs visible to your Slack account into "
+                "Mirror all direct and group Slack DMs visible to your Slack account into "
                 "private, owner-controlled conversations in MLAI Chat. The other person "
-                "does not need to link Slack and cannot see your imported copy unless "
-                "they link independently. Up to 30 days of history is imported; DMs are "
+                "or group members do not need to link Slack and cannot see your imported "
+                "copy unless they link independently. Up to 30 days of history is imported; DMs are "
                 "excluded from Roo, organization memory, public search, and analytics."
             ),
         }
@@ -92,8 +93,13 @@ class SlackDmMirrorView(APIView):
                 resume_grant(grant)
             except SlackDmMirrorError as exc:
                 raise ValidationError({"slack": str(exc)}) from exc
+        elif action == "backfill":
+            try:
+                backfill_grant(grant)
+            except SlackDmMirrorError as exc:
+                raise ValidationError({"slack": str(exc)}) from exc
         else:
-            raise ValidationError({"action": "Use pause or resume."})
+            raise ValidationError({"action": "Use pause, resume, or backfill."})
         return Response(status_payload(request.user))
 
     def delete(self, request):

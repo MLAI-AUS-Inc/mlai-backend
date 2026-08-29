@@ -103,9 +103,11 @@ prevention.
 
 The public-channel normalizer continues to ignore direct messages, private
 channels, and payloads marked as shared/external. A separate consent-gated DM
-path handles one-to-one Slack IMs only: both human participants must link Slack,
-both must have verified MLAI Chat keys, and the exact participant set determines
-the destination DM. Group DMs and Slack Connect conversations are excluded.
+path handles Slack IMs and multi-person IMs for one linking owner. The owner's
+verified MLAI Chat key and deterministic shadow keys for the other participants
+determine a private destination conversation. Other participants do not need to
+link and do not gain access to that owner-controlled copy; if they link, they
+receive independent mirrors. Slack Connect conversations remain excluded.
 Private message bodies use a dedicated encrypted queue and are erased after
 delivery; they never enter public bridge receipts, Roo, organization memory,
 search, or analytics. Operators must also confirm that every public mapped
@@ -128,22 +130,25 @@ SLACK_BRIDGE_BOT_USER_ID=U...
 BUZZ_BRIDGE_ADAPTER_URL=https://chat.mlai.au/_mlai/bridge
 BUZZ_BRIDGE_ADAPTER_TOKEN=...
 BUZZ_BRIDGE_CALLBACK_SECRET=...
-SLACK_OAUTH_USER_SCOPES=channels:history,channels:read,groups:history,groups:read,im:history,im:read,im:write,chat:write,team:read,users:read
+SLACK_OAUTH_USER_SCOPES=channels:history,channels:read,groups:history,groups:read,im:history,im:read,im:write,mpim:history,mpim:read,chat:write,team:read,users:read
 SLACK_DM_MIRROR_HISTORY_DAYS=30
 SLACK_DM_MIRROR_SHADOW_SECRET=replace-with-a-long-random-secret
 ```
 
-For one-click DM linking, add `message.im` under **Subscribe to events on behalf
-of users** in the Slack app and keep the same signed request URL used by the
-bridge. Existing users who authorized before these scopes were added must use
-the app's **Re-authorize Slack** action once. The OAuth callback automatically
-activates DM discovery after the new user token is stored.
+For one-click DM linking, add `message.im` and `message.mpim` under **Subscribe
+to events on behalf of users** in the Slack app and keep the same signed request
+URL used by the bridge. Existing users who authorized before the multi-person
+scopes were added can keep direct-message sync active, but must use the app's
+**Re-authorize Slack** action once to add group DMs. The OAuth callback
+automatically activates DM discovery after the new user token is stored.
 
 Each linked member receives an independent, owner-controlled mirror of every
-one-to-one Slack DM visible to their user token. The Slack counterpart is
-represented by a deterministic shadow key, so linking never gives an
-unconsenting counterpart access to imported history. If both people link, each
-has an independent mirror and Slack remains the transport between them.
+direct and supported multi-person Slack DM visible to their user token. The
+other participants are represented by deterministic shadow keys, so linking
+never gives an unconsenting participant access to imported history. A bounded
+history scan runs once for every discovered conversation, including mirrors
+created before the history marker was deployed. The idempotency key prevents
+duplicate deliveries; an explicit retry is available from Community Home.
 
 Create each public-channel mapping with:
 

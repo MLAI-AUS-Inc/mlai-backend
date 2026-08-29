@@ -343,7 +343,21 @@ def _slack_oauth_user_scope_list() -> list[str]:
         getattr(settings, "SLACK_OAUTH_USER_SCOPES", None)
         or getattr(settings, "SLACK_OAUTH_SCOPES", [])
     )
-    return _uniq_scopes(configured)
+    # Direct and group-DM migration is a first-party Slack capability. Append
+    # its scopes even when an older deployment still provides an explicit
+    # environment list, so re-authorization can upgrade existing links.
+    return _uniq_scopes(
+        [
+            *configured,
+            "im:read",
+            "im:history",
+            "im:write",
+            "mpim:read",
+            "mpim:history",
+            "chat:write",
+            "users:read",
+        ]
+    )
 
 
 def _slack_oauth_bot_scope_list() -> list[str]:
@@ -480,6 +494,8 @@ def _provider_configuration_error(provider: str) -> Optional[str]:
             "im:read",
             "im:history",
             "im:write",
+            "mpim:read",
+            "mpim:history",
             "chat:write",
             "team:read",
             "users:read",

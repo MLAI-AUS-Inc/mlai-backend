@@ -171,7 +171,7 @@ class ExternalServiceConnection(models.Model):
 class SlackDmMirrorGrant(models.Model):
     """A member's explicit consent to mirror Slack DMs into MLAI Chat."""
 
-    CONSENT_VERSION = "slack-dm-mirror-v2-owner"
+    CONSENT_VERSION = "slack-dm-mirror-v3-owner-direct-and-group"
 
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -245,6 +245,7 @@ class SlackDmMirrorConversation(models.Model):
     )
     oldest_synced_ts = models.CharField(max_length=32, blank=True, default="")
     latest_synced_ts = models.CharField(max_length=32, blank=True, default="")
+    history_backfilled_at = models.DateTimeField(null=True, blank=True)
     last_synced_at = models.DateTimeField(null=True, blank=True)
     last_error = models.TextField(blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)
