@@ -25,12 +25,16 @@ from integrations.models import (
 )
 from integrations.services.slack_dm_mirror import (
     activate_connection,
+    backfill_grant,
     ingest_slack_dm_event,
     process_ready_deliveries,
+    status_payload,
 )
 
 
-SCOPES = ["im:read", "im:history", "im:write", "chat:write", "users:read"]
+DIRECT_SCOPES = ["im:read", "im:history", "im:write", "chat:write", "users:read"]
+GROUP_SCOPES = ["mpim:read", "mpim:history"]
+SCOPES = DIRECT_SCOPES + GROUP_SCOPES
 OAUTH_SCOPES = SCOPES + [
     "channels:read",
     "channels:history",
@@ -81,7 +85,11 @@ class SlackDmMirrorApiTests(APITestCase):
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.data["authorization_url"].startswith("http"))
         self.assertIn("/integrations/connect/slack?", response.data["authorization_url"])
-        self.assertIn("slack-dm-mirror-v2-owner", response.data["consent"]["version"])
+        self.assertIn(
+            "slack-dm-mirror-v3-owner-direct-and-group",
+            response.data["consent"]["version"],
+        )
+        self.assertIn("direct and group Slack DMs", response.data["consent"]["summary"])
         self.assertFalse(response.data["privacy"]["requires_both_participants"])
         self.assertTrue(response.data["privacy"]["owner_controlled"])
         self.assertFalse(response.data["privacy"]["included_in_roo"])
@@ -105,6 +113,22 @@ class SlackDmMirrorApiTests(APITestCase):
         self.assertEqual(slack_url.netloc, "slack.com")
         scopes = set(parse_qs(slack_url.query)["user_scope"][0].split(","))
         self.assertTrue(set(SCOPES).issubset(scopes))
+
+    @patch("community_chat.slack_views.backfill_grant")
+    def test_linked_owner_can_request_an_idempotent_history_backfill(self, backfill):
+        connection = _slack_connection(self.user, "UBACKFILL")
+        grant = SlackDmMirrorGrant.objects.create(
+            user=self.user,
+            connection=connection,
+            slack_workspace_id="TMLAI",
+            slack_user_id="UBACKFILL",
+            consented_at=timezone.now(),
+        )
+
+        response = self.client.patch(self.url, {"action": "backfill"}, format="json")
+
+        self.assertEqual(response.status_code, 200)
+        backfill.assert_called_once_with(grant)
 
     @override_settings(COMMUNITY_CHAT_FRONTEND_URL="https://chat.mlai.au")
     def test_existing_slack_connection_without_dm_scopes_is_reauthorized(self):
@@ -230,6 +254,177 @@ class SlackDmMirrorOwnerTests(APITestCase):
                 encrypted_text__gt="",
             ).exists()
         )
+
+    @patch("integrations.services.slack_dm_mirror.BuzzBridgeClient.provision_private_conversation")
+    @patch("integrations.services.slack_dm_mirror.WebClient")
+    def test_one_link_discovers_and_backfills_group_dms(
+        self,
+        web_client,
+        provision,
+    ):
+        client = MagicMock()
+        client.conversations_list.return_value = {
+            "channels": [
+                {
+                    "id": "GMPIM",
+                    "is_mpim": True,
+                    "members": ["UONE", "UTWO", "UTHREE"],
+                }
+            ],
+            "response_metadata": {"next_cursor": ""},
+        }
+        client.users_info.side_effect = lambda *, user: {
+            "user": {
+                "id": user,
+                "name": user.lower(),
+                "profile": {"display_name": {"UONE": "First", "UTWO": "Second", "UTHREE": "Third"}[user]},
+            }
+        }
+        client.conversations_history.return_value = {
+            "messages": [
+                {"ts": "1787900300.000100", "user": "UTHREE", "text": "group history"},
+            ],
+            "response_metadata": {"next_cursor": ""},
+        }
+        web_client.return_value = client
+        provision.side_effect = lambda pubkeys, **_: {
+            "channel_id": str(uuid.uuid4()),
+            "participant_pubkeys": pubkeys,
+        }
+
+        activate_connection(self.first_connection)
+
+        conversation = SlackDmMirrorConversation.objects.get(
+            slack_conversation_id="GMPIM"
+        )
+        self.assertEqual(
+            conversation.participant_slack_ids,
+            ["UONE", "UTHREE", "UTWO"],
+        )
+        self.assertEqual(len(conversation.participant_buzz_pubkeys), 3)
+        self.assertEqual(conversation.participant_identity_map["UONE"], "1" * 64)
+        self.assertNotEqual(conversation.participant_identity_map["UTWO"], "2" * 64)
+        self.assertIsNotNone(conversation.history_backfilled_at)
+        self.assertEqual(conversation.deliveries.count(), 1)
+        client.conversations_list.assert_called_once_with(
+            types="im,mpim",
+            exclude_archived=True,
+            limit=200,
+            cursor="",
+        )
+        provision.assert_called_once_with(
+            conversation.participant_buzz_pubkeys,
+            conversation_name="Third, Second",
+        )
+
+    @patch("integrations.services.slack_dm_mirror.BuzzBridgeClient.provision_private_conversation")
+    @patch("integrations.services.slack_dm_mirror.WebClient")
+    def test_existing_live_mirror_gets_one_automatic_idempotent_backfill(
+        self,
+        web_client,
+        provision,
+    ):
+        client = MagicMock()
+        client.conversations_list.return_value = {
+            "channels": [{"id": "DONE", "user": "UTWO"}],
+            "response_metadata": {"next_cursor": ""},
+        }
+        client.users_info.side_effect = lambda *, user: {
+            "user": {"id": user, "name": user.lower(), "profile": {}}
+        }
+        client.conversations_history.return_value = {
+            "messages": [
+                {"ts": "1787900400.000100", "user": "UTWO", "text": "recovered"},
+            ],
+            "response_metadata": {"next_cursor": ""},
+        }
+        web_client.return_value = client
+        channel_id = str(uuid.uuid4())
+        provision.return_value = {
+            "channel_id": channel_id,
+            "participant_pubkeys": [],
+        }
+        provision.side_effect = lambda pubkeys, **_: {
+            "channel_id": channel_id,
+            "participant_pubkeys": pubkeys,
+        }
+
+        activate_connection(self.first_connection)
+        conversation = SlackDmMirrorConversation.objects.get(
+            slack_conversation_id="DONE"
+        )
+        first_marker = conversation.history_backfilled_at
+        self.assertIsNotNone(first_marker)
+        self.assertEqual(conversation.deliveries.count(), 1)
+
+        backfill_grant(conversation.grant)
+        conversation.refresh_from_db()
+
+        self.assertGreaterEqual(conversation.history_backfilled_at, first_marker)
+        self.assertEqual(conversation.deliveries.count(), 1)
+
+    @patch("integrations.services.slack_dm_mirror.BuzzBridgeClient.provision_private_conversation")
+    @patch("integrations.services.slack_dm_mirror.WebClient")
+    def test_direct_only_grant_backfills_once_and_requests_group_reauthorization(
+        self,
+        web_client,
+        provision,
+    ):
+        self.first_connection.scopes = DIRECT_SCOPES
+        self.first_connection.save(update_fields=("scopes", "updated_at"))
+        client = MagicMock()
+        client.conversations_list.return_value = {
+            "channels": [{"id": "DONE", "user": "UTWO"}],
+            "response_metadata": {"next_cursor": ""},
+        }
+        client.users_info.side_effect = lambda *, user: {
+            "user": {"id": user, "name": user.lower(), "profile": {}}
+        }
+        client.conversations_history.return_value = {
+            "messages": [],
+            "response_metadata": {"next_cursor": ""},
+        }
+        web_client.return_value = client
+        provision.side_effect = lambda pubkeys, **_: {
+            "channel_id": str(uuid.uuid4()),
+            "participant_pubkeys": pubkeys,
+        }
+
+        activate_connection(self.first_connection)
+        activate_connection(self.first_connection)
+
+        conversation = SlackDmMirrorConversation.objects.get(
+            slack_conversation_id="DONE"
+        )
+        self.assertIsNotNone(conversation.history_backfilled_at)
+        self.assertEqual(client.conversations_history.call_count, 1)
+        client.conversations_list.assert_called_with(
+            types="im",
+            exclude_archived=True,
+            limit=200,
+            cursor="",
+        )
+        payload = status_payload(self.first)
+        self.assertTrue(payload["enabled"])
+        self.assertTrue(payload["needs_reauthorization"])
+        self.assertFalse(payload["group_dms_enabled"])
+        self.assertEqual(payload["backfill"], {"complete": 1, "pending": 0})
+
+    def test_private_channel_event_is_not_misclassified_as_a_group_dm(self):
+        result = ingest_slack_dm_event(
+            {
+                "team_id": "TMLAI",
+                "event": {
+                    "channel": "GPRIVATE",
+                    "channel_type": "group",
+                    "ts": "1787900500.000100",
+                    "user": "UTWO",
+                    "text": "private channel message",
+                },
+            }
+        )
+
+        self.assertIsNone(result)
 
     def test_live_slack_event_fans_out_to_each_independent_owner_mirror(self):
         first_grant = SlackDmMirrorGrant.objects.create(

@@ -41,7 +41,9 @@ from integrations.services.community_bridge.buzz import BuzzBridgeClient
 
 
 logger = logging.getLogger(__name__)
-REQUIRED_SCOPES = {"im:read", "im:history", "im:write", "chat:write", "users:read"}
+DIRECT_DM_SCOPES = {"im:read", "im:history", "im:write", "chat:write", "users:read"}
+GROUP_DM_SCOPES = {"mpim:read", "mpim:history"}
+REQUIRED_SCOPES = DIRECT_DM_SCOPES | GROUP_DM_SCOPES
 _last_registration_refresh = 0.0
 _last_grant_discovery_scan = 0.0
 GRANT_DISCOVERY_INTERVAL_SECONDS = 300
@@ -85,6 +87,10 @@ def status_payload(user) -> dict[str, Any]:
             "error": SlackDmMirrorConversationStatus.ERROR,
         }.items()
     }
+    backfill_counts = {
+        "complete": conversations.filter(history_backfilled_at__isnull=False).count(),
+        "pending": conversations.filter(history_backfilled_at__isnull=True).count(),
+    }
     return {
         "connected": connection is not None,
         "needs_reauthorization": bool(
@@ -102,6 +108,11 @@ def status_payload(user) -> dict[str, Any]:
         "last_synced_at": grant.last_synced_at if grant else None,
         "last_error": grant.last_error if grant else "",
         "conversations": counts,
+        "backfill": backfill_counts,
+        "group_dms_enabled": bool(
+            connection is not None
+            and GROUP_DM_SCOPES.issubset(set(connection.scopes or []))
+        ),
         "privacy": {
             "requires_both_participants": False,
             "owner_controlled": True,
@@ -118,7 +129,7 @@ def activate_connection(connection: ExternalServiceConnection) -> SlackDmMirrorG
     if connection.provider != ExternalServiceProvider.SLACK:
         raise SlackDmMirrorError("Connection is not a Slack connection.")
     workspace_id, slack_user_id = _connection_identity(connection)
-    missing = REQUIRED_SCOPES - set(connection.scopes or [])
+    missing = DIRECT_DM_SCOPES - set(connection.scopes or [])
     if missing:
         raise SlackDmMirrorError(f"Slack grant is missing scopes: {', '.join(sorted(missing))}.")
     device = _preferred_device(connection.user_id)
@@ -187,6 +198,14 @@ def resume_grant(grant: SlackDmMirrorGrant) -> None:
     discover_conversations(grant)
 
 
+def backfill_grant(grant: SlackDmMirrorGrant) -> int:
+    """Re-scan Slack and idempotently enqueue the configured history window."""
+
+    if grant.status != SlackDmMirrorGrantStatus.ACTIVE or grant.revoked_at is not None:
+        raise SlackDmMirrorError("Resume Slack mirroring before starting a backfill.")
+    return discover_conversations(grant, force_backfill=True)
+
+
 def revoke_grant(grant: SlackDmMirrorGrant) -> None:
     connection = grant.connection
     try:
@@ -237,23 +256,33 @@ def revoke_grant(grant: SlackDmMirrorGrant) -> None:
     )
 
 
-def discover_conversations(grant: SlackDmMirrorGrant) -> int:
-    """Discover and provision every 1:1 IM visible to the consenting member."""
+def discover_conversations(grant: SlackDmMirrorGrant, *, force_backfill: bool = False) -> int:
+    """Discover and provision every direct or group DM visible to the owner."""
 
     client = WebClient(token=grant.connection.access_token)
+    include_group_dms = GROUP_DM_SCOPES.issubset(set(grant.connection.scopes or []))
+    conversation_types = "im,mpim" if include_group_dms else "im"
     cursor = ""
     discovered = 0
     profile_cache: dict[str, dict[str, str]] = {}
     while True:
-        response = client.conversations_list(types="im", exclude_archived=True, limit=200, cursor=cursor)
+        response = client.conversations_list(
+            types=conversation_types,
+            exclude_archived=True,
+            limit=200,
+            cursor=cursor,
+        )
         for raw in response.get("channels") or []:
             if not isinstance(raw, dict):
                 continue
             channel_id = str(raw.get("id") or "").strip()
-            other_user_id = str(raw.get("user") or "").strip()
-            if not channel_id.startswith("D") or not other_user_id:
+            participant_ids = _conversation_participant_ids(
+                client,
+                raw,
+                owner_slack_user_id=grant.slack_user_id,
+            )
+            if not participant_ids:
                 continue
-            participant_ids = sorted({grant.slack_user_id, other_user_id})
             conversation, _ = SlackDmMirrorConversation.objects.update_or_create(
                 grant=grant,
                 slack_conversation_id=channel_id,
@@ -266,7 +295,10 @@ def discover_conversations(grant: SlackDmMirrorGrant) -> int:
                     },
                 },
             )
-            _provision_owner_conversation(conversation)
+            _provision_owner_conversation(
+                conversation,
+                force_backfill=force_backfill,
+            )
             discovered += 1
         cursor = str((response.get("response_metadata") or {}).get("next_cursor") or "").strip()
         if not cursor:
@@ -280,11 +312,22 @@ def discover_conversations(grant: SlackDmMirrorGrant) -> int:
 def ingest_slack_dm_event(payload: dict[str, Any]) -> dict[str, Any] | None:
     event = payload.get("event") if isinstance(payload.get("event"), dict) else {}
     channel_id = str(event.get("channel") or "").strip()
-    if not channel_id.startswith("D"):
+    workspace_id = str(payload.get("team_id") or "").strip()
+    known_group_dm = bool(
+        channel_id.startswith("G")
+        and SlackDmMirrorConversation.objects.filter(
+            slack_workspace_id=workspace_id,
+            slack_conversation_id=channel_id,
+        ).exists()
+    )
+    is_group_dm_event = (
+        channel_id.startswith("G")
+        and str(event.get("channel_type") or "").strip().lower() == "mpim"
+    )
+    if not channel_id.startswith("D") and not known_group_dm and not is_group_dm_event:
         return None
     if event.get("bot_id") or event.get("subtype") in {"message_changed", "message_deleted"}:
         return {"status": "ignored"}
-    workspace_id = str(payload.get("team_id") or "").strip()
     conversations = list(
         SlackDmMirrorConversation.objects.select_related("grant").filter(
             slack_workspace_id=workspace_id,
@@ -520,7 +563,11 @@ def _refresh_adapter_registrations_if_due() -> None:
             )
 
 
-def _provision_owner_conversation(conversation: SlackDmMirrorConversation) -> None:
+def _provision_owner_conversation(
+    conversation: SlackDmMirrorConversation,
+    *,
+    force_backfill: bool = False,
+) -> None:
     """Provision a mirror readable only by the consenting owner.
 
     The counterpart is represented by a deterministic shadow key. Even when
@@ -530,7 +577,11 @@ def _provision_owner_conversation(conversation: SlackDmMirrorConversation) -> No
 
     participant_ids = sorted(set(conversation.participant_slack_ids or []))
     grant = conversation.grant
-    if grant.slack_user_id not in participant_ids or len(participant_ids) != 2:
+    if (
+        grant.slack_user_id not in participant_ids
+        or len(participant_ids) < 2
+        or len(participant_ids) > 9
+    ):
         raise SlackDmMirrorError("Slack DM participant set is invalid.")
     owner_identity = CommunityBridgeIdentityLink.objects.filter(
         slack_workspace_id=conversation.slack_workspace_id,
@@ -541,18 +592,27 @@ def _provision_owner_conversation(conversation: SlackDmMirrorConversation) -> No
         conversation.status = SlackDmMirrorConversationStatus.AWAITING_SETUP
         conversation.save(update_fields=("status", "updated_at"))
         return
-    counterpart_id = next(value for value in participant_ids if value != grant.slack_user_id)
-    identity_map = {
-        grant.slack_user_id: owner_identity.buzz_pubkey,
-        counterpart_id: _shadow_pubkey(conversation, counterpart_id),
-    }
+    identity_map = {grant.slack_user_id: owner_identity.buzz_pubkey}
+    identity_map.update(
+        {
+            participant_id: _shadow_pubkey(conversation, participant_id)
+            for participant_id in participant_ids
+            if participant_id != grant.slack_user_id
+        }
+    )
     pubkeys = sorted(identity_map.values())
     participant_hash = hashlib.sha256(b"".join(bytes.fromhex(value) for value in pubkeys)).hexdigest()
+    participant_set_changed = bool(
+        conversation.participant_hash
+        and conversation.participant_hash != participant_hash
+    )
     conversation.participant_buzz_pubkeys = pubkeys
     conversation.participant_identity_map = identity_map
     conversation.participant_hash = participant_hash
     conversation.status = SlackDmMirrorConversationStatus.PROVISIONING
     conversation.last_error = ""
+    if participant_set_changed:
+        conversation.history_backfilled_at = None
     conversation.save(
         update_fields=(
             "participant_buzz_pubkeys",
@@ -560,6 +620,7 @@ def _provision_owner_conversation(conversation: SlackDmMirrorConversation) -> No
             "participant_hash",
             "status",
             "last_error",
+            "history_backfilled_at",
             "updated_at",
         )
     )
@@ -570,10 +631,11 @@ def _provision_owner_conversation(conversation: SlackDmMirrorConversation) -> No
     conversation.mlai_channel_id = provisioned["channel_id"]
     conversation.status = SlackDmMirrorConversationStatus.LIVE
     conversation.save(update_fields=("mlai_channel_id", "status", "updated_at"))
-    _enqueue_history(conversation, grant)
+    if force_backfill or conversation.history_backfilled_at is None:
+        _enqueue_history(conversation, grant)
 
 
-def _enqueue_history(conversation: SlackDmMirrorConversation, grant: SlackDmMirrorGrant) -> None:
+def _enqueue_history(conversation: SlackDmMirrorConversation, grant: SlackDmMirrorGrant) -> int:
     oldest = max(0, int(time.time()) - grant.history_days * 86_400)
     client = WebClient(token=grant.connection.access_token)
     cursor = ""
@@ -617,10 +679,15 @@ def _enqueue_history(conversation: SlackDmMirrorConversation, grant: SlackDmMirr
                 "available_at": timezone.now(),
             },
         )
+    update_fields = ["history_backfilled_at", "last_error", "updated_at"]
     if history:
         conversation.oldest_synced_ts = str(history[0].get("ts") or "")
         conversation.latest_synced_ts = str(history[-1].get("ts") or "")
-        conversation.save(update_fields=("oldest_synced_ts", "latest_synced_ts", "updated_at"))
+        update_fields.extend(("oldest_synced_ts", "latest_synced_ts"))
+    conversation.history_backfilled_at = timezone.now()
+    conversation.last_error = ""
+    conversation.save(update_fields=tuple(update_fields))
+    return len(history)
 
 
 def _deliver_to_mlai(delivery: SlackDmMirrorDelivery) -> None:
@@ -762,6 +829,47 @@ def _slack_profile(
     return profile
 
 
+def _conversation_participant_ids(
+    client: WebClient,
+    raw_conversation: dict[str, Any],
+    *,
+    owner_slack_user_id: str,
+) -> list[str]:
+    channel_id = str(raw_conversation.get("id") or "").strip()
+    if channel_id.startswith("D"):
+        counterpart = str(raw_conversation.get("user") or "").strip()
+        participant_ids = sorted({owner_slack_user_id, counterpart} - {""})
+        return participant_ids if len(participant_ids) == 2 else []
+    if not channel_id.startswith("G") or not raw_conversation.get("is_mpim"):
+        return []
+
+    participant_ids = {
+        str(value or "").strip()
+        for value in raw_conversation.get("members") or []
+        if str(value or "").strip()
+    }
+    cursor = ""
+    while not participant_ids or cursor:
+        response = client.conversations_members(
+            channel=channel_id,
+            limit=200,
+            cursor=cursor,
+        )
+        participant_ids.update(
+            str(value or "").strip()
+            for value in response.get("members") or []
+            if str(value or "").strip()
+        )
+        cursor = str(
+            (response.get("response_metadata") or {}).get("next_cursor") or ""
+        ).strip()
+        if not cursor:
+            break
+    if owner_slack_user_id not in participant_ids or not 2 <= len(participant_ids) <= 9:
+        return []
+    return sorted(participant_ids)
+
+
 def _conversation_name(conversation: SlackDmMirrorConversation) -> str:
     profiles = conversation.participant_profiles or {}
     counterpart_ids = [
@@ -771,5 +879,8 @@ def _conversation_name(conversation: SlackDmMirrorConversation) -> str:
     ]
     if not counterpart_ids:
         return "Slack DM"
-    profile = profiles.get(counterpart_ids[0]) or {}
-    return str(profile.get("display_name") or counterpart_ids[0])[:255]
+    display_names = []
+    for counterpart_id in counterpart_ids:
+        profile = profiles.get(counterpart_id) or {}
+        display_names.append(str(profile.get("display_name") or counterpart_id))
+    return ", ".join(display_names)[:255]
