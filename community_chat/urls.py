@@ -29,7 +29,7 @@ from .coding_views import (
     CodingTurnTicketRefreshView,
 )
 from .home_views import CommunityHomeView
-from .slack_views import SlackDmMirrorView
+from .slack_views import SlackDmMirrorView, SlackDmStartView, SlackUserDirectoryView
 from .usage_views import (
     TokenUsageHistoryView,
     TokenUsageIngestView,
@@ -41,6 +41,16 @@ from .usage_views import (
 urlpatterns = [
     path("home/", CommunityHomeView.as_view(), name="community_chat_home"),
     path("slack/", SlackDmMirrorView.as_view(), name="community_chat_slack"),
+    path(
+        "slack/users/",
+        SlackUserDirectoryView.as_view(),
+        name="community_chat_slack_users",
+    ),
+    path(
+        "slack/dms/",
+        SlackDmStartView.as_view(),
+        name="community_chat_slack_dms",
+    ),
     path("coding/jwks/", CodingJwksView.as_view(), name="community_chat_coding_jwks"),
     path(
         "coding/entitlement/",

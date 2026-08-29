@@ -354,8 +354,12 @@ def _slack_oauth_user_scope_list() -> list[str]:
             "im:write",
             "mpim:read",
             "mpim:history",
+            "mpim:write",
             "chat:write",
             "users:read",
+            "reactions:read",
+            "reactions:write",
+            "files:read",
         ]
     )
 
@@ -496,9 +500,13 @@ def _provider_configuration_error(provider: str) -> Optional[str]:
             "im:write",
             "mpim:read",
             "mpim:history",
+            "mpim:write",
             "chat:write",
             "team:read",
             "users:read",
+            "reactions:read",
+            "reactions:write",
+            "files:read",
         }
         missing = []
         if not client_id:

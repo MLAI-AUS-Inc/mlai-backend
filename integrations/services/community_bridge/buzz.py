@@ -129,12 +129,27 @@ class BuzzBridgeClient:
         cls,
         participant_pubkeys: list[str],
         *,
+        callback_author_pubkeys: list[str],
         conversation_name: str = "",
     ) -> dict:
         """Idempotently provision an exact-participant private MLAI DM."""
         pubkeys = sorted({str(value or "").strip().lower() for value in participant_pubkeys})
         if len(pubkeys) < 2 or len(pubkeys) > 9 or any(not EVENT_ID_RE.fullmatch(value) for value in pubkeys):
             raise BuzzBridgePermanentError("Private conversations require 2-9 valid public keys")
+        callback_pubkeys = sorted(
+            {
+                str(value or "").strip().lower()
+                for value in callback_author_pubkeys
+            }
+        )
+        if (
+            not callback_pubkeys
+            or len(callback_pubkeys) > 8
+            or any(value not in pubkeys for value in callback_pubkeys)
+        ):
+            raise BuzzBridgePermanentError(
+                "Private callback authors must be participant public keys"
+            )
         name = str(conversation_name or "").strip()
         if len(name) > 255 or any(character.isprintable() is False for character in name):
             raise BuzzBridgePermanentError("Private conversation name is invalid")
@@ -142,6 +157,7 @@ class BuzzBridgeClient:
             "v1/private-conversations",
             {
                 "participant_pubkeys": pubkeys,
+                "callback_author_pubkeys": callback_pubkeys,
                 "conversation_name": name or None,
             },
         )
@@ -153,7 +169,19 @@ class BuzzBridgeClient:
         returned = sorted(str(value or "").strip().lower() for value in result.get("participant_pubkeys") or [])
         if returned != pubkeys:
             raise BuzzBridgeError("MLAI Chat adapter returned the wrong private participants")
-        return {"channel_id": channel_id, "participant_pubkeys": returned}
+        returned_callback_pubkeys = sorted(
+            str(value or "").strip().lower()
+            for value in result.get("callback_author_pubkeys") or []
+        )
+        if returned_callback_pubkeys != callback_pubkeys:
+            raise BuzzBridgeError(
+                "MLAI Chat adapter returned the wrong private callback authors"
+            )
+        return {
+            "channel_id": channel_id,
+            "participant_pubkeys": returned,
+            "callback_author_pubkeys": returned_callback_pubkeys,
+        }
 
     @classmethod
     def deliver_private(
@@ -172,6 +200,8 @@ class BuzzBridgeClient:
         source_author_display_name: str,
         source_author_avatar_url: str,
         linked_pubkey: str,
+        target_message_id: str = "",
+        parent_message_id: str = "",
     ) -> dict:
         result = cls._post_adapter(
             "v1/private-deliveries",
@@ -189,13 +219,22 @@ class BuzzBridgeClient:
                 "source_author_display_name": str(source_author_display_name or "") or None,
                 "source_author_avatar_url": str(source_author_avatar_url or "") or None,
                 "linked_pubkey": str(linked_pubkey),
+                "target_message_id": str(target_message_id or "") or None,
+                "parent_message_id": str(parent_message_id or "") or None,
             },
         )
         returned_channel = str(result.get("channel_id") or "").strip()
         message_id = str(result.get("message_id") or "").strip().lower()
+        returned_parent_message_id = str(result.get("parent_message_id") or "").strip().lower()
         if returned_channel != str(channel_id) or not EVENT_ID_RE.fullmatch(message_id):
             raise BuzzBridgeError("MLAI Chat adapter returned an invalid private delivery")
-        return {"channel_id": returned_channel, "message_id": message_id}
+        if returned_parent_message_id and not EVENT_ID_RE.fullmatch(returned_parent_message_id):
+            raise BuzzBridgeError("MLAI Chat adapter returned an invalid private parent message")
+        return {
+            "channel_id": returned_channel,
+            "message_id": message_id,
+            "parent_message_id": returned_parent_message_id,
+        }
 
     @classmethod
     def _post_adapter(cls, path: str, payload: dict) -> dict:

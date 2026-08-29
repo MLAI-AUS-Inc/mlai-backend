@@ -207,10 +207,10 @@ services:
         done;
         sleep "$${COMMUNITY_BRIDGE_RECONCILE_INITIAL_DELAY_SECONDS}";
         while true; do
-          if ! python manage.py reconcile_recent_community_bridge_slack
-            --lookback-seconds "$${COMMUNITY_BRIDGE_RECONCILE_LOOKBACK_SECONDS}"
-            --max-roots-per-channel "$${COMMUNITY_BRIDGE_RECONCILE_MAX_ROOTS}"
-            --maximum-history-messages "$${COMMUNITY_BRIDGE_RECONCILE_MAX_HISTORY_MESSAGES}"
+          if ! python manage.py reconcile_recent_community_bridge_slack \
+            --lookback-seconds "$${COMMUNITY_BRIDGE_RECONCILE_LOOKBACK_SECONDS}" \
+            --max-roots-per-channel "$${COMMUNITY_BRIDGE_RECONCILE_MAX_ROOTS}" \
+            --maximum-history-messages "$${COMMUNITY_BRIDGE_RECONCILE_MAX_HISTORY_MESSAGES}" \
             --wait-seconds "$${COMMUNITY_BRIDGE_RECONCILE_WAIT_SECONDS}"; then
             echo "Community bridge gap reconciliation failed; the next bounded poll will retry" >&2;
           fi;

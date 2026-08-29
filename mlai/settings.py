@@ -1395,9 +1395,13 @@ SLACK_OAUTH_SCOPES = _env_list(
         "im:write",
         "mpim:history",
         "mpim:read",
+        "mpim:write",
         "chat:write",
         "team:read",
         "users:read",
+        "reactions:read",
+        "reactions:write",
+        "files:read",
     ],
 )
 SLACK_OAUTH_USER_SCOPES = _env_list("SLACK_OAUTH_USER_SCOPES", SLACK_OAUTH_SCOPES)

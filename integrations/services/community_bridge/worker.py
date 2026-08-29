@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import uuid
-from typing import Any, Optional
+from typing import Optional
 
 import discord
 from discord.ext import tasks
@@ -33,8 +33,11 @@ from integrations.services.community_bridge.store import (
     resolve_mapped_message,
     resolve_message_link,
 )
-from integrations.services.slack_dm_mirror import process_ready_deliveries as process_slack_dm_deliveries
-
+from integrations.services.slack_dm_mirror import (
+    discover_grants_if_due,
+    process_due_history_backfills,
+    process_ready_deliveries as process_slack_dm_deliveries,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -51,12 +54,17 @@ class CommunityBridgeDiscordClient(discord.Client):
         intents.message_content = True
         super().__init__(intents=intents, max_messages=5000)
         self._delivery_loop_started = False
+        self._slack_dm_maintenance_started = False
 
     async def setup_hook(self) -> None:
         await asyncio.to_thread(reset_stale_processing_deliveries)
         if not self._delivery_loop_started:
             self.delivery_loop.start()
             self._delivery_loop_started = True
+        if not self._slack_dm_maintenance_started:
+            self.slack_dm_discovery_loop.start()
+            self.slack_dm_history_loop.start()
+            self._slack_dm_maintenance_started = True
 
     async def on_ready(self) -> None:
         logger.info("community_bridge_discord_ready user=%s", getattr(self.user, "id", ""))
@@ -150,6 +158,16 @@ class CommunityBridgeDiscordClient(discord.Client):
     @tasks.loop(seconds=1.0)
     async def delivery_loop(self) -> None:
         await self.process_pending_deliveries_once(limit=10)
+
+    @tasks.loop(seconds=60.0)
+    async def slack_dm_discovery_loop(self) -> None:
+        await asyncio.to_thread(discover_grants_if_due)
+
+    @tasks.loop(seconds=2.0)
+    async def slack_dm_history_loop(self) -> None:
+        # Keep a paced baseline; Slack Retry-After responses can pause this
+        # independently from delivery retries.
+        await asyncio.to_thread(process_due_history_backfills, 1)
 
     async def process_pending_deliveries_once(self, limit: int = 10) -> None:
         await asyncio.to_thread(process_slack_dm_deliveries, limit)
@@ -652,9 +670,11 @@ class CommunityBridgeDiscordClient(discord.Client):
             )
             if identity:
                 return str(identity.get("display_name") or user_id)
-        if source_platform == CommunityBridgePlatform.SLACK:
-            if user_id:
-                return await asyncio.to_thread(SlackBridgeClient.get_user_display_name, user_id)
+        if source_platform == CommunityBridgePlatform.SLACK and user_id:
+            return await asyncio.to_thread(
+                SlackBridgeClient.get_user_display_name,
+                user_id,
+            )
         return user_id or "Unknown user"
 
     async def _resolve_message_body(self, payload: dict, *, source_platform: str) -> str:
@@ -710,6 +730,15 @@ async def _run_headless_delivery_worker(client: CommunityBridgeDiscordClient) ->
         min(float(getattr(settings, "COMMUNITY_BRIDGE_WORKER_POLL_SECONDS", 1.0)), 60.0),
     )
     logger.info("community_bridge_headless_worker_ready target=mlai_chat")
+    next_discovery_at = 0.0
+    next_history_at = 0.0
     while True:
+        now = asyncio.get_running_loop().time()
+        if now >= next_discovery_at:
+            await asyncio.to_thread(discover_grants_if_due)
+            next_discovery_at = now + 60.0
+        if now >= next_history_at:
+            await asyncio.to_thread(process_due_history_backfills, 1)
+            next_history_at = now + 2.0
         await client.process_pending_deliveries_once(limit=10)
         await asyncio.sleep(poll_seconds)

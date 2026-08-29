@@ -38,10 +38,11 @@ class SlackCommunityBridgeEventView(APIView):
 
         result = ingest_slack_dm_event(payload) or ingest_slack_event(payload)
         logger.info(
-            "community_bridge_slack_event status=%s receipt_id=%s delivery_id=%s",
+            "community_bridge_slack_event status=%s receipt_id=%s delivery_ids=%s",
             result.get("status"),
             result.get("receipt_id"),
-            result.get("delivery_id"),
+            result.get("delivery_ids")
+            or ([result.get("delivery_id")] if result.get("delivery_id") else []),
         )
         return Response({"ok": True, "status": result.get("status", "accepted")}, status=status.HTTP_200_OK)
 
