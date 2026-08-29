@@ -1,15 +1,18 @@
 import base64
 import hashlib
+import re
 import secrets
 import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone as datetime_timezone
 from urllib.parse import urlencode
+from zoneinfo import ZoneInfo
 
 from django.conf import settings
 from django.contrib.auth.models import update_last_login
 from django.core import signing
+from django.core.cache import cache
 from django.db import IntegrityError, connection, transaction
 from django.db.models import Q
 from django.http import HttpResponse
@@ -71,6 +74,14 @@ from core.auth_throttles import (
     enforce_chat_password_login_limits,
 )
 from core.password_auth import authenticate_account, normalize_account_email
+from integrations.services.luma import (
+    LumaAPIError,
+    LumaAttendeeReportService,
+    LumaConfigurationError,
+    MELBOURNE_TIMEZONE,
+)
+from roo.models import RewardsCatalog, Task, TaskAssignment
+from roo.services import PointsService
 from .email_codes import (
     InvalidEmailCode,
     consume_email_code,
@@ -111,6 +122,17 @@ DESKTOP_AUTH_ORIGINS = (
 )
 DESKTOP_AUTHORIZATION_CODE_SALT = "community-chat.desktop-authorization.v1"
 DESKTOP_AUTHORIZATION_CODE_INVALID_DETAIL = "Desktop authorization code is invalid."
+PKCE_CHALLENGE_RE = re.compile(r"^[A-Za-z0-9_-]{43}$")
+HOME_ITEM_LIMIT = 12
+UPCOMING_EVENTS_CACHE_KEY = "community-chat:upcoming-events:v1"
+UPCOMING_EVENT_FIELDS = (
+    "id",
+    "name",
+    "url",
+    "start_at",
+    "end_at",
+    "timezone",
+)
 
 
 class _EmailCodeBindingConflict(ValueError):
@@ -126,6 +148,14 @@ def _is_eligible(user):
 def _require_eligible(user):
     if not _is_eligible(user):
         raise PermissionDenied("This MLAI account is not eligible for community chat.")
+
+
+def _allowlisted_items(items, fields):
+    return [
+        {field: item.get(field) for field in fields}
+        for item in items
+        if isinstance(item, dict)
+    ]
 
 
 def _request_origin(request):
@@ -747,6 +777,173 @@ class AccountView(APIView):
                 "devices": [_device_payload(device) for device in devices],
             }
         )
+
+
+class HomeView(APIView):
+    """Return member-scoped Roo dashboard data for MLAI Chat Home.
+
+    Only the caller's aggregate balance and public/volunteer catalog fields
+    cross this boundary. Slack ids, assignment/reviewer details, internal
+    tasks, redemption records, and other members' balances are excluded.
+    """
+
+    authentication_classes = (CommunityChatAccountAuthentication,)
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [CommunityChatScopedThrottle]
+    community_chat_throttle_scope = "community_chat_home"
+
+    def get(self, request):
+        balance = PointsService.get_balance(request.user)
+        today = timezone.localdate(timezone=ZoneInfo(MELBOURNE_TIMEZONE))
+        opportunities = (
+            Task.objects.filter(
+                status="open",
+                volunteer_ready=True,
+                visibility__in=("volunteer", "public"),
+            )
+            .filter(Q(due_date__isnull=True) | Q(due_date__gte=today))
+            .exclude(assignments__status__in=TaskAssignment.ACTIVE_STATUSES)
+            .distinct()
+            .order_by("due_date", "id")[:HOME_ITEM_LIMIT]
+        )
+        rewards = (
+            RewardsCatalog.objects.filter(is_active=True)
+            .filter(Q(stock_remaining__isnull=True) | Q(stock_remaining__gt=0))
+            .order_by("cost_points", "name")[:HOME_ITEM_LIMIT]
+        )
+
+        earn_actions = [
+            {
+                "id": "intro",
+                "name": "Introduce yourself",
+                "description": "Post your first message in #_start-here.",
+                "points": 4,
+            }
+        ]
+        monthly_update_points = int(
+            getattr(settings, "ROO_POINTS_MONTHLY_UPDATE_REWARD", 0)
+        )
+        if monthly_update_points > 0:
+            earn_actions.append(
+                {
+                    "id": "monthly_update",
+                    "name": "Complete your monthly startup update",
+                    "description": (
+                        "Complete and save a ready monthly update for your "
+                        "verified company."
+                    ),
+                    "points": monthly_update_points,
+                }
+            )
+        earn_actions.extend(
+            {
+                "id": f"task:{task.task_code}",
+                "name": task.title,
+                "description": task.description,
+                "points": task.points_estimate or task.points,
+                "command": f"@Roo task claim {task.task_code}",
+            }
+            for task in opportunities
+            if task.task_code
+        )
+
+        response = Response(
+            {
+                "points": {
+                    "balance": balance["balance"],
+                    "earned_balance": balance["earned_balance"],
+                    "purchased_topup_balance": balance[
+                        "purchased_topup_balance"
+                    ],
+                    "lifetime_earned": balance["lifetime_earned"],
+                    "lifetime_spent": balance["lifetime_spent"],
+                },
+                "earn_actions": earn_actions,
+                "rewards": [
+                    {
+                        "code": reward.code,
+                        "name": reward.name,
+                        "description": reward.description,
+                        "cost_points": reward.cost_points,
+                        "stock_remaining": reward.stock_remaining,
+                        "can_afford": balance["balance"] >= reward.cost_points,
+                    }
+                    for reward in rewards
+                ],
+                "feature_flags": {
+                    "link_love": False,
+                    "meeting_rooms": bool(
+                        getattr(settings, "MEETING_ROOM_BOOKING_ENABLED", False)
+                    ),
+                },
+            }
+        )
+        response["Cache-Control"] = "private, no-store"
+        return response
+
+
+class UpcomingEventsView(APIView):
+    """Return cached, public Luma event cards to signed-in chat members."""
+
+    authentication_classes = (CommunityChatAccountAuthentication,)
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [CommunityChatScopedThrottle]
+    community_chat_throttle_scope = "community_chat_upcoming_events"
+
+    def get(self, request):
+        raw_limit = request.query_params.get("limit") or 5
+        try:
+            requested_limit = int(raw_limit)
+        except (TypeError, ValueError):
+            return Response(
+                {"error": "invalid_limit"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if requested_limit < 1:
+            return Response(
+                {"error": "invalid_limit"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        requested_limit = min(requested_limit, 10)
+
+        events = cache.get(UPCOMING_EVENTS_CACHE_KEY)
+        if not isinstance(events, list):
+            try:
+                events = LumaAttendeeReportService(
+                    timeout=settings.LUMA_API_TIMEOUT_SECONDS,
+                ).list_upcoming_events(limit=10)
+            except LumaConfigurationError:
+                return Response(
+                    {"error": "upcoming_events_unavailable"},
+                    status=status.HTTP_503_SERVICE_UNAVAILABLE,
+                )
+            except LumaAPIError as exc:
+                response_status = (
+                    status.HTTP_429_TOO_MANY_REQUESTS
+                    if exc.status_code == status.HTTP_429_TOO_MANY_REQUESTS
+                    else status.HTTP_502_BAD_GATEWAY
+                )
+                return Response(
+                    {"error": "upcoming_events_unavailable"},
+                    status=response_status,
+                )
+            events = _allowlisted_items(events, UPCOMING_EVENT_FIELDS)
+            cache.set(
+                UPCOMING_EVENTS_CACHE_KEY,
+                events,
+                timeout=settings.LUMA_UPCOMING_EVENTS_CACHE_SECONDS,
+            )
+        else:
+            events = _allowlisted_items(events, UPCOMING_EVENT_FIELDS)
+
+        response = Response(
+            {
+                "calendar_url": settings.LUMA_CALENDAR_URL,
+                "events": events[:requested_limit],
+            }
+        )
+        response["Cache-Control"] = "private, max-age=60"
+        return response
 
 
 class PublicProfileBatchView(APIView):
