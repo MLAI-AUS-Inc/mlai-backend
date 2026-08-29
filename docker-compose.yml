@@ -50,6 +50,26 @@ services:
         aliases:
           - mlai-backend-scheduler
 
+  committee-remuneration:
+    build: .
+    command: sh -c "until python manage.py migrate --check --noinput; do echo 'Waiting for migrations to complete...'; sleep 5; done; while true; do python manage.py pay_committee_weekly_points; sleep 3600; done"
+    environment:
+      APP_ENV: ${APP_ENV:-production}
+      COMMITTEE_REMUNERATION_ENABLED: ${COMMITTEE_REMUNERATION_ENABLED:-false}
+      COMMITTEE_REMUNERATION_WEEKLY_POINTS: ${COMMITTEE_REMUNERATION_WEEKLY_POINTS:-40}
+      COMMITTEE_REMUNERATION_SLACK_CHANNEL: ${COMMITTEE_REMUNERATION_SLACK_CHANNEL:-#roo-testing}
+      COMMITTEE_REMUNERATION_TIMEZONE: ${COMMITTEE_REMUNERATION_TIMEZONE:-Australia/Melbourne}
+    env_file:
+      - .env
+    depends_on:
+      - db
+    restart: unless-stopped
+    networks:
+      default:
+      mlai-shared:
+        aliases:
+          - mlai-backend-committee-remuneration
+
   analytics-sync:
     build: .
     command: >-

@@ -1,10 +1,10 @@
 import logging
-from django.core.management.base import BaseCommand
+from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction, IntegrityError
 from core.models import User
 from roo.models import (
     PointsAccount, Ledger, Task, TaskSubmission, 
-    CoworkingBooking, RewardRedemption, PointsAdmin
+    CoworkingBooking, RewardRedemption, PointsAdmin, BoostPostAdmission
 )
 from roo.services import PointsService
 from integrations.services import SlackService
@@ -20,11 +20,26 @@ class Command(BaseCommand):
             action='store_true',
             help='Actually commit changes to the database',
         )
+        parser.add_argument(
+            '--source-slack-id',
+            help='Merge just this user into --target-slack-id, skipping the Slack-wide sweep',
+        )
+        parser.add_argument(
+            '--target-slack-id',
+            help='The surviving user for a targeted --source-slack-id merge',
+        )
 
     def handle(self, *args, **options):
         commit = options['commit']
+
+        source_slack_id = options.get('source_slack_id')
+        target_slack_id = options.get('target_slack_id')
+        if source_slack_id or target_slack_id:
+            self.merge_pair(source_slack_id, target_slack_id, commit)
+            return
+
         self.stdout.write(f"Starting cleanup... (Commit: {commit})")
-        
+
         # Get all users with Slack IDs
         slack_users = User.objects.filter(slack_id__isnull=False).exclude(slack_id='')
         
@@ -91,6 +106,39 @@ class Command(BaseCommand):
         self.stdout.write(self.style.SUCCESS(f"Done. Updated Emails: {updated_count}, Merged Users: {merged_count}, Skipped/Error: {skipped_count}"))
 
     @transaction.atomic
+    def merge_pair(self, source_slack_id, target_slack_id, commit):
+        """Merge one known duplicate pair, without consulting the Slack API."""
+        if not source_slack_id or not target_slack_id:
+            raise CommandError('--source-slack-id and --target-slack-id must be given together')
+        if source_slack_id == target_slack_id:
+            raise CommandError('Source and target are the same user')
+
+        try:
+            source = User.objects.get(slack_id=source_slack_id)
+        except User.DoesNotExist:
+            raise CommandError(f'No user with slack_id {source_slack_id}')
+        try:
+            target = User.objects.get(slack_id=target_slack_id)
+        except User.DoesNotExist:
+            raise CommandError(f'No user with slack_id {target_slack_id}')
+
+        self.stdout.write(f"Merging {source.email} ({source_slack_id}) into {target.email} ({target_slack_id})")
+        if not commit:
+            self.stdout.write(self.style.WARNING('Dry run - re-run with --commit to apply'))
+            self.report_related(source)
+            return
+
+        with transaction.atomic():
+            self.merge_users(source=source, target=target)
+        self.stdout.write(self.style.SUCCESS('Merge complete'))
+
+    def report_related(self, user):
+        """List every row still pointing at this user, so nothing is merged blind."""
+        for rel in User._meta.related_objects:
+            count = rel.related_model.objects.filter(**{rel.field.name: user}).count()
+            if count:
+                self.stdout.write(f"  {rel.related_model._meta.label}: {count}")
+
     def merge_users(self, source, target):
         """
         Merges source (the duplicates/slack-only user) INTO target (the email user).
@@ -186,6 +234,13 @@ class Command(BaseCommand):
                 self.stdout.write("  Target is already PointsAdmin, deleting source admin role")
                 PointsAdmin.objects.filter(user=source).delete()
         
-        # 7. Delete Source
+        # 7. Boost posts
+        count = BoostPostAdmission.objects.filter(user=source).update(user=target)
+        self.stdout.write(f"  moved {count} BoostPostAdmissions")
+
+        # 8. Delete Source
+        # Anything still pointing at source is about to be cascaded away or
+        # orphaned by SET_NULL, so name it rather than lose it quietly.
+        self.report_related(source)
         self.stdout.write(f"  Deleting source user {source.id}")
         source.delete()
