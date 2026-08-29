@@ -71,6 +71,9 @@ GRANT_DISCOVERY_INTERVAL_SECONDS = 300
 HISTORY_STATE_PREFIX = "history-state:"
 HISTORY_MAIN_STATE_ID = f"{HISTORY_STATE_PREFIX}main"
 SLACK_ECHO_WINDOW_SECONDS = 300
+PRIVATE_REGISTRATION_REVOCATION_PENDING = (
+    "MLAI Chat private registration revocation is pending"
+)
 
 
 class SlackDmMirrorError(RuntimeError):
@@ -657,7 +660,7 @@ def revoke_grant(grant: SlackDmMirrorGrant) -> None:
         # must fail until the adapter's durable registration is also gone. A
         # retry is safe because adapter unregistration is idempotent.
         SlackDmMirrorGrant.objects.filter(pk=grant.pk).update(
-            last_error="MLAI Chat private registration revocation is pending",
+            last_error=PRIVATE_REGISTRATION_REVOCATION_PENDING,
             updated_at=timezone.now(),
         )
         logger.warning(
@@ -736,8 +739,11 @@ def discover_conversations(
                 if conversation is not None:
                     conversation.last_error = error_text
                     # A transient refresh failure must not take an already-live
-                    # DM offline; queued delivery retries can still succeed.
-                    if conversation.status != SlackDmMirrorConversationStatus.LIVE:
+                    # DM offline, and a revoked mirror must remain paused.
+                    if conversation.status not in (
+                        SlackDmMirrorConversationStatus.LIVE,
+                        SlackDmMirrorConversationStatus.PAUSED,
+                    ):
                         conversation.status = SlackDmMirrorConversationStatus.ERROR
                     conversation.save(
                         update_fields=("status", "last_error", "updated_at")
@@ -754,9 +760,11 @@ def discover_conversations(
         ).strip()
         if not cursor:
             break
-    grant.last_discovery_at = timezone.now()
-    grant.last_error = "; ".join(failures)[:2000]
-    grant.save(update_fields=("last_discovery_at", "last_error", "updated_at"))
+    grant.refresh_from_db(fields=("status", "revoked_at", "last_error"))
+    if grant.status == SlackDmMirrorGrantStatus.ACTIVE and grant.revoked_at is None:
+        grant.last_discovery_at = timezone.now()
+        grant.last_error = "; ".join(failures)[:2000]
+        grant.save(update_fields=("last_discovery_at", "last_error", "updated_at"))
     return discovered
 
 
@@ -1547,8 +1555,140 @@ def _provision_owner_conversation(
     owner-controlled mirror without their own independent Slack link.
     """
 
+    provision_request: dict[str, Any] | None = None
+    deferred_error: Exception | None = None
+    with transaction.atomic():
+        # Establish the local provisioning intent while serialized with
+        # revoke_grant, then release the lock before calling the adapter.
+        grant = SlackDmMirrorGrant.objects.select_for_update().get(
+            pk=conversation.grant_id
+        )
+        conversation = SlackDmMirrorConversation.objects.select_for_update().get(
+            pk=conversation.pk
+        )
+        conversation.grant = grant
+        provision_request, deferred_error = _prepare_owner_conversation_locked(
+            conversation,
+            force_backfill=force_backfill,
+            reset_history=reset_history,
+            required_owner_public_key=required_owner_public_key,
+        )
+    if deferred_error is not None:
+        raise deferred_error
+    if provision_request is None:
+        return
+
+    provisioned = BuzzBridgeClient.provision_private_conversation(
+        provision_request["participant_pubkeys"],
+        callback_author_pubkeys=provision_request["callback_author_pubkeys"],
+        conversation_name=provision_request["conversation_name"],
+    )
+    channel_id = provisioned["channel_id"]
+    cleanup_required = False
+    with transaction.atomic():
+        # Whichever operation acquires the grant lock first wins. If finalizing
+        # wins, revoke_grant subsequently snapshots the committed channel id.
+        # If revocation wins, retain the late id in PAUSED state so cleanup is
+        # immediately retryable before any error escapes this function.
+        grant = SlackDmMirrorGrant.objects.select_for_update().get(
+            pk=conversation.grant_id
+        )
+        conversation = SlackDmMirrorConversation.objects.select_for_update().get(
+            pk=conversation.pk
+        )
+        if (
+            grant.status != SlackDmMirrorGrantStatus.ACTIVE
+            or grant.revoked_at is not None
+        ):
+            conversation.mlai_channel_id = channel_id
+            conversation.status = SlackDmMirrorConversationStatus.PAUSED
+            conversation.last_error = "Slack DM mirroring is no longer active"
+            conversation.save(
+                update_fields=(
+                    "mlai_channel_id",
+                    "status",
+                    "last_error",
+                    "updated_at",
+                )
+            )
+            grant.last_error = PRIVATE_REGISTRATION_REVOCATION_PENDING
+            grant.save(update_fields=("last_error", "updated_at"))
+            cleanup_required = True
+        else:
+            conversation.mlai_channel_id = channel_id
+            conversation.status = SlackDmMirrorConversationStatus.LIVE
+            conversation.save(
+                update_fields=("mlai_channel_id", "status", "updated_at")
+            )
+
+    if not cleanup_required:
+        return
+
+    try:
+        BuzzBridgeClient.unregister_private_conversation(str(channel_id))
+    except Exception as exc:
+        logger.warning(
+            "slack_dm_mirror_late_registration_cleanup_failed "
+            "grant_id=%s conversation_id=%s error=%s",
+            grant.pk,
+            conversation.pk,
+            exc.__class__.__name__,
+        )
+        raise
+
+    with transaction.atomic():
+        grant = SlackDmMirrorGrant.objects.select_for_update().get(
+            pk=conversation.grant_id
+        )
+        conversation = SlackDmMirrorConversation.objects.select_for_update().get(
+            pk=conversation.pk
+        )
+        still_revoked = (
+            grant.status != SlackDmMirrorGrantStatus.ACTIVE
+            or grant.revoked_at is not None
+        )
+        if (
+            still_revoked
+            and conversation.status == SlackDmMirrorConversationStatus.PAUSED
+            and str(conversation.mlai_channel_id or "") == str(channel_id)
+        ):
+            conversation.mlai_channel_id = None
+            conversation.save(update_fields=("mlai_channel_id", "updated_at"))
+        if (
+            still_revoked
+            and grant.last_error == PRIVATE_REGISTRATION_REVOCATION_PENDING
+        ):
+            grant.last_error = ""
+            grant.save(update_fields=("last_error", "updated_at"))
+    raise SlackDmMirrorAuthorizationError(
+        "Slack DM mirroring consent was revoked during provisioning."
+    )
+
+
+def _prepare_owner_conversation_locked(
+    conversation: SlackDmMirrorConversation,
+    *,
+    force_backfill: bool,
+    reset_history: bool,
+    required_owner_public_key: str | None,
+) -> tuple[dict[str, Any] | None, Exception | None]:
+    """Prepare a provision request while grant and conversation rows are locked."""
+
     participant_ids = sorted(set(conversation.participant_slack_ids or []))
     grant = conversation.grant
+    if (
+        grant.status != SlackDmMirrorGrantStatus.ACTIVE
+        or grant.revoked_at is not None
+    ):
+        conversation.status = SlackDmMirrorConversationStatus.PAUSED
+        conversation.last_error = "Slack DM mirroring is no longer active"
+        conversation.save(update_fields=("status", "last_error", "updated_at"))
+        return (
+            None,
+            SlackDmMirrorAuthorizationError(
+                "Slack DM mirroring consent is no longer active."
+            ),
+        )
     if (
         grant.slack_user_id not in participant_ids
         or len(participant_ids) < 2
@@ -1563,7 +1703,7 @@ def _provision_owner_conversation(
     if owner_identity is None:
         conversation.status = SlackDmMirrorConversationStatus.AWAITING_SETUP
         conversation.save(update_fields=("status", "updated_at"))
-        return
+        return None, None
     current_owner_key = str(
         (conversation.participant_identity_map or {}).get(grant.slack_user_id) or ""
     ).lower()
@@ -1653,7 +1793,7 @@ def _provision_owner_conversation(
                 "updated_at",
             )
         )
-        return
+        return None, None
     conversation.status = SlackDmMirrorConversationStatus.PROVISIONING
     conversation.save(
         update_fields=(
@@ -1666,14 +1806,14 @@ def _provision_owner_conversation(
             "updated_at",
         )
     )
-    provisioned = BuzzBridgeClient.provision_private_conversation(
-        pubkeys,
-        callback_author_pubkeys=owner_device_pubkeys,
-        conversation_name=_conversation_name(conversation),
+    return (
+        {
+            "participant_pubkeys": pubkeys,
+            "callback_author_pubkeys": owner_device_pubkeys,
+            "conversation_name": _conversation_name(conversation),
+        },
+        None,
     )
-    conversation.mlai_channel_id = provisioned["channel_id"]
-    conversation.status = SlackDmMirrorConversationStatus.LIVE
-    conversation.save(update_fields=("mlai_channel_id", "status", "updated_at"))
 
 
 def _mark_conversation_history_due(

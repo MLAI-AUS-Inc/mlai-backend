@@ -522,6 +522,141 @@ class SlackDmMirrorOwnerTests(APITestCase):
         )
         return grant, conversation
 
+    def _conversation_ready_for_provision(self, slack_conversation_id="DRACE"):
+        grant = SlackDmMirrorGrant.objects.create(
+            user=self.first,
+            connection=self.first_connection,
+            slack_workspace_id="TMLAI",
+            slack_user_id="UONE",
+            consented_at=timezone.now(),
+        )
+        CommunityBridgeIdentityLink.objects.create(
+            user=self.first,
+            slack_workspace_id="TMLAI",
+            slack_user_id="UONE",
+            buzz_pubkey="1" * 64,
+            display_name="First",
+            verification_method=(
+                CommunityBridgeIdentityVerificationMethod.ACCOUNT_CHALLENGE
+            ),
+            verification_reference="provision-race-test",
+            verified_at=timezone.now(),
+        )
+        conversation = SlackDmMirrorConversation.objects.create(
+            grant=grant,
+            slack_workspace_id="TMLAI",
+            slack_conversation_id=slack_conversation_id,
+            participant_slack_ids=["UONE", "UTWO"],
+        )
+        return grant, conversation
+
+    @patch(
+        "integrations.services.slack_dm_mirror.BuzzBridgeClient.unregister_private_conversation"
+    )
+    @patch(
+        "integrations.services.slack_dm_mirror.BuzzBridgeClient.provision_private_conversation"
+    )
+    @patch("integrations.services.slack_dm_mirror.WebClient")
+    def test_revocation_during_provision_unregisters_the_late_channel(
+        self,
+        web_client,
+        provision_private_conversation,
+        unregister_private_conversation,
+    ):
+        grant, conversation = self._conversation_ready_for_provision()
+        late_channel_id = uuid.uuid4()
+
+        def revoke_before_adapter_returns(pubkeys, **kwargs):
+            self.assertEqual(
+                SlackDmMirrorConversation.objects.get(pk=conversation.pk).status,
+                SlackDmMirrorConversationStatus.PROVISIONING,
+            )
+            slack_dm_mirror.revoke_grant(grant)
+            return {
+                "channel_id": str(late_channel_id),
+                "participant_pubkeys": pubkeys,
+            }
+
+        provision_private_conversation.side_effect = revoke_before_adapter_returns
+
+        with self.assertRaises(slack_dm_mirror.SlackDmMirrorAuthorizationError):
+            slack_dm_mirror._provision_owner_conversation(conversation)
+
+        grant.refresh_from_db()
+        conversation.refresh_from_db()
+        self.first_connection.refresh_from_db()
+        self.assertEqual(grant.status, SlackDmMirrorGrantStatus.REVOKED)
+        self.assertIsNotNone(grant.revoked_at)
+        self.assertEqual(conversation.status, SlackDmMirrorConversationStatus.PAUSED)
+        self.assertIsNone(conversation.mlai_channel_id)
+        self.assertEqual(
+            self.first_connection.status,
+            ExternalServiceConnectionStatus.DISCONNECTED,
+        )
+        unregister_private_conversation.assert_called_once_with(str(late_channel_id))
+        web_client.return_value.auth_revoke.assert_called_once_with()
+
+    @patch(
+        "integrations.services.slack_dm_mirror.BuzzBridgeClient.unregister_private_conversation"
+    )
+    @patch(
+        "integrations.services.slack_dm_mirror.BuzzBridgeClient.provision_private_conversation"
+    )
+    @patch("integrations.services.slack_dm_mirror.WebClient")
+    def test_late_registration_cleanup_failure_remains_retryable(
+        self,
+        web_client,
+        provision_private_conversation,
+        unregister_private_conversation,
+    ):
+        grant, conversation = self._conversation_ready_for_provision()
+        late_channel_id = uuid.uuid4()
+        client = web_client.return_value
+        client.conversations_list.return_value = {
+            "channels": [{"id": "DRACE", "user": "UTWO"}],
+            "response_metadata": {"next_cursor": ""},
+        }
+        client.users_info.side_effect = lambda *, user: {
+            "user": {"id": user, "team_id": "TMLAI", "name": user.lower()}
+        }
+
+        def revoke_before_adapter_returns(pubkeys, **kwargs):
+            self.assertEqual(
+                SlackDmMirrorConversation.objects.get(pk=conversation.pk).status,
+                SlackDmMirrorConversationStatus.PROVISIONING,
+            )
+            slack_dm_mirror.revoke_grant(grant)
+            return {
+                "channel_id": str(late_channel_id),
+                "participant_pubkeys": pubkeys,
+            }
+
+        provision_private_conversation.side_effect = revoke_before_adapter_returns
+        unregister_private_conversation.side_effect = RuntimeError(
+            "adapter unavailable"
+        )
+
+        self.assertEqual(slack_dm_mirror.discover_conversations(grant), 0)
+
+        grant.refresh_from_db()
+        conversation.refresh_from_db()
+        self.assertEqual(grant.status, SlackDmMirrorGrantStatus.REVOKED)
+        self.assertEqual(
+            grant.last_error,
+            slack_dm_mirror.PRIVATE_REGISTRATION_REVOCATION_PENDING,
+        )
+        self.assertEqual(conversation.status, SlackDmMirrorConversationStatus.PAUSED)
+        self.assertEqual(conversation.mlai_channel_id, late_channel_id)
+
+        unregister_private_conversation.side_effect = None
+        slack_dm_mirror.revoke_grant(grant)
+
+        grant.refresh_from_db()
+        self.assertEqual(grant.last_error, "")
+        self.assertEqual(unregister_private_conversation.call_count, 2)
+        unregister_private_conversation.assert_called_with(str(late_channel_id))
+        web_client.return_value.auth_revoke.assert_called_once_with()
+
     def test_reauthorization_preserves_explicit_full_history_setting(self):
         grant = SlackDmMirrorGrant.objects.create(
             user=self.first,
