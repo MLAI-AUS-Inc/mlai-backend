@@ -557,7 +557,7 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     upsert_env_value COMMUNITY_CHAT_ADAPTER_URL "$COMMUNITY_CHAT_ADAPTER_URL"
     upsert_env_value COMMUNITY_CHAT_EMAIL_CODE_AUTH_ENABLED "true"
     upsert_env_value COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED "false"
-    upsert_env_value COMMUNITY_CHAT_DEVICE_AUTH_ENABLED "false"
+    upsert_env_value COMMUNITY_CHAT_DEVICE_AUTH_ENABLED "true"
     upsert_env_value CUSTOMERIO_COMMUNITY_CHAT_CODE_MESSAGE_ID "mlai_chat_sign_in_code"
     upsert_env_value COMMUNITY_CHAT_ALLOWED_ORIGINS "https://chat.mlai.au,tauri://localhost,http://tauri.localhost,mlaichat://callback"
     upsert_env_value MEETING_ROOM_BOOKING_ENABLED "\$meeting_room_booking_enabled"

@@ -6,7 +6,8 @@ from uuid import uuid4
 
 from django.conf import settings
 from django.db import OperationalError, connection, transaction
-from django.http import JsonResponse
+from django.http import HttpResponse, JsonResponse
+from django.utils.cache import patch_vary_headers
 
 logger = logging.getLogger(__name__)
 SENSITIVE_QUERY_PARAMETERS = {
@@ -18,6 +19,64 @@ SENSITIVE_QUERY_PARAMETERS = {
     "state",
     "token",
 }
+
+
+class DesktopAuthCorsMiddleware:
+    """Allow exact Tauri origins to call Community Chat without cookies."""
+
+    _ALLOWED_ORIGINS = {"http://tauri.localhost", "tauri://localhost"}
+    _ALLOWED_PATH_PREFIX = "/api/v1/community-chat/"
+    _ALLOWED_METHODS = {"DELETE", "GET", "HEAD", "PATCH", "POST"}
+    _ALLOWED_REQUEST_HEADERS = {"authorization", "content-type", "x-request-id"}
+
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        origin = str(request.headers.get("Origin") or "").strip().rstrip("/")
+        if (
+            not request.path.startswith(self._ALLOWED_PATH_PREFIX)
+            or origin not in self._ALLOWED_ORIGINS
+        ):
+            return self.get_response(request)
+
+        is_preflight = request.method == "OPTIONS" and bool(
+            request.headers.get("Access-Control-Request-Method")
+        )
+        if is_preflight:
+            requested_method = str(
+                request.headers.get("Access-Control-Request-Method") or ""
+            ).upper()
+            requested_headers = {
+                item.strip().lower()
+                for item in str(
+                    request.headers.get("Access-Control-Request-Headers") or ""
+                ).split(",")
+                if item.strip()
+            }
+            if requested_method not in self._ALLOWED_METHODS or not requested_headers.issubset(
+                self._ALLOWED_REQUEST_HEADERS
+            ):
+                return HttpResponse(status=204)
+            response = HttpResponse(status=204)
+        else:
+            response = self.get_response(request)
+
+        # Fail closed if a deployment accidentally adds a Tauri origin to the
+        # global credentialed django-cors-headers allowlist.
+        if "Access-Control-Allow-Credentials" in response:
+            del response["Access-Control-Allow-Credentials"]
+        response["Access-Control-Allow-Origin"] = origin
+        response["Access-Control-Allow-Methods"] = (
+            "DELETE, GET, HEAD, PATCH, POST, OPTIONS"
+        )
+        response["Access-Control-Allow-Headers"] = (
+            "authorization, content-type, x-request-id"
+        )
+        response["Access-Control-Expose-Headers"] = "X-Request-ID"
+        response["Access-Control-Max-Age"] = "600"
+        patch_vary_headers(response, ("Origin",))
+        return response
 
 
 def safe_request_path(request) -> str:
