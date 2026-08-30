@@ -535,6 +535,19 @@ class SlackChannelListView(APIView):
             )
         except ConnectorConfigurationError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except ConnectorOAuthError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_401_UNAUTHORIZED)
+        except ConnectorRateLimitError as exc:
+            return Response(
+                {"detail": str(exc), "retryAfterSeconds": exc.retry_after_seconds},
+                status=status.HTTP_429_TOO_MANY_REQUESTS,
+            )
+        except requests.RequestException as exc:
+            logger.exception("Unable to load Slack channels")
+            return Response(
+                {"detail": str(exc) or "Slack is temporarily unavailable."},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
         except DatabaseError:
             return Response(PREVIEW_STORAGE_UNAVAILABLE_PAYLOAD, status=status.HTTP_503_SERVICE_UNAVAILABLE)
         return Response(payload, status=status.HTTP_200_OK)
@@ -567,6 +580,21 @@ class SlackChannelSelectionView(APIView):
             payload = update_slack_channel_selections(request.user, channel_ids, organization=scope)
         except ConnectorConfigurationError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except ConnectorOAuthError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_401_UNAUTHORIZED)
+        except ConnectorRateLimitError as exc:
+            return Response(
+                {"detail": str(exc), "retryAfterSeconds": exc.retry_after_seconds},
+                status=status.HTTP_429_TOO_MANY_REQUESTS,
+            )
+        except requests.RequestException as exc:
+            logger.exception("Unable to update Slack channel selections")
+            return Response(
+                {"detail": str(exc) or "Slack is temporarily unavailable."},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+        except DatabaseError:
+            return Response(PREVIEW_STORAGE_UNAVAILABLE_PAYLOAD, status=status.HTTP_503_SERVICE_UNAVAILABLE)
         return Response(payload, status=status.HTTP_200_OK)
 
 

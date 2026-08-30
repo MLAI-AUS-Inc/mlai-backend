@@ -4,6 +4,7 @@ import mimetypes
 import os
 import urllib.parse
 from datetime import date, timedelta
+from functools import wraps
 from pathlib import Path
 from typing import Optional
 from uuid import uuid4
@@ -47,6 +48,7 @@ from startup_updates.metric_catalog import (
     startup_update_metric_label,
 )
 from integrations.services.external_connectors import (
+    ConnectorOAuthError,
     active_google_connection,
     active_organization_for_user,
     google_connection_for_org,
@@ -188,6 +190,22 @@ VIBE_RAISING_INPUT_SOURCE_KEYS = {
     MANUAL_DOCUMENTS_SOURCE,
 }
 XERO_DRAFT_SYNC_STALE_AFTER = timedelta(minutes=15)
+
+
+def _connector_oauth_guarded(callback):
+    """Return the established connector-auth response for a revoked source."""
+
+    @wraps(callback)
+    def wrapped(*args, **kwargs):
+        try:
+            return callback(*args, **kwargs)
+        except ConnectorOAuthError as exc:
+            return Response(
+                {"detail": str(exc)},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+
+    return wrapped
 
 
 def _sync_selected_connector_sources_for_draft(user, input_sources: list[str]) -> dict[str, list[str]]:
@@ -2704,6 +2722,7 @@ class VibeRaisingStartupUpdateBootstrapView(APIView):
 class VibeRaisingStartupUpdateRunView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
+    @_connector_oauth_guarded
     def post(self, request):
         context, error_response = _get_founder_company_context_or_response(request)
         if error_response:
@@ -2855,6 +2874,7 @@ class VibeRaisingStartupUpdateStatusView(APIView):
 class VibeRaisingEmailDraftStartView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
+    @_connector_oauth_guarded
     def post(self, request):
         context, error_response = _get_founder_company_context_or_response(request)
         if error_response:

@@ -4,12 +4,13 @@ import logging
 import re
 import secrets
 import urllib.parse
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone as dt_timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Iterable, Optional
 
 from django.conf import settings
+from django.contrib.auth import get_user_model
 from django.core import signing
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
@@ -25,6 +26,8 @@ from integrations.models import (
     ExternalServiceProvider,
     FinancialAccount,
     GoogleConnection,
+    SlackDmMirrorGrant,
+    SlackDmMirrorGrantStatus,
 )
 from startup_updates.models import (
     ArtifactProcessingStatus,
@@ -42,6 +45,7 @@ from startup_updates.models import (
     SlackMessageArtifact,
     SlackThreadArtifact,
     StartupMetricObservation,
+    UserStartupBinding,
 )
 from startup_updates.metric_catalog import LUMA_METRIC_KEYS, startup_update_metric_label
 from integrations.services.gmail import build_gmail_service, get_message_metadata, list_message_page
@@ -70,6 +74,11 @@ from integrations.services.xero_scopes import (
     xero_missing_operational_scopes,
     xero_needs_report_reconnect,
 )
+from integrations.services.slack_oauth_authority import (
+    connection_slack_oauth_generation,
+    current_slack_oauth_generation,
+    stamp_slack_oauth_generation,
+)
 from integrations.utils import normalize_domain
 
 logger = logging.getLogger(__name__)
@@ -77,6 +86,7 @@ logger = logging.getLogger(__name__)
 CONNECTOR_OAUTH_STATE_SESSION_KEY = "connector_oauth_state"
 CONNECTOR_OAUTH_STATE_SIGNING_SALT = "mlai.integrations.connector_oauth_state.v1"
 CONNECTOR_OAUTH_STATE_MAX_AGE_SECONDS = 15 * 60
+SLACK_OAUTH_STATE_GENERATION_KEY = "slack_oauth_generation"
 DEFAULT_CONNECTOR_NEXT_PATH = "/vibe-raising/connect-data"
 ALLOWED_CONNECTOR_NEXT_PREFIXES = (
     "/vibe-raising/connect-data",
@@ -828,11 +838,14 @@ def build_authorization_url(request, provider: str) -> str:
     if provider == ExternalServiceProvider.BANK_FEED:
         return _build_basiq_consent_url(request, next_url=next_url, organization=organization)
 
+    state_extra = {"organization_id": organization.id if organization else None}
+    if provider == ExternalServiceProvider.SLACK:
+        state_extra[SLACK_OAUTH_STATE_GENERATION_KEY] = current_slack_oauth_generation(request.user.pk)
     state = _save_state(
         request,
         provider,
         next_url,
-        {"organization_id": organization.id if organization else None},
+        state_extra,
     )
 
     if provider == ExternalServiceProvider.STRIPE:
@@ -1437,7 +1450,39 @@ def _store_google_analytics_connection(user, organization: Optional[Organization
     )
 
 
-def _store_slack_connection(user, organization: Optional[Organization], token_data: dict[str, Any]) -> ExternalServiceConnection:
+def _revoke_stale_slack_oauth_tokens(token_data: dict[str, Any]) -> None:
+    """Best-effort revoke the user credential from an invalidated callback.
+
+    Slack's top-level access token is an installation/bot credential when bot
+    scopes are present and may be shared by other users in that workspace. The
+    callback race belongs only to the incoming ``authed_user`` authority, so it
+    must never revoke the installation token as collateral cleanup.
+    """
+
+    authed_user = token_data.get("authed_user") if isinstance(token_data.get("authed_user"), dict) else {}
+    user_token = str(authed_user.get("access_token") or "").strip()
+    if not user_token:
+        return
+    try:
+        requests.post(
+            "https://slack.com/api/auth.revoke",
+            headers={"Authorization": f"Bearer {user_token}"},
+            timeout=(3, 20),
+        )
+    except Exception as exc:
+        logger.warning(
+            "Failed to revoke stale Slack OAuth callback token",
+            extra={"error": exc.__class__.__name__},
+        )
+
+
+def _store_slack_connection(
+    user,
+    organization: Optional[Organization],
+    token_data: dict[str, Any],
+    *,
+    expected_generation: int,
+) -> ExternalServiceConnection:
     team = token_data.get("team") if isinstance(token_data.get("team"), dict) else {}
     authed_user = token_data.get("authed_user") if isinstance(token_data.get("authed_user"), dict) else {}
     team_id = str(team.get("id") or "").strip()
@@ -1456,19 +1501,162 @@ def _store_slack_connection(user, organization: Optional[Organization], token_da
         for key, value in authed_user.items()
         if key not in {"access_token", "refresh_token"}
     }
-    return _upsert_connection(
-        user=user,
-        provider=ExternalServiceProvider.SLACK,
-        organization=organization,
-        access_token=access_token,
-        refresh_token=refresh_token,
-        token_type=str(token_data.get("token_type") or authed_user.get("token_type") or "Bearer"),
-        token_expires_at=_expires_at(token_data) or _expires_at(authed_user),
-        scopes=scopes or _as_scope_list(getattr(settings, "SLACK_OAUTH_SCOPES", [])),
-        external_account_id=team_id,
-        account_label=team_name or team_id or "Slack workspace",
-        provider_metadata=provider_metadata,
-    )
+    stale_callback = False
+    identity_conflict = False
+    organization_access_lost = False
+    connection = None
+    with transaction.atomic():
+        locked_user = user.__class__.objects.select_for_update().get(pk=user.pk)
+        # Slack DM privacy boundaries use user -> grants -> connections. Keep
+        # OAuth token replacement on that same order, and never let the generic
+        # connector fallback overwrite a connection backing another Slack
+        # identity.
+        locked_grants = list(
+            SlackDmMirrorGrant.objects.select_for_update()
+            .filter(user_id=locked_user.pk)
+            .order_by("id")
+        )
+        locked_connections = list(
+            ExternalServiceConnection.objects.select_for_update()
+            .filter(user_id=locked_user.pk, provider=ExternalServiceProvider.SLACK)
+            .order_by("id")
+        )
+        current_generation = max(
+            (
+                connection_slack_oauth_generation(item)
+                for item in locked_connections
+            ),
+            default=0,
+        )
+        if expected_generation != current_generation:
+            stale_callback = True
+        elif organization is not None and not UserStartupBinding.objects.filter(
+            user_id=locked_user.pk,
+            organization_id=organization.pk,
+        ).exists():
+            # OAuth state is an integrity-protected snapshot, not durable
+            # authorization. Recheck tenant membership at the same user lock
+            # that guards token persistence so a removed founder cannot land a
+            # late callback in their former startup.
+            organization_access_lost = True
+        else:
+            provider_metadata = stamp_slack_oauth_generation(provider_metadata, current_generation)
+            organization_id = getattr(organization, "pk", None)
+            incoming_slack_user_id = str(authed_user.get("id") or "").strip()
+            # A user may have historical/legacy Slack connector rows across
+            # multiple startups (including duplicate NULL-organization rows).
+            # The DM mirror grant is the consent authority, so inspect every
+            # locked grant for this workspace before choosing any connector row
+            # to reuse. A grant is only historical once both revocation fields
+            # agree; a partial/inconsistent tombstone stays privacy-active.
+            conflicting_workspace_grant = next(
+                (
+                    grant
+                    for grant in locked_grants
+                    if str(grant.slack_workspace_id or "").strip() == team_id
+                    and (
+                        grant.status != SlackDmMirrorGrantStatus.REVOKED
+                        or grant.revoked_at is None
+                    )
+                    and str(grant.slack_user_id or "").strip()
+                    != incoming_slack_user_id
+                ),
+                None,
+            )
+            if conflicting_workspace_grant is not None:
+                identity_conflict = True
+            connection = next(
+                (
+                    item
+                    for item in locked_connections
+                    if item.organization_id == organization_id
+                    and item.external_account_id == team_id
+                ),
+                None,
+            )
+            linked_grant = next(
+                (
+                    grant
+                    for grant in locked_grants
+                    if connection is not None and grant.connection_id == connection.pk
+                ),
+                None,
+            )
+            incoming_identity = (
+                team_id,
+                incoming_slack_user_id,
+            )
+            if (
+                not identity_conflict
+                and linked_grant is not None
+                and incoming_identity != (
+                    linked_grant.slack_workspace_id,
+                    linked_grant.slack_user_id,
+                )
+            ):
+                if (
+                    linked_grant.status != SlackDmMirrorGrantStatus.REVOKED
+                    or linked_grant.revoked_at is None
+                ):
+                    # A live/paused/error grant still owns this connection and
+                    # identity. Never let a second Slack user silently replace
+                    # the authority behind that grant.
+                    identity_conflict = True
+                    connection = None
+                else:
+                    # Explicit disconnect is a completed consent boundary. Keep
+                    # its grant and connection as immutable historical control
+                    # rows, but free the workspace account key so a deliberate
+                    # new OAuth flow can bind a different Slack user cleanly.
+                    connection.external_account_id = (
+                        f"{team_id}:revoked:{connection.pk}:{current_generation}"
+                    )[:255]
+                    connection.save(
+                        update_fields=("external_account_id", "updated_at")
+                    )
+                    connection = None
+            if not identity_conflict:
+                if connection is None:
+                    connection = ExternalServiceConnection(
+                        user=locked_user,
+                        provider=ExternalServiceProvider.SLACK,
+                        organization=organization,
+                    )
+                connection.organization = organization
+                connection.access_token = access_token
+                connection.refresh_token = refresh_token
+                connection.token_type = str(
+                    token_data.get("token_type")
+                    or authed_user.get("token_type")
+                    or "Bearer"
+                )
+                connection.token_expires_at = _expires_at(token_data) or _expires_at(
+                    authed_user
+                )
+                connection.scopes = scopes or _as_scope_list(
+                    getattr(settings, "SLACK_OAUTH_SCOPES", [])
+                )
+                connection.external_account_id = team_id
+                connection.account_label = team_name or team_id or "Slack workspace"
+                connection.status = ExternalServiceConnectionStatus.CONNECTED
+                connection.provider_metadata = provider_metadata
+                connection.last_error = ""
+                connection.save()
+    if stale_callback or identity_conflict or organization_access_lost:
+        _revoke_stale_slack_oauth_tokens(token_data)
+    if stale_callback:
+        raise ConnectorOAuthError("Slack was disconnected while authorization was in progress. Try again.")
+    if identity_conflict:
+        raise ConnectorOAuthError(
+            "Disconnect the existing Slack DM mirror before authorizing a different Slack identity."
+        )
+    if organization_access_lost:
+        raise ConnectorOAuthError(
+            "Startup access changed while Slack authorization was in progress."
+        )
+    if connection is None:
+        raise ConnectorOAuthError("Failed to persist Slack authorization.")
+    return connection
 
 
 def _store_linear_connection(user, organization: Optional[Organization], token_data: dict[str, Any]) -> ExternalServiceConnection:
@@ -1551,7 +1739,20 @@ def complete_oauth_callback(request, provider: str) -> str:
     state_payload = _consume_state(request, provider, str(request.GET.get("state") or ""))
     next_url = normalize_connector_next(state_payload.get("next"))
     organization_id = state_payload.get("organization_id")
-    organization = Organization.objects.filter(id=organization_id).first() if organization_id else resolve_connector_organization(request.user)
+    if organization_id is not None:
+        try:
+            organization = Organization.objects.filter(id=organization_id).first()
+        except (TypeError, ValueError):
+            organization = None
+        if organization is None:
+            # A signed OAuth state is an immutable startup intent. Never turn a
+            # deleted/stale scoped intent into an unscoped credential row, and
+            # fail before exchanging the one-use provider code.
+            raise ConnectorOAuthError(
+                "The startup selected for this connector no longer exists."
+            )
+    else:
+        organization = resolve_connector_organization(request.user)
 
     if provider == ExternalServiceProvider.BANK_FEED:
         job_ids = [
@@ -1594,7 +1795,16 @@ def complete_oauth_callback(request, provider: str) -> str:
         elif provider == ExternalServiceProvider.GOOGLE_ANALYTICS:
             connection = _store_google_analytics_connection(request.user, organization, _exchange_google_analytics_code(code))
         elif provider == ExternalServiceProvider.SLACK:
-            connection = _store_slack_connection(request.user, organization, _exchange_slack_code(code))
+            try:
+                expected_slack_generation = int(state_payload.get(SLACK_OAUTH_STATE_GENERATION_KEY))
+            except (TypeError, ValueError):
+                expected_slack_generation = -1
+            connection = _store_slack_connection(
+                request.user,
+                organization,
+                _exchange_slack_code(code),
+                expected_generation=expected_slack_generation,
+            )
         elif provider == ExternalServiceProvider.LINEAR:
             connection = _store_linear_connection(request.user, organization, _exchange_linear_code(code))
         else:
@@ -4282,6 +4492,93 @@ def _latest_slack_connection(user, organization=_ACTIVE_ORG) -> Optional[Externa
     return queryset.order_by("-updated_at", "-id").first()
 
 
+@dataclass(frozen=True)
+class _SlackConnectionAuthority:
+    user_id: int
+    connection_id: int
+    organization_id: Optional[int]
+    oauth_generation: int
+    access_token: str = field(repr=False)
+
+
+def _slack_connection_authority(
+    connection: ExternalServiceConnection,
+) -> _SlackConnectionAuthority:
+    """Capture the exact Slack authority a connector operation intends to use."""
+
+    return _SlackConnectionAuthority(
+        user_id=connection.user_id,
+        connection_id=connection.pk,
+        organization_id=connection.organization_id,
+        oauth_generation=connection_slack_oauth_generation(connection),
+        access_token=str(connection.access_token or ""),
+    )
+
+
+def _lock_slack_connection_authority(
+    authority: _SlackConnectionAuthority,
+) -> ExternalServiceConnection:
+    """Lock and revalidate one Slack authority inside an atomic block.
+
+    Slack disconnect and OAuth replacement use the same user -> all grants ->
+    connection order. The user lock also makes the unlocked max-generation read
+    below stable: every supported generation advance first holds that row.
+    """
+
+    get_user_model().objects.select_for_update().get(pk=authority.user_id)
+    # Evaluate the queryset so these locks are acquired before the connection
+    # lock, even when the user has no active DM mirror grant.
+    list(
+        SlackDmMirrorGrant.objects.select_for_update()
+        .filter(user_id=authority.user_id)
+        .order_by("id")
+    )
+    connection = (
+        ExternalServiceConnection.objects.select_for_update()
+        .filter(
+            pk=authority.connection_id,
+            user_id=authority.user_id,
+            provider=ExternalServiceProvider.SLACK,
+        )
+        .first()
+    )
+    if connection is None:
+        raise ConnectorOAuthError("Slack connection authority is no longer available.")
+
+    current_generation = current_slack_oauth_generation(authority.user_id)
+    active_token = str(connection.access_token or "")
+    if (
+        connection.organization_id != authority.organization_id
+        or connection.status == ExternalServiceConnectionStatus.DISCONNECTED
+        or not active_token
+        or connection_slack_oauth_generation(connection) != authority.oauth_generation
+        or current_generation != authority.oauth_generation
+        or not secrets.compare_digest(active_token, authority.access_token)
+    ):
+        raise ConnectorOAuthError(
+            "Slack authorization changed while the connector request was in progress. Try again."
+        )
+    return connection
+
+
+def _record_slack_sync_error(
+    authority: _SlackConnectionAuthority,
+    exc: Exception,
+) -> None:
+    """Persist an error only while the exact credential authority is current."""
+
+    with transaction.atomic():
+        try:
+            connection = _lock_slack_connection_authority(authority)
+        except ConnectorOAuthError:
+            # Disconnect/re-authorization is authoritative. Never replace its
+            # tombstone with a stale ERROR state from an older request.
+            return
+        connection.status = ExternalServiceConnectionStatus.ERROR
+        connection.last_error = str(exc) or "Slack sync failed."
+        connection.save(update_fields=["status", "last_error", "updated_at"])
+
+
 def _slack_source_id(channel_id: str, message_ts: str) -> str:
     return f"slack:{channel_id}:{message_ts}"
 
@@ -4409,6 +4706,57 @@ def _upsert_slack_message(
     return artifact
 
 
+def _slack_api_request_and_persist_messages(
+    authority: _SlackConnectionAuthority,
+    *,
+    selection_id: int,
+    expected_sync_cursor: dict[str, Any],
+    method: str,
+    params: dict[str, Any],
+) -> tuple[dict[str, Any], list[SlackMessageArtifact]]:
+    """Run one Slack page and persist its messages at one authority point."""
+
+    with transaction.atomic():
+        connection = _lock_slack_connection_authority(authority)
+        selection = (
+            SlackChannelSelection.objects.select_for_update()
+            .filter(
+                pk=selection_id,
+                connection=connection,
+                selected=True,
+            )
+            .first()
+        )
+        if selection is None:
+            raise ConnectorConfigurationError(
+                "Slack channel selection changed while sync was in progress."
+            )
+        if dict(selection.sync_cursor or {}) != expected_sync_cursor:
+            raise ConnectorConfigurationError(
+                "Slack sync progress changed while this page was in progress. Retry."
+            )
+
+        # Keep the bounded authority transaction open across this single API
+        # page and its direct writes. That closes the check/call gap: DELETE
+        # either commits first (and this call never starts) or waits, then
+        # erases the rows written before releasing this lock.
+        payload = _slack_api_request(connection, method, params=params)
+        messages = [
+            item for item in payload.get("messages", []) if isinstance(item, dict)
+        ]
+        artifacts = []
+        for message in messages:
+            artifact = _upsert_slack_message(
+                connection=connection,
+                channel_id=selection.channel_id,
+                channel_name=selection.channel_name,
+                message=message,
+            )
+            if artifact is not None:
+                artifacts.append(artifact)
+        return payload, artifacts
+
+
 def _upsert_slack_thread_artifact(
     *,
     connection: ExternalServiceConnection,
@@ -4531,6 +4879,7 @@ def serialize_slack_channels(user, *, cursor: Optional[str] = None, limit: int =
             "warnings": ["Slack is not connected."],
         }
 
+    authority = _slack_connection_authority(connection)
     limit = min(max(int(limit or 200), 1), 1000)
     params = {
         "types": "public_channel,private_channel",
@@ -4539,10 +4888,20 @@ def serialize_slack_channels(user, *, cursor: Optional[str] = None, limit: int =
     }
     if cursor:
         params["cursor"] = cursor
-    payload = _slack_api_request(connection, "conversations.list", params=params)
-    channels = [item for item in payload.get("channels", []) if isinstance(item, dict)]
     channel_rows = []
     with transaction.atomic():
+        connection = _lock_slack_connection_authority(authority)
+        # The authority locks bridge the last local check to the actual Slack
+        # request. A concurrent disconnect either wins before this block (and
+        # no request starts) or waits and then erases these response rows.
+        payload = _slack_api_request(
+            connection,
+            "conversations.list",
+            params=params,
+        )
+        channels = [
+            item for item in payload.get("channels", []) if isinstance(item, dict)
+        ]
         for channel in channels:
             channel_id = str(channel.get("id") or "").strip()
             if not channel_id:
@@ -4579,12 +4938,14 @@ def update_slack_channel_selections(user, channel_ids: Iterable[str], *, organiz
     connection = _latest_slack_connection(user, organization)
     if not connection:
         raise ConnectorConfigurationError("Slack is not connected.")
+    authority = _slack_connection_authority(connection)
     selected_ids = {
         str(channel_id or "").strip()
         for channel_id in channel_ids or []
         if str(channel_id or "").strip()
     }
     with transaction.atomic():
+        connection = _lock_slack_connection_authority(authority)
         SlackChannelSelection.objects.filter(connection=connection).update(selected=False)
         for channel_id in sorted(selected_ids):
             selection, created = SlackChannelSelection.objects.get_or_create(
@@ -4607,7 +4968,7 @@ def update_slack_channel_selections(user, channel_ids: Iterable[str], *, organiz
                 connection=connection,
                 channel_id__in=selected_ids,
             ).update(selected=True)
-    selected = list(_selected_slack_channels(connection))
+        selected = list(_selected_slack_channels(connection))
     return {
         "accountLabel": connection.account_label or connection.external_account_id,
         "account_label": connection.account_label or connection.external_account_id,
@@ -4678,14 +5039,6 @@ def sync_slack_connection_page(
     if not connection.access_token:
         raise ConnectorOAuthError("Slack connection needs to be reauthorised.")
 
-    selected_qs = _selected_slack_channels(connection)
-    if channel_ids:
-        selected_set = {str(item or "").strip() for item in channel_ids if str(item or "").strip()}
-        selected_qs = selected_qs.filter(channel_id__in=selected_set)
-    selections = list(selected_qs)
-    if not selections:
-        raise ConnectorConfigurationError("Select at least one Slack channel before syncing.")
-
     history_limit = min(max(int(getattr(settings, "SLACK_SYNC_HISTORY_PAGE_LIMIT", 100) or 100), 1), 1000)
     reply_page_budget = max(1, int(getattr(settings, "SLACK_SYNC_REPLY_PAGE_BUDGET", 2) or 2))
     default_oldest_dt = timezone.now() - timedelta(days=int(getattr(settings, "SLACK_SYNC_HISTORY_DAYS", 120) or 120))
@@ -4695,37 +5048,56 @@ def sync_slack_connection_page(
     selected_run_id = str(run_id or "").strip()
     if not selected_run_id:
         raise ConnectorConfigurationError("Slack sync run id is required.")
-
-    connection.status = ExternalServiceConnectionStatus.SYNCING
-    connection.last_error = ""
-    connection.save(update_fields=["status", "last_error", "updated_at"])
-
-    selection = next(
-        (item for item in selections if _slack_selection_needs_work(item, run_id=selected_run_id)),
-        None,
+    selected_set = (
+        {str(item or "").strip() for item in channel_ids if str(item or "").strip()}
+        if channel_ids
+        else None
     )
+    authority = _slack_connection_authority(connection)
     synced_at = timezone.now()
-    if selection is None:
-        connection.status = ExternalServiceConnectionStatus.CONNECTED
+    with transaction.atomic():
+        connection = _lock_slack_connection_authority(authority)
+        selected_qs = _selected_slack_channels(connection).select_for_update()
+        if selected_set is not None:
+            selected_qs = selected_qs.filter(channel_id__in=selected_set)
+        selections = list(selected_qs)
+        if not selections:
+            raise ConnectorConfigurationError("Select at least one Slack channel before syncing.")
+        selection = next(
+            (
+                item
+                for item in selections
+                if _slack_selection_needs_work(item, run_id=selected_run_id)
+            ),
+            None,
+        )
+        if selection is None:
+            connection.status = ExternalServiceConnectionStatus.CONNECTED
+            connection.last_error = ""
+            connection.last_synced_at = synced_at
+            connection.save(
+                update_fields=["status", "last_error", "last_synced_at", "updated_at"]
+            )
+            return {
+                "connectionId": connection.id,
+                "connection_id": connection.id,
+                "provider": connection.provider,
+                "status": "synced",
+                "lastSyncedAt": synced_at.isoformat(),
+                "last_synced_at": synced_at.isoformat(),
+                "messagesSynced": 0,
+                "messages_synced": 0,
+                "threadsTouched": 0,
+                "threads_touched": 0,
+                "channels": [],
+                "has_more": False,
+            }
+        initial_selection_cursor = dict(selection.sync_cursor or {})
+        connection.status = ExternalServiceConnectionStatus.SYNCING
         connection.last_error = ""
-        connection.last_synced_at = synced_at
-        connection.save(update_fields=["status", "last_error", "last_synced_at", "updated_at"])
-        return {
-            "connectionId": connection.id,
-            "connection_id": connection.id,
-            "provider": connection.provider,
-            "status": "synced",
-            "lastSyncedAt": synced_at.isoformat(),
-            "last_synced_at": synced_at.isoformat(),
-            "messagesSynced": 0,
-            "messages_synced": 0,
-            "threadsTouched": 0,
-            "threads_touched": 0,
-            "channels": [],
-            "has_more": False,
-        }
+        connection.save(update_fields=["status", "last_error", "updated_at"])
 
-    cursor_payload = dict(selection.sync_cursor or {})
+    cursor_payload = dict(initial_selection_cursor)
     oldest_ts = explicit_oldest or str(cursor_payload.get("oldest") or default_oldest)
     cursor_payload = _reset_slack_run_cursor(
         cursor_payload,
@@ -4759,21 +5131,20 @@ def sync_slack_connection_page(
             reply_cursor = str(reply_state.get("cursor") or "").strip()
             if reply_cursor:
                 reply_params["cursor"] = reply_cursor
-            reply_payload = _slack_api_request(connection, "conversations.replies", params=reply_params)
-            replies = [item for item in reply_payload.get("messages", []) if isinstance(item, dict)]
-            for reply in replies:
-                reply_artifact = _upsert_slack_message(
-                    connection=connection,
-                    channel_id=selection.channel_id,
-                    channel_name=selection.channel_name,
-                    message=reply,
-                )
-                if reply_artifact is None:
-                    continue
+            reply_payload, reply_artifacts = _slack_api_request_and_persist_messages(
+                authority,
+                selection_id=selection.pk,
+                expected_sync_cursor=initial_selection_cursor,
+                method="conversations.replies",
+                params=reply_params,
+            )
+            for artifact in reply_artifacts:
                 channel_message_count += 1
-                channel_thread_ts.add(reply_artifact.thread_ts or reply_artifact.slack_message_ts)
-                if str(reply_artifact.slack_message_ts) > latest_seen:
-                    latest_seen = reply_artifact.slack_message_ts
+                channel_thread_ts.add(
+                    artifact.thread_ts or artifact.slack_message_ts
+                )
+                if str(artifact.slack_message_ts) > latest_seen:
+                    latest_seen = artifact.slack_message_ts
             next_reply_cursor = _slack_next_cursor(reply_payload)
             if next_reply_cursor:
                 pending_replies.append({"thread_ts": thread_ts, "cursor": next_reply_cursor})
@@ -4791,21 +5162,22 @@ def sync_slack_connection_page(
                 params["latest"] = sync_latest
             if history_cursor:
                 params["cursor"] = history_cursor
-            payload = _slack_api_request(connection, "conversations.history", params=params)
+            payload, history_artifacts = _slack_api_request_and_persist_messages(
+                authority,
+                selection_id=selection.pk,
+                expected_sync_cursor=initial_selection_cursor,
+                method="conversations.history",
+                params=params,
+            )
             messages = [item for item in payload.get("messages", []) if isinstance(item, dict)]
-            for message in messages:
-                artifact = _upsert_slack_message(
-                    connection=connection,
-                    channel_id=selection.channel_id,
-                    channel_name=selection.channel_name,
-                    message=message,
-                )
-                if artifact is None:
-                    continue
+            for artifact in history_artifacts:
                 channel_message_count += 1
-                channel_thread_ts.add(artifact.thread_ts or artifact.slack_message_ts)
+                channel_thread_ts.add(
+                    artifact.thread_ts or artifact.slack_message_ts
+                )
                 if str(artifact.slack_message_ts) > latest_seen:
                     latest_seen = artifact.slack_message_ts
+            for message in messages:
                 if int(message.get("reply_count") or 0) > 0:
                     pending_replies.append(
                         {
@@ -4828,111 +5200,150 @@ def sync_slack_connection_page(
                 reply_cursor = str(reply_state.get("cursor") or "").strip()
                 if reply_cursor:
                     reply_params["cursor"] = reply_cursor
-                reply_payload = _slack_api_request(connection, "conversations.replies", params=reply_params)
-                replies = [item for item in reply_payload.get("messages", []) if isinstance(item, dict)]
-                for reply in replies:
-                    reply_artifact = _upsert_slack_message(
-                        connection=connection,
-                        channel_id=selection.channel_id,
-                        channel_name=selection.channel_name,
-                        message=reply,
-                    )
-                    if reply_artifact is None:
-                        continue
+                reply_payload, reply_artifacts = _slack_api_request_and_persist_messages(
+                    authority,
+                    selection_id=selection.pk,
+                    expected_sync_cursor=initial_selection_cursor,
+                    method="conversations.replies",
+                    params=reply_params,
+                )
+                for artifact in reply_artifacts:
                     channel_message_count += 1
-                    channel_thread_ts.add(reply_artifact.thread_ts or reply_artifact.slack_message_ts)
-                    if str(reply_artifact.slack_message_ts) > latest_seen:
-                        latest_seen = reply_artifact.slack_message_ts
+                    channel_thread_ts.add(
+                        artifact.thread_ts or artifact.slack_message_ts
+                    )
+                    if str(artifact.slack_message_ts) > latest_seen:
+                        latest_seen = artifact.slack_message_ts
                 next_reply_cursor = _slack_next_cursor(reply_payload)
                 if next_reply_cursor:
                     pending_replies.append({"thread_ts": thread_ts, "cursor": next_reply_cursor})
                 reply_pages_processed += 1
 
-        total_threads = 0
-        for thread_ts in sorted(channel_thread_ts):
-            if _upsert_slack_thread_artifact(
-                connection=connection,
-                channel_id=selection.channel_id,
-                channel_name=selection.channel_name,
-                thread_ts=thread_ts,
-            ):
-                total_threads += 1
+        with transaction.atomic():
+            connection = _lock_slack_connection_authority(authority)
+            locked_selection = (
+                SlackChannelSelection.objects.select_for_update()
+                .filter(
+                    pk=selection.pk,
+                    connection=connection,
+                    selected=True,
+                )
+                .first()
+            )
+            if locked_selection is None:
+                raise ConnectorConfigurationError(
+                    "Slack channel selection changed while sync was in progress."
+                )
+            if dict(locked_selection.sync_cursor or {}) != initial_selection_cursor:
+                raise ConnectorConfigurationError(
+                    "Slack sync progress changed while this page was in progress. Retry."
+                )
+            selection = locked_selection
+            total_threads = 0
+            for thread_ts in sorted(channel_thread_ts):
+                if _upsert_slack_thread_artifact(
+                    connection=connection,
+                    channel_id=selection.channel_id,
+                    channel_name=selection.channel_name,
+                    thread_ts=thread_ts,
+                ):
+                    total_threads += 1
 
-        cursor_payload["latest_seen"] = latest_seen
-        cursor_payload["pending_replies"] = pending_replies
-        cursor_payload["run_messages_synced"] = int(cursor_payload.get("run_messages_synced") or 0) + channel_message_count
-        cursor_payload["run_threads_touched"] = int(cursor_payload.get("run_threads_touched") or 0) + total_threads
-        if history_cursor:
-            cursor_payload["history_cursor"] = history_cursor
-        else:
-            cursor_payload.pop("history_cursor", None)
+            cursor_payload["latest_seen"] = latest_seen
+            cursor_payload["pending_replies"] = pending_replies
+            cursor_payload["run_messages_synced"] = int(
+                cursor_payload.get("run_messages_synced") or 0
+            ) + channel_message_count
+            cursor_payload["run_threads_touched"] = int(
+                cursor_payload.get("run_threads_touched") or 0
+            ) + total_threads
+            if history_cursor:
+                cursor_payload["history_cursor"] = history_cursor
+            else:
+                cursor_payload.pop("history_cursor", None)
 
-        selection_has_more = bool(pending_replies or history_cursor)
-        if not selection_has_more:
-            cursor_payload["run_backfill_complete"] = True
-            cursor_payload.pop("pending_replies", None)
-            cursor_payload.pop("history_cursor", None)
-            if latest_seen:
-                cursor_payload["oldest"] = latest_seen
-            cursor_payload["last_synced_at"] = synced_at.isoformat()
-            selection.last_synced_at = synced_at
+            selection_has_more = bool(pending_replies or history_cursor)
+            if not selection_has_more:
+                cursor_payload["run_backfill_complete"] = True
+                cursor_payload.pop("pending_replies", None)
+                cursor_payload.pop("history_cursor", None)
+                if latest_seen:
+                    cursor_payload["oldest"] = latest_seen
+                cursor_payload["last_synced_at"] = synced_at.isoformat()
+                selection.last_synced_at = synced_at
 
-        selection.sync_cursor = cursor_payload
-        selection.save(update_fields=["sync_cursor", "last_synced_at", "updated_at"])
+            selection.sync_cursor = cursor_payload
+            selection.save(
+                update_fields=["sync_cursor", "last_synced_at", "updated_at"]
+            )
 
-        has_more = selection_has_more or any(
-            _slack_selection_needs_work(item, run_id=selected_run_id)
-            for item in selections
-            if item.pk != selection.pk
-        )
+            current_selections = list(
+                _selected_slack_channels(connection).select_for_update()
+            )
+            has_more = selection_has_more or any(
+                _slack_selection_needs_work(item, run_id=selected_run_id)
+                for item in current_selections
+                if item.pk != selection.pk
+            )
 
-        if has_more:
-            connection.status = ExternalServiceConnectionStatus.SYNCING
-        else:
-            connection.status = ExternalServiceConnectionStatus.CONNECTED
-            connection.last_synced_at = synced_at
-        connection.last_error = ""
-        connection.sync_cursor = {
-            **dict(connection.sync_cursor or {}),
-            "last_synced_at": synced_at.isoformat(),
-            "latest_seen_by_channel": {
-                **dict((connection.sync_cursor or {}).get("latest_seen_by_channel") or {}),
-                selection.channel_id: latest_seen,
-            },
-        }
-        connection.save(update_fields=["status", "last_error", "last_synced_at", "sync_cursor", "updated_at"])
+            if has_more:
+                connection.status = ExternalServiceConnectionStatus.SYNCING
+            else:
+                connection.status = ExternalServiceConnectionStatus.CONNECTED
+                connection.last_synced_at = synced_at
+            connection.last_error = ""
+            connection.sync_cursor = {
+                **dict(connection.sync_cursor or {}),
+                "last_synced_at": synced_at.isoformat(),
+                "latest_seen_by_channel": {
+                    **dict(
+                        (connection.sync_cursor or {}).get(
+                            "latest_seen_by_channel"
+                        )
+                        or {}
+                    ),
+                    selection.channel_id: latest_seen,
+                },
+            }
+            connection.save(
+                update_fields=[
+                    "status",
+                    "last_error",
+                    "last_synced_at",
+                    "sync_cursor",
+                    "updated_at",
+                ]
+            )
 
-        return {
-            "connectionId": connection.id,
-            "connection_id": connection.id,
-            "provider": connection.provider,
-            "status": "syncing" if has_more else "synced",
-            "lastSyncedAt": synced_at.isoformat(),
-            "last_synced_at": synced_at.isoformat(),
-            "messagesSynced": channel_message_count,
-            "messages_synced": channel_message_count,
-            "threadsTouched": total_threads,
-            "threads_touched": total_threads,
-            "channels": [
-                {
-                    "channelId": selection.channel_id,
-                    "channel_id": selection.channel_id,
-                    "channelName": selection.channel_name,
-                    "channel_name": selection.channel_name,
-                    "messagesSynced": channel_message_count,
-                    "messages_synced": channel_message_count,
-                    "threadsTouched": total_threads,
-                    "threads_touched": total_threads,
-                }
-            ],
-            "has_more": has_more,
-        }
+            return {
+                "connectionId": connection.id,
+                "connection_id": connection.id,
+                "provider": connection.provider,
+                "status": "syncing" if has_more else "synced",
+                "lastSyncedAt": synced_at.isoformat(),
+                "last_synced_at": synced_at.isoformat(),
+                "messagesSynced": channel_message_count,
+                "messages_synced": channel_message_count,
+                "threadsTouched": total_threads,
+                "threads_touched": total_threads,
+                "channels": [
+                    {
+                        "channelId": selection.channel_id,
+                        "channel_id": selection.channel_id,
+                        "channelName": selection.channel_name,
+                        "channel_name": selection.channel_name,
+                        "messagesSynced": channel_message_count,
+                        "messages_synced": channel_message_count,
+                        "threadsTouched": total_threads,
+                        "threads_touched": total_threads,
+                    }
+                ],
+                "has_more": has_more,
+            }
     except ConnectorRateLimitError:
         raise
-    except (ConnectorOAuthError, ConnectorRateLimitError, requests.RequestException) as exc:
-        connection.status = ExternalServiceConnectionStatus.ERROR
-        connection.last_error = str(exc) or "Slack sync failed."
-        connection.save(update_fields=["status", "last_error", "updated_at"])
+    except (ConnectorOAuthError, requests.RequestException) as exc:
+        _record_slack_sync_error(authority, exc)
         raise
 
 
@@ -4950,14 +5361,6 @@ def sync_slack_connection(
     if not connection.access_token:
         raise ConnectorOAuthError("Slack connection needs to be reauthorised.")
 
-    selected_qs = _selected_slack_channels(connection)
-    if channel_ids:
-        selected_set = {str(item or "").strip() for item in channel_ids if str(item or "").strip()}
-        selected_qs = selected_qs.filter(channel_id__in=selected_set)
-    selections = list(selected_qs)
-    if not selections:
-        raise ConnectorConfigurationError("Select at least one Slack channel before syncing.")
-
     history_limit = min(max(int(getattr(settings, "SLACK_SYNC_HISTORY_PAGE_LIMIT", 100) or 100), 1), 1000)
     max_history_pages = max(1, int(getattr(settings, "SLACK_SYNC_HISTORY_MAX_PAGES", 5) or 5))
     max_reply_pages = max(1, int(getattr(settings, "SLACK_SYNC_REPLY_MAX_PAGES", 3) or 3))
@@ -4965,21 +5368,38 @@ def sync_slack_connection(
     default_oldest = str(default_oldest_dt.timestamp())
     explicit_oldest = str(oldest.timestamp()) if hasattr(oldest, "timestamp") else (str(oldest) if oldest else None)
     explicit_latest = str(latest.timestamp()) if hasattr(latest, "timestamp") else (str(latest) if latest else None)
-
-    connection.status = ExternalServiceConnectionStatus.SYNCING
-    connection.last_error = ""
-    connection.save(update_fields=["status", "last_error", "updated_at"])
+    selected_set = (
+        {str(item or "").strip() for item in channel_ids if str(item or "").strip()}
+        if channel_ids
+        else None
+    )
+    authority = _slack_connection_authority(connection)
+    with transaction.atomic():
+        connection = _lock_slack_connection_authority(authority)
+        selected_qs = _selected_slack_channels(connection).select_for_update()
+        if selected_set is not None:
+            selected_qs = selected_qs.filter(channel_id__in=selected_set)
+        selections = list(selected_qs)
+        if not selections:
+            raise ConnectorConfigurationError(
+                "Select at least one Slack channel before syncing."
+            )
+        initial_selection_cursors = {
+            selection.pk: dict(selection.sync_cursor or {}) for selection in selections
+        }
+        connection.status = ExternalServiceConnectionStatus.SYNCING
+        connection.last_error = ""
+        connection.save(update_fields=["status", "last_error", "updated_at"])
 
     synced_at = timezone.now()
     total_messages = 0
-    total_threads = 0
-    channel_results = []
-    latest_seen_by_channel: dict[str, str] = {}
+    pending_channel_results: list[dict[str, Any]] = []
     try:
         for selection in selections:
             channel_thread_ts: set[str] = set()
             channel_message_count = 0
-            cursor_payload = dict(selection.sync_cursor or {})
+            initial_selection_cursor = initial_selection_cursors[selection.pk]
+            cursor_payload = dict(initial_selection_cursor)
             oldest_ts = explicit_oldest or str(cursor_payload.get("oldest") or default_oldest)
             latest_seen = str(cursor_payload.get("oldest") or "")
             page_cursor = None
@@ -4995,21 +5415,22 @@ def sync_slack_connection(
                     params["latest"] = explicit_latest
                 if page_cursor:
                     params["cursor"] = page_cursor
-                payload = _slack_api_request(connection, "conversations.history", params=params)
+                payload, history_artifacts = _slack_api_request_and_persist_messages(
+                    authority,
+                    selection_id=selection.pk,
+                    expected_sync_cursor=initial_selection_cursor,
+                    method="conversations.history",
+                    params=params,
+                )
                 messages = [item for item in payload.get("messages", []) if isinstance(item, dict)]
-                for message in messages:
-                    artifact = _upsert_slack_message(
-                        connection=connection,
-                        channel_id=selection.channel_id,
-                        channel_name=selection.channel_name,
-                        message=message,
-                    )
-                    if artifact is None:
-                        continue
+                for artifact in history_artifacts:
                     channel_message_count += 1
-                    channel_thread_ts.add(artifact.thread_ts or artifact.slack_message_ts)
+                    channel_thread_ts.add(
+                        artifact.thread_ts or artifact.slack_message_ts
+                    )
                     if str(artifact.slack_message_ts) > latest_seen:
                         latest_seen = artifact.slack_message_ts
+                for message in messages:
                     if int(message.get("reply_count") or 0) <= 0:
                         continue
                     reply_cursor = None
@@ -5022,92 +5443,158 @@ def sync_slack_connection(
                         }
                         if reply_cursor:
                             reply_params["cursor"] = reply_cursor
-                        reply_payload = _slack_api_request(connection, "conversations.replies", params=reply_params)
-                        replies = [item for item in reply_payload.get("messages", []) if isinstance(item, dict)]
-                        for reply in replies:
-                            reply_artifact = _upsert_slack_message(
-                                connection=connection,
-                                channel_id=selection.channel_id,
-                                channel_name=selection.channel_name,
-                                message=reply,
-                            )
-                            if reply_artifact is None:
-                                continue
+                        (
+                            reply_payload,
+                            reply_artifacts,
+                        ) = _slack_api_request_and_persist_messages(
+                            authority,
+                            selection_id=selection.pk,
+                            expected_sync_cursor=initial_selection_cursor,
+                            method="conversations.replies",
+                            params=reply_params,
+                        )
+                        for reply_artifact in reply_artifacts:
                             channel_message_count += 1
-                            channel_thread_ts.add(reply_artifact.thread_ts or reply_artifact.slack_message_ts)
+                            channel_thread_ts.add(
+                                reply_artifact.thread_ts
+                                or reply_artifact.slack_message_ts
+                            )
                             if str(reply_artifact.slack_message_ts) > latest_seen:
                                 latest_seen = reply_artifact.slack_message_ts
-                        reply_metadata = reply_payload.get("response_metadata") if isinstance(reply_payload.get("response_metadata"), dict) else {}
+                        reply_metadata = (
+                            reply_payload.get("response_metadata")
+                            if isinstance(reply_payload.get("response_metadata"), dict)
+                            else {}
+                        )
                         reply_cursor = str(reply_metadata.get("next_cursor") or "").strip()
                         reply_pages += 1
                         if not reply_cursor:
                             break
 
-                response_metadata = payload.get("response_metadata") if isinstance(payload.get("response_metadata"), dict) else {}
+                response_metadata = (
+                    payload.get("response_metadata")
+                    if isinstance(payload.get("response_metadata"), dict)
+                    else {}
+                )
                 page_cursor = str(response_metadata.get("next_cursor") or "").strip()
                 page_count += 1
                 if not page_cursor:
                     break
 
-            for thread_ts in sorted(channel_thread_ts):
-                if _upsert_slack_thread_artifact(
-                    connection=connection,
-                    channel_id=selection.channel_id,
-                    channel_name=selection.channel_name,
-                    thread_ts=thread_ts,
-                ):
-                    total_threads += 1
             total_messages += channel_message_count
             if latest_seen:
-                latest_seen_by_channel[selection.channel_id] = latest_seen
-                selection.sync_cursor = {**cursor_payload, "oldest": latest_seen, "last_synced_at": synced_at.isoformat()}
+                next_sync_cursor = {
+                    **cursor_payload,
+                    "oldest": latest_seen,
+                    "last_synced_at": synced_at.isoformat(),
+                }
             else:
-                selection.sync_cursor = {**cursor_payload, "last_synced_at": synced_at.isoformat()}
-            selection.last_synced_at = synced_at
-            selection.save(update_fields=["sync_cursor", "last_synced_at", "updated_at"])
-            channel_results.append(
+                next_sync_cursor = {
+                    **cursor_payload,
+                    "last_synced_at": synced_at.isoformat(),
+                }
+            pending_channel_results.append(
                 {
-                    "channelId": selection.channel_id,
-                    "channel_id": selection.channel_id,
-                    "channelName": selection.channel_name,
-                    "channel_name": selection.channel_name,
-                    "messagesSynced": channel_message_count,
+                    "selection_id": selection.pk,
+                    "initial_sync_cursor": initial_selection_cursor,
+                    "next_sync_cursor": next_sync_cursor,
+                    "latest_seen": latest_seen,
+                    "thread_timestamps": channel_thread_ts,
                     "messages_synced": channel_message_count,
-                    "threadsTouched": len(channel_thread_ts),
-                    "threads_touched": len(channel_thread_ts),
                 }
             )
+
+        with transaction.atomic():
+            connection = _lock_slack_connection_authority(authority)
+            locked_selections = {
+                item.pk: item
+                for item in SlackChannelSelection.objects.select_for_update().filter(
+                    connection=connection,
+                    selected=True,
+                    pk__in=[item["selection_id"] for item in pending_channel_results],
+                )
+            }
+            total_threads = 0
+            channel_results = []
+            latest_seen_by_channel: dict[str, str] = {}
+            for pending in pending_channel_results:
+                selection = locked_selections.get(pending["selection_id"])
+                if selection is None:
+                    raise ConnectorConfigurationError(
+                        "Slack channel selection changed while sync was in progress."
+                    )
+                if dict(selection.sync_cursor or {}) != pending["initial_sync_cursor"]:
+                    raise ConnectorConfigurationError(
+                        "Slack sync progress changed while this request was in progress. Retry."
+                    )
+                channel_threads = 0
+                for thread_ts in sorted(pending["thread_timestamps"]):
+                    if _upsert_slack_thread_artifact(
+                        connection=connection,
+                        channel_id=selection.channel_id,
+                        channel_name=selection.channel_name,
+                        thread_ts=thread_ts,
+                    ):
+                        channel_threads += 1
+                        total_threads += 1
+                selection.sync_cursor = pending["next_sync_cursor"]
+                selection.last_synced_at = synced_at
+                selection.save(
+                    update_fields=["sync_cursor", "last_synced_at", "updated_at"]
+                )
+                if pending["latest_seen"]:
+                    latest_seen_by_channel[selection.channel_id] = pending[
+                        "latest_seen"
+                    ]
+                channel_results.append(
+                    {
+                        "channelId": selection.channel_id,
+                        "channel_id": selection.channel_id,
+                        "channelName": selection.channel_name,
+                        "channel_name": selection.channel_name,
+                        "messagesSynced": pending["messages_synced"],
+                        "messages_synced": pending["messages_synced"],
+                        "threadsTouched": channel_threads,
+                        "threads_touched": channel_threads,
+                    }
+                )
+
+            connection.status = ExternalServiceConnectionStatus.CONNECTED
+            connection.last_error = ""
+            connection.last_synced_at = synced_at
+            connection.sync_cursor = {
+                **dict(connection.sync_cursor or {}),
+                "last_synced_at": synced_at.isoformat(),
+                "latest_seen_by_channel": latest_seen_by_channel,
+                "messages_synced": total_messages,
+                "threads_touched": total_threads,
+            }
+            connection.save(
+                update_fields=[
+                    "status",
+                    "last_error",
+                    "last_synced_at",
+                    "sync_cursor",
+                    "updated_at",
+                ]
+            )
+
+            return {
+                "connectionId": connection.id,
+                "connection_id": connection.id,
+                "provider": connection.provider,
+                "status": "synced",
+                "lastSyncedAt": synced_at.isoformat(),
+                "last_synced_at": synced_at.isoformat(),
+                "messagesSynced": total_messages,
+                "messages_synced": total_messages,
+                "threadsTouched": total_threads,
+                "threads_touched": total_threads,
+                "channels": channel_results,
+            }
     except (ConnectorOAuthError, requests.RequestException) as exc:
-        connection.status = ExternalServiceConnectionStatus.ERROR
-        connection.last_error = str(exc) or "Slack sync failed."
-        connection.save(update_fields=["status", "last_error", "updated_at"])
+        _record_slack_sync_error(authority, exc)
         raise
-
-    connection.status = ExternalServiceConnectionStatus.CONNECTED
-    connection.last_error = ""
-    connection.last_synced_at = synced_at
-    connection.sync_cursor = {
-        **dict(connection.sync_cursor or {}),
-        "last_synced_at": synced_at.isoformat(),
-        "latest_seen_by_channel": latest_seen_by_channel,
-        "messages_synced": total_messages,
-        "threads_touched": total_threads,
-    }
-    connection.save(update_fields=["status", "last_error", "last_synced_at", "sync_cursor", "updated_at"])
-
-    return {
-        "connectionId": connection.id,
-        "connection_id": connection.id,
-        "provider": connection.provider,
-        "status": "synced",
-        "lastSyncedAt": synced_at.isoformat(),
-        "last_synced_at": synced_at.isoformat(),
-        "messagesSynced": total_messages,
-        "messages_synced": total_messages,
-        "threadsTouched": total_threads,
-        "threads_touched": total_threads,
-        "channels": channel_results,
-    }
 
 
 def serialize_slack_preview(user, *, limit: int = 5, organization=_ACTIVE_ORG) -> dict[str, Any]:
@@ -5747,6 +6234,7 @@ def mark_sources_sync_requested(
             continue
 
         if connection.provider == ExternalServiceProvider.SLACK:
+            authority = _slack_connection_authority(connection)
             try:
                 updated.append(sync_slack_connection(connection))
             except (ConnectorConfigurationError, ConnectorOAuthError, ConnectorRateLimitError, requests.RequestException) as exc:
@@ -5754,16 +6242,14 @@ def mark_sources_sync_requested(
                     "Slack sync failed",
                     extra={"connection_id": connection.id, "user_id": user.id},
                 )
-                connection.status = ExternalServiceConnectionStatus.ERROR
-                connection.last_error = str(exc) or "Slack sync failed."
-                connection.save(update_fields=["status", "last_error", "updated_at"])
+                _record_slack_sync_error(authority, exc)
                 updated.append(
                     {
                         "connectionId": connection.id,
                         "connection_id": connection.id,
                         "provider": connection.provider,
                         "status": "error",
-                        "error": connection.last_error,
+                        "error": str(exc) or "Slack sync failed.",
                     }
                 )
             continue
@@ -5880,13 +6366,10 @@ def disconnect_external_connection(user, connection_id: int) -> bool:
     if not connection:
         return False
     if connection.provider == ExternalServiceProvider.SLACK:
-        from integrations.models import SlackDmMirrorGrant
-        from integrations.services.slack_dm_mirror import revoke_grant
+        from integrations.services.slack_dm_mirror import revoke_connection_grant
 
-        grant = SlackDmMirrorGrant.objects.filter(connection=connection).first()
-        if grant is not None:
-            revoke_grant(grant)
-            return True
+        revoke_connection_grant(user, connection.pk)
+        return True
     connection.status = ExternalServiceConnectionStatus.DISCONNECTED
     connection.access_token = ""
     connection.refresh_token = ""
