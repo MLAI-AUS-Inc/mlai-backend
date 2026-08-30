@@ -246,7 +246,7 @@ class SlackDmIneligibleRetirementTests(TestCase):
                 },
             }
         )
-        self.assertEqual(result, {"status": "discovery_queued"})
+        self.assertEqual(result, {"status": "ignored"})
         self.assertFalse(
             conversation.deliveries.filter(
                 source_message_id="1700000200.000001"

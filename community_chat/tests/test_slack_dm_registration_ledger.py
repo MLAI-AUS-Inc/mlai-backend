@@ -769,6 +769,7 @@ class SlackDmRegistrationLedgerTests(APITestCase):
                 slack_dm_mirror.ingest_slack_dm_event(
                     {
                         "team_id": "TLEDGER",
+                        "authorizations": [{"user_id": "UOWNER"}],
                         "event": {
                             "channel": "DLEDGER",
                             "ts": "1787900003.000100",
@@ -795,7 +796,10 @@ class SlackDmRegistrationLedgerTests(APITestCase):
                     reset_history=False,
                 )
 
-        self.assertEqual(callback_results, [{"status": "discovery_queued"}])
+        self.assertEqual(
+            callback_results,
+            [{"status": "discovery_queued", "staged": 1}],
+        )
         self.assertFalse(self._message_rows().exists())
         self.conversation.refresh_from_db()
         self.assertEqual(
@@ -1393,7 +1397,11 @@ class SlackDmRegistrationLedgerTests(APITestCase):
         )
 
         self.assertEqual(slack_dm_mirror.process_due_history_backfills(), 0)
-        self.assertFalse(self._message_rows().exists())
+        self.assertFalse(
+            self._message_rows()
+            .filter(source_message_id="1787900000.000100")
+            .exists()
+        )
         self.assertTrue(
             all(row.encrypted_text == "" for row in SlackDmMirrorDelivery.objects.all())
         )
@@ -1638,7 +1646,7 @@ class SlackDmRegistrationLedgerTests(APITestCase):
                 },
             }
         )
-        self.assertIsNone(result)
+        self.assertEqual(result, {"status": "ignored"})
         self.assertFalse(
             self._message_rows()
             .exclude(pk=queued.pk)

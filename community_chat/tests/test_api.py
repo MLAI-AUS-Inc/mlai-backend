@@ -733,6 +733,7 @@ class CommunityChatDeviceAuthorityTransactionTests(TransactionTestCase):
         revoke_started = threading.Event()
         finish_revoke = threading.Event()
         invite_authenticated = threading.Event()
+        finish_invite_authentication = threading.Event()
         errors = []
         delete_responses = []
         invite_responses = []
@@ -751,6 +752,10 @@ class CommunityChatDeviceAuthorityTransactionTests(TransactionTestCase):
         def observed_authenticate(raw_token):
             session = authenticate_access_token_original(raw_token)
             invite_authenticated.set()
+            if not finish_invite_authentication.wait(timeout=5):
+                raise RuntimeError(
+                    "test timed out waiting to finish invite authentication"
+                )
             return session
 
         def delete_request():
@@ -803,13 +808,14 @@ class CommunityChatDeviceAuthorityTransactionTests(TransactionTestCase):
             ),
             patch("community_chat.views.issue_member_invite") as issue_invite,
         ):
-            delete_thread = threading.Thread(target=delete_request)
-            delete_thread.start()
-            self.assertTrue(revoke_started.wait(timeout=5))
-
             invite_thread = threading.Thread(target=invite_request)
             invite_thread.start()
             self.assertTrue(invite_authenticated.wait(timeout=5))
+
+            delete_thread = threading.Thread(target=delete_request)
+            delete_thread.start()
+            self.assertTrue(revoke_started.wait(timeout=5))
+            finish_invite_authentication.set()
             self.assertTrue(invite_thread.is_alive())
 
             finish_revoke.set()

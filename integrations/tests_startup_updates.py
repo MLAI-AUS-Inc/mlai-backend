@@ -11,7 +11,7 @@ from unittest.mock import MagicMock, patch
 from django.contrib.auth import get_user_model
 from django.core.management import call_command
 from django.db import close_old_connections, connection
-from django.test import TestCase, TransactionTestCase
+from django.test import TestCase, TransactionTestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
 from googleapiclient.errors import HttpError
@@ -1678,6 +1678,7 @@ class StartupUpdateSlackBackfillViewTest(StartupUpdateApiTestCase):
     connection.vendor == "postgresql",
     "Requires PostgreSQL row-lock concurrency semantics.",
 )
+@override_settings(ROO_API_KEY="startup-api-key")
 class StartupUpdateSlackLineagePostgresTests(TransactionTestCase):
     reset_sequences = True
 

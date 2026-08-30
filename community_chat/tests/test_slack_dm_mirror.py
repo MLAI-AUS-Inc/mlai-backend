@@ -1016,6 +1016,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
     @patch(
         "integrations.services.slack_dm_mirror.BuzzBridgeClient.provision_private_conversation"
     )
+    @patch("integrations.services.slack_dm_mirror.BuzzBridgeClient.deliver_private")
     @patch("integrations.services.slack_dm_mirror.WebClient")
     def test_one_link_provisions_owner_only_mirror_and_backfills_in_timestamp_order(
         self,
@@ -1114,6 +1115,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
     def test_discovery_resumes_durable_cursor_after_page_failure(
         self,
         web_client,
+        _deliver_private,
         provision,
     ):
         client = web_client.return_value
@@ -3934,6 +3936,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
             metadata={"destination_message_id": "p" * 64},
             status=CommunityBridgeDeliveryStatus.COMPLETED,
             completed_at=timezone.now(),
+            available_at=timezone.now(),
         )
         SlackDmMirrorDelivery.objects.filter(pk=child.pk).update(
             available_at=timezone.now()
@@ -3976,6 +3979,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
             metadata={"destination_message_id": "t" * 64},
             status=CommunityBridgeDeliveryStatus.COMPLETED,
             completed_at=timezone.now(),
+            available_at=timezone.now(),
         )
         SlackDmMirrorDelivery.objects.filter(pk=deletion.pk).update(
             available_at=timezone.now()
@@ -4005,6 +4009,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
             metadata={"slack_ts": slack_ts},
             status=CommunityBridgeDeliveryStatus.COMPLETED,
             completed_at=timezone.now(),
+            available_at=timezone.now(),
         )
         reaction_id = slack_dm_mirror.reaction_object_id(
             message_id=slack_ts,
@@ -4021,6 +4026,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
             metadata={"slack_reaction_object_id": reaction_id},
             status=CommunityBridgeDeliveryStatus.COMPLETED,
             completed_at=timezone.now(),
+            available_at=timezone.now(),
         )
         authority = slack_dm_mirror._SlackHistoryScanAuthority(
             epoch="history-epoch",
@@ -4073,6 +4079,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
             metadata={"slack_ts": deleted_slack_ts},
             status=CommunityBridgeDeliveryStatus.COMPLETED,
             completed_at=timezone.now(),
+            available_at=timezone.now(),
         )
         SlackDmMirrorDelivery.objects.create(
             conversation=conversation,
@@ -4084,6 +4091,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
             metadata={"slack_ts": deleted_slack_ts},
             status=CommunityBridgeDeliveryStatus.COMPLETED,
             completed_at=timezone.now(),
+            available_at=timezone.now(),
         )
         slack_dm_mirror._mark_history_reconciliation_candidates_locked(conversation)
         outbound_create.refresh_from_db()
@@ -4222,6 +4230,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
             metadata={"reaction_object_id": "historical"},
             status=CommunityBridgeDeliveryStatus.COMPLETED,
             completed_at=timezone.now(),
+            available_at=timezone.now(),
         )
 
         slack_dm_mirror._mark_history_reconciliation_candidates_locked(conversation)
@@ -4332,6 +4341,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
             encrypted_text="",
             status=CommunityBridgeDeliveryStatus.COMPLETED,
             completed_at=timezone.now(),
+            available_at=timezone.now(),
         )
         permanent = SlackDmMirrorDelivery.objects.create(
             conversation=conversation,
@@ -4384,6 +4394,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
             metadata={"slack_echo_key": echo_key},
             status=CommunityBridgeDeliveryStatus.COMPLETED,
             completed_at=timezone.now(),
+            available_at=timezone.now(),
         )
         SlackDmMirrorDelivery.objects.filter(pk=outbound.pk).update(
             updated_at=timezone.now() - timedelta(minutes=6)
@@ -4449,6 +4460,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
             encrypted_text="",
             status=CommunityBridgeDeliveryStatus.COMPLETED,
             completed_at=timezone.now(),
+            available_at=timezone.now(),
         )
         with patch.object(slack_dm_mirror.time, "time", return_value=marker_now):
             slack_dm_mirror._mark_history_reconciliation_candidates_locked(

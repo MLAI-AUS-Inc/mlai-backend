@@ -1062,7 +1062,7 @@ def status_payload(
     return {
         "connected": connection is not None,
         "needs_reauthorization": bool(
-            grant is not None
+            (grant is not None or connection is not None)
             and (
                 connection is None
                 or not REQUIRED_SCOPES.issubset(set(connection.scopes or []))
