@@ -4482,13 +4482,13 @@ def clear_slack_connection_startup_lineage_locked(
         .order_by("id")
     )
     locked_events = list(
-        StartupEvent.objects.select_for_update()
+        StartupEvent.objects.select_for_update(of=("self",))
         .select_related("run")
         .filter(pk__in=event_ids)
         .order_by("id")
     )
     locked_metrics = list(
-        StartupMetricObservation.objects.select_for_update()
+        StartupMetricObservation.objects.select_for_update(of=("self",))
         .select_related("run")
         .filter(pk__in=metric_ids)
         .order_by("id")
