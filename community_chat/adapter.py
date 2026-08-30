@@ -1,6 +1,7 @@
 """Narrow HTTP client for the private Buzz membership adapter."""
 
 import dataclasses
+import urllib.parse
 import uuid
 from typing import Optional
 
@@ -21,6 +22,10 @@ class MembershipAdapterConflict(MembershipAdapterError):
     def __init__(self, code):
         super().__init__(code)
         self.code = code
+
+
+MEMBER_INVITE_PROTOCOL = "generation_cas_v2"
+MAX_MEMBER_INVITE_GENERATION = (1 << 63) - 2
 
 
 @dataclasses.dataclass(frozen=True)
@@ -76,11 +81,45 @@ def _request(method, path, *, json_body=None, request_id=None):
         raise MembershipAdapterUnavailable("adapter_invalid_response") from exc
 
 
+def _capture_member_invite_generation(public_key):
+    capabilities, _ = _request("GET", "/v1/capabilities")
+    protocols = capabilities.get("member_invite_protocols")
+    if not isinstance(protocols, list) or MEMBER_INVITE_PROTOCOL not in protocols:
+        # The legacy one-request mint is not request-start safe. A deployment
+        # without the generation-CAS protocol must fail closed rather than
+        # silently falling back to /v1/member-invites.
+        raise MembershipAdapterUnavailable("adapter_protocol_unavailable")
+
+    payload, _ = _request(
+        "POST",
+        "/v2/member-invite-intents",
+        json_body={"public_key": public_key},
+    )
+    generation = payload.get("generation")
+    if (
+        payload.get("public_key") != public_key
+        or isinstance(generation, bool)
+        or not isinstance(generation, int)
+        or generation < 0
+        or generation > MAX_MEMBER_INVITE_GENERATION
+    ):
+        raise MembershipAdapterUnavailable("adapter_invalid_response")
+    return generation
+
+
 def issue_member_invite(public_key):
+    # The caller holds the durable user/device authority lock across this
+    # complete sequence. The adapter durably captures the generation in phase
+    # one; phase two can mint only against that exact generation. A late phase
+    # one creates no capability, while a late phase two loses to key DELETE.
+    expected_generation = _capture_member_invite_generation(public_key)
     payload, request_id = _request(
         "POST",
-        "/v1/member-invites",
-        json_body={"public_key": public_key},
+        "/v2/member-invites",
+        json_body={
+            "public_key": public_key,
+            "expected_generation": expected_generation,
+        },
     )
     code = str(payload.get("invite_code") or "")
     invite_id = str(payload.get("invite_id") or "")
@@ -96,6 +135,17 @@ def issue_member_invite(public_key):
     ):
         raise MembershipAdapterUnavailable("adapter_invalid_response")
     return IssuedInvite(code, invite_id, expires_at, request_id)
+
+
+def revoke_member_invite(invite_id):
+    encoded_invite_id = urllib.parse.quote(str(invite_id or "").strip(), safe="")
+    payload, request_id = _request(
+        "DELETE",
+        f"/v1/member-invites/{encoded_invite_id}",
+    )
+    if payload.get("status") not in {"revoked", "not_found"}:
+        raise MembershipAdapterUnavailable("adapter_invalid_response")
+    return str(payload["status"]), request_id
 
 
 def get_relay_membership(public_key):

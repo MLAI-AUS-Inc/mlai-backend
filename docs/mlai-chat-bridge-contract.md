@@ -155,10 +155,29 @@ created before the history marker was deployed. The worker scans one page every
 two seconds, persists the oldest timestamp boundary, and honors Slack's
 `Retry-After` response without blocking OAuth or Community Home.
 Backfill status is complete only after every queued history delivery completes;
-dead rows remain visible and an explicit backfill safely repopulates their
-encrypted body from Slack. The `backfill_all` action explicitly switches that
+transient dead rows are safely repopulated from Slack, while a permanently
+rejected adapter delivery stays fenced until explicit backfill or renewed
+consent. The `backfill_all` action explicitly switches that
 grant to full retained history and omits Slack's `oldest` parameter. The
 idempotency key prevents duplicate deliveries.
+
+The backend also starts an hourly bounded reconciliation and immediately starts
+one after Slack reports `app_rate_limited`. A message that disappeared from an
+otherwise complete bounded scan is mirrored as a delete. Slack history may
+truncate the actor list on a reaction (`count` can exceed `users.length`), so
+absence from history is deliberately **not** treated as a reaction removal;
+only a signed `reaction_removed` Events API callback is authoritative.
+
+This deployment does not configure an app-level token with
+`authorizations:read`. Private callbacks are therefore routed only to the exact
+user installation identified by Slack's signed `authorizations`/`authed_users`
+fields; the backend never copies a DM body into unrelated workspace owners as a
+fan-out shortcut. Slack may represent additional installations behind
+`event_context`; complete one-callback multi-owner fan-out would require the
+separate `apps.event.authorizations.list` contract and credential. The current
+production deployment has one active owner grant. If multi-owner live fan-out
+is enabled later, add that app-level contract before claiming immediate parity
+for every owner (bounded reconciliation remains the recovery path).
 
 All active verified MLAI Chat device keys are included in a one-to-one mirror,
 alongside the counterpart shadow key. Revoked keys are removed on the next
@@ -171,8 +190,20 @@ worker discovery), marks every destination participant set due for
 re-provisioning, and requeues Slack history for the new private destination.
 Private registration sends these included owner-device keys separately as
 `callback_author_pubkeys`; every callback author must also be a conversation
-participant. The adapter can therefore poll one compact union of authorized
-human authors instead of querying every private channel independently.
+participant. The adapter polls each private channel only for that registration's
+callback-author keys, so one owner's device authorization cannot broaden
+another channel's callback scope.
+
+Every private-registration POST has a distinct, content-free durable attempt
+row written before adapter I/O. The row binds the exact consent generation,
+Slack participant set, destination key set, callback-author key set, and any
+returned channel ID. Ambiguous, superseded, and interrupted attempts remain
+retryable until their deterministic adapter registration is reconciled and
+deleted. Consent resume, participant replacement, and device reactivation stay
+fenced while earlier cleanup is pending, so a delayed POST or DELETE cannot
+silently replace or remove the current registration. Registration-control rows
+never enter the normal private-message delivery worker and contain no message
+body.
 
 Community Chat exposes these owner-authenticated endpoints:
 
@@ -188,6 +219,14 @@ Community Chat exposes these owner-authenticated endpoints:
   verified Community Chat device; body-supplied owner keys are ignored.
 - `PATCH /api/v1/community-chat/slack/` accepts `pause`, `resume`, `backfill`,
   and the explicit unbounded `backfill_all` action.
+- `DELETE /api/v1/community-chat/slack/` revokes local consent and Slack token
+  access, erases queued private bodies, then makes one best-effort call to the
+  adapter's authenticated, idempotent
+  `DELETE /v1/private-conversations/{channel_id}`. Success means that the local
+  privacy boundary is durable. Every provisioned mirror is recorded in a
+  content-free durable cleanup ledger; any remaining registrations or adapter
+  failures are retried by periodic reconciliation without restoring Slack
+  access or retaining message bodies.
 
 Private delivery retries are direction-specific: Slack-origin rows retry only
 through MLAI Chat, while MLAI-origin rows retry only through Slack with a stable
