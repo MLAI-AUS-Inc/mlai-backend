@@ -246,6 +246,23 @@ class RuntimeHardeningConfigTests(SimpleTestCase):
             workflow,
         )
 
+    def test_bridge_reconciler_multiline_command_keeps_shell_continuations(self):
+        continued_fragments = (
+            "python manage.py reconcile_recent_community_bridge_slack",
+            "--lookback-seconds",
+            "--max-roots-per-channel",
+            "--maximum-history-messages",
+        )
+        for filename in ("docker-compose.yml", "docker-compose.local.yml"):
+            lines = (ROOT / filename).read_text().splitlines()
+            for fragment in continued_fragments:
+                matching = [line for line in lines if fragment in line]
+                self.assertEqual(len(matching), 1, f"{fragment} in {filename}")
+                self.assertTrue(
+                    matching[0].rstrip().endswith("\\"),
+                    f"{fragment} must continue in {filename}",
+                )
+
     def test_meeting_room_feature_flag_is_deployment_managed_and_smoke_tested(self):
         workflow = (ROOT / ".github" / "workflows" / "deploy.yml").read_text()
         deploy = (ROOT / "deploy.sh").read_text()

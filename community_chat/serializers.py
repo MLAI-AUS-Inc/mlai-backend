@@ -9,6 +9,7 @@ COMMUNITY_CHAT_CLIENT_IDS = (
     'mlai-chat-ios',
     'mlai-chat-android',
 )
+COMMUNITY_CHAT_DESKTOP_CLIENT_IDS = ('mlai-chat-desktop',)
 
 COMMUNITY_CHAT_PUBLIC_PROFILE_BATCH_SIZE = 200
 
@@ -51,6 +52,22 @@ class CommunityChatDeviceLoginSerializer(serializers.Serializer):
             raise serializers.ValidationError(str(exc)) from exc
 
 
+def validate_community_chat_client_device(attrs):
+    client_id = attrs['client_id']
+    platform = attrs['device']['platform']
+    allowed_platforms = {
+        'mlai-chat-web': {'web'},
+        'mlai-chat-desktop': {'macos', 'windows', 'linux'},
+        'mlai-chat-ios': {'ios'},
+        'mlai-chat-android': {'android'},
+    }
+    if platform not in allowed_platforms[client_id]:
+        raise serializers.ValidationError(
+            {'device': {'platform': 'Platform does not match the registered client.'}}
+        )
+    return attrs
+
+
 class CommunityChatPasswordLoginSerializer(serializers.Serializer):
     email = serializers.EmailField(max_length=254)
     password = serializers.CharField(max_length=128, trim_whitespace=False, write_only=True)
@@ -58,19 +75,7 @@ class CommunityChatPasswordLoginSerializer(serializers.Serializer):
     device = CommunityChatDeviceLoginSerializer()
 
     def validate(self, attrs):
-        client_id = attrs['client_id']
-        platform = attrs['device']['platform']
-        allowed_platforms = {
-            'mlai-chat-web': {'web'},
-            'mlai-chat-desktop': {'macos', 'windows', 'linux'},
-            'mlai-chat-ios': {'ios'},
-            'mlai-chat-android': {'android'},
-        }
-        if platform not in allowed_platforms[client_id]:
-            raise serializers.ValidationError(
-                {'device': {'platform': 'Platform does not match the registered client.'}}
-            )
-        return attrs
+        return validate_community_chat_client_device(attrs)
 
 
 class CommunityChatEmailCodeRequestSerializer(serializers.Serializer):
@@ -93,6 +98,51 @@ class CommunityChatEmailCodeVerifySerializer(serializers.Serializer):
         if len(normalized) != 6 or not normalized.isdigit():
             raise serializers.ValidationError("Enter the six-digit code.")
         return normalized
+
+
+class CommunityChatDeviceAuthStartSerializer(serializers.Serializer):
+    client_id = serializers.ChoiceField(choices=COMMUNITY_CHAT_DESKTOP_CLIENT_IDS)
+    device = CommunityChatDeviceLoginSerializer()
+    state = serializers.CharField(
+        min_length=32,
+        max_length=256,
+        trim_whitespace=False,
+    )
+    code_challenge = serializers.RegexField(
+        r'\A[A-Za-z0-9_-]{43}\Z',
+        trim_whitespace=False,
+    )
+
+    def validate(self, attrs):
+        return validate_community_chat_client_device(attrs)
+
+
+class CommunityChatDeviceAuthAuthorizeSerializer(serializers.Serializer):
+    request_id = serializers.UUIDField()
+
+
+class CommunityChatDeviceAuthExchangeSerializer(serializers.Serializer):
+    request_id = serializers.UUIDField()
+    authorization_code = serializers.CharField(
+        min_length=32,
+        max_length=1024,
+        trim_whitespace=False,
+        write_only=True,
+    )
+    client_id = serializers.ChoiceField(choices=COMMUNITY_CHAT_DESKTOP_CLIENT_IDS)
+    device = CommunityChatDeviceLoginSerializer()
+    state = serializers.CharField(
+        min_length=32,
+        max_length=256,
+        trim_whitespace=False,
+    )
+    code_verifier = serializers.RegexField(
+        r'\A[A-Za-z0-9._~-]{43,128}\Z',
+        trim_whitespace=False,
+    )
+
+    def validate(self, attrs):
+        return validate_community_chat_client_device(attrs)
 
 
 def display_name_for_user(user):

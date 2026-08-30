@@ -40,6 +40,7 @@ GOOGLE_OAUTH_SUCCESS_PATH = "/settings?gmail_connected=true"
 # is bounced to login and the OAuth attempt is silently dropped.
 GOOGLE_CONNECT_TICKET_SALT = "integrations.google-connect-ticket"
 GOOGLE_CONNECT_TICKET_MAX_AGE_SECONDS = 900
+CONNECTOR_TICKET_SALT = "integrations.connector-ticket-v1"
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +49,17 @@ def mint_google_connect_ticket(user) -> str:
     from django.core import signing
 
     return signing.dumps({"uid": user.pk}, salt=GOOGLE_CONNECT_TICKET_SALT, compress=True)
+
+
+def mint_connector_connect_ticket(user, provider: str) -> str:
+    """Mint a short-lived, provider-bound ticket for a top-level OAuth navigation."""
+    from django.core import signing
+
+    return signing.dumps(
+        {"uid": user.pk, "provider": normalize_provider(provider)},
+        salt=CONNECTOR_TICKET_SALT,
+        compress=True,
+    )
 
 
 def _user_from_connect_ticket(ticket: Optional[str]):
@@ -62,6 +74,26 @@ def _user_from_connect_ticket(ticket: Optional[str]):
             max_age=GOOGLE_CONNECT_TICKET_MAX_AGE_SECONDS,
         )
     except signing.BadSignature:
+        return None
+    from django.contrib.auth import get_user_model
+
+    return get_user_model().objects.filter(pk=payload.get("uid"), is_active=True).first()
+
+
+def _user_from_connector_ticket(ticket: Optional[str], provider: str):
+    if not ticket:
+        return None
+    from django.core import signing
+
+    try:
+        payload = signing.loads(
+            ticket,
+            salt=CONNECTOR_TICKET_SALT,
+            max_age=GOOGLE_CONNECT_TICKET_MAX_AGE_SECONDS,
+        )
+    except signing.BadSignature:
+        return None
+    if payload.get("provider") != normalize_provider(provider):
         return None
     from django.contrib.auth import get_user_model
 
@@ -376,6 +408,10 @@ def connector_connect(request, provider):
         return google_connect(request)
 
     user = _resolve_google_oauth_user(request)
+    if user is None:
+        user = _user_from_connector_ticket(request.GET.get("ticket"), normalized_provider)
+        if user is not None:
+            request.user = user
     if user is None:
         return redirect(_vibe_raising_login_url(request.GET.get("next")))
 

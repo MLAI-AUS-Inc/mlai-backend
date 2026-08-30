@@ -3002,6 +3002,121 @@ class StartupUpdateServiceHelpersTest(TestCase):
             self.assertEqual(label, GmailRelevanceLabel.IRRELEVANT, msg=subject)
             self.assertIn("hard_filtered_low_signal_pattern", reasons, msg=subject)
 
+    def _own_domain_profile(self):
+        return SimpleNamespace(
+            company_aliases=["Acme"],
+            domain_aliases=["acme.com"],
+            founder_names=[],
+            team_names=[],
+            investor_domains=[],
+            investor_names=[],
+            competitor_names=[],
+            competitor_domains=[],
+            customer_names=[],
+            customer_domains=["customer.example"],
+            prospect_names=[],
+            prospect_domains=[],
+            positive_keywords=[],
+            negative_keywords=[],
+        )
+
+    def test_score_message_for_profile_ignores_own_domain_among_recipients(self):
+        # Every message in a founder's mailbox is addressed to the founder at
+        # the company domain. Counting that as a signal would allowlist the
+        # whole inbox and cancel out every hard filter.
+        profile = self._own_domain_profile()
+        artifact = SimpleNamespace(
+            subject="Weekly digest",
+            snippet="Top posts for you this week",
+            cleaned_text="",
+            from_address="noreply@news.example",
+            to_addresses=["founder@acme.com"],
+            cc_addresses=[],
+            bcc_addresses=[],
+            reply_to_addresses=[],
+            header_values={"list-unsubscribe": "<mailto:unsubscribe@news.example>"},
+            label_ids=["CATEGORY_PROMOTIONS"],
+        )
+
+        score, reasons, label = score_message_for_profile(profile, artifact)
+
+        self.assertEqual(score, 0)
+        self.assertEqual(label, GmailRelevanceLabel.IRRELEVANT)
+        self.assertNotIn("allowlist_company_domain", reasons)
+        self.assertNotIn("matched_company_domain", reasons)
+
+    def test_score_message_for_profile_counts_company_domain_only_for_sender(self):
+        profile = self._own_domain_profile()
+        base = {
+            "subject": "Quick question",
+            "snippet": "Following up on the thing",
+            "cleaned_text": "",
+            "to_addresses": ["founder@acme.com"],
+            "cc_addresses": [],
+            "bcc_addresses": [],
+            "reply_to_addresses": [],
+            "header_values": {},
+            "label_ids": [],
+        }
+
+        internal = SimpleNamespace(from_address="teammate@acme.com", **base)
+        internal_score, internal_reasons, _ = score_message_for_profile(profile, internal)
+        self.assertIn("matched_company_domain", internal_reasons)
+
+        external = SimpleNamespace(from_address="someone@vendor.example", **base)
+        external_score, external_reasons, _ = score_message_for_profile(profile, external)
+        self.assertNotIn("matched_company_domain", external_reasons)
+
+        # Internal mail is worth at least the domain bonus more. It also picks
+        # up the company alias from the sender address itself, so the gap is
+        # wider than 25 and the exact figure is not the point.
+        self.assertGreaterEqual(internal_score - external_score, 25)
+        self.assertEqual(external_score, 50)
+
+    def test_score_message_for_profile_ignores_company_alias_in_own_address(self):
+        # "acme" appears only inside the recipient's own address, which says
+        # nothing about what the message is about.
+        profile = self._own_domain_profile()
+        artifact = SimpleNamespace(
+            subject="Lunch on Thursday?",
+            snippet="Are you free around one",
+            cleaned_text="",
+            from_address="friend@personal.example",
+            to_addresses=["founder@acme.com"],
+            cc_addresses=[],
+            bcc_addresses=[],
+            reply_to_addresses=[],
+            header_values={},
+            label_ids=[],
+        )
+
+        score, reasons, label = score_message_for_profile(profile, artifact)
+
+        self.assertNotIn("matched_company_alias_or_positive_keyword", reasons)
+        self.assertEqual(score, 50)
+        self.assertEqual(label, GmailRelevanceLabel.AMBIGUOUS)
+
+    def test_score_message_for_profile_still_credits_counterparty_domains(self):
+        profile = self._own_domain_profile()
+        artifact = SimpleNamespace(
+            subject="Renewal paperwork",
+            snippet="Sending the signed contract across",
+            cleaned_text="",
+            from_address="ap@customer.example",
+            to_addresses=["founder@acme.com"],
+            cc_addresses=[],
+            bcc_addresses=[],
+            reply_to_addresses=[],
+            header_values={},
+            label_ids=[],
+        )
+
+        score, reasons, label = score_message_for_profile(profile, artifact)
+
+        self.assertIn("matched_customer_or_prospect_domain", reasons)
+        self.assertGreaterEqual(score, 65)
+        self.assertNotEqual(label, GmailRelevanceLabel.IRRELEVANT)
+
     def test_sync_startup_profile_from_company_merges_existing_org_context(self):
         user = User.objects.create_user(
             email="merge-founder@example.com",

@@ -7,11 +7,14 @@ MLAI Chat is another client surface, not a one-time data migration.
 ## MVP scope
 
 - Operators explicitly map a public Slack channel to one MLAI Chat channel.
-- New messages, replies, edits, deletes, and the approved reaction set (`👍`,
-  `❤️`, `🎉`, `👀`, `🚀`, `✅`) are mirrored after the mapping is enabled.
-  General historical backfill and custom emoji are out of scope. A bounded,
-  operator-confirmed repair command exists only for pre-cutover messages whose
-  retained Slack receipts still contain resolvable user/channel references.
+- New messages, replies, edits, deletes, common Unicode reactions (`👍`, `❤️`,
+  `🎉`, `👀`, `🚀`, `✅`), and safe Slack shortcode reactions are mirrored after
+  the mapping is enabled. Shortcodes use canonical `:name:` content with an
+  inner `[a-z0-9][a-z0-9_+-]{0,61}` name so the full value stays within MLAI
+  Chat's 64-scalar reaction limit; longer Slack custom-emoji names fail closed.
+  General historical backfill is out of scope for mapped public channels. A
+  bounded, operator-confirmed repair command exists only for pre-cutover messages
+  whose retained Slack receipts still contain resolvable user/channel references.
 - Direct messages, private channels, huddles, workflow payloads, ephemeral
   messages, and Slack Connect channels fail closed unless separately approved.
 - Attachments remain represented as safe provider-hosted links in the durable
@@ -101,10 +104,19 @@ grant only `channels:history`, `channels:read`, `chat:write`, `files:read`,
 `SLACK_BRIDGE_BOT_USER_ID` so its messages and reactions are discarded for loop
 prevention.
 
-Direct messages, private channels, and payloads marked as shared/external are
-ignored in normalization. Operators must also confirm that every mapped channel
-is not a Slack Connect channel before enabling it. Rotate the Slack signing
-secret, adapter token, callback secret, and bridge Nostr key independently.
+The public-channel normalizer continues to ignore direct messages, private
+channels, and payloads marked as shared/external. A separate consent-gated DM
+path handles Slack IMs and multi-person IMs for one linking owner. The owner's
+verified MLAI Chat key and deterministic shadow keys for the other participants
+determine a private destination conversation. Other participants do not need to
+link and do not gain access to that owner-controlled copy; if they link, they
+receive independent mirrors. Slack Connect conversations remain excluded.
+Private message bodies use a dedicated encrypted queue and are erased after
+delivery; they never enter public bridge receipts, Roo, organization memory,
+search, or analytics. Operators must also confirm that every public mapped
+channel is not a Slack Connect channel before enabling it. Rotate the Slack
+signing secret, adapter token, callback secret, and bridge Nostr key
+independently.
 
 The bridge Nostr public key is intentionally non-secret. Configure that same
 lowercase 64-character value as `MLAI_BRIDGE_PUBKEY` in browser, desktop, and
@@ -121,7 +133,67 @@ SLACK_BRIDGE_BOT_USER_ID=U...
 BUZZ_BRIDGE_ADAPTER_URL=https://chat.mlai.au/_mlai/bridge
 BUZZ_BRIDGE_ADAPTER_TOKEN=...
 BUZZ_BRIDGE_CALLBACK_SECRET=...
+SLACK_OAUTH_USER_SCOPES=channels:history,channels:read,groups:history,groups:read,im:history,im:read,im:write,mpim:history,mpim:read,mpim:write,chat:write,team:read,users:read,reactions:read,reactions:write,files:read
+SLACK_DM_MIRROR_HISTORY_DAYS=30
+SLACK_DM_MIRROR_SHADOW_SECRET=replace-with-a-long-random-secret
 ```
+
+For one-click DM linking, add `message.im`, `message.mpim`, `reaction_added`,
+and `reaction_removed` under **Subscribe to events on behalf of users** in the
+Slack app and keep the same signed request URL used by the bridge. Reauthorize
+existing users to add `mpim:write`, `reactions:read`, `reactions:write`, and
+`files:read`; file metadata and links are mirrored without requesting
+`files:write`. The OAuth callback marks DM discovery due after the new user
+token is stored.
+
+Each linked member receives an independent, owner-controlled mirror of every
+direct and supported multi-person Slack DM visible to their user token. The
+other participants are represented by deterministic shadow keys, so linking
+never gives an unconsenting participant access to imported history. A bounded
+history scan runs once for every discovered conversation, including mirrors
+created before the history marker was deployed. The worker scans one page every
+two seconds, persists the oldest timestamp boundary, and honors Slack's
+`Retry-After` response without blocking OAuth or Community Home.
+Backfill status is complete only after every queued history delivery completes;
+dead rows remain visible and an explicit backfill safely repopulates their
+encrypted body from Slack. The `backfill_all` action explicitly switches that
+grant to full retained history and omits Slack's `oldest` parameter. The
+idempotency key prevents duplicate deliveries.
+
+All active verified MLAI Chat device keys are included in a one-to-one mirror,
+alongside the counterpart shadow key. Revoked keys are removed on the next
+discovery. MPIMs retain the relay's nine-participant cap: the authenticated or
+preferred owner key is included first and status/start responses report when
+additional active devices could not fit. An active preferred identity is never
+silently rebound; a revoked or otherwise inactive preferred device is repaired
+atomically to the authenticated verified device (or the newest active device in
+worker discovery), marks every destination participant set due for
+re-provisioning, and requeues Slack history for the new private destination.
+Private registration sends these included owner-device keys separately as
+`callback_author_pubkeys`; every callback author must also be a conversation
+participant. The adapter can therefore poll one compact union of authorized
+human authors instead of querying every private channel independently.
+
+Community Chat exposes these owner-authenticated endpoints:
+
+- `GET /api/v1/community-chat/slack/` returns delivery-aware backfill,
+  identity-repair, device-capacity, and full-history status.
+- `GET /api/v1/community-chat/slack/users/?q=...&limit=...&cursor=...` searches
+  internal human Slack users. It excludes deleted, bot, app, Slack Connect, and
+  owner rows and never returns email addresses or OAuth tokens.
+- `POST /api/v1/community-chat/slack/dms/` accepts `slack_user_ids` containing
+  one to eight non-owner IDs, calls `conversations.open`, provisions the exact
+  private MLAI conversation, and returns its participant public keys and
+  sanitized profiles. The owner key always comes from the authenticated active
+  verified Community Chat device; body-supplied owner keys are ignored.
+- `PATCH /api/v1/community-chat/slack/` accepts `pause`, `resume`, `backfill`,
+  and the explicit unbounded `backfill_all` action.
+
+Private delivery retries are direction-specific: Slack-origin rows retry only
+through MLAI Chat, while MLAI-origin rows retry only through Slack with a stable
+UUID `client_msg_id`. Discovery and history maintenance run independently from
+the delivery retry loop. Adapter provisioning occurs for discovery, explicit
+start, or participant changes rather than as a fleet-wide periodic refresh.
 
 Create each public-channel mapping with:
 

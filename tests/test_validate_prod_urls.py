@@ -31,7 +31,7 @@ VALID_PROD_URL_SETTINGS = {
     "COMMUNITY_CHAT_EMAIL_CODE_DELIVERY_SECRET": "email-delivery-independent-0000000000",
     "COMMUNITY_CHAT_EMAIL_CODE_AUTH_ENABLED": True,
     "COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED": False,
-    "COMMUNITY_CHAT_DEVICE_AUTH_ENABLED": False,
+    "COMMUNITY_CHAT_DEVICE_AUTH_ENABLED": True,
     "CUSTOMERIO_COMMUNITY_CHAT_CODE_MESSAGE_ID": "community-chat-code",
     "CUSTOMERIO_API_KEY": "customerio-production-test-key",
     "SECRET_KEY": "django-production-test-key-independent",
@@ -180,18 +180,24 @@ class ValidateProdUrlsTests(SimpleTestCase):
             CORS_ALLOWED_ORIGINS=[
                 *VALID_PROD_URL_SETTINGS["CORS_ALLOWED_ORIGINS"],
                 "https://admin.mlai.au",
+                "http://tauri.localhost",
+                "tauri://localhost",
             ],
             CSRF_TRUSTED_ORIGINS=[
                 *VALID_PROD_URL_SETTINGS["CSRF_TRUSTED_ORIGINS"],
                 "https://admin.mlai.au",
+                "http://tauri.localhost",
+                "tauri://localhost",
             ],
         )
         self.assertIn(
-            "CORS_ALLOWED_ORIGINS contains forbidden origin(s): https://admin.mlai.au.",
+            "CORS_ALLOWED_ORIGINS contains forbidden origin(s): "
+            "http://tauri.localhost, https://admin.mlai.au, tauri://localhost.",
             forbidden_errors,
         )
         self.assertIn(
-            "CSRF_TRUSTED_ORIGINS contains forbidden origin(s): https://admin.mlai.au.",
+            "CSRF_TRUSTED_ORIGINS contains forbidden origin(s): "
+            "http://tauri.localhost, https://admin.mlai.au, tauri://localhost.",
             forbidden_errors,
         )
 
@@ -228,11 +234,17 @@ class ValidateProdUrlsTests(SimpleTestCase):
         self.assertIn("COMMUNITY_CHAT_RELAY_URL: wss://chat.mlai.au", workflow)
         self.assertIn('COMMUNITY_CHAT_EMAIL_CODE_AUTH_ENABLED: "true"', workflow)
         self.assertIn('COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED: "false"', workflow)
-        self.assertIn('COMMUNITY_CHAT_DEVICE_AUTH_ENABLED: "false"', workflow)
+        self.assertIn('COMMUNITY_CHAT_DEVICE_AUTH_ENABLED: "true"', workflow)
         self.assertIn("CUSTOMERIO_COMMUNITY_CHAT_CODE_MESSAGE_ID:", workflow)
         self.assertIn(
             "COMMUNITY_CHAT_ALLOWED_ORIGINS: "
             "https://chat.mlai.au,tauri://localhost,http://tauri.localhost,mlaichat://callback",
+            workflow,
+        )
+        self.assertIn(
+            "CORS_ALLOWED_ORIGINS: "
+            "https://mlai.au,https://www.mlai.au,https://victorai.win,"
+            "https://www.victorai.win,https://ops.mlai.au,https://chat.mlai.au",
             workflow,
         )
 
@@ -250,11 +262,24 @@ class ValidateProdUrlsTests(SimpleTestCase):
             errors,
         )
 
-    def test_community_chat_production_requires_email_code_only_auth(self):
+    def test_community_chat_production_requires_exact_native_app_origins(self):
+        errors = self._validation_errors(
+            COMMUNITY_CHAT_ALLOWED_ORIGINS=[
+                "https://chat.mlai.au",
+            ],
+        )
+
+        self.assertIn(
+            "COMMUNITY_CHAT_ALLOWED_ORIGINS is missing required origin(s): "
+            "http://tauri.localhost, mlaichat://callback, tauri://localhost.",
+            errors,
+        )
+
+    def test_community_chat_production_requires_email_code_and_browser_handoff(self):
         errors = self._validation_errors(
             COMMUNITY_CHAT_EMAIL_CODE_AUTH_ENABLED=False,
             COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED=True,
-            COMMUNITY_CHAT_DEVICE_AUTH_ENABLED=True,
+            COMMUNITY_CHAT_DEVICE_AUTH_ENABLED=False,
             CUSTOMERIO_COMMUNITY_CHAT_CODE_MESSAGE_ID="",
         )
 
@@ -267,7 +292,7 @@ class ValidateProdUrlsTests(SimpleTestCase):
             errors,
         )
         self.assertIn(
-            "COMMUNITY_CHAT_DEVICE_AUTH_ENABLED must be false in production.",
+            "COMMUNITY_CHAT_DEVICE_AUTH_ENABLED must be true in production.",
             errors,
         )
         self.assertIn(

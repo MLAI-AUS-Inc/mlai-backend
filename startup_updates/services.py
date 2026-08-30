@@ -2826,19 +2826,38 @@ def _serialize_metric(metric) -> dict:
     }
 
 
-def _message_haystack(artifact: GmailMessageArtifact) -> str:
+def _message_haystack(artifact: GmailMessageArtifact, *, own_domains: Optional[list[str]] = None) -> str:
+    """Searchable text for one message, excluding the founder's own addresses.
+
+    The recipient of nearly every message in a founder's mailbox is the founder
+    at the company domain, so leaving the recipient list in would make
+    `company_aliases` and `domain_aliases` match the entire inbox. Only the
+    counterparty's addresses carry information about who a message involves.
+    """
+    own_domains = [domain for domain in (own_domains or []) if domain]
+
+    def _counterparty_only(values: Iterable[str]) -> str:
+        return " ".join(value for value in (values or []) if _address_domain(value) not in own_domains)
+
     return " ".join(
         [
             getattr(artifact, "subject", "") or "",
             getattr(artifact, "snippet", "") or "",
             getattr(artifact, "cleaned_text", "") or "",
             getattr(artifact, "from_address", "") or "",
-            " ".join(getattr(artifact, "to_addresses", []) or []),
-            " ".join(getattr(artifact, "cc_addresses", []) or []),
-            " ".join(getattr(artifact, "bcc_addresses", []) or []),
-            " ".join(getattr(artifact, "reply_to_addresses", []) or []),
+            _counterparty_only(getattr(artifact, "to_addresses", [])),
+            _counterparty_only(getattr(artifact, "cc_addresses", [])),
+            _counterparty_only(getattr(artifact, "bcc_addresses", [])),
+            _counterparty_only(getattr(artifact, "reply_to_addresses", [])),
         ]
     ).lower()
+
+
+def _address_domain(value: str) -> str:
+    raw = str(value or "")
+    if "@" not in raw:
+        return ""
+    return normalize_domain(raw.split("@")[-1])
 
 
 def _participant_domains(artifact: GmailMessageArtifact) -> list[str]:
@@ -2854,6 +2873,22 @@ def _participant_domains(artifact: GmailMessageArtifact) -> list[str]:
             continue
         participant_domains.append(normalize_domain(value.split("@")[-1]))
     return participant_domains
+
+
+def _counterparty_domains(artifact: GmailMessageArtifact, *, own_domains: list[str]) -> list[str]:
+    """Participant domains with the company's own domains removed."""
+    return [domain for domain in _participant_domains(artifact) if domain and domain not in own_domains]
+
+
+def _is_internal_sender(artifact: GmailMessageArtifact, *, own_domains: list[str]) -> bool:
+    """True when the message was sent from the company's own domain.
+
+    This is the only way the company domain carries signal. Its presence among
+    the recipients just means the mailbox owner received the message, which is
+    true of everything in the mailbox.
+    """
+    sender_domain = _address_domain(getattr(artifact, "from_address", "") or "")
+    return bool(sender_domain) and sender_domain in own_domains
 
 
 def _normalize_sender_localpart(value: str) -> str:
@@ -2893,7 +2928,8 @@ def _profile_signal_lists(profile: StartupProfile) -> dict[str, list[str]]:
 def _allowlist_override_reasons(
     *,
     haystack: str,
-    participant_domains: list[str],
+    counterparty_domains: list[str],
+    internal_sender: bool,
     profile_signals: dict[str, list[str]],
 ) -> list[str]:
     reasons = []
@@ -2907,11 +2943,11 @@ def _allowlist_override_reasons(
         reasons.append("allowlist_customer_or_prospect_name")
     if _match_any(HIGH_SIGNAL_TERMS, haystack):
         reasons.append("allowlist_high_signal_term")
-    if any(domain and domain in participant_domains for domain in profile_signals["domain_aliases"]):
+    if internal_sender:
         reasons.append("allowlist_company_domain")
-    if any(domain and domain in participant_domains for domain in profile_signals["investor_domains"]):
+    if any(domain and domain in counterparty_domains for domain in profile_signals["investor_domains"]):
         reasons.append("allowlist_investor_domain")
-    if any(domain and domain in participant_domains for domain in profile_signals["customer_domains"] + profile_signals["prospect_domains"]):
+    if any(domain and domain in counterparty_domains for domain in profile_signals["customer_domains"] + profile_signals["prospect_domains"]):
         reasons.append("allowlist_customer_or_prospect_domain")
     return _uniq(reasons)
 
@@ -3863,12 +3899,15 @@ def maybe_start_startup_update_for_google_connection(
 
 
 def score_message_for_profile(profile: StartupProfile, artifact: GmailMessageArtifact) -> tuple[int, list[str], str]:
-    haystack = _message_haystack(artifact)
-    participant_domains = _participant_domains(artifact)
     profile_signals = _profile_signal_lists(profile)
+    own_domains = [domain for domain in profile_signals["domain_aliases"] if domain]
+    haystack = _message_haystack(artifact, own_domains=own_domains)
+    counterparty_domains = _counterparty_domains(artifact, own_domains=own_domains)
+    internal_sender = _is_internal_sender(artifact, own_domains=own_domains)
     allowlist_reasons = _allowlist_override_reasons(
         haystack=haystack,
-        participant_domains=participant_domains,
+        counterparty_domains=counterparty_domains,
+        internal_sender=internal_sender,
         profile_signals=profile_signals,
     )
     hard_irrelevant_reasons = _hard_irrelevant_reasons(artifact, haystack=haystack)
@@ -3910,22 +3949,22 @@ def score_message_for_profile(profile: StartupProfile, artifact: GmailMessageArt
         score += 15
         reasons.append("matched_high_signal_term")
 
-    if any(domain and domain in participant_domains for domain in profile_signals["domain_aliases"]):
+    if internal_sender:
         score += 25
         reasons.append("matched_company_domain")
 
-    if any(domain and domain in participant_domains for domain in profile_signals["investor_domains"]):
+    if any(domain and domain in counterparty_domains for domain in profile_signals["investor_domains"]):
         score += 20
         reasons.append("matched_investor_domain")
 
     if any(
-        domain and domain in participant_domains
+        domain and domain in counterparty_domains
         for domain in profile_signals["customer_domains"] + profile_signals["prospect_domains"]
     ):
         score += 15
         reasons.append("matched_customer_or_prospect_domain")
 
-    if any(domain and domain in participant_domains for domain in profile_signals["competitor_domains"]):
+    if any(domain and domain in counterparty_domains for domain in profile_signals["competitor_domains"]):
         score += 10
         reasons.append("matched_competitor_domain")
 

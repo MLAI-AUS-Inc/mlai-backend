@@ -1,5 +1,28 @@
 # Community Home and token usage API
 
+## Correcting an invalid daily baseline
+
+An operator can remove a single opted-in member's invalid daily delta without
+changing their cumulative session history or all-time leaderboard total. The
+command is a read-only preview unless `--apply` and an exact email confirmation
+are both supplied:
+
+```bash
+python manage.py correct_token_usage_daily_buckets \
+  --email member@example.com \
+  --usage-date 2026-08-26
+
+python manage.py correct_token_usage_daily_buckets \
+  --email member@example.com \
+  --usage-date 2026-08-26 \
+  --apply \
+  --confirm-email member@example.com
+```
+
+Production execution is exposed through the manually dispatched
+`Correct production token usage daily buckets` workflow. Apply mode requires
+the separate confirmation checkbox and accepts only one account and one date.
+
 This document is the current backend contract for MLAI Chat's Community Home.
 The endpoints live below `/api/v1/community-chat/`.
 
@@ -46,26 +69,37 @@ billing records or a basis for prizes.
 
 Each reporter row is a cumulative `(source, session_id, model)` snapshot.
 All-time totals come from the latest monotonic snapshot. Live ingest adds only
-positive growth since the prior snapshot to the configured calendar day on
-which that report arrives. This is report-arrival attribution, not the
-session's start date or an estimate of when each token was consumed. Repeating
-the same snapshot adds zero, and growth reported after Melbourne midnight is
-credited to the new day. History backfill updates all-time totals only: it
-establishes cumulative baselines but does not invent historical daily
+positive growth since a prior snapshot to the configured calendar day on which
+that report arrives. An unseen live snapshot establishes a baseline and adds
+nothing to the daily window; otherwise a member's entire cumulative history
+could be mislabelled as today's usage. This is report-arrival attribution, not
+the session's start date or an estimate of when each token was consumed.
+Repeating the same snapshot adds zero, and growth reported after Melbourne
+midnight is credited to the new day. History backfill updates all-time totals
+only: it establishes cumulative baselines but does not invent historical daily
 attribution. The next live report credits only growth beyond that backfilled
 baseline to its own arrival day.
 
 ## Leaderboard windows
 
-`GET usage/leaderboard/?window=today|7d|30d|all&limit=100` returns public
-opted-in rows and defaults to `today`. `today`, `7d`, and `30d` are inclusive Melbourne calendar-day
-windows (`Australia/Melbourne` by default), not UTC or rolling-hour windows.
-An optional `date=YYYY-MM-DD` anchors a current or historical calendar window;
-invalid and future dates return 400. Invalid window values also return 400.
+`GET usage/leaderboard/?window=today|7d|30d|all&scope=mlai|australia&limit=100`
+returns ranked public rows and defaults to `today`. `scope=mlai` ranks only
+opted-in MLAI reporter accounts. `scope=australia` adds the read-only public
+Tokenmaxer federation and ranks the combined result; it remains the API default
+for compatibility with clients released before scopes were introduced. MLAI
+Chat always sends an explicit scope and defaults its UI to MLAI-only.
 
-Responses include `timezone`, `date_from`, and `date_to`. All-time responses
-set both dates to null. Daily history begins when live delta buckets are first
-collected. Bucket dates always mean the live report-arrival date in the
-configured timezone; a history backfill improves all-time totals but
-deliberately does not populate any daily window or fabricate past daily
-rankings.
+`today`, `7d`, and `30d` are inclusive calendar-day windows in the configured
+leaderboard timezone (`UTC` by default), not rolling-hour windows. Sessions are
+assigned by `started_at`, so a history import appears in the period when each
+session began instead of the day the import arrived. An optional
+`date=YYYY-MM-DD` anchors a current or historical calendar window; invalid and
+future dates return 400. Invalid window or scope values also return 400.
+
+Responses include `scope`, `timezone`, `date_from`, and `date_to`. All-time
+responses set both dates to null. A history backfill therefore contributes to
+the appropriate historical windows as well as all time. Every public opted-in
+MLAI reporter account remains visible in every MLAI window. Rows include
+`has_reported`: false means the member connected but the backend has not
+accepted a session yet; true with zero window totals means the member has
+history but no session that began in that period.

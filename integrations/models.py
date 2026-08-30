@@ -42,6 +42,21 @@ class CommunityBridgeIdentityVerificationMethod(models.TextChoices):
     ACCOUNT_CHALLENGE = "account_challenge", "Account and key challenge"
 
 
+class SlackDmMirrorGrantStatus(models.TextChoices):
+    ACTIVE = "active", "Active"
+    PAUSED = "paused", "Paused"
+    ERROR = "error", "Error"
+    REVOKED = "revoked", "Revoked"
+
+
+class SlackDmMirrorConversationStatus(models.TextChoices):
+    AWAITING_SETUP = "awaiting_setup", "Awaiting owner setup"
+    PROVISIONING = "provisioning", "Provisioning"
+    LIVE = "live", "Live"
+    PAUSED = "paused", "Paused"
+    ERROR = "error", "Error"
+
+
 class ExternalServiceProvider(models.TextChoices):
     STRIPE = "stripe", "Stripe"
     HUMANITIX = "humanitix", "Humanitix"
@@ -151,6 +166,151 @@ class ExternalServiceConnection(models.Model):
     def __str__(self):
         account = self.account_label or self.external_account_id or "unknown"
         return f"{self.get_provider_display()} connection for {self.user_id} ({account})"
+
+
+class SlackDmMirrorGrant(models.Model):
+    """A member's explicit consent to mirror Slack DMs into MLAI Chat."""
+
+    CONSENT_VERSION = "slack-dm-mirror-v3-owner-direct-and-group"
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="slack_dm_mirror_grants",
+    )
+    connection = models.OneToOneField(
+        ExternalServiceConnection,
+        on_delete=models.CASCADE,
+        related_name="slack_dm_mirror_grant",
+    )
+    slack_workspace_id = models.CharField(max_length=100, db_index=True)
+    slack_user_id = models.CharField(max_length=100, db_index=True)
+    status = models.CharField(
+        max_length=24,
+        choices=SlackDmMirrorGrantStatus.choices,
+        default=SlackDmMirrorGrantStatus.ACTIVE,
+        db_index=True,
+    )
+    consent_version = models.CharField(max_length=64, default=CONSENT_VERSION)
+    history_days = models.PositiveSmallIntegerField(default=30)
+    consented_at = models.DateTimeField()
+    paused_at = models.DateTimeField(null=True, blank=True)
+    revoked_at = models.DateTimeField(null=True, blank=True)
+    last_discovery_at = models.DateTimeField(null=True, blank=True)
+    last_synced_at = models.DateTimeField(null=True, blank=True)
+    last_error = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "slack_dm_mirror_grant"
+        constraints = [
+            models.UniqueConstraint(
+                fields=("slack_workspace_id", "slack_user_id"),
+                name="slack_dm_grant_workspace_user_unique",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=("slack_workspace_id", "status"),
+                name="slack_dm_grant_ws_status_idx",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.slack_workspace_id}:{self.slack_user_id} ({self.status})"
+
+
+class SlackDmMirrorConversation(models.Model):
+    """One member-owned mirror of a Slack IM and its private MLAI conversation."""
+
+    grant = models.ForeignKey(
+        SlackDmMirrorGrant,
+        on_delete=models.CASCADE,
+        related_name="conversations",
+    )
+    slack_workspace_id = models.CharField(max_length=100, db_index=True)
+    slack_conversation_id = models.CharField(max_length=100)
+    participant_slack_ids = models.JSONField(default=list)
+    participant_buzz_pubkeys = models.JSONField(default=list)
+    participant_identity_map = models.JSONField(default=dict)
+    participant_profiles = models.JSONField(default=dict)
+    participant_hash = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    mlai_channel_id = models.UUIDField(null=True, blank=True, unique=True)
+    status = models.CharField(
+        max_length=24,
+        choices=SlackDmMirrorConversationStatus.choices,
+        default=SlackDmMirrorConversationStatus.AWAITING_SETUP,
+        db_index=True,
+    )
+    oldest_synced_ts = models.CharField(max_length=32, blank=True, default="")
+    latest_synced_ts = models.CharField(max_length=32, blank=True, default="")
+    history_backfilled_at = models.DateTimeField(null=True, blank=True)
+    last_synced_at = models.DateTimeField(null=True, blank=True)
+    last_error = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "slack_dm_mirror_conversation"
+        constraints = [
+            models.UniqueConstraint(
+                fields=("grant", "slack_conversation_id"),
+                name="slack_dm_conv_grant_chan_uniq",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=("slack_workspace_id", "status"),
+                name="slack_dm_conv_ws_status_idx",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.slack_conversation_id} -> {self.mlai_channel_id or self.status}"
+
+
+class SlackDmMirrorDelivery(models.Model):
+    """Short-lived encrypted queue item; DM bodies never enter public bridge tables."""
+
+    conversation = models.ForeignKey(
+        SlackDmMirrorConversation,
+        on_delete=models.CASCADE,
+        related_name="deliveries",
+    )
+    source_platform = models.CharField(max_length=20, choices=CommunityBridgePlatform.choices)
+    source_message_id = models.CharField(max_length=100)
+    source_author_id = models.CharField(max_length=100)
+    operation = models.CharField(max_length=20, choices=CommunityBridgeDeliveryType.choices)
+    encrypted_text = EncryptedTextField(blank=True, default="")
+    metadata = models.JSONField(default=dict, blank=True)
+    status = models.CharField(
+        max_length=20,
+        choices=CommunityBridgeDeliveryStatus.choices,
+        default=CommunityBridgeDeliveryStatus.PENDING,
+        db_index=True,
+    )
+    attempts = models.PositiveSmallIntegerField(default=0)
+    available_at = models.DateTimeField(db_index=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    last_error = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "slack_dm_mirror_delivery"
+        constraints = [
+            models.UniqueConstraint(
+                fields=("conversation", "source_platform", "source_message_id", "operation"),
+                name="slack_dm_delivery_source_operation_unique",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=("status", "available_at"),
+                name="slack_dm_delivery_ready_idx",
+            ),
+        ]
 
 
 class FinancialAccount(models.Model):
@@ -1739,6 +1899,80 @@ class LinearIssueCreationReceipt(models.Model):
 
     def __str__(self):
         return f"{self.idempotency_key}:{self.status}"
+
+
+class LinearMeetingActionBatch(models.Model):
+    """Requester-bound, restart-safe review batch for extracted Linear work."""
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        PROCESSING = "processing", "Processing"
+        PARTIAL = "partial", "Partially completed"
+        COMPLETED = "completed", "Completed"
+        REJECTED = "rejected", "Rejected"
+        EXPIRED = "expired", "Expired"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    requested_by_slack_user_id = models.CharField(max_length=255, db_index=True)
+    slack_channel_id = models.CharField(max_length=255, blank=True, default="")
+    slack_thread_ts = models.CharField(max_length=255, blank=True, default="")
+    source_fingerprint = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    status = models.CharField(
+        max_length=24,
+        choices=Status.choices,
+        default=Status.PENDING,
+        db_index=True,
+    )
+    expires_at = models.DateTimeField(db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "linear_meeting_action_batch"
+        ordering = ["-created_at"]
+
+
+class LinearMeetingActionItem(models.Model):
+    """One durable proposal within a meeting-action batch."""
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        PROCESSING = "processing", "Processing"
+        APPROVED = "approved", "Approved"
+        REJECTED = "rejected", "Rejected"
+        FAILED = "failed", "Failed"
+        EXPIRED = "expired", "Expired"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    batch = models.ForeignKey(
+        LinearMeetingActionBatch,
+        on_delete=models.CASCADE,
+        related_name="items",
+    )
+    position = models.PositiveSmallIntegerField()
+    issue_input = models.JSONField(default=dict)
+    display = models.JSONField(default=dict, blank=True)
+    reason = models.TextField(blank=True, default="")
+    status = models.CharField(
+        max_length=24,
+        choices=Status.choices,
+        default=Status.PENDING,
+        db_index=True,
+    )
+    linear_issue_payload = models.JSONField(default=dict, blank=True)
+    last_error = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "linear_meeting_action_item"
+        ordering = ["position", "created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["batch", "position"],
+                name="linear_meeting_batch_position_uniq",
+            ),
+        ]
 
 
 class LinearProjectSizingRun(models.Model):

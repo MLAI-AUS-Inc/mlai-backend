@@ -14,6 +14,8 @@ from django.utils.dateparse import parse_datetime
 from integrations import http_client as http_requests
 from integrations.models import (
     LinearIssueCreationReceipt,
+    LinearMeetingActionBatch,
+    LinearMeetingActionItem,
     LinearProjectSizingItem,
     LinearProjectSizingRun,
 )
@@ -57,6 +59,10 @@ class LinearMeetingSizingConflictError(Exception):
     pass
 
 
+class LinearMeetingActionConflictError(Exception):
+    pass
+
+
 def get_linear_meeting_context() -> dict[str, Any]:
     teams = list_teams()
     users = list_users()
@@ -70,6 +76,297 @@ def get_linear_meeting_context() -> dict[str, Any]:
         "projects": projects,
         "labels": labels,
         "recentIssues": recent_issues,
+    }
+
+
+def create_linear_meeting_action_batch(payload: dict[str, Any]) -> dict[str, Any]:
+    """Persist a bounded review batch before Roo renders Slack controls."""
+
+    if not isinstance(payload, dict):
+        raise ValueError("Request payload must be an object.")
+    requested_by = str(payload.get("requested_by_slack_user_id") or "").strip()
+    if not requested_by:
+        raise ValueError("requested_by_slack_user_id is required.")
+    raw_items = payload.get("items")
+    if not isinstance(raw_items, list) or not raw_items:
+        raise ValueError("items must contain at least one proposed Linear issue.")
+    if len(raw_items) > 20:
+        raise ValueError("A Linear meeting-action batch can contain at most 20 items.")
+
+    items: list[dict[str, Any]] = []
+    for position, raw_item in enumerate(raw_items):
+        if not isinstance(raw_item, dict):
+            raise ValueError(f"items[{position}] must be an object.")
+        issue_input = raw_item.get("issue_input")
+        if not isinstance(issue_input, dict):
+            raise ValueError(f"items[{position}].issue_input must be an object.")
+        if not str(issue_input.get("title") or "").strip():
+            raise ValueError(f"items[{position}].issue_input.title is required.")
+        if not str(issue_input.get("team_id") or "").strip():
+            raise ValueError(f"items[{position}].issue_input.team_id is required.")
+        display = raw_item.get("display")
+        items.append(
+            {
+                "position": position,
+                "issue_input": issue_input,
+                "display": display if isinstance(display, dict) else {},
+                "reason": str(raw_item.get("reason") or "")[:2000],
+            }
+        )
+
+    ttl_seconds = max(
+        300,
+        min(
+            int(
+                getattr(
+                    settings,
+                    "LINEAR_MEETING_ACTION_BATCH_TTL_SECONDS",
+                    86400,
+                )
+                or 86400
+            ),
+            604800,
+        ),
+    )
+    fingerprint = str(payload.get("source_fingerprint") or "").strip()
+    if fingerprint and not re.fullmatch(r"[a-fA-F0-9]{64}", fingerprint):
+        raise ValueError("source_fingerprint must be a 64-character hexadecimal digest.")
+
+    with transaction.atomic():
+        if fingerprint:
+            existing = (
+                LinearMeetingActionBatch.objects.select_for_update()
+                .filter(
+                    requested_by_slack_user_id=requested_by[:255],
+                    slack_channel_id=str(payload.get("slack_channel_id") or "")[:255],
+                    slack_thread_ts=str(payload.get("slack_thread_ts") or "")[:255],
+                    source_fingerprint=fingerprint.lower(),
+                    status=LinearMeetingActionBatch.Status.PENDING,
+                    expires_at__gt=timezone.now(),
+                )
+                .prefetch_related("items")
+                .order_by("-created_at")
+                .first()
+            )
+            if existing is not None:
+                existing_inputs = [
+                    item.issue_input
+                    for item in existing.items.all()
+                ]
+                if existing_inputs == [item["issue_input"] for item in items]:
+                    return _serialize_linear_meeting_action_batch(existing)
+        batch = LinearMeetingActionBatch.objects.create(
+            requested_by_slack_user_id=requested_by[:255],
+            slack_channel_id=str(payload.get("slack_channel_id") or "")[:255],
+            slack_thread_ts=str(payload.get("slack_thread_ts") or "")[:255],
+            source_fingerprint=fingerprint.lower(),
+            expires_at=timezone.now() + timedelta(seconds=ttl_seconds),
+        )
+        LinearMeetingActionItem.objects.bulk_create(
+            [
+                LinearMeetingActionItem(batch=batch, **item)
+                for item in items
+            ]
+        )
+    return _serialize_linear_meeting_action_batch(
+        LinearMeetingActionBatch.objects.prefetch_related("items").get(pk=batch.pk)
+    )
+
+
+def get_linear_meeting_action_batch(batch_id: Any) -> dict[str, Any]:
+    batch = _get_linear_meeting_action_batch(batch_id)
+    _expire_linear_meeting_action_batch(batch)
+    return _serialize_linear_meeting_action_batch(
+        LinearMeetingActionBatch.objects.prefetch_related("items").get(pk=batch.pk)
+    )
+
+
+def decide_linear_meeting_action_batch(
+    batch_id: Any,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Approve or reject selected proposals with idempotent issue creation."""
+
+    if not isinstance(payload, dict):
+        raise ValueError("Request payload must be an object.")
+    requested_by = str(payload.get("requested_by_slack_user_id") or "").strip()
+    decision = str(payload.get("decision") or "").strip().lower()
+    if decision not in {"approve", "reject"}:
+        raise ValueError("decision must be approve or reject.")
+
+    batch = _get_linear_meeting_action_batch(batch_id)
+    if not requested_by or requested_by != batch.requested_by_slack_user_id:
+        raise LinearMeetingActionConflictError(
+            "Only the Slack user who requested this batch can approve or reject it."
+        )
+    if _expire_linear_meeting_action_batch(batch):
+        raise LinearMeetingActionConflictError(
+            "This Linear meeting-action batch expired. Regenerate it from the original Slack request."
+        )
+
+    raw_item_ids = payload.get("item_ids")
+    if raw_item_ids is not None and not isinstance(raw_item_ids, list):
+        raise ValueError("item_ids must be a list when supplied.")
+    item_ids = {
+        str(value).strip()
+        for value in (raw_item_ids or [])
+        if str(value).strip()
+    }
+    if raw_item_ids is not None and not item_ids:
+        raise ValueError("item_ids must contain at least one item when supplied.")
+    items = list(batch.items.all())
+    if item_ids:
+        known_ids = {str(item.id) for item in items}
+        unknown_ids = item_ids - known_ids
+        if unknown_ids:
+            raise ValueError("One or more selected items do not belong to this batch.")
+        items = [item for item in items if str(item.id) in item_ids]
+    if not items:
+        raise ValueError("No Linear meeting-action items were selected.")
+
+    if decision == "reject":
+        LinearMeetingActionItem.objects.filter(
+            id__in=[item.id for item in items],
+            status__in=[
+                LinearMeetingActionItem.Status.PENDING,
+                LinearMeetingActionItem.Status.FAILED,
+            ],
+        ).update(
+            status=LinearMeetingActionItem.Status.REJECTED,
+            last_error="",
+            updated_at=timezone.now(),
+        )
+    else:
+        for item in items:
+            claimed = _claim_linear_meeting_action_item(item.id)
+            if claimed is None:
+                continue
+            try:
+                issue = create_linear_meeting_issue(dict(claimed.issue_input))
+            except Exception as exc:
+                LinearMeetingActionItem.objects.filter(pk=claimed.pk).update(
+                    status=LinearMeetingActionItem.Status.FAILED,
+                    last_error=f"{exc.__class__.__name__}: {exc}"[:4000],
+                    updated_at=timezone.now(),
+                )
+                continue
+            LinearMeetingActionItem.objects.filter(pk=claimed.pk).update(
+                status=LinearMeetingActionItem.Status.APPROVED,
+                linear_issue_payload=issue,
+                last_error="",
+                updated_at=timezone.now(),
+            )
+
+    _refresh_linear_meeting_action_batch_status(batch.id)
+    return _serialize_linear_meeting_action_batch(
+        LinearMeetingActionBatch.objects.prefetch_related("items").get(pk=batch.pk)
+    )
+
+
+def _get_linear_meeting_action_batch(batch_id: Any) -> LinearMeetingActionBatch:
+    try:
+        return LinearMeetingActionBatch.objects.prefetch_related("items").get(pk=batch_id)
+    except (LinearMeetingActionBatch.DoesNotExist, ValueError, TypeError) as exc:
+        raise ValueError("Linear meeting-action batch was not found.") from exc
+
+
+def _expire_linear_meeting_action_batch(batch: LinearMeetingActionBatch) -> bool:
+    if batch.status == LinearMeetingActionBatch.Status.EXPIRED:
+        return True
+    if batch.expires_at > timezone.now():
+        return False
+    LinearMeetingActionItem.objects.filter(
+        batch=batch,
+        status__in=[
+            LinearMeetingActionItem.Status.PENDING,
+            LinearMeetingActionItem.Status.FAILED,
+            LinearMeetingActionItem.Status.PROCESSING,
+        ],
+    ).update(status=LinearMeetingActionItem.Status.EXPIRED, updated_at=timezone.now())
+    LinearMeetingActionBatch.objects.filter(pk=batch.pk).update(
+        status=LinearMeetingActionBatch.Status.EXPIRED,
+        updated_at=timezone.now(),
+    )
+    batch.status = LinearMeetingActionBatch.Status.EXPIRED
+    return True
+
+
+def _claim_linear_meeting_action_item(item_id: Any) -> LinearMeetingActionItem | None:
+    stale_before = timezone.now() - timedelta(minutes=5)
+    with transaction.atomic():
+        item = LinearMeetingActionItem.objects.select_for_update().get(pk=item_id)
+        if item.status in {
+            LinearMeetingActionItem.Status.APPROVED,
+            LinearMeetingActionItem.Status.REJECTED,
+            LinearMeetingActionItem.Status.EXPIRED,
+        }:
+            return None
+        if (
+            item.status == LinearMeetingActionItem.Status.PROCESSING
+            and item.updated_at > stale_before
+        ):
+            return None
+        item.status = LinearMeetingActionItem.Status.PROCESSING
+        item.last_error = ""
+        item.save(update_fields=["status", "last_error", "updated_at"])
+        return item
+
+
+def _refresh_linear_meeting_action_batch_status(batch_id: Any) -> None:
+    statuses = list(
+        LinearMeetingActionItem.objects.filter(batch_id=batch_id).values_list(
+            "status", flat=True
+        )
+    )
+    if statuses and all(status == LinearMeetingActionItem.Status.REJECTED for status in statuses):
+        status = LinearMeetingActionBatch.Status.REJECTED
+    elif statuses and all(
+        status in {
+            LinearMeetingActionItem.Status.APPROVED,
+            LinearMeetingActionItem.Status.REJECTED,
+        }
+        for status in statuses
+    ):
+        status = LinearMeetingActionBatch.Status.COMPLETED
+    elif any(status == LinearMeetingActionItem.Status.PROCESSING for status in statuses):
+        status = LinearMeetingActionBatch.Status.PROCESSING
+    elif any(status in {LinearMeetingActionItem.Status.APPROVED, LinearMeetingActionItem.Status.FAILED} for status in statuses):
+        status = LinearMeetingActionBatch.Status.PARTIAL
+    else:
+        status = LinearMeetingActionBatch.Status.PENDING
+    LinearMeetingActionBatch.objects.filter(pk=batch_id).update(
+        status=status,
+        updated_at=timezone.now(),
+    )
+
+
+def _serialize_linear_meeting_action_batch(
+    batch: LinearMeetingActionBatch,
+) -> dict[str, Any]:
+    items = list(batch.items.all())
+    return {
+        "id": str(batch.id),
+        "status": batch.status,
+        "requestedBySlackUserId": batch.requested_by_slack_user_id,
+        "slackChannelId": batch.slack_channel_id,
+        "slackThreadTs": batch.slack_thread_ts,
+        "expiresAt": batch.expires_at.isoformat(),
+        "counts": {
+            status: sum(1 for item in items if item.status == status)
+            for status in LinearMeetingActionItem.Status.values
+        },
+        "items": [
+            {
+                "id": str(item.id),
+                "position": item.position,
+                "status": item.status,
+                "display": item.display,
+                "reason": item.reason,
+                "issue": item.linear_issue_payload,
+                "error": item.last_error,
+            }
+            for item in items
+        ],
     }
 
 

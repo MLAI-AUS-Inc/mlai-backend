@@ -11,7 +11,8 @@ board and it is stated plainly in the UI — there are no prizes attached.
 
 import hashlib
 import secrets
-from datetime import date as calendar_date, timedelta
+from datetime import date as calendar_date, datetime, time, timedelta
+from zoneinfo import ZoneInfo
 
 from django.conf import settings
 from django.db.models import CharField, Count, Sum, Value
@@ -33,7 +34,6 @@ from .models import (
     CommunityChatDevice,
     DeviceBindingStatus,
     TokenUsageAccount,
-    TokenUsageDailyBucket,
     TokenUsageSession,
 )
 from .serializers import public_chat_profile
@@ -42,10 +42,11 @@ from .token_usage import (
     MAX_HISTORY_SESSIONS,
     MAX_INGEST_SESSIONS,
     IngestError,
-    local_usage_date,
+    normalized_token_total,
     parse_sessions,
     upsert_sessions,
 )
+from .tokenmaxer_federation import fetch_public_tokenmaxer_entries
 
 
 ACCOUNT_AUTHENTICATION_CLASSES = (
@@ -64,6 +65,10 @@ TOKEN_FIELDS = (
 
 WINDOWS = ("today", "7d", "30d", "all")
 DEFAULT_WINDOW = "today"
+SCOPES = ("mlai", "australia")
+# Preserve the existing no-parameter contract for older clients. MLAI Chat
+# sends its explicit, user-selected scope and defaults that selection to MLAI.
+DEFAULT_SCOPE = "australia"
 DEFAULT_LIMIT = 100
 MAX_LIMIT = 200
 
@@ -89,6 +94,73 @@ def _parse_anchor(raw, local_today):
     if anchor > local_today:
         return None
     return anchor
+
+
+def _leaderboard_date(at):
+    return at.astimezone(
+        ZoneInfo(settings.TOKEN_USAGE_LEADERBOARD_TIME_ZONE)
+    ).date()
+
+
+def _session_window(rows, date_from, date_to):
+    """Filter cumulative sessions by their start date for every time window."""
+    if date_from is None:
+        return rows
+    zone = ZoneInfo(settings.TOKEN_USAGE_LEADERBOARD_TIME_ZONE)
+    start = datetime.combine(date_from, time.min, tzinfo=zone)
+    end = datetime.combine(date_to + timedelta(days=1), time.min, tzinfo=zone)
+    return rows.filter(started_at__gte=start, started_at__lt=end)
+
+
+def _empty_entry(account_id, *, has_reported):
+    return {
+        "account_id": account_id,
+        "sessions": 0,
+        "grand_total": 0,
+        "has_reported": has_reported,
+        **{field: 0 for field in TOKEN_FIELDS},
+    }
+
+
+def _aggregate_entries(rows, initial):
+    """Fold source-aware aggregates so inclusive caches are counted once."""
+    session_identity = Concat(
+        "source",
+        Value(":"),
+        "session_id",
+        output_field=CharField(),
+    )
+    grouped = rows.values("account_id", "source").annotate(
+        sessions=Count(session_identity, distinct=True),
+        **{field: Sum(field) for field in TOKEN_FIELDS},
+    )
+    entries = {account_id: dict(entry) for account_id, entry in initial.items()}
+    for group in grouped:
+        account_id = group["account_id"]
+        entry = entries.setdefault(
+            account_id,
+            _empty_entry(account_id, has_reported=True),
+        )
+        totals = {field: int(group[field] or 0) for field in TOKEN_FIELDS}
+        entry["sessions"] += int(group["sessions"] or 0)
+        entry["grand_total"] += normalized_token_total(group["source"], totals)
+        entry["has_reported"] = True
+        for field, value in totals.items():
+            entry[field] += value
+    return list(entries.values())
+
+
+def _external_payload(entry):
+    return {
+        "public_id": entry["external_id"],
+        "display_name": entry["display_name"],
+        "avatar_url": None,
+        "public_key": None,
+        "profile_url": entry["profile_url"],
+        "origin": "tokenmaxer",
+        "has_reported": True,
+        **{key: entry[key] for key in ("sessions", "grand_total", *TOKEN_FIELDS)},
+    }
 
 
 class _TokenUsageIngestBase(APIView):
@@ -214,6 +286,12 @@ class TokenUsageLeaderboardView(APIView):
                 {"error": "window must be one of: " + ", ".join(WINDOWS)},
                 status=400,
             )
+        scope = request.query_params.get("scope", DEFAULT_SCOPE)
+        if scope not in SCOPES:
+            return Response(
+                {"error": "scope must be one of: " + ", ".join(SCOPES)},
+                status=400,
+            )
         try:
             limit = int(request.query_params.get("limit", DEFAULT_LIMIT))
         except (TypeError, ValueError):
@@ -221,88 +299,77 @@ class TokenUsageLeaderboardView(APIView):
         limit = min(max(limit, 1), MAX_LIMIT)
 
         now = timezone.now()
-        local_today = local_usage_date(now)
-        anchor = _parse_anchor(request.query_params.get("date"), local_today)
+        leaderboard_today = _leaderboard_date(now)
+        anchor = _parse_anchor(request.query_params.get("date"), leaderboard_today)
         if anchor is None:
             return Response(
                 {"error": "date must be a valid, non-future YYYY-MM-DD value"},
                 status=400,
             )
         date_from, date_to = _window_dates(window, anchor)
-        if date_from is None:
-            rows = TokenUsageSession.objects.filter(
+        rows = _session_window(
+            TokenUsageSession.objects.filter(
                 account__is_public=True,
                 started_at__lte=now,
-            )
-        else:
-            rows = TokenUsageDailyBucket.objects.filter(
+            ),
+            date_from,
+            date_to,
+        )
+
+        # An opted-in member should not disappear merely because they have not
+        # emitted a positive delta inside the selected window. Keep every public
+        # reporter account on the board and fill the selected window with zeroes
+        # when it has no matching buckets. `has_reported` distinguishes an
+        # installed-but-silent reporter from a historical contributor who is
+        # simply inactive in this period.
+        public_accounts = list(
+            TokenUsageAccount.objects.filter(is_public=True).select_related("user")
+        )
+        reported_account_ids = set(
+            TokenUsageSession.objects.filter(
                 account__is_public=True,
-                usage_date__range=(date_from, date_to),
-            )
-
-        session_identity = Concat(
-            "source",
-            Value(":"),
-            "session_id",
-            output_field=CharField(),
+                started_at__lte=now,
+            ).values_list("account_id", flat=True)
         )
-        grouped = rows.values("account_id").annotate(
-            sessions=Count(session_identity, distinct=True),
-            **{field: Sum(field) for field in TOKEN_FIELDS}
+        entries = _aggregate_entries(
+            rows,
+            {
+                account.id: _empty_entry(
+                    account.id,
+                    has_reported=account.id in reported_account_ids,
+                )
+                for account in public_accounts
+            },
         )
-
-        entries = []
-        for group in grouped:
-            totals = {field: int(group[field] or 0) for field in TOKEN_FIELDS}
-            entries.append(
-                {
-                    "account_id": group["account_id"],
-                    "sessions": group["sessions"],
-                    "grand_total": sum(totals.values()),
-                    **totals,
-                }
-            )
 
         own = TokenUsageAccount.objects.filter(user=request.user).first()
         hidden_own_entry = None
         if own is not None and not own.is_public:
-            if date_from is None:
-                own_rows = TokenUsageSession.objects.filter(
+            own_rows = _session_window(
+                TokenUsageSession.objects.filter(
                     account=own,
                     started_at__lte=now,
-                )
-            else:
-                own_rows = TokenUsageDailyBucket.objects.filter(
-                    account=own,
-                    usage_date__range=(date_from, date_to),
-                )
-            own_group = own_rows.aggregate(
-                sessions=Count(session_identity, distinct=True),
-                **{field: Sum(field) for field in TOKEN_FIELDS},
+                ),
+                date_from,
+                date_to,
             )
-            own_totals = {
-                field: int(own_group[field] or 0) for field in TOKEN_FIELDS
-            }
-            if any(own_totals.values()):
-                hidden_own_entry = {
-                    "account_id": own.id,
-                    "sessions": own_group["sessions"],
-                    "grand_total": sum(own_totals.values()),
-                    **own_totals,
-                }
-        entries.sort(
-            key=lambda entry: (-entry["grand_total"], str(entry["account_id"]))
-        )
+            has_reported = TokenUsageSession.objects.filter(
+                account=own,
+                started_at__lte=now,
+            ).exists()
+            hidden_own_entry = _aggregate_entries(
+                own_rows,
+                {
+                    own.id: _empty_entry(
+                        own.id,
+                        has_reported=has_reported,
+                    )
+                },
+            )[0]
 
-        accounts = {
-            account.id: account
-            for account in TokenUsageAccount.objects.filter(
-                id__in=[
-                    *[entry["account_id"] for entry in entries],
-                    *([own.id] if hidden_own_entry is not None else []),
-                ]
-            ).select_related("user")
-        }
+        accounts = {account.id: account for account in public_accounts}
+        if own is not None and own.id not in accounts:
+            accounts[own.id] = own
 
         own_account_id = None
         if own is not None:
@@ -312,9 +379,9 @@ class TokenUsageLeaderboardView(APIView):
             [account.user_id for account in accounts.values()]
         )
 
-        ranked = []
-        you = None
-        for rank, entry in enumerate(entries, start=1):
+        local_payloads = []
+        own_public_id = None
+        for entry in entries:
             account = accounts.get(entry["account_id"])
             if account is None:
                 continue
@@ -322,41 +389,82 @@ class TokenUsageLeaderboardView(APIView):
                 key: value for key, value in entry.items() if key != "account_id"
             }
             payload = dict(
-                totals, rank=rank, **_member_payload(account, pubkeys)
+                totals,
+                profile_url=None,
+                origin="mlai",
+                **_member_payload(account, pubkeys),
             )
             if account.id == own_account_id:
-                you = payload
-            if account.is_public and rank <= limit:
-                ranked.append(payload)
+                own_public_id = payload["public_id"]
+            if account.is_public:
+                local_payloads.append(payload)
+
+        # The upstream API can only describe its current windows. Historical
+        # anchor queries remain local rather than presenting mismatched dates.
+        external_payloads = []
+        if scope == "australia" and anchor == leaderboard_today:
+            external_payloads = [
+                _external_payload(entry)
+                for entry in fetch_public_tokenmaxer_entries(window)
+            ]
+
+        combined = [*local_payloads, *external_payloads]
+        combined.sort(
+            key=lambda entry: (
+                -entry["grand_total"],
+                entry["origin"],
+                entry["public_id"],
+            )
+        )
+        for rank, payload in enumerate(combined, start=1):
+            payload["rank"] = rank
+
+        ranked = combined[:limit]
+        you = next(
+            (
+                payload
+                for payload in combined
+                if own_public_id is not None
+                and payload["public_id"] == own_public_id
+            ),
+            None,
+        )
 
         if hidden_own_entry is not None and own is not None:
-            hidden_sort_key = (
-                -hidden_own_entry["grand_total"],
-                str(hidden_own_entry["account_id"]),
-            )
-            hidden_rank = 1 + sum(
-                (
-                    -entry["grand_total"],
-                    str(entry["account_id"]),
-                )
-                < hidden_sort_key
-                for entry in entries
-            )
             hidden_totals = {
                 key: value
                 for key, value in hidden_own_entry.items()
                 if key != "account_id"
             }
-            you = dict(
+            hidden_payload = dict(
                 hidden_totals,
-                rank=hidden_rank,
+                profile_url=None,
+                origin="mlai",
                 **_member_payload(own, pubkeys),
             )
+            hidden_sort_key = (
+                -hidden_payload["grand_total"],
+                hidden_payload["origin"],
+                hidden_payload["public_id"],
+            )
+            hidden_payload["rank"] = 1 + sum(
+                (
+                    -entry["grand_total"],
+                    entry["origin"],
+                    entry["public_id"],
+                )
+                < hidden_sort_key
+                for entry in combined
+            )
+            you = hidden_payload
 
         return Response(
             {
                 "window": window,
-                "timezone": settings.TOKEN_USAGE_TIME_ZONE,
+                "scope": scope,
+                "timezone": settings.TOKEN_USAGE_LEADERBOARD_TIME_ZONE,
+                "window_basis": "session_started_at",
+                "total_basis": "source_normalized",
                 "date_from": date_from.isoformat() if date_from else None,
                 "date_to": date_to.isoformat() if date_to else None,
                 "entries": ranked,

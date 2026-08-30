@@ -81,6 +81,7 @@ DEFAULT_CONNECTOR_NEXT_PATH = "/vibe-raising/connect-data"
 ALLOWED_CONNECTOR_NEXT_PREFIXES = (
     "/vibe-raising/connect-data",
     "/vibe-raising/create-update",
+    "/home",
 )
 
 
@@ -250,6 +251,7 @@ def _known_frontend_origins() -> set[str]:
             _origin_from_url(getattr(settings, "DEFAULT_FRONTEND_URL", None)),
             _origin_from_url(getattr(settings, "MEDHACK_URL", None)),
             _origin_from_url(getattr(settings, "ESAFETY_URL", None)),
+            _origin_from_url(getattr(settings, "COMMUNITY_CHAT_FRONTEND_URL", None)),
         )
         if origin
     }
@@ -267,11 +269,13 @@ def normalize_connector_next(next_url: Optional[str]) -> str:
         return default_next
 
     parsed = urllib.parse.urlparse(raw_next)
+    target_origin = ""
     if parsed.scheme or parsed.netloc:
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
             return default_next
         if _origin_from_url(raw_next) not in _known_frontend_origins():
             return default_next
+        target_origin = _origin_from_url(raw_next)
         candidate = urllib.parse.urlunparse(("", "", parsed.path, "", parsed.query, ""))
     else:
         candidate = raw_next if raw_next.startswith("/") else f"/{raw_next}"
@@ -279,7 +283,7 @@ def normalize_connector_next(next_url: Optional[str]) -> str:
     if not any(candidate.startswith(prefix) for prefix in ALLOWED_CONNECTOR_NEXT_PREFIXES):
         return default_next
 
-    return f"{frontend_base}{candidate}"
+    return f"{target_origin or frontend_base}{candidate}"
 
 
 def _as_scope_list(value: Any) -> list[str]:
@@ -339,7 +343,25 @@ def _slack_oauth_user_scope_list() -> list[str]:
         getattr(settings, "SLACK_OAUTH_USER_SCOPES", None)
         or getattr(settings, "SLACK_OAUTH_SCOPES", [])
     )
-    return _uniq_scopes(configured)
+    # Direct and group-DM migration is a first-party Slack capability. Append
+    # its scopes even when an older deployment still provides an explicit
+    # environment list, so re-authorization can upgrade existing links.
+    return _uniq_scopes(
+        [
+            *configured,
+            "im:read",
+            "im:history",
+            "im:write",
+            "mpim:read",
+            "mpim:history",
+            "mpim:write",
+            "chat:write",
+            "users:read",
+            "reactions:read",
+            "reactions:write",
+            "files:read",
+        ]
+    )
 
 
 def _slack_oauth_bot_scope_list() -> list[str]:
@@ -473,10 +495,19 @@ def _provider_configuration_error(provider: str) -> Optional[str]:
             "channels:history",
             "groups:read",
             "groups:history",
+            "im:read",
+            "im:history",
+            "im:write",
+            "mpim:read",
+            "mpim:history",
+            "mpim:write",
+            "chat:write",
             "team:read",
             "users:read",
+            "reactions:read",
+            "reactions:write",
+            "files:read",
         }
-        disallowed_dm_scopes = {"im:read", "im:history", "mpim:read", "mpim:history"}
         missing = []
         if not client_id:
             missing.append("SLACK_CLIENT_ID")
@@ -497,9 +528,6 @@ def _provider_configuration_error(provider: str) -> Optional[str]:
         missing_scopes = sorted(required_scopes - user_scopes)
         if missing_scopes:
             return f"Slack OAuth user scopes are missing: {', '.join(missing_scopes)}."
-        configured_dm_scopes = sorted(disallowed_dm_scopes & user_scopes)
-        if configured_dm_scopes:
-            return f"Slack OAuth v1 excludes DMs and MPIMs. Remove: {', '.join(configured_dm_scopes)}."
         return None
 
     if provider == ExternalServiceProvider.LINEAR:
@@ -1579,6 +1607,18 @@ def complete_oauth_callback(request, provider: str) -> str:
         "Stored external service connection",
         extra={"provider": provider, "connection_id": connection.id, "user_id": request.user.id},
     )
+    if provider == ExternalServiceProvider.SLACK:
+        from integrations.services.slack_dm_mirror import (
+            activate_connection,
+        )
+
+        try:
+            activate_connection(connection)
+        except Exception as exc:
+            logger.warning(
+                "Slack connected but DM mirroring could not activate",
+                extra={"connection_id": connection.id, "user_id": request.user.id, "error": str(exc)},
+            )
     return next_url
 
 

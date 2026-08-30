@@ -52,24 +52,27 @@ time, result, and log artifact.
 Any unresolved item blocks production approval. Record the reviewer and link to
 evidence rather than copying sensitive values into the change record.
 
-## Email-code cutover controls
+## Account sign-in controls
 
 MLAI Chat launches with `COMMUNITY_CHAT_EMAIL_CODE_AUTH_ENABLED=true`,
 `COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED=false`, and
-`COMMUNITY_CHAT_DEVICE_AUTH_ENABLED=false`. The latter two switches are
-temporary rollback controls for pre-launch clients, not supported member-facing
-sign-in methods. `validate_prod_urls` rejects a production configuration that
-enables either legacy path, disables email codes, or omits
-`CUSTOMERIO_COMMUNITY_CHAT_CODE_MESSAGE_ID`.
+`COMMUNITY_CHAT_DEVICE_AUTH_ENABLED=true`. Email codes remain the human account
+proof in the browser; the device-auth switch enables the state- and PKCE-bound
+browser-to-desktop handoff and is not a password or alternate identity path.
+`validate_prod_urls` rejects a production configuration that enables password
+authentication, disables either required flow, omits the exact Tauri CORS
+origins, or omits `CUSTOMERIO_COMMUNITY_CHAT_CODE_MESSAGE_ID`.
 
 Before deploying the web/API process, provision independent values for
 `COMMUNITY_CHAT_EMAIL_CODE_PEPPER` and
 `COMMUNITY_CHAT_EMAIL_CODE_DELIVERY_SECRET`, publish the Customer.io six-digit
 code template, and start `run_email_code_worker` under the same immutable
 release. Test request, delivery, expiry, resend, invalid-attempt lockout, scoped
-session refresh, sign-out, and server-first device removal in staging. Never
-copy a code, normalized email, token, or delivery ciphertext into release
-evidence.
+session refresh, explicit browser approval, missing/tampered/cross-request/
+expired/replayed authorization-code and PKCE exchange, Tauri CORS preflight,
+mobile `mlaichat://callback` enrollment, sign-out, and server-first device
+removal in staging. Never copy a code, normalized email, state, verifier,
+token, or delivery ciphertext into release evidence.
 
 ## Migration and backup exercise
 

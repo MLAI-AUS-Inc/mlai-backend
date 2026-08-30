@@ -241,6 +241,7 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    'core.middleware.DesktopAuthCorsMiddleware',
     'corsheaders.middleware.CorsMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
@@ -467,6 +468,8 @@ REST_FRAMEWORK = {
         'auth_magic_link': None if _RUNNING_TESTS else os.getenv('AUTH_MAGIC_LINK_RATE', '5/minute'),
         'community_chat_session': os.getenv('COMMUNITY_CHAT_SESSION_RATE', '120/minute'),
         'community_chat_link_preview': os.getenv('COMMUNITY_CHAT_LINK_PREVIEW_RATE', '300/minute'),
+        'community_chat_home': os.getenv('COMMUNITY_CHAT_HOME_RATE', '60/minute'),
+        'community_chat_upcoming_events': os.getenv('COMMUNITY_CHAT_UPCOMING_EVENTS_RATE', '60/minute'),
         'community_chat_challenge': os.getenv('COMMUNITY_CHAT_CHALLENGE_RATE', '20/minute'),
         'community_chat_invite': os.getenv('COMMUNITY_CHAT_INVITE_RATE', '10/minute'),
         'community_chat_confirm': os.getenv('COMMUNITY_CHAT_CONFIRM_RATE', '30/minute'),
@@ -490,6 +493,26 @@ TOKEN_USAGE_API_BASE = os.getenv(
 TOKEN_USAGE_TIME_ZONE = _validated_timezone_name(
     os.getenv('TOKEN_USAGE_TIME_ZONE', 'Australia/Melbourne'),
     'TOKEN_USAGE_TIME_ZONE',
+)
+# The public Tokenmaxer board slices sessions by their UTC start date.  Keep
+# the federated board on the same calendar so local and upstream rows are
+# comparable instead of silently mixing two definitions of "Today".
+TOKEN_USAGE_LEADERBOARD_TIME_ZONE = _validated_timezone_name(
+    os.getenv('TOKEN_USAGE_LEADERBOARD_TIME_ZONE', 'UTC'),
+    'TOKEN_USAGE_LEADERBOARD_TIME_ZONE',
+)
+TOKENMAXER_FEDERATION_ENABLED = _env_is_true(
+    'TOKENMAXER_FEDERATION_ENABLED',
+    not _RUNNING_TESTS,
+)
+TOKENMAXER_PUBLIC_API_BASE = os.getenv(
+    'TOKENMAXER_PUBLIC_API_BASE', 'https://tokenmaxer.quest'
+).rstrip('/')
+TOKENMAXER_FEDERATION_TIMEOUT_SECONDS = float(
+    os.getenv('TOKENMAXER_FEDERATION_TIMEOUT_SECONDS', '3')
+)
+TOKENMAXER_FEDERATION_CACHE_SECONDS = int(
+    os.getenv('TOKENMAXER_FEDERATION_CACHE_SECONDS', '600')
 )
 COMMUNITY_CHAT_API_AUDIENCE = os.getenv('COMMUNITY_CHAT_API_AUDIENCE', 'https://api.mlai.au')
 COMMUNITY_CHAT_ADAPTER_URL = os.getenv(
@@ -570,6 +593,10 @@ COMMUNITY_CHAT_PASSWORD_RESET_URL = os.getenv(
     'COMMUNITY_CHAT_PASSWORD_RESET_URL',
     'http://localhost:3001/#/reset-password' if DEBUG else 'https://chat.mlai.au/#/reset-password',
 )
+MEETING_ROOM_BOOKING_ENABLED = _env_is_true(
+    'MEETING_ROOM_BOOKING_ENABLED',
+    False,
+)
 PASSWORD_RESET_TTL_SECONDS = int(os.getenv('PASSWORD_RESET_TTL_SECONDS', '3600'))
 PASSWORD_RESET_MIN_RESPONSE_SECONDS = float(
     os.getenv('PASSWORD_RESET_MIN_RESPONSE_SECONDS', '0.12')
@@ -580,6 +607,10 @@ PASSWORD_RESET_DELIVERY_SECRET = os.getenv(
 )
 
 HEALTH_HACK_ACTIVE_CASE_ID = int(os.getenv('HEALTH_HACK_ACTIVE_CASE_ID', '1'))
+# Scoring truth is intentionally stored outside this public repository. The
+# configured file must use the ID,predicted_label,Usage contract validated by
+# hospital.views.load_ground_truth.
+HEALTH_HACK_SOLUTION_PATH = os.getenv('HEALTH_HACK_SOLUTION_PATH', '').strip()
 HEALTH_HACK_AI_BODY_MAX_BYTES = int(os.getenv('HEALTH_HACK_AI_BODY_MAX_BYTES', str(16 * 1024)))
 HEALTH_HACK_AI_UPSTREAM_MAX_BYTES = int(
     os.getenv('HEALTH_HACK_AI_UPSTREAM_MAX_BYTES', str(32 * 1024))
@@ -1041,6 +1072,10 @@ JOBS_NOTION_API_VERSION = os.getenv('JOBS_NOTION_API_VERSION', '2022-06-28')
 JOBS_SLACK_CHANNEL = os.getenv('JOBS_SLACK_CHANNEL', '#jobs')
 JOBS_SLACK_WEBHOOK_URL = os.getenv('JOBS_SLACK_WEBHOOK_URL', '')
 SLACK_BOT_TOKEN = os.getenv('SLACK_BOT_TOKEN', '')
+COMMITTEE_REMUNERATION_ENABLED = _env_is_true('COMMITTEE_REMUNERATION_ENABLED', False)
+COMMITTEE_REMUNERATION_WEEKLY_POINTS = int(os.getenv('COMMITTEE_REMUNERATION_WEEKLY_POINTS', '40'))
+COMMITTEE_REMUNERATION_SLACK_CHANNEL = os.getenv('COMMITTEE_REMUNERATION_SLACK_CHANNEL', '#roo-testing')
+COMMITTEE_REMUNERATION_TIMEZONE = os.getenv('COMMITTEE_REMUNERATION_TIMEZONE', 'Australia/Melbourne')
 HOSPITAL_SLACK_CHANNEL_NAME = os.getenv('HOSPITAL_SLACK_CHANNEL_NAME', 'healthhack')
 HEALTHHACK_ANNOUNCEMENT_ADMIN_IDS = [
     value.strip()
@@ -1397,8 +1432,18 @@ SLACK_OAUTH_SCOPES = _env_list(
         "channels:read",
         "groups:history",
         "groups:read",
+        "im:history",
+        "im:read",
+        "im:write",
+        "mpim:history",
+        "mpim:read",
+        "mpim:write",
+        "chat:write",
         "team:read",
         "users:read",
+        "reactions:read",
+        "reactions:write",
+        "files:read",
     ],
 )
 SLACK_OAUTH_USER_SCOPES = _env_list("SLACK_OAUTH_USER_SCOPES", SLACK_OAUTH_SCOPES)
@@ -1408,6 +1453,10 @@ SLACK_SYNC_HISTORY_PAGE_LIMIT = int(os.environ.get("SLACK_SYNC_HISTORY_PAGE_LIMI
 SLACK_SYNC_HISTORY_MAX_PAGES = int(os.environ.get("SLACK_SYNC_HISTORY_MAX_PAGES", "5") or 5)
 SLACK_SYNC_REPLY_MAX_PAGES = int(os.environ.get("SLACK_SYNC_REPLY_MAX_PAGES", "3") or 3)
 SLACK_SYNC_REPLY_PAGE_BUDGET = int(os.environ.get("SLACK_SYNC_REPLY_PAGE_BUDGET", "2") or 2)
+SLACK_DM_MIRROR_HISTORY_DAYS = max(
+    0, min(int(os.environ.get("SLACK_DM_MIRROR_HISTORY_DAYS", "30") or 30), 90)
+)
+SLACK_DM_MIRROR_SHADOW_SECRET = os.environ.get("SLACK_DM_MIRROR_SHADOW_SECRET", "")
 SLACK_API_CONNECT_TIMEOUT_SECONDS = float(os.environ.get("SLACK_API_CONNECT_TIMEOUT_SECONDS", "3") or 3)
 SLACK_API_READ_TIMEOUT_SECONDS = float(os.environ.get("SLACK_API_READ_TIMEOUT_SECONDS", "8") or 8)
 
@@ -1437,6 +1486,9 @@ LINEAR_STUDIO_RECEIPT_PENDING_TTL_SECONDS = int(
 )
 LINEAR_PROJECT_SIZING_RUN_TTL_SECONDS = int(
     os.environ.get("LINEAR_PROJECT_SIZING_RUN_TTL_SECONDS", "86400") or 86400
+)
+LINEAR_MEETING_ACTION_BATCH_TTL_SECONDS = int(
+    os.environ.get("LINEAR_MEETING_ACTION_BATCH_TTL_SECONDS", "86400") or 86400
 )
 LINEAR_PROJECT_SIZING_PROCESSING_TTL_SECONDS = int(
     os.environ.get("LINEAR_PROJECT_SIZING_PROCESSING_TTL_SECONDS", "300") or 300
@@ -1934,6 +1986,18 @@ if VICTOR_AI_ROO_ENABLED:
         )
 LUMA_API_KEY = os.environ.get('LUMA_API_KEY')
 LUMA_BASE_URL = os.environ.get('LUMA_BASE_URL', 'https://public-api.luma.com')
+LUMA_CALENDAR_URL = os.environ.get(
+    'LUMA_CALENDAR_URL',
+    'https://luma.com/mlai_au',
+).strip() or 'https://luma.com/mlai_au'
+LUMA_API_TIMEOUT_SECONDS = max(
+    0.1,
+    float(os.environ.get('LUMA_API_TIMEOUT_SECONDS', '5')),
+)
+LUMA_UPCOMING_EVENTS_CACHE_SECONDS = max(
+    0,
+    int(os.environ.get('LUMA_UPCOMING_EVENTS_CACHE_SECONDS', '300')),
+)
 HUMANITIX_API_BASE_URL = os.environ.get(
     'HUMANITIX_API_BASE_URL',
     'https://api.humanitix.com/v1',

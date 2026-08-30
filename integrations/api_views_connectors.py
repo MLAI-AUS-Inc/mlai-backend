@@ -34,6 +34,7 @@ from integrations.services.external_connectors import (
     update_slack_channel_selections,
 )
 from integrations.services.linear_meeting_actions import (
+    LinearMeetingActionConflictError,
     LinearMeetingConfigurationError,
     LinearMeetingGraphQLError,
     LinearMeetingIdempotencyConflictError,
@@ -41,9 +42,12 @@ from integrations.services.linear_meeting_actions import (
     LinearMeetingSizingConflictError,
     apply_linear_project_sizing_run,
     cancel_linear_project_sizing_run,
+    create_linear_meeting_action_batch,
     create_linear_meeting_issue,
     create_linear_meeting_project_update,
     create_linear_project_sizing_run,
+    decide_linear_meeting_action_batch,
+    get_linear_meeting_action_batch,
     get_linear_issue_receipt,
     get_linear_meeting_context,
     get_linear_project_issue_page,
@@ -63,6 +67,14 @@ logger = logging.getLogger(__name__)
 
 
 def _linear_meeting_error_response(exc):
+    if isinstance(exc, LinearMeetingActionConflictError):
+        return Response(
+            {
+                "detail": str(exc),
+                "code": "linear_meeting_action_conflict",
+            },
+            status=status.HTTP_409_CONFLICT,
+        )
     if isinstance(exc, LinearMeetingIdempotencyConflictError):
         return Response(
             {
@@ -788,6 +800,47 @@ class LinearMeetingIssueCreateView(APIView):
         ) as exc:
             return _linear_meeting_error_response(exc)
         return Response(payload, status=status.HTTP_201_CREATED)
+
+
+class LinearMeetingActionBatchCreateView(APIView):
+    permission_classes = [HasRooApiKey]
+
+    def post(self, request):
+        try:
+            payload = create_linear_meeting_action_batch(request.data)
+        except (LinearMeetingActionConflictError, ValueError) as exc:
+            return _linear_meeting_error_response(exc)
+        return Response(payload, status=status.HTTP_201_CREATED)
+
+
+class LinearMeetingActionBatchDetailView(APIView):
+    permission_classes = [HasRooApiKey]
+
+    def get(self, request, batch_id):
+        try:
+            payload = get_linear_meeting_action_batch(batch_id)
+        except (LinearMeetingActionConflictError, ValueError) as exc:
+            return _linear_meeting_error_response(exc)
+        return Response(payload, status=status.HTTP_200_OK)
+
+
+class LinearMeetingActionBatchDecisionView(APIView):
+    permission_classes = [HasRooApiKey]
+
+    def post(self, request, batch_id):
+        try:
+            payload = decide_linear_meeting_action_batch(batch_id, request.data)
+        except (
+            LinearMeetingActionConflictError,
+            LinearMeetingConfigurationError,
+            LinearMeetingRateLimitError,
+            LinearMeetingGraphQLError,
+            LinearMeetingIdempotencyConflictError,
+            LinearMeetingSizingConflictError,
+            ValueError,
+        ) as exc:
+            return _linear_meeting_error_response(exc)
+        return Response(payload, status=status.HTTP_200_OK)
 
 
 class LinearProjectSizingContextView(APIView):

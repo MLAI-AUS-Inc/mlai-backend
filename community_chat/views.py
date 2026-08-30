@@ -1,15 +1,19 @@
-import hashlib
 import base64
+import hashlib
 import re
 import secrets
 import time
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone as datetime_timezone
 from urllib.parse import urlencode
+from zoneinfo import ZoneInfo
 
 from django.conf import settings
 from django.contrib.auth.models import update_last_login
-from django.db import IntegrityError, transaction
+from django.core import signing
+from django.core.cache import cache
+from django.db import IntegrityError, connection, transaction
 from django.db.models import Q
 from django.http import HttpResponse
 from django.urls import reverse
@@ -36,6 +40,7 @@ from .authentication import (
     CommunityChatBootstrapAuthentication,
 )
 from .account_cookies import (
+    ACCESS_COOKIE as ACCOUNT_ACCESS_COOKIE,
     REFRESH_COOKIE as ACCOUNT_REFRESH_COOKIE,
     clear_account_session_cookies,
     set_account_session_cookies,
@@ -69,6 +74,14 @@ from core.auth_throttles import (
     enforce_chat_password_login_limits,
 )
 from core.password_auth import authenticate_account, normalize_account_email
+from integrations.services.luma import (
+    LumaAPIError,
+    LumaAttendeeReportService,
+    LumaConfigurationError,
+    MELBOURNE_TIMEZONE,
+)
+from roo.models import RewardsCatalog, Task, TaskAssignment
+from roo.services import PointsService
 from .email_codes import (
     InvalidEmailCode,
     consume_email_code,
@@ -81,6 +94,9 @@ from .slack_file_previews import (
     fetch_slack_file_preview,
 )
 from .serializers import (
+    CommunityChatDeviceAuthAuthorizeSerializer,
+    CommunityChatDeviceAuthExchangeSerializer,
+    CommunityChatDeviceAuthStartSerializer,
     CommunityChatEmailCodeRequestSerializer,
     CommunityChatEmailCodeVerifySerializer,
     CommunityChatPasswordLoginSerializer,
@@ -100,7 +116,23 @@ ACCOUNT_AUTHENTICATION_CLASSES = (
     CommunityChatBootstrapAuthentication,
     CustomJWTAuthentication,
 )
+DESKTOP_AUTH_ORIGINS = (
+    "tauri://localhost",
+    "http://tauri.localhost",
+)
+DESKTOP_AUTHORIZATION_CODE_SALT = "community-chat.desktop-authorization.v1"
+DESKTOP_AUTHORIZATION_CODE_INVALID_DETAIL = "Desktop authorization code is invalid."
 PKCE_CHALLENGE_RE = re.compile(r"^[A-Za-z0-9_-]{43}$")
+HOME_ITEM_LIMIT = 12
+UPCOMING_EVENTS_CACHE_KEY = "community-chat:upcoming-events:v1"
+UPCOMING_EVENT_FIELDS = (
+    "id",
+    "name",
+    "url",
+    "start_at",
+    "end_at",
+    "timezone",
+)
 
 
 class _EmailCodeBindingConflict(ValueError):
@@ -116,6 +148,14 @@ def _is_eligible(user):
 def _require_eligible(user):
     if not _is_eligible(user):
         raise PermissionDenied("This MLAI account is not eligible for community chat.")
+
+
+def _allowlisted_items(items, fields):
+    return [
+        {field: item.get(field) for field in fields}
+        for item in items
+        if isinstance(item, dict)
+    ]
 
 
 def _request_origin(request):
@@ -189,6 +229,126 @@ def _pkce_challenge(verifier):
     return base64.urlsafe_b64encode(
         hashlib.sha256(verifier.encode("utf-8")).digest()
     ).decode("ascii").rstrip("=")
+
+
+def _issue_device_auth_authorization_code(auth_request):
+    """Return a short-lived signed code that reveals no account credential."""
+
+    if auth_request.user_id is None:
+        raise ValueError("Cannot authorize a desktop request without a user.")
+    return signing.dumps(
+        {
+            "request_id": str(auth_request.id),
+            "user_id": str(auth_request.user_id),
+            "nonce": secrets.token_urlsafe(32),
+        },
+        salt=DESKTOP_AUTHORIZATION_CODE_SALT,
+        compress=False,
+    )
+
+
+def _require_valid_device_auth_authorization_code(code, auth_request):
+    """Verify a purpose-bound timestamped code against the locked request."""
+
+    max_age = int(settings.COMMUNITY_CHAT_DEVICE_AUTH_TTL_SECONDS)
+    if max_age <= 0:
+        raise PermissionDenied(DESKTOP_AUTHORIZATION_CODE_INVALID_DETAIL)
+    try:
+        payload = signing.loads(
+            code,
+            salt=DESKTOP_AUTHORIZATION_CODE_SALT,
+            max_age=max_age,
+        )
+    except (signing.BadSignature, signing.SignatureExpired) as exc:
+        raise PermissionDenied(DESKTOP_AUTHORIZATION_CODE_INVALID_DETAIL) from exc
+
+    if not isinstance(payload, dict):
+        raise PermissionDenied(DESKTOP_AUTHORIZATION_CODE_INVALID_DETAIL)
+    request_id = payload.get("request_id")
+    user_id = payload.get("user_id")
+    nonce = payload.get("nonce")
+    valid_payload = all(isinstance(value, str) for value in (request_id, user_id, nonce))
+    if not valid_payload or not nonce:
+        raise PermissionDenied(DESKTOP_AUTHORIZATION_CODE_INVALID_DETAIL)
+    if not secrets.compare_digest(request_id, str(auth_request.id)):
+        raise PermissionDenied(DESKTOP_AUTHORIZATION_CODE_INVALID_DETAIL)
+    if auth_request.user_id is None or not secrets.compare_digest(
+        user_id,
+        str(auth_request.user_id),
+    ):
+        raise PermissionDenied(DESKTOP_AUTHORIZATION_CODE_INVALID_DETAIL)
+
+
+def _lock_device_auth_installation(enrollment):
+    """Serialize credential issuance for one native installation in Postgres."""
+
+    if connection.vendor != "postgresql":
+        return
+    material = (
+        f"community-chat-device-auth-v1:{enrollment.client_id}:"
+        f"{enrollment.installation_id}"
+    ).encode("utf-8")
+    lock_id = int.from_bytes(hashlib.sha256(material).digest()[:8], "big", signed=True)
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT pg_advisory_xact_lock(%s)", [lock_id])
+
+
+@dataclass(frozen=True)
+class _DeviceAuthEnrollmentContext:
+    public_key: str
+    installation_id: uuid.UUID
+    client_id: str
+    origin: str
+    platform: str
+    device_name: str
+
+
+def _device_auth_enrollment_context(data, origin):
+    device = data["device"]
+    return _DeviceAuthEnrollmentContext(
+        public_key=device["public_key"],
+        installation_id=device["installation_id"],
+        client_id=data["client_id"],
+        origin=origin,
+        platform=device["platform"],
+        device_name=device.get("name", ""),
+    )
+
+
+def _device_auth_state_hash(state, context):
+    """Bind the secret state to the complete native enrollment context."""
+
+    digest = hashlib.sha256()
+    digest.update(b"mlai-chat-device-auth-v1\0")
+    for value in (
+        state,
+        context.public_key,
+        str(context.installation_id),
+        context.client_id,
+        context.origin,
+        context.platform,
+        context.device_name,
+    ):
+        encoded = value.encode("utf-8")
+        digest.update(len(encoded).to_bytes(4, "big"))
+        digest.update(encoded)
+    return digest.hexdigest()
+
+
+def _desktop_auth_origin(request):
+    origin = _request_origin(request)
+    claimed_origins = (
+        str(request.headers.get("Origin") or "").strip(),
+        str(request.data.get("origin") or "").strip(),
+    )
+    if any(
+        claimed and not secrets.compare_digest(claimed, origin)
+        for claimed in claimed_origins
+    ):
+        raise PermissionDenied("Desktop sign-in requires an exact application origin.")
+    if not any(secrets.compare_digest(origin, allowed) for allowed in DESKTOP_AUTH_ORIGINS):
+        raise PermissionDenied("Desktop sign-in must start from the MLAI Chat application.")
+    return origin
 
 
 def _device_payload(device):
@@ -292,6 +452,7 @@ def _uniform_email_code_delay(started_at):
 
 
 def _issue_email_code_bootstrap(user, challenge):
+    _lock_device_auth_installation(challenge)
     active_key = CommunityChatDevice.objects.select_for_update().filter(
         public_key=challenge.public_key,
         status__in=(DeviceBindingStatus.PENDING, DeviceBindingStatus.VERIFIED),
@@ -618,6 +779,173 @@ class AccountView(APIView):
         )
 
 
+class HomeView(APIView):
+    """Return member-scoped Roo dashboard data for MLAI Chat Home.
+
+    Only the caller's aggregate balance and public/volunteer catalog fields
+    cross this boundary. Slack ids, assignment/reviewer details, internal
+    tasks, redemption records, and other members' balances are excluded.
+    """
+
+    authentication_classes = (CommunityChatAccountAuthentication,)
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [CommunityChatScopedThrottle]
+    community_chat_throttle_scope = "community_chat_home"
+
+    def get(self, request):
+        balance = PointsService.get_balance(request.user)
+        today = timezone.localdate(timezone=ZoneInfo(MELBOURNE_TIMEZONE))
+        opportunities = (
+            Task.objects.filter(
+                status="open",
+                volunteer_ready=True,
+                visibility__in=("volunteer", "public"),
+            )
+            .filter(Q(due_date__isnull=True) | Q(due_date__gte=today))
+            .exclude(assignments__status__in=TaskAssignment.ACTIVE_STATUSES)
+            .distinct()
+            .order_by("due_date", "id")[:HOME_ITEM_LIMIT]
+        )
+        rewards = (
+            RewardsCatalog.objects.filter(is_active=True)
+            .filter(Q(stock_remaining__isnull=True) | Q(stock_remaining__gt=0))
+            .order_by("cost_points", "name")[:HOME_ITEM_LIMIT]
+        )
+
+        earn_actions = [
+            {
+                "id": "intro",
+                "name": "Introduce yourself",
+                "description": "Post your first message in #_start-here.",
+                "points": 4,
+            }
+        ]
+        monthly_update_points = int(
+            getattr(settings, "ROO_POINTS_MONTHLY_UPDATE_REWARD", 0)
+        )
+        if monthly_update_points > 0:
+            earn_actions.append(
+                {
+                    "id": "monthly_update",
+                    "name": "Complete your monthly startup update",
+                    "description": (
+                        "Complete and save a ready monthly update for your "
+                        "verified company."
+                    ),
+                    "points": monthly_update_points,
+                }
+            )
+        earn_actions.extend(
+            {
+                "id": f"task:{task.task_code}",
+                "name": task.title,
+                "description": task.description,
+                "points": task.points_estimate or task.points,
+                "command": f"@Roo task claim {task.task_code}",
+            }
+            for task in opportunities
+            if task.task_code
+        )
+
+        response = Response(
+            {
+                "points": {
+                    "balance": balance["balance"],
+                    "earned_balance": balance["earned_balance"],
+                    "purchased_topup_balance": balance[
+                        "purchased_topup_balance"
+                    ],
+                    "lifetime_earned": balance["lifetime_earned"],
+                    "lifetime_spent": balance["lifetime_spent"],
+                },
+                "earn_actions": earn_actions,
+                "rewards": [
+                    {
+                        "code": reward.code,
+                        "name": reward.name,
+                        "description": reward.description,
+                        "cost_points": reward.cost_points,
+                        "stock_remaining": reward.stock_remaining,
+                        "can_afford": balance["balance"] >= reward.cost_points,
+                    }
+                    for reward in rewards
+                ],
+                "feature_flags": {
+                    "link_love": False,
+                    "meeting_rooms": bool(
+                        getattr(settings, "MEETING_ROOM_BOOKING_ENABLED", False)
+                    ),
+                },
+            }
+        )
+        response["Cache-Control"] = "private, no-store"
+        return response
+
+
+class UpcomingEventsView(APIView):
+    """Return cached, public Luma event cards to signed-in chat members."""
+
+    authentication_classes = (CommunityChatAccountAuthentication,)
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [CommunityChatScopedThrottle]
+    community_chat_throttle_scope = "community_chat_upcoming_events"
+
+    def get(self, request):
+        raw_limit = request.query_params.get("limit") or 5
+        try:
+            requested_limit = int(raw_limit)
+        except (TypeError, ValueError):
+            return Response(
+                {"error": "invalid_limit"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if requested_limit < 1:
+            return Response(
+                {"error": "invalid_limit"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        requested_limit = min(requested_limit, 10)
+
+        events = cache.get(UPCOMING_EVENTS_CACHE_KEY)
+        if not isinstance(events, list):
+            try:
+                events = LumaAttendeeReportService(
+                    timeout=settings.LUMA_API_TIMEOUT_SECONDS,
+                ).list_upcoming_events(limit=10)
+            except LumaConfigurationError:
+                return Response(
+                    {"error": "upcoming_events_unavailable"},
+                    status=status.HTTP_503_SERVICE_UNAVAILABLE,
+                )
+            except LumaAPIError as exc:
+                response_status = (
+                    status.HTTP_429_TOO_MANY_REQUESTS
+                    if exc.status_code == status.HTTP_429_TOO_MANY_REQUESTS
+                    else status.HTTP_502_BAD_GATEWAY
+                )
+                return Response(
+                    {"error": "upcoming_events_unavailable"},
+                    status=response_status,
+                )
+            events = _allowlisted_items(events, UPCOMING_EVENT_FIELDS)
+            cache.set(
+                UPCOMING_EVENTS_CACHE_KEY,
+                events,
+                timeout=settings.LUMA_UPCOMING_EVENTS_CACHE_SECONDS,
+            )
+        else:
+            events = _allowlisted_items(events, UPCOMING_EVENT_FIELDS)
+
+        response = Response(
+            {
+                "calendar_url": settings.LUMA_CALENDAR_URL,
+                "events": events[:requested_limit],
+            }
+        )
+        response["Cache-Control"] = "private, max-age=60"
+        return response
+
+
 class PublicProfileBatchView(APIView):
     """Resolve current and historical verified chat keys to public profiles.
 
@@ -726,7 +1054,7 @@ class LinkPreviewImageView(APIView):
 
 
 class DeviceAuthStartView(APIView):
-    """Create an origin/key/state/PKCE-bound browser-to-app login request."""
+    """Create a desktop-only origin/device/state/PKCE-bound login request."""
 
     authentication_classes = []
     permission_classes = [AllowAny]
@@ -737,32 +1065,29 @@ class DeviceAuthStartView(APIView):
                 {"error": "device_auth_disabled"},
                 status=status.HTTP_404_NOT_FOUND,
             )
-        public_key = _public_key(request.data.get("public_key"))
-        origin = _request_origin(request)
-        state = str(request.data.get("state") or "")
-        code_challenge = str(request.data.get("code_challenge") or "")
-        if len(state) < 32 or len(state) > 256:
-            raise ValidationError({"state": "State must contain at least 32 characters."})
-        if not PKCE_CHALLENGE_RE.fullmatch(code_challenge):
-            raise ValidationError({"code_challenge": "Invalid PKCE S256 challenge."})
+        serializer = CommunityChatDeviceAuthStartSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        origin = _desktop_auth_origin(request)
+        enrollment = _device_auth_enrollment_context(data, origin)
         enforce_bootstrap_limits(
             request,
             action="auth-start",
-            public_key=public_key,
+            public_key=enrollment.public_key,
             user_limit=20,
             key_limit=10,
             ip_limit=30,
         )
         auth_request = CommunityChatDeviceAuthRequest.objects.create(
-            public_key=public_key,
+            public_key=enrollment.public_key,
             origin=origin,
-            state_hash=hashlib.sha256(state.encode("utf-8")).hexdigest(),
-            code_challenge=code_challenge,
+            state_hash=_device_auth_state_hash(data["state"], enrollment),
+            code_challenge=data["code_challenge"],
             expires_at=timezone.now()
             + timedelta(seconds=settings.COMMUNITY_CHAT_DEVICE_AUTH_TTL_SECONDS),
         )
-        callback_path = f"/auth/callback?request={auth_request.id}"
-        return Response(
+        callback_path = f"/auth/desktop?request={auth_request.id}"
+        response = Response(
             {
                 "request_id": str(auth_request.id),
                 "callback_path": callback_path,
@@ -770,12 +1095,15 @@ class DeviceAuthStartView(APIView):
             },
             status=status.HTTP_201_CREATED,
         )
+        response["Cache-Control"] = "no-store"
+        response["Pragma"] = "no-cache"
+        return response
 
 
 class DeviceAuthAuthorizeView(APIView):
-    """Authorize a pending app handoff using the browser's MLAI session."""
+    """Explicitly authorize a pending app handoff with a Chat browser session."""
 
-    authentication_classes = (CustomJWTAuthentication,)
+    authentication_classes = (CommunityChatAccountAuthentication,)
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
@@ -785,17 +1113,28 @@ class DeviceAuthAuthorizeView(APIView):
                 status=status.HTTP_404_NOT_FOUND,
             )
         _require_eligible(request.user)
+        cookie_access = str(request.COOKIES.get(ACCOUNT_ACCESS_COOKIE) or "")
+        cookie_hash = hashlib.sha256(cookie_access.encode("utf-8")).hexdigest()
+        if not cookie_access or not secrets.compare_digest(
+            cookie_hash,
+            request.community_chat_account_session.access_token_hash,
+        ):
+            raise PermissionDenied("Device approval requires a browser sign-in cookie.")
+        if request.community_chat_account_session.client_id != "mlai-chat-web":
+            raise PermissionDenied("Device approval requires an MLAI Chat browser session.")
         origin = _request_origin(request)
         browser_origin = str(settings.COMMUNITY_CHAT_FRONTEND_URL).strip().rstrip("/")
         if not secrets.compare_digest(origin, browser_origin):
             raise PermissionDenied("Device approval must come from the MLAI Chat browser origin.")
-        request_id = request.data.get("request_id")
-        now = timezone.now()
+        serializer = CommunityChatDeviceAuthAuthorizeSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        request_id = serializer.validated_data["request_id"]
         try:
             with transaction.atomic():
                 auth_request = CommunityChatDeviceAuthRequest.objects.select_for_update().get(
                     id=request_id
                 )
+                now = timezone.now()
                 if auth_request.expires_at <= now:
                     return Response(
                         {"error": "authorization_expired"},
@@ -806,18 +1145,31 @@ class DeviceAuthAuthorizeView(APIView):
                         {"error": "authorization_consumed"},
                         status=status.HTTP_409_CONFLICT,
                     )
-                if auth_request.user_id and auth_request.user_id != request.user.id:
+                if (
+                    auth_request.user_id is not None
+                    and auth_request.user_id != request.user.id
+                ):
                     raise PermissionDenied("Login request belongs to another MLAI account.")
                 auth_request.user = request.user
                 auth_request.authorized_at = now
                 auth_request.save(update_fields=("user", "authorized_at"))
-        except (CommunityChatDeviceAuthRequest.DoesNotExist, ValueError):
+                authorization_code = _issue_device_auth_authorization_code(auth_request)
+        except CommunityChatDeviceAuthRequest.DoesNotExist:
             return Response({"error": "authorization_not_found"}, status=status.HTTP_404_NOT_FOUND)
-        return Response({"status": "authorized", "request_id": str(auth_request.id)})
+        response = Response(
+            {
+                "status": "authorized",
+                "request_id": str(auth_request.id),
+                "authorization_code": authorization_code,
+            }
+        )
+        response["Cache-Control"] = "no-store"
+        response["Pragma"] = "no-cache"
+        return response
 
 
 class DeviceAuthExchangeView(APIView):
-    """Exchange the state + PKCE verifier for a one-purpose bootstrap token."""
+    """Exchange desktop state + PKCE for bootstrap and native account sessions."""
 
     authentication_classes = []
     permission_classes = [AllowAny]
@@ -828,16 +1180,18 @@ class DeviceAuthExchangeView(APIView):
                 {"error": "device_auth_disabled"},
                 status=status.HTTP_404_NOT_FOUND,
             )
-        request_id = request.data.get("request_id")
-        state_value = str(request.data.get("state") or "")
-        verifier = str(request.data.get("code_verifier") or "")
-        origin = _request_origin(request)
-        now = timezone.now()
+        serializer = CommunityChatDeviceAuthExchangeSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        request_id = data["request_id"]
+        origin = _desktop_auth_origin(request)
+        enrollment = _device_auth_enrollment_context(data, origin)
         try:
             with transaction.atomic():
                 auth_request = CommunityChatDeviceAuthRequest.objects.select_for_update().get(
                     id=request_id
                 )
+                now = timezone.now()
                 enforce_bootstrap_limits(
                     request,
                     action="auth-exchange",
@@ -848,6 +1202,15 @@ class DeviceAuthExchangeView(APIView):
                 )
                 if auth_request.origin != origin:
                     raise PermissionDenied("Login request origin does not match.")
+                if not secrets.compare_digest(
+                    auth_request.public_key,
+                    enrollment.public_key,
+                ):
+                    raise PermissionDenied("Login request belongs to a different device key.")
+                _require_valid_device_auth_authorization_code(
+                    data["authorization_code"],
+                    auth_request,
+                )
                 if auth_request.expires_at <= now:
                     return Response(
                         {"error": "authorization_expired"},
@@ -858,40 +1221,58 @@ class DeviceAuthExchangeView(APIView):
                         {"error": "authorization_consumed"},
                         status=status.HTTP_409_CONFLICT,
                     )
-                state_hash = hashlib.sha256(state_value.encode("utf-8")).hexdigest()
-                verifier_challenge = _pkce_challenge(verifier)
-                if not secrets.compare_digest(auth_request.state_hash, state_hash) or not secrets.compare_digest(
-                    auth_request.code_challenge, verifier_challenge
-                ):
+                state_hash = _device_auth_state_hash(data["state"], enrollment)
+                verifier_challenge = _pkce_challenge(data["code_verifier"])
+                valid_state = secrets.compare_digest(auth_request.state_hash, state_hash)
+                valid_verifier = secrets.compare_digest(
+                    auth_request.code_challenge,
+                    verifier_challenge,
+                )
+                if not valid_state or not valid_verifier:
                     raise PermissionDenied("Login state or verifier is invalid.")
                 if auth_request.authorized_at is None or auth_request.user_id is None:
-                    return Response(
-                        {"status": "pending"},
-                        status=status.HTTP_202_ACCEPTED,
-                    )
+                    raise PermissionDenied(DESKTOP_AUTHORIZATION_CODE_INVALID_DETAIL)
+                _require_eligible(auth_request.user)
 
-                raw_token = f"{TOKEN_PREFIX}{secrets.token_urlsafe(48)}"
-                token = CommunityChatBootstrapToken.objects.create(
-                    user=auth_request.user,
-                    public_key=auth_request.public_key,
-                    origin=auth_request.origin,
-                    token_hash=hashlib.sha256(raw_token.encode("utf-8")).hexdigest(),
-                    expires_at=now
-                    + timedelta(seconds=settings.COMMUNITY_CHAT_BOOTSTRAP_TOKEN_TTL_SECONDS),
+                raw_token, token = _issue_email_code_bootstrap(
+                    auth_request.user,
+                    enrollment,
+                )
+                account_session = issue_account_session(
+                    auth_request.user,
+                    enrollment,
                 )
                 auth_request.consumed_at = now
                 auth_request.save(update_fields=("consumed_at",))
-        except (CommunityChatDeviceAuthRequest.DoesNotExist, ValueError):
+        except _EmailCodeBindingConflict as exc:
+            return Response(
+                {"error": exc.code},
+                status=status.HTTP_409_CONFLICT,
+            )
+        except MembershipAdapterConflict as exc:
+            return Response({"error": exc.code}, status=status.HTTP_409_CONFLICT)
+        except MembershipAdapterUnavailable:
+            return Response(
+                {"error": "membership_service_unavailable"},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        except CommunityChatDeviceAuthRequest.DoesNotExist:
             return Response({"error": "authorization_not_found"}, status=status.HTTP_404_NOT_FOUND)
 
-        return Response(
+        response = Response(
             {
-                "status": "authorized",
-                "access_token": raw_token,
+                "status": "authenticated",
+                "bootstrap_token": raw_token,
                 "expires_at": token.expires_at,
-                "public_key": token.public_key,
+                "relay_url": settings.COMMUNITY_CHAT_RELAY_URL,
+                "origin": enrollment.origin,
+                "profile": own_chat_profile(auth_request.user),
+                "session": _account_session_payload(account_session),
             }
         )
+        response["Cache-Control"] = "no-store"
+        response["Pragma"] = "no-cache"
+        return response
 
 
 class SessionView(APIView):
