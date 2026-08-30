@@ -643,7 +643,7 @@ class CommunityChatDeviceAuthorityTransactionTests(TransactionTestCase):
             except BaseException as exc:
                 errors.append(exc)
             finally:
-                close_old_connections()
+                connection.close()
 
         def delete_request():
             close_old_connections()
@@ -659,7 +659,7 @@ class CommunityChatDeviceAuthorityTransactionTests(TransactionTestCase):
                 errors.append(exc)
             finally:
                 delete_returned.set()
-                close_old_connections()
+                connection.close()
 
         with (
             patch("community_chat.views.issue_member_invite", side_effect=blocked_issue),
@@ -771,7 +771,7 @@ class CommunityChatDeviceAuthorityTransactionTests(TransactionTestCase):
             except BaseException as exc:
                 errors.append(exc)
             finally:
-                close_old_connections()
+                connection.close()
 
         def invite_request():
             close_old_connections()
@@ -795,7 +795,7 @@ class CommunityChatDeviceAuthorityTransactionTests(TransactionTestCase):
             except BaseException as exc:
                 errors.append(exc)
             finally:
-                close_old_connections()
+                connection.close()
 
         with (
             patch(
@@ -866,7 +866,7 @@ class CommunityChatDeviceAuthorityTransactionTests(TransactionTestCase):
             except BaseException as exc:
                 errors.append(exc)
             finally:
-                close_old_connections()
+                connection.close()
 
         def delete_request():
             close_old_connections()
@@ -882,7 +882,7 @@ class CommunityChatDeviceAuthorityTransactionTests(TransactionTestCase):
                 errors.append(exc)
             finally:
                 delete_returned.set()
-                close_old_connections()
+                connection.close()
 
         with (
             patch("community_chat.views.get_relay_membership", side_effect=blocked_membership),

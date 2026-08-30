@@ -646,7 +646,7 @@ class SlackConnectorAuthorityPostgresTests(
         except Exception as exc:  # pragma: no cover - asserted by the caller
             errors.append(exc)
         finally:
-            close_old_connections()
+            connection.close()
             completed.set()
 
     def test_user_disconnect_waits_for_channel_discovery_then_erases_selection(self):

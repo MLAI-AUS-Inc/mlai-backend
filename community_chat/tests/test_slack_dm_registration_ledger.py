@@ -1859,7 +1859,7 @@ class SlackDmDeliveryLeaseTransactionTests(TransactionTestCase):
             except BaseException as exc:  # surfaced on the test thread below
                 errors.append(exc)
             finally:
-                close_old_connections()
+                connection.close()
 
         def revoke():
             close_old_connections()
@@ -1870,7 +1870,7 @@ class SlackDmDeliveryLeaseTransactionTests(TransactionTestCase):
                 errors.append(exc)
             finally:
                 revoke_returned.set()
-                close_old_connections()
+                connection.close()
 
         delivery_thread = threading.Thread(target=drain_delivery)
         delivery_thread.start()
@@ -1929,7 +1929,7 @@ class SlackDmDeliveryLeaseTransactionTests(TransactionTestCase):
             except BaseException as exc:
                 errors.append(exc)
             finally:
-                close_old_connections()
+                connection.close()
 
         def delete_device():
             close_old_connections()
@@ -1953,7 +1953,7 @@ class SlackDmDeliveryLeaseTransactionTests(TransactionTestCase):
                 errors.append(exc)
             finally:
                 delete_returned.set()
-                close_old_connections()
+                connection.close()
 
         delivery_thread = threading.Thread(target=drain_delivery)
         delivery_thread.start()

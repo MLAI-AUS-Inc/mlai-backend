@@ -1747,7 +1747,7 @@ class StartupUpdateSlackLineagePostgresTests(TransactionTestCase):
         except Exception as exc:  # pragma: no cover - asserted by caller
             errors.append(exc)
         finally:
-            close_old_connections()
+            connection.close()
             done.set()
 
     def test_delete_first_rejects_queued_downstream_draft_result(self):

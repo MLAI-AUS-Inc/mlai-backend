@@ -240,7 +240,7 @@ class SlackDmIoAuthorityTransactionTests(
             except BaseException as exc:
                 errors.append(exc)
             finally:
-                close_old_connections()
+                connection.close()
 
         with patch.object(
             slack_dm_mirror,
@@ -313,7 +313,7 @@ class SlackDmIoAuthorityTransactionTests(
             except BaseException as exc:
                 errors.append(exc)
             finally:
-                close_old_connections()
+                connection.close()
 
         def revoke():
             close_old_connections()
@@ -327,7 +327,7 @@ class SlackDmIoAuthorityTransactionTests(
                 errors.append(exc)
             finally:
                 revoke_returned.set()
-                close_old_connections()
+                connection.close()
 
         scan_thread = threading.Thread(target=scan_history)
         scan_thread.start()
@@ -406,7 +406,7 @@ class SlackDmIoAuthorityTransactionTests(
             except BaseException as exc:
                 errors.append(exc)
             finally:
-                close_old_connections()
+                connection.close()
 
         def revoke():
             close_old_connections()
@@ -420,7 +420,7 @@ class SlackDmIoAuthorityTransactionTests(
                 errors.append(exc)
             finally:
                 revoke_returned.set()
-                close_old_connections()
+                connection.close()
 
         start_thread = threading.Thread(target=start_dm)
         start_thread.start()
