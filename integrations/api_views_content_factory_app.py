@@ -616,7 +616,11 @@ class ContentFactoryAppDiscoveryView(APIView):
             "user_avatar_url": request.user.avatar_url,
         }
         try:
-            result = trigger_article_generation(actor_id, article_request)
+            result = trigger_article_generation(
+                actor_id,
+                article_request,
+                billing_user=request.user,
+            )
             return Response(result, status=status.HTTP_202_ACCEPTED)
         except ContentFactoryBackendUnavailableError as exc:
             return Response(exc.payload, status=status.HTTP_503_SERVICE_UNAVAILABLE)
@@ -665,6 +669,7 @@ class ContentFactoryAppArticleView(APIView):
                     delivery_mode=delivery_mode,
                     delivery_mode_confirmed=True,
                     request_source=CONTENT_FACTORY_REQUEST_SOURCE,
+                    billing_user=request.user,
                 )
             else:
                 article_request = {
@@ -684,7 +689,11 @@ class ContentFactoryAppArticleView(APIView):
                     "user_last_name": request.user.last_name,
                     "user_avatar_url": request.user.avatar_url,
                 }
-                result = trigger_article_generation(actor_id, article_request)
+                result = trigger_article_generation(
+                    actor_id,
+                    article_request,
+                    billing_user=request.user,
+                )
             return Response(result, status=status.HTTP_202_ACCEPTED)
         except ContentFactoryBackendUnavailableError as exc:
             return Response(exc.payload, status=status.HTTP_503_SERVICE_UNAVAILABLE)

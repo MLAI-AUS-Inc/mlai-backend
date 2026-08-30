@@ -4,6 +4,30 @@ from django.db import migrations
 
 
 LEGACY_ACTOR_PATTERN = re.compile(r"web_([1-9][0-9]*)\Z")
+ACTOR_JSON_FIELDS = {
+    "actor_id",
+    "connected_slack_user_id",
+    "requested_by_slack_user_id",
+    "slack_user_id",
+}
+INTEGRATION_STATE_FIELDS = (
+    "github_access_token",
+    "github_refresh_token",
+    "github_token_expires_at",
+    "github_user_name",
+    "github_repo",
+    "github_scopes",
+    "github_installation_id",
+    "project_scanned",
+    "last_scanned_sha",
+    "last_scanned_at",
+    "pending_intent",
+)
+CREDENTIAL_AUTHORITY_FIELDS = (
+    "github_access_token",
+    "github_refresh_token",
+    "github_installation_id",
+)
 
 
 def _canonical_actor_id(value, valid_user_ids):
@@ -19,53 +43,56 @@ def _canonical_actor_id(value, valid_user_ids):
 
 
 def _replace_actor_ids(value, valid_user_ids):
-    if isinstance(value, str):
-        return _canonical_actor_id(value, valid_user_ids)
     if isinstance(value, list):
         return [_replace_actor_ids(item, valid_user_ids) for item in value]
     if isinstance(value, dict):
         return {
-            key: _replace_actor_ids(item, valid_user_ids)
+            key: (
+                _canonical_actor_id(item, valid_user_ids)
+                if key in ACTOR_JSON_FIELDS
+                else _replace_actor_ids(item, valid_user_ids)
+            )
             for key, item in value.items()
         }
     return value
 
 
 def _is_blank(value):
-    return value is None or value == "" or value == [] or value == {}
+    return value is None or value is False or value == "" or value == [] or value == {}
 
 
-def _copy_missing_user_integration_fields(UserIntegration, legacy, canonical):
-    updates = {}
-    fallback_fields = (
-        "github_access_token",
-        "github_refresh_token",
-        "github_token_expires_at",
-        "github_user_name",
-        "github_repo",
-        "github_scopes",
-        "github_installation_id",
-        "last_scanned_sha",
-        "pending_intent",
+def _copy_legacy_integration_bundle_when_safe(
+    UserIntegration,
+    legacy,
+    canonical,
+):
+    # Tokens, refresh tokens, expiry, scopes, installation and repository form
+    # one authorization bundle. Never fill them field-by-field across two rows:
+    # they may represent different GitHub grants or accounts. Only copy the
+    # complete legacy state when the canonical row has no credential authority
+    # of its own. Non-authoritative canonical metadata is replaced as part of
+    # that one bundle instead of being combined with the legacy grant.
+    canonical_has_credentials = any(
+        not _is_blank(getattr(canonical, field_name))
+        for field_name in CREDENTIAL_AUTHORITY_FIELDS
     )
-    for field_name in fallback_fields:
-        current_value = getattr(canonical, field_name)
-        legacy_value = getattr(legacy, field_name)
-        if _is_blank(current_value) and not _is_blank(legacy_value):
-            updates[field_name] = legacy_value
-
-    if legacy.project_scanned and not canonical.project_scanned:
-        updates["project_scanned"] = True
-    if legacy.last_scanned_at and (
-        not canonical.last_scanned_at
-        or legacy.last_scanned_at > canonical.last_scanned_at
+    legacy_has_credentials = any(
+        not _is_blank(getattr(legacy, field_name))
+        for field_name in CREDENTIAL_AUTHORITY_FIELDS
+    )
+    canonical_is_blank = all(
+        _is_blank(getattr(canonical, field_name))
+        for field_name in INTEGRATION_STATE_FIELDS
+    )
+    if canonical_has_credentials or not (
+        legacy_has_credentials or canonical_is_blank
     ):
-        updates["last_scanned_at"] = legacy.last_scanned_at
-        if legacy.last_scanned_sha:
-            updates["last_scanned_sha"] = legacy.last_scanned_sha
-
-    if updates:
-        UserIntegration.objects.filter(pk=canonical.pk).update(**updates)
+        return
+    updates = {
+        field_name: getattr(legacy, field_name)
+        for field_name in INTEGRATION_STATE_FIELDS
+    }
+    UserIntegration.objects.filter(pk=canonical.pk).update(**updates)
 
 
 def canonicalize_legacy_actor_ids(apps, schema_editor):
@@ -135,10 +162,10 @@ def canonicalize_legacy_actor_ids(apps, schema_editor):
                 slack_user_id=canonical_id
             )
             continue
-        # Both rows may carry different live credentials. Fill gaps in the
-        # canonical row, but retain the legacy alias rather than guessing which
-        # non-empty credential set is authoritative.
-        _copy_missing_user_integration_fields(
+        # Both rows may carry different live credentials. Keep each non-empty
+        # bundle intact. An uncredentialed canonical row may adopt the complete
+        # legacy bundle, replacing its metadata rather than mixing grants.
+        _copy_legacy_integration_bundle_when_safe(
             UserIntegration,
             legacy,
             canonical,

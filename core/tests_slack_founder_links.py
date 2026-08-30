@@ -377,7 +377,11 @@ class SlackFounderActorReferenceMigrationTests(TransactionTestCase):
             domain=organization.domain,
             request_meta={
                 "requested_by_slack_user_id": self.legacy_actor_id,
-                "nested": {"actors": [self.legacy_actor_id]},
+                "topic": self.legacy_actor_id,
+                "nested": {
+                    "actor_id": self.legacy_actor_id,
+                    "actors": [self.legacy_actor_id],
+                },
             },
         )
         self.job_pk = job.pk
@@ -414,11 +418,32 @@ class SlackFounderActorReferenceMigrationTests(TransactionTestCase):
         self.collision_actor_id = f"mlai_user:{collision_user.pk}"
         OldUserIntegration.objects.create(
             slack_user_id=self.collision_actor_id,
+            github_access_token="canonical-access-token",
             github_user_name="canonical-owner",
         )
         OldUserIntegration.objects.create(
             slack_user_id=self.collision_legacy_actor_id,
+            github_access_token="legacy-access-token",
+            github_refresh_token="legacy-refresh-token",
             github_repo="legacy-owner/collision-repository",
+            project_scanned=True,
+        )
+
+        blank_collision_user = OldUser.objects.create(
+            email="blank-collision@example.com"
+        )
+        self.blank_collision_legacy_actor_id = f"web_{blank_collision_user.pk}"
+        self.blank_collision_actor_id = f"mlai_user:{blank_collision_user.pk}"
+        OldUserIntegration.objects.create(
+            slack_user_id=self.blank_collision_actor_id,
+            github_user_name="stale-canonical-metadata",
+        )
+        OldUserIntegration.objects.create(
+            slack_user_id=self.blank_collision_legacy_actor_id,
+            github_access_token="blank-legacy-access-token",
+            github_refresh_token="blank-legacy-refresh-token",
+            github_user_name="blank-legacy-owner",
+            github_repo="legacy-owner/blank-collision-repository",
             project_scanned=True,
         )
 
@@ -459,8 +484,13 @@ class SlackFounderActorReferenceMigrationTests(TransactionTestCase):
             self.canonical_actor_id,
         )
         self.assertEqual(
+            job.request_meta["nested"]["actor_id"],
+            self.canonical_actor_id,
+        )
+        self.assertEqual(job.request_meta["topic"], self.legacy_actor_id)
+        self.assertEqual(
             job.request_meta["nested"]["actors"],
-            [self.canonical_actor_id],
+            [self.legacy_actor_id],
         )
         self.assertEqual(dispatch.slack_user_id, self.canonical_actor_id)
         self.assertEqual(run.slack_user_id, self.canonical_actor_id)
@@ -511,12 +541,14 @@ class SlackFounderActorReferenceMigrationTests(TransactionTestCase):
             "web_999999999",
         )
         canonical = MigratedUserIntegration.objects.get(pk=self.collision_actor_id)
-        self.assertEqual(canonical.github_user_name, "canonical-owner")
         self.assertEqual(
-            canonical.github_repo,
-            "legacy-owner/collision-repository",
+            canonical.github_access_token,
+            "canonical-access-token",
         )
-        self.assertTrue(canonical.project_scanned)
+        self.assertFalse(canonical.github_refresh_token)
+        self.assertEqual(canonical.github_user_name, "canonical-owner")
+        self.assertFalse(canonical.github_repo)
+        self.assertFalse(canonical.project_scanned)
         self.assertTrue(
             MigratedUserIntegration.objects.filter(
                 pk=self.collision_legacy_actor_id
@@ -525,9 +557,42 @@ class SlackFounderActorReferenceMigrationTests(TransactionTestCase):
         legacy = MigratedUserIntegration.objects.get(
             pk=self.collision_legacy_actor_id
         )
+        self.assertEqual(legacy.github_access_token, "legacy-access-token")
+        self.assertEqual(legacy.github_refresh_token, "legacy-refresh-token")
         self.assertEqual(
             legacy.github_repo,
             "legacy-owner/collision-repository",
+        )
+        copied = MigratedUserIntegration.objects.get(
+            pk=self.blank_collision_actor_id
+        )
+        self.assertEqual(
+            copied.github_access_token,
+            "blank-legacy-access-token",
+        )
+        self.assertEqual(
+            copied.github_refresh_token,
+            "blank-legacy-refresh-token",
+        )
+        self.assertEqual(copied.github_user_name, "blank-legacy-owner")
+        self.assertEqual(
+            copied.github_repo,
+            "legacy-owner/blank-collision-repository",
+        )
+        self.assertTrue(copied.project_scanned)
+        self.assertTrue(
+            MigratedUserIntegration.objects.filter(
+                pk=self.blank_collision_legacy_actor_id
+            ).exists()
+        )
+
+        from integrations.services.article_generation import (
+            _get_content_factory_user_for_job,
+        )
+
+        self.assertEqual(
+            _get_content_factory_user_for_job(job).pk,
+            self.user_pk,
         )
 
 
@@ -1786,6 +1851,152 @@ class SlackFounderLinkApiTests(APITestCase):
         self.assertEqual(actor_id, f"mlai_user:{self.founder_user.pk}")
         self.founder_user.refresh_from_db()
         self.assertEqual(self.founder_user.slack_id, "UFOUNDER123")
+
+    def test_content_factory_internal_actor_resolves_without_slack_registration(self):
+        from integrations.services.article_generation import (
+            _ensure_content_factory_user,
+        )
+        from roo.models import PointsAccount
+
+        actor_id = f"mlai_user:{self.founder_user.pk}"
+        original_user_count = User.objects.count()
+
+        resolved_user = _ensure_content_factory_user(
+            actor_id,
+            {
+                "requested_by_slack_user_id": actor_id,
+                "user_email": self.founder_user.email,
+            },
+        )
+
+        self.assertEqual(resolved_user.pk, self.founder_user.pk)
+        self.founder_user.refresh_from_db()
+        self.assertIsNone(self.founder_user.slack_id)
+        self.assertEqual(User.objects.count(), original_user_count)
+        self.assertTrue(PointsAccount.objects.filter(user=self.founder_user).exists())
+
+    @patch("integrations.services.article_generation._charge_content_factory_user")
+    def test_authenticated_content_factory_actor_charges_existing_user(
+        self,
+        mock_charge,
+    ):
+        from integrations.services.article_generation import (
+            _charge_content_factory_request,
+        )
+
+        self.founder_user.slack_id = "UFOUNDER123"
+        self.founder_user.save(update_fields=["slack_id"])
+        actor_id = f"mlai_user:{self.founder_user.pk}"
+        mock_charge.return_value = (self.founder_user, None, 0)
+
+        _charge_content_factory_request(
+            actor_id,
+            {
+                "requested_by_slack_user_id": actor_id,
+                "client_request_id": "authenticated-founder-request",
+            },
+            "founder.example",
+            billing_user=self.founder_user,
+        )
+
+        self.assertEqual(
+            mock_charge.call_args.kwargs["user"].pk,
+            self.founder_user.pk,
+        )
+        self.founder_user.refresh_from_db()
+        self.assertEqual(self.founder_user.slack_id, "UFOUNDER123")
+        self.assertFalse(User.objects.filter(slack_id=actor_id).exists())
+
+    @patch("integrations.api_views_content_factory_app._assert_domain_access")
+    @patch("integrations.api_views_content_factory_app.trigger_article_generation")
+    def test_content_factory_discovery_binds_authenticated_billing_user(
+        self,
+        mock_trigger,
+        mock_access,
+    ):
+        mock_access.return_value = (None, "founder.example")
+        mock_trigger.return_value = {
+            "job_id": "authenticated-founder-job",
+            "status": "queued",
+        }
+        self.client.force_authenticate(self.founder_user)
+
+        response = self.client.post(
+            reverse("content_factory_app_discovery_slash"),
+            {"domain": "founder.example"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
+        self.assertEqual(
+            mock_trigger.call_args.kwargs["billing_user"].pk,
+            self.founder_user.pk,
+        )
+        actor_id, article_request = mock_trigger.call_args.args
+        self.assertEqual(actor_id, f"mlai_user:{self.founder_user.pk}")
+        self.assertEqual(
+            article_request["requested_by_slack_user_id"],
+            actor_id,
+        )
+
+    @patch("integrations.api_views_content_factory_app._assert_domain_access")
+    @patch("integrations.api_views_content_factory_app.trigger_article_generation")
+    def test_content_factory_direct_article_binds_authenticated_billing_user(
+        self,
+        mock_trigger,
+        mock_access,
+    ):
+        mock_access.return_value = (None, "founder.example")
+        mock_trigger.return_value = {
+            "job_id": "authenticated-founder-article",
+            "status": "queued",
+        }
+        self.client.force_authenticate(self.founder_user)
+
+        response = self.client.post(
+            reverse("content_factory_app_article_slash"),
+            {
+                "domain": "founder.example",
+                "target_keyword": "founder identity",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
+        self.assertEqual(
+            mock_trigger.call_args.kwargs["billing_user"].pk,
+            self.founder_user.pk,
+        )
+
+    @patch("integrations.api_views_content_factory_app._assert_domain_access")
+    @patch("integrations.api_views_content_factory_app.confirm_topic")
+    def test_content_factory_confirmed_article_binds_authenticated_billing_user(
+        self,
+        mock_confirm,
+        mock_access,
+    ):
+        mock_access.return_value = (None, "founder.example")
+        mock_confirm.return_value = {
+            "job_id": "authenticated-founder-confirmed-article",
+            "status": "queued",
+        }
+        self.client.force_authenticate(self.founder_user)
+
+        response = self.client.post(
+            reverse("content_factory_app_article_slash"),
+            {
+                "domain": "founder.example",
+                "target_keyword": "founder identity",
+                "source_run_id": "source-run-1",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
+        self.assertEqual(
+            mock_confirm.call_args.kwargs["billing_user"].pk,
+            self.founder_user.pk,
+        )
 
     def test_content_factory_access_accepts_all_actor_id_generations(self):
         from content_factory.models import OrganizationContentConfig
