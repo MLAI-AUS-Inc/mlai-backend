@@ -31,12 +31,13 @@ from integrations.models import (
 from integrations.services.slack_dm_registration_ledger import (
     REGISTRATION_STATE_CLEANED,
     REGISTRATION_STATE_PREFIX,
+    ensure_current_registration_row_locked,
     mark_registration_cleanup_pending_locked,
-    prepare_conversation_registration_cleanup_locked,
     registration_channel_id,
     registration_request,
     registration_rows_for_grant,
     registration_state,
+    update_registration_cleanup_summary_from_locked_rows,
 )
 
 HISTORY_STATE_PREFIX = "history-state:"
@@ -263,9 +264,12 @@ def revoke_device_authority(
                 )
             )
 
+        registration_rows_by_grant: dict[int, list[SlackDmMirrorDelivery]] = {}
         registration_rows_by_conversation: dict[int, list[SlackDmMirrorDelivery]] = {}
         for grant in grants:
-            for row in registration_rows_for_grant(grant.pk, for_update=True):
+            rows = list(registration_rows_for_grant(grant.pk, for_update=True))
+            registration_rows_by_grant[grant.pk] = rows
+            for row in rows:
                 registration_rows_by_conversation.setdefault(
                     row.conversation_id,
                     [],
@@ -308,15 +312,24 @@ def revoke_device_authority(
         for conversation in affected_conversations:
             grant = grant_by_id[conversation.grant_id]
             conversation.grant = grant
-            prepare_conversation_registration_cleanup_locked(
-                grant,
-                conversation,
-                reason="MLAI Chat device participant was revoked",
+            conversation_rows = registration_rows_by_conversation.setdefault(
+                conversation.pk,
+                [],
             )
+            current_row = ensure_current_registration_row_locked(
+                conversation,
+                grant,
+                locked_rows=conversation_rows,
+            )
+            if current_row is not None and all(
+                row.pk != current_row.pk for row in conversation_rows
+            ):
+                conversation_rows.append(current_row)
+                registration_rows_by_grant.setdefault(grant.pk, []).append(current_row)
             # Registration I/O shares these locks, but a timed-out request can
             # still be executing server-side. Fence every row now while the
             # ledger helper preserves any conservative ambiguity lease.
-            for row in registration_rows_by_conversation.get(conversation.pk, []):
+            for row in conversation_rows:
                 if registration_state(row) == REGISTRATION_STATE_CLEANED:
                     continue
                 mark_registration_cleanup_pending_locked(
@@ -351,6 +364,10 @@ def revoke_device_authority(
 
         for grant_id in touched_grants:
             grant = grant_by_id[grant_id]
+            update_registration_cleanup_summary_from_locked_rows(
+                grant,
+                registration_rows_by_grant.get(grant_id, []),
+            )
             if grant.status == SlackDmMirrorGrantStatus.ACTIVE:
                 grant.last_discovery_at = None
                 grant.save(update_fields=("last_discovery_at", "updated_at"))
