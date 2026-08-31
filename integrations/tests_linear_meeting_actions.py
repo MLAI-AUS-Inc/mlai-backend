@@ -2,8 +2,15 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+from django.core.cache import cache
 from django.test import SimpleTestCase, TestCase, override_settings
 from rest_framework.test import APIClient
+from rest_framework.throttling import ScopedRateThrottle
+
+from integrations.api_views_connectors import (
+    LinearChannelIssueDetailView,
+    LinearChannelIssueListView,
+)
 
 
 class FakeLinearResponse:
@@ -56,6 +63,59 @@ class LinearMeetingActionsApiTests(SimpleTestCase):
         )
 
         self.assertEqual(response.status_code, 401)
+
+    def test_channel_issue_views_use_separate_scoped_throttles(self):
+        self.assertEqual(LinearChannelIssueListView.throttle_classes, [ScopedRateThrottle])
+        self.assertEqual(
+            LinearChannelIssueListView.throttle_scope,
+            "linear_channel_issue_list",
+        )
+        self.assertEqual(LinearChannelIssueDetailView.throttle_classes, [ScopedRateThrottle])
+        self.assertEqual(
+            LinearChannelIssueDetailView.throttle_scope,
+            "linear_channel_issue_detail",
+        )
+
+    @override_settings(
+        REST_FRAMEWORK={
+            "DEFAULT_AUTHENTICATION_CLASSES": [],
+            "DEFAULT_THROTTLE_RATES": {
+                "linear_channel_issue_list": "1/minute",
+                "linear_channel_issue_detail": "1/minute",
+            },
+        }
+    )
+    @patch(
+        "integrations.api_views_connectors.list_linear_channel_issues",
+        return_value={"list": {}, "issues": [], "pageInfo": {}},
+    )
+    def test_channel_issue_list_is_throttled(self, mock_list):
+        cache.clear()
+        self.addCleanup(cache.clear)
+        request = {
+            "slack_workspace_id": "TMLAI",
+            "slack_channel_id": "CTECH",
+            "requester_slack_id": "U123",
+        }
+
+        first = self.client.post(
+            "/api/v1/integrations/linear/channel-issues/list",
+            request,
+            format="json",
+            REMOTE_ADDR="192.0.2.10",
+            **self.auth_headers,
+        )
+        second = self.client.post(
+            "/api/v1/integrations/linear/channel-issues/list",
+            request,
+            format="json",
+            REMOTE_ADDR="192.0.2.10",
+            **self.auth_headers,
+        )
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 429)
+        self.assertEqual(mock_list.call_count, 1)
 
     @patch("integrations.services.linear_meeting_actions.http_requests.post")
     def test_channel_issue_list_uses_bound_team_and_state(self, mock_post):

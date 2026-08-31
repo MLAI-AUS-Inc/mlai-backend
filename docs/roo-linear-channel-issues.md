@@ -21,6 +21,8 @@ channel binding below:
 LINEAR_API_KEY=lin_api_replace_locally
 LINEAR_CHANNEL_ISSUE_BINDINGS_JSON={"T05N9C1QSJC:C0BRM181EDV":{"display_name":"MLAI_TECH · Todo","team_name":"MLAI_TECH","state_name":"Todo","linear_team_id":"def24f5e-2990-4e28-9e06-e89db4a09f9f","linear_state_id":"f3591a1e-f7a2-4514-9280-000d43ea60e5"}}
 LINEAR_CHANNEL_ISSUE_MAX_COMMENTS=250
+LINEAR_CHANNEL_ISSUE_LIST_RATE=60/minute
+LINEAR_CHANNEL_ISSUE_DETAIL_RATE=20/minute
 ```
 
 Production `#tech_volunteers` must be configured as a separate
@@ -81,13 +83,18 @@ returned by Linear.
 }
 ```
 
-The backend fetches the issue first and verifies its team before requesting
-comments. A request from an unbound Slack channel, or for an issue on another
-team, returns `403 linear_channel_issue_access_denied`.
+The backend fetches the issue first and verifies both its team and workflow
+state before requesting comments. A request from an unbound Slack channel, or
+for an issue outside the channel's configured team or state, returns
+`403 linear_channel_issue_access_denied`. An issue that moves out of the
+configured `Todo` state is therefore no longer readable from that channel.
 
 Comment retrieval is paginated and bounded by
 `LINEAR_CHANNEL_ISSUE_MAX_COMMENTS`. The response says when comments,
 attachments, or relations were truncated so Roo can direct the user to Linear.
+Requests are additionally protected by separate Redis-backed scoped throttles:
+`LINEAR_CHANNEL_ISSUE_LIST_RATE` for list calls and
+`LINEAR_CHANNEL_ISSUE_DETAIL_RATE` for the more expensive detail calls.
 
 ## Slack behavior
 

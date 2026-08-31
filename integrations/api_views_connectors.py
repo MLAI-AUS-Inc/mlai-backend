@@ -4,6 +4,7 @@ import requests
 from django.db import DatabaseError
 from rest_framework import permissions, status
 from rest_framework.response import Response
+from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
 from core.permissions import HasRooApiKey
@@ -781,6 +782,8 @@ class LinearMeetingContextView(APIView):
 
 class LinearChannelIssueListView(APIView):
     permission_classes = [HasRooApiKey]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "linear_channel_issue_list"
 
     def post(self, request):
         try:
@@ -798,6 +801,8 @@ class LinearChannelIssueListView(APIView):
 
 class LinearChannelIssueDetailView(APIView):
     permission_classes = [HasRooApiKey]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "linear_channel_issue_detail"
 
     def post(self, request):
         try:

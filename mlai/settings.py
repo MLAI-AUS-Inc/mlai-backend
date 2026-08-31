@@ -459,6 +459,8 @@ REST_FRAMEWORK = {
         'watt_unity_ticket_redeem': os.getenv('WATT_UNITY_TICKET_REDEEM_RATE', '60/minute'),
         'public_knowledge': os.getenv('ORG_MEMORY_PUBLIC_RATE', '60/minute'),
         'org_memory_actions': os.getenv('ORG_MEMORY_ACTION_RATE', '30/minute'),
+        'linear_channel_issue_list': os.getenv('LINEAR_CHANNEL_ISSUE_LIST_RATE', '60/minute'),
+        'linear_channel_issue_detail': os.getenv('LINEAR_CHANNEL_ISSUE_DETAIL_RATE', '20/minute'),
         # Unauthenticated auth entry points (core.throttles). Bound
         # credential-enumeration and magic-link email spam. Disabled under the
         # test runner so suites that issue many auth calls in a loop aren't

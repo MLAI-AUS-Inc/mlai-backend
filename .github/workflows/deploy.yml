@@ -153,6 +153,7 @@ jobs:
           tests.test_drive_transcript_inventory \
           tests.test_validate_prod_urls \
           tests.test_deploy_command_wiring \
+          tests.test_linear_deployment_wiring \
           tests.test_health_check \
           tests.test_content_factory_org_config \
           tests.test_new_endpoints.EndpointTests \
@@ -182,6 +183,7 @@ jobs:
           integrations.tests_xero_reconciliation \
           integrations.tests_smart_scan \
           integrations.tests_http_client \
+          integrations.tests_linear_meeting_actions \
           tests.test_teardown_company \
           tests.test_editorial_learning_loop \
           startup_updates.tests_monthly_update_reminders \
