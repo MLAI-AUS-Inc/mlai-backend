@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 from django.contrib.auth import get_user_model
 from django.db import close_old_connections, connection, transaction
 from django.test import TransactionTestCase, override_settings
+from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 from django.utils import timezone
 from rest_framework.test import APIClient, APITestCase
@@ -1506,6 +1507,81 @@ class SlackDmRegistrationLedgerTests(APITestCase):
                 attempt.pk,
                 channel_id=str(uuid.uuid4()),
             )
+        )
+
+    def test_device_authority_revoke_reuses_locked_registration_snapshot(self):
+        from community_chat.device_revocation import revoke_device_authority
+
+        self._make_live_without_adapter()
+        for index in range(1, 25):
+            shadow_key = hashlib.sha256(f"shadow-{index}".encode()).hexdigest()
+            pubkeys = sorted([self.owner_key, shadow_key])
+            SlackDmMirrorConversation.objects.create(
+                grant=self.grant,
+                slack_workspace_id="TLEDGER",
+                slack_conversation_id=f"DLEDGER{index}",
+                participant_slack_ids=["UOWNER", f"UOTHER{index}"],
+                participant_buzz_pubkeys=pubkeys,
+                participant_identity_map={
+                    "UOWNER": self.owner_key,
+                    f"UOTHER{index}": shadow_key,
+                },
+                participant_hash=hashlib.sha256(
+                    b"".join(bytes.fromhex(value) for value in pubkeys)
+                ).hexdigest(),
+                mlai_channel_id=uuid.uuid4(),
+                status=SlackDmMirrorConversationStatus.LIVE,
+            )
+        with transaction.atomic():
+            grant = SlackDmMirrorGrant.objects.select_for_update().get(pk=self.grant.pk)
+            conversations = list(
+                SlackDmMirrorConversation.objects.select_for_update()
+                .filter(grant=grant)
+                .order_by("id")
+            )
+            for conversation in conversations:
+                conversation.grant = grant
+                registration_ledger.ensure_current_registration_row_locked(
+                    conversation,
+                    grant,
+                )
+
+        device = CommunityChatDevice.objects.get(
+            user=self.user,
+            public_key=self.owner_key,
+        )
+        with CaptureQueriesContext(connection) as captured:
+            revoked = revoke_device_authority(
+                self.user,
+                device_id=device.pk,
+                public_key=self.owner_key,
+                reason="rotated browser identity",
+            )
+
+        self.assertIsNotNone(revoked)
+        registration_selects = [
+            query["sql"]
+            for query in captured.captured_queries
+            if query["sql"].lstrip().upper().startswith("SELECT")
+            and SlackDmMirrorDelivery._meta.db_table in query["sql"]
+            and registration_ledger.REGISTRATION_STATE_PREFIX in query["sql"]
+        ]
+        self.assertLessEqual(len(registration_selects), 2)
+        self.assertEqual(
+            {
+                registration_ledger.registration_state(row)
+                for row in SlackDmMirrorDelivery.objects.filter(
+                    source_message_id__startswith=(
+                        registration_ledger.REGISTRATION_STATE_PREFIX
+                    )
+                )
+            },
+            {registration_ledger.REGISTRATION_STATE_CLEANUP_PENDING},
+        )
+        self.grant.refresh_from_db()
+        self.assertEqual(
+            self.grant.last_error,
+            registration_ledger.PRIVATE_REGISTRATION_REVOCATION_PENDING,
         )
 
     def test_device_revoke_finds_old_registration_after_participant_replacement(self):

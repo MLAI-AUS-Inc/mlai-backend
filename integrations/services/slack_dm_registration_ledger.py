@@ -186,22 +186,32 @@ def create_registration_row_locked(
 def ensure_current_registration_row_locked(
     conversation: SlackDmMirrorConversation,
     grant: SlackDmMirrorGrant,
+    *,
+    locked_rows: list[SlackDmMirrorDelivery] | None = None,
 ) -> SlackDmMirrorDelivery | None:
-    """Backfill a durable active row for a pre-ledger/current channel."""
+    """Backfill a durable active row for a pre-ledger/current channel.
+
+    ``locked_rows`` lets callers that already hold every registration row for
+    this conversation reuse that snapshot. Device revocation processes every
+    mirrored conversation for an installation, so re-querying the same grant
+    once per conversation turns key rotation into quadratic work.
+    """
 
     channel_id = str(conversation.mlai_channel_id or "").strip()
     if not channel_id:
         return None
-    rows = list(
-        SlackDmMirrorDelivery.objects.select_for_update()
-        .filter(
-            conversation=conversation,
-            source_platform=CommunityBridgePlatform.BUZZ,
-            source_message_id__startswith=REGISTRATION_STATE_PREFIX,
-            operation=CommunityBridgeDeliveryType.CREATE,
+    rows = locked_rows
+    if rows is None:
+        rows = list(
+            SlackDmMirrorDelivery.objects.select_for_update()
+            .filter(
+                conversation=conversation,
+                source_platform=CommunityBridgePlatform.BUZZ,
+                source_message_id__startswith=REGISTRATION_STATE_PREFIX,
+                operation=CommunityBridgeDeliveryType.CREATE,
+            )
+            .order_by("id")
         )
-        .order_by("id")
-    )
     existing = next(
         (
             row
@@ -360,7 +370,24 @@ def registration_cleanup_pending_locked(
 
 
 def update_registration_cleanup_summary_locked(grant: SlackDmMirrorGrant) -> None:
-    pending = registration_cleanup_pending_locked(grant.pk)
+    rows = list(registration_rows_for_grant(grant.pk, for_update=True))
+    update_registration_cleanup_summary_from_locked_rows(grant, rows)
+
+
+def update_registration_cleanup_summary_from_locked_rows(
+    grant: SlackDmMirrorGrant,
+    rows: list[SlackDmMirrorDelivery],
+) -> None:
+    """Update one grant from registration rows already locked by the caller."""
+
+    pending = any(
+        registration_state(row)
+        in {
+            REGISTRATION_STATE_CLEANUP_PENDING,
+            REGISTRATION_STATE_CLEANUP_PROCESSING,
+        }
+        for row in rows
+    )
     next_error = PRIVATE_REGISTRATION_REVOCATION_PENDING if pending else ""
     if pending or grant.last_error == PRIVATE_REGISTRATION_REVOCATION_PENDING:
         grant.last_error = next_error
