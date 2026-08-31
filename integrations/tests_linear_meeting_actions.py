@@ -76,14 +76,13 @@ class LinearMeetingActionsApiTests(SimpleTestCase):
             "linear_channel_issue_detail",
         )
 
-    @override_settings(
-        REST_FRAMEWORK={
-            "DEFAULT_AUTHENTICATION_CLASSES": [],
-            "DEFAULT_THROTTLE_RATES": {
-                "linear_channel_issue_list": "1/minute",
-                "linear_channel_issue_detail": "1/minute",
-            },
-        }
+    @patch.object(
+        ScopedRateThrottle,
+        "THROTTLE_RATES",
+        {
+            "linear_channel_issue_list": "1/minute",
+            "linear_channel_issue_detail": "1/minute",
+        },
     )
     @patch(
         "integrations.api_views_connectors.list_linear_channel_issues",
