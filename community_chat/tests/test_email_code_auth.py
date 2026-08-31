@@ -13,6 +13,7 @@ from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
 
+from community_chat import views as community_chat_views
 from community_chat.account_sessions import issue_account_session
 from community_chat.adapter import MembershipAdapterUnavailable
 from community_chat.email_codes import _locked_email_code_challenges, code_digest
@@ -239,10 +240,26 @@ class CommunityChatEmailCodeAuthTests(APITestCase):
         requested = self.request_code()
         code = self.deliver_code()
 
-        verified = self.verify(requested.data["challenge_id"], code)
+        original_issue = community_chat_views._issue_email_code_bootstrap
+
+        def issue_with_pending_cleanup(*args, **kwargs):
+            raw_token, token, _ = original_issue(*args, **kwargs)
+            return raw_token, token, (123,)
+
+        with (
+            patch(
+                "community_chat.views._issue_email_code_bootstrap",
+                side_effect=issue_with_pending_cleanup,
+            ),
+            patch(
+                "integrations.services.slack_dm_registration_ledger.reconcile_registration_cleanup"
+            ) as reconcile_cleanup,
+        ):
+            verified = self.verify(requested.data["challenge_id"], code)
 
         self.assertEqual(verified.status_code, status.HTTP_200_OK)
         self.assertEqual(verified.data["status"], "authenticated")
+        reconcile_cleanup.assert_not_called()
         mock_revoke.assert_called_once_with(old_public_key)
         old_device.refresh_from_db()
         self.assertEqual(old_device.status, DeviceBindingStatus.REVOKED)
