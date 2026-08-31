@@ -356,22 +356,23 @@ def registration_cleanup_pending_locked(
     *,
     conversation_id: int | None = None,
 ) -> bool:
-    rows = registration_rows_for_grant(grant_id, for_update=True)
+    rows = registration_rows_for_grant(grant_id, for_update=True).filter(
+        status__in=(
+            CommunityBridgeDeliveryStatus.PENDING,
+            CommunityBridgeDeliveryStatus.PROCESSING,
+        )
+    )
     if conversation_id is not None:
         rows = rows.filter(conversation_id=conversation_id)
-    return any(
-        registration_state(row)
-        in {
-            REGISTRATION_STATE_CLEANUP_PENDING,
-            REGISTRATION_STATE_CLEANUP_PROCESSING,
-        }
-        for row in rows
-    )
+    return rows.exists()
 
 
 def update_registration_cleanup_summary_locked(grant: SlackDmMirrorGrant) -> None:
-    rows = list(registration_rows_for_grant(grant.pk, for_update=True))
-    update_registration_cleanup_summary_from_locked_rows(grant, rows)
+    pending = registration_cleanup_pending_locked(grant.pk)
+    next_error = PRIVATE_REGISTRATION_REVOCATION_PENDING if pending else ""
+    if pending or grant.last_error == PRIVATE_REGISTRATION_REVOCATION_PENDING:
+        grant.last_error = next_error
+        grant.save(update_fields=("last_error", "updated_at"))
 
 
 def update_registration_cleanup_summary_from_locked_rows(
@@ -542,10 +543,13 @@ def _authoritative_registration_locked(
         (
             row
             for row in reversed(
-                list(registration_rows_for_grant(grant.pk, for_update=True))
+                list(
+                    registration_rows_for_grant(grant.pk, for_update=True).filter(
+                        conversation_id=conversation.pk
+                    )
+                )
             )
-            if row.conversation_id == conversation.pk
-            and registration_state(row) == REGISTRATION_STATE_ACTIVE
+            if registration_state(row) == REGISTRATION_STATE_ACTIVE
             and registration_channel_id(row) == channel_id
             and registration_generation(row) == grant_consent_generation(grant)
             and registration_participant_hash(row) == conversation.participant_hash
@@ -585,9 +589,10 @@ def _registration_cleanup_disposition_locked(
         now = timezone.now()
         colliding_attempts = [
             other
-            for other in registration_rows_for_grant(grant.pk, for_update=True)
-            if other.conversation_id == conversation.pk
-            and other.pk != row.pk
+            for other in registration_rows_for_grant(
+                grant.pk, for_update=True
+            ).filter(conversation_id=conversation.pk)
+            if other.pk != row.pk
             and registration_participant_hash(other) == participant_hash
             and registration_state(other) == REGISTRATION_STATE_PROVISIONING
         ]
@@ -617,9 +622,9 @@ def _mark_channel_registration_cleaned_locked(
     completed_row_id: int,
 ) -> None:
     now = timezone.now()
-    for row in registration_rows_for_grant(grant.pk, for_update=True):
-        if registration_channel_id(row) != channel_id:
-            continue
+    for row in registration_rows_for_grant(grant.pk, for_update=True).filter(
+        metadata__channel_id=channel_id
+    ):
         state = registration_state(row)
         if state == REGISTRATION_STATE_ACTIVE or (
             state == REGISTRATION_STATE_CLEANUP_PROCESSING

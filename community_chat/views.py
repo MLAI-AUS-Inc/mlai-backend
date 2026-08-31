@@ -770,7 +770,6 @@ class EmailCodeVerifyView(APIView):
             data["installation_id"],
         )
         invalid_email_code = False
-        cleanup_grant_ids = ()
         try:
             # Keep code consumption, device recovery, bootstrap creation, and
             # session replacement in one database transaction. Any binding or
@@ -788,9 +787,7 @@ class EmailCodeVerifyView(APIView):
                     # and terminal invalidation remain durable.
                     invalid_email_code = True
                 else:
-                    raw_token, token, cleanup_grant_ids = _issue_email_code_bootstrap(
-                        user, challenge
-                    )
+                    raw_token, token, _ = _issue_email_code_bootstrap(user, challenge)
                     account_session = issue_account_session(user, challenge)
         except _EmailCodeBindingConflict as exc:
             return Response(
@@ -809,15 +806,10 @@ class EmailCodeVerifyView(APIView):
                 {"error": "invalid_or_expired_code"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        from integrations.services.slack_dm_registration_ledger import (
-            reconcile_registration_cleanup,
-        )
-
-        for grant_id in cleanup_grant_ids:
-            reconcile_registration_cleanup(
-                grant_id,
-                raise_on_pending=False,
-            )
+        # Device rotation has already fenced every old Slack registration in
+        # the committed transaction above. Adapter DELETEs are content-free,
+        # durable work drained by the community-bridge maintenance worker.
+        # Never hold the login response open while a large DM archive drains.
         response = Response(
             {
                 "status": "authenticated",
@@ -1361,7 +1353,6 @@ class DeviceAuthExchangeView(APIView):
         request_id = data["request_id"]
         origin = _desktop_auth_origin(request)
         enrollment = _device_auth_enrollment_context(data, origin)
-        cleanup_grant_ids = ()
         auth_request_identity = (
             CommunityChatDeviceAuthRequest.objects.filter(id=request_id)
             .values("user_id")
@@ -1438,7 +1429,7 @@ class DeviceAuthExchangeView(APIView):
                     raise PermissionDenied(DESKTOP_AUTHORIZATION_CODE_INVALID_DETAIL)
                 _require_eligible(locked_user)
 
-                raw_token, token, cleanup_grant_ids = _issue_email_code_bootstrap(
+                raw_token, token, _ = _issue_email_code_bootstrap(
                     locked_user,
                     enrollment,
                 )
@@ -1465,16 +1456,8 @@ class DeviceAuthExchangeView(APIView):
                 {"error": "authorization_not_found"}, status=status.HTTP_404_NOT_FOUND
             )
 
-        from integrations.services.slack_dm_registration_ledger import (
-            reconcile_registration_cleanup,
-        )
-
-        for grant_id in cleanup_grant_ids:
-            reconcile_registration_cleanup(
-                grant_id,
-                raise_on_pending=False,
-            )
-
+        # See EmailCodeVerifyView: authentication succeeds once the privacy
+        # fence is durable; the periodic worker owns adapter cleanup.
         response = Response(
             {
                 "status": "authenticated",
