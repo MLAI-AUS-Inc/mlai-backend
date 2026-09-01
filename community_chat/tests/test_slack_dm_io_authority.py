@@ -207,7 +207,7 @@ class SlackDmIoAuthorityTransactionTests(
         self.fail("disconnect backend never entered a database lock wait")
 
     @patch("integrations.services.slack_dm_mirror.WebClient")
-    def test_full_history_restart_wins_before_old_page_persistence(self, web_client):
+    def test_bounded_restart_wins_before_old_page_persistence(self, web_client):
         persist_started = threading.Event()
         allow_persist = threading.Event()
         scan_results: list[int] = []
@@ -262,7 +262,7 @@ class SlackDmIoAuthorityTransactionTests(
         self.assertEqual(scan_results, [0])
         self.grant.refresh_from_db()
         self.conversation.refresh_from_db()
-        self.assertEqual(self.grant.history_days, 0)
+        self.assertEqual(self.grant.history_days, 30)
         self.assertIsNone(self.conversation.history_backfilled_at)
         self.assertFalse(
             SlackDmMirrorDelivery.objects.filter(

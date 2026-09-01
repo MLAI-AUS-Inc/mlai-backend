@@ -223,8 +223,11 @@ class SlackDmMirrorView(SlackDmMirrorApiView):
             except SlackDmMirrorError as exc:
                 raise ValidationError({"slack": str(exc)}) from exc
         elif action == "backfill_all":
+            # Compatibility for desktop releases that predate the bounded
+            # import contract. The service deliberately treats this as the
+            # same rolling-window rescan as `backfill`.
             try:
-                backfill_grant(grant, full_history=True)
+                backfill_grant(grant)
             except SlackDmMirrorError as exc:
                 raise ValidationError({"slack": str(exc)}) from exc
         else:
