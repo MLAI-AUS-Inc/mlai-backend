@@ -227,6 +227,70 @@ def list_linear_channel_issue_statuses(payload: dict[str, Any]) -> dict[str, Any
     }
 
 
+def create_linear_channel_issue(payload: dict[str, Any]) -> dict[str, Any]:
+    """Create one issue in the Linear team bound to the invoking Slack channel."""
+
+    if not bool(getattr(settings, "LINEAR_CHANNEL_ISSUE_WRITES_ENABLED", False)):
+        raise LinearChannelIssueAccessError("Linear issue editing is currently disabled.")
+    binding = _linear_channel_issue_binding(payload)
+    allowed_keys = {
+        "slack_workspace_id",
+        "slack_channel_id",
+        "requester_slack_id",
+        "request_id",
+        "title",
+        "description",
+        "status",
+        "priority",
+        "estimate",
+        "due_date",
+        "assignee",
+        "labels",
+        "project",
+        "cycle",
+    }
+    unknown_keys = set(payload) - allowed_keys
+    if unknown_keys:
+        raise ValueError(
+            "Unsupported Linear create fields: " + ", ".join(sorted(unknown_keys))
+        )
+    request_id = str(payload.get("request_id") or "").strip()
+    if not request_id:
+        raise ValueError("request_id is required.")
+
+    _required_write_text(payload.get("title"), field="title", maximum=255)
+    receipt_key = _claim_linear_channel_write_request(request_id, binding)
+    try:
+        issue = _run_linear_channel_write_with_receipt(
+            receipt_key,
+            lambda: _create_linear_channel_issue(
+                _linear_channel_issue_create_input(payload, binding)
+            ),
+        )
+    except LinearChannelIssueWriteUncertainError:
+        logger.error(
+            "linear_channel_issue_create_uncertain request_id=%s requester_slack_id=%s "
+            "slack_workspace_id=%s slack_channel_id=%s linear_team_id=%s",
+            request_id[:255],
+            binding["requester_slack_id"][:255],
+            binding["slack_workspace_id"][:255],
+            binding["slack_channel_id"][:255],
+            binding["linear_team_id"][:255],
+        )
+        raise
+    logger.info(
+        "linear_channel_issue_create_completed identifier=%s request_id=%s "
+        "requester_slack_id=%s slack_workspace_id=%s slack_channel_id=%s linear_team_id=%s",
+        issue.get("identifier"),
+        request_id[:255],
+        binding["requester_slack_id"][:255],
+        binding["slack_workspace_id"][:255],
+        binding["slack_channel_id"][:255],
+        binding["linear_team_id"][:255],
+    )
+    return {"operation": "create_issue", "requestId": request_id, "issue": issue}
+
+
 def write_linear_channel_issue(payload: dict[str, Any]) -> dict[str, Any]:
     """Apply one explicit, typed edit to a channel-bound Linear issue."""
 
@@ -511,7 +575,13 @@ def _complete_linear_channel_write_request(receipt_key: str) -> None:
 def _run_linear_channel_write_with_receipt(receipt_key: str, mutation: Any) -> Any:
     try:
         result = mutation()
-    except (LinearMeetingRateLimitError, LinearMeetingGraphQLError):
+    except (
+        LinearChannelIssueAccessError,
+        LinearMeetingConfigurationError,
+        LinearMeetingRateLimitError,
+        LinearMeetingGraphQLError,
+        ValueError,
+    ):
         # These outcomes conclusively say Linear did not accept the mutation,
         # so the same Slack delivery may safely retry after its backoff.
         try:
@@ -663,6 +733,67 @@ def _linear_channel_issue_update_input(
     raise ValueError("Unsupported Linear issue operation.")
 
 
+def _linear_channel_issue_create_input(
+    payload: dict[str, Any], binding: dict[str, str]
+) -> dict[str, Any]:
+    title = _required_write_text(payload.get("title"), field="title", maximum=255)
+    mutation_input: dict[str, Any] = {
+        "teamId": binding["linear_team_id"],
+        "stateId": binding["linear_state_id"],
+        "title": title,
+    }
+    if "description" in payload:
+        mutation_input["description"] = _required_write_text(
+            payload.get("description"), field="description", maximum=10000
+        )
+    optional_operations = {
+        "status": "set_status",
+        "priority": "set_priority",
+        "estimate": "set_estimate",
+        "due_date": "set_due_date",
+        "assignee": "set_assignee",
+        "project": "set_project",
+        "cycle": "set_cycle",
+    }
+    for field, operation in optional_operations.items():
+        if field not in payload:
+            continue
+        update_input = _linear_channel_issue_update_input(
+            issue={}, binding=binding, operation=operation, value=payload[field]
+        )
+        mutation_input.update(update_input)
+
+    if "labels" in payload:
+        raw_labels = payload.get("labels")
+        if isinstance(raw_labels, str):
+            raw_labels = [raw_labels]
+        if not isinstance(raw_labels, list) or not raw_labels or len(raw_labels) > 20:
+            raise ValueError("labels must contain between 1 and 20 label names.")
+        if any(not isinstance(label, str) or not label.strip() for label in raw_labels):
+            raise ValueError("Each label must be non-empty text.")
+        available_labels = list_issue_labels()
+        if any("team" not in label for label in available_labels):
+            raise LinearMeetingConfigurationError(
+                "Linear label team metadata is unavailable, so no issue was created."
+            )
+        scoped_labels = [
+            label
+            for label in available_labels
+            if not label.get("archivedAt")
+            and str((label.get("team") or {}).get("id") or "")
+            in {"", binding["linear_team_id"]}
+        ]
+        label_ids: list[str] = []
+        for value in raw_labels:
+            label_id = str(
+                _resolve_linear_write_target(scoped_labels, value, kind="label")["id"]
+            )
+            if label_id not in label_ids:
+                label_ids.append(label_id)
+        mutation_input["labelIds"] = label_ids
+    return mutation_input
+
+
 def _list_linear_team_cycles(team_id: str) -> list[dict[str, Any]]:
     query = """
     query LinearChannelIssueCycles($teamId: String!, $first: Int!, $after: String) {
@@ -794,6 +925,34 @@ def _create_linear_channel_issue_comment(issue_id: str, body: str) -> dict[str, 
     if not result.get("success") or not isinstance(result.get("comment"), dict):
         raise LinearMeetingGraphQLError("Linear comment creation returned success=false.", operation="LinearChannelIssueComment")
     return {"comment": result["comment"]}
+
+
+def _create_linear_channel_issue(mutation_input: dict[str, Any]) -> dict[str, Any]:
+    query = """
+    mutation LinearChannelIssueCreate($input: IssueCreateInput!) {
+      issueCreate(input: $input) {
+        success
+        issue {
+          id identifier title description url priority priorityLabel estimate dueDate
+          createdAt updatedAt state { id name type } assignee { id name displayName }
+          project { id name } cycle { id name number } labels { nodes { id name } }
+          team { id key name }
+        }
+      }
+    }
+    """
+    data = _graphql_write(
+        query,
+        {"input": mutation_input},
+        operation_name="LinearChannelIssueCreate",
+    )
+    result = data.get("issueCreate") if isinstance(data.get("issueCreate"), dict) else {}
+    if not result.get("success") or not isinstance(result.get("issue"), dict):
+        raise LinearMeetingGraphQLError(
+            "Linear issue creation returned success=false.",
+            operation="LinearChannelIssueCreate",
+        )
+    return result["issue"]
 
 
 def _create_linear_channel_issue_duplicate_relation(issue_id: str, related_issue_id: str) -> dict[str, Any]:
@@ -3551,6 +3710,7 @@ def _graphql_write(
         )
         raise LinearMeetingGraphQLError(message, operation=operation_name)
     mutation_shapes = {
+        "LinearChannelIssueCreate": ("issueCreate", "issue"),
         "LinearChannelIssueUpdate": ("issueUpdate", "issue"),
         "LinearChannelIssueComment": ("commentCreate", "comment"),
         "LinearChannelIssueDuplicate": ("issueRelationCreate", "issueRelation"),

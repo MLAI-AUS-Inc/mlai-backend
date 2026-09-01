@@ -9,6 +9,7 @@ from rest_framework.throttling import ScopedRateThrottle
 
 from integrations.services import linear_meeting_actions as linear_service
 from integrations.api_views_connectors import (
+    LinearChannelIssueCreateView,
     LinearChannelIssueDetailView,
     LinearChannelIssueListView,
     LinearChannelIssueStatusesView,
@@ -82,7 +83,127 @@ class LinearMeetingActionsApiTests(SimpleTestCase):
             "linear_channel_issue_detail",
         )
         self.assertEqual(LinearChannelIssueStatusesView.throttle_scope, "linear_channel_issue_statuses")
+        self.assertEqual(LinearChannelIssueCreateView.throttle_scope, "linear_channel_issue_write")
         self.assertEqual(LinearChannelIssueWriteView.throttle_scope, "linear_channel_issue_write")
+
+    @patch("integrations.services.linear_meeting_actions.http_requests.post")
+    def test_channel_issue_create_forces_bound_team_and_default_status(self, mock_post):
+        mock_post.return_value = FakeLinearResponse({"data": {"issueCreate": {
+            "success": True,
+            "issue": {
+                "id": "issue-30", "identifier": "TECH-30", "title": "Ship alerts",
+                "url": "https://linear.app/issue/TECH-30", "updatedAt": "2026-09-01T02:00:00.000Z",
+                "state": {"id": "state-todo", "name": "Todo"},
+            },
+        }}})
+
+        response = self.client.post(
+            "/api/v1/integrations/linear/channel-issues/create",
+            {
+                "slack_workspace_id": "TMLAI", "slack_channel_id": "CTECH",
+                "requester_slack_id": "U123", "request_id": "Ev-create-123",
+                "title": "Ship alerts", "description": "Add deploy alerts.",
+            },
+            format="json",
+            **self.auth_headers,
+        )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.json()["issue"]["identifier"], "TECH-30")
+        mutation = mock_post.call_args.kwargs["json"]
+        self.assertEqual(mutation["operationName"], "LinearChannelIssueCreate")
+        self.assertEqual(mutation["variables"]["input"], {
+            "teamId": "team-tech", "stateId": "state-todo",
+            "title": "Ship alerts", "description": "Add deploy alerts.",
+        })
+
+    @patch("integrations.services.linear_meeting_actions.http_requests.post")
+    def test_channel_issue_create_resolves_live_status_and_deduplicates_request(self, mock_post):
+        mock_post.side_effect = [
+            FakeLinearResponse({"data": {"team": {"id": "team-tech", "states": {"nodes": [
+                {"id": "state-progress", "name": "In Progress", "type": "started", "position": 2},
+            ]}}}}),
+            FakeLinearResponse({"data": {"issueCreate": {"success": True, "issue": {
+                "id": "issue-31", "identifier": "TECH-31", "title": "Ship alerts",
+                "url": "https://linear.app/issue/TECH-31", "updatedAt": "2026-09-01T02:00:00.000Z",
+                "state": {"id": "state-progress", "name": "In Progress"},
+            }}}}),
+        ]
+        payload = {
+            "slack_workspace_id": "TMLAI", "slack_channel_id": "CTECH",
+            "requester_slack_id": "U123", "request_id": "Ev-create-status",
+            "title": "Ship alerts", "status": "In Progress",
+        }
+
+        first = self.client.post(
+            "/api/v1/integrations/linear/channel-issues/create",
+            payload, format="json", **self.auth_headers,
+        )
+        duplicate = self.client.post(
+            "/api/v1/integrations/linear/channel-issues/create",
+            payload, format="json", **self.auth_headers,
+        )
+
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual(duplicate.status_code, 409)
+        self.assertEqual(len(mock_post.call_args_list), 2)
+        mutation = mock_post.call_args_list[1].kwargs["json"]
+        self.assertEqual(mutation["variables"]["input"]["teamId"], "team-tech")
+        self.assertEqual(mutation["variables"]["input"]["stateId"], "state-progress")
+
+    def test_channel_issue_create_rejects_team_override_and_wrong_channel(self):
+        override = self.client.post(
+            "/api/v1/integrations/linear/channel-issues/create",
+            {
+                "slack_workspace_id": "TMLAI", "slack_channel_id": "CTECH",
+                "requester_slack_id": "U123", "request_id": "Ev-create-team",
+                "title": "Wrong team", "team_id": "another-team",
+            },
+            format="json", **self.auth_headers,
+        )
+        wrong_channel = self.client.post(
+            "/api/v1/integrations/linear/channel-issues/create",
+            {
+                "slack_workspace_id": "TMLAI", "slack_channel_id": "COTHER",
+                "requester_slack_id": "U123", "request_id": "Ev-create-channel",
+                "title": "Wrong channel",
+            },
+            format="json", **self.auth_headers,
+        )
+
+        self.assertEqual(override.status_code, 400)
+        self.assertIn("team_id", override.json()["detail"])
+        self.assertEqual(wrong_channel.status_code, 403)
+
+    def test_channel_issue_create_requires_strict_roo_authentication(self):
+        response = self.client.post(
+            "/api/v1/integrations/linear/channel-issues/create",
+            {
+                "slack_workspace_id": "TMLAI", "slack_channel_id": "CTECH",
+                "requester_slack_id": "U123", "request_id": "Ev-create-auth",
+                "title": "Authenticated only",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 401)
+
+    @override_settings(LINEAR_CHANNEL_ISSUE_WRITES_ENABLED=False)
+    @patch("integrations.services.linear_meeting_actions.http_requests.post")
+    def test_channel_issue_create_respects_write_kill_switch(self, mock_post):
+        response = self.client.post(
+            "/api/v1/integrations/linear/channel-issues/create",
+            {
+                "slack_workspace_id": "TMLAI", "slack_channel_id": "CTECH",
+                "requester_slack_id": "U123", "request_id": "Ev-create-disabled",
+                "title": "Disabled create",
+            },
+            format="json",
+            **self.auth_headers,
+        )
+
+        self.assertEqual(response.status_code, 403)
+        mock_post.assert_not_called()
 
     @patch("integrations.services.linear_meeting_actions.http_requests.post")
     def test_channel_issue_statuses_are_live_and_team_scoped(self, mock_post):

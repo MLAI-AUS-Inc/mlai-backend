@@ -1,6 +1,6 @@
 # Roo Linear channel issues
 
-This integration lets Roo read and, when explicitly enabled, edit MLAI_TECH
+This integration lets Roo read and, when explicitly enabled, create and edit MLAI_TECH
 Linear issues from one configured Slack channel. The backend, rather than
 Roo's prompt router, owns the authorization boundary.
 
@@ -107,6 +107,16 @@ operations are comments; title;
 description append/replace; priority; estimate; due date; assignee; labels;
 project; cycle; status; and duplicate relation. Team moves, archive, deletion,
 existing-comment changes, and arbitrary GraphQL are not accepted.
+
+`POST /api/v1/integrations/linear/channel-issues/create` immediately creates
+one issue in the channel-bound team. The caller supplies workspace, channel,
+requester, Slack request ID, and an explicit title. Description and status are
+optional; the configured queue status is used by default. The backend derives
+`teamId` exclusively from the binding and rejects caller-supplied team fields.
+It also accepts optional priority, estimate, due date, assignee, labels,
+project, and cycle values for trusted clients, resolving every named target
+against the bound MLAI_TECH catalog. The same cache receipt and non-retrying
+write transport prevent duplicate creation from Slack redelivery.
 
 If `updatedAt` changed, the endpoint returns `409`. If Linear may have accepted
 a mutation but its transport response is uncertain, the endpoint returns

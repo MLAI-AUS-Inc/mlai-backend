@@ -46,6 +46,7 @@ from integrations.services.linear_meeting_actions import (
     LinearMeetingSizingConflictError,
     apply_linear_project_sizing_run,
     cancel_linear_project_sizing_run,
+    create_linear_channel_issue,
     create_linear_meeting_action_batch,
     create_linear_meeting_issue,
     create_linear_meeting_project_update,
@@ -898,6 +899,27 @@ class LinearChannelIssueWriteView(APIView):
         ) as exc:
             return _linear_meeting_error_response(exc)
         return Response(payload, status=status.HTTP_200_OK)
+
+
+class LinearChannelIssueCreateView(APIView):
+    permission_classes = [HasStrictRooApiKey]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "linear_channel_issue_write"
+
+    def post(self, request):
+        try:
+            payload = create_linear_channel_issue(request.data)
+        except (
+            LinearChannelIssueAccessError,
+            LinearChannelIssueConflictError,
+            LinearChannelIssueWriteUncertainError,
+            LinearMeetingConfigurationError,
+            LinearMeetingRateLimitError,
+            LinearMeetingGraphQLError,
+            ValueError,
+        ) as exc:
+            return _linear_meeting_error_response(exc)
+        return Response(payload, status=status.HTTP_201_CREATED)
 
 
 class LinearProjectResolveView(APIView):
