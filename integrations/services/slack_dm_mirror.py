@@ -121,6 +121,7 @@ _last_grant_discovery_scan = 0.0
 _history_scan_available_at = 0.0
 GRANT_DISCOVERY_INTERVAL_SECONDS = 300
 HISTORY_RECONCILIATION_INTERVAL_SECONDS = 3600
+MAX_HISTORY_DAYS = 30
 HISTORY_STATE_PREFIX = "history-state:"
 HISTORY_MAIN_STATE_ID = f"{HISTORY_STATE_PREFIX}main"
 DISCOVERY_CHECKPOINT_KEY = "slack_dm_mirror_discovery_v1"
@@ -1059,6 +1060,7 @@ def status_payload(
             )
         ).count(),
     }
+    history_days = _bounded_history_days(grant.history_days if grant else None)
     return {
         "connected": connection is not None,
         "needs_reauthorization": bool(
@@ -1079,7 +1081,7 @@ def status_payload(
         "workspace_name": connection.account_label if connection else "",
         "workspace_id": grant.slack_workspace_id if grant else "",
         "slack_user_id": grant.slack_user_id if grant else "",
-        "history_days": grant.history_days if grant else _history_days(),
+        "history_days": history_days,
         "consent_version": (
             grant.consent_version if grant else SlackDmMirrorGrant.CONSENT_VERSION
         ),
@@ -1101,8 +1103,8 @@ def status_payload(
             "owner_controlled": True,
             "included_in_roo": False,
             "included_in_analytics": False,
-            "history_is_bounded": not bool(grant and grant.history_days == 0),
-            "full_history": bool(grant and grant.history_days == 0),
+            "history_is_bounded": True,
+            "full_history": False,
         },
     }
 
@@ -1276,6 +1278,7 @@ def activate_connection(connection: ExternalServiceConnection) -> SlackDmMirrorG
                         "updated_at",
                     )
                 )
+                _normalize_grant_history_window_locked(grant)
                 _adopt_current_registration_generation_locked(grant)
                 if _registration_cleanup_pending_locked(grant.pk):
                     activation_error = SlackDmMirrorError(
@@ -1356,6 +1359,7 @@ def resume_grant(grant: SlackDmMirrorGrant) -> None:
                     "updated_at",
                 )
             )
+            _normalize_grant_history_window_locked(grant)
     if resume_error is not None:
         raise resume_error
 
@@ -1371,8 +1375,11 @@ def backfill_grant(
     grant = SlackDmMirrorGrant.objects.select_for_update().get(pk=grant.pk)
     if grant.status != SlackDmMirrorGrantStatus.ACTIVE or grant.revoked_at is not None:
         raise SlackDmMirrorError("Resume Slack mirroring before starting a backfill.")
-    if full_history and grant.history_days != 0:
-        grant.history_days = 0
+    # `full_history` is retained only so older MLAI Chat releases can keep
+    # calling this method while they upgrade. An owner-triggered import is
+    # always bounded now; a legacy `backfill_all` request must never remove
+    # Slack's `oldest` timestamp.
+    grant.history_days = _history_days()
     grant.last_discovery_at = None
     grant.save(update_fields=("history_days", "last_discovery_at", "updated_at"))
     now = timezone.now()
@@ -4426,6 +4433,14 @@ def _prepare_history_scan_page(
             authority,
             required_scopes,
         )
+        if _normalize_grant_history_window_locked(grant):
+            # The queryset update in the normalizer deliberately resets every
+            # conversation owned by this legacy grant. Keep this locked model
+            # instance in sync before constructing the new bounded scan.
+            conversation.history_backfilled_at = None
+            conversation.oldest_synced_ts = ""
+            conversation.latest_synced_ts = ""
+            conversation.last_error = ""
         state = (
             SlackDmMirrorDelivery.objects.select_for_update()
             .filter(
@@ -6698,7 +6713,58 @@ def _preferred_device(user_id: int) -> CommunityChatDevice | None:
 
 
 def _history_days() -> int:
-    return max(0, min(int(getattr(settings, "SLACK_DM_MIRROR_HISTORY_DAYS", 30)), 90))
+    """Return the configured import window, capped at thirty days.
+
+    Zero previously meant unbounded retained Slack history. Keep the runtime
+    fail-safe even if a deployment still has that legacy value configured.
+    """
+
+    try:
+        configured = int(getattr(settings, "SLACK_DM_MIRROR_HISTORY_DAYS", 30))
+    except (TypeError, ValueError):
+        configured = MAX_HISTORY_DAYS
+    return max(1, min(configured, MAX_HISTORY_DAYS))
+
+
+def _bounded_history_days(value: Any) -> int:
+    configured = _history_days()
+    try:
+        current = int(value)
+    except (TypeError, ValueError):
+        current = configured
+    if current <= 0:
+        return configured
+    return min(current, configured, MAX_HISTORY_DAYS)
+
+
+def _normalize_grant_history_window_locked(grant: SlackDmMirrorGrant) -> bool:
+    """Fence legacy unbounded scans before any further Slack history I/O."""
+
+    bounded_days = _bounded_history_days(grant.history_days)
+    if grant.history_days == bounded_days:
+        return False
+    grant.history_days = bounded_days
+    grant.save(update_fields=("history_days", "updated_at"))
+    conversation_ids = list(
+        SlackDmMirrorConversation.objects.select_for_update()
+        .filter(
+            grant=grant,
+            status=SlackDmMirrorConversationStatus.LIVE,
+        )
+        .values_list("id", flat=True)
+    )
+    _clear_history_scan_states(conversation_ids)
+    _clear_permanent_recovery_fences_locked(conversation_ids)
+    now = timezone.now()
+    SlackDmMirrorConversation.objects.filter(pk__in=conversation_ids).update(
+        history_backfilled_at=None,
+        oldest_synced_ts="",
+        latest_synced_ts="",
+        last_error="",
+        updated_at=now,
+    )
+    _mark_backfill_rows_for_recovery_locked(conversation_ids, now=now)
+    return True
 
 
 def _shadow_pubkey(conversation: SlackDmMirrorConversation, counterpart_id: str) -> str:

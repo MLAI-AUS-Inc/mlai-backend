@@ -128,7 +128,12 @@ class SlackDmMirrorApiTests(APITestCase):
             "slack-dm-mirror-v3-owner-direct-and-group",
             response.data["consent"]["version"],
         )
-        self.assertIn("direct and group Slack DMs", response.data["consent"]["summary"])
+        self.assertIn(
+            "direct and group Slack DMs", response.data["consent"]["summary"]
+        )
+        self.assertIn(
+            "Up to 30 days of history", response.data["consent"]["summary"]
+        )
         self.assertFalse(response.data["privacy"]["requires_both_participants"])
         self.assertTrue(response.data["privacy"]["owner_controlled"])
         self.assertFalse(response.data["privacy"]["included_in_roo"])
@@ -713,7 +718,7 @@ class SlackDmMirrorApiTests(APITestCase):
             return_im=True,
         )
 
-    def test_full_history_action_marks_live_conversations_due_without_sync_io(self):
+    def test_legacy_full_history_action_uses_bounded_window_without_sync_io(self):
         connection = _slack_connection(self.user, "UOWNER")
         grant = SlackDmMirrorGrant.objects.create(
             user=self.user,
@@ -742,11 +747,11 @@ class SlackDmMirrorApiTests(APITestCase):
         self.assertEqual(response.status_code, 200)
         grant.refresh_from_db()
         conversation.refresh_from_db()
-        self.assertEqual(grant.history_days, 0)
+        self.assertEqual(grant.history_days, 30)
         self.assertIsNone(conversation.history_backfilled_at)
         self.assertEqual(conversation.oldest_synced_ts, "")
-        self.assertTrue(response.data["privacy"]["full_history"])
-        self.assertFalse(response.data["privacy"]["history_is_bounded"])
+        self.assertFalse(response.data["privacy"]["full_history"])
+        self.assertTrue(response.data["privacy"]["history_is_bounded"])
 
 
 class SlackDmMirrorOwnerTests(APITestCase):
@@ -998,7 +1003,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
         unregister_private_conversation.assert_called_with(str(late_channel_id))
         web_client.return_value.auth_revoke.assert_called_once_with()
 
-    def test_reauthorization_preserves_explicit_full_history_setting(self):
+    def test_reauthorization_reports_legacy_full_history_as_bounded(self):
         grant = SlackDmMirrorGrant.objects.create(
             user=self.first,
             connection=self.first_connection,
@@ -1011,7 +1016,10 @@ class SlackDmMirrorOwnerTests(APITestCase):
         activate_connection(self.first_connection)
 
         grant.refresh_from_db()
-        self.assertEqual(grant.history_days, 0)
+        payload = status_payload(self.first)
+        self.assertEqual(grant.history_days, 30)
+        self.assertEqual(payload["history_days"], 30)
+        self.assertTrue(payload["privacy"]["history_is_bounded"])
 
     @patch(
         "integrations.services.slack_dm_mirror.BuzzBridgeClient.provision_private_conversation"
@@ -2246,7 +2254,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
         )
 
     @patch("integrations.services.slack_dm_mirror.WebClient")
-    def test_old_bounded_response_cannot_complete_new_full_history_scan(
+    def test_old_bounded_response_cannot_complete_restarted_bounded_scan(
         self,
         web_client,
     ):
@@ -2272,7 +2280,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
 
         grant.refresh_from_db()
         conversation.refresh_from_db()
-        self.assertEqual(grant.history_days, 0)
+        self.assertEqual(grant.history_days, 30)
         self.assertIsNone(conversation.history_backfilled_at)
         self.assertFalse(
             conversation.deliveries.filter(
@@ -2829,7 +2837,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
         self.assertGreater(held.available_at, timezone.now() + timedelta(days=300))
 
     @patch("integrations.services.slack_dm_mirror.WebClient")
-    def test_full_history_is_paged_without_oldest_and_requeues_dead_rows(
+    def test_legacy_unbounded_grant_is_capped_and_requeues_dead_rows(
         self, web_client
     ):
         grant = SlackDmMirrorGrant.objects.create(
@@ -2908,7 +2916,10 @@ class SlackDmMirrorOwnerTests(APITestCase):
         second_kwargs = web_client.return_value.conversations_history.call_args_list[
             1
         ].kwargs
-        self.assertNotIn("oldest", first_kwargs)
+        grant.refresh_from_db()
+        self.assertEqual(grant.history_days, 30)
+        self.assertIn("oldest", first_kwargs)
+        self.assertEqual(second_kwargs["oldest"], first_kwargs["oldest"])
         self.assertEqual(second_kwargs["latest"], "1787900900.000100")
         self.assertFalse(second_kwargs["inclusive"])
 

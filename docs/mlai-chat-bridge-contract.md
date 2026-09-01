@@ -157,8 +157,9 @@ two seconds, persists the oldest timestamp boundary, and honors Slack's
 Backfill status is complete only after every queued history delivery completes;
 transient dead rows are safely repopulated from Slack, while a permanently
 rejected adapter delivery stays fenced until explicit backfill or renewed
-consent. The `backfill_all` action explicitly switches that
-grant to full retained history and omits Slack's `oldest` parameter. The
+consent. History is always limited to the most recent 30 days. The legacy
+`backfill_all` action is accepted as a compatibility alias for the same bounded
+rescan, and every Slack history request includes an `oldest` parameter. The
 idempotency key prevents duplicate deliveries.
 
 The backend also starts an hourly bounded reconciliation and immediately starts
@@ -217,8 +218,9 @@ Community Chat exposes these owner-authenticated endpoints:
   private MLAI conversation, and returns its participant public keys and
   sanitized profiles. The owner key always comes from the authenticated active
   verified Community Chat device; body-supplied owner keys are ignored.
-- `PATCH /api/v1/community-chat/slack/` accepts `pause`, `resume`, `backfill`,
-  and the explicit unbounded `backfill_all` action.
+- `PATCH /api/v1/community-chat/slack/` accepts `pause`, `resume`, and
+  `backfill`. The legacy `backfill_all` value remains a bounded compatibility
+  alias for older installed clients.
 - `DELETE /api/v1/community-chat/slack/` revokes local consent and Slack token
   access, erases queued private bodies, then makes one best-effort call to the
   adapter's authenticated, idempotent
