@@ -1,9 +1,8 @@
-# Roo Linear channel issue reader
+# Roo Linear channel issues
 
-This read-only integration lets Roo list a configured Linear queue from one
-Slack channel and retrieve one issue's details and comments in follow-up
-messages. The backend, rather than Roo's prompt router, owns the authorization
-boundary.
+This integration lets Roo read and, when explicitly enabled, edit MLAI_TECH
+Linear issues from one configured Slack channel. The backend, rather than
+Roo's prompt router, owns the authorization boundary.
 
 ## MLAI_TECH local development binding
 
@@ -19,10 +18,14 @@ channel binding below:
 
 ```dotenv
 LINEAR_API_KEY=lin_api_replace_locally
+LINEAR_WRITE_API_KEY=lin_api_distinct_write_key
 LINEAR_CHANNEL_ISSUE_BINDINGS_JSON={"T05N9C1QSJC:C0BRM181EDV":{"display_name":"MLAI_TECH · Todo","team_name":"MLAI_TECH","state_name":"Todo","linear_team_id":"def24f5e-2990-4e28-9e06-e89db4a09f9f","linear_state_id":"f3591a1e-f7a2-4514-9280-000d43ea60e5"}}
 LINEAR_CHANNEL_ISSUE_MAX_COMMENTS=250
 LINEAR_CHANNEL_ISSUE_LIST_RATE=60/minute
 LINEAR_CHANNEL_ISSUE_DETAIL_RATE=20/minute
+LINEAR_CHANNEL_ISSUE_STATUSES_RATE=30/minute
+LINEAR_CHANNEL_ISSUE_WRITE_RATE=10/minute
+LINEAR_CHANNEL_ISSUE_WRITES_ENABLED=false
 ```
 
 Production `#tech_volunteers` must be configured as a separate
@@ -41,8 +44,9 @@ control. No database migration is required for this feature.
 
 ## Production deployment configuration
 
-The backend deployment reads `LINEAR_API_KEY` from a GitHub Actions repository
-secret. It reads `LINEAR_CHANNEL_ISSUE_BINDINGS_JSON` and
+The backend deployment reads `LINEAR_API_KEY` and the distinct
+`LINEAR_WRITE_API_KEY` from GitHub Actions repository secrets. It reads
+`LINEAR_CHANNEL_ISSUE_BINDINGS_JSON`, `LINEAR_CHANNEL_ISSUE_WRITES_ENABLED`, and
 `LINEAR_CHANNEL_ISSUE_MAX_COMMENTS` from repository variables. The deployment
 validates all three values before connecting to the production host, then
 installs them into the host `.env` over SSH stdin before recreating services.
@@ -53,7 +57,8 @@ has reached `main`.
 
 ## API contract
 
-Both endpoints require Roo service authentication (`HasRooApiKey`). The caller
+Read endpoints require Roo service authentication (`HasRooApiKey`). The write
+endpoint requires the stricter `HasStrictRooApiKey`. The caller
 must forward the actual Slack workspace, channel, and requester IDs.
 
 `POST /api/v1/integrations/linear/channel-issues/list`
@@ -63,13 +68,18 @@ must forward the actual Slack workspace, channel, and requester IDs.
   "slack_workspace_id": "T05N9C1QSJC",
   "slack_channel_id": "C0BRM181EDV",
   "requester_slack_id": "U123",
-  "limit": 50
+  "limit": 50,
+  "status": "all"
 }
 ```
 
 The response contains issue identifiers, titles, links, and summary metadata
-from the configured team and state. The service discards any out-of-scope node
-returned by Linear.
+from the configured team. With no `status`, the configured state remains the
+default; use a live status name or `all` to change the filter. The service
+discards any out-of-scope node returned by Linear.
+
+`POST /api/v1/integrations/linear/channel-issues/statuses` returns the live
+workflow states belonging to the bound team.
 
 `POST /api/v1/integrations/linear/channel-issues/detail`
 
@@ -83,18 +93,33 @@ returned by Linear.
 }
 ```
 
-The backend fetches the issue first and verifies both its team and workflow
-state before requesting comments. A request from an unbound Slack channel, or
-for an issue outside the channel's configured team or state, returns
-`403 linear_channel_issue_access_denied`. An issue that moves out of the
-configured `Todo` state is therefore no longer readable from that channel.
+The backend fetches the issue first and verifies its team and that it is not
+archived before requesting comments. Issues remain readable after moving out
+of the default `Todo` state.
+
+`POST /api/v1/integrations/linear/channel-issues/write` applies one explicit
+typed operation. It requires workspace, channel, requester, issue identifier,
+operation, value, Slack request ID, and the issue's exact previously-read
+`updatedAt`. The backend re-fetches and re-authorizes the issue immediately
+before one non-retrying mutation. A bounded shared-cache receipt rejects a
+duplicate Slack delivery without requiring a database table. Supported
+operations are comments; title;
+description append/replace; priority; estimate; due date; assignee; labels;
+project; cycle; status; and duplicate relation. Team moves, archive, deletion,
+existing-comment changes, and arbitrary GraphQL are not accepted.
+
+If `updatedAt` changed, the endpoint returns `409`. If Linear may have accepted
+a mutation but its transport response is uncertain, the endpoint returns
+`502 linear_channel_issue_write_uncertain`; Roo must tell the user to inspect
+Linear and must not retry automatically.
 
 Comment retrieval is paginated and bounded by
 `LINEAR_CHANNEL_ISSUE_MAX_COMMENTS`. The response says when comments,
 attachments, or relations were truncated so Roo can direct the user to Linear.
 Requests are additionally protected by separate Redis-backed scoped throttles:
 `LINEAR_CHANNEL_ISSUE_LIST_RATE` for list calls and
-`LINEAR_CHANNEL_ISSUE_DETAIL_RATE` for the more expensive detail calls.
+`LINEAR_CHANNEL_ISSUE_DETAIL_RATE` for the more expensive detail calls, plus
+separate status and write limits.
 
 ## Slack behavior
 

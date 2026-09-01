@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import pickle
 import re
-from datetime import timedelta
+from datetime import date, timedelta
 from difflib import SequenceMatcher
 from typing import Any
 
 from django.conf import settings
+from django.core.cache import cache, caches
 from django.db import transaction
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
@@ -68,16 +71,55 @@ class LinearChannelIssueAccessError(Exception):
     pass
 
 
+class LinearChannelIssueConflictError(Exception):
+    pass
+
+
+class LinearChannelIssueWriteUncertainError(Exception):
+    pass
+
+
+LINEAR_CHANNEL_WRITE_OPERATIONS = {
+    "add_comment",
+    "set_title",
+    "replace_description",
+    "append_description",
+    "set_priority",
+    "set_estimate",
+    "set_due_date",
+    "set_assignee",
+    "add_label",
+    "remove_label",
+    "set_project",
+    "set_cycle",
+    "set_status",
+    "mark_duplicate",
+}
+
+
 def list_linear_channel_issues(payload: dict[str, Any]) -> dict[str, Any]:
     """Return a bounded live Linear issue index for an approved Slack channel."""
 
     binding = _linear_channel_issue_binding(payload)
     page_size = _bounded_limit(payload.get("limit"), default=50, maximum=100)
     cursor = str(payload.get("after") or "").strip() or None
+    requested_status = str(payload.get("status") or "").strip()
+    state_id = binding["linear_state_id"]
+    state_name = binding["state_name"]
+    if requested_status:
+        if requested_status.casefold() == "all":
+            state_id = ""
+            state_name = "All statuses"
+        else:
+            state = _resolve_linear_channel_status(binding, requested_status)
+            state_id = str(state["id"])
+            state_name = str(state["name"])
+    state_filter = "state: { id: { eq: $stateId } }" if state_id else ""
+    state_variable = "$stateId: ID!," if state_id else ""
     query = """
     query LinearChannelIssueList(
       $teamId: ID!,
-      $stateId: ID!,
+      __STATE_VARIABLE__
       $first: Int!,
       $after: String
     ) {
@@ -87,11 +129,11 @@ def list_linear_channel_issues(payload: dict[str, Any]) -> dict[str, Any]:
         orderBy: updatedAt,
         filter: {
           team: { id: { eq: $teamId } },
-          state: { id: { eq: $stateId } }
+          __STATE_FILTER__
         }
       ) {
         nodes {
-          id identifier title url priority priorityLabel dueDate updatedAt
+          id identifier title url priority priorityLabel dueDate updatedAt archivedAt
           state { id name type }
           team { id key name }
           assignee { id name displayName }
@@ -100,21 +142,27 @@ def list_linear_channel_issues(payload: dict[str, Any]) -> dict[str, Any]:
         pageInfo { hasNextPage endCursor }
       }
     }
-    """
+    """.replace("__STATE_VARIABLE__", state_variable).replace(
+        "__STATE_FILTER__", state_filter
+    )
+    variables = {
+        "teamId": binding["linear_team_id"],
+        "first": page_size,
+        "after": cursor,
+    }
+    if state_id:
+        variables["stateId"] = state_id
     data = _graphql(
         query,
-        {
-            "teamId": binding["linear_team_id"],
-            "stateId": binding["linear_state_id"],
-            "first": page_size,
-            "after": cursor,
-        },
+        variables,
         operation_name="LinearChannelIssueList",
     )
     connection = data.get("issues") if isinstance(data.get("issues"), dict) else {}
     issues = []
     for issue in _connection_nodes(connection):
-        if not _linear_issue_matches_binding(issue, binding):
+        if issue.get("archivedAt") or not _linear_issue_matches_binding(
+            issue, binding, state_id=state_id
+        ):
             logger.warning(
                 "linear_channel_issue_list_dropped_out_of_scope_issue identifier=%s",
                 issue.get("identifier"),
@@ -122,7 +170,11 @@ def list_linear_channel_issues(payload: dict[str, Any]) -> dict[str, Any]:
             continue
         issues.append(issue)
     return {
-        "list": _linear_channel_issue_list_metadata(binding),
+        "list": _linear_channel_issue_list_metadata(
+            binding,
+            state_id=state_id,
+            state_name=state_name,
+        ),
         "issues": issues,
         "pageInfo": _page_info(connection),
         "snapshotAt": timezone.now().isoformat(),
@@ -142,7 +194,7 @@ def get_linear_channel_issue(payload: dict[str, Any]) -> dict[str, Any]:
     issue = _fetch_linear_channel_issue_detail(issue_reference)
     if not issue:
         raise ValueError("Linear issue was not found.")
-    if not _linear_issue_matches_binding(issue, binding):
+    if not _linear_issue_matches_binding(issue, binding) or issue.get("archivedAt"):
         raise LinearChannelIssueAccessError(
             "That Linear issue is not available from this Slack channel."
         )
@@ -158,6 +210,468 @@ def get_linear_channel_issue(payload: dict[str, Any]) -> dict[str, Any]:
         "commentsTruncated": comments_truncated,
         "snapshotAt": timezone.now().isoformat(),
     }
+
+
+def list_linear_channel_issue_statuses(payload: dict[str, Any]) -> dict[str, Any]:
+    """Return the live workflow states for the channel-bound Linear team."""
+
+    binding = _linear_channel_issue_binding(payload)
+    statuses = _list_linear_team_statuses(binding["linear_team_id"])
+    return {
+        "team": {
+            "id": binding["linear_team_id"],
+            "name": binding["team_name"],
+        },
+        "statuses": statuses,
+        "snapshotAt": timezone.now().isoformat(),
+    }
+
+
+def write_linear_channel_issue(payload: dict[str, Any]) -> dict[str, Any]:
+    """Apply one explicit, typed edit to a channel-bound Linear issue."""
+
+    if not bool(getattr(settings, "LINEAR_CHANNEL_ISSUE_WRITES_ENABLED", False)):
+        raise LinearChannelIssueAccessError("Linear issue editing is currently disabled.")
+    binding = _linear_channel_issue_binding(payload)
+    issue_reference = str(payload.get("issue_identifier") or "").strip()
+    operation = str(payload.get("operation") or "").strip().lower()
+    request_id = str(payload.get("request_id") or "").strip()
+    expected_updated_at = str(payload.get("expected_updated_at") or "").strip()
+    unknown_keys = set(payload) - {
+        "slack_workspace_id",
+        "slack_channel_id",
+        "requester_slack_id",
+        "issue_identifier",
+        "operation",
+        "value",
+        "expected_updated_at",
+        "request_id",
+    }
+    if unknown_keys:
+        raise ValueError("Unsupported Linear write fields: " + ", ".join(sorted(unknown_keys)))
+    if not issue_reference or not request_id or not expected_updated_at:
+        raise ValueError("issue_identifier, expected_updated_at, and request_id are required.")
+    if operation not in LINEAR_CHANNEL_WRITE_OPERATIONS:
+        raise ValueError("Unsupported Linear issue operation.")
+
+    issue = _fetch_linear_channel_issue_detail(issue_reference)
+    if not issue:
+        raise ValueError("Linear issue was not found.")
+    _require_writable_linear_channel_issue(issue, binding)
+    if str(issue.get("updatedAt") or "") != expected_updated_at:
+        raise LinearChannelIssueConflictError(
+            "The Linear issue changed after Roo read it. Please review it and retry the edit."
+        )
+
+    issue_id = str(issue["id"])
+    lock_key, lock_owner = _claim_linear_channel_issue_write_lock(
+        issue_id, request_id, binding
+    )
+    try:
+        # The lock closes the gap between the optimistic version check and the
+        # mutation. Re-read inside it so two distinct Slack events cannot both
+        # apply against the same version.
+        issue = _fetch_linear_channel_issue_detail(issue_id)
+        if not issue:
+            raise ValueError("Linear issue was not found.")
+        _require_writable_linear_channel_issue(issue, binding)
+        if str(issue.get("updatedAt") or "") != expected_updated_at:
+            raise LinearChannelIssueConflictError(
+                "The Linear issue changed after Roo read it. Please review it and retry the edit."
+            )
+
+        value = payload.get("value")
+        if operation == "add_comment":
+            body = _required_write_text(value, field="comment", maximum=10000)
+            receipt_key = _claim_linear_channel_write_request(request_id, binding)
+            updated = _create_linear_channel_issue_comment(issue_id, body)
+            _complete_linear_channel_write_request(receipt_key)
+            return _linear_channel_write_result(issue, operation, updated, request_id)
+
+        if operation == "mark_duplicate":
+            related = _fetch_linear_channel_issue_detail(str(value or "").strip())
+            if not related:
+                raise ValueError("The duplicate target issue was not found.")
+            _require_writable_linear_channel_issue(related, binding)
+            if str(related.get("id")) == issue_id:
+                raise ValueError("An issue cannot be marked as a duplicate of itself.")
+            receipt_key = _claim_linear_channel_write_request(request_id, binding)
+            updated = _create_linear_channel_issue_duplicate_relation(
+                issue_id, str(related["id"])
+            )
+            _complete_linear_channel_write_request(receipt_key)
+            return _linear_channel_write_result(issue, operation, updated, request_id)
+
+        mutation_input = _linear_channel_issue_update_input(
+            issue=issue,
+            binding=binding,
+            operation=operation,
+            value=value,
+        )
+        receipt_key = _claim_linear_channel_write_request(request_id, binding)
+        updated = _update_linear_channel_issue(issue_id, mutation_input)
+        _complete_linear_channel_write_request(receipt_key)
+        return _linear_channel_write_result(issue, operation, updated, request_id)
+    finally:
+        _release_linear_channel_issue_write_lock(lock_key, lock_owner)
+
+
+def _linear_channel_write_receipt_ttl() -> int:
+    return max(
+        300,
+        min(
+            int(
+                getattr(
+                    settings,
+                    "LINEAR_CHANNEL_ISSUE_WRITE_RECEIPT_TTL_SECONDS",
+                    86400,
+                )
+                or 86400
+            ),
+            604800,
+        ),
+    )
+
+
+def _claim_linear_channel_write_request(
+    request_id: str, binding: dict[str, str]
+) -> str:
+    receipt_identity = ":".join(
+        (
+            binding["slack_workspace_id"],
+            binding["slack_channel_id"],
+            request_id,
+        )
+    )
+    digest = hashlib.sha256(receipt_identity.encode("utf-8")).hexdigest()
+    cache_key = f"linear-channel-write:{digest}"
+    if not cache.add(cache_key, "processing", timeout=_linear_channel_write_receipt_ttl()):
+        raise LinearChannelIssueConflictError(
+            "This Slack request was already processed or is still in progress. Check Linear before retrying."
+        )
+    return cache_key
+
+
+def _linear_channel_write_lock_ttl() -> int:
+    return max(
+        30,
+        min(
+            int(
+                getattr(
+                    settings,
+                    "LINEAR_CHANNEL_ISSUE_WRITE_LOCK_SECONDS",
+                    600,
+                )
+                or 600
+            ),
+            1800,
+        ),
+    )
+
+
+def _claim_linear_channel_issue_write_lock(
+    issue_id: str, request_id: str, binding: dict[str, str]
+) -> tuple[str, str]:
+    digest = hashlib.sha256(
+        f"{binding['linear_team_id']}:{issue_id}".encode("utf-8")
+    ).hexdigest()
+    owner = hashlib.sha256(
+        f"{binding['slack_workspace_id']}:{binding['slack_channel_id']}:{request_id}".encode(
+            "utf-8"
+        )
+    ).hexdigest()
+    lock_key = f"linear-channel-write-lock:{digest}"
+    try:
+        claimed = cache.add(lock_key, owner, timeout=_linear_channel_write_lock_ttl())
+    except Exception as exc:
+        logger.exception("linear_channel_issue_write_lock_unavailable")
+        raise LinearChannelIssueConflictError(
+            "Roo could not safely lock this issue for editing. Nothing was changed."
+        ) from exc
+    if not claimed:
+        raise LinearChannelIssueConflictError(
+            "Another edit to this Linear issue is already in progress. Check Linear before retrying."
+        )
+    return lock_key, owner
+
+
+def _release_linear_channel_issue_write_lock(lock_key: str, owner: str) -> None:
+    try:
+        _atomic_cache_compare_and_delete(lock_key, owner)
+    except Exception:
+        # The bounded TTL will release the lock. A cache outage must never turn
+        # a conclusive Linear response into an unsafe automatic retry.
+        logger.exception("linear_channel_issue_write_lock_release_failed")
+
+
+def _atomic_cache_compare_and_delete(key: str, expected_value: str) -> bool:
+    """Delete a lock only while its ownership token still matches."""
+
+    backend = caches["default"]
+    backend_module = backend.__class__.__module__
+    if backend_module == "django.core.cache.backends.redis":
+        redis_key = backend.make_and_validate_key(key)
+        redis_cache_client = backend._cache
+        client = redis_cache_client.get_client(redis_key, write=True)
+        serialized_owner = redis_cache_client._serializer.dumps(expected_value)
+        deleted = client.eval(
+            "if redis.call('get', KEYS[1]) == ARGV[1] then "
+            "return redis.call('del', KEYS[1]) else return 0 end",
+            1,
+            redis_key,
+            serialized_owner,
+        )
+        return bool(deleted)
+
+    if backend_module == "django.core.cache.backends.locmem":
+        local_key = backend.make_and_validate_key(key)
+        with backend._lock:
+            if backend._has_expired(local_key):
+                backend._delete(local_key)
+                return False
+            serialized_value = backend._cache.get(local_key)
+            if serialized_value is None or pickle.loads(serialized_value) != expected_value:
+                return False
+            return bool(backend._delete(local_key))
+
+    # Production requires Redis. For any unexpected backend, leave the key to
+    # its bounded TTL instead of risking deletion of a replacement owner.
+    logger.error(
+        "linear_channel_issue_write_lock_release_unsupported_cache backend=%s",
+        backend_module,
+    )
+    return False
+
+
+def _complete_linear_channel_write_request(receipt_key: str) -> None:
+    try:
+        completed = cache.set(
+            receipt_key,
+            "completed",
+            timeout=_linear_channel_write_receipt_ttl(),
+        )
+        if completed is False:
+            raise RuntimeError("cache rejected the completed receipt")
+    except Exception as exc:
+        logger.exception("linear_channel_issue_write_receipt_completion_failed")
+        raise LinearChannelIssueWriteUncertainError(
+            "Linear accepted the edit, but Roo could not finalize its duplicate guard. Check the issue before retrying."
+        ) from exc
+
+
+def _list_linear_team_statuses(team_id: str) -> list[dict[str, Any]]:
+    query = """
+    query LinearChannelIssueStatuses($teamId: String!) {
+      team(id: $teamId) {
+        id
+        states { nodes { id name type position color } }
+      }
+    }
+    """
+    data = _graphql(
+        query,
+        {"teamId": team_id},
+        operation_name="LinearChannelIssueStatuses",
+    )
+    team = data.get("team") if isinstance(data.get("team"), dict) else {}
+    if str(team.get("id") or "") != team_id:
+        raise LinearChannelIssueAccessError("The configured Linear team was not found.")
+    return sorted(
+        _connection_nodes(team.get("states")),
+        key=lambda state: (float(state.get("position") or 0), str(state.get("name") or "")),
+    )
+
+
+def _resolve_linear_channel_status(
+    binding: dict[str, str], value: Any
+) -> dict[str, Any]:
+    return _resolve_linear_write_target(
+        _list_linear_team_statuses(binding["linear_team_id"]),
+        value,
+        kind="status",
+    )
+
+
+def _require_writable_linear_channel_issue(
+    issue: dict[str, Any], binding: dict[str, str]
+) -> None:
+    if not _linear_issue_matches_binding(issue, binding) or issue.get("archivedAt"):
+        raise LinearChannelIssueAccessError(
+            "That Linear issue is not editable from this Slack channel."
+        )
+
+
+def _linear_channel_issue_update_input(
+    *, issue: dict[str, Any], binding: dict[str, str], operation: str, value: Any
+) -> dict[str, Any]:
+    if operation == "set_title":
+        return {"title": _required_write_text(value, field="title", maximum=255)}
+    if operation in {"replace_description", "append_description"}:
+        text = _required_write_text(value, field="description", maximum=10000)
+        if operation == "append_description":
+            current = str(issue.get("description") or "").rstrip()
+            text = f"{current}\n\n{text}" if current else text
+            if len(text) > 10000:
+                raise ValueError("The combined description is too long.")
+        return {"description": text}
+    if operation == "set_priority":
+        normalized = str(value or "").strip().casefold().replace(" ", "_")
+        priorities = {"none": 0, "no_priority": 0, "urgent": 1, "high": 2, "normal": 3, "medium": 3, "low": 4}
+        if normalized not in priorities:
+            raise ValueError("Priority must be none, urgent, high, normal, or low.")
+        return {"priority": priorities[normalized]}
+    if operation == "set_estimate":
+        if value in {None, "", "none", "clear"}:
+            return {"estimate": None}
+        try:
+            estimate = int(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Estimate must be a whole number or clear.") from exc
+        if estimate < 0 or estimate > 100:
+            raise ValueError("Estimate must be between 0 and 100.")
+        return {"estimate": estimate}
+    if operation == "set_due_date":
+        due_date = str(value or "").strip()
+        if due_date.casefold() in {"", "none", "clear", "remove"}:
+            return {"dueDate": None}
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", due_date):
+            raise ValueError("Due date must use YYYY-MM-DD or clear.")
+        try:
+            date.fromisoformat(due_date)
+        except ValueError as exc:
+            raise ValueError("Due date must be a valid calendar date.") from exc
+        return {"dueDate": due_date}
+    if operation == "set_status":
+        return {"stateId": _resolve_linear_channel_status(binding, value)["id"]}
+    if operation == "set_assignee":
+        if str(value or "").strip().casefold() in {"", "none", "clear", "unassigned"}:
+            return {"assigneeId": None}
+        teams = [team for team in list_teams() if str(team.get("id")) == binding["linear_team_id"]]
+        members = _connection_nodes(teams[0].get("members")) if teams else []
+        return {"assigneeId": _resolve_linear_write_target(members, value, kind="assignee")["id"]}
+    if operation in {"add_label", "remove_label"}:
+        current_labels = issue.get("labels") if isinstance(issue.get("labels"), dict) else {}
+        if _page_info(current_labels).get("hasNextPage"):
+            raise ValueError(
+                "This issue has more than 100 labels, so Roo refused to replace an incomplete label set."
+            )
+        available_labels = list_issue_labels()
+        if any("team" not in label for label in available_labels):
+            raise LinearMeetingConfigurationError(
+                "Linear label team metadata is unavailable, so no label was changed."
+            )
+        labels = [
+            label for label in available_labels
+            if "team" in label
+            and not label.get("archivedAt")
+            and str((label.get("team") or {}).get("id") or "")
+            in {"", binding["linear_team_id"]}
+        ]
+        label = _resolve_linear_write_target(labels, value, kind="label")
+        current_ids = [str(item.get("id")) for item in _connection_nodes(current_labels) if item.get("id")]
+        if operation == "add_label" and str(label["id"]) not in current_ids:
+            current_ids.append(str(label["id"]))
+        if operation == "remove_label":
+            current_ids = [item_id for item_id in current_ids if item_id != str(label["id"])]
+        return {"labelIds": current_ids}
+    if operation == "set_project":
+        if str(value or "").strip().casefold() in {"", "none", "clear", "remove"}:
+            return {"projectId": None}
+        projects = [
+            project for project in _list_projects(include_inactive=False)
+            if any(str(team.get("id")) == binding["linear_team_id"] for team in _connection_nodes(project.get("teams")))
+        ]
+        return {"projectId": _resolve_linear_write_target(projects, value, kind="project")["id"]}
+    if operation == "set_cycle":
+        if str(value or "").strip().casefold() in {"", "none", "clear", "remove"}:
+            return {"cycleId": None}
+        return {"cycleId": _resolve_linear_write_target(_list_linear_team_cycles(binding["linear_team_id"]), value, kind="cycle")["id"]}
+    raise ValueError("Unsupported Linear issue operation.")
+
+
+def _list_linear_team_cycles(team_id: str) -> list[dict[str, Any]]:
+    query = """
+    query LinearChannelIssueCycles($teamId: String!) {
+      team(id: $teamId) { id cycles(first: 100) { nodes { id name number startsAt endsAt completedAt archivedAt } } }
+    }
+    """
+    data = _graphql(query, {"teamId": team_id}, operation_name="LinearChannelIssueCycles")
+    team = data.get("team") if isinstance(data.get("team"), dict) else {}
+    return [cycle for cycle in _connection_nodes(team.get("cycles")) if not cycle.get("archivedAt")]
+
+
+def _resolve_linear_write_target(
+    candidates: list[dict[str, Any]], value: Any, *, kind: str
+) -> dict[str, Any]:
+    needle = str(value or "").strip().casefold()
+    if not needle:
+        raise ValueError(f"A {kind} is required.")
+    exact = [item for item in candidates if needle in {str(item.get("id") or "").casefold(), str(item.get("name") or "").casefold(), str(item.get("displayName") or "").casefold(), str(item.get("number") or "").casefold()}]
+    matches = exact or [item for item in candidates if needle in str(item.get("name") or item.get("displayName") or "").casefold()]
+    if len(matches) != 1:
+        raise ValueError(f"The {kind} value did not match exactly one MLAI_TECH option.")
+    return matches[0]
+
+
+def _required_write_text(value: Any, *, field: str, maximum: int) -> str:
+    text = str(value or "").strip()
+    if not text:
+        raise ValueError(f"{field} cannot be empty.")
+    if len(text) > maximum:
+        raise ValueError(f"{field} is too long.")
+    return text
+
+
+def _update_linear_channel_issue(issue_id: str, mutation_input: dict[str, Any]) -> dict[str, Any]:
+    query = """
+    mutation LinearChannelIssueUpdate($id: String!, $input: IssueUpdateInput!) {
+      issueUpdate(id: $id, input: $input) {
+        success
+        issue { id identifier title description url priority priorityLabel estimate dueDate updatedAt state { id name type } assignee { id name displayName } project { id name } cycle { id name number } labels { nodes { id name } } }
+      }
+    }
+    """
+    data = _graphql_write(query, {"id": issue_id, "input": mutation_input}, operation_name="LinearChannelIssueUpdate")
+    result = data.get("issueUpdate") if isinstance(data.get("issueUpdate"), dict) else {}
+    if not result.get("success") or not isinstance(result.get("issue"), dict):
+        raise LinearMeetingGraphQLError("Linear issue update returned success=false.", operation="LinearChannelIssueUpdate")
+    return result["issue"]
+
+
+def _create_linear_channel_issue_comment(issue_id: str, body: str) -> dict[str, Any]:
+    query = """
+    mutation LinearChannelIssueComment($input: CommentCreateInput!) {
+      commentCreate(input: $input) { success comment { id body createdAt updatedAt user { id name displayName } } }
+    }
+    """
+    data = _graphql_write(query, {"input": {"issueId": issue_id, "body": body}}, operation_name="LinearChannelIssueComment")
+    result = data.get("commentCreate") if isinstance(data.get("commentCreate"), dict) else {}
+    if not result.get("success") or not isinstance(result.get("comment"), dict):
+        raise LinearMeetingGraphQLError("Linear comment creation returned success=false.", operation="LinearChannelIssueComment")
+    return {"comment": result["comment"]}
+
+
+def _create_linear_channel_issue_duplicate_relation(issue_id: str, related_issue_id: str) -> dict[str, Any]:
+    query = """
+    mutation LinearChannelIssueDuplicate($input: IssueRelationCreateInput!) {
+      issueRelationCreate(input: $input) { success issueRelation { id type relatedIssue { id identifier title } } }
+    }
+    """
+    data = _graphql_write(query, {"input": {"issueId": issue_id, "relatedIssueId": related_issue_id, "type": "duplicate"}}, operation_name="LinearChannelIssueDuplicate")
+    result = data.get("issueRelationCreate") if isinstance(data.get("issueRelationCreate"), dict) else {}
+    if not result.get("success") or not isinstance(result.get("issueRelation"), dict):
+        raise LinearMeetingGraphQLError("Linear duplicate relation returned success=false.", operation="LinearChannelIssueDuplicate")
+    return {"relation": result["issueRelation"]}
+
+
+def _linear_channel_write_result(issue: dict[str, Any], operation: str, result: dict[str, Any], request_id: str) -> dict[str, Any]:
+    logger.info(
+        "linear_channel_issue_write_completed identifier=%s operation=%s request_id=%s",
+        issue.get("identifier"),
+        operation,
+        request_id[:255],
+    )
+    return {"operation": operation, "requestId": request_id, "previousUpdatedAt": issue.get("updatedAt"), "issue": result}
 
 
 def _linear_channel_issue_binding(payload: dict[str, Any]) -> dict[str, str]:
@@ -211,25 +725,39 @@ def _linear_channel_issue_binding(payload: dict[str, Any]) -> dict[str, str]:
     }
 
 
-def _linear_channel_issue_list_metadata(binding: dict[str, str]) -> dict[str, str]:
+def _linear_channel_issue_list_metadata(
+    binding: dict[str, str],
+    *,
+    state_id: str | None = None,
+    state_name: str | None = None,
+) -> dict[str, str]:
+    resolved_state_name = binding["state_name"] if state_name is None else state_name
+    display_name = binding["display_name"]
+    if state_name is not None and resolved_state_name != binding["state_name"]:
+        display_name = (
+            f"{binding['team_name']} · {resolved_state_name}"
+            if binding["team_name"]
+            else resolved_state_name
+        )
     return {
-        "displayName": binding["display_name"],
+        "displayName": display_name,
         "teamId": binding["linear_team_id"],
         "teamName": binding["team_name"],
-        "stateId": binding["linear_state_id"],
-        "stateName": binding["state_name"],
+        "stateId": binding["linear_state_id"] if state_id is None else state_id,
+        "stateName": resolved_state_name,
     }
 
 
 def _linear_issue_matches_binding(
     issue: dict[str, Any],
     binding: dict[str, str],
+    *,
+    state_id: str = "",
 ) -> bool:
     team = issue.get("team") if isinstance(issue.get("team"), dict) else {}
     state = issue.get("state") if isinstance(issue.get("state"), dict) else {}
-    return (
-        str(team.get("id") or "") == binding["linear_team_id"]
-        and str(state.get("id") or "") == binding["linear_state_id"]
+    return str(team.get("id") or "") == binding["linear_team_id"] and (
+        not state_id or str(state.get("id") or "") == state_id
     )
 
 
@@ -245,7 +773,10 @@ def _fetch_linear_channel_issue_detail(issue_reference: str) -> dict[str, Any]:
         creator { id name displayName }
         project { id name }
         cycle { id name number }
-        labels(first: 100) { nodes { id name color } }
+        labels(first: 100) {
+          nodes { id name color }
+          pageInfo { hasNextPage endCursor }
+        }
         attachments(first: 100) {
           nodes { id title subtitle url }
           pageInfo { hasNextPage endCursor }
@@ -2784,6 +3315,90 @@ def _graphql(
         ) from exc
 
     data = payload.get("data")
+    return data if isinstance(data, dict) else {}
+
+
+def _graphql_write(
+    query: str,
+    variables: dict[str, Any],
+    *,
+    operation_name: str,
+) -> dict[str, Any]:
+    """Send a Linear mutation once; uncertain transport outcomes are never retried."""
+
+    api_key = str(getattr(settings, "LINEAR_WRITE_API_KEY", "") or "").strip()
+    if not api_key:
+        raise LinearMeetingConfigurationError(
+            "Linear issue editing is missing its dedicated write credential."
+        )
+    connect_timeout = float(getattr(settings, "LINEAR_API_CONNECT_TIMEOUT_SECONDS", 3) or 3)
+    read_timeout = float(getattr(settings, "LINEAR_API_READ_TIMEOUT_SECONDS", 20) or 20)
+    try:
+        response = http_requests.post(
+            LINEAR_GRAPHQL_URL,
+            headers={
+                "Authorization": api_key,
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+            },
+            json={
+                "query": query,
+                "variables": variables,
+                "operationName": operation_name,
+            },
+            timeout=(connect_timeout, read_timeout),
+        )
+    except http_requests.RequestException as exc:
+        raise LinearChannelIssueWriteUncertainError(
+            "Linear may have received the edit, but Roo could not verify the result. Check the issue before retrying."
+        ) from exc
+    if response.status_code == 429:
+        raise LinearMeetingRateLimitError(_retry_after_seconds(response))
+    if response.status_code >= 500:
+        raise LinearChannelIssueWriteUncertainError(
+            "Linear may have received the edit, but returned a server error. Check the issue before retrying."
+        )
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise LinearChannelIssueWriteUncertainError(
+            "Linear may have received the edit, but Roo could not verify its response. Check the issue before retrying."
+        ) from exc
+    data = payload.get("data") if isinstance(payload, dict) else None
+    errors = payload.get("errors") if isinstance(payload, dict) and isinstance(payload.get("errors"), list) else []
+    if errors:
+        message = _graphql_error_message(errors)
+        mutation_shapes = {
+            "LinearChannelIssueUpdate": ("issueUpdate", "issue"),
+            "LinearChannelIssueComment": ("commentCreate", "comment"),
+            "LinearChannelIssueDuplicate": ("issueRelationCreate", "issueRelation"),
+        }
+        root_name, entity_name = mutation_shapes.get(operation_name, ("", ""))
+        root = data.get(root_name) if isinstance(data, dict) and root_name else None
+        if (
+            isinstance(root, dict)
+            and root.get("success") is True
+            and isinstance(root.get(entity_name), dict)
+        ):
+            logger.warning(
+                "linear_channel_issue_write_partial_graphql_success operation=%s detail=%s",
+                operation_name,
+                message,
+            )
+            return data
+        if _graphql_errors_are_rate_limited(errors, message):
+            raise LinearMeetingRateLimitError(1)
+        if isinstance(root, dict) and root.get("success") is False:
+            raise LinearMeetingGraphQLError(message, operation=operation_name)
+        raise LinearChannelIssueWriteUncertainError(
+            "Linear returned an ambiguous response and may have applied the edit. Check the issue before retrying."
+        )
+    try:
+        response.raise_for_status()
+    except http_requests.RequestException as exc:
+        raise LinearMeetingGraphQLError(
+            f"Linear rejected the edit: {exc}", operation=operation_name
+        ) from exc
     return data if isinstance(data, dict) else {}
 
 

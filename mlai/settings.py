@@ -462,6 +462,8 @@ REST_FRAMEWORK = {
         'org_memory_actions': os.getenv('ORG_MEMORY_ACTION_RATE', '30/minute'),
         'linear_channel_issue_list': os.getenv('LINEAR_CHANNEL_ISSUE_LIST_RATE', '60/minute'),
         'linear_channel_issue_detail': os.getenv('LINEAR_CHANNEL_ISSUE_DETAIL_RATE', '20/minute'),
+        'linear_channel_issue_statuses': os.getenv('LINEAR_CHANNEL_ISSUE_STATUSES_RATE', '30/minute'),
+        'linear_channel_issue_write': os.getenv('LINEAR_CHANNEL_ISSUE_WRITE_RATE', '10/minute'),
         # Unauthenticated auth entry points (core.throttles). Bound
         # credential-enumeration and magic-link email spam. Disabled under the
         # test runner so suites that issue many auth calls in a loop aren't
@@ -1425,6 +1427,7 @@ SLACK_API_CONNECT_TIMEOUT_SECONDS = float(os.environ.get("SLACK_API_CONNECT_TIME
 SLACK_API_READ_TIMEOUT_SECONDS = float(os.environ.get("SLACK_API_READ_TIMEOUT_SECONDS", "8") or 8)
 
 LINEAR_API_KEY = os.environ.get("LINEAR_API_KEY", "")
+LINEAR_WRITE_API_KEY = os.environ.get("LINEAR_WRITE_API_KEY", "")
 LINEAR_CLIENT_ID = os.environ.get("LINEAR_CLIENT_ID", "")
 LINEAR_CLIENT_SECRET = os.environ.get("LINEAR_CLIENT_SECRET", "")
 LINEAR_OAUTH_REDIRECT_URI = os.environ.get(
@@ -1443,6 +1446,15 @@ LINEAR_CHANNEL_ISSUE_BINDINGS_JSON = os.environ.get(
 )
 LINEAR_CHANNEL_ISSUE_MAX_COMMENTS = int(
     os.environ.get("LINEAR_CHANNEL_ISSUE_MAX_COMMENTS", "250") or 250
+)
+LINEAR_CHANNEL_ISSUE_WRITES_ENABLED = os.environ.get(
+    "LINEAR_CHANNEL_ISSUE_WRITES_ENABLED", "false"
+).strip().lower() in {"1", "true", "yes", "on"}
+LINEAR_CHANNEL_ISSUE_WRITE_RECEIPT_TTL_SECONDS = int(
+    os.environ.get("LINEAR_CHANNEL_ISSUE_WRITE_RECEIPT_TTL_SECONDS", "86400") or 86400
+)
+LINEAR_CHANNEL_ISSUE_WRITE_LOCK_SECONDS = int(
+    os.environ.get("LINEAR_CHANNEL_ISSUE_WRITE_LOCK_SECONDS", "600") or 600
 )
 LINEAR_TASK_SIZING_ENFORCEMENT_MODE = os.environ.get(
     "LINEAR_TASK_SIZING_ENFORCEMENT_MODE"
