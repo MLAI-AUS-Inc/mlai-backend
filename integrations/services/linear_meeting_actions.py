@@ -43,6 +43,10 @@ class LinearMeetingConfigurationError(Exception):
     pass
 
 
+class LinearMeetingAccessError(Exception):
+    """Raised when Roo's Linear credential cannot see its required teams."""
+
+
 class LinearMeetingGraphQLError(Exception):
     def __init__(self, message: str, *, operation: str | None = None):
         self.operation = operation
@@ -1242,6 +1246,7 @@ def _normalize_linear_channel_issue_detail(
 
 def get_linear_meeting_context() -> dict[str, Any]:
     teams = list_teams()
+    _assert_required_linear_team_access(teams)
     users = list_users()
     projects = list_active_projects(teams=teams)
     labels = list_issue_labels()
@@ -1864,7 +1869,9 @@ def resolve_linear_project(query: str, *, limit: int = 100) -> dict[str, Any]:
     if len(normalized_query) < 3:
         raise ValueError("A specific Linear project query is required.")
 
-    projects = _list_projects(limit=limit, teams=[], include_inactive=True)
+    teams = list_teams()
+    _assert_required_linear_team_access(teams)
+    projects = _list_projects(limit=limit, teams=teams, include_inactive=True)
     ranked: list[tuple[float, dict[str, Any], str]] = []
     for project in projects:
         best_score = 0.0
@@ -1946,7 +1953,12 @@ def _list_projects(
 ) -> list[dict[str, Any]]:
     page_size = _bounded_limit(limit, default=100, maximum=100)
     query = """
-    query LinearProjects($first: Int!, $after: String, $includeArchived: Boolean!) {
+    query LinearProjects(
+      $first: Int!,
+      $after: String,
+      $includeArchived: Boolean!,
+      $memberFirst: Int!
+    ) {
       projects(first: $first, after: $after, includeArchived: $includeArchived) {
         nodes {
           id
@@ -1989,7 +2001,7 @@ def _list_projects(
               name
             }
           }
-          members(first: 50) {
+          members(first: $memberFirst) {
             nodes {
               id
               name
@@ -2012,6 +2024,12 @@ def _list_projects(
             "after": cursor,
             "includeArchived": include_inactive,
         }
+        if not use_basic_query:
+            # Project members are useful assignment evidence, but multiplying
+            # 100 projects by 50 nested members exceeds Linear's query budget in
+            # the MLAI workspace. Ten preserves a bounded tie-breaker while team
+            # membership remains the complete fallback.
+            variables["memberFirst"] = 10
         try:
             data = _graphql(
                 _basic_projects_query() if use_basic_query else query,
@@ -3385,6 +3403,42 @@ def _team_members_query_unsupported(exc: LinearMeetingGraphQLError) -> bool:
                 or "field" in message
             )
         )
+    )
+
+
+def _assert_required_linear_team_access(teams: list[dict[str, Any]]) -> None:
+    required_keys = {
+        str(value or "").strip().upper()
+        for value in getattr(settings, "LINEAR_MEETING_REQUIRED_TEAM_KEYS", []) or []
+        if str(value or "").strip()
+    }
+    if not required_keys:
+        return
+
+    accessible_keys = {
+        str(team.get("key") or "").strip().upper()
+        for team in teams
+        if isinstance(team, dict) and str(team.get("key") or "").strip()
+    }
+    missing_keys = sorted(required_keys - accessible_keys)
+    if not missing_keys:
+        return
+
+    accessible_names = sorted(
+        {
+            str(team.get("name") or team.get("key") or "").strip()
+            for team in teams
+            if isinstance(team, dict)
+            and str(team.get("name") or team.get("key") or "").strip()
+        }
+    )
+    visible = ", ".join(accessible_names) if accessible_names else "no teams"
+    missing = ", ".join(missing_keys)
+    raise LinearMeetingAccessError(
+        "Roo's Linear credential has incomplete workspace access. "
+        f"Missing required team keys: {missing}; currently visible: {visible}. "
+        "Replace or re-authorize LINEAR_API_KEY with read/write access and "
+        "'All teams you have access to'. Nothing was changed."
     )
 
 

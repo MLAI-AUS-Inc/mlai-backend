@@ -1292,10 +1292,23 @@ class LinearMeetingActionsApiTests(SimpleTestCase):
 
     @patch("integrations.services.linear_meeting_actions.http_requests.post")
     def test_project_resolve_finds_normalized_inactive_project(self, mock_post):
-        mock_post.return_value = FakeLinearResponse(
-            {
-                "data": {
-                    "projects": {
+        mock_post.side_effect = [
+            FakeLinearResponse(
+                {
+                    "data": {
+                        "teams": {
+                            "nodes": [
+                                {"id": "team-1", "key": "ENG", "name": "Engineering"}
+                            ],
+                            "pageInfo": {"hasNextPage": False, "endCursor": None},
+                        }
+                    }
+                }
+            ),
+            FakeLinearResponse(
+                {
+                    "data": {
+                        "projects": {
                         "nodes": [
                             {
                                 "id": "project-study-nash",
@@ -1325,10 +1338,11 @@ class LinearMeetingActionsApiTests(SimpleTestCase):
                             },
                         ],
                         "pageInfo": {"hasNextPage": False, "endCursor": None},
+                        }
                     }
                 }
-            }
-        )
+            ),
+        ]
 
         response = self.client.get(
             "/api/v1/integrations/linear/projects/resolve",
@@ -1341,16 +1355,117 @@ class LinearMeetingActionsApiTests(SimpleTestCase):
         self.assertEqual(response.json()["project"]["id"], "project-study-nash")
         self.assertEqual(response.json()["confidence"], 1.0)
         self.assertTrue(response.json()["isInactive"])
-        request_payload = mock_post.call_args.kwargs["json"]
+        request_payload = mock_post.call_args_list[1].kwargs["json"]
         self.assertEqual(request_payload["operationName"], "LinearProjects")
         self.assertTrue(request_payload["variables"]["includeArchived"])
+        self.assertEqual(request_payload["variables"]["memberFirst"], 10)
+
+    @patch("integrations.services.linear_meeting_actions.http_requests.post")
+    def test_project_resolve_finds_sansoni_master_app_on_later_page(self, mock_post):
+        mock_post.side_effect = [
+            FakeLinearResponse(
+                {
+                    "data": {
+                        "teams": {
+                            "nodes": [
+                                {"id": "team-studio", "key": "STU", "name": "Studio"}
+                            ],
+                            "pageInfo": {"hasNextPage": False, "endCursor": None},
+                        }
+                    }
+                }
+            ),
+            FakeLinearResponse(
+                {
+                    "data": {
+                        "projects": {
+                            "nodes": [
+                                {"id": "project-other", "name": "[Studio] Other"}
+                            ],
+                            "pageInfo": {
+                                "hasNextPage": True,
+                                "endCursor": "project-cursor-1",
+                            },
+                        }
+                    }
+                }
+            ),
+            FakeLinearResponse(
+                {
+                    "data": {
+                        "projects": {
+                            "nodes": [
+                                {
+                                    "id": "project-sansoni-master-app",
+                                    "name": "[Studio] Sansoni Master App",
+                                    "slugId": "sansoni-master-app",
+                                    "status": {"name": "In Progress", "type": "started"},
+                                    "teams": {
+                                        "nodes": [
+                                            {
+                                                "id": "team-studio",
+                                                "key": "STU",
+                                                "name": "Studio",
+                                            }
+                                        ]
+                                    },
+                                    "members": {"nodes": []},
+                                }
+                            ],
+                            "pageInfo": {"hasNextPage": False, "endCursor": None},
+                        }
+                    }
+                }
+            ),
+        ]
+
+        response = self.client.get(
+            "/api/v1/integrations/linear/projects/resolve",
+            {"query": "[Studio] Sansoni Master App"},
+            **self.auth_headers,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "matched")
+        self.assertEqual(
+            response.json()["project"]["id"],
+            "project-sansoni-master-app",
+        )
+        project_requests = [
+            call.kwargs["json"]
+            for call in mock_post.call_args_list
+            if call.kwargs["json"]["operationName"] == "LinearProjects"
+        ]
+        self.assertEqual(len(project_requests), 2)
+        self.assertIsNone(project_requests[0]["variables"]["after"])
+        self.assertEqual(
+            project_requests[1]["variables"]["after"],
+            "project-cursor-1",
+        )
+        self.assertEqual(
+            [request["variables"]["memberFirst"] for request in project_requests],
+            [10, 10],
+        )
 
     @patch("integrations.services.linear_meeting_actions.http_requests.post")
     def test_project_resolve_fails_closed_on_ambiguous_containment(self, mock_post):
-        mock_post.return_value = FakeLinearResponse(
-            {
-                "data": {
-                    "projects": {
+        mock_post.side_effect = [
+            FakeLinearResponse(
+                {
+                    "data": {
+                        "teams": {
+                            "nodes": [
+                                {"id": "team-1", "key": "ENG", "name": "Engineering"}
+                            ],
+                            "pageInfo": {"hasNextPage": False, "endCursor": None},
+                        }
+                    }
+                }
+            ),
+            FakeLinearResponse(
+                {
+                    "data": {
+                        "projects": {
                         "nodes": [
                             {
                                 "id": "project-crm",
@@ -1366,10 +1481,11 @@ class LinearMeetingActionsApiTests(SimpleTestCase):
                             },
                         ],
                         "pageInfo": {"hasNextPage": False, "endCursor": None},
+                        }
                     }
                 }
-            }
-        )
+            ),
+        ]
 
         response = self.client.get(
             "/api/v1/integrations/linear/projects/resolve",
@@ -1381,6 +1497,38 @@ class LinearMeetingActionsApiTests(SimpleTestCase):
         self.assertEqual(response.json()["status"], "ambiguous")
         self.assertIsNone(response.json()["project"])
         self.assertEqual(response.json()["candidateCount"], 2)
+
+    @override_settings(LINEAR_MEETING_REQUIRED_TEAM_KEYS=["TECH", "STU", "MLA"])
+    @patch("integrations.services.linear_meeting_actions.http_requests.post")
+    def test_context_reports_incomplete_linear_team_access(self, mock_post):
+        mock_post.return_value = FakeLinearResponse(
+            {
+                "data": {
+                    "teams": {
+                        "nodes": [
+                            {
+                                "id": "team-tech",
+                                "key": "TECH",
+                                "name": "MLAI_TECH",
+                                "members": {"nodes": []},
+                            }
+                        ],
+                        "pageInfo": {"hasNextPage": False, "endCursor": None},
+                    }
+                }
+            }
+        )
+
+        response = self.client.get(
+            "/api/v1/integrations/linear/meeting-context",
+            **self.auth_headers,
+        )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["code"], "linear_team_access_incomplete")
+        self.assertIn("Missing required team keys: MLA, STU", response.json()["detail"])
+        self.assertIn("currently visible: MLAI_TECH", response.json()["detail"])
+        self.assertEqual(mock_post.call_count, 1)
 
     @override_settings(LINEAR_API_KEY="")
     def test_missing_linear_api_key_returns_503(self):
@@ -1543,6 +1691,7 @@ class LinearMeetingActionsApiTests(SimpleTestCase):
         self.assertEqual(team_request["variables"]["memberFirst"], 50)
         project_request = mock_post.call_args_list[2].kwargs["json"]
         self.assertEqual(project_request["operationName"], "LinearProjects")
+        self.assertEqual(project_request["variables"]["memberFirst"], 10)
         self.assertIn("status", project_request["query"])
         self.assertIn("completedAt", project_request["query"])
         self.assertIn("canceledAt", project_request["query"])

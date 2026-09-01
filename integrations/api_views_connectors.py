@@ -39,6 +39,7 @@ from integrations.services.linear_meeting_actions import (
     LinearChannelIssueConflictError,
     LinearChannelIssueRequestConflictError,
     LinearChannelIssueWriteUncertainError,
+    LinearMeetingAccessError,
     LinearMeetingActionConflictError,
     LinearMeetingConfigurationError,
     LinearMeetingGraphQLError,
@@ -130,6 +131,14 @@ def _linear_meeting_error_response(exc):
             {
                 "detail": str(exc),
                 "code": "linear_not_configured",
+            },
+            status=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+    if isinstance(exc, LinearMeetingAccessError):
+        return Response(
+            {
+                "detail": str(exc),
+                "code": "linear_team_access_incomplete",
             },
             status=status.HTTP_503_SERVICE_UNAVAILABLE,
         )
@@ -819,6 +828,7 @@ class LinearMeetingContextView(APIView):
         try:
             payload = get_linear_meeting_context()
         except (
+            LinearMeetingAccessError,
             LinearMeetingConfigurationError,
             LinearMeetingRateLimitError,
             LinearMeetingGraphQLError,
@@ -937,6 +947,7 @@ class LinearProjectResolveView(APIView):
         try:
             payload = resolve_linear_project(request.query_params.get("query") or "")
         except (
+            LinearMeetingAccessError,
             LinearMeetingConfigurationError,
             LinearMeetingRateLimitError,
             LinearMeetingGraphQLError,

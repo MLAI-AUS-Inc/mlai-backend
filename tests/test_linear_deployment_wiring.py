@@ -1,9 +1,12 @@
+import json
 import os
-from pathlib import Path
+import runpy
 import shutil
 import subprocess
 import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -18,13 +21,21 @@ VALID_BINDINGS = (
 
 
 class LinearDeploymentWiringTests(unittest.TestCase):
-    def validator_result(self, **overrides):
-        environment = {
-            **os.environ,
+    @staticmethod
+    def validator_environment(**overrides):
+        return {
             "LINEAR_API_KEY": "linear-test-key-at-least-32-characters",
+            "LINEAR_MEETING_REQUIRED_TEAM_KEYS": "TECH,STU,MLA",
+            "LINEAR_VERIFY_TEAM_ACCESS": "false",
             "LINEAR_CHANNEL_ISSUE_BINDINGS_JSON": VALID_BINDINGS,
             "LINEAR_CHANNEL_ISSUE_MAX_COMMENTS": "250",
             **overrides,
+        }
+
+    def validator_result(self, **overrides):
+        environment = {
+            **os.environ,
+            **self.validator_environment(**overrides),
         }
         return subprocess.run(
             ["python3", "scripts/validate_linear_channel_issue_deploy_config.py"],
@@ -54,10 +65,82 @@ class LinearDeploymentWiringTests(unittest.TestCase):
         whitespace_reader = self.validator_result(LINEAR_API_KEY=" " * 40)
         self.assertNotEqual(whitespace_reader.returncode, 0)
 
+    def test_validator_rejects_invalid_team_keys(self):
+        invalid_team_keys = self.validator_result(
+            LINEAR_MEETING_REQUIRED_TEAM_KEYS="TECH,Studio Team"
+        )
+        self.assertNotEqual(invalid_team_keys.returncode, 0)
+
+    def test_validator_live_check_accepts_complete_team_catalogue(self):
+        payload = {
+            "data": {
+                "teams": {
+                    "nodes": [{"key": "TECH"}, {"key": "STU"}, {"key": "MLA"}],
+                    "pageInfo": {"hasNextPage": False, "endCursor": None},
+                }
+            }
+        }
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self):
+                return json.dumps(payload).encode("utf-8")
+
+        with patch.dict(
+            os.environ,
+            self.validator_environment(LINEAR_VERIFY_TEAM_ACCESS="true"),
+            clear=True,
+        ), patch("urllib.request.urlopen", return_value=FakeResponse()):
+            runpy.run_path(
+                str(REPO_ROOT / "scripts/validate_linear_channel_issue_deploy_config.py")
+            )
+
+    def test_validator_live_check_rejects_team_scoped_key(self):
+        payload = {
+            "data": {
+                "teams": {
+                    "nodes": [{"key": "TECH"}],
+                    "pageInfo": {"hasNextPage": False, "endCursor": None},
+                }
+            }
+        }
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self):
+                return json.dumps(payload).encode("utf-8")
+
+        with patch.dict(
+            os.environ,
+            self.validator_environment(LINEAR_VERIFY_TEAM_ACCESS="true"),
+            clear=True,
+        ), patch("urllib.request.urlopen", return_value=FakeResponse()), self.assertRaisesRegex(
+            SystemExit,
+            "cannot access required Linear teams: MLA, STU",
+        ):
+            runpy.run_path(
+                str(REPO_ROOT / "scripts/validate_linear_channel_issue_deploy_config.py")
+            )
+
     def test_workflow_passes_github_settings_to_deploy_script(self):
         workflow = (REPO_ROOT / ".github/workflows/deploy.yml").read_text()
         self.assertIn("LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}", workflow)
         self.assertNotIn("LINEAR_WRITE_API_KEY", workflow)
+        self.assertIn(
+            "LINEAR_MEETING_REQUIRED_TEAM_KEYS: ${{ vars.LINEAR_MEETING_REQUIRED_TEAM_KEYS || 'TECH,STU,MLA' }}",
+            workflow,
+        )
+        self.assertIn('LINEAR_VERIFY_TEAM_ACCESS: "true"', workflow)
         self.assertIn(
             "LINEAR_CHANNEL_ISSUE_BINDINGS_JSON: ${{ vars.LINEAR_CHANNEL_ISSUE_BINDINGS_JSON }}",
             workflow,
@@ -76,6 +159,10 @@ class LinearDeploymentWiringTests(unittest.TestCase):
         deploy = (REPO_ROOT / "deploy.sh").read_text()
         self.assertIn('install_remote_env_secret LINEAR_API_KEY "$LINEAR_API_KEY"', deploy)
         self.assertNotIn("LINEAR_WRITE_API_KEY", deploy)
+        self.assertIn(
+            'install_remote_env_value LINEAR_MEETING_REQUIRED_TEAM_KEYS "$LINEAR_MEETING_REQUIRED_TEAM_KEYS"',
+            deploy,
+        )
         self.assertIn(
             'install_remote_env_value LINEAR_CHANNEL_ISSUE_BINDINGS_JSON "$LINEAR_CHANNEL_ISSUE_BINDINGS_JSON"',
             deploy,
