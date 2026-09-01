@@ -3539,15 +3539,15 @@ def _graphql_write(
             f"Linear GraphQL rejected the write with HTTP {response.status_code}."
         )
         raise LinearMeetingGraphQLError(message, operation=operation_name)
+    mutation_shapes = {
+        "LinearChannelIssueUpdate": ("issueUpdate", "issue"),
+        "LinearChannelIssueComment": ("commentCreate", "comment"),
+        "LinearChannelIssueDuplicate": ("issueRelationCreate", "issueRelation"),
+    }
+    root_name, entity_name = mutation_shapes.get(operation_name, ("", ""))
+    root = data.get(root_name) if isinstance(data, dict) and root_name else None
     if errors:
         message = _graphql_error_message(errors)
-        mutation_shapes = {
-            "LinearChannelIssueUpdate": ("issueUpdate", "issue"),
-            "LinearChannelIssueComment": ("commentCreate", "comment"),
-            "LinearChannelIssueDuplicate": ("issueRelationCreate", "issueRelation"),
-        }
-        root_name, entity_name = mutation_shapes.get(operation_name, ("", ""))
-        root = data.get(root_name) if isinstance(data, dict) and root_name else None
         if (
             isinstance(root, dict)
             and root.get("success") is True
@@ -3572,7 +3572,19 @@ def _graphql_write(
         raise LinearMeetingGraphQLError(
             f"Linear rejected the edit: {exc}", operation=operation_name
         ) from exc
-    return data if isinstance(data, dict) else {}
+    if (
+        isinstance(root, dict)
+        and root.get("success") is True
+        and isinstance(root.get(entity_name), dict)
+    ):
+        return data
+    if isinstance(root, dict) and root.get("success") is False:
+        raise LinearMeetingGraphQLError(
+            "Linear rejected the issue edit.", operation=operation_name
+        )
+    raise LinearChannelIssueWriteUncertainError(
+        "Linear returned an ambiguous response and may have applied the edit. Check the issue before retrying."
+    )
 
 
 def _linear_api_key() -> str:

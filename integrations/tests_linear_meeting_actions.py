@@ -270,6 +270,26 @@ class LinearMeetingActionsApiTests(SimpleTestCase):
 
         self.assertIsNone(cache.get(receipt_key))
 
+    @patch("integrations.services.linear_meeting_actions.http_requests.post")
+    def test_missing_2xx_mutation_data_keeps_write_receipt(self, mock_post):
+        mock_post.return_value = FakeLinearResponse({"data": None})
+        receipt_key = "linear-channel-write:test-ambiguous-2xx"
+        cache.set(receipt_key, "processing", timeout=60)
+
+        with self.assertRaises(
+            linear_service.LinearChannelIssueWriteUncertainError
+        ):
+            linear_service._run_linear_channel_write_with_receipt(
+                receipt_key,
+                lambda: linear_service._graphql_write(
+                    "mutation Test { commentCreate { success } }",
+                    {"input": {"issueId": "issue-29", "body": "Update"}},
+                    operation_name="LinearChannelIssueComment",
+                ),
+            )
+
+        self.assertEqual(cache.get(receipt_key), "processing")
+
     def test_write_requires_explicit_well_typed_value(self):
         base_payload = {
             "slack_workspace_id": "TMLAI",
