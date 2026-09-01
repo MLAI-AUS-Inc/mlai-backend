@@ -11,9 +11,21 @@ DEPLOY_SSH_TARGET="${DEPLOY_SSH_TARGET:-root@$DROPLET_IP}"
 PROJECT_DIR="/root/mlai-backend"
 APP_RELEASE="${APP_RELEASE:-$(git rev-parse --short=12 HEAD 2>/dev/null || date +%Y%m%d%H%M)}"
 APP_RELEASE_SHORT="${APP_RELEASE:0:12}"
+MEETING_ROOM_BOOKING_ENABLED="${MEETING_ROOM_BOOKING_ENABLED:-false}"
 COMMUNITY_BRIDGE_PRODUCTION_ENABLED="${COMMUNITY_BRIDGE_PRODUCTION_ENABLED:-false}"
 ORG_MEMORY_PRODUCTION_DEPLOY_ENABLED="${ORG_MEMORY_PRODUCTION_DEPLOY_ENABLED:-false}"
 ORG_MEMORY_PRODUCTION_PUBLIC_CHANNEL_ADMIN_SCOPE_APPROVED="${ORG_MEMORY_PRODUCTION_PUBLIC_CHANNEL_ADMIN_SCOPE_APPROVED:-false}"
+LINEAR_CHANNEL_ISSUE_MAX_COMMENTS="${LINEAR_CHANNEL_ISSUE_MAX_COMMENTS:-250}"
+
+case "$MEETING_ROOM_BOOKING_ENABLED" in
+    true|TRUE|True|1|yes|YES|Yes|on|ON|On) MEETING_ROOM_BOOKING_ENABLED=true ;;
+    false|FALSE|False|0|no|NO|No|off|OFF|Off|"") MEETING_ROOM_BOOKING_ENABLED=false ;;
+    *)
+        echo "❌ MEETING_ROOM_BOOKING_ENABLED must be true or false."
+        exit 1
+        ;;
+esac
+export MEETING_ROOM_BOOKING_ENABLED
 
 case "$COMMUNITY_BRIDGE_PRODUCTION_ENABLED" in
     true|TRUE|True|1|yes|YES|Yes|on|ON|On) COMMUNITY_BRIDGE_PRODUCTION_ENABLED=true ;;
@@ -181,6 +193,7 @@ if [ "$VICTOR_AI_ROO_SIGNING_SECRET" = "$ROO_SIM_PATIENT_KEY" ]; then
     echo "❌ Victor AI and simulated-patient credentials must be distinct."
     exit 1
 fi
+python3 scripts/validate_linear_channel_issue_deploy_config.py
 if [ "$ORG_MEMORY_PRODUCTION_DEPLOY_ENABLED" = "true" ]; then
     if [[ ! "${ORG_MEMORY_PILOT_ALLOWLIST_KEY_VERSION:-}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]]; then
         echo "❌ ORG_MEMORY_PILOT_ALLOWLIST_KEY_VERSION must be supplied in the required format."
@@ -240,12 +253,25 @@ echo "🔐 Updating MLAI Chat credentials (values redacted)..."
 install_remote_env_secret COMMUNITY_CHAT_EMAIL_CODE_PEPPER "$COMMUNITY_CHAT_EMAIL_CODE_PEPPER"
 install_remote_env_secret COMMUNITY_CHAT_EMAIL_CODE_DELIVERY_SECRET "$COMMUNITY_CHAT_EMAIL_CODE_DELIVERY_SECRET"
 install_remote_env_secret COMMUNITY_CHAT_ADAPTER_TOKEN "$COMMUNITY_CHAT_ADAPTER_TOKEN"
+echo "🔐 Updating Linear channel issue reader credential (value redacted)..."
+install_remote_env_secret LINEAR_API_KEY "$LINEAR_API_KEY"
 if [ "$bridge_present" -gt 0 ]; then
     install_remote_env_secret SLACK_BRIDGE_BOT_TOKEN "$SLACK_BRIDGE_BOT_TOKEN"
     install_remote_env_secret SLACK_BRIDGE_SIGNING_SECRET "$SLACK_BRIDGE_SIGNING_SECRET"
     install_remote_env_secret BUZZ_BRIDGE_ADAPTER_TOKEN "$BUZZ_BRIDGE_ADAPTER_TOKEN"
     install_remote_env_secret BUZZ_BRIDGE_CALLBACK_SECRET "$BUZZ_BRIDGE_CALLBACK_SECRET"
 fi
+
+install_remote_env_value() {
+    local key="$1"
+    local value="$2"
+    printf '%s' "$value" \
+        | ssh "$DEPLOY_SSH_TARGET" "$PROJECT_DIR/scripts/upsert_env_value_from_stdin.sh $key"
+}
+
+echo "🔧 Updating Linear channel issue reader configuration..."
+install_remote_env_value LINEAR_CHANNEL_ISSUE_BINDINGS_JSON "$LINEAR_CHANNEL_ISSUE_BINDINGS_JSON"
+install_remote_env_value LINEAR_CHANNEL_ISSUE_MAX_COMMENTS "$LINEAR_CHANNEL_ISSUE_MAX_COMMENTS"
 
 # Send the credential over SSH stdin rather than a command-line argument. The
 # remote shell updates .env using builtins, so the value is neither echoed nor
@@ -515,6 +541,7 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     fi
 
     cd $PROJECT_DIR
+    meeting_room_booking_enabled="$MEETING_ROOM_BOOKING_ENABLED"
     community_bridge_production_enabled="$COMMUNITY_BRIDGE_PRODUCTION_ENABLED"
     org_memory_production_deploy_enabled="$ORG_MEMORY_PRODUCTION_DEPLOY_ENABLED"
 
@@ -545,9 +572,10 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     upsert_env_value COMMUNITY_CHAT_ADAPTER_URL "$COMMUNITY_CHAT_ADAPTER_URL"
     upsert_env_value COMMUNITY_CHAT_EMAIL_CODE_AUTH_ENABLED "true"
     upsert_env_value COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED "false"
-    upsert_env_value COMMUNITY_CHAT_DEVICE_AUTH_ENABLED "false"
+    upsert_env_value COMMUNITY_CHAT_DEVICE_AUTH_ENABLED "true"
     upsert_env_value CUSTOMERIO_COMMUNITY_CHAT_CODE_MESSAGE_ID "mlai_chat_sign_in_code"
     upsert_env_value COMMUNITY_CHAT_ALLOWED_ORIGINS "https://chat.mlai.au,tauri://localhost,http://tauri.localhost,mlaichat://callback"
+    upsert_env_value MEETING_ROOM_BOOKING_ENABLED "\$meeting_room_booking_enabled"
     upsert_env_value COMMUNITY_BRIDGE_PRODUCTION_ENABLED "\$community_bridge_production_enabled"
     if [ "$bridge_present" -gt 0 ]; then
         upsert_env_value SLACK_BRIDGE_BOT_USER_ID "$SLACK_BRIDGE_BOT_USER_ID"
@@ -930,6 +958,29 @@ PY
         echo "Expected /healthz/ready to report release $APP_RELEASE_SHORT for $APP_RELEASE"
         echo "\$health_body"
         exit 1
+    fi
+
+    if [ "\$meeting_room_booking_enabled" = "true" ]; then
+        echo "🏢 Verifying the enabled meeting-room API and active room catalogue..."
+        meeting_room_api_key=\$(read_env_value ROO_API_KEY)
+        meeting_rooms_body=\$(curl -fsS --max-time 10 \
+            -H "X-API-Key: \$meeting_room_api_key" \
+            https://api.mlai.au/api/v1/points/meeting-rooms/rooms/)
+        printf '%s' "\$meeting_rooms_body" | python3 -c '
+import json
+import sys
+
+payload = json.load(sys.stdin)
+slugs = {
+    str(room.get("slug") or "")
+    for room in payload.get("rooms", [])
+    if isinstance(room, dict)
+}
+expected = {"small-meeting-room", "big-meeting-room"}
+if slugs != expected:
+    raise SystemExit(f"Expected active meeting rooms {sorted(expected)}, got {sorted(slugs)}")
+'
+        unset meeting_room_api_key meeting_rooms_body
     fi
 
     echo "🛠️ Verifying external Django admin assets..."

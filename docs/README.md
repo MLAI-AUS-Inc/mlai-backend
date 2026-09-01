@@ -4,6 +4,10 @@ Start with the repository [`README`](../README.md) and
 [`ARCHITECTURE`](../ARCHITECTURE.md). Use this index to find current
 subsystem-specific contracts and runbooks.
 
+## Community chat APIs
+
+- [`community-chat-home.md`](community-chat-home.md)
+
 ## Inactive Buzz / MLAI Chat experiment
 
 These documents describe integration work for the inactive experiment in
@@ -30,6 +34,25 @@ rollout sequence.
 - [`humanitix-xero-reconciliation.md`](humanitix-xero-reconciliation.md)
 - [`reconciliation-knowledge-export.md`](reconciliation-knowledge-export.md)
 - [`monthly-update-reminders.md`](monthly-update-reminders.md)
+
+## HealthHack
+
+- [`healthhack-scoring-data.md`](healthhack-scoring-data.md) documents the
+  private scoring-data boundary and runtime provisioning contract.
+
+## Roo
+
+- [`coworking-booking.md`](coworking-booking.md)
+- [`office-manager.md`](office-manager.md)
+- [`roo-linear-channel-issues.md`](roo-linear-channel-issues.md)
+
+Linear meeting-action reviews are stored by the internal, Roo-authenticated
+`/api/v1/integrations/linear/action-batches` endpoints. Batches contain 1–20
+requester-bound proposals, expire after
+`LINEAR_MEETING_ACTION_BATCH_TTL_SECONDS` (24 hours by default), and delegate
+approved work to the existing idempotent Linear issue writer. Deploy migration
+`integrations.0042_linear_meeting_action_batches` and these endpoints before
+the Roo release that renders durable review buttons.
 
 ## Document status
 

@@ -361,7 +361,10 @@ def map_state_label(state_label):
     }
     return mapping.get(int(state_label), -1)
 
-SOLUTION_PATH = Path(__file__).with_name('solution.csv')
+_solution_path_setting = str(
+    getattr(settings, 'HEALTH_HACK_SOLUTION_PATH', '') or ''
+).strip()
+SOLUTION_PATH = Path(_solution_path_setting).expanduser() if _solution_path_setting else None
 SOLUTION_COLUMNS = ['ID', 'predicted_label', 'Usage']
 VALID_CLASSES = {0, 1, 2, 3}
 
@@ -372,6 +375,12 @@ def load_ground_truth():
     global _ground_truth_cache
     if _ground_truth_cache is not None:
         return _ground_truth_cache
+    if SOLUTION_PATH is None:
+        logger.error(
+            'HealthHack ground truth is unavailable because '
+            'HEALTH_HACK_SOLUTION_PATH is not configured'
+        )
+        return []
     gt_rows = []
     try:
         with SOLUTION_PATH.open('r', encoding='utf-8-sig', newline='') as f:
@@ -399,7 +408,7 @@ def load_ground_truth():
                         f'Invalid Usage {row["Usage"]!r} at row {expected_id}'
                     )
                 gt_rows.append(row)
-    except FileNotFoundError:
+    except (FileNotFoundError, IsADirectoryError):
         logger.error("Ground truth file not found at %s", SOLUTION_PATH)
         return gt_rows
     _ground_truth_cache = gt_rows

@@ -1272,17 +1272,6 @@ def run_office_manager_scheduler(
     now: datetime | None = None,
     dry_run: bool = False,
 ) -> dict:
-    if not dry_run and not _office_manager_enabled():
-        return {"status": "skipped", "reason": "disabled"}
-    if not dry_run:
-        try:
-            _office_manager_slack_token()
-        except OfficeManagerConfigurationError:
-            return {
-                "status": "failed",
-                "reason": "slack_bot_token_not_configured",
-            }
-
     winner_channel_retractions = (
         []
         if dry_run
@@ -1293,6 +1282,20 @@ def run_office_manager_scheduler(
         if winner_channel_retractions:
             payload["winner_channel_retractions"] = winner_channel_retractions
         return payload
+
+    # Retractions repair previously committed state and must continue while the
+    # creation path is disabled during a rollback. Otherwise a stale winner can
+    # remain named publicly until the feature is enabled again.
+    if not dry_run and not _office_manager_enabled():
+        return scheduler_result({"status": "skipped", "reason": "disabled"})
+    if not dry_run:
+        try:
+            _office_manager_slack_token()
+        except OfficeManagerConfigurationError:
+            return scheduler_result({
+                "status": "failed",
+                "reason": "slack_bot_token_not_configured",
+            })
 
     local_now = _local_now(now)
     local_date = local_now.date()

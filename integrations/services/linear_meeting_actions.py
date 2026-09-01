@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 import logging
 import re
 from datetime import timedelta
+from difflib import SequenceMatcher
 from typing import Any
 
 from django.conf import settings
@@ -13,6 +15,8 @@ from django.utils.dateparse import parse_datetime
 from integrations import http_client as http_requests
 from integrations.models import (
     LinearIssueCreationReceipt,
+    LinearMeetingActionBatch,
+    LinearMeetingActionItem,
     LinearProjectSizingItem,
     LinearProjectSizingRun,
 )
@@ -56,6 +60,307 @@ class LinearMeetingSizingConflictError(Exception):
     pass
 
 
+class LinearMeetingActionConflictError(Exception):
+    pass
+
+
+class LinearChannelIssueAccessError(Exception):
+    pass
+
+
+def list_linear_channel_issues(payload: dict[str, Any]) -> dict[str, Any]:
+    """Return a bounded live Linear issue index for an approved Slack channel."""
+
+    binding = _linear_channel_issue_binding(payload)
+    page_size = _bounded_limit(payload.get("limit"), default=50, maximum=100)
+    cursor = str(payload.get("after") or "").strip() or None
+    query = """
+    query LinearChannelIssueList(
+      $teamId: ID!,
+      $stateId: ID!,
+      $first: Int!,
+      $after: String
+    ) {
+      issues(
+        first: $first,
+        after: $after,
+        orderBy: updatedAt,
+        filter: {
+          team: { id: { eq: $teamId } },
+          state: { id: { eq: $stateId } }
+        }
+      ) {
+        nodes {
+          id identifier title url priority priorityLabel dueDate updatedAt
+          state { id name type }
+          team { id key name }
+          assignee { id name displayName }
+          project { id name }
+        }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+    """
+    data = _graphql(
+        query,
+        {
+            "teamId": binding["linear_team_id"],
+            "stateId": binding["linear_state_id"],
+            "first": page_size,
+            "after": cursor,
+        },
+        operation_name="LinearChannelIssueList",
+    )
+    connection = data.get("issues") if isinstance(data.get("issues"), dict) else {}
+    issues = []
+    for issue in _connection_nodes(connection):
+        if not _linear_issue_matches_binding(issue, binding):
+            logger.warning(
+                "linear_channel_issue_list_dropped_out_of_scope_issue identifier=%s",
+                issue.get("identifier"),
+            )
+            continue
+        issues.append(issue)
+    return {
+        "list": _linear_channel_issue_list_metadata(binding),
+        "issues": issues,
+        "pageInfo": _page_info(connection),
+        "snapshotAt": timezone.now().isoformat(),
+    }
+
+
+def get_linear_channel_issue(payload: dict[str, Any]) -> dict[str, Any]:
+    """Return one approved issue plus every bounded comment page."""
+
+    binding = _linear_channel_issue_binding(payload)
+    issue_reference = str(
+        payload.get("issue_identifier") or payload.get("issue_id") or ""
+    ).strip()
+    if not issue_reference:
+        raise ValueError("issue_identifier is required.")
+
+    issue = _fetch_linear_channel_issue_detail(issue_reference)
+    if not issue:
+        raise ValueError("Linear issue was not found.")
+    if not _linear_issue_matches_binding(issue, binding):
+        raise LinearChannelIssueAccessError(
+            "That Linear issue is not available from this Slack channel."
+        )
+
+    comments: list[dict[str, Any]] = []
+    comments_truncated = False
+    if payload.get("include_comments") is not False:
+        comments, comments_truncated = _list_linear_issue_comments(issue_reference)
+    return {
+        "list": _linear_channel_issue_list_metadata(binding),
+        "issue": _normalize_linear_channel_issue_detail(issue, binding),
+        "comments": comments,
+        "commentsTruncated": comments_truncated,
+        "snapshotAt": timezone.now().isoformat(),
+    }
+
+
+def _linear_channel_issue_binding(payload: dict[str, Any]) -> dict[str, str]:
+    if not isinstance(payload, dict):
+        raise ValueError("Request payload must be an object.")
+    workspace_id = str(payload.get("slack_workspace_id") or "").strip()
+    channel_id = str(payload.get("slack_channel_id") or "").strip()
+    requester_id = str(payload.get("requester_slack_id") or "").strip()
+    if not workspace_id or not channel_id or not requester_id:
+        raise ValueError(
+            "slack_workspace_id, slack_channel_id, and requester_slack_id are required."
+        )
+
+    raw_bindings = str(
+        getattr(settings, "LINEAR_CHANNEL_ISSUE_BINDINGS_JSON", "") or ""
+    ).strip()
+    if not raw_bindings:
+        raise LinearMeetingConfigurationError(
+            "Linear channel issue reading is not configured."
+        )
+    try:
+        configured = json.loads(raw_bindings)
+    except (TypeError, ValueError) as exc:
+        raise LinearMeetingConfigurationError(
+            "LINEAR_CHANNEL_ISSUE_BINDINGS_JSON is invalid."
+        ) from exc
+    if not isinstance(configured, dict):
+        raise LinearMeetingConfigurationError(
+            "LINEAR_CHANNEL_ISSUE_BINDINGS_JSON must be an object."
+        )
+
+    raw_binding = configured.get(f"{workspace_id}:{channel_id}")
+    if not isinstance(raw_binding, dict):
+        raise LinearChannelIssueAccessError(
+            "This Slack channel is not connected to a Linear issue list."
+        )
+    team_id = str(raw_binding.get("linear_team_id") or "").strip()
+    state_id = str(raw_binding.get("linear_state_id") or "").strip()
+    if not team_id or not state_id:
+        raise LinearMeetingConfigurationError(
+            "The Linear channel issue binding is incomplete."
+        )
+    return {
+        "slack_workspace_id": workspace_id,
+        "slack_channel_id": channel_id,
+        "linear_team_id": team_id,
+        "linear_state_id": state_id,
+        "display_name": str(raw_binding.get("display_name") or "Linear issues").strip(),
+        "team_name": str(raw_binding.get("team_name") or "").strip(),
+        "state_name": str(raw_binding.get("state_name") or "").strip(),
+    }
+
+
+def _linear_channel_issue_list_metadata(binding: dict[str, str]) -> dict[str, str]:
+    return {
+        "displayName": binding["display_name"],
+        "teamId": binding["linear_team_id"],
+        "teamName": binding["team_name"],
+        "stateId": binding["linear_state_id"],
+        "stateName": binding["state_name"],
+    }
+
+
+def _linear_issue_matches_binding(
+    issue: dict[str, Any],
+    binding: dict[str, str],
+) -> bool:
+    team = issue.get("team") if isinstance(issue.get("team"), dict) else {}
+    state = issue.get("state") if isinstance(issue.get("state"), dict) else {}
+    return (
+        str(team.get("id") or "") == binding["linear_team_id"]
+        and str(state.get("id") or "") == binding["linear_state_id"]
+    )
+
+
+def _fetch_linear_channel_issue_detail(issue_reference: str) -> dict[str, Any]:
+    query = """
+    query LinearChannelIssueDetail($id: String!) {
+      issue(id: $id) {
+        id identifier title description url priority priorityLabel estimate dueDate
+        createdAt updatedAt startedAt completedAt canceledAt archivedAt
+        state { id name type }
+        team { id key name }
+        assignee { id name displayName }
+        creator { id name displayName }
+        project { id name }
+        cycle { id name number }
+        labels(first: 100) { nodes { id name color } }
+        attachments(first: 100) {
+          nodes { id title subtitle url }
+          pageInfo { hasNextPage endCursor }
+        }
+        relations(first: 50) {
+          nodes {
+            type
+            issue { id identifier title state { id name type } team { id key name } }
+            relatedIssue { id identifier title state { id name type } team { id key name } }
+          }
+          pageInfo { hasNextPage endCursor }
+        }
+        inverseRelations(first: 50) {
+          nodes {
+            type
+            issue { id identifier title state { id name type } team { id key name } }
+            relatedIssue { id identifier title state { id name type } team { id key name } }
+          }
+          pageInfo { hasNextPage endCursor }
+        }
+      }
+    }
+    """
+    data = _graphql(
+        query,
+        {"id": issue_reference},
+        operation_name="LinearChannelIssueDetail",
+    )
+    issue = data.get("issue")
+    return issue if isinstance(issue, dict) else {}
+
+
+def _list_linear_issue_comments(issue_reference: str) -> tuple[list[dict[str, Any]], bool]:
+    page_size = 50
+    maximum = max(
+        1,
+        min(
+            int(
+                getattr(settings, "LINEAR_CHANNEL_ISSUE_MAX_COMMENTS", 250)
+                or 250
+            ),
+            500,
+        ),
+    )
+    query = """
+    query LinearChannelIssueComments($id: String!, $first: Int!, $after: String) {
+      issue(id: $id) {
+        comments(first: $first, after: $after, orderBy: createdAt) {
+          nodes {
+            id body createdAt updatedAt resolvedAt quotedText
+            parent { id }
+            user { id name displayName }
+            onBehalfOf { id name displayName }
+          }
+          pageInfo { hasNextPage endCursor }
+        }
+      }
+    }
+    """
+    comments: list[dict[str, Any]] = []
+    cursor: str | None = None
+    seen_cursors: set[str] = set()
+    while len(comments) < maximum:
+        data = _graphql(
+            query,
+            {
+                "id": issue_reference,
+                "first": min(page_size, maximum - len(comments)),
+                "after": cursor,
+            },
+            operation_name="LinearChannelIssueComments",
+        )
+        issue = data.get("issue") if isinstance(data.get("issue"), dict) else {}
+        connection = issue.get("comments") if isinstance(issue.get("comments"), dict) else {}
+        comments.extend(_connection_nodes(connection))
+        page_info = _page_info(connection)
+        if not page_info.get("hasNextPage"):
+            return comments, False
+        next_cursor = str(page_info.get("endCursor") or "").strip()
+        if not next_cursor or next_cursor in seen_cursors:
+            raise LinearMeetingGraphQLError(
+                "Linear comment pagination did not advance safely.",
+                operation="LinearChannelIssueComments",
+            )
+        seen_cursors.add(next_cursor)
+        cursor = next_cursor
+    return comments, True
+
+
+def _normalize_linear_channel_issue_detail(
+    issue: dict[str, Any],
+    binding: dict[str, str],
+) -> dict[str, Any]:
+    normalized = dict(issue)
+    normalized["labels"] = _connection_nodes(issue.get("labels"))
+    attachments = issue.get("attachments")
+    normalized["attachments"] = _connection_nodes(attachments)
+    normalized["attachmentsTruncated"] = bool(
+        _page_info(attachments).get("hasNextPage")
+    )
+    normalized = _normalize_sizing_issue(normalized, relations_available=True)
+    relation_summary = normalized.get("relations")
+    if isinstance(relation_summary, dict):
+        edges = [
+            edge
+            for edge in relation_summary.get("edges", [])
+            if isinstance(edge, dict)
+            and isinstance(edge.get("issue"), dict)
+            and _linear_issue_matches_binding(edge["issue"], binding)
+        ]
+        relation_summary["edges"] = edges
+        relation_summary["returned"] = len(edges)
+    return normalized
+
+
 def get_linear_meeting_context() -> dict[str, Any]:
     teams = list_teams()
     users = list_users()
@@ -69,6 +374,297 @@ def get_linear_meeting_context() -> dict[str, Any]:
         "projects": projects,
         "labels": labels,
         "recentIssues": recent_issues,
+    }
+
+
+def create_linear_meeting_action_batch(payload: dict[str, Any]) -> dict[str, Any]:
+    """Persist a bounded review batch before Roo renders Slack controls."""
+
+    if not isinstance(payload, dict):
+        raise ValueError("Request payload must be an object.")
+    requested_by = str(payload.get("requested_by_slack_user_id") or "").strip()
+    if not requested_by:
+        raise ValueError("requested_by_slack_user_id is required.")
+    raw_items = payload.get("items")
+    if not isinstance(raw_items, list) or not raw_items:
+        raise ValueError("items must contain at least one proposed Linear issue.")
+    if len(raw_items) > 20:
+        raise ValueError("A Linear meeting-action batch can contain at most 20 items.")
+
+    items: list[dict[str, Any]] = []
+    for position, raw_item in enumerate(raw_items):
+        if not isinstance(raw_item, dict):
+            raise ValueError(f"items[{position}] must be an object.")
+        issue_input = raw_item.get("issue_input")
+        if not isinstance(issue_input, dict):
+            raise ValueError(f"items[{position}].issue_input must be an object.")
+        if not str(issue_input.get("title") or "").strip():
+            raise ValueError(f"items[{position}].issue_input.title is required.")
+        if not str(issue_input.get("team_id") or "").strip():
+            raise ValueError(f"items[{position}].issue_input.team_id is required.")
+        display = raw_item.get("display")
+        items.append(
+            {
+                "position": position,
+                "issue_input": issue_input,
+                "display": display if isinstance(display, dict) else {},
+                "reason": str(raw_item.get("reason") or "")[:2000],
+            }
+        )
+
+    ttl_seconds = max(
+        300,
+        min(
+            int(
+                getattr(
+                    settings,
+                    "LINEAR_MEETING_ACTION_BATCH_TTL_SECONDS",
+                    86400,
+                )
+                or 86400
+            ),
+            604800,
+        ),
+    )
+    fingerprint = str(payload.get("source_fingerprint") or "").strip()
+    if fingerprint and not re.fullmatch(r"[a-fA-F0-9]{64}", fingerprint):
+        raise ValueError("source_fingerprint must be a 64-character hexadecimal digest.")
+
+    with transaction.atomic():
+        if fingerprint:
+            existing = (
+                LinearMeetingActionBatch.objects.select_for_update()
+                .filter(
+                    requested_by_slack_user_id=requested_by[:255],
+                    slack_channel_id=str(payload.get("slack_channel_id") or "")[:255],
+                    slack_thread_ts=str(payload.get("slack_thread_ts") or "")[:255],
+                    source_fingerprint=fingerprint.lower(),
+                    status=LinearMeetingActionBatch.Status.PENDING,
+                    expires_at__gt=timezone.now(),
+                )
+                .prefetch_related("items")
+                .order_by("-created_at")
+                .first()
+            )
+            if existing is not None:
+                existing_inputs = [
+                    item.issue_input
+                    for item in existing.items.all()
+                ]
+                if existing_inputs == [item["issue_input"] for item in items]:
+                    return _serialize_linear_meeting_action_batch(existing)
+        batch = LinearMeetingActionBatch.objects.create(
+            requested_by_slack_user_id=requested_by[:255],
+            slack_channel_id=str(payload.get("slack_channel_id") or "")[:255],
+            slack_thread_ts=str(payload.get("slack_thread_ts") or "")[:255],
+            source_fingerprint=fingerprint.lower(),
+            expires_at=timezone.now() + timedelta(seconds=ttl_seconds),
+        )
+        LinearMeetingActionItem.objects.bulk_create(
+            [
+                LinearMeetingActionItem(batch=batch, **item)
+                for item in items
+            ]
+        )
+    return _serialize_linear_meeting_action_batch(
+        LinearMeetingActionBatch.objects.prefetch_related("items").get(pk=batch.pk)
+    )
+
+
+def get_linear_meeting_action_batch(batch_id: Any) -> dict[str, Any]:
+    batch = _get_linear_meeting_action_batch(batch_id)
+    _expire_linear_meeting_action_batch(batch)
+    return _serialize_linear_meeting_action_batch(
+        LinearMeetingActionBatch.objects.prefetch_related("items").get(pk=batch.pk)
+    )
+
+
+def decide_linear_meeting_action_batch(
+    batch_id: Any,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Approve or reject selected proposals with idempotent issue creation."""
+
+    if not isinstance(payload, dict):
+        raise ValueError("Request payload must be an object.")
+    requested_by = str(payload.get("requested_by_slack_user_id") or "").strip()
+    decision = str(payload.get("decision") or "").strip().lower()
+    if decision not in {"approve", "reject"}:
+        raise ValueError("decision must be approve or reject.")
+
+    batch = _get_linear_meeting_action_batch(batch_id)
+    if not requested_by or requested_by != batch.requested_by_slack_user_id:
+        raise LinearMeetingActionConflictError(
+            "Only the Slack user who requested this batch can approve or reject it."
+        )
+    if _expire_linear_meeting_action_batch(batch):
+        raise LinearMeetingActionConflictError(
+            "This Linear meeting-action batch expired. Regenerate it from the original Slack request."
+        )
+
+    raw_item_ids = payload.get("item_ids")
+    if raw_item_ids is not None and not isinstance(raw_item_ids, list):
+        raise ValueError("item_ids must be a list when supplied.")
+    item_ids = {
+        str(value).strip()
+        for value in (raw_item_ids or [])
+        if str(value).strip()
+    }
+    if raw_item_ids is not None and not item_ids:
+        raise ValueError("item_ids must contain at least one item when supplied.")
+    items = list(batch.items.all())
+    if item_ids:
+        known_ids = {str(item.id) for item in items}
+        unknown_ids = item_ids - known_ids
+        if unknown_ids:
+            raise ValueError("One or more selected items do not belong to this batch.")
+        items = [item for item in items if str(item.id) in item_ids]
+    if not items:
+        raise ValueError("No Linear meeting-action items were selected.")
+
+    if decision == "reject":
+        LinearMeetingActionItem.objects.filter(
+            id__in=[item.id for item in items],
+            status__in=[
+                LinearMeetingActionItem.Status.PENDING,
+                LinearMeetingActionItem.Status.FAILED,
+            ],
+        ).update(
+            status=LinearMeetingActionItem.Status.REJECTED,
+            last_error="",
+            updated_at=timezone.now(),
+        )
+    else:
+        for item in items:
+            claimed = _claim_linear_meeting_action_item(item.id)
+            if claimed is None:
+                continue
+            try:
+                issue = create_linear_meeting_issue(dict(claimed.issue_input))
+            except Exception as exc:
+                LinearMeetingActionItem.objects.filter(pk=claimed.pk).update(
+                    status=LinearMeetingActionItem.Status.FAILED,
+                    last_error=f"{exc.__class__.__name__}: {exc}"[:4000],
+                    updated_at=timezone.now(),
+                )
+                continue
+            LinearMeetingActionItem.objects.filter(pk=claimed.pk).update(
+                status=LinearMeetingActionItem.Status.APPROVED,
+                linear_issue_payload=issue,
+                last_error="",
+                updated_at=timezone.now(),
+            )
+
+    _refresh_linear_meeting_action_batch_status(batch.id)
+    return _serialize_linear_meeting_action_batch(
+        LinearMeetingActionBatch.objects.prefetch_related("items").get(pk=batch.pk)
+    )
+
+
+def _get_linear_meeting_action_batch(batch_id: Any) -> LinearMeetingActionBatch:
+    try:
+        return LinearMeetingActionBatch.objects.prefetch_related("items").get(pk=batch_id)
+    except (LinearMeetingActionBatch.DoesNotExist, ValueError, TypeError) as exc:
+        raise ValueError("Linear meeting-action batch was not found.") from exc
+
+
+def _expire_linear_meeting_action_batch(batch: LinearMeetingActionBatch) -> bool:
+    if batch.status == LinearMeetingActionBatch.Status.EXPIRED:
+        return True
+    if batch.expires_at > timezone.now():
+        return False
+    LinearMeetingActionItem.objects.filter(
+        batch=batch,
+        status__in=[
+            LinearMeetingActionItem.Status.PENDING,
+            LinearMeetingActionItem.Status.FAILED,
+            LinearMeetingActionItem.Status.PROCESSING,
+        ],
+    ).update(status=LinearMeetingActionItem.Status.EXPIRED, updated_at=timezone.now())
+    LinearMeetingActionBatch.objects.filter(pk=batch.pk).update(
+        status=LinearMeetingActionBatch.Status.EXPIRED,
+        updated_at=timezone.now(),
+    )
+    batch.status = LinearMeetingActionBatch.Status.EXPIRED
+    return True
+
+
+def _claim_linear_meeting_action_item(item_id: Any) -> LinearMeetingActionItem | None:
+    stale_before = timezone.now() - timedelta(minutes=5)
+    with transaction.atomic():
+        item = LinearMeetingActionItem.objects.select_for_update().get(pk=item_id)
+        if item.status in {
+            LinearMeetingActionItem.Status.APPROVED,
+            LinearMeetingActionItem.Status.REJECTED,
+            LinearMeetingActionItem.Status.EXPIRED,
+        }:
+            return None
+        if (
+            item.status == LinearMeetingActionItem.Status.PROCESSING
+            and item.updated_at > stale_before
+        ):
+            return None
+        item.status = LinearMeetingActionItem.Status.PROCESSING
+        item.last_error = ""
+        item.save(update_fields=["status", "last_error", "updated_at"])
+        return item
+
+
+def _refresh_linear_meeting_action_batch_status(batch_id: Any) -> None:
+    statuses = list(
+        LinearMeetingActionItem.objects.filter(batch_id=batch_id).values_list(
+            "status", flat=True
+        )
+    )
+    if statuses and all(status == LinearMeetingActionItem.Status.REJECTED for status in statuses):
+        status = LinearMeetingActionBatch.Status.REJECTED
+    elif statuses and all(
+        status in {
+            LinearMeetingActionItem.Status.APPROVED,
+            LinearMeetingActionItem.Status.REJECTED,
+        }
+        for status in statuses
+    ):
+        status = LinearMeetingActionBatch.Status.COMPLETED
+    elif any(status == LinearMeetingActionItem.Status.PROCESSING for status in statuses):
+        status = LinearMeetingActionBatch.Status.PROCESSING
+    elif any(status in {LinearMeetingActionItem.Status.APPROVED, LinearMeetingActionItem.Status.FAILED} for status in statuses):
+        status = LinearMeetingActionBatch.Status.PARTIAL
+    else:
+        status = LinearMeetingActionBatch.Status.PENDING
+    LinearMeetingActionBatch.objects.filter(pk=batch_id).update(
+        status=status,
+        updated_at=timezone.now(),
+    )
+
+
+def _serialize_linear_meeting_action_batch(
+    batch: LinearMeetingActionBatch,
+) -> dict[str, Any]:
+    items = list(batch.items.all())
+    return {
+        "id": str(batch.id),
+        "status": batch.status,
+        "requestedBySlackUserId": batch.requested_by_slack_user_id,
+        "slackChannelId": batch.slack_channel_id,
+        "slackThreadTs": batch.slack_thread_ts,
+        "expiresAt": batch.expires_at.isoformat(),
+        "counts": {
+            status: sum(1 for item in items if item.status == status)
+            for status in LinearMeetingActionItem.Status.values
+        },
+        "items": [
+            {
+                "id": str(item.id),
+                "position": item.position,
+                "status": item.status,
+                "display": item.display,
+                "reason": item.reason,
+                "issue": item.linear_issue_payload,
+                "error": item.last_error,
+            }
+            for item in items
+        ],
     }
 
 
@@ -283,10 +879,11 @@ def get_linear_project_update_page(
 
 
 def list_teams(limit: int = 100, member_limit: int = 50) -> list[dict[str, Any]]:
+    page_size = _bounded_limit(limit, default=100, maximum=100)
     member_limit = max(min(int(member_limit or 50), 50), 1)
-    query = """
-    query LinearTeamsWithMembers($first: Int!, $memberFirst: Int!) {
-      teams(first: $first) {
+    rich_query = """
+    query LinearTeamsWithMembers($first: Int!, $after: String, $memberFirst: Int!) {
+      teams(first: $first, after: $after) {
         nodes {
           id
           key
@@ -301,38 +898,61 @@ def list_teams(limit: int = 100, member_limit: int = 50) -> list[dict[str, Any]]
             }
           }
         }
+        pageInfo { hasNextPage endCursor }
       }
     }
     """
-    try:
-        data = _graphql(
-            query,
-            {"first": limit, "memberFirst": member_limit},
-            operation_name="LinearTeamsWithMembers",
-        )
-        return _nodes(data, "teams")
-    except LinearMeetingGraphQLError as exc:
-        if not _team_members_query_unsupported(exc):
-            raise
-        logger.warning(
-            "linear_meeting_actions_team_members_unavailable operation=%s detail=%s",
-            exc.operation,
-            str(exc),
-        )
-
-    query = """
-    query LinearTeams($first: Int!) {
-      teams(first: $first) {
+    basic_query = """
+    query LinearTeams($first: Int!, $after: String) {
+      teams(first: $first, after: $after) {
         nodes {
           id
           key
           name
         }
+        pageInfo { hasNextPage endCursor }
       }
     }
     """
-    data = _graphql(query, {"first": limit}, operation_name="LinearTeams")
-    return _nodes(data, "teams")
+    teams: list[dict[str, Any]] = []
+    cursor: str | None = None
+    use_basic_query = False
+    for _page_number in range(20):
+        operation_name = "LinearTeams" if use_basic_query else "LinearTeamsWithMembers"
+        variables: dict[str, Any] = {"first": page_size, "after": cursor}
+        if not use_basic_query:
+            variables["memberFirst"] = member_limit
+        try:
+            data = _graphql(
+                basic_query if use_basic_query else rich_query,
+                variables,
+                operation_name=operation_name,
+            )
+        except LinearMeetingGraphQLError as exc:
+            if use_basic_query or not _team_members_query_unsupported(exc):
+                raise
+            logger.warning(
+                "linear_meeting_actions_team_members_unavailable operation=%s detail=%s",
+                exc.operation,
+                str(exc),
+            )
+            # Restart from page one so the fallback response is complete and does
+            # not mix rich and basic team records.
+            use_basic_query = True
+            cursor = None
+            teams = []
+            continue
+
+        teams.extend(_nodes(data, "teams"))
+        page_info = _page_info(data.get("teams"))
+        cursor = str(page_info.get("endCursor") or "").strip() or None
+        if not page_info.get("hasNextPage") or not cursor:
+            return teams
+
+    raise LinearMeetingGraphQLError(
+        "Linear team catalogue exceeded the 20-page safety limit.",
+        operation="LinearTeams" if use_basic_query else "LinearTeamsWithMembers",
+    )
 
 
 def list_users(limit: int = 250) -> list[dict[str, Any]]:
@@ -354,10 +974,101 @@ def list_users(limit: int = 250) -> list[dict[str, Any]]:
 
 
 def list_active_projects(limit: int = 100, teams: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+    return _list_projects(limit=limit, teams=teams, include_inactive=False)
+
+
+def resolve_linear_project(query: str, *, limit: int = 100) -> dict[str, Any]:
+    """Resolve an explicit Roo project hint against every Linear project."""
+
+    query = str(query or "").strip()
+    normalized_query = _normalize_project_lookup_value(query)
+    if len(normalized_query) < 3:
+        raise ValueError("A specific Linear project query is required.")
+
+    projects = _list_projects(limit=limit, teams=[], include_inactive=True)
+    ranked: list[tuple[float, dict[str, Any], str]] = []
+    for project in projects:
+        best_score = 0.0
+        best_reason = ""
+        for field, value in (
+            ("name", project.get("name")),
+            ("slug", project.get("slugId")),
+        ):
+            normalized_value = _normalize_project_lookup_value(value)
+            if not normalized_value:
+                continue
+            if normalized_query == normalized_value:
+                score = 1.0 if field == "name" else 0.99
+                reason = f"Matched project by exact normalized {field}"
+            elif (
+                len(normalized_query) >= 6
+                and (
+                    normalized_query in normalized_value
+                    or normalized_value in normalized_query
+                )
+            ):
+                score = 0.94
+                reason = f"Matched project by {field} containment"
+            else:
+                similarity = SequenceMatcher(
+                    None,
+                    normalized_query,
+                    normalized_value,
+                ).ratio()
+                score = min(similarity, 0.90) if similarity >= 0.82 else 0.0
+                reason = f"Matched project by {field} similarity" if score else ""
+            if score > best_score:
+                best_score = score
+                best_reason = reason
+        if best_score:
+            ranked.append((best_score, project, best_reason))
+
+    ranked.sort(key=lambda item: item[0], reverse=True)
+    if not ranked or ranked[0][0] < 0.82:
+        return {
+            "status": "not_found",
+            "project": None,
+            "confidence": 0.0,
+            "reason": "No Linear project matched the explicit query.",
+            "candidateCount": 0,
+        }
+
+    best_score, best_project, best_reason = ranked[0]
+    second_score = ranked[1][0] if len(ranked) > 1 else 0.0
+    if second_score >= 0.82 and best_score - second_score < 0.05:
+        return {
+            "status": "ambiguous",
+            "project": None,
+            "confidence": 0.0,
+            "reason": "Multiple Linear projects matched the explicit query.",
+            "candidateCount": len(ranked),
+            "candidates": [
+                _project_lookup_summary(project, score=score)
+                for score, project, _reason in ranked[:5]
+            ],
+        }
+
+    inactive_states = {"completed", "canceled", "cancelled", "archived"}
+    return {
+        "status": "matched",
+        "project": best_project,
+        "confidence": best_score,
+        "reason": best_reason,
+        "candidateCount": len(ranked),
+        "isInactive": _project_is_inactive(best_project, inactive_states),
+    }
+
+
+def _list_projects(
+    limit: int = 100,
+    teams: list[dict[str, Any]] | None = None,
+    *,
+    include_inactive: bool,
+) -> list[dict[str, Any]]:
     page_size = _bounded_limit(limit, default=100, maximum=100)
     query = """
-    query LinearProjects($first: Int!, $after: String) {
-      projects(first: $first, after: $after) {
+    query LinearProjects($first: Int!, $after: String, $includeArchived: Boolean!) {
+      projects(first: $first, after: $after, includeArchived: $includeArchived) {
         nodes {
           id
           name
@@ -417,7 +1128,11 @@ def list_active_projects(limit: int = 100, teams: list[dict[str, Any]] | None = 
     cursor: str | None = None
     use_basic_query = False
     for _page_number in range(20):
-        variables = {"first": page_size, "after": cursor}
+        variables = {
+            "first": page_size,
+            "after": cursor,
+            "includeArchived": include_inactive,
+        }
         try:
             data = _graphql(
                 _basic_projects_query() if use_basic_query else query,
@@ -441,13 +1156,22 @@ def list_active_projects(limit: int = 100, teams: list[dict[str, Any]] | None = 
         cursor = str(page_info.get("endCursor") or "").strip() or None
         if not page_info.get("hasNextPage") or not cursor:
             break
+    else:
+        raise LinearMeetingGraphQLError(
+            "Linear project catalogue exceeded the 20-page safety limit.",
+            operation="LinearProjectsBasic" if use_basic_query else "LinearProjects",
+        )
     inactive_states = {"completed", "canceled", "cancelled", "archived"}
-    active_projects = [
-        project
-        for project in projects
-        if not _project_is_inactive(project, inactive_states)
-    ]
-    return _enrich_projects_with_members(active_projects, teams or [])
+    selected_projects = (
+        projects
+        if include_inactive
+        else [
+            project
+            for project in projects
+            if not _project_is_inactive(project, inactive_states)
+        ]
+    )
+    return _enrich_projects_with_members(selected_projects, teams or [])
 
 
 def list_issue_labels(limit: int = 100) -> list[dict[str, Any]]:
@@ -1796,8 +2520,8 @@ def _project_context_query_unsupported(exc: LinearMeetingGraphQLError) -> bool:
 
 def _basic_projects_query() -> str:
     return """
-    query LinearProjectsBasic($first: Int!, $after: String) {
-      projects(first: $first, after: $after) {
+    query LinearProjectsBasic($first: Int!, $after: String, $includeArchived: Boolean!) {
+      projects(first: $first, after: $after, includeArchived: $includeArchived) {
         nodes {
           id
           name
@@ -1826,6 +2550,25 @@ def _project_is_inactive(project: dict[str, Any], inactive_states: set[str]) -> 
     status_name = str(status_data.get("name") or "").lower()
     status_type = str(status_data.get("type") or "").lower()
     return status_name in inactive_states or status_type in inactive_states
+
+
+def _normalize_project_lookup_value(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
+
+
+def _project_lookup_summary(
+    project: dict[str, Any],
+    *,
+    score: float,
+) -> dict[str, Any]:
+    inactive_states = {"completed", "canceled", "cancelled", "archived"}
+    return {
+        "id": project.get("id"),
+        "name": project.get("name"),
+        "slugId": project.get("slugId"),
+        "confidence": score,
+        "isInactive": _project_is_inactive(project, inactive_states),
+    }
 
 
 def _enrich_projects_with_members(

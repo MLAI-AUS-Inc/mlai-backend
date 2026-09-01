@@ -16,8 +16,8 @@ DISCORD_CHANNEL_MENTION_RE = re.compile(r"<#\d+>")
 DISCORD_ROLE_MENTION_RE = re.compile(r"<@&\d+>")
 DISCORD_EMOJI_RE = re.compile(r"<a?:([A-Za-z0-9_]+):\d+>")
 
-# Deliberately small, reversible MVP set. Unsupported/custom reactions fail
-# closed instead of silently changing meaning between Slack and MLAI Chat.
+# Preserve familiar reactions as Unicode. Other safe Slack names pass through
+# as bounded ``:name:`` shortcodes; malformed or overlong names fail closed.
 SLACK_REACTION_TO_EMOJI = {
     "+1": "👍",
     "thumbsup": "👍",
@@ -36,14 +36,29 @@ EMOJI_TO_SLACK_REACTION = {
     "🚀": "rocket",
     "✅": "white_check_mark",
 }
+# Buzz reaction content is capped at 64 Unicode scalar values. The surrounding
+# colons consume two, so Slack shortcode names are safely bounded to 62.
+SLACK_REACTION_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_+\-]{0,61}$")
 
 
 def slack_reaction_to_emoji(value: str) -> str:
-    return SLACK_REACTION_TO_EMOJI.get(str(value or "").strip().lower(), "")
+    reaction = str(value or "").strip()
+    mapped = SLACK_REACTION_TO_EMOJI.get(reaction)
+    if mapped:
+        return mapped
+    return f":{reaction}:" if SLACK_REACTION_NAME_RE.fullmatch(reaction) else ""
 
 
 def emoji_to_slack_reaction(value: str) -> str:
-    return EMOJI_TO_SLACK_REACTION.get(str(value or "").strip(), "")
+    reaction = str(value or "").strip()
+    mapped = EMOJI_TO_SLACK_REACTION.get(reaction)
+    if mapped:
+        return mapped
+    if reaction.startswith(":") and reaction.endswith(":"):
+        shortcode = reaction[1:-1]
+        if SLACK_REACTION_NAME_RE.fullmatch(shortcode):
+            return shortcode
+    return ""
 
 
 def reaction_object_id(*, message_id: str, reaction: str, author_id: str) -> str:

@@ -190,3 +190,107 @@ class GetOrCreateSlackUserTests(TestCase):
         user = User.objects.get(slack_id='UMIN12345')
         self.assertEqual(user.email, 'minimal@example.com')
         self.assertTrue(user.is_active)
+
+
+@override_settings(ROO_API_KEY='test-slack-user-key')
+class LinkSlackUserTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.headers = {'HTTP_X_API_KEY': 'test-slack-user-key'}
+        self.url = '/api/v1/users/link-slack/'
+
+    def test_links_existing_account_by_case_insensitive_email(self):
+        user = User.objects.create_user(email='member@example.com')
+
+        response = self.client.post(
+            self.url,
+            {'slack_id': 'ULINK12345', 'email': 'MEMBER@example.com'},
+            format='json',
+            **self.headers,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        user.refresh_from_db()
+        self.assertEqual(user.slack_id, 'ULINK12345')
+        self.assertEqual(response.json()['user_id'], user.id)
+
+    def test_repeated_link_is_idempotent(self):
+        user = User.objects.create_user(
+            email='linked@example.com',
+            slack_id='ULINKED123',
+        )
+
+        response = self.client.post(
+            self.url,
+            {'slack_id': 'ULINKED123', 'email': 'linked@example.com'},
+            format='json',
+            **self.headers,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()['already_linked'])
+        self.assertEqual(response.json()['user_id'], user.id)
+
+    def test_existing_slack_link_cannot_be_moved_to_another_account(self):
+        original = User.objects.create_user(
+            email='original@example.com',
+            slack_id='UORIGINAL1',
+        )
+        other = User.objects.create_user(email='other@example.com')
+
+        response = self.client.post(
+            self.url,
+            {'slack_id': 'UORIGINAL1', 'email': 'other@example.com'},
+            format='json',
+            **self.headers,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()['user_id'], original.id)
+        other.refresh_from_db()
+        self.assertIsNone(other.slack_id)
+
+    def test_account_linked_to_another_slack_identity_returns_conflict(self):
+        user = User.objects.create_user(
+            email='claimed@example.com',
+            slack_id='UCLAIMED12',
+        )
+
+        response = self.client.post(
+            self.url,
+            {'slack_id': 'UNEWLINK12', 'email': 'claimed@example.com'},
+            format='json',
+            **self.headers,
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()['code'], 'slack_identity_conflict')
+        user.refresh_from_db()
+        self.assertEqual(user.slack_id, 'UCLAIMED12')
+
+    def test_missing_account_does_not_create_one(self):
+        response = self.client.post(
+            self.url,
+            {'slack_id': 'UNOMATCH12', 'email': 'missing@example.com'},
+            format='json',
+            **self.headers,
+        )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()['code'], 'slack_account_not_found')
+        self.assertFalse(User.objects.filter(email='missing@example.com').exists())
+
+    @override_settings(INTERNAL_API_KEY='general-internal-key')
+    def test_general_internal_key_cannot_mutate_slack_links(self):
+        user = User.objects.create_user(email='strict-roo@example.com')
+
+        response = self.client.post(
+            self.url,
+            {'slack_id': 'USTRICT123', 'email': user.email},
+            format='json',
+            HTTP_X_API_KEY='general-internal-key',
+        )
+
+        self.assertEqual(response.status_code, 403)
+        user.refresh_from_db()
+        self.assertIsNone(user.slack_id)

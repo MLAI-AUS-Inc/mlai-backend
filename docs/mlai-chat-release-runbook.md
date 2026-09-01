@@ -52,24 +52,27 @@ time, result, and log artifact.
 Any unresolved item blocks production approval. Record the reviewer and link to
 evidence rather than copying sensitive values into the change record.
 
-## Email-code cutover controls
+## Account sign-in controls
 
 MLAI Chat launches with `COMMUNITY_CHAT_EMAIL_CODE_AUTH_ENABLED=true`,
 `COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED=false`, and
-`COMMUNITY_CHAT_DEVICE_AUTH_ENABLED=false`. The latter two switches are
-temporary rollback controls for pre-launch clients, not supported member-facing
-sign-in methods. `validate_prod_urls` rejects a production configuration that
-enables either legacy path, disables email codes, or omits
-`CUSTOMERIO_COMMUNITY_CHAT_CODE_MESSAGE_ID`.
+`COMMUNITY_CHAT_DEVICE_AUTH_ENABLED=true`. Email codes remain the human account
+proof in the browser; the device-auth switch enables the state- and PKCE-bound
+browser-to-desktop handoff and is not a password or alternate identity path.
+`validate_prod_urls` rejects a production configuration that enables password
+authentication, disables either required flow, omits the exact Tauri CORS
+origins, or omits `CUSTOMERIO_COMMUNITY_CHAT_CODE_MESSAGE_ID`.
 
 Before deploying the web/API process, provision independent values for
 `COMMUNITY_CHAT_EMAIL_CODE_PEPPER` and
 `COMMUNITY_CHAT_EMAIL_CODE_DELIVERY_SECRET`, publish the Customer.io six-digit
 code template, and start `run_email_code_worker` under the same immutable
 release. Test request, delivery, expiry, resend, invalid-attempt lockout, scoped
-session refresh, sign-out, and server-first device removal in staging. Never
-copy a code, normalized email, token, or delivery ciphertext into release
-evidence.
+session refresh, explicit browser approval, missing/tampered/cross-request/
+expired/replayed authorization-code and PKCE exchange, Tauri CORS preflight,
+mobile `mlaichat://callback` enrollment, sign-out, and server-first device
+removal in staging. Never copy a code, normalized email, state, verifier,
+token, or delivery ciphertext into release evidence.
 
 ## Migration and backup exercise
 
@@ -230,20 +233,30 @@ receipts, message links, or relay events by hand during triage.
 
 ## Deployment order
 
-1. Apply additive database migrations.
-2. Provision independent `COMMUNITY_CHAT_EMAIL_CODE_PEPPER`,
+1. Deploy the membership adapter that advertises
+   `generation_cas_v2` from authenticated `GET /v1/capabilities` and implements
+   the v2 intent/CAS-mint endpoints. During this compatibility window it may
+   continue advertising and serving `legacy_v1` for the previous backend only.
+   Prove that a key delete between intent capture and mint rejects the stale
+   mint and leaves no member or bound invite before deploying the backend.
+2. Apply additive database migrations.
+3. Provision independent `COMMUNITY_CHAT_EMAIL_CODE_PEPPER`,
    `COMMUNITY_CHAT_EMAIL_CODE_DELIVERY_SECRET`, and
    `COMMUNITY_CHAT_ADAPTER_TOKEN` values, deploy the backend image by immutable
    digest, and start `run_email_code_worker`. Rotating the delivery secret
    cancels pending encrypted codes, so rotate only with the outbox empty or
    after intentionally invalidating those requests.
-3. Deploy the bridge adapter by immutable digest and confirm its dedicated
+   The new backend must fail closed unless `generation_cas_v2` is advertised
+   and must never fall back to the legacy invite POST. After its production
+   membership smoke is green, deploy a membership-adapter follow-up that
+   removes `legacy_v1`.
+4. Deploy the bridge adapter by immutable digest and confirm its dedicated
    public key matches client release configuration.
-4. Run health checks and one synthetic private adapter delivery.
-5. Set the protected `COMMUNITY_BRIDGE_PRODUCTION_ENABLED=true` deployment
+5. Run health checks and one synthetic private adapter delivery.
+6. Set the protected `COMMUNITY_BRIDGE_PRODUCTION_ENABLED=true` deployment
    variable only after the credential, topology, and mapping review is complete.
-6. Resume workers, then enable only the selected reviewed mapping.
-7. Observe receipt/delivery rates, retry/dead counts, callback rejections,
+7. Resume workers, then enable only the selected reviewed mapping.
+8. Observe receipt/delivery rates, retry/dead counts, callback rejections,
    password-email failures, membership denials, auth throttles, and latency
    before expanding the cohort.
 

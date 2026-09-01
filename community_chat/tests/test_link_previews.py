@@ -5,7 +5,7 @@ import uuid
 from coincurve import PrivateKey
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
 from rest_framework import status
@@ -14,6 +14,7 @@ from rest_framework.test import APIClient
 from community_chat.account_sessions import issue_account_session
 from community_chat.link_previews import LinkPreviewError, _validated_public_url
 from community_chat.models import CommunityChatEmailCodeChallenge
+from integrations.models import CommunityBridgeChannel, CommunityBridgePlatform
 
 
 class _FakeResponse:
@@ -38,6 +39,7 @@ def _public_key(private_int):
     return PrivateKey.from_int(private_int).public_key.format(compressed=True)[1:].hex()
 
 
+@override_settings(SLACK_BRIDGE_BOT_TOKEN="xoxb-test")
 class CommunityChatLinkPreviewTests(TestCase):
     def setUp(self):
         cache.clear()
@@ -112,3 +114,104 @@ class CommunityChatLinkPreviewTests(TestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    @patch("community_chat.slack_file_previews.SlackBridgeClient.get_client")
+    def test_slack_image_in_a_mapped_public_channel_returns_proxied_preview(
+        self,
+        get_client,
+    ):
+        CommunityBridgeChannel.objects.create(
+            slack_workspace_id="TMLAI",
+            slack_channel_id="CRANDOM",
+            slack_channel_name="random-and-memes",
+            destination_platform=CommunityBridgePlatform.BUZZ,
+            destination_channel_id="buzz-random",
+        )
+        get_client.return_value.files_info.return_value = {
+            "ok": True,
+            "file": {
+                "id": "F0BRPQD104F",
+                "title": "image.png",
+                "mimetype": "image/png",
+                "channels": ["CRANDOM"],
+                "permalink": "https://mlai-aus.slack.com/files/U123/F0BRPQD104F/image.png",
+                "url_private_download": "https://files.slack.com/files-pri/T-F/image.png",
+            },
+        }
+
+        response = self.client.get(
+            reverse("community_chat_link_preview"),
+            {
+                "url": "https://mlai-aus.slack.com/files/U123/F0BRPQD104F/image.png"
+            },
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["title"], "image.png")
+        self.assertEqual(response.data["site_name"], "MLAI Slack")
+        self.assertIn("slack_file=F0BRPQD104F", response.data["image_url"])
+        self.assertNotIn("xoxb", str(response.data))
+
+    @patch("community_chat.slack_file_previews.requests.Session.get")
+    @patch("community_chat.slack_file_previews.SlackBridgeClient.get_client")
+    def test_slack_image_proxy_downloads_with_server_side_credentials(
+        self,
+        get_client,
+        session_get,
+    ):
+        CommunityBridgeChannel.objects.create(
+            slack_workspace_id="TMLAI",
+            slack_channel_id="CRANDOM",
+            destination_platform=CommunityBridgePlatform.BUZZ,
+            destination_channel_id="buzz-random",
+        )
+        get_client.return_value.files_info.return_value = {
+            "ok": True,
+            "file": {
+                "id": "F0BRPQD104F",
+                "title": "image.png",
+                "mimetype": "image/png",
+                "channels": ["CRANDOM"],
+                "url_private_download": "https://files.slack.com/files-pri/T-F/image.png",
+            },
+        }
+        session_get.return_value = _FakeResponse(
+            body=b"\x89PNG\r\n\x1a\npreview",
+            content_type="image/png",
+        )
+
+        response = self.client.get(
+            reverse("community_chat_link_preview_image"),
+            {"slack_file": "F0BRPQD104F"},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response["Content-Type"], "image/png")
+        self.assertEqual(response.content, b"\x89PNG\r\n\x1a\npreview")
+        self.assertEqual(
+            session_get.call_args.kwargs["headers"]["Authorization"],
+            "Bearer xoxb-test",
+        )
+
+    @patch("community_chat.slack_file_previews.SlackBridgeClient.get_client")
+    def test_slack_image_outside_mapped_channels_is_rejected(self, get_client):
+        get_client.return_value.files_info.return_value = {
+            "ok": True,
+            "file": {
+                "id": "F0BRPQD104F",
+                "title": "private.png",
+                "mimetype": "image/png",
+                "channels": ["CUNMAPPED"],
+                "url_private_download": "https://files.slack.com/files-pri/T-F/image.png",
+            },
+        }
+
+        response = self.client.get(
+            reverse("community_chat_link_preview"),
+            {
+                "url": "https://mlai-aus.slack.com/files/U123/F0BRPQD104F/private.png"
+            },
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_422_UNPROCESSABLE_ENTITY)
+        self.assertEqual(response.data["error"], "preview_unavailable")

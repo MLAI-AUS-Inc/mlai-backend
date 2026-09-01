@@ -1,9 +1,20 @@
-from django.test import SimpleTestCase
+import uuid
+from unittest.mock import patch
 
+from django.test import SimpleTestCase, override_settings
+
+from integrations.services.community_bridge.buzz import (
+    BuzzBridgeClient,
+    BuzzBridgePermanentError,
+)
 from integrations.services.community_bridge.contracts import (
     BridgeAttachment,
     BridgeDeliveryResult,
     CanonicalBridgeEvent,
+)
+from integrations.services.community_bridge.formatting import (
+    emoji_to_slack_reaction,
+    slack_reaction_to_emoji,
 )
 
 
@@ -106,3 +117,93 @@ class BridgeDeliveryResultTests(SimpleTestCase):
     def test_destination_identifiers_are_required(self):
         with self.assertRaisesMessage(ValueError, "destination_message_id is required"):
             BridgeDeliveryResult(destination_channel_id="channel", destination_message_id="")
+
+
+class SlackReactionFormattingTests(SimpleTestCase):
+    def test_common_unicode_reactions_keep_their_native_emoji(self):
+        self.assertEqual(slack_reaction_to_emoji("heart"), "❤️")
+        self.assertEqual(emoji_to_slack_reaction("❤️"), "heart")
+
+    def test_valid_custom_shortcodes_round_trip_without_execution_markup(self):
+        self.assertEqual(slack_reaction_to_emoji("ship_it+1"), ":ship_it+1:")
+        self.assertEqual(emoji_to_slack_reaction(":ship_it+1:"), "ship_it+1")
+        boundary_name = "a" * 62
+        self.assertEqual(
+            slack_reaction_to_emoji(boundary_name),
+            f":{boundary_name}:",
+        )
+        self.assertEqual(
+            emoji_to_slack_reaction(f":{boundary_name}:"),
+            boundary_name,
+        )
+
+    def test_invalid_custom_shortcodes_fail_closed(self):
+        self.assertEqual(slack_reaction_to_emoji("../secret"), "")
+        self.assertEqual(emoji_to_slack_reaction(":two words:"), "")
+        self.assertEqual(emoji_to_slack_reaction(":PartyParrot:"), "")
+        self.assertEqual(emoji_to_slack_reaction(":_private:"), "")
+        self.assertEqual(slack_reaction_to_emoji("a" * 63), "")
+
+
+class PrivateConversationRegistrationTests(SimpleTestCase):
+    @patch.object(BuzzBridgeClient, "_post_adapter")
+    def test_registration_separates_callback_authors_from_all_participants(
+        self,
+        post_adapter,
+    ):
+        participants = ["1" * 64, "2" * 64, "3" * 64]
+        callback_authors = ["1" * 64, "3" * 64]
+        channel_id = str(uuid.uuid4())
+        post_adapter.return_value = {
+            "channel_id": channel_id,
+            "participant_pubkeys": participants,
+            "callback_author_pubkeys": callback_authors,
+        }
+
+        result = BuzzBridgeClient.provision_private_conversation(
+            participants,
+            callback_author_pubkeys=callback_authors,
+            conversation_name="Slack DM",
+        )
+
+        self.assertEqual(result["callback_author_pubkeys"], callback_authors)
+        post_adapter.assert_called_once_with(
+            "v1/private-conversations",
+            {
+                "participant_pubkeys": participants,
+                "callback_author_pubkeys": callback_authors,
+                "conversation_name": "Slack DM",
+            },
+        )
+
+    def test_registration_rejects_callback_author_outside_participants(self):
+        with self.assertRaisesMessage(
+            BuzzBridgePermanentError,
+            "Private callback authors must be participant public keys",
+        ):
+            BuzzBridgeClient.provision_private_conversation(
+                ["1" * 64, "2" * 64],
+                callback_author_pubkeys=["3" * 64],
+            )
+
+    @override_settings(
+        BUZZ_BRIDGE_ADAPTER_URL="http://buzz-bridge-adapter:8090",
+        BUZZ_BRIDGE_ADAPTER_TOKEN="a" * 40,
+        BUZZ_BRIDGE_ADAPTER_TIMEOUT_SECONDS=12,
+    )
+    @patch("integrations.services.community_bridge.buzz.requests.delete")
+    def test_unregister_uses_the_authenticated_idempotent_adapter_route(
+        self,
+        delete,
+    ):
+        channel_id = uuid.uuid4()
+        delete.return_value.status_code = 204
+        delete.return_value.ok = True
+
+        BuzzBridgeClient.unregister_private_conversation(str(channel_id))
+
+        delete.assert_called_once_with(
+            f"http://buzz-bridge-adapter:8090/v1/private-conversations/{channel_id}",
+            headers={"Authorization": f"Bearer {'a' * 40}"},
+            timeout=12,
+        )

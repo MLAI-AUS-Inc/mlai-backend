@@ -1,13 +1,17 @@
 from datetime import date, datetime, timedelta, timezone as dt_timezone
 from decimal import Decimal
 from io import StringIO
+import threading
+import time
 from types import SimpleNamespace
 from typing import Optional
+from unittest import skipUnless
 from unittest.mock import MagicMock, patch
 
 from django.contrib.auth import get_user_model
 from django.core.management import call_command
-from django.test import TestCase
+from django.db import close_old_connections, connection
+from django.test import TestCase, TransactionTestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
 from googleapiclient.errors import HttpError
@@ -60,6 +64,11 @@ from integrations.services.google_analytics import (
     GA_REPORT_SPECS,
     period_bounds_for_run,
 )
+from integrations.services.slack_dm_mirror import revoke_user_grant
+from integrations.services.slack_oauth_authority import (
+    connection_slack_oauth_generation,
+    stamp_slack_oauth_generation,
+)
 from startup_updates.services import (
     STARTUP_UPDATE_WORKFLOW,
     build_cancel_backup_for_draft,
@@ -71,6 +80,10 @@ from startup_updates.services import (
     score_message_for_profile,
     set_startup_update_run_cancel_backups,
     sync_startup_profile_from_company,
+)
+from startup_updates.slack_lineage import (
+    pin_slack_run_authority,
+    slack_run_authority_for_connection,
 )
 
 User = get_user_model()
@@ -846,6 +859,12 @@ class StartupUpdateSlackBackfillViewTest(StartupUpdateApiTestCase):
             payload["thread_ts"] = thread_ts
         return payload
 
+    def _thread_public_id(self, thread: SlackThreadArtifact) -> str:
+        return slack_run_authority_for_connection(self.connection).thread_public_id(
+            thread.channel_id,
+            thread.thread_ts,
+        )
+
     def test_slack_backfill_processes_one_history_page_and_resumes(self):
         first_page = FakeSlackResponse(
             {
@@ -1035,7 +1054,10 @@ class StartupUpdateSlackBackfillViewTest(StartupUpdateApiTestCase):
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["count"], 1)
-        self.assertEqual(response.data["threads"][0]["slack_thread_id"], f"slack:C123:{candidate_thread.thread_ts}")
+        self.assertEqual(
+            response.data["threads"][0]["slack_thread_id"],
+            self._thread_public_id(candidate_thread),
+        )
         noisy_thread.refresh_from_db()
         self.assertEqual(noisy_thread.relevance_label, GmailRelevanceLabel.IRRELEVANT)
         self.assertFalse(noisy_thread.needs_extraction)
@@ -1102,7 +1124,7 @@ class StartupUpdateSlackBackfillViewTest(StartupUpdateApiTestCase):
                 {
                     "results": [
                         {
-                            "slack_thread_id": f"slack:C123:{relevant_thread.thread_ts}",
+                            "slack_thread_id": self._thread_public_id(relevant_thread),
                             "relevance_label": GmailRelevanceLabel.RELEVANT,
                             "relevance_score": 0.97,
                             "relevance_reason": "Customer and MRR update.",
@@ -1127,9 +1149,935 @@ class StartupUpdateSlackBackfillViewTest(StartupUpdateApiTestCase):
         self.assertEqual(batch_response.status_code, status.HTTP_200_OK)
         self.assertEqual(batch_response.data["count"], 1)
         bundle = batch_response.data["threads"][0]
-        self.assertEqual(bundle["slack_thread_id"], f"slack:C123:{relevant_thread.thread_ts}")
+        self.assertEqual(
+            bundle["slack_thread_id"],
+            self._thread_public_id(relevant_thread),
+        )
         self.assertEqual(bundle["relevance_score"], 0.97)
         self.assertIn("compression", bundle["participant_summary"])
+
+    def _create_extractable_slack_thread(
+        self,
+        *,
+        thread_ts: str = "1770000010.000100",
+    ) -> SlackThreadArtifact:
+        return SlackThreadArtifact.objects.create(
+            organization=self.organization,
+            connection=self.connection,
+            channel_id="C123",
+            channel_name="wins",
+            thread_ts=thread_ts,
+            source_message_ids=[f"slack:C123:{thread_ts}"],
+            source_message_count=1,
+            cleaned_text="[2026-03-15T12:00:00+00:00] Sam: private launch detail",
+            message_payloads=[
+                {
+                    "message_id": f"slack:C123:{thread_ts}",
+                    "author_name": "Sam",
+                    "cleaned_text": "private launch detail",
+                }
+            ],
+            latest_message_at=timezone.now() - timedelta(minutes=1),
+            relevance_label=GmailRelevanceLabel.RELEVANT,
+            relevance_score=0.95,
+            needs_extraction=True,
+            extraction_status=ArtifactProcessingStatus.HYDRATED,
+        )
+
+    def _extract_thread(self, thread: SlackThreadArtifact) -> str:
+        with self._with_key():
+            batch = self.client.get(
+                reverse(
+                    "startup_updates_slack_extraction_batch",
+                    args=[self.run.run_id],
+                ),
+                {"limit": 10},
+                **self.headers,
+            )
+        self.assertEqual(batch.status_code, status.HTTP_200_OK)
+        public_id = batch.data["threads"][0]["slack_thread_id"]
+        with self._with_key():
+            response = self.client.post(
+                reverse(
+                    "startup_updates_slack_extraction_results",
+                    args=[self.run.run_id],
+                ),
+                {
+                    "results": [
+                        {
+                            "slack_thread_id": public_id,
+                            "events": [
+                                {
+                                    "canonical_key": "launch-win",
+                                    "event_type": "product_milestone",
+                                    "title": "Private launch",
+                                    "summary": "Private Slack launch detail",
+                                    "month_bucket": "2026-03-01",
+                                    # The server must force exact lineage even
+                                    # when the extractor omits it.
+                                    "source_thread_ids": [],
+                                    "confidence": 0.9,
+                                }
+                            ],
+                            "metrics": [
+                                {
+                                    "metric_key": "private_pipeline",
+                                    "metric_name": "Private pipeline",
+                                    "value_text": "$12k",
+                                    "period_month": "2026-03-01",
+                                    "summary": "Private Slack metric",
+                                }
+                            ],
+                        }
+                    ]
+                },
+                format="json",
+                **self.headers,
+            )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        return public_id
+
+    def test_slack_authority_present_but_malformed_fails_closed(self):
+        run_request = dict(self.run.run_request or {})
+        external_context = dict(run_request.get("external_context") or {})
+        external_context["slack"] = {
+            "authority": {
+                "version": 2,
+                "connection_id": "corrupt",
+            }
+        }
+        run_request["external_context"] = external_context
+        self.run.run_request = run_request
+        self.run.save(update_fields=["run_request", "updated_at"])
+
+        with self._with_key():
+            response = self.client.get(
+                reverse(
+                    "startup_updates_slack_classification_batch",
+                    args=[self.run.run_id],
+                ),
+                {"limit": 10},
+                **self.headers,
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.run.refresh_from_db()
+        self.assertEqual(
+            self.run.run_request["external_context"]["slack"]["authority"][
+                "connection_id"
+            ],
+            "corrupt",
+        )
+
+    def test_slack_input_run_is_pinned_before_first_worker_callback(self):
+        slack_context = self.run.run_request["external_context"]["slack"]
+
+        self.assertEqual(
+            slack_context["authority"]["connection_id"],
+            self.connection.pk,
+        )
+        self.assertEqual(slack_context["authority"]["oauth_generation"], 0)
+        self.assertEqual(self.run.run_request["slack_channel_ids"], ["C123"])
+
+    @patch("integrations.services.slack_dm_mirror._revoke_remote_token")
+    def test_disconnect_before_first_slack_worker_cancels_exact_run(
+        self,
+        _mock_remote_revoke,
+    ):
+        revoke_user_grant(self.user)
+
+        self.run.refresh_from_db()
+        self.assertEqual(self.run.status, ContentFactoryRunStatus.CANCELLED)
+        self.assertEqual(
+            self.run.run_request["external_context"]["slack"]["authority"][
+                "oauth_generation"
+            ],
+            0,
+        )
+
+    @patch("integrations.services.slack_dm_mirror._revoke_remote_token")
+    def test_disconnect_erases_orphaned_exact_outputs_and_transitive_draft(
+        self,
+        _mock_remote_revoke,
+    ):
+        authority = slack_run_authority_for_connection(self.connection)
+        public_id = authority.thread_public_id("C123", "1770000040.000100")
+        orphan_event = StartupEvent.objects.create(
+            organization=self.organization,
+            run=None,
+            canonical_key="orphan-slack-event",
+            event_type="product_milestone",
+            title="Orphan private Slack event",
+            month_bucket=date(2026, 3, 1),
+            source_thread_ids=[public_id],
+        )
+        orphan_metric = StartupMetricObservation.objects.create(
+            organization=self.organization,
+            run=None,
+            source_provider="slack",
+            metric_key="orphan_slack_metric",
+            metric_name="Orphan Slack metric",
+            value_text="private",
+            period_month=date(2026, 3, 1),
+            source_metadata={
+                "slack_connection_id": self.connection.pk,
+                "slack_thread_id": public_id,
+            },
+        )
+        orphan_draft = MonthlyUpdateDraft.objects.create(
+            organization=self.organization,
+            run=None,
+            month=date(2026, 3, 1),
+            structured_memo={"summary": "Orphan private Slack draft"},
+            evidence_event_ids=[orphan_event.pk],
+            evidence_metric_ids=[orphan_metric.pk],
+        )
+
+        revoke_user_grant(self.user)
+
+        self.assertFalse(StartupEvent.objects.filter(pk=orphan_event.pk).exists())
+        self.assertFalse(
+            StartupMetricObservation.objects.filter(pk=orphan_metric.pk).exists()
+        )
+        self.assertFalse(
+            MonthlyUpdateDraft.objects.filter(pk=orphan_draft.pk).exists()
+        )
+
+    @patch("integrations.services.slack_dm_mirror._revoke_remote_token")
+    def test_missing_backup_run_fails_closed_for_private_draft_restore(
+        self,
+        _mock_remote_revoke,
+    ):
+        draft = MonthlyUpdateDraft.objects.create(
+            organization=self.organization,
+            run=self.run,
+            month=date(2026, 3, 1),
+            structured_memo={"summary": "Current private Slack draft"},
+        )
+        snapshot = build_cancel_backup_for_draft(draft)
+        snapshot["run_id"] = "deleted-prior-run"
+        snapshot["structured_memo"] = {
+            "summary": "Private Slack content with missing provenance"
+        }
+        backups = {"drafts": {draft.month.isoformat(): snapshot}}
+        set_startup_update_run_cancel_backups(self.run, backups)
+        self.run.save(update_fields=["result", "updated_at"])
+
+        revoke_user_grant(self.user)
+
+        self.run.refresh_from_db()
+        self.assertFalse(MonthlyUpdateDraft.objects.filter(pk=draft.pk).exists())
+        self.assertNotIn("missing provenance", str(self.run.result))
+
+    @patch("integrations.services.slack_dm_mirror._revoke_remote_token")
+    def test_disconnect_erases_cross_run_draft_candidate_and_hidden_backup(
+        self,
+        _mock_remote_revoke,
+    ):
+        authority = slack_run_authority_for_connection(self.connection)
+        public_id = authority.thread_public_id("C123", "1770000050.000100")
+        slack_event = StartupEvent.objects.create(
+            organization=self.organization,
+            run=self.run,
+            canonical_key="cross-run-slack-event",
+            event_type="product_milestone",
+            title="Private cross-run Slack event",
+            month_bucket=date(2026, 3, 1),
+            source_thread_ids=[public_id],
+        )
+        gmail_run = ContentFactoryRun.objects.create(
+            run_id="gmail-only-derived-run",
+            workflow=STARTUP_UPDATE_WORKFLOW,
+            organization=self.organization,
+            domain=self.organization.domain,
+            run_request={
+                "binding_id": self.binding.pk,
+                "input_sources": ["gmail"],
+            },
+            result={
+                "update_candidates": [
+                    {
+                        "event_id": slack_event.pk,
+                        "summary": "Private Slack candidate copied cross-run",
+                    }
+                ]
+            },
+        )
+        derived_draft = MonthlyUpdateDraft.objects.create(
+            organization=self.organization,
+            run=gmail_run,
+            month=date(2026, 3, 1),
+            structured_memo={"summary": "Private Slack draft copied cross-run"},
+            evidence_event_ids=[slack_event.pk],
+        )
+        snapshot = build_cancel_backup_for_event(slack_event)
+        current_event = slack_event
+        current_event.run = gmail_run
+        current_event.title = "Current Gmail-only replacement"
+        current_event.source_thread_ids = ["gmail:replacement-thread"]
+        current_event.evidence_message_ids = ["gmail:replacement-message"]
+        current_event.save(
+            update_fields=[
+                "run",
+                "title",
+                "source_thread_ids",
+                "evidence_message_ids",
+                "updated_at",
+            ]
+        )
+        set_startup_update_run_cancel_backups(
+            gmail_run,
+            {"events": {current_event.canonical_key: snapshot}},
+        )
+        gmail_run.save(update_fields=["result", "updated_at"])
+
+        revoke_user_grant(self.user)
+
+        gmail_run.refresh_from_db()
+        current_event.refresh_from_db()
+        self.assertNotEqual(gmail_run.status, ContentFactoryRunStatus.CANCELLED)
+        self.assertEqual(current_event.title, "Current Gmail-only replacement")
+        self.assertFalse(
+            MonthlyUpdateDraft.objects.filter(pk=derived_draft.pk).exists()
+        )
+        self.assertNotIn("Private Slack", str(gmail_run.result))
+
+    @patch("integrations.services.slack_dm_mirror._revoke_remote_token")
+    def test_disconnect_erases_exact_slack_lineage_and_preserves_mixed_sources(
+        self,
+        _mock_remote_revoke,
+    ):
+        prior_run = ContentFactoryRun.objects.create(
+            run_id="prior-gmail-run",
+            workflow=STARTUP_UPDATE_WORKFLOW,
+            organization=self.organization,
+            domain=self.organization.domain,
+            run_request={"input_sources": ["gmail"]},
+        )
+        StartupEvent.objects.create(
+            organization=self.organization,
+            run=prior_run,
+            canonical_key="launch-win",
+            event_type="product_milestone",
+            title="Prior Gmail launch",
+            month_bucket=date(2026, 3, 1),
+            source_thread_ids=["gmail:thread-1"],
+        )
+        unrelated_event = StartupEvent.objects.create(
+            organization=self.organization,
+            run=self.run,
+            canonical_key="gmail-only",
+            event_type="product_milestone",
+            title="Gmail-only event",
+            month_bucket=date(2026, 3, 1),
+            source_thread_ids=["gmail:thread-2"],
+        )
+        unrelated_metric = StartupMetricObservation.objects.create(
+            organization=self.organization,
+            run=self.run,
+            source_provider="gmail",
+            metric_key="gmail_metric",
+            metric_name="Gmail metric",
+            value_text="7",
+            period_month=date(2026, 3, 1),
+        )
+        thread = self._create_extractable_slack_thread()
+        public_id = self._extract_thread(thread)
+        slack_event = StartupEvent.objects.get(canonical_key="launch-win")
+        slack_metric = StartupMetricObservation.objects.get(
+            metric_key="private_pipeline"
+        )
+        self.assertEqual(slack_event.source_thread_ids[0], public_id)
+        self.assertEqual(
+            slack_metric.source_metadata["slack_connection_id"],
+            self.connection.pk,
+        )
+        draft = MonthlyUpdateDraft.objects.create(
+            organization=self.organization,
+            run=self.run,
+            month=date(2026, 3, 1),
+            structured_memo={"summary": "Private Slack launch detail"},
+            rendered_markdown="Private Slack launch detail",
+            evidence_event_ids=[slack_event.pk],
+            evidence_metric_ids=[slack_metric.pk],
+        )
+
+        revoke_user_grant(self.user)
+
+        self.connection.refresh_from_db()
+        self.run.refresh_from_db()
+        self.assertEqual(
+            self.connection.status,
+            ExternalServiceConnectionStatus.DISCONNECTED,
+        )
+        self.assertEqual(connection_slack_oauth_generation(self.connection), 1)
+        restored_event = StartupEvent.objects.get(canonical_key="launch-win")
+        self.assertEqual(restored_event.run, prior_run)
+        self.assertEqual(restored_event.title, "Prior Gmail launch")
+        self.assertTrue(StartupEvent.objects.filter(pk=unrelated_event.pk).exists())
+        self.assertTrue(
+            StartupMetricObservation.objects.filter(pk=unrelated_metric.pk).exists()
+        )
+        self.assertFalse(
+            StartupMetricObservation.objects.filter(pk=slack_metric.pk).exists()
+        )
+        self.assertFalse(MonthlyUpdateDraft.objects.filter(pk=draft.pk).exists())
+        self.assertFalse(SlackThreadArtifact.objects.filter(pk=thread.pk).exists())
+        self.assertEqual(self.run.status, ContentFactoryRunStatus.CANCELLED)
+        self.assertEqual(self.run.run_request["slack_channel_ids"], [])
+        slack_context = self.run.run_request["external_context"]["slack"]
+        self.assertTrue(slack_context["source_unavailable"])
+        # The tombstone retains the generation the worker actually observed;
+        # the connection row advances separately to generation 1.
+        self.assertEqual(slack_context["authority"]["oauth_generation"], 0)
+        with self._with_key():
+            stale_draft_response = self.client.post(
+                reverse(
+                    "startup_updates_draft_results",
+                    args=[self.run.run_id],
+                ),
+                {
+                    "drafts": [
+                        {
+                            "month": "2026-03-01",
+                            "structured_memo": {"summary": "stale Slack result"},
+                        }
+                    ]
+                },
+                format="json",
+                **self.headers,
+            )
+        self.assertEqual(
+            stale_draft_response.status_code,
+            status.HTTP_409_CONFLICT,
+        )
+        self.assertFalse(MonthlyUpdateDraft.objects.filter(run=self.run).exists())
+
+    @patch("integrations.services.slack_dm_mirror._revoke_remote_token")
+    def test_disconnect_does_not_match_other_connection_legacy_ids(
+        self,
+        _mock_remote_revoke,
+    ):
+        thread = self._create_extractable_slack_thread(
+            thread_ts="1770000020.000100"
+        )
+        other_user = User.objects.create_user(
+            email="other-founder@example.com",
+            password="test1234",
+        )
+        other_binding = UserStartupBinding.objects.create(
+            user=other_user,
+            organization=self.organization,
+        )
+        other_connection = ExternalServiceConnection.objects.create(
+            provider=ExternalServiceProvider.SLACK,
+            user=other_user,
+            organization=self.organization,
+            access_token="xoxp-other",
+            external_account_id="T-OTHER",
+        )
+        other_run = ContentFactoryRun.objects.create(
+            run_id="other-slack-run",
+            workflow=STARTUP_UPDATE_WORKFLOW,
+            organization=self.organization,
+            domain=self.organization.domain,
+            status=ContentFactoryRunStatus.RUNNING,
+            run_request=pin_slack_run_authority(
+                {
+                    "binding_id": other_binding.pk,
+                    "input_sources": ["slack"],
+                },
+                slack_run_authority_for_connection(other_connection),
+            ),
+        )
+        colliding_event = StartupEvent.objects.create(
+            organization=self.organization,
+            run=other_run,
+            canonical_key="other-workspace-event",
+            event_type="product_milestone",
+            title="Other workspace",
+            month_bucket=date(2026, 3, 1),
+            source_thread_ids=[f"slack:C123:{thread.thread_ts}"],
+            evidence_message_ids=list(thread.source_message_ids),
+        )
+
+        revoke_user_grant(self.user)
+
+        other_run.refresh_from_db()
+        self.assertEqual(other_run.status, ContentFactoryRunStatus.RUNNING)
+        self.assertTrue(StartupEvent.objects.filter(pk=colliding_event.pk).exists())
+
+    @patch("integrations.services.slack_dm_mirror._revoke_remote_token")
+    def test_old_public_id_cannot_target_reconnected_same_channel(
+        self,
+        _mock_remote_revoke,
+    ):
+        old_thread = self._create_extractable_slack_thread(
+            thread_ts="1770000030.000100"
+        )
+        with self._with_key():
+            batch = self.client.get(
+                reverse(
+                    "startup_updates_slack_extraction_batch",
+                    args=[self.run.run_id],
+                ),
+                {"limit": 10},
+                **self.headers,
+            )
+        old_public_id = batch.data["threads"][0]["slack_thread_id"]
+        revoke_user_grant(self.user)
+
+        replacement = ExternalServiceConnection.objects.create(
+            provider=ExternalServiceProvider.SLACK,
+            user=self.user,
+            organization=self.organization,
+            access_token="xoxp-reconnected",
+            external_account_id="T123-RECONNECTED",
+            provider_metadata=stamp_slack_oauth_generation({}, 1),
+        )
+        replacement_thread = SlackThreadArtifact.objects.create(
+            organization=self.organization,
+            connection=replacement,
+            channel_id=old_thread.channel_id,
+            channel_name="wins",
+            thread_ts=old_thread.thread_ts,
+            source_message_ids=[f"slack:C123:{old_thread.thread_ts}"],
+            source_message_count=1,
+            cleaned_text="replacement content",
+            latest_message_at=timezone.now(),
+            extraction_status=ArtifactProcessingStatus.HYDRATED,
+        )
+
+        with self._with_key():
+            response = self.client.post(
+                reverse(
+                    "startup_updates_slack_classification_results",
+                    args=[self.run.run_id],
+                ),
+                {
+                    "results": [
+                        {
+                            "slack_thread_id": old_public_id,
+                            "relevance_label": GmailRelevanceLabel.RELEVANT,
+                        }
+                    ]
+                },
+                format="json",
+                **self.headers,
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        replacement_thread.refresh_from_db()
+        self.assertEqual(
+            replacement_thread.relevance_label,
+            GmailRelevanceLabel.PENDING,
+        )
+
+
+@skipUnless(
+    connection.vendor == "postgresql",
+    "Requires PostgreSQL row-lock concurrency semantics.",
+)
+@override_settings(ROO_API_KEY="startup-api-key")
+class StartupUpdateSlackLineagePostgresTests(TransactionTestCase):
+    reset_sequences = True
+
+    def setUp(self):
+        self.api_key = "startup-api-key"
+        self.user = User.objects.create_user(
+            email="lineage-race@example.com",
+            password="test1234",
+        )
+        self.google_connection = GoogleConnection.objects.create(
+            user=self.user,
+            google_email="lineage-race@gmail.com",
+            refresh_token="refresh-token",
+            scope="https://www.googleapis.com/auth/gmail.readonly",
+        )
+        self.organization = Organization.objects.create(
+            name="Lineage Race",
+            domain="lineage-race.example",
+        )
+        self.binding = UserStartupBinding.objects.create(
+            user=self.user,
+            organization=self.organization,
+            google_connection=self.google_connection,
+            is_default_for_gmail=True,
+        )
+        StartupProfile.objects.create(organization=self.organization)
+        self.slack_connection = ExternalServiceConnection.objects.create(
+            provider=ExternalServiceProvider.SLACK,
+            user=self.user,
+            organization=self.organization,
+            access_token="xoxp-race",
+            external_account_id="T-RACE",
+        )
+        self.run = create_startup_update_run(
+            organization=self.organization,
+            binding=self.binding,
+            input_sources=["gmail", "slack"],
+        )
+        self.run.run_request = pin_slack_run_authority(
+            self.run.run_request,
+            slack_run_authority_for_connection(self.slack_connection),
+        )
+        self.run.status = ContentFactoryRunStatus.RUNNING
+        self.run.save(update_fields=["run_request", "status", "updated_at"])
+
+    def _backend_pid(self):
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT pg_backend_pid()")
+            return int(cursor.fetchone()[0])
+
+    def _wait_for_blocker(self, backend_pid, *, timeout=5):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT pg_blocking_pids(%s)", [backend_pid])
+                blockers = cursor.fetchone()[0]
+            if blockers:
+                return blockers
+        self.fail(f"backend {backend_pid} never waited for the Slack authority lock")
+
+    @staticmethod
+    def _thread_target(callback, errors, done):
+        close_old_connections()
+        try:
+            callback()
+        except Exception as exc:  # pragma: no cover - asserted by caller
+            errors.append(exc)
+        finally:
+            connection.close()
+            done.set()
+
+    def test_delete_first_rejects_queued_downstream_draft_result(self):
+        from startup_updates import services as startup_services
+
+        original_cleanup = (
+            startup_services.clear_slack_connection_startup_lineage_locked
+        )
+        delete_holds_authority = threading.Event()
+        release_delete = threading.Event()
+        delete_done = threading.Event()
+        callback_ready = threading.Event()
+        callback_done = threading.Event()
+        delete_errors = []
+        callback_errors = []
+        callback_backend_pid = []
+        callback_responses = []
+
+        def blocking_cleanup(slack_connection):
+            delete_holds_authority.set()
+            if not release_delete.wait(10):
+                raise TimeoutError("timed out waiting to release DELETE")
+            return original_cleanup(slack_connection)
+
+        def post_stale_draft():
+            callback_backend_pid.append(self._backend_pid())
+            callback_ready.set()
+            client = APIClient()
+            callback_responses.append(
+                client.post(
+                    reverse(
+                        "startup_updates_draft_results",
+                        args=[self.run.run_id],
+                    ),
+                    {
+                        "drafts": [
+                            {
+                                "month": "2026-08-01",
+                                "structured_memo": {
+                                    "summary": "stale private Slack result"
+                                },
+                            }
+                        ]
+                    },
+                    format="json",
+                    HTTP_X_API_KEY=self.api_key,
+                )
+            )
+
+        delete_thread = threading.Thread(
+            target=self._thread_target,
+            args=(
+                lambda: revoke_user_grant(User.objects.get(pk=self.user.pk)),
+                delete_errors,
+                delete_done,
+            ),
+        )
+        callback_thread = threading.Thread(
+            target=self._thread_target,
+            args=(post_stale_draft, callback_errors, callback_done),
+        )
+
+        with (
+            patch(
+                "startup_updates.services.clear_slack_connection_startup_lineage_locked",
+                side_effect=blocking_cleanup,
+            ),
+            patch("integrations.services.slack_dm_mirror._revoke_remote_token"),
+        ):
+            delete_thread.start()
+            self.assertTrue(delete_holds_authority.wait(5))
+            callback_thread.start()
+            self.assertTrue(callback_ready.wait(5))
+            self._wait_for_blocker(callback_backend_pid[0])
+            self.assertFalse(callback_done.is_set())
+            release_delete.set()
+            delete_thread.join(10)
+            callback_thread.join(10)
+
+        self.assertTrue(delete_done.is_set())
+        self.assertTrue(callback_done.is_set())
+        self.assertEqual(delete_errors, [])
+        self.assertEqual(callback_errors, [])
+        self.assertEqual(callback_responses[0].status_code, status.HTTP_409_CONFLICT)
+        self.assertFalse(MonthlyUpdateDraft.objects.filter(run=self.run).exists())
+        self.run.refresh_from_db()
+        self.assertEqual(self.run.status, ContentFactoryRunStatus.CANCELLED)
+        self.assertNotIn("stale private Slack result", str(self.run.result))
+
+    def test_delete_first_rejects_queued_gmail_result_on_mixed_source_run(self):
+        from startup_updates import services as startup_services
+
+        authority = slack_run_authority_for_connection(self.slack_connection)
+        public_id = authority.thread_public_id("C-RACE", "1770000060.000100")
+        private_event = StartupEvent.objects.create(
+            organization=self.organization,
+            run=self.run,
+            canonical_key="mixed-source-race-event",
+            event_type="product_milestone",
+            title="Private Slack event before DELETE",
+            month_bucket=date(2026, 8, 1),
+            source_thread_ids=[public_id],
+        )
+        gmail_thread = GmailThreadArtifact.objects.create(
+            organization=self.organization,
+            google_connection=self.google_connection,
+            gmail_thread_id="gmail-race-thread",
+            source_message_ids=["gmail-race-message"],
+            cleaned_text="Current Gmail-only replacement",
+            hydration_status=ArtifactProcessingStatus.HYDRATED,
+            extraction_status=ArtifactProcessingStatus.PENDING,
+        )
+        original_cleanup = (
+            startup_services.clear_slack_connection_startup_lineage_locked
+        )
+        delete_holds_authority = threading.Event()
+        release_delete = threading.Event()
+        delete_done = threading.Event()
+        callback_ready = threading.Event()
+        callback_done = threading.Event()
+        delete_errors = []
+        callback_errors = []
+        callback_backend_pid = []
+        callback_responses = []
+
+        def blocking_cleanup(slack_connection):
+            delete_holds_authority.set()
+            if not release_delete.wait(10):
+                raise TimeoutError("timed out waiting to release DELETE")
+            return original_cleanup(slack_connection)
+
+        def post_stale_gmail_result():
+            callback_backend_pid.append(self._backend_pid())
+            callback_ready.set()
+            client = APIClient()
+            callback_responses.append(
+                client.post(
+                    reverse(
+                        "startup_updates_extraction_results",
+                        args=[self.run.run_id],
+                    ),
+                    {
+                        "results": [
+                            {
+                                "gmail_thread_id": gmail_thread.gmail_thread_id,
+                                "attachment_updates": [],
+                                "events": [
+                                    {
+                                        "canonical_key": private_event.canonical_key,
+                                        "event_type": "product_milestone",
+                                        "title": "Stale Gmail overwrite after DELETE",
+                                        "month_bucket": "2026-08-01",
+                                        "source_thread_ids": ["gmail:race-thread"],
+                                    }
+                                ],
+                                "metrics": [],
+                            }
+                        ]
+                    },
+                    format="json",
+                    HTTP_X_API_KEY=self.api_key,
+                )
+            )
+
+        delete_thread = threading.Thread(
+            target=self._thread_target,
+            args=(
+                lambda: revoke_user_grant(User.objects.get(pk=self.user.pk)),
+                delete_errors,
+                delete_done,
+            ),
+        )
+        callback_thread = threading.Thread(
+            target=self._thread_target,
+            args=(post_stale_gmail_result, callback_errors, callback_done),
+        )
+
+        with (
+            patch(
+                "startup_updates.services.clear_slack_connection_startup_lineage_locked",
+                side_effect=blocking_cleanup,
+            ),
+            patch("integrations.services.slack_dm_mirror._revoke_remote_token"),
+        ):
+            delete_thread.start()
+            self.assertTrue(delete_holds_authority.wait(5))
+            callback_thread.start()
+            self.assertTrue(callback_ready.wait(5))
+            self._wait_for_blocker(callback_backend_pid[0])
+            self.assertFalse(callback_done.is_set())
+            release_delete.set()
+            delete_thread.join(10)
+            callback_thread.join(10)
+
+        self.assertTrue(delete_done.is_set())
+        self.assertTrue(callback_done.is_set())
+        self.assertEqual(delete_errors, [])
+        self.assertEqual(callback_errors, [])
+        self.assertEqual(callback_responses[0].status_code, status.HTTP_409_CONFLICT)
+        self.assertFalse(
+            StartupEvent.objects.filter(pk=private_event.pk).exists()
+        )
+        gmail_thread.refresh_from_db()
+        self.assertEqual(
+            gmail_thread.extraction_status,
+            ArtifactProcessingStatus.PENDING,
+        )
+        self.run.refresh_from_db()
+        self.assertEqual(self.run.status, ContentFactoryRunStatus.CANCELLED)
+        self.assertNotIn("Private Slack", str(self.run.result))
+
+    def test_gmail_result_first_holds_authority_until_delete_scrubs_lineage(self):
+        from startup_updates import api_views as startup_api_views
+
+        authority = slack_run_authority_for_connection(self.slack_connection)
+        public_id = authority.thread_public_id("C-RACE", "1770000070.000100")
+        private_event = StartupEvent.objects.create(
+            organization=self.organization,
+            run=self.run,
+            canonical_key="mixed-source-api-first-event",
+            event_type="product_milestone",
+            title="Private Slack event before API-first race",
+            month_bucket=date(2026, 8, 1),
+            source_thread_ids=[public_id],
+        )
+        gmail_thread = GmailThreadArtifact.objects.create(
+            organization=self.organization,
+            google_connection=self.google_connection,
+            gmail_thread_id="gmail-api-first-thread",
+            source_message_ids=["gmail-api-first-message"],
+            cleaned_text="Current Gmail-only replacement",
+            hydration_status=ArtifactProcessingStatus.HYDRATED,
+            extraction_status=ArtifactProcessingStatus.PENDING,
+        )
+        original_update_run_step = startup_api_views._update_run_step
+        callback_holds_authority = threading.Event()
+        release_callback = threading.Event()
+        callback_done = threading.Event()
+        delete_ready = threading.Event()
+        delete_done = threading.Event()
+        callback_errors = []
+        delete_errors = []
+        callback_responses = []
+        delete_backend_pid = []
+
+        def blocking_update_run_step(run, *, step_key):
+            if run.pk == self.run.pk and step_key == "event_extraction":
+                callback_holds_authority.set()
+                if not release_callback.wait(10):
+                    raise TimeoutError("timed out waiting to release Gmail callback")
+            return original_update_run_step(run, step_key=step_key)
+
+        def post_gmail_result():
+            client = APIClient()
+            callback_responses.append(
+                client.post(
+                    reverse(
+                        "startup_updates_extraction_results",
+                        args=[self.run.run_id],
+                    ),
+                    {
+                        "results": [
+                            {
+                                "gmail_thread_id": gmail_thread.gmail_thread_id,
+                                "attachment_updates": [],
+                                "events": [
+                                    {
+                                        "canonical_key": private_event.canonical_key,
+                                        "event_type": "product_milestone",
+                                        "title": "Current Gmail replacement",
+                                        "month_bucket": "2026-08-01",
+                                        "source_thread_ids": ["gmail:api-first-thread"],
+                                    }
+                                ],
+                                "metrics": [],
+                            }
+                        ]
+                    },
+                    format="json",
+                    HTTP_X_API_KEY=self.api_key,
+                )
+            )
+
+        def disconnect_slack():
+            delete_backend_pid.append(self._backend_pid())
+            delete_ready.set()
+            revoke_user_grant(User.objects.get(pk=self.user.pk))
+
+        callback_thread = threading.Thread(
+            target=self._thread_target,
+            args=(post_gmail_result, callback_errors, callback_done),
+        )
+        delete_thread = threading.Thread(
+            target=self._thread_target,
+            args=(disconnect_slack, delete_errors, delete_done),
+        )
+
+        with (
+            patch(
+                "startup_updates.api_views._update_run_step",
+                side_effect=blocking_update_run_step,
+            ),
+            patch("integrations.services.slack_dm_mirror._revoke_remote_token"),
+        ):
+            callback_thread.start()
+            self.assertTrue(callback_holds_authority.wait(5))
+            delete_thread.start()
+            self.assertTrue(delete_ready.wait(5))
+            self._wait_for_blocker(delete_backend_pid[0])
+            self.assertFalse(delete_done.is_set())
+            release_callback.set()
+            callback_thread.join(10)
+            delete_thread.join(10)
+
+        self.assertTrue(callback_done.is_set())
+        self.assertTrue(delete_done.is_set())
+        self.assertEqual(callback_errors, [])
+        self.assertEqual(delete_errors, [])
+        self.assertEqual(callback_responses[0].status_code, status.HTTP_200_OK)
+        private_event.refresh_from_db()
+        self.assertEqual(private_event.title, "Current Gmail replacement")
+        self.assertEqual(private_event.source_thread_ids, ["gmail:api-first-thread"])
+        gmail_thread.refresh_from_db()
+        self.assertEqual(
+            gmail_thread.extraction_status,
+            ArtifactProcessingStatus.PROCESSED,
+        )
+        self.run.refresh_from_db()
+        self.assertEqual(self.run.status, ContentFactoryRunStatus.CANCELLED)
+        self.assertNotIn("Private Slack", str(self.run.result))
 
 
 class StartupUpdateResetCommandTest(StartupUpdateApiTestCase):
@@ -3001,6 +3949,121 @@ class StartupUpdateServiceHelpersTest(TestCase):
             self.assertEqual(score, 0, msg=subject)
             self.assertEqual(label, GmailRelevanceLabel.IRRELEVANT, msg=subject)
             self.assertIn("hard_filtered_low_signal_pattern", reasons, msg=subject)
+
+    def _own_domain_profile(self):
+        return SimpleNamespace(
+            company_aliases=["Acme"],
+            domain_aliases=["acme.com"],
+            founder_names=[],
+            team_names=[],
+            investor_domains=[],
+            investor_names=[],
+            competitor_names=[],
+            competitor_domains=[],
+            customer_names=[],
+            customer_domains=["customer.example"],
+            prospect_names=[],
+            prospect_domains=[],
+            positive_keywords=[],
+            negative_keywords=[],
+        )
+
+    def test_score_message_for_profile_ignores_own_domain_among_recipients(self):
+        # Every message in a founder's mailbox is addressed to the founder at
+        # the company domain. Counting that as a signal would allowlist the
+        # whole inbox and cancel out every hard filter.
+        profile = self._own_domain_profile()
+        artifact = SimpleNamespace(
+            subject="Weekly digest",
+            snippet="Top posts for you this week",
+            cleaned_text="",
+            from_address="noreply@news.example",
+            to_addresses=["founder@acme.com"],
+            cc_addresses=[],
+            bcc_addresses=[],
+            reply_to_addresses=[],
+            header_values={"list-unsubscribe": "<mailto:unsubscribe@news.example>"},
+            label_ids=["CATEGORY_PROMOTIONS"],
+        )
+
+        score, reasons, label = score_message_for_profile(profile, artifact)
+
+        self.assertEqual(score, 0)
+        self.assertEqual(label, GmailRelevanceLabel.IRRELEVANT)
+        self.assertNotIn("allowlist_company_domain", reasons)
+        self.assertNotIn("matched_company_domain", reasons)
+
+    def test_score_message_for_profile_counts_company_domain_only_for_sender(self):
+        profile = self._own_domain_profile()
+        base = {
+            "subject": "Quick question",
+            "snippet": "Following up on the thing",
+            "cleaned_text": "",
+            "to_addresses": ["founder@acme.com"],
+            "cc_addresses": [],
+            "bcc_addresses": [],
+            "reply_to_addresses": [],
+            "header_values": {},
+            "label_ids": [],
+        }
+
+        internal = SimpleNamespace(from_address="teammate@acme.com", **base)
+        internal_score, internal_reasons, _ = score_message_for_profile(profile, internal)
+        self.assertIn("matched_company_domain", internal_reasons)
+
+        external = SimpleNamespace(from_address="someone@vendor.example", **base)
+        external_score, external_reasons, _ = score_message_for_profile(profile, external)
+        self.assertNotIn("matched_company_domain", external_reasons)
+
+        # Internal mail is worth at least the domain bonus more. It also picks
+        # up the company alias from the sender address itself, so the gap is
+        # wider than 25 and the exact figure is not the point.
+        self.assertGreaterEqual(internal_score - external_score, 25)
+        self.assertEqual(external_score, 50)
+
+    def test_score_message_for_profile_ignores_company_alias_in_own_address(self):
+        # "acme" appears only inside the recipient's own address, which says
+        # nothing about what the message is about.
+        profile = self._own_domain_profile()
+        artifact = SimpleNamespace(
+            subject="Lunch on Thursday?",
+            snippet="Are you free around one",
+            cleaned_text="",
+            from_address="friend@personal.example",
+            to_addresses=["founder@acme.com"],
+            cc_addresses=[],
+            bcc_addresses=[],
+            reply_to_addresses=[],
+            header_values={},
+            label_ids=[],
+        )
+
+        score, reasons, label = score_message_for_profile(profile, artifact)
+
+        self.assertNotIn("matched_company_alias_or_positive_keyword", reasons)
+        self.assertEqual(score, 50)
+        self.assertEqual(label, GmailRelevanceLabel.AMBIGUOUS)
+
+    def test_score_message_for_profile_still_credits_counterparty_domains(self):
+        profile = self._own_domain_profile()
+        artifact = SimpleNamespace(
+            subject="Renewal paperwork",
+            snippet="Sending the signed contract across",
+            cleaned_text="",
+            from_address="ap@customer.example",
+            to_addresses=["founder@acme.com"],
+            cc_addresses=[],
+            bcc_addresses=[],
+            reply_to_addresses=[],
+            header_values={},
+            label_ids=[],
+        )
+
+        score, reasons, label = score_message_for_profile(profile, artifact)
+
+        self.assertIn("matched_customer_or_prospect_domain", reasons)
+        self.assertGreaterEqual(score, 65)
+        self.assertNotEqual(label, GmailRelevanceLabel.IRRELEVANT)
 
     def test_sync_startup_profile_from_company_merges_existing_org_context(self):
         user = User.objects.create_user(

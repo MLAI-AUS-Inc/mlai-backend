@@ -12,12 +12,14 @@ from .views import (
     EmailCodeRequestView,
     EmailCodeVerifyView,
     DeviceView,
+    HomeView,
     InviteView,
     LinkPreviewImageView,
     LinkPreviewView,
     PasswordAuthView,
     PublicProfileBatchView,
     SessionView,
+    UpcomingEventsView,
 )
 from .coding_views import (
     CodingEntitlementView,
@@ -26,9 +28,29 @@ from .coding_views import (
     CodingTurnFinalizeView,
     CodingTurnTicketRefreshView,
 )
+from .home_views import CommunityHomeView
+from .slack_views import SlackDmMirrorView, SlackDmStartView, SlackUserDirectoryView
+from .usage_views import (
+    TokenUsageHistoryView,
+    TokenUsageIngestView,
+    TokenUsageLeaderboardView,
+    TokenUsageTokenView,
+)
 
 
 urlpatterns = [
+    path("home/", CommunityHomeView.as_view(), name="community_chat_home"),
+    path("slack/", SlackDmMirrorView.as_view(), name="community_chat_slack"),
+    path(
+        "slack/users/",
+        SlackUserDirectoryView.as_view(),
+        name="community_chat_slack_users",
+    ),
+    path(
+        "slack/dms/",
+        SlackDmStartView.as_view(),
+        name="community_chat_slack_dms",
+    ),
     path("coding/jwks/", CodingJwksView.as_view(), name="community_chat_coding_jwks"),
     path(
         "coding/entitlement/",
@@ -51,6 +73,12 @@ urlpatterns = [
         name="community_chat_coding_turn_finalize",
     ),
     path("account/", AccountView.as_view(), name="community_chat_account"),
+    path("home/", HomeView.as_view(), name="community_chat_home"),
+    path(
+        "upcoming-events/",
+        UpcomingEventsView.as_view(),
+        name="community_chat_upcoming_events",
+    ),
     path(
         "profiles/batch/",
         PublicProfileBatchView.as_view(),
@@ -83,4 +111,16 @@ urlpatterns = [
     path("bootstrap/invite/", InviteView.as_view(), name="community_chat_invite"),
     path("bootstrap/confirm/", ConfirmView.as_view(), name="community_chat_confirm"),
     path("devices/<str:public_key>/", DeviceView.as_view(), name="community_chat_device"),
+    # The tokenmaxer reporter builds "{apiBase}/api/ingest" by plain string
+    # concatenation, so these two paths must match literally — no trailing
+    # slash, or APPEND_SLASH would 301 the POST and the reporter would record
+    # a silent failure.
+    path("usage/api/ingest", TokenUsageIngestView.as_view(), name="token_usage_ingest"),
+    path("usage/api/history", TokenUsageHistoryView.as_view(), name="token_usage_history"),
+    path("usage/token/", TokenUsageTokenView.as_view(), name="token_usage_token"),
+    path(
+        "usage/leaderboard/",
+        TokenUsageLeaderboardView.as_view(),
+        name="token_usage_leaderboard",
+    ),
 ]

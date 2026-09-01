@@ -2,8 +2,15 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+from django.core.cache import cache
 from django.test import SimpleTestCase, TestCase, override_settings
 from rest_framework.test import APIClient
+from rest_framework.throttling import ScopedRateThrottle
+
+from integrations.api_views_connectors import (
+    LinearChannelIssueDetailView,
+    LinearChannelIssueListView,
+)
 
 
 class FakeLinearResponse:
@@ -25,6 +32,14 @@ class FakeLinearResponse:
     INTERNAL_API_KEY="",
     MLAI_API_KEY="",
     LINEAR_STUDIO_SIZING_ENFORCEMENT_MODE="off",
+    LINEAR_CHANNEL_ISSUE_BINDINGS_JSON=(
+        '{"TMLAI:CTECH": {'
+        '"display_name": "MLAI_TECH · Todo", '
+        '"team_name": "MLAI_TECH", '
+        '"state_name": "Todo", '
+        '"linear_team_id": "team-tech", '
+        '"linear_state_id": "state-todo"}}'
+    ),
 )
 class LinearMeetingActionsApiTests(SimpleTestCase):
     def setUp(self):
@@ -35,6 +50,442 @@ class LinearMeetingActionsApiTests(SimpleTestCase):
         response = self.client.get("/api/v1/integrations/linear/meeting-context")
 
         self.assertEqual(response.status_code, 401)
+
+    def test_channel_issue_list_rejects_requests_without_roo_api_key(self):
+        response = self.client.post(
+            "/api/v1/integrations/linear/channel-issues/list",
+            {
+                "slack_workspace_id": "TMLAI",
+                "slack_channel_id": "CTECH",
+                "requester_slack_id": "U123",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 401)
+
+    def test_channel_issue_views_use_separate_scoped_throttles(self):
+        self.assertEqual(LinearChannelIssueListView.throttle_classes, [ScopedRateThrottle])
+        self.assertEqual(
+            LinearChannelIssueListView.throttle_scope,
+            "linear_channel_issue_list",
+        )
+        self.assertEqual(LinearChannelIssueDetailView.throttle_classes, [ScopedRateThrottle])
+        self.assertEqual(
+            LinearChannelIssueDetailView.throttle_scope,
+            "linear_channel_issue_detail",
+        )
+
+    @patch.object(
+        ScopedRateThrottle,
+        "THROTTLE_RATES",
+        {
+            "linear_channel_issue_list": "1/minute",
+            "linear_channel_issue_detail": "1/minute",
+        },
+    )
+    @patch(
+        "integrations.api_views_connectors.list_linear_channel_issues",
+        return_value={"list": {}, "issues": [], "pageInfo": {}},
+    )
+    def test_channel_issue_list_is_throttled(self, mock_list):
+        cache.clear()
+        self.addCleanup(cache.clear)
+        request = {
+            "slack_workspace_id": "TMLAI",
+            "slack_channel_id": "CTECH",
+            "requester_slack_id": "U123",
+        }
+
+        first = self.client.post(
+            "/api/v1/integrations/linear/channel-issues/list",
+            request,
+            format="json",
+            REMOTE_ADDR="192.0.2.10",
+            **self.auth_headers,
+        )
+        second = self.client.post(
+            "/api/v1/integrations/linear/channel-issues/list",
+            request,
+            format="json",
+            REMOTE_ADDR="192.0.2.10",
+            **self.auth_headers,
+        )
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 429)
+        self.assertEqual(mock_list.call_count, 1)
+
+    @patch("integrations.services.linear_meeting_actions.http_requests.post")
+    def test_channel_issue_list_uses_bound_team_and_state(self, mock_post):
+        mock_post.return_value = FakeLinearResponse(
+            {
+                "data": {
+                    "issues": {
+                        "nodes": [
+                            {
+                                "id": "issue-16",
+                                "identifier": "TECH-16",
+                                "title": "Roo jobs filtering",
+                                "url": "https://linear.app/mlai-aus/issue/TECH-16",
+                                "state": {
+                                    "id": "state-todo",
+                                    "name": "Todo",
+                                    "type": "unstarted",
+                                },
+                                "team": {
+                                    "id": "team-tech",
+                                    "key": "TECH",
+                                    "name": "MLAI_TECH",
+                                },
+                            },
+                            {
+                                "id": "issue-other",
+                                "identifier": "MLAI-1",
+                                "title": "Out of scope",
+                                "state": {"id": "state-todo"},
+                                "team": {"id": "team-other"},
+                            },
+                        ],
+                        "pageInfo": {
+                            "hasNextPage": False,
+                            "endCursor": None,
+                        },
+                    }
+                }
+            }
+        )
+
+        response = self.client.post(
+            "/api/v1/integrations/linear/channel-issues/list",
+            {
+                "slack_workspace_id": "TMLAI",
+                "slack_channel_id": "CTECH",
+                "requester_slack_id": "U123",
+            },
+            format="json",
+            **self.auth_headers,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            [issue["identifier"] for issue in response.json()["issues"]],
+            ["TECH-16"],
+        )
+        self.assertEqual(response.json()["list"]["displayName"], "MLAI_TECH · Todo")
+        request_payload = mock_post.call_args.kwargs["json"]
+        self.assertEqual(request_payload["operationName"], "LinearChannelIssueList")
+        self.assertEqual(request_payload["variables"]["teamId"], "team-tech")
+        self.assertEqual(request_payload["variables"]["stateId"], "state-todo")
+
+    def test_channel_issue_list_rejects_unbound_channel(self):
+        response = self.client.post(
+            "/api/v1/integrations/linear/channel-issues/list",
+            {
+                "slack_workspace_id": "TMLAI",
+                "slack_channel_id": "COTHER",
+                "requester_slack_id": "U123",
+            },
+            format="json",
+            **self.auth_headers,
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(
+            response.json()["code"],
+            "linear_channel_issue_access_denied",
+        )
+
+    @patch("integrations.services.linear_meeting_actions.http_requests.post")
+    def test_channel_issue_detail_returns_description_relations_and_comments(self, mock_post):
+        mock_post.side_effect = [
+            FakeLinearResponse(
+                {
+                    "data": {
+                        "issue": {
+                            "id": "issue-16",
+                            "identifier": "TECH-16",
+                            "title": "Roo jobs filtering",
+                            "description": "Full issue description",
+                            "state": {
+                                "id": "state-todo",
+                                "name": "Todo",
+                                "type": "unstarted",
+                            },
+                            "team": {
+                                "id": "team-tech",
+                                "key": "TECH",
+                                "name": "MLAI_TECH",
+                            },
+                            "labels": {"nodes": [{"id": "label-1", "name": "Bug"}]},
+                            "attachments": {
+                                "nodes": [
+                                    {
+                                        "id": "attachment-1",
+                                        "title": "GitHub issue",
+                                        "url": "https://github.com/example/issue/1",
+                                    }
+                                ],
+                                "pageInfo": {"hasNextPage": False},
+                            },
+                            "relations": {
+                                "nodes": [
+                                    {
+                                        "type": "blocks",
+                                        "relatedIssue": {
+                                            "id": "issue-17",
+                                            "identifier": "TECH-17",
+                                            "title": "Allowed relation",
+                                            "state": {"id": "state-todo", "name": "Todo"},
+                                            "team": {"id": "team-tech", "name": "MLAI_TECH"},
+                                        },
+                                    },
+                                    {
+                                        "type": "related",
+                                        "relatedIssue": {
+                                            "id": "issue-18",
+                                            "identifier": "TECH-18",
+                                            "title": "Wrong state relation",
+                                            "state": {"id": "state-progress", "name": "In Progress"},
+                                            "team": {"id": "team-tech", "name": "MLAI_TECH"},
+                                        },
+                                    },
+                                    {
+                                        "type": "related",
+                                        "relatedIssue": {
+                                            "id": "issue-other",
+                                            "identifier": "MLAI-1",
+                                            "title": "Wrong team relation",
+                                            "state": {"id": "state-todo", "name": "Todo"},
+                                            "team": {"id": "team-other", "name": "MLAI"},
+                                        },
+                                    },
+                                ],
+                                "pageInfo": {"hasNextPage": False},
+                            },
+                            "inverseRelations": {
+                                "nodes": [],
+                                "pageInfo": {"hasNextPage": False},
+                            },
+                        }
+                    }
+                }
+            ),
+            FakeLinearResponse(
+                {
+                    "data": {
+                        "issue": {
+                            "comments": {
+                                "nodes": [
+                                    {
+                                        "id": "comment-1",
+                                        "body": "First comment",
+                                        "createdAt": "2026-08-27T00:00:00Z",
+                                        "user": {"id": "user-1", "name": "CJ"},
+                                    }
+                                ],
+                                "pageInfo": {
+                                    "hasNextPage": False,
+                                    "endCursor": None,
+                                },
+                            }
+                        }
+                    }
+                }
+            ),
+        ]
+
+        response = self.client.post(
+            "/api/v1/integrations/linear/channel-issues/detail",
+            {
+                "slack_workspace_id": "TMLAI",
+                "slack_channel_id": "CTECH",
+                "requester_slack_id": "U123",
+                "issue_identifier": "TECH-16",
+                "include_comments": True,
+            },
+            format="json",
+            **self.auth_headers,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["issue"]["description"], "Full issue description")
+        self.assertEqual(payload["issue"]["labels"][0]["name"], "Bug")
+        self.assertEqual(payload["issue"]["attachments"][0]["title"], "GitHub issue")
+        self.assertEqual(
+            [edge["issue"]["identifier"] for edge in payload["issue"]["relations"]["edges"]],
+            ["TECH-17"],
+        )
+        self.assertEqual(payload["issue"]["relations"]["returned"], 1)
+        self.assertEqual(payload["comments"][0]["body"], "First comment")
+        self.assertFalse(payload["commentsTruncated"])
+        self.assertEqual(
+            [call.kwargs["json"]["operationName"] for call in mock_post.call_args_list],
+            ["LinearChannelIssueDetail", "LinearChannelIssueComments"],
+        )
+
+    @patch("integrations.services.linear_meeting_actions.http_requests.post")
+    def test_channel_issue_detail_rejects_issue_from_another_team(self, mock_post):
+        mock_post.return_value = FakeLinearResponse(
+            {
+                "data": {
+                    "issue": {
+                        "id": "issue-other",
+                        "identifier": "MLAI-1",
+                        "title": "Private issue",
+                        "team": {"id": "team-other", "name": "MLAI"},
+                    }
+                }
+            }
+        )
+
+        response = self.client.post(
+            "/api/v1/integrations/linear/channel-issues/detail",
+            {
+                "slack_workspace_id": "TMLAI",
+                "slack_channel_id": "CTECH",
+                "requester_slack_id": "U123",
+                "issue_identifier": "MLAI-1",
+            },
+            format="json",
+            **self.auth_headers,
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(mock_post.call_count, 1)
+
+    @patch("integrations.services.linear_meeting_actions.http_requests.post")
+    def test_channel_issue_detail_rejects_issue_outside_bound_state(self, mock_post):
+        mock_post.return_value = FakeLinearResponse(
+            {
+                "data": {
+                    "issue": {
+                        "id": "issue-16",
+                        "identifier": "TECH-16",
+                        "title": "Already in progress",
+                        "state": {"id": "state-progress", "name": "In Progress"},
+                        "team": {"id": "team-tech", "name": "MLAI_TECH"},
+                    }
+                }
+            }
+        )
+
+        response = self.client.post(
+            "/api/v1/integrations/linear/channel-issues/detail",
+            {
+                "slack_workspace_id": "TMLAI",
+                "slack_channel_id": "CTECH",
+                "requester_slack_id": "U123",
+                "issue_identifier": "TECH-16",
+                "include_comments": True,
+            },
+            format="json",
+            **self.auth_headers,
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(mock_post.call_count, 1)
+
+    def test_project_resolve_rejects_requests_without_roo_api_key(self):
+        response = self.client.get(
+            "/api/v1/integrations/linear/projects/resolve",
+            {"query": "[Studio] Studynash"},
+        )
+
+        self.assertEqual(response.status_code, 401)
+
+    @patch("integrations.services.linear_meeting_actions.http_requests.post")
+    def test_project_resolve_finds_normalized_inactive_project(self, mock_post):
+        mock_post.return_value = FakeLinearResponse(
+            {
+                "data": {
+                    "projects": {
+                        "nodes": [
+                            {
+                                "id": "project-study-nash",
+                                "name": "[Studio] Study Nash",
+                                "slugId": "studio-study-nash",
+                                "completedAt": "2026-08-20T00:00:00Z",
+                                "canceledAt": None,
+                                "status": {"name": "Completed", "type": "completed"},
+                                "teams": {
+                                    "nodes": [
+                                        {
+                                            "id": "team-1",
+                                            "key": "ENG",
+                                            "name": "Engineering",
+                                        }
+                                    ]
+                                },
+                                "members": {"nodes": []},
+                            },
+                            {
+                                "id": "project-other",
+                                "name": "[Studio] Aaron AI",
+                                "slugId": "studio-aaron-ai",
+                                "status": {"name": "Started", "type": "started"},
+                                "teams": {"nodes": [{"id": "team-1"}]},
+                                "members": {"nodes": []},
+                            },
+                        ],
+                        "pageInfo": {"hasNextPage": False, "endCursor": None},
+                    }
+                }
+            }
+        )
+
+        response = self.client.get(
+            "/api/v1/integrations/linear/projects/resolve",
+            {"query": "[Studio] Studynash"},
+            **self.auth_headers,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "matched")
+        self.assertEqual(response.json()["project"]["id"], "project-study-nash")
+        self.assertEqual(response.json()["confidence"], 1.0)
+        self.assertTrue(response.json()["isInactive"])
+        request_payload = mock_post.call_args.kwargs["json"]
+        self.assertEqual(request_payload["operationName"], "LinearProjects")
+        self.assertTrue(request_payload["variables"]["includeArchived"])
+
+    @patch("integrations.services.linear_meeting_actions.http_requests.post")
+    def test_project_resolve_fails_closed_on_ambiguous_containment(self, mock_post):
+        mock_post.return_value = FakeLinearResponse(
+            {
+                "data": {
+                    "projects": {
+                        "nodes": [
+                            {
+                                "id": "project-crm",
+                                "name": "[Studio] Study Nash CRM",
+                                "teams": {"nodes": []},
+                                "members": {"nodes": []},
+                            },
+                            {
+                                "id": "project-app",
+                                "name": "[Studio] Study Nash App",
+                                "teams": {"nodes": []},
+                                "members": {"nodes": []},
+                            },
+                        ],
+                        "pageInfo": {"hasNextPage": False, "endCursor": None},
+                    }
+                }
+            }
+        )
+
+        response = self.client.get(
+            "/api/v1/integrations/linear/projects/resolve",
+            {"query": "[Studio] Study Nash"},
+            **self.auth_headers,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "ambiguous")
+        self.assertIsNone(response.json()["project"])
+        self.assertEqual(response.json()["candidateCount"], 2)
 
     @override_settings(LINEAR_API_KEY="")
     def test_missing_linear_api_key_returns_503(self):
@@ -284,6 +735,82 @@ class LinearMeetingActionsApiTests(SimpleTestCase):
             response.json()["projects"][0]["members"]["nodes"],
             [{"id": "lead-1", "name": "Jane"}],
         )
+
+    @patch("integrations.services.linear_meeting_actions.http_requests.post")
+    def test_context_paginates_every_accessible_team(self, mock_post):
+        mock_post.side_effect = [
+            FakeLinearResponse(
+                {
+                    "data": {
+                        "teams": {
+                            "nodes": [
+                                {
+                                    "id": "team-mlai",
+                                    "key": "MLA",
+                                    "name": "MLAI",
+                                    "members": {"nodes": []},
+                                }
+                            ],
+                            "pageInfo": {"hasNextPage": True, "endCursor": "team-cursor-1"},
+                        }
+                    }
+                }
+            ),
+            FakeLinearResponse(
+                {
+                    "data": {
+                        "teams": {
+                            "nodes": [
+                                {
+                                    "id": "team-studio",
+                                    "key": "STU",
+                                    "name": "Studio",
+                                    "members": {"nodes": []},
+                                }
+                            ],
+                            "pageInfo": {"hasNextPage": False, "endCursor": None},
+                        }
+                    }
+                }
+            ),
+            FakeLinearResponse({"data": {"users": {"nodes": []}}}),
+            FakeLinearResponse(
+                {
+                    "data": {
+                        "projects": {
+                            "nodes": [],
+                            "pageInfo": {"hasNextPage": False, "endCursor": None},
+                        }
+                    }
+                }
+            ),
+            FakeLinearResponse(
+                {
+                    "data": {
+                        "issueLabels": {
+                            "nodes": [],
+                            "pageInfo": {"hasNextPage": False, "endCursor": None},
+                        }
+                    }
+                }
+            ),
+            FakeLinearResponse({"data": {"issues": {"nodes": []}}}),
+        ]
+
+        response = self.client.get(
+            "/api/v1/integrations/linear/meeting-context",
+            **self.auth_headers,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            [(team["id"], team["key"]) for team in response.json()["teams"]],
+            [("team-mlai", "MLA"), ("team-studio", "STU")],
+        )
+        first_team_request = mock_post.call_args_list[0].kwargs["json"]
+        second_team_request = mock_post.call_args_list[1].kwargs["json"]
+        self.assertIsNone(first_team_request["variables"]["after"])
+        self.assertEqual(second_team_request["variables"]["after"], "team-cursor-1")
 
     @patch("integrations.services.linear_meeting_actions.http_requests.post")
     def test_create_issue_translates_snake_case_payload_to_linear_input(self, mock_post):
@@ -1183,3 +1710,150 @@ class LinearProjectSizingInventoryTests(SimpleTestCase):
         self.assertIn("orderBy: createdAt", query)
         self.assertEqual(variables["after"], "update-cursor-1")
         self.assertEqual(payload["nodes"][0]["id"], "update-26")
+
+
+@override_settings(
+    LINEAR_API_KEY="lin-api-key",
+    ROO_API_KEY="roo-api-key",
+    INTERNAL_API_KEY="",
+    MLAI_API_KEY="",
+)
+class LinearMeetingActionBatchTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.auth_headers = {"HTTP_X_API_KEY": "roo-api-key"}
+        self.payload = {
+            "requested_by_slack_user_id": "UDANIEL",
+            "slack_channel_id": "C1",
+            "slack_thread_ts": "1.1",
+            "source_fingerprint": "a" * 64,
+            "items": [
+                {
+                    "issue_input": {
+                        "title": "Compare Apollo and Firmable",
+                        "team_id": "team-1",
+                        "project_id": "project-1",
+                        "idempotency_key": "b" * 64,
+                    },
+                    "display": {
+                        "title": "Compare Apollo and Firmable",
+                        "project": "[Studio] Project Acquire",
+                        "assignee": "callumpholt",
+                    },
+                    "reason": "Needs approval",
+                }
+            ],
+        }
+
+    def test_batch_survives_database_reload_and_approval_is_idempotent(self):
+        created = self.client.post(
+            "/api/v1/integrations/linear/action-batches",
+            self.payload,
+            format="json",
+            **self.auth_headers,
+        )
+        self.assertEqual(created.status_code, 201)
+        batch_id = created.json()["id"]
+        item_id = created.json()["items"][0]["id"]
+
+        detail = self.client.get(
+            f"/api/v1/integrations/linear/action-batches/{batch_id}",
+            **self.auth_headers,
+        )
+        self.assertEqual(detail.status_code, 200)
+        self.assertEqual(detail.json()["items"][0]["status"], "pending")
+
+        with patch(
+            "integrations.services.linear_meeting_actions.create_linear_meeting_issue",
+            return_value={
+                "id": "issue-1",
+                "identifier": "MLA-1",
+                "url": "https://linear.app/issue/MLA-1",
+            },
+        ) as create_issue:
+            decision = self.client.post(
+                f"/api/v1/integrations/linear/action-batches/{batch_id}/decisions",
+                {
+                    "requested_by_slack_user_id": "UDANIEL",
+                    "decision": "approve",
+                    "item_ids": [item_id],
+                },
+                format="json",
+                **self.auth_headers,
+            )
+            replay = self.client.post(
+                f"/api/v1/integrations/linear/action-batches/{batch_id}/decisions",
+                {
+                    "requested_by_slack_user_id": "UDANIEL",
+                    "decision": "approve",
+                    "item_ids": [item_id],
+                },
+                format="json",
+                **self.auth_headers,
+            )
+
+        self.assertEqual(decision.status_code, 200)
+        self.assertEqual(replay.status_code, 200)
+        self.assertEqual(decision.json()["items"][0]["status"], "approved")
+        self.assertEqual(replay.json()["items"][0]["status"], "approved")
+        create_issue.assert_called_once()
+
+    def test_identical_pending_batch_creation_reuses_the_durable_batch(self):
+        first = self.client.post(
+            "/api/v1/integrations/linear/action-batches",
+            self.payload,
+            format="json",
+            **self.auth_headers,
+        )
+        replay = self.client.post(
+            "/api/v1/integrations/linear/action-batches",
+            self.payload,
+            format="json",
+            **self.auth_headers,
+        )
+
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual(replay.status_code, 201)
+        self.assertEqual(first.json()["id"], replay.json()["id"])
+        self.assertEqual(first.json()["items"][0]["id"], replay.json()["items"][0]["id"])
+
+    def test_batch_rejects_a_different_slack_user(self):
+        created = self.client.post(
+            "/api/v1/integrations/linear/action-batches",
+            self.payload,
+            format="json",
+            **self.auth_headers,
+        ).json()
+        response = self.client.post(
+            f"/api/v1/integrations/linear/action-batches/{created['id']}/decisions",
+            {
+                "requested_by_slack_user_id": "UOTHER",
+                "decision": "approve",
+            },
+            format="json",
+            **self.auth_headers,
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["code"], "linear_meeting_action_conflict")
+
+    def test_reject_all_closes_the_batch_without_creating_issues(self):
+        created = self.client.post(
+            "/api/v1/integrations/linear/action-batches",
+            self.payload,
+            format="json",
+            **self.auth_headers,
+        ).json()
+        response = self.client.post(
+            f"/api/v1/integrations/linear/action-batches/{created['id']}/decisions",
+            {
+                "requested_by_slack_user_id": "UDANIEL",
+                "decision": "reject",
+            },
+            format="json",
+            **self.auth_headers,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "rejected")
+        self.assertEqual(response.json()["items"][0]["status"], "rejected")

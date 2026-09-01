@@ -230,6 +230,21 @@ urlpatterns = [
         name='linear_meeting_context',
     ),
     path(
+        'linear/channel-issues/list',
+        api_views_connectors.LinearChannelIssueListView.as_view(),
+        name='linear_channel_issue_list',
+    ),
+    path(
+        'linear/channel-issues/detail',
+        api_views_connectors.LinearChannelIssueDetailView.as_view(),
+        name='linear_channel_issue_detail',
+    ),
+    path(
+        'linear/projects/resolve',
+        api_views_connectors.LinearProjectResolveView.as_view(),
+        name='linear_project_resolve',
+    ),
+    path(
         'linear/issues',
         api_views_connectors.LinearMeetingIssueCreateView.as_view(),
         name='linear_meeting_issue_create',
@@ -238,6 +253,21 @@ urlpatterns = [
         'linear/issues/receipts/<str:idempotency_key>',
         api_views_connectors.LinearMeetingIssueReceiptView.as_view(),
         name='linear_meeting_issue_receipt',
+    ),
+    path(
+        'linear/action-batches',
+        api_views_connectors.LinearMeetingActionBatchCreateView.as_view(),
+        name='linear_meeting_action_batch_create',
+    ),
+    path(
+        'linear/action-batches/<uuid:batch_id>',
+        api_views_connectors.LinearMeetingActionBatchDetailView.as_view(),
+        name='linear_meeting_action_batch_detail',
+    ),
+    path(
+        'linear/action-batches/<uuid:batch_id>/decisions',
+        api_views_connectors.LinearMeetingActionBatchDecisionView.as_view(),
+        name='linear_meeting_action_batch_decision',
     ),
     path(
         'linear/projects/<str:project_id>/sizing-context',

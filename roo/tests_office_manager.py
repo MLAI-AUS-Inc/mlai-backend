@@ -1443,6 +1443,44 @@ class OfficeManagerSchedulerTests(TestCase):
         assignment.refresh_from_db()
         self.assertFalse(assignment.winner_channel_retraction_pending)
 
+    @override_settings(OFFICE_MANAGER_ENABLED=False)
+    def test_scheduler_retries_retraction_while_feature_is_disabled(self):
+        now = melbourne_at(2026, 8, 3, 9)
+        prior_day = office_manager_day(now.date() - timedelta(days=1))
+        user = User.objects.create_user(
+            email="disabled-retraction@example.com",
+            slack_id="UDISABLEDRETRACTION",
+        )
+        booking = CoworkingBooking.objects.create(
+            user=user,
+            date=prior_day.date,
+            status="cancelled",
+            points_cost=0,
+            booking_source="office_manager",
+        )
+        assignment = OfficeManagerAssignment.objects.create(
+            day=prior_day,
+            user=user,
+            booking=booking,
+            status="relinquished",
+            winner_channel_announcement_status="sent",
+            winner_channel_message_ts="disabled.123",
+            winner_channel_retraction_pending=True,
+        )
+
+        with patch(
+            "roo.office_manager.SlackService.update_message",
+            return_value=True,
+        ) as update_message:
+            result = run_office_manager_scheduler(now=now)
+
+        self.assertEqual(result["status"], "skipped")
+        self.assertEqual(result["reason"], "disabled")
+        self.assertEqual(result["winner_channel_retractions"], [True])
+        update_message.assert_called_once()
+        assignment.refresh_from_db()
+        self.assertFalse(assignment.winner_channel_retraction_pending)
+
     def test_bounded_retraction_sweep_rotates_failed_assignments(self):
         assignments = []
         for offset, suffix in enumerate(("OLD", "NEXT"), start=1):
@@ -1584,6 +1622,28 @@ class OfficeManagerClaimApiTests(APITestCase):
             format="json",
         )
         self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    @override_settings(
+        INTERNAL_API_KEY="legacy-internal-test-key",
+        MLAI_API_KEY="legacy-mlai-test-key",
+    )
+    def test_broader_service_keys_cannot_claim_for_a_slack_member(self):
+        for api_key in ("legacy-internal-test-key", "legacy-mlai-test-key"):
+            with self.subTest(api_key=api_key):
+                response = self.client.post(
+                    self.url,
+                    {
+                        "slack_user_id": self.user.slack_id,
+                        "date": self.now.date(),
+                    },
+                    format="json",
+                    HTTP_X_API_KEY=api_key,
+                )
+
+                self.assertEqual(
+                    response.status_code,
+                    status.HTTP_401_UNAUTHORIZED,
+                )
 
     @patch("roo.views.OfficeManagerService.claim")
     def test_claim_rejection_code_contract(self, claim):
