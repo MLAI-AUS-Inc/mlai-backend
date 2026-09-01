@@ -318,7 +318,7 @@ class SlackFounderActorReferenceMigrationTests(TransactionTestCase):
         ("workflow_runs", "0005_contentfactoryrun_reconciled_at"),
     ]
     migrate_to = [
-        ("core", "0063_canonicalize_legacy_content_factory_actor_ids")
+        ("core", "0064_guard_legacy_actor_migration_history")
     ]
 
     def setUp(self):
@@ -644,6 +644,199 @@ class SlackFounderActorReferenceMigrationTests(TransactionTestCase):
             _get_content_factory_user_for_job(job).pk,
             self.user_pk,
         )
+
+
+class SlackFounderActorMigrationHistoryGuardTests(TransactionTestCase):
+    migrate_from = [
+        ("core", "0063_canonicalize_legacy_content_factory_actor_ids")
+    ]
+    migrate_to = [
+        ("core", "0064_guard_legacy_actor_migration_history")
+    ]
+
+    def setUp(self):
+        super().setUp()
+        executor = MigrationExecutor(connection)
+        executor.migrate(self.migrate_from)
+        self.apps = executor.loader.project_state(self.migrate_from).apps
+        self.User = self.apps.get_model("core", "User")
+        self.Organization = self.apps.get_model(
+            "organizations", "Organization"
+        )
+        self.OrganizationContentConfig = self.apps.get_model(
+            "content_factory", "OrganizationContentConfig"
+        )
+        self.ContentFactoryJob = self.apps.get_model(
+            "content_factory", "ContentFactoryJob"
+        )
+        self.ContentFactoryRun = self.apps.get_model(
+            "workflow_runs", "ContentFactoryRun"
+        )
+        self.ScheduledDiscoveryDispatch = self.apps.get_model(
+            "content_factory", "ScheduledDiscoveryDispatch"
+        )
+        self.UserIntegration = self.apps.get_model(
+            "integrations", "UserIntegration"
+        )
+
+    def tearDown(self):
+        # A fail-closed migration deliberately leaves 0064 unapplied. Remove
+        # the synthetic ambiguous state before restoring the graph for the next
+        # migration test.
+        for model in (
+            self.ContentFactoryJob,
+            self.ContentFactoryRun,
+            self.ScheduledDiscoveryDispatch,
+            self.OrganizationContentConfig,
+            self.UserIntegration,
+            self.Organization,
+            self.User,
+        ):
+            model.objects.all().delete()
+        executor = MigrationExecutor(connection)
+        executor.migrate(executor.loader.graph.leaf_nodes())
+        super().tearDown()
+
+    def _create_collision(self, *, canonical_references, identical_bundles=False):
+        user = self.User.objects.create(email="historical-collision@example.com")
+        legacy_actor_id = f"web_{user.pk}"
+        canonical_actor_id = f"mlai_user:{user.pk}"
+        legacy_bundle = {
+            "github_access_token": "legacy-access-token",
+            "github_refresh_token": "legacy-refresh-token",
+            "github_user_name": "legacy-owner",
+            "github_repo": "legacy-owner/repository",
+            "github_scopes": ["repo"],
+            "project_scanned": True,
+            "pending_intent": {"source": "legacy"},
+        }
+        canonical_bundle = (
+            legacy_bundle
+            if identical_bundles
+            else {
+                "github_access_token": "canonical-access-token",
+                "github_user_name": "canonical-owner",
+                "github_repo": "canonical-owner/repository",
+                "github_scopes": ["repo", "read:org"],
+                "project_scanned": False,
+                "pending_intent": {"source": "canonical"},
+            }
+        )
+        self.UserIntegration.objects.create(
+            slack_user_id=legacy_actor_id,
+            **legacy_bundle,
+        )
+        self.UserIntegration.objects.create(
+            slack_user_id=canonical_actor_id,
+            **canonical_bundle,
+        )
+
+        referenced_actor_id = (
+            canonical_actor_id if canonical_references else legacy_actor_id
+        )
+        organization = self.Organization.objects.create(
+            name="Historical Collision Company",
+            domain="historical-collision.example",
+        )
+        config = self.OrganizationContentConfig.objects.create(
+            organization=organization,
+            connected_slack_user_id=referenced_actor_id,
+        )
+        job = self.ContentFactoryJob.objects.create(
+            job_id="historical-collision-job",
+            slack_user_id=referenced_actor_id,
+            domain=organization.domain,
+            request_meta={
+                "requested_by_slack_user_id": referenced_actor_id,
+                "topic": "A safe topic",
+            },
+        )
+        return user, legacy_actor_id, canonical_actor_id, config, job
+
+    def _migrate_forward(self):
+        executor = MigrationExecutor(connection)
+        executor.migrate(self.migrate_to)
+        return executor.loader.project_state(self.migrate_to).apps
+
+    def test_fails_closed_when_old_0063_repointed_a_distinct_bundle(self):
+        self._create_collision(canonical_references=True)
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "ambiguous_collision_references=.*OrganizationContentConfig",
+        ):
+            self._migrate_forward()
+
+    def test_allows_current_0063_preserved_legacy_collision(self):
+        user, legacy_actor_id, canonical_actor_id, config, job = (
+            self._create_collision(canonical_references=False)
+        )
+
+        self._migrate_forward()
+        config.refresh_from_db()
+        job.refresh_from_db()
+        self.assertEqual(config.connected_slack_user_id, legacy_actor_id)
+        self.assertEqual(job.slack_user_id, legacy_actor_id)
+
+        from integrations.services.github_installations import (
+            resolve_user_for_actor_id,
+        )
+
+        self.assertEqual(resolve_user_for_actor_id(legacy_actor_id).pk, user.pk)
+        self.assertEqual(resolve_user_for_actor_id(canonical_actor_id).pk, user.pk)
+
+    def test_allows_identical_bundle_with_canonical_references(self):
+        _, _, canonical_actor_id, config, job = self._create_collision(
+            canonical_references=True,
+            identical_bundles=True,
+        )
+
+        self._migrate_forward()
+        config.refresh_from_db()
+        job.refresh_from_db()
+        self.assertEqual(config.connected_slack_user_id, canonical_actor_id)
+        self.assertEqual(job.slack_user_id, canonical_actor_id)
+
+    def test_fails_closed_when_distinct_bundle_has_no_reference_evidence(self):
+        user = self.User.objects.create(email="historical-no-refs@example.com")
+        legacy_actor_id = f"web_{user.pk}"
+        canonical_actor_id = f"mlai_user:{user.pk}"
+        self.UserIntegration.objects.create(
+            slack_user_id=legacy_actor_id,
+            github_access_token="legacy-access-token",
+            github_repo="legacy-owner/repository",
+        )
+        self.UserIntegration.objects.create(
+            slack_user_id=canonical_actor_id,
+            github_access_token="canonical-access-token",
+            github_repo="canonical-owner/repository",
+        )
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "unproven_integration_history="
+            f"{legacy_actor_id}->{canonical_actor_id}",
+        ):
+            self._migrate_forward()
+
+    def test_fails_closed_on_old_0063_non_actor_json_rewrite(self):
+        user = self.User.objects.create(email="historical-json@example.com")
+        canonical_actor_id = f"mlai_user:{user.pk}"
+        self.ContentFactoryJob.objects.create(
+            job_id="historical-json-job",
+            slack_user_id=canonical_actor_id,
+            domain="historical-json.example",
+            request_meta={
+                "requested_by_slack_user_id": canonical_actor_id,
+                "topic": canonical_actor_id,
+            },
+        )
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "ambiguous_non_actor_json=content_factory.ContentFactoryJob.request_meta",
+        ):
+            self._migrate_forward()
 
 
 class SlackFounderLinkLegacyCommandTests(TransactionTestCase):

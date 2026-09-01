@@ -368,6 +368,7 @@ jobs:
         python manage.py test \
           core.tests_slack_founder_links.SlackFounderSyntheticIdentityMigrationTests \
           core.tests_slack_founder_links.SlackFounderActorReferenceMigrationTests \
+          core.tests_slack_founder_links.SlackFounderActorMigrationHistoryGuardTests \
           org_memory.tests.test_migrations \
           --verbosity 2
 

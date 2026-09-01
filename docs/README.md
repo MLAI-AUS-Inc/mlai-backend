@@ -44,6 +44,7 @@ rollout sequence.
 
 - [`coworking-booking.md`](coworking-booking.md)
 - [`roo-linear-channel-issues.md`](roo-linear-channel-issues.md)
+- [`slack-founder-actor-migration-recovery.md`](slack-founder-actor-migration-recovery.md)
 
 Linear meeting-action reviews are stored by the internal, Roo-authenticated
 `/api/v1/integrations/linear/action-batches` endpoints. Batches contain 1–20
