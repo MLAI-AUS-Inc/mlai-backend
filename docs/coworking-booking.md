@@ -27,13 +27,14 @@ has never run `link`. Coworking booking reuses that points owner directly and
 charges its existing balance. It does not require email linking or create a
 second account.
 
-Roo's self-service `link` command uses the authenticated
-`POST /api/v1/users/link-slack/` service endpoint with the email Roo has just
-read from the exact Slack member profile. The endpoint accepts only Roo's
-dedicated service key, not the broader legacy internal key. Replays are
-idempotent. An existing Slack link is authoritative, and an MLAI account
-already linked to a different Slack identity returns `slack_identity_conflict`
-instead of being reassigned.
+Roo's self-service `link` command starts a short-lived, one-time capability with
+`POST /api/v1/users/slack-founder-link/start/` using Roo's dedicated service
+key and the actor from the verified Slack event. Roo delivers the capability
+only in a direct message. The member signs in to Founder Tools to preview and
+complete the link, so email matching is not an ownership authority. Creating a
+fresh request invalidates older unused capabilities; completed capabilities are
+single-use. Existing direct or explicit ownership conflicts fail closed rather
+than silently moving either identity.
 
 Linking is a durable identity update. If linking succeeds but the booking is
 rejected (for example, because the account has insufficient points), a later

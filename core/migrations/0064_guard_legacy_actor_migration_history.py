@@ -1,5 +1,9 @@
+import hashlib
+import hmac
+import json
 import re
 
+from django.conf import settings
 from django.db import migrations
 
 
@@ -25,6 +29,7 @@ INTEGRATION_STATE_FIELDS = (
     "pending_intent",
 )
 RECOVERY_RUNBOOK = "docs/slack-founder-actor-migration-recovery.md"
+GUARD_VERSION = "state-bound-attestation-v2"
 
 
 def _canonical_actor_id(legacy_actor_id, valid_user_ids):
@@ -42,6 +47,16 @@ def _integration_bundle(integration):
         getattr(integration, field_name)
         for field_name in INTEGRATION_STATE_FIELDS
     )
+
+
+def _stable_digest(value):
+    encoded = json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _actor_ids_in_payload(value):
@@ -76,6 +91,35 @@ def _contains_ambiguous_non_actor_marker(value, valid_user_ids):
     return False
 
 
+def _attestation_fingerprint(
+    collision_findings,
+    collision_state_fingerprints,
+    collision_reference_fingerprints,
+    unproven_integration_findings,
+    ambiguous_non_actor_findings,
+    ambiguous_non_actor_state_fingerprints,
+):
+    """Bind an operator attestation to the exact non-secret finding set."""
+    payload = {
+        "ambiguous_collision_references": sorted(collision_findings),
+        "ambiguous_collision_state": sorted(collision_state_fingerprints),
+        "ambiguous_collision_reference_state": sorted(
+            collision_reference_fingerprints
+        ),
+        "unproven_integration_history": sorted(unproven_integration_findings),
+        "ambiguous_non_actor_json": sorted(ambiguous_non_actor_findings),
+        "ambiguous_non_actor_state": sorted(
+            ambiguous_non_actor_state_fingerprints
+        ),
+    }
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def guard_legacy_actor_migration_history(apps, schema_editor):
     User = apps.get_model("core", "User")
     OrganizationContentConfig = apps.get_model(
@@ -95,6 +139,7 @@ def guard_legacy_actor_migration_history(apps, schema_editor):
     # GitHub authorities. If those bundles still differ, a canonical reference
     # may now point at the wrong grant and cannot be reassigned without evidence.
     ambiguous_collisions = {}
+    collision_state_fingerprints = []
     legacy_integrations = UserIntegration.objects.filter(
         slack_user_id__startswith="web_"
     ).order_by("slack_user_id")
@@ -109,6 +154,11 @@ def guard_legacy_actor_migration_history(apps, schema_editor):
             continue
         if _integration_bundle(legacy) != _integration_bundle(canonical):
             ambiguous_collisions[canonical_actor_id] = legacy.pk
+            collision_state_fingerprints.append(
+                f"{legacy.pk}->{canonical_actor_id}:"
+                f"{_stable_digest(_integration_bundle(legacy))}:"
+                f"{_stable_digest(_integration_bundle(canonical))}"
+            )
 
     reference_sources = {}
     for canonical_actor_id, legacy_actor_id in ambiguous_collisions.items():
@@ -133,11 +183,12 @@ def guard_legacy_actor_migration_history(apps, schema_editor):
             break
         values = model.objects.filter(
             **{f"{field_name}__in": candidate_actor_ids}
-        ).values_list(field_name, flat=True)
-        for actor_id in set(values):
-            reference_sources[actor_id].add(source_name)
+        ).values_list("pk", field_name)
+        for record_pk, actor_id in values:
+            reference_sources[actor_id].add(f"{source_name}#{record_pk}")
 
-    ambiguous_non_actor_sources = set()
+    ambiguous_non_actor_findings = set()
+    ambiguous_non_actor_state_fingerprints = []
     json_models = (
         (
             ContentFactoryJob,
@@ -160,60 +211,103 @@ def guard_legacy_actor_migration_history(apps, schema_editor):
             direct_actor_id = getattr(record, actor_field)
             if direct_actor_id in candidate_actor_ids:
                 reference_sources[direct_actor_id].add(
-                    f"{source_name}.{actor_field}"
+                    f"{source_name}.{actor_field}#{record.pk}"
                 )
 
             payload = getattr(record, json_field)
             for actor_id in _actor_ids_in_payload(payload) & candidate_actor_ids:
-                reference_sources[actor_id].add(f"{source_name}.{json_field}")
+                reference_sources[actor_id].add(
+                    f"{source_name}.{json_field}#{record.pk}"
+                )
 
             # The first committed core.0063 body recursively changed every JSON
             # string, including topics and arbitrary user content. A canonical
             # marker outside a named actor field may therefore be lossy history.
             if _contains_ambiguous_non_actor_marker(payload, valid_user_ids):
-                ambiguous_non_actor_sources.add(f"{source_name}.{json_field}")
+                ambiguous_non_actor_findings.add(
+                    f"{source_name}.{json_field}#{record.pk}"
+                )
+                ambiguous_non_actor_state_fingerprints.append(
+                    f"{source_name}.{json_field}#{record.pk}:{_stable_digest(payload)}"
+                )
 
     collision_findings = []
+    collision_reference_fingerprints = []
     unproven_integration_findings = []
     for canonical_actor_id, legacy_actor_id in sorted(
         ambiguous_collisions.items()
     ):
         canonical_sources = reference_sources[canonical_actor_id]
         legacy_sources = reference_sources[legacy_actor_id]
+        collision_reference_fingerprints.append(
+            f"{legacy_actor_id}->{canonical_actor_id}:"
+            f"legacy[{','.join(sorted(legacy_sources))}]:"
+            f"canonical[{','.join(sorted(canonical_sources))}]"
+        )
         if canonical_sources:
             collision_findings.append(
                 f"{legacy_actor_id}->{canonical_actor_id}"
                 f"[{','.join(sorted(canonical_sources))}]"
             )
-        elif not legacy_sources:
-            # A surviving reference to the legacy key is evidence that the
-            # current 0063 body preserved the distinct authority. Without that
-            # evidence, an older 0063 may already have mixed missing fields into
-            # the canonical integration even if no dependent reference remains.
+        else:
+            # Current rows cannot prove which committed 0063 body ran. Even a
+            # surviving legacy reference can be a later mixed-version write
+            # after an older body changed or merged canonical state.
+            legacy_evidence = (
+                f"[{','.join(sorted(legacy_sources))}]"
+                if legacy_sources
+                else "[no-dependent-references]"
+            )
             unproven_integration_findings.append(
-                f"{legacy_actor_id}->{canonical_actor_id}"
+                f"{legacy_actor_id}->{canonical_actor_id}{legacy_evidence}"
             )
 
     if (
         collision_findings
         or unproven_integration_findings
-        or ambiguous_non_actor_sources
+        or ambiguous_non_actor_findings
     ):
+        attestation_fingerprint = _attestation_fingerprint(
+            collision_findings,
+            collision_state_fingerprints,
+            collision_reference_fingerprints,
+            unproven_integration_findings,
+            ambiguous_non_actor_findings,
+            ambiguous_non_actor_state_fingerprints,
+        )
+        supplied_attestation = str(
+            getattr(
+                settings,
+                "CORE_ACTOR_MIGRATION_HISTORY_ATTESTATION",
+                "",
+            )
+            or ""
+        ).strip().lower()
+        if hmac.compare_digest(
+            supplied_attestation,
+            attestation_fingerprint,
+        ):
+            print(
+                "core actor migration history attestation accepted "
+                f"fingerprint={attestation_fingerprint}"
+            )
+            return
+
         details = []
         if collision_findings:
             details.append(
                 "ambiguous_collision_references="
-                + ";".join(collision_findings[:20])
+                + ";".join(collision_findings)
             )
         if unproven_integration_findings:
             details.append(
                 "unproven_integration_history="
-                + ";".join(unproven_integration_findings[:20])
+                + ";".join(unproven_integration_findings)
             )
-        if ambiguous_non_actor_sources:
+        if ambiguous_non_actor_findings:
             details.append(
                 "ambiguous_non_actor_json="
-                + ",".join(sorted(ambiguous_non_actor_sources))
+                + ",".join(sorted(ambiguous_non_actor_findings))
             )
         raise RuntimeError(
             "core.0064 detected state that may have been changed by an earlier "
@@ -221,6 +315,7 @@ def guard_legacy_actor_migration_history(apps, schema_editor):
             "user content automatically. Follow "
             f"{RECOVERY_RUNBOOK}. "
             + " ".join(details)
+            + f" attestation_fingerprint={attestation_fingerprint}"
         )
 
 
