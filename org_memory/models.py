@@ -395,13 +395,6 @@ class MemoryPilotSuspensionReason(models.TextChoices):
     SUPERSEDED = "superseded", "Superseded"
 
 
-class MemorySelectorShadowRunStatus(models.TextChoices):
-    BLOCKED = "blocked", "Blocked"
-    RUNNING = "running", "Running"
-    COMPLETED = "completed", "Completed"
-    FAILED = "failed", "Failed"
-
-
 class MemoryOutboxEventType(models.TextChoices):
     SOURCE_VERSION_CAPTURED = "source_version.captured", "Source version captured"
     SOURCE_ACCESS_RESTORED = "source.access_restored", "Source access restored"
@@ -4140,125 +4133,6 @@ class MemoryPilotDeployment(ImmutableEvidenceMixin):
         if self.state == MemoryPilotDeploymentState.SUSPENDED:
             if not self.suspended_at or not self.suspension_reason:
                 raise ValidationError("Suspended pilot deployment lifecycle is invalid.")
-
-
-class MemorySelectorShadowRun(models.Model):
-    """Content-minimised comparison of one learned artifact with production traces."""
-
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    organization = models.ForeignKey(
-        "organizations.Organization",
-        on_delete=models.CASCADE,
-        related_name="memory_selector_shadow_runs",
-    )
-    status = models.CharField(
-        max_length=16,
-        choices=MemorySelectorShadowRunStatus.choices,
-        db_index=True,
-    )
-    baseline_selector_version = models.CharField(max_length=64)
-    learned_selector_version = models.CharField(max_length=128)
-    feature_schema_version = models.CharField(max_length=64)
-    dataset_hash = models.CharField(max_length=64, db_index=True)
-    model_artifact_hash = models.CharField(max_length=64)
-    minimum_required_traces = models.PositiveIntegerField(default=3000)
-    eligible_trace_count = models.PositiveIntegerField(default=0)
-    labeled_trace_count = models.PositiveIntegerField(default=0)
-    evaluated_trace_count = models.PositiveIntegerField(default=0)
-    metrics = models.JSONField(default=dict, blank=True)
-    error_code = models.CharField(max_length=64, blank=True, default="")
-    started_at = models.DateTimeField(default=timezone.now)
-    completed_at = models.DateTimeField(null=True, blank=True)
-    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
-
-    class Meta:
-        constraints = [
-            models.UniqueConstraint(
-                fields=(
-                    "organization",
-                    "dataset_hash",
-                    "model_artifact_hash",
-                    "learned_selector_version",
-                ),
-                name="orgmem_selector_shadow_run_uniq",
-            ),
-        ]
-        indexes = [
-            models.Index(
-                fields=("organization", "status", "created_at"),
-                name="orgmem_selector_shadow_status",
-            ),
-        ]
-        ordering = ("-created_at",)
-
-
-class MemorySelectorShadowResult(ImmutableEvidenceMixin):
-    """Per-query hashes and metrics only; no query, answer, source, or candidate IDs."""
-
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    run = models.ForeignKey(
-        MemorySelectorShadowRun,
-        on_delete=models.CASCADE,
-        related_name="results",
-    )
-    query_log = models.ForeignKey(
-        MemoryQueryLog,
-        on_delete=models.CASCADE,
-        related_name="selector_shadow_results",
-    )
-    query_ref = models.CharField(max_length=64)
-    candidate_count = models.PositiveIntegerField(default=0)
-    labeled_candidate_count = models.PositiveIntegerField(default=0)
-    baseline_order_hash = models.CharField(max_length=64)
-    shadow_order_hash = models.CharField(max_length=64)
-    top_k_overlap = models.FloatField(default=0)
-    baseline_ndcg = models.FloatField(null=True, blank=True)
-    shadow_ndcg = models.FloatField(null=True, blank=True)
-    baseline_pairwise_accuracy = models.FloatField(null=True, blank=True)
-    shadow_pairwise_accuracy = models.FloatField(null=True, blank=True)
-    disagreement = models.BooleanField(default=False, db_index=True)
-    latency_ms = models.PositiveIntegerField(default=0)
-    created_at = models.DateTimeField(auto_now_add=True)
-
-    immutable_fields = (
-        "run_id",
-        "query_log_id",
-        "query_ref",
-        "candidate_count",
-        "labeled_candidate_count",
-        "baseline_order_hash",
-        "shadow_order_hash",
-        "top_k_overlap",
-        "baseline_ndcg",
-        "shadow_ndcg",
-        "baseline_pairwise_accuracy",
-        "shadow_pairwise_accuracy",
-        "disagreement",
-        "latency_ms",
-        "created_at",
-    )
-
-    class Meta:
-        constraints = [
-            models.UniqueConstraint(
-                fields=("run", "query_log"),
-                name="orgmem_selector_shadow_result_uniq",
-            ),
-        ]
-        indexes = [
-            models.Index(
-                fields=("run", "disagreement"),
-                name="orgmem_selector_disagree",
-            ),
-        ]
-        ordering = ("run", "query_ref")
-
-    def clean(self):
-        if self.run_id and self.query_log_id:
-            if self.run.organization_id != self.query_log.organization_id:
-                raise ValidationError(
-                    "Selector shadow result must stay within one organization."
-                )
 
 
 class MemoryReviewItem(models.Model):
