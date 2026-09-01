@@ -114,6 +114,120 @@ _MERCHANT_NOISE = {
     "visa",
     "www",
 }
+
+
+def canonical_bank_account_id(value: Any) -> str:
+    """Return the comparison key for a Xero bank-account identifier.
+
+    Xero surfaces the same UUID in both hyphenated and compact forms. Treating
+    those strings as different accounts duplicates every active statement row
+    and can make a reconciliation run analyse stale queue entries.
+    """
+
+    return "".join(
+        character
+        for character in str(value or "").casefold()
+        if character.isalnum()
+    )
+
+
+def _resolved_bank_account_identity(*, organization, bank_account_id: str) -> tuple[str, set[str]]:
+    """Choose one existing storage spelling and return every equivalent alias."""
+
+    comparison_key = canonical_bank_account_id(bank_account_id)
+    if not comparison_key:
+        raise ValueError("bank_account_id is required")
+
+    existing_ids = {
+        str(value or "").strip()
+        for value in XeroStatementLineSnapshot.objects.filter(
+            organization=organization,
+        ).values_list("bank_account_id", flat=True).distinct()
+        if str(value or "").strip()
+    }
+    existing_ids.update(
+        str(value or "").strip()
+        for value in XeroStatementScan.objects.filter(
+            organization=organization,
+        ).values_list("bank_account_id", flat=True).distinct()
+        if str(value or "").strip()
+    )
+    equivalent_existing = {
+        value
+        for value in existing_ids
+        if canonical_bank_account_id(value) == comparison_key
+    }
+    compact_existing = {
+        value
+        for value in equivalent_existing
+        if value.casefold() == comparison_key
+    }
+    if compact_existing:
+        preferred = (
+            XeroStatementScan.objects.filter(
+                organization=organization,
+                bank_account_id__in=compact_existing,
+            )
+            .order_by("-started_at", "-id")
+            .values_list("bank_account_id", flat=True)
+            .first()
+        )
+        if not preferred:
+            preferred = (
+                XeroStatementLineSnapshot.objects.filter(
+                    organization=organization,
+                    bank_account_id__in=compact_existing,
+                )
+                .order_by("-last_seen_at", "-id")
+                .values_list("bank_account_id", flat=True)
+                .first()
+            )
+        storage_id = str(preferred or sorted(compact_existing)[0])
+    elif str(bank_account_id).strip().casefold() == comparison_key:
+        storage_id = str(bank_account_id).strip()
+    elif equivalent_existing:
+        storage_id = str(
+            XeroStatementScan.objects.filter(
+                organization=organization,
+                bank_account_id__in=equivalent_existing,
+            )
+            .order_by("-started_at", "-id")
+            .values_list("bank_account_id", flat=True)
+            .first()
+            or sorted(equivalent_existing)[0]
+        )
+    else:
+        storage_id = str(bank_account_id).strip()
+
+    return storage_id, equivalent_existing | {storage_id, str(bank_account_id).strip()}
+
+
+def _active_statement_lines(
+    *,
+    organization,
+    statement_line_ids: list[str] | set[str] | None = None,
+) -> list[XeroStatementLineSnapshot]:
+    """Return current rows while suppressing legacy account-ID aliases."""
+
+    queryset = XeroStatementLineSnapshot.objects.filter(
+        organization=organization,
+        active=True,
+    )
+    if statement_line_ids is not None:
+        queryset = queryset.filter(statement_line_id__in=statement_line_ids)
+    newest_by_identity: dict[tuple[str, str], XeroStatementLineSnapshot] = {}
+    for line in queryset.order_by("-last_seen_at", "-id"):
+        identity = (
+            canonical_bank_account_id(line.bank_account_id),
+            line.statement_line_id,
+        )
+        newest_by_identity.setdefault(identity, line)
+    return sorted(
+        newest_by_identity.values(),
+        key=lambda line: (line.transaction_date, line.statement_line_id, line.id),
+    )
+
+
 _LOW_SIGNAL_MERCHANT_TERMS = {
     "australia",
     "city",
@@ -645,14 +759,75 @@ def _sanitize_capture_metadata(raw: dict[str, Any] | None) -> dict[str, Any]:
     blockers = raw.get("blocking_reasons") or []
     if not isinstance(blockers, list) or len(blockers) > 20:
         raise ValueError("capture_metadata blocking_reasons must be a bounded list")
-    return {
-        "schema_version": 1,
+    schema_version = raw.get("schema_version", 1)
+    if schema_version not in {1, 2}:
+        raise ValueError("capture_metadata schema_version must be 1 or 2")
+    safe = {
+        "schema_version": schema_version,
         "scan_id": str(raw.get("scan_id") or "")[:128],
         "source_started_at": str(raw.get("source_started_at") or "")[:64],
         "source_completed_at": str(raw.get("source_completed_at") or "")[:64],
         "pages": safe_pages,
         "derived_complete": raw.get("derived_complete") is True,
         "blocking_reasons": [str(reason)[:500] for reason in blockers],
+    }
+    if schema_version == 1:
+        return safe
+
+    active_ids = raw.get("active_bank_account_ids")
+    if not isinstance(active_ids, list) or not 1 <= len(active_ids) <= 100:
+        raise ValueError("capture_metadata active_bank_account_ids must be a bounded list")
+    active_ids = [str(value or "").strip()[:255] for value in active_ids]
+    if any(not value for value in active_ids) or len(active_ids) != len(set(active_ids)):
+        raise ValueError("capture_metadata active bank-account IDs must be non-empty and unique")
+    try:
+        account_position = int(raw.get("account_position"))
+        account_count = int(raw.get("account_count"))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("capture_metadata account position/count must be integers") from exc
+    if account_count != len(active_ids) or not 1 <= account_position <= account_count:
+        raise ValueError("capture_metadata account coverage is inconsistent")
+    hashes = {
+        key: str(raw.get(key) or "").strip().lower()
+        for key in ("source_sha256", "account_source_sha256")
+    }
+    if any(not re.fullmatch(r"[a-f0-9]{64}", value) for value in hashes.values()):
+        raise ValueError("capture_metadata source hashes must be SHA-256 hex digests")
+    required_text = {
+        key: str(raw.get(key) or "").strip()
+        for key in (
+            "capture_source",
+            "capture_id",
+            "report_format",
+            "tenant_id",
+            "organisation_name",
+            "bank_account_label",
+            "period_start",
+            "period_end",
+        )
+    }
+    if any(not value for value in required_text.values()):
+        raise ValueError("capture_metadata all-account fields must not be blank")
+    if any(
+        raw.get(key) is not True
+        for key in (
+            "all_accounts_requested",
+            "full_organisation_coverage_confirmed",
+            "date_range_confirmed",
+            "derived_complete",
+        )
+    ):
+        raise ValueError("capture_metadata all-account confirmations must be true")
+    return {
+        **safe,
+        **{key: value[:255] for key, value in required_text.items()},
+        **hashes,
+        "account_position": account_position,
+        "account_count": account_count,
+        "active_bank_account_ids": active_ids,
+        "all_accounts_requested": True,
+        "full_organisation_coverage_confirmed": True,
+        "date_range_confirmed": True,
     }
 
 
@@ -690,9 +865,13 @@ def import_xero_statement_lines(
     saved: list[XeroStatementLineSnapshot] = []
     seen_ids: set[str] = set()
     with transaction.atomic():
-        scan = XeroStatementScan.objects.create(
+        storage_bank_account_id, equivalent_bank_account_ids = _resolved_bank_account_identity(
             organization=organization,
             bank_account_id=bank_account_id,
+        )
+        scan = XeroStatementScan.objects.create(
+            organization=organization,
+            bank_account_id=storage_bank_account_id,
             status=XeroStatementScan.STATUS_STARTED,
             source=str(source or "browser")[:32],
             requested_by=str(requested_by or "")[:100],
@@ -725,7 +904,7 @@ def import_xero_statement_lines(
                 raise ValueError(f"Invalid statement direction for {statement_line_id}")
             values = {
                 "statement_line_id": statement_line_id,
-                "bank_account_id": bank_account_id,
+                "bank_account_id": storage_bank_account_id,
                 "transaction_date": transaction_date,
                 "narration": str(raw.get("narration") or "").strip()[:4000],
                 "reference": str(raw.get("reference") or "").strip()[:500],
@@ -766,16 +945,35 @@ def import_xero_statement_lines(
             }
             snapshot, _created = XeroStatementLineSnapshot.objects.update_or_create(
                 organization=organization,
-                bank_account_id=bank_account_id,
+                bank_account_id=storage_bank_account_id,
                 statement_line_id=statement_line_id,
                 defaults=defaults,
             )
             saved.append(snapshot)
         completed_at = timezone.now()
+
+        # A partial scan can still safely retire an alias of a row it actually
+        # observed. Do not call that row reconciled: it is the same live Xero
+        # item under a different UUID spelling.
+        duplicate_alias_ids = list(
+            XeroStatementLineSnapshot.objects.filter(
+                organization=organization,
+                bank_account_id__in=equivalent_bank_account_ids,
+                statement_line_id__in=seen_ids,
+                active=True,
+            )
+            .exclude(bank_account_id=storage_bank_account_id)
+            .values_list("id", flat=True)
+        )
+        XeroStatementLineSnapshot.objects.filter(id__in=duplicate_alias_ids).update(
+            active=False,
+            queue_state=XeroStatementLineSnapshot.QUEUE_INACTIVE,
+            last_seen_at=completed_at,
+        )
         if complete_scan:
             missing_lines = list(XeroStatementLineSnapshot.objects.filter(
                 organization=organization,
-                bank_account_id=bank_account_id,
+                bank_account_id__in=equivalent_bank_account_ids,
                 active=True,
             ).exclude(statement_line_id__in=seen_ids))
             missing_line_ids = [line.id for line in missing_lines]
@@ -1007,6 +1205,15 @@ def normalize_statement_action(action: str) -> str:
     return XeroStatementSuggestion.ACTION_NEEDS_REVIEW
 
 
+def csv_statement_duplicate_count(statement_line_id: str) -> int:
+    match = re.fullmatch(
+        r"csv-[a-f0-9]{40}-\d+-of-(\d+)",
+        str(statement_line_id or ""),
+        re.IGNORECASE,
+    )
+    return int(match.group(1)) if match else 0
+
+
 def serialize_statement_posting(posting) -> dict[str, Any] | None:
     if posting is None:
         return None
@@ -1192,14 +1399,14 @@ def build_statement_reconciliation_context(
     luma_events: list[dict[str, Any]] | None = None,
     humanitix_events: list[dict[str, Any]] | None = None,
     linear_projects: list[dict[str, Any]] | None = None,
+    statement_line_ids: list[str] | set[str] | None = None,
 ) -> dict[str, Any]:
     luma_events = luma_events or []
     humanitix_events = humanitix_events or []
     linear_projects = linear_projects or []
-    lines = list(
-        XeroStatementLineSnapshot.objects.filter(organization=organization, active=True).order_by(
-            "transaction_date", "statement_line_id"
-        )
+    lines = _active_statement_lines(
+        organization=organization,
+        statement_line_ids=statement_line_ids,
     )
     prefetched_gmail: list[dict[str, Any]] | None = None
     prefetched_slack: list[dict[str, Any]] | None = None
@@ -1680,6 +1887,14 @@ def save_statement_suggestions(
                 has_tracking_assignment=allocation_mode != XeroStatementSuggestion.ALLOCATION_UNASSIGNED,
                 require_tracking=bool(profile and profile.require_statement_tracking),
             )
+            if csv_statement_duplicate_count(line.statement_line_id) > 1:
+                execution_ready = False
+                duplicate_reason = (
+                    "Identical CSV statement lines cannot be prepared automatically because "
+                    "the report has no stable per-line identifier."
+                )
+                if duplicate_reason not in blocking_reasons:
+                    blocking_reasons.append(duplicate_reason)
 
             XeroStatementSuggestion.objects.filter(
                 organization=organization,
@@ -1773,12 +1988,9 @@ def prepare_verified_rule_suggestions(
         for item in statement_line_ids
         if str(item or "").strip()
     ))
-    lines = list(
-        XeroStatementLineSnapshot.objects.filter(
-            organization=organization,
-            statement_line_id__in=requested_ids,
-            active=True,
-        ).order_by("transaction_date", "statement_line_id")
+    lines = _active_statement_lines(
+        organization=organization,
+        statement_line_ids=requested_ids,
     )
     prepared_payloads: list[dict[str, Any]] = []
     deterministic_line_ids: list[str] = []
