@@ -257,15 +257,17 @@ def create_linear_channel_issue(payload: dict[str, Any]) -> dict[str, Any]:
     request_id = str(payload.get("request_id") or "").strip()
     if not request_id:
         raise ValueError("request_id is required.")
-
+    if not isinstance(payload.get("title"), str):
+        raise ValueError("title must be text.")
+    if "description" in payload and not isinstance(payload.get("description"), str):
+        raise ValueError("description must be text.")
     _required_write_text(payload.get("title"), field="title", maximum=255)
+    mutation_input = _linear_channel_issue_create_input(payload, binding)
     receipt_key = _claim_linear_channel_write_request(request_id, binding)
     try:
         issue = _run_linear_channel_write_with_receipt(
             receipt_key,
-            lambda: _create_linear_channel_issue(
-                _linear_channel_issue_create_input(payload, binding)
-            ),
+            lambda: _create_linear_channel_issue(mutation_input),
         )
     except LinearChannelIssueWriteUncertainError:
         logger.error(
@@ -384,6 +386,15 @@ def write_linear_channel_issue(payload: dict[str, Any]) -> dict[str, Any]:
             _require_writable_linear_channel_issue(related, binding)
             if str(related.get("id")) == issue_id:
                 raise ValueError("An issue cannot be marked as a duplicate of itself.")
+            issue = _fetch_linear_channel_issue_detail(issue_id)
+            if not issue:
+                raise ValueError("Linear issue was not found.")
+            _require_writable_linear_channel_issue(issue, binding)
+            if str(issue.get("updatedAt") or "") != expected_updated_at:
+                raise LinearChannelIssueConflictError(
+                    "The Linear issue changed while Roo resolved the duplicate target. "
+                    "Please review it and retry the edit."
+                )
             receipt_key = _claim_linear_channel_write_request(request_id, binding)
             updated = _run_linear_channel_write_with_receipt(
                 receipt_key,

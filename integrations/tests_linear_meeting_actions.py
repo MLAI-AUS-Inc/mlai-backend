@@ -128,6 +128,9 @@ class LinearMeetingActionsApiTests(SimpleTestCase):
                 "url": "https://linear.app/issue/TECH-31", "updatedAt": "2026-09-01T02:00:00.000Z",
                 "state": {"id": "state-progress", "name": "In Progress"},
             }}}}),
+            FakeLinearResponse({"data": {"team": {"id": "team-tech", "states": {"nodes": [
+                {"id": "state-progress", "name": "In Progress", "type": "started", "position": 2},
+            ]}}}}),
         ]
         payload = {
             "slack_workspace_id": "TMLAI", "slack_channel_id": "CTECH",
@@ -146,7 +149,7 @@ class LinearMeetingActionsApiTests(SimpleTestCase):
 
         self.assertEqual(first.status_code, 201)
         self.assertEqual(duplicate.status_code, 409)
-        self.assertEqual(len(mock_post.call_args_list), 2)
+        self.assertEqual(len(mock_post.call_args_list), 3)
         mutation = mock_post.call_args_list[1].kwargs["json"]
         self.assertEqual(mutation["variables"]["input"]["teamId"], "team-tech")
         self.assertEqual(mutation["variables"]["input"]["stateId"], "state-progress")
@@ -174,6 +177,26 @@ class LinearMeetingActionsApiTests(SimpleTestCase):
         self.assertEqual(override.status_code, 400)
         self.assertIn("team_id", override.json()["detail"])
         self.assertEqual(wrong_channel.status_code, 403)
+
+    @patch("integrations.services.linear_meeting_actions.http_requests.post")
+    def test_channel_issue_create_rejects_non_text_title_and_description(self, mock_post):
+        base = {
+            "slack_workspace_id": "TMLAI", "slack_channel_id": "CTECH",
+            "requester_slack_id": "U123", "request_id": "Ev-create-types",
+        }
+        bad_title = self.client.post(
+            "/api/v1/integrations/linear/channel-issues/create",
+            {**base, "title": True}, format="json", **self.auth_headers,
+        )
+        bad_description = self.client.post(
+            "/api/v1/integrations/linear/channel-issues/create",
+            {**base, "request_id": "Ev-create-types-2", "title": "Valid", "description": {"body": "No"}},
+            format="json", **self.auth_headers,
+        )
+
+        self.assertEqual(bad_title.status_code, 400)
+        self.assertEqual(bad_description.status_code, 400)
+        mock_post.assert_not_called()
 
     def test_channel_issue_create_requires_strict_roo_authentication(self):
         response = self.client.post(
@@ -375,6 +398,39 @@ class LinearMeetingActionsApiTests(SimpleTestCase):
             })
 
         mock_update.assert_not_called()
+
+    @patch.object(linear_service, "_create_linear_channel_issue_duplicate_relation")
+    @patch.object(linear_service, "_fetch_linear_channel_issue_detail")
+    def test_duplicate_write_rechecks_source_after_resolving_target(
+        self, mock_fetch, mock_duplicate
+    ):
+        source = {
+            "id": "issue-29", "identifier": "TECH-29", "archivedAt": None,
+            "team": {"id": "team-tech"}, "state": {"id": "state-todo"},
+            "labels": {"nodes": [], "pageInfo": {"hasNextPage": False}},
+        }
+        related = {
+            "id": "issue-30", "identifier": "TECH-30", "updatedAt": "related-version",
+            "archivedAt": None, "team": {"id": "team-tech"},
+            "state": {"id": "state-todo"},
+            "labels": {"nodes": [], "pageInfo": {"hasNextPage": False}},
+        }
+        mock_fetch.side_effect = [
+            {**source, "updatedAt": "version-1"},
+            {**source, "updatedAt": "version-1"},
+            related,
+            {**source, "updatedAt": "version-2"},
+        ]
+
+        with self.assertRaises(linear_service.LinearChannelIssueConflictError):
+            linear_service.write_linear_channel_issue({
+                "slack_workspace_id": "TMLAI", "slack_channel_id": "CTECH",
+                "requester_slack_id": "U123", "issue_identifier": "TECH-29",
+                "operation": "mark_duplicate", "value": "TECH-30",
+                "expected_updated_at": "version-1", "request_id": "Ev-duplicate-race",
+            })
+
+        mock_duplicate.assert_not_called()
 
     @patch("integrations.services.linear_meeting_actions.http_requests.post")
     def test_ambiguous_partial_graphql_write_is_reported_as_uncertain(self, mock_post):
