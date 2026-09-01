@@ -22,6 +22,7 @@ from integrations.services.external_connectors import (
     ConnectorConfigurationError,
     ConnectorOAuthError,
     build_authorization_url,
+    connector_oauth_state_user_id,
     complete_oauth_callback,
     normalize_provider,
 )
@@ -439,6 +440,15 @@ def connector_callback(request, provider):
         return google_callback(request)
 
     user = _resolve_google_oauth_user(request)
+    if user is None and normalized_provider == "slack":
+        from django.contrib.auth import get_user_model
+
+        user_id = connector_oauth_state_user_id(
+            provider=normalized_provider,
+            state=str(request.GET.get("state") or ""),
+        )
+        if user_id is not None:
+            user = get_user_model().objects.filter(id=user_id, is_active=True).first()
     if user is None:
         return redirect(_vibe_raising_login_url(None))
 

@@ -33,6 +33,7 @@ from integrations.services.community_bridge.contracts import (
 logger = logging.getLogger(__name__)
 
 RETRY_DELAYS_SECONDS = [10, 30, 120, 300, 900]
+PARENT_DEPENDENCY_RETRY_SECONDS = 10
 
 # Slack conversation types that may be mirrored: public channels ("channel")
 # and private channels ("group"). Direct messages ("im") and group DMs
@@ -207,7 +208,11 @@ def claim_ready_deliveries(limit: int = 10) -> list[dict]:
         queryset = (
             CommunityBridgeDelivery.objects.select_related("channel")
             .filter(
-                status__in=[CommunityBridgeDeliveryStatus.PENDING, CommunityBridgeDeliveryStatus.FAILED],
+                status__in=[
+                    CommunityBridgeDeliveryStatus.PENDING,
+                    CommunityBridgeDeliveryStatus.WAITING_FOR_PARENT,
+                    CommunityBridgeDeliveryStatus.FAILED,
+                ],
                 available_at__lte=now,
             )
             .filter(attempts__lt=F("max_attempts"))
@@ -322,6 +327,7 @@ def complete_create_delivery(
         delivery.locked_at = None
         delivery.last_error = ""
         delivery.save(update_fields=["status", "completed_at", "locked_at", "last_error", "updated_at"])
+        _wake_waiting_child_deliveries(delivery)
 
 
 def complete_delivery(*, delivery_id: int) -> None:
@@ -366,6 +372,101 @@ def mark_delivery_retry(*, delivery_id: int, error_text: str, permanent: bool = 
     delivery.locked_at = None
     delivery.last_error = error_message[:2000]
     delivery.save(update_fields=["status", "available_at", "locked_at", "last_error", "updated_at"])
+
+
+def mark_delivery_waiting_for_parent(
+    *, delivery_id: int, parent_message_id: str
+) -> None:
+    """Park a delivery until its source parent has a destination mapping.
+
+    Dependency waits are deliberately separate from provider retries: no Slack,
+    Discord, or Buzz request has happened yet, so waiting must not consume the
+    delivery's bounded provider-attempt budget.
+    """
+
+    delivery = CommunityBridgeDelivery.objects.filter(id=delivery_id).first()
+    if not delivery:
+        return
+
+    now = timezone.now()
+    first_seen = delivery.dependency_first_seen_at or now
+    dependency_attempts = int(delivery.dependency_attempts or 0) + 1
+    max_age_seconds = max(
+        1,
+        int(
+            getattr(
+                settings,
+                "COMMUNITY_BRIDGE_PARENT_DEPENDENCY_MAX_AGE_SECONDS",
+                3600,
+            )
+            or 3600
+        ),
+    )
+    max_attempts = max(
+        1,
+        int(
+            getattr(
+                settings,
+                "COMMUNITY_BRIDGE_PARENT_DEPENDENCY_MAX_ATTEMPTS",
+                360,
+            )
+            or 360
+        ),
+    )
+    expired = (
+        dependency_attempts >= max_attempts
+        or (now - first_seen).total_seconds() >= max_age_seconds
+    )
+
+    delivery.status = (
+        CommunityBridgeDeliveryStatus.DEAD
+        if expired
+        else CommunityBridgeDeliveryStatus.WAITING_FOR_PARENT
+    )
+    delivery.attempts = max(0, int(delivery.attempts or 0) - 1)
+    delivery.dependency_attempts = dependency_attempts
+    delivery.dependency_first_seen_at = first_seen
+    delivery.available_at = (
+        now if expired else now + timedelta(seconds=PARENT_DEPENDENCY_RETRY_SECONDS)
+    )
+    delivery.locked_at = None
+    delivery.last_error = (
+        f"parent_mapping_timeout:{str(parent_message_id or '').strip()}"
+        if expired
+        else f"parent_mapping_pending:{str(parent_message_id or '').strip()}"
+    )
+    delivery.save(
+        update_fields=[
+            "status",
+            "attempts",
+            "dependency_attempts",
+            "dependency_first_seen_at",
+            "available_at",
+            "locked_at",
+            "last_error",
+            "updated_at",
+        ]
+    )
+
+
+def _wake_waiting_child_deliveries(parent: CommunityBridgeDelivery) -> int:
+    """Make children immediately eligible after their parent link is committed."""
+
+    now = timezone.now()
+    return CommunityBridgeDelivery.objects.filter(
+        channel=parent.channel,
+        source_platform=parent.source_platform,
+        source_channel_id=parent.source_channel_id,
+        source_parent_message_id=parent.source_message_id,
+        target_platform=parent.target_platform,
+        status=CommunityBridgeDeliveryStatus.WAITING_FOR_PARENT,
+    ).update(
+        status=CommunityBridgeDeliveryStatus.PENDING,
+        available_at=now,
+        locked_at=None,
+        last_error="",
+        updated_at=now,
+    )
 
 
 def reset_stale_processing_deliveries(max_age_seconds: int = 300) -> int:

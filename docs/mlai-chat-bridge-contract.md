@@ -62,6 +62,10 @@ deliberately retain no message content.
   reaction rather than the parent message.
 - Delivery is at least once; adapters must be idempotent for a claimed outbox
   row. Ordering is best effort within one mapped channel.
+- Replies whose parent mapping is not ready are parked without consuming the
+  provider retry budget. Completing the parent wakes its parked children; a
+  bounded age and dependency-attempt limit dead-letters unresolved children
+  instead of flattening them into top-level messages.
 - Exhausted deliveries enter a dead state for operator inspection and replay.
 
 The backend reaches the Rust sidecar with `BUZZ_BRIDGE_ADAPTER_TOKEN`. When the
@@ -229,6 +233,13 @@ Community Chat exposes these owner-authenticated endpoints:
   content-free durable cleanup ledger; any remaining registrations or adapter
   failures are retried by periodic reconciliation without restoring Slack
   access or retaining message bodies.
+- `POST /api/v1/community-chat/messages/delete-slack-origin/` accepts the
+  mirrored Buzz event ID and a caller-generated idempotency UUID. It verifies
+  the active MLAI device and linked Slack author, then uses that member's
+  connected Slack user token to delete the Slack source message. The signed
+  Slack deletion callback remains authoritative for removing the mirrored
+  event; requests and provider outcomes are retained as content-free audit
+  records.
 
 Private delivery retries are direction-specific: Slack-origin rows retry only
 through MLAI Chat, while MLAI-origin rows retry only through Slack with a stable

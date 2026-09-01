@@ -145,6 +145,17 @@ class CommunityChatDeviceAuthExchangeSerializer(serializers.Serializer):
         return validate_community_chat_client_device(attrs)
 
 
+class CommunityChatSlackDeleteSerializer(serializers.Serializer):
+    buzz_event_id = serializers.RegexField(
+        regex=r"^[0-9a-fA-F]{64}$",
+        max_length=64,
+    )
+    idempotency_key = serializers.UUIDField()
+
+    def validate_buzz_event_id(self, value):
+        return value.lower()
+
+
 def display_name_for_user(user):
     return user.full_name or 'MLAI member'
 

@@ -481,6 +481,9 @@ REST_FRAMEWORK = {
         'token_usage_token': os.getenv('TOKEN_USAGE_TOKEN_RATE', '10/minute'),
         'token_usage_leaderboard': os.getenv('TOKEN_USAGE_LEADERBOARD_RATE', '60/minute'),
         'community_chat_home': os.getenv('COMMUNITY_CHAT_HOME_RATE', '60/minute'),
+        'community_chat_slack_delete': os.getenv(
+            'COMMUNITY_CHAT_SLACK_DELETE_RATE', '20/minute'
+        ),
     }
 }
 
@@ -1069,6 +1072,12 @@ BUZZ_BRIDGE_CALLBACK_MAX_AGE_SECONDS = int(
 )
 COMMUNITY_BRIDGE_WORKER_POLL_SECONDS = float(
     os.getenv('COMMUNITY_BRIDGE_WORKER_POLL_SECONDS', '1')
+)
+COMMUNITY_BRIDGE_PARENT_DEPENDENCY_MAX_AGE_SECONDS = int(
+    os.getenv('COMMUNITY_BRIDGE_PARENT_DEPENDENCY_MAX_AGE_SECONDS', '3600')
+)
+COMMUNITY_BRIDGE_PARENT_DEPENDENCY_MAX_ATTEMPTS = int(
+    os.getenv('COMMUNITY_BRIDGE_PARENT_DEPENDENCY_MAX_ATTEMPTS', '360')
 )
 DISCORD_BRIDGE_BOT_TOKEN = os.getenv('DISCORD_BRIDGE_BOT_TOKEN', '')
 DISCORD_BRIDGE_APPLICATION_ID = os.getenv('DISCORD_BRIDGE_APPLICATION_ID', '')

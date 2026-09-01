@@ -19,6 +19,7 @@ from .views import (
     PasswordAuthView,
     PublicProfileBatchView,
     SessionView,
+    SlackOriginMessageDeleteView,
     UpcomingEventsView,
 )
 from .coding_views import (
@@ -107,6 +108,16 @@ urlpatterns = [
         name="community_chat_auth_exchange",
     ),
     path("session/", SessionView.as_view(), name="community_chat_session"),
+    path(
+        "messages/delete-slack-origin/",
+        SlackOriginMessageDeleteView.as_view(),
+        name="community_chat_delete_slack_origin",
+    ),
+    path(
+        "messages/delete-slack-origin/",
+        SlackOriginMessageDeleteView.as_view(),
+        name="community_chat_delete_slack_origin",
+    ),
     path("bootstrap/challenge/", ChallengeView.as_view(), name="community_chat_challenge"),
     path("bootstrap/invite/", InviteView.as_view(), name="community_chat_invite"),
     path("bootstrap/confirm/", ConfirmView.as_view(), name="community_chat_confirm"),
