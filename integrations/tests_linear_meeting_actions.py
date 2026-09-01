@@ -149,6 +149,9 @@ class LinearMeetingActionsApiTests(SimpleTestCase):
 
         self.assertEqual(first.status_code, 201)
         self.assertEqual(duplicate.status_code, 409)
+        self.assertEqual(
+            duplicate.json()["code"], "linear_channel_issue_write_conflict"
+        )
         self.assertEqual(len(mock_post.call_args_list), 3)
         mutation = mock_post.call_args_list[1].kwargs["json"]
         self.assertEqual(mutation["variables"]["input"]["teamId"], "team-tech")
@@ -306,7 +309,7 @@ class LinearMeetingActionsApiTests(SimpleTestCase):
             owner,
         )
 
-        with self.assertRaises(linear_service.LinearChannelIssueConflictError):
+        with self.assertRaises(linear_service.LinearChannelIssueRequestConflictError):
             linear_service._claim_linear_channel_issue_write_lock(
                 "issue-29", "Ev-lock-2", binding
             )

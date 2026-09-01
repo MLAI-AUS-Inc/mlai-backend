@@ -75,6 +75,10 @@ class LinearChannelIssueConflictError(Exception):
     pass
 
 
+class LinearChannelIssueRequestConflictError(Exception):
+    pass
+
+
 class LinearChannelIssueWriteUncertainError(Exception):
     pass
 
@@ -470,7 +474,7 @@ def _claim_linear_channel_write_request(
     digest = hashlib.sha256(receipt_identity.encode("utf-8")).hexdigest()
     cache_key = f"linear-channel-write:{digest}"
     if not cache.add(cache_key, "processing", timeout=_linear_channel_write_receipt_ttl()):
-        raise LinearChannelIssueConflictError(
+        raise LinearChannelIssueRequestConflictError(
             "This Slack request was already processed or is still in progress. Check Linear before retrying."
         )
     return cache_key
@@ -509,11 +513,11 @@ def _claim_linear_channel_issue_write_lock(
         claimed = cache.add(lock_key, owner, timeout=_linear_channel_write_lock_ttl())
     except Exception as exc:
         logger.exception("linear_channel_issue_write_lock_unavailable")
-        raise LinearChannelIssueConflictError(
+        raise LinearChannelIssueRequestConflictError(
             "Roo could not safely lock this issue for editing. Nothing was changed."
         ) from exc
     if not claimed:
-        raise LinearChannelIssueConflictError(
+        raise LinearChannelIssueRequestConflictError(
             "Another edit to this Linear issue is already in progress. Check Linear before retrying."
         )
     return lock_key, owner

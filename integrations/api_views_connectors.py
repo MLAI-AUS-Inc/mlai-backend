@@ -37,6 +37,7 @@ from integrations.services.external_connectors import (
 from integrations.services.linear_meeting_actions import (
     LinearChannelIssueAccessError,
     LinearChannelIssueConflictError,
+    LinearChannelIssueRequestConflictError,
     LinearChannelIssueWriteUncertainError,
     LinearMeetingActionConflictError,
     LinearMeetingConfigurationError,
@@ -87,6 +88,11 @@ def _linear_meeting_error_response(exc):
     if isinstance(exc, LinearChannelIssueConflictError):
         return Response(
             {"detail": str(exc), "code": "linear_channel_issue_stale"},
+            status=status.HTTP_409_CONFLICT,
+        )
+    if isinstance(exc, LinearChannelIssueRequestConflictError):
+        return Response(
+            {"detail": str(exc), "code": "linear_channel_issue_write_conflict"},
             status=status.HTTP_409_CONFLICT,
         )
     if isinstance(exc, LinearChannelIssueWriteUncertainError):
@@ -891,6 +897,7 @@ class LinearChannelIssueWriteView(APIView):
         except (
             LinearChannelIssueAccessError,
             LinearChannelIssueConflictError,
+            LinearChannelIssueRequestConflictError,
             LinearChannelIssueWriteUncertainError,
             LinearMeetingConfigurationError,
             LinearMeetingRateLimitError,
@@ -912,6 +919,7 @@ class LinearChannelIssueCreateView(APIView):
         except (
             LinearChannelIssueAccessError,
             LinearChannelIssueConflictError,
+            LinearChannelIssueRequestConflictError,
             LinearChannelIssueWriteUncertainError,
             LinearMeetingConfigurationError,
             LinearMeetingRateLimitError,
