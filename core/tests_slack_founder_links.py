@@ -428,6 +428,24 @@ class SlackFounderActorReferenceMigrationTests(TransactionTestCase):
             github_repo="legacy-owner/collision-repository",
             project_scanned=True,
         )
+        collision_organization = OldOrganization.objects.create(
+            name="Colliding Actor Company",
+            domain="colliding-actor.example",
+        )
+        collision_config = OldOrganizationContentConfig.objects.create(
+            organization=collision_organization,
+            connected_slack_user_id=self.collision_legacy_actor_id,
+        )
+        self.collision_config_pk = collision_config.pk
+        collision_job = OldContentFactoryJob.objects.create(
+            job_id="colliding-actor-job",
+            slack_user_id=self.collision_legacy_actor_id,
+            domain=collision_organization.domain,
+            request_meta={
+                "requested_by_slack_user_id": self.collision_legacy_actor_id,
+            },
+        )
+        self.collision_job_pk = collision_job.pk
 
         blank_collision_user = OldUser.objects.create(
             email="blank-collision@example.com"
@@ -562,6 +580,23 @@ class SlackFounderActorReferenceMigrationTests(TransactionTestCase):
         self.assertEqual(
             legacy.github_repo,
             "legacy-owner/collision-repository",
+        )
+        # The legacy config/job must continue to address the legacy credential
+        # bundle. Rewriting these references to the canonical actor would make
+        # them silently use the unrelated canonical GitHub grant above.
+        collision_config = MigratedConfig.objects.get(pk=self.collision_config_pk)
+        self.assertEqual(
+            collision_config.connected_slack_user_id,
+            self.collision_legacy_actor_id,
+        )
+        collision_job = MigratedJob.objects.get(pk=self.collision_job_pk)
+        self.assertEqual(
+            collision_job.slack_user_id,
+            self.collision_legacy_actor_id,
+        )
+        self.assertEqual(
+            collision_job.request_meta["requested_by_slack_user_id"],
+            self.collision_legacy_actor_id,
         )
         copied = MigratedUserIntegration.objects.get(
             pk=self.blank_collision_actor_id

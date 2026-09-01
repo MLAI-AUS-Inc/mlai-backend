@@ -30,8 +30,10 @@ CREDENTIAL_AUTHORITY_FIELDS = (
 )
 
 
-def _canonical_actor_id(value, valid_user_ids):
+def _canonical_actor_id(value, valid_user_ids, preserved_actor_ids=frozenset()):
     if not isinstance(value, str):
+        return value
+    if value in preserved_actor_ids:
         return value
     match = LEGACY_ACTOR_PATTERN.fullmatch(value)
     if not match:
@@ -42,15 +44,18 @@ def _canonical_actor_id(value, valid_user_ids):
     return f"mlai_user:{user_id}"
 
 
-def _replace_actor_ids(value, valid_user_ids):
+def _replace_actor_ids(value, valid_user_ids, preserved_actor_ids=frozenset()):
     if isinstance(value, list):
-        return [_replace_actor_ids(item, valid_user_ids) for item in value]
+        return [
+            _replace_actor_ids(item, valid_user_ids, preserved_actor_ids)
+            for item in value
+        ]
     if isinstance(value, dict):
         return {
             key: (
-                _canonical_actor_id(item, valid_user_ids)
+                _canonical_actor_id(item, valid_user_ids, preserved_actor_ids)
                 if key in ACTOR_JSON_FIELDS
-                else _replace_actor_ids(item, valid_user_ids)
+                else _replace_actor_ids(item, valid_user_ids, preserved_actor_ids)
             )
             for key, item in value.items()
         }
@@ -87,12 +92,13 @@ def _copy_legacy_integration_bundle_when_safe(
     if canonical_has_credentials or not (
         legacy_has_credentials or canonical_is_blank
     ):
-        return
+        return False
     updates = {
         field_name: getattr(legacy, field_name)
         for field_name in INTEGRATION_STATE_FIELDS
     }
     UserIntegration.objects.filter(pk=canonical.pk).update(**updates)
+    return True
 
 
 def canonicalize_legacy_actor_ids(apps, schema_editor):
@@ -109,44 +115,12 @@ def canonicalize_legacy_actor_ids(apps, schema_editor):
 
     valid_user_ids = set(User.objects.values_list("pk", flat=True).iterator())
 
-    scalar_models = (
-        (OrganizationContentConfig, "connected_slack_user_id"),
-        (ScheduledDiscoveryDispatch, "slack_user_id"),
-    )
-    for model, field_name in scalar_models:
-        for record in model.objects.only("pk", field_name).iterator(chunk_size=500):
-            current_value = getattr(record, field_name)
-            canonical_value = _canonical_actor_id(current_value, valid_user_ids)
-            if canonical_value != current_value:
-                model.objects.filter(pk=record.pk).update(
-                    **{field_name: canonical_value}
-                )
-
-    json_models = (
-        (ContentFactoryJob, "slack_user_id", "request_meta"),
-        (ContentFactoryRun, "slack_user_id", "run_request"),
-    )
-    for model, actor_field, json_field in json_models:
-        for record in model.objects.only(
-            "pk", actor_field, json_field
-        ).iterator(chunk_size=500):
-            updates = {}
-            current_actor = getattr(record, actor_field)
-            canonical_actor = _canonical_actor_id(current_actor, valid_user_ids)
-            if canonical_actor != current_actor:
-                updates[actor_field] = canonical_actor
-
-            current_payload = getattr(record, json_field)
-            canonical_payload = _replace_actor_ids(
-                current_payload,
-                valid_user_ids,
-            )
-            if canonical_payload != current_payload:
-                updates[json_field] = canonical_payload
-
-            if updates:
-                model.objects.filter(pk=record.pk).update(**updates)
-
+    # Resolve integration collisions before rewriting any references. When both
+    # actor rows carry independent state, changing a config/job from the legacy
+    # key to the canonical key would silently switch its GitHub authority. Keep
+    # that actor graph on the legacy alias unless the complete legacy bundle can
+    # be copied to an uncredentialed canonical row without mixing grants.
+    preserved_actor_ids = set()
     integrations = list(
         UserIntegration.objects.filter(slack_user_id__startswith="web_").iterator(
             chunk_size=500
@@ -162,15 +136,60 @@ def canonicalize_legacy_actor_ids(apps, schema_editor):
                 slack_user_id=canonical_id
             )
             continue
-        # Both rows may carry different live credentials. Keep each non-empty
-        # bundle intact. An uncredentialed canonical row may adopt the complete
-        # legacy bundle, replacing its metadata rather than mixing grants.
-        _copy_legacy_integration_bundle_when_safe(
+        copied = _copy_legacy_integration_bundle_when_safe(
             UserIntegration,
             legacy,
             canonical,
         )
+        if not copied:
+            preserved_actor_ids.add(legacy.pk)
 
+    scalar_models = (
+        (OrganizationContentConfig, "connected_slack_user_id"),
+        (ScheduledDiscoveryDispatch, "slack_user_id"),
+    )
+    for model, field_name in scalar_models:
+        for record in model.objects.only("pk", field_name).iterator(chunk_size=500):
+            current_value = getattr(record, field_name)
+            canonical_value = _canonical_actor_id(
+                current_value,
+                valid_user_ids,
+                preserved_actor_ids,
+            )
+            if canonical_value != current_value:
+                model.objects.filter(pk=record.pk).update(
+                    **{field_name: canonical_value}
+                )
+
+    json_models = (
+        (ContentFactoryJob, "slack_user_id", "request_meta"),
+        (ContentFactoryRun, "slack_user_id", "run_request"),
+    )
+    for model, actor_field, json_field in json_models:
+        for record in model.objects.only(
+            "pk", actor_field, json_field
+        ).iterator(chunk_size=500):
+            updates = {}
+            current_actor = getattr(record, actor_field)
+            canonical_actor = _canonical_actor_id(
+                current_actor,
+                valid_user_ids,
+                preserved_actor_ids,
+            )
+            if canonical_actor != current_actor:
+                updates[actor_field] = canonical_actor
+
+            current_payload = getattr(record, json_field)
+            canonical_payload = _replace_actor_ids(
+                current_payload,
+                valid_user_ids,
+                preserved_actor_ids,
+            )
+            if canonical_payload != current_payload:
+                updates[json_field] = canonical_payload
+
+            if updates:
+                model.objects.filter(pk=record.pk).update(**updates)
 
 class Migration(migrations.Migration):
     dependencies = [
