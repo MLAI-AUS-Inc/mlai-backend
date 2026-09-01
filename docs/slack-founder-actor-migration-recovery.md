@@ -1,6 +1,6 @@
 # Slack-Founder actor migration recovery
 
-`core.0064_guard_legacy_actor_migration_history` is an append-only safety gate
+`core.0064_guard_legacy_actor_migration_history` is a forward-only safety gate
 for databases that may have applied an earlier committed body of
 `core.0063_canonicalize_legacy_content_factory_actor_ids`.
 `core.0065_recheck_legacy_actor_migration_attestation` runs the corrected guard
@@ -20,9 +20,11 @@ finds either of these ambiguous states:
 ## Before deployment
 
 Check every persistent environment's `django_migrations` table for the applied
-timestamp of `core.0063_canonicalize_legacy_content_factory_actor_ids` and
-correlate it with the deployed application commit. A green migration test on a
-new database does not identify which body an existing database executed.
+timestamps of `core.0063_canonicalize_legacy_content_factory_actor_ids` and
+`core.0064_guard_legacy_actor_migration_history`, then correlate both with the
+deployed application commit. A green migration test on a new database does not
+identify which body an existing database executed. Never fake `0064` or `0065`;
+`0065` is the required recheck when an earlier `0064` was already recorded.
 
 Take a database backup before any operator repair. Do not copy access tokens,
 refresh tokens, installation IDs, scopes, repositories, or scan state
@@ -59,8 +61,9 @@ external evidence, but the valid state must remain unchanged, use the exact
 fingerprint contains no credential values and is bound to the complete finding
 set, referenced record IDs, credential-bundle digests, and ambiguous-payload
 digests, so any ownership-relevant change invalidates it. Record the evidence
-and fingerprint in the deployment log, apply the migration, then remove the
-environment value.
+and fingerprint in the deployment log, set it before retrying the stopped
+migration, then remove the environment value immediately after `0065` records
+success.
 An attestation is not permission to skip investigation or repair a state whose
 ownership is still unknown.
 
