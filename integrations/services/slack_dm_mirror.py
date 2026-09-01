@@ -1056,7 +1056,10 @@ def status_payload(
         "imported_messages": backfill_deliveries.filter(
             status=CommunityBridgeDeliveryStatus.COMPLETED,
         )
-        .exclude(metadata__history_outside_window=True)
+        .filter(
+            Q(metadata__history_outside_window__isnull=True)
+            | Q(metadata__history_outside_window=False)
+        )
         .count(),
         "queued_messages": backfill_deliveries.filter(
             status__in=(
