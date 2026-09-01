@@ -249,6 +249,55 @@ class LinearMeetingActionsApiTests(SimpleTestCase):
 
         self.assertTrue(result["issueUpdate"]["success"])
 
+    @patch("integrations.services.linear_meeting_actions.http_requests.post")
+    def test_definitive_graphql_4xx_releases_write_receipt(self, mock_post):
+        mock_post.return_value = FakeLinearResponse(
+            {"errors": [{"message": "Authentication required"}]},
+            status_code=401,
+        )
+        receipt_key = "linear-channel-write:test-4xx"
+        cache.set(receipt_key, "processing", timeout=60)
+
+        with self.assertRaises(linear_service.LinearMeetingGraphQLError):
+            linear_service._run_linear_channel_write_with_receipt(
+                receipt_key,
+                lambda: linear_service._graphql_write(
+                    "mutation Test { issueUpdate { success } }",
+                    {"id": "issue-29", "input": {"title": "New"}},
+                    operation_name="LinearChannelIssueUpdate",
+                ),
+            )
+
+        self.assertIsNone(cache.get(receipt_key))
+
+    def test_write_requires_explicit_well_typed_value(self):
+        base_payload = {
+            "slack_workspace_id": "TMLAI",
+            "slack_channel_id": "CTECH",
+            "requester_slack_id": "U123",
+            "issue_identifier": "TECH-29",
+            "operation": "set_due_date",
+            "expected_updated_at": "version-1",
+            "request_id": "Ev-invalid-value",
+        }
+        for invalid_value in (False, 0, ""):
+            with self.subTest(invalid_value=invalid_value):
+                response = self.client.post(
+                    "/api/v1/integrations/linear/channel-issues/write",
+                    {**base_payload, "value": invalid_value},
+                    format="json",
+                    **self.auth_headers,
+                )
+                self.assertEqual(response.status_code, 400)
+
+        response = self.client.post(
+            "/api/v1/integrations/linear/channel-issues/write",
+            base_payload,
+            format="json",
+            **self.auth_headers,
+        )
+        self.assertEqual(response.status_code, 400)
+
     @patch.object(linear_service.cache, "set", side_effect=RuntimeError("redis unavailable"))
     def test_receipt_completion_failure_is_reported_as_uncertain(self, _mock_set):
         with self.assertRaises(linear_service.LinearChannelIssueWriteUncertainError):

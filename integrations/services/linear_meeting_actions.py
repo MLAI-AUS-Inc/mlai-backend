@@ -253,6 +253,27 @@ def write_linear_channel_issue(payload: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("issue_identifier, expected_updated_at, and request_id are required.")
     if operation not in LINEAR_CHANNEL_WRITE_OPERATIONS:
         raise ValueError("Unsupported Linear issue operation.")
+    if "value" not in payload:
+        raise ValueError("value is required for Linear issue writes.")
+    value = payload["value"]
+    clearable_operations = {
+        "set_estimate",
+        "set_due_date",
+        "set_assignee",
+        "set_project",
+        "set_cycle",
+    }
+    if isinstance(value, bool) or isinstance(value, (dict, list)):
+        raise ValueError("Linear issue write value has an unsupported type.")
+    if operation == "set_estimate":
+        if not isinstance(value, (str, int, float)) and value is not None:
+            raise ValueError("Estimate must be a whole number or clear.")
+    elif not isinstance(value, str) and not (
+        value is None and operation in clearable_operations
+    ):
+        raise ValueError("Linear issue write value must be text.")
+    if isinstance(value, str) and not value.strip():
+        raise ValueError("Linear issue write value cannot be empty; use clear explicitly.")
 
     issue = _fetch_linear_channel_issue_detail(issue_reference)
     if not issue:
@@ -3503,11 +3524,21 @@ def _graphql_write(
     try:
         payload = response.json()
     except ValueError as exc:
+        if 400 <= response.status_code < 500:
+            raise LinearMeetingGraphQLError(
+                f"Linear GraphQL rejected the write with HTTP {response.status_code}.",
+                operation=operation_name,
+            ) from exc
         raise LinearChannelIssueWriteUncertainError(
             "Linear may have received the edit, but Roo could not verify its response. Check the issue before retrying."
         ) from exc
     data = payload.get("data") if isinstance(payload, dict) else None
     errors = payload.get("errors") if isinstance(payload, dict) and isinstance(payload.get("errors"), list) else []
+    if 400 <= response.status_code < 500:
+        message = _graphql_error_message(errors) if errors else (
+            f"Linear GraphQL rejected the write with HTTP {response.status_code}."
+        )
+        raise LinearMeetingGraphQLError(message, operation=operation_name)
     if errors:
         message = _graphql_error_message(errors)
         mutation_shapes = {
