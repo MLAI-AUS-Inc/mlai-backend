@@ -334,6 +334,16 @@ class LinearMeetingActionsApiTests(SimpleTestCase):
                     expected,
                 )
 
+        for invalid_estimate in (1.5, "1.5", True):
+            with self.subTest(invalid_estimate=invalid_estimate):
+                with self.assertRaisesMessage(ValueError, "whole number"):
+                    linear_service._linear_channel_issue_update_input(
+                        issue=issue,
+                        binding=binding,
+                        operation="set_estimate",
+                        value=invalid_estimate,
+                    )
+
         with patch.object(
             linear_service,
             "_resolve_linear_channel_status",
@@ -463,6 +473,53 @@ class LinearMeetingActionsApiTests(SimpleTestCase):
         self.assertIn("requester_slack_id=U123", log_line)
         self.assertIn("slack_workspace_id=TMLAI", log_line)
         self.assertIn("slack_channel_id=CTECH", log_line)
+
+    @patch.object(
+        linear_service,
+        "_update_linear_channel_issue",
+        side_effect=linear_service.LinearChannelIssueWriteUncertainError(
+            "ambiguous transport"
+        ),
+    )
+    @patch.object(linear_service, "_fetch_linear_channel_issue_detail")
+    def test_uncertain_write_log_attributes_slack_requester_and_channel(
+        self, mock_fetch, _mock_update
+    ):
+        mock_fetch.return_value = {
+            "id": "issue-29",
+            "identifier": "TECH-29",
+            "title": "Safe edits",
+            "updatedAt": "version-1",
+            "archivedAt": None,
+            "team": {"id": "team-tech"},
+            "state": {"id": "state-todo"},
+            "labels": {"nodes": [], "pageInfo": {"hasNextPage": False}},
+        }
+
+        with self.assertLogs(
+            "integrations.services.linear_meeting_actions", level="ERROR"
+        ) as captured:
+            with self.assertRaises(
+                linear_service.LinearChannelIssueWriteUncertainError
+            ):
+                linear_service.write_linear_channel_issue({
+                    "slack_workspace_id": "TMLAI",
+                    "slack_channel_id": "CTECH",
+                    "requester_slack_id": "U123",
+                    "issue_identifier": "TECH-29",
+                    "operation": "set_title",
+                    "value": "New title",
+                    "expected_updated_at": "version-1",
+                    "request_id": "Ev-uncertain-audit",
+                })
+
+        uncertain_logs = [
+            line for line in captured.output
+            if "linear_channel_issue_write_uncertain" in line
+        ]
+        self.assertEqual(len(uncertain_logs), 1)
+        self.assertIn("requester_slack_id=U123", uncertain_logs[0])
+        self.assertIn("slack_channel_id=CTECH", uncertain_logs[0])
 
     def test_conclusive_rate_limit_releases_processing_receipt(self):
         binding = {

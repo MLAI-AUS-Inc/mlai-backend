@@ -324,6 +324,11 @@ def write_linear_channel_issue(payload: dict[str, Any]) -> dict[str, Any]:
         return _linear_channel_write_result(
             issue, binding, operation, updated, request_id
         )
+    except LinearChannelIssueWriteUncertainError:
+        _log_linear_channel_write_uncertain(
+            issue, binding, operation, request_id
+        )
+        raise
     finally:
         _release_linear_channel_issue_write_lock(lock_key, lock_owner)
 
@@ -548,8 +553,19 @@ def _linear_channel_issue_update_input(
             raise ValueError("Priority must be none, urgent, high, normal, or low.")
         return {"priority": priorities[normalized]}
     if operation == "set_estimate":
-        if value in {None, "", "none", "clear"}:
+        if value is None or (
+            isinstance(value, str)
+            and value.strip().casefold() in {"", "none", "clear"}
+        ):
             return {"estimate": None}
+        if isinstance(value, bool):
+            raise ValueError("Estimate must be a whole number or clear.")
+        if isinstance(value, float) and not value.is_integer():
+            raise ValueError("Estimate must be a whole number or clear.")
+        if isinstance(value, str) and not re.fullmatch(
+            r"[+-]?\d+", value.strip()
+        ):
+            raise ValueError("Estimate must be a whole number or clear.")
         try:
             estimate = int(value)
         except (TypeError, ValueError) as exc:
@@ -779,6 +795,24 @@ def _linear_channel_write_result(
         binding["slack_channel_id"][:255],
     )
     return {"operation": operation, "requestId": request_id, "previousUpdatedAt": issue.get("updatedAt"), "issue": result}
+
+
+def _log_linear_channel_write_uncertain(
+    issue: dict[str, Any],
+    binding: dict[str, str],
+    operation: str,
+    request_id: str,
+) -> None:
+    logger.error(
+        "linear_channel_issue_write_uncertain identifier=%s operation=%s request_id=%s "
+        "requester_slack_id=%s slack_workspace_id=%s slack_channel_id=%s",
+        issue.get("identifier"),
+        operation,
+        request_id[:255],
+        binding["requester_slack_id"][:255],
+        binding["slack_workspace_id"][:255],
+        binding["slack_channel_id"][:255],
+    )
 
 
 def _linear_channel_issue_binding(payload: dict[str, Any]) -> dict[str, str]:
