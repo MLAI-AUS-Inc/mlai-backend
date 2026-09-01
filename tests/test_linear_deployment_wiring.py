@@ -56,6 +56,13 @@ class LinearDeploymentWiringTests(unittest.TestCase):
             LINEAR_WRITE_API_KEY="linear-test-key-at-least-32-characters",
         )
         self.assertNotEqual(shared.returncode, 0)
+        padded_shared = self.validator_result(
+            LINEAR_CHANNEL_ISSUE_WRITES_ENABLED="true",
+            LINEAR_WRITE_API_KEY="  linear-test-key-at-least-32-characters  ",
+        )
+        self.assertNotEqual(padded_shared.returncode, 0)
+        whitespace_reader = self.validator_result(LINEAR_API_KEY=" " * 40)
+        self.assertNotEqual(whitespace_reader.returncode, 0)
         distinct = self.validator_result(
             LINEAR_CHANNEL_ISSUE_WRITES_ENABLED="true",
             LINEAR_WRITE_API_KEY="distinct-write-key-at-least-32-characters",
