@@ -464,6 +464,15 @@ class SlackFounderActorReferenceMigrationTests(TransactionTestCase):
             github_repo="legacy-owner/blank-collision-repository",
             project_scanned=True,
         )
+        blank_collision_organization = OldOrganization.objects.create(
+            name="Safely Collapsible Actor Company",
+            domain="safe-colliding-actor.example",
+        )
+        blank_collision_config = OldOrganizationContentConfig.objects.create(
+            organization=blank_collision_organization,
+            connected_slack_user_id=self.blank_collision_legacy_actor_id,
+        )
+        self.blank_collision_config_pk = blank_collision_config.pk
 
         executor = MigrationExecutor(connection)
         executor.migrate(self.migrate_to)
@@ -615,6 +624,12 @@ class SlackFounderActorReferenceMigrationTests(TransactionTestCase):
             "legacy-owner/blank-collision-repository",
         )
         self.assertTrue(copied.project_scanned)
+        self.assertEqual(
+            MigratedConfig.objects.get(
+                pk=self.blank_collision_config_pk
+            ).connected_slack_user_id,
+            self.blank_collision_actor_id,
+        )
         self.assertTrue(
             MigratedUserIntegration.objects.filter(
                 pk=self.blank_collision_legacy_actor_id
