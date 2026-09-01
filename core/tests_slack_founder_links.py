@@ -780,8 +780,10 @@ class SlackFounderActorMigrationHistoryGuardTests(TransactionTestCase):
         executor.migrate(self.migrate_to)
         return executor.loader.project_state(self.migrate_to).apps
 
-    def test_fails_closed_when_old_0063_repointed_a_distinct_bundle(self):
-        self._create_collision(canonical_references=True)
+    def test_canonical_only_collision_requires_attestation(self):
+        user, legacy_actor_id, canonical_actor_id, config, _ = (
+            self._create_collision(canonical_references=True)
+        )
 
         with self.assertRaises(RuntimeError) as raised:
             self._migrate_forward()
@@ -790,6 +792,21 @@ class SlackFounderActorMigrationHistoryGuardTests(TransactionTestCase):
         self.assertIn("OrganizationContentConfig", message)
         self.assertNotIn("legacy-access-token", message)
         self.assertNotIn("canonical-access-token", message)
+        fingerprint = _migration_attestation_fingerprint(raised.exception)
+
+        with override_settings(
+            CORE_ACTOR_MIGRATION_HISTORY_ATTESTATION=fingerprint
+        ):
+            self._migrate_forward()
+        config.refresh_from_db()
+        self.assertEqual(config.connected_slack_user_id, canonical_actor_id)
+
+        from integrations.services.github_installations import (
+            resolve_user_for_actor_id,
+        )
+
+        self.assertEqual(resolve_user_for_actor_id(legacy_actor_id).pk, user.pk)
+        self.assertEqual(resolve_user_for_actor_id(canonical_actor_id).pk, user.pk)
 
     def test_current_0063_legacy_collision_requires_attestation(self):
         user, legacy_actor_id, canonical_actor_id, config, job = (
@@ -935,7 +952,7 @@ class SlackFounderActorMigrationHistoryGuardTests(TransactionTestCase):
             stale_fingerprint,
         )
 
-    def test_fails_closed_when_distinct_bundle_has_no_reference_evidence(self):
+    def test_no_reference_collision_requires_attestation(self):
         user = self.User.objects.create(email="historical-no-refs@example.com")
         legacy_actor_id = f"web_{user.pk}"
         canonical_actor_id = f"mlai_user:{user.pk}"
@@ -950,18 +967,32 @@ class SlackFounderActorMigrationHistoryGuardTests(TransactionTestCase):
             github_repo="canonical-owner/repository",
         )
 
-        with self.assertRaisesRegex(
-            RuntimeError,
+        with self.assertRaises(RuntimeError) as raised:
+            self._migrate_forward()
+        self.assertIn(
             "unproven_integration_history="
             f"{legacy_actor_id}->{canonical_actor_id}"
-            r"\[no-dependent-references\]",
+            "[no-dependent-references]",
+            str(raised.exception),
+        )
+        fingerprint = _migration_attestation_fingerprint(raised.exception)
+
+        with override_settings(
+            CORE_ACTOR_MIGRATION_HISTORY_ATTESTATION=fingerprint
         ):
             self._migrate_forward()
 
-    def test_fails_closed_on_old_0063_non_actor_json_rewrite(self):
+        from integrations.services.github_installations import (
+            resolve_user_for_actor_id,
+        )
+
+        self.assertEqual(resolve_user_for_actor_id(legacy_actor_id).pk, user.pk)
+        self.assertEqual(resolve_user_for_actor_id(canonical_actor_id).pk, user.pk)
+
+    def test_non_actor_json_rewrite_requires_attestation(self):
         user = self.User.objects.create(email="historical-json@example.com")
         canonical_actor_id = f"mlai_user:{user.pk}"
-        self.ContentFactoryJob.objects.create(
+        job = self.ContentFactoryJob.objects.create(
             job_id="historical-json-job",
             slack_user_id=canonical_actor_id,
             domain="historical-json.example",
@@ -971,11 +1002,27 @@ class SlackFounderActorMigrationHistoryGuardTests(TransactionTestCase):
             },
         )
 
-        with self.assertRaisesRegex(
-            RuntimeError,
-            "ambiguous_non_actor_json=content_factory.ContentFactoryJob.request_meta",
+        with self.assertRaises(RuntimeError) as raised:
+            self._migrate_forward()
+        self.assertIn(
+            "ambiguous_non_actor_json="
+            "content_factory.ContentFactoryJob.request_meta",
+            str(raised.exception),
+        )
+        fingerprint = _migration_attestation_fingerprint(raised.exception)
+
+        with override_settings(
+            CORE_ACTOR_MIGRATION_HISTORY_ATTESTATION=fingerprint
         ):
             self._migrate_forward()
+        job.refresh_from_db()
+        self.assertEqual(job.request_meta["topic"], canonical_actor_id)
+
+        from integrations.services.github_installations import (
+            resolve_user_for_actor_id,
+        )
+
+        self.assertEqual(resolve_user_for_actor_id(canonical_actor_id).pk, user.pk)
 
 
 class SlackFounderActorMigrationAlreadyAppliedGuardTests(TransactionTestCase):
