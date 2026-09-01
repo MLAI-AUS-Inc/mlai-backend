@@ -60,18 +60,40 @@ same membership request flow below.
    `community-chat:enrol-device` action, API audience, and exact client origin.
 3. The client signs the returned unsigned kind `27235` event with the device
    key and sends it to `POST .../bootstrap/invite/`.
-4. The backend verifies the event id and BIP-340 signature, atomically consumes
-   the challenge, and asks the private adapter for a five-minute, one-use
-   `member` invite.
+4. The backend verifies the event id and BIP-340 signature and atomically
+   consumes the challenge. While holding the device-authority lock, it requires
+   the adapter's authenticated `generation_cas_v2` capability, captures the
+   current per-key generation with `POST /v2/member-invite-intents`, and passes
+   that exact `expected_generation` to `POST /v2/member-invites`. It never falls
+   back to the legacy one-request mint. The resulting five-minute, one-use
+   `member` invite ID is audited under the same lock; the invite code is not.
 5. The client claims the invite directly against `chat.mlai.au`, then calls
    `POST .../bootstrap/confirm/`. Only a relay role of exactly `member` is
    accepted.
-6. `DELETE .../devices/{pubkey}/` asks the adapter to remove exactly a
-   `member`, then marks the binding revoked while retaining its audit history.
+6. `DELETE .../devices/{pubkey}/` first cancels every unconfirmed audited invite,
+   then asks the adapter to remove exactly a `member` and advance that key's
+   durable enrollment generation. It marks the binding revoked while retaining
+   its audit history. Repeating the delete is safe and advances the same
+   delete-wins fence, including recovery after an adapter mint whose backend
+   transaction did not commit.
 
 The backend stores adapter invite IDs and expiry metadata, never invite codes,
 signed proof payloads, email addresses, raw chat content, or private keys in
 membership audit records.
+
+The adapter serializes invite mint, invite cancellation, membership claim, and
+member deletion by community and public key. A member delete durably advances a
+per-key generation before it returns. An older invite mint that finishes later
+cannot bind or redeem in that newer generation; an explicit later enrollment
+starts from the new generation. Generic operator-created relay invites are not
+bound to this device fence and are not deleted by these endpoints.
+
+The intent phase creates no invite or membership capability. If it times out
+and reaches the adapter only after a delete, its caller has no mint response and
+cannot continue. If the mint phase is delayed until after a delete, its captured
+generation is stale and the adapter returns `invite_attempt_revoked` without
+creating an invite. Capability discovery, intent capture, and mint all require
+the private adapter bearer token.
 
 ## Private adapter boundary
 

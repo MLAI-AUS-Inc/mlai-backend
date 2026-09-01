@@ -13,6 +13,7 @@ from content_factory.models import OrganizationContentConfig
 from organizations.models import Organization
 from workflow_runs.models import ContentFactoryRun, ContentFactoryRunStatus, ContentFactoryStepStatus
 from integrations.models import ExternalServiceConnection, ExternalServiceProvider, GoogleConnection
+from integrations.services.external_connectors import ConnectorOAuthError
 from integrations.services.valley_harness import ValleyHarnessResult
 from startup_updates.models import (
     MonthlyUpdateDraft,
@@ -1884,6 +1885,41 @@ class VibeRaisingApiTests(TestCase):
         self.assertEqual(run.run_request["external_context"]["slack"]["selected_channel_ids"], ["C123"])
         self.assertIn("xero", run.run_request["external_context"])
 
+    def test_startup_update_run_maps_create_authority_error_to_connector_auth_response(self):
+        self.client.force_authenticate(user=self.user)
+        self._create_founder_company()
+        self._create_google_connection()
+
+        with patch(
+            "vibe_raising.views.create_startup_update_run",
+            side_effect=ConnectorOAuthError("Slack authority was revoked"),
+        ):
+            response = self.client.post(
+                "/api/v1/vibe-raising/startup-update/run/",
+                {"inputSources": ["gmail", "slack"]},
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.data, {"detail": "Slack authority was revoked"})
+
+    def test_startup_update_run_maps_refresh_authority_error_to_connector_auth_response(self):
+        self.client.force_authenticate(user=self.user)
+        self._create_active_gmail_run_with_slack_selection()
+
+        with patch(
+            "vibe_raising.views.refresh_startup_update_run_source_context",
+            side_effect=ConnectorOAuthError("Slack authority changed"),
+        ):
+            response = self.client.post(
+                "/api/v1/vibe-raising/startup-update/run/",
+                {"inputSources": ["gmail", "xero", "slack"]},
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.data, {"detail": "Slack authority changed"})
+
     def test_startup_update_status_returns_ready_with_form_shaped_draft(self):
         self.client.force_authenticate(user=self.user)
         _profile, company = self._create_founder_company()
@@ -2307,6 +2343,69 @@ class VibeRaisingApiTests(TestCase):
         for step_key in ["timeline_merge", "draft_generation", "groundedness_review"]:
             self.assertEqual(steps_by_key[step_key].status, ContentFactoryStepStatus.PENDING)
             self.assertEqual(steps_by_key[step_key].attempts, 0)
+
+    def test_email_draft_start_maps_create_authority_error_to_connector_auth_response(self):
+        self.client.force_authenticate(user=self.user)
+        self._create_founder_company()
+        self._create_google_connection()
+
+        with patch(
+            "vibe_raising.views.create_startup_update_run",
+            side_effect=ConnectorOAuthError("Slack authority was revoked"),
+        ):
+            response = self.client.post(
+                "/api/v1/vibe-raising/email-draft/start/",
+                {"inputSources": ["gmail", "slack"]},
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.data, {"detail": "Slack authority was revoked"})
+
+    def test_email_draft_start_maps_redispatch_refresh_authority_error_to_connector_auth_response(self):
+        self.client.force_authenticate(user=self.user)
+        _organization, _binding, run = self._create_active_gmail_run_with_slack_selection()
+        run.status = ContentFactoryRunStatus.QUEUED
+        run.save(update_fields=["status", "updated_at"])
+        ContentFactoryRun.objects.filter(pk=run.pk).update(
+            updated_at=timezone.now() - timedelta(minutes=1)
+        )
+
+        with patch(
+            "vibe_raising.views.refresh_startup_update_run_source_context",
+            side_effect=ConnectorOAuthError("Slack redispatch authority changed"),
+        ):
+            response = self.client.post(
+                "/api/v1/vibe-raising/email-draft/start/",
+                {"inputSources": ["gmail", "xero", "slack"]},
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(
+            response.data,
+            {"detail": "Slack redispatch authority changed"},
+        )
+
+    def test_email_draft_start_maps_active_refresh_authority_error_to_connector_auth_response(self):
+        self.client.force_authenticate(user=self.user)
+        self._create_active_gmail_run_with_slack_selection()
+
+        with patch(
+            "vibe_raising.views.refresh_startup_update_run_source_context",
+            side_effect=ConnectorOAuthError("Slack active-run authority changed"),
+        ):
+            response = self.client.post(
+                "/api/v1/vibe-raising/email-draft/start/",
+                {"inputSources": ["gmail", "xero", "slack"]},
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(
+            response.data,
+            {"detail": "Slack active-run authority changed"},
+        )
 
     def test_email_draft_start_redispatches_stale_queued_run(self):
         self.client.force_authenticate(user=self.user)

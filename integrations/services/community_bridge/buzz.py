@@ -184,6 +184,20 @@ class BuzzBridgeClient:
         }
 
     @classmethod
+    def unregister_private_conversation(cls, channel_id: str) -> None:
+        """Idempotently remove one private-channel adapter registration."""
+
+        try:
+            normalized_channel_id = str(uuid.UUID(str(channel_id or "").strip()))
+        except (ValueError, TypeError, AttributeError) as exc:
+            raise BuzzBridgePermanentError(
+                "Private conversation channel must be a valid UUID"
+            ) from exc
+        cls._delete_adapter(
+            f"v1/private-conversations/{normalized_channel_id}"
+        )
+
+    @classmethod
     def deliver_private(
         cls,
         *,
@@ -265,6 +279,52 @@ class BuzzBridgeClient:
         if not isinstance(result, dict):
             raise BuzzBridgeError("MLAI Chat adapter returned invalid JSON")
         return result
+
+    @classmethod
+    def _delete_adapter(cls, path: str) -> None:
+        adapter_url = cls._validated_adapter_url()
+        api_token = cls._api_token()
+        if not api_token:
+            raise BuzzBridgePermanentError(
+                "BUZZ_BRIDGE_ADAPTER_TOKEN is not configured"
+            )
+        timeout = max(
+            1,
+            min(
+                int(
+                    getattr(
+                        settings,
+                        "BUZZ_BRIDGE_ADAPTER_TIMEOUT_SECONDS",
+                        15,
+                    )
+                ),
+                60,
+            ),
+        )
+        try:
+            response = requests.delete(
+                urljoin(adapter_url, path),
+                headers={"Authorization": f"Bearer {api_token}"},
+                timeout=timeout,
+            )
+        except requests.RequestException as exc:
+            raise BuzzBridgeError(
+                "MLAI Chat adapter unregister request failed: "
+                f"{exc.__class__.__name__}"
+            ) from exc
+        if 400 <= response.status_code < 500 and response.status_code not in {
+            408,
+            429,
+        }:
+            raise BuzzBridgePermanentError(
+                "MLAI Chat adapter rejected unregister request with HTTP "
+                f"{response.status_code}"
+            )
+        if not response.ok:
+            raise BuzzBridgeError(
+                "MLAI Chat adapter unregister returned HTTP "
+                f"{response.status_code}"
+            )
 
     @classmethod
     def lookup_messages(

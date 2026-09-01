@@ -1,7 +1,7 @@
 import uuid
 from unittest.mock import patch
 
-from django.test import SimpleTestCase
+from django.test import SimpleTestCase, override_settings
 
 from integrations.services.community_bridge.buzz import (
     BuzzBridgeClient,
@@ -185,3 +185,25 @@ class PrivateConversationRegistrationTests(SimpleTestCase):
                 ["1" * 64, "2" * 64],
                 callback_author_pubkeys=["3" * 64],
             )
+
+    @override_settings(
+        BUZZ_BRIDGE_ADAPTER_URL="http://buzz-bridge-adapter:8090",
+        BUZZ_BRIDGE_ADAPTER_TOKEN="a" * 40,
+        BUZZ_BRIDGE_ADAPTER_TIMEOUT_SECONDS=12,
+    )
+    @patch("integrations.services.community_bridge.buzz.requests.delete")
+    def test_unregister_uses_the_authenticated_idempotent_adapter_route(
+        self,
+        delete,
+    ):
+        channel_id = uuid.uuid4()
+        delete.return_value.status_code = 204
+        delete.return_value.ok = True
+
+        BuzzBridgeClient.unregister_private_conversation(str(channel_id))
+
+        delete.assert_called_once_with(
+            f"http://buzz-bridge-adapter:8090/v1/private-conversations/{channel_id}",
+            headers={"Authorization": f"Bearer {'a' * 40}"},
+            timeout=12,
+        )

@@ -75,6 +75,12 @@ def issue_email_code_challenge(
     code = f"{secrets.randbelow(1_000_000):06d}"
     now = timezone.now()
     with transaction.atomic():
+        if eligible_user is not None:
+            # Serialize creation of a new sign-in capability with server-side
+            # device deletion. A challenge committed before DELETE is
+            # invalidated there; one committed afterward is a fresh explicit
+            # account proof rather than a surviving pre-delete credential.
+            User.objects.select_for_update().get(pk=eligible_user.pk)
         active = CommunityChatEmailCodeChallenge.objects.filter(
             email_digest=digest,
             client_id=client_id,
@@ -124,8 +130,9 @@ def _locked_email_code_challenges():
 
     ``user`` is nullable so ``select_related`` uses a left outer join. PostgreSQL
     rejects an unscoped ``FOR UPDATE`` for that query because the nullable side
-    of an outer join cannot be locked. The challenge is the concurrency boundary
-    for one-use code consumption; the related user does not need a row lock.
+    of an outer join cannot be locked. Callers acquire the immutable eligible
+    user's row first; this queryset then takes only the challenge lock so device
+    deletion and code consumption use the same user->challenge order.
     """
 
     return CommunityChatEmailCodeChallenge.objects.select_for_update(
@@ -138,20 +145,32 @@ def consume_email_code(*, challenge_id, code, client_id, installation_id):
 
     now = timezone.now()
     invalid = False
+    identity = (
+        CommunityChatEmailCodeChallenge.objects.filter(id=challenge_id)
+        .values("user_id")
+        .first()
+    )
     with transaction.atomic():
+        locked_user = None
+        if identity is not None and identity["user_id"] is not None:
+            locked_user = User.objects.select_for_update().get(
+                pk=identity["user_id"]
+            )
         try:
             challenge = _locked_email_code_challenges().get(id=challenge_id)
         except (CommunityChatEmailCodeChallenge.DoesNotExist, ValueError):
             challenge = None
 
         valid_state = bool(challenge) and (
-            challenge.client_id == client_id
+            locked_user is not None
+            and challenge.user_id == locked_user.pk
+            and challenge.client_id == client_id
             and challenge.installation_id == installation_id
             and challenge.consumed_at is None
             and challenge.invalidated_at is None
             and challenge.expires_at > now
             and challenge.attempt_count < challenge.max_attempts
-            and is_email_code_eligible(challenge.user)
+            and is_email_code_eligible(locked_user)
         )
         expected_digest = code_digest(challenge.id, code) if challenge else ""
         if not valid_state or not secrets.compare_digest(
@@ -174,7 +193,7 @@ def consume_email_code(*, challenge_id, code, client_id, installation_id):
         else:
             challenge.consumed_at = now
             challenge.save(update_fields=("consumed_at",))
-            user = challenge.user
+            user = locked_user
             if user.email_verified_at is None:
                 user.email_verified_at = now
                 user.save(update_fields=("email_verified_at",))

@@ -460,6 +460,8 @@ REST_FRAMEWORK = {
         'watt_unity_ticket_redeem': os.getenv('WATT_UNITY_TICKET_REDEEM_RATE', '60/minute'),
         'public_knowledge': os.getenv('ORG_MEMORY_PUBLIC_RATE', '60/minute'),
         'org_memory_actions': os.getenv('ORG_MEMORY_ACTION_RATE', '30/minute'),
+        'linear_channel_issue_list': os.getenv('LINEAR_CHANNEL_ISSUE_LIST_RATE', '60/minute'),
+        'linear_channel_issue_detail': os.getenv('LINEAR_CHANNEL_ISSUE_DETAIL_RATE', '20/minute'),
         # Unauthenticated auth entry points (core.throttles). Bound
         # credential-enumeration and magic-link email spam. Disabled under the
         # test runner so suites that issue many auth calls in a loop aren't
@@ -1454,7 +1456,7 @@ SLACK_SYNC_HISTORY_MAX_PAGES = int(os.environ.get("SLACK_SYNC_HISTORY_MAX_PAGES"
 SLACK_SYNC_REPLY_MAX_PAGES = int(os.environ.get("SLACK_SYNC_REPLY_MAX_PAGES", "3") or 3)
 SLACK_SYNC_REPLY_PAGE_BUDGET = int(os.environ.get("SLACK_SYNC_REPLY_PAGE_BUDGET", "2") or 2)
 SLACK_DM_MIRROR_HISTORY_DAYS = max(
-    0, min(int(os.environ.get("SLACK_DM_MIRROR_HISTORY_DAYS", "30") or 30), 90)
+    1, min(int(os.environ.get("SLACK_DM_MIRROR_HISTORY_DAYS", "30") or 30), 30)
 )
 SLACK_DM_MIRROR_SHADOW_SECRET = os.environ.get("SLACK_DM_MIRROR_SHADOW_SECRET", "")
 SLACK_API_CONNECT_TIMEOUT_SECONDS = float(os.environ.get("SLACK_API_CONNECT_TIMEOUT_SECONDS", "3") or 3)
@@ -1473,6 +1475,13 @@ LINEAR_SYNC_ISSUE_PAGE_LIMIT = int(os.environ.get("LINEAR_SYNC_ISSUE_PAGE_LIMIT"
 LINEAR_SYNC_UPDATE_PAGE_LIMIT = int(os.environ.get("LINEAR_SYNC_UPDATE_PAGE_LIMIT", "20") or 20)
 LINEAR_API_CONNECT_TIMEOUT_SECONDS = float(os.environ.get("LINEAR_API_CONNECT_TIMEOUT_SECONDS", "3") or 3)
 LINEAR_API_READ_TIMEOUT_SECONDS = float(os.environ.get("LINEAR_API_READ_TIMEOUT_SECONDS", "20") or 20)
+LINEAR_CHANNEL_ISSUE_BINDINGS_JSON = os.environ.get(
+    "LINEAR_CHANNEL_ISSUE_BINDINGS_JSON",
+    "",
+)
+LINEAR_CHANNEL_ISSUE_MAX_COMMENTS = int(
+    os.environ.get("LINEAR_CHANNEL_ISSUE_MAX_COMMENTS", "250") or 250
+)
 LINEAR_TASK_SIZING_ENFORCEMENT_MODE = os.environ.get(
     "LINEAR_TASK_SIZING_ENFORCEMENT_MODE"
 )

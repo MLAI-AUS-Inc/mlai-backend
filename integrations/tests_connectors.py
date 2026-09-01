@@ -751,6 +751,45 @@ class ConnectorEndpointTests(TestCase):
                 "http://localhost:5173/vibe-raising/connect-data?next=/vibe-raising/create-update",
             )
 
+    def test_slack_callback_rejects_deleted_scoped_startup_before_code_exchange(self):
+        organization = Organization.objects.create(
+            name="Deleted OAuth startup",
+            domain="deleted-oauth-startup.example",
+        )
+        binding = UserStartupBinding.objects.create(
+            user=self.user,
+            organization=organization,
+            role="founder",
+        )
+        connect_response = self.client.get(
+            "/integrations/connect/slack",
+            {"next": "http://localhost:5173/vibe-raising/connect-data"},
+        )
+        self.assertEqual(connect_response.status_code, 302)
+        state = urllib.parse.parse_qs(
+            urllib.parse.urlparse(connect_response.url).query
+        )["state"][0]
+        binding.delete()
+        organization.delete()
+
+        with patch(
+            "integrations.services.external_connectors._exchange_slack_code"
+        ) as exchange:
+            response = self.client.get(
+                "/integrations/callback/slack",
+                {"state": state, "code": "must-not-be-exchanged"},
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn(b"no longer exists", response.content)
+        exchange.assert_not_called()
+        self.assertFalse(
+            ExternalServiceConnection.objects.filter(
+                user=self.user,
+                provider=ExternalServiceProvider.SLACK,
+            ).exists()
+        )
+
     def test_google_analytics_property_list_discovers_and_persists_selectable_properties(self):
         connection = ExternalServiceConnection.objects.create(
             user=self.user,

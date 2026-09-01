@@ -117,6 +117,20 @@ class CommunityChatPasswordAuthTests(APITestCase):
             self.assertEqual(response.data, {'error': 'invalid_credentials'})
         self.assertFalse(CommunityChatBootstrapToken.objects.exists())
 
+    @patch('community_chat.views.authenticate_account')
+    def test_account_eligibility_is_rechecked_under_the_user_lock(self, authenticate):
+        def deactivate_after_initial_auth(*_args, **_kwargs):
+            get_user_model().objects.filter(pk=self.user.pk).update(is_active=False)
+            return self.user
+
+        authenticate.side_effect = deactivate_after_initial_auth
+
+        response = self.login()
+
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertEqual(response.data, {'error': 'invalid_credentials'})
+        self.assertFalse(CommunityChatBootstrapToken.objects.exists())
+
     def test_client_platform_and_origin_are_strict(self):
         mismatched = self.login(
             client_id='mlai-chat-ios',

@@ -155,6 +155,7 @@ jobs:
           tests.test_drive_transcript_inventory \
           tests.test_validate_prod_urls \
           tests.test_deploy_command_wiring \
+          tests.test_linear_deployment_wiring \
           tests.test_health_check \
           tests.test_content_factory_org_config \
           tests.test_new_endpoints.EndpointTests \
@@ -165,13 +166,20 @@ jobs:
           content_factory.tests_admin_metrics \
           tests.test_community_bridge_adapter_url \
           community_chat.tests.test_account_sessions \
+          community_chat.tests.test_adapter \
+          community_chat.tests.test_api \
           community_chat.tests.test_device_auth \
           community_chat.tests.test_throttles \
           community_chat.tests.test_link_previews \
           community_chat.tests.test_token_usage \
           community_chat.tests.test_tokenmaxer_federation \
           community_chat.tests.test_home \
+          community_chat.tests.test_password_auth \
+          community_chat.tests.test_slack_dm_ineligible_retirement \
+          community_chat.tests.test_slack_dm_io_authority \
           community_chat.tests.test_slack_dm_mirror \
+          community_chat.tests.test_slack_dm_registration_ledger \
+          community_chat.tests.test_slack_endpoint_errors \
           integrations.tests_community_bridge \
           integrations.tests_community_bridge_avatar_backfill \
           integrations.tests_community_bridge_mention_backfill \
@@ -183,10 +191,18 @@ jobs:
           integrations.tests_github_installation_reconciliation \
           integrations.tests_github_app_probe \
           integrations.tests_connectors \
+          integrations.tests_slack_connector_authority \
+          integrations.tests_startup_updates.StartupUpdateSlackBackfillViewTest \
+          vibe_raising.tests.VibeRaisingApiTests.test_startup_update_run_maps_create_authority_error_to_connector_auth_response \
+          vibe_raising.tests.VibeRaisingApiTests.test_startup_update_run_maps_refresh_authority_error_to_connector_auth_response \
+          vibe_raising.tests.VibeRaisingApiTests.test_email_draft_start_maps_create_authority_error_to_connector_auth_response \
+          vibe_raising.tests.VibeRaisingApiTests.test_email_draft_start_maps_redispatch_refresh_authority_error_to_connector_auth_response \
+          vibe_raising.tests.VibeRaisingApiTests.test_email_draft_start_maps_active_refresh_authority_error_to_connector_auth_response \
           integrations.tests_humanitix \
           integrations.tests_xero_reconciliation \
           integrations.tests_smart_scan \
           integrations.tests_http_client \
+          integrations.tests_linear_meeting_actions \
           tests.test_teardown_company \
           tests.test_editorial_learning_loop \
           startup_updates.tests_monthly_update_reminders \
@@ -294,6 +310,16 @@ jobs:
     - name: Run meeting-room PostgreSQL tests
       run: python manage.py test roo.tests_meeting_rooms --verbosity 2
 
+    - name: Run privacy-boundary PostgreSQL tests
+      run: |
+        python manage.py test \
+          community_chat.tests.test_api.CommunityChatDeviceAuthorityTransactionTests \
+          community_chat.tests.test_slack_dm_io_authority.SlackDmIoAuthorityTransactionTests \
+          community_chat.tests.test_slack_dm_registration_ledger.SlackDmDeliveryLeaseTransactionTests \
+          integrations.tests_slack_connector_authority.SlackConnectorAuthorityPostgresTests \
+          integrations.tests_startup_updates.StartupUpdateSlackLineagePostgresTests \
+          --verbosity 2
+
   # org_memory.tests.test_migrations rewinds the org_memory graph to 0001 and
   # replays it, which costs ~116s of migration operations. That is the same on
   # SQLite and PostgreSQL — the cost is the number of operations, not the
@@ -368,6 +394,9 @@ jobs:
         REDIS_URL: ${{ secrets.REDIS_URL }}
         XERO_OAUTH_SCOPES: ${{ vars.XERO_OAUTH_SCOPES || '' }}
         ROO_SIM_PATIENT_KEY: ${{ secrets.ROO_SIM_PATIENT_KEY }}
+        LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+        LINEAR_CHANNEL_ISSUE_BINDINGS_JSON: ${{ vars.LINEAR_CHANNEL_ISSUE_BINDINGS_JSON }}
+        LINEAR_CHANNEL_ISSUE_MAX_COMMENTS: ${{ vars.LINEAR_CHANNEL_ISSUE_MAX_COMMENTS || '250' }}
         VICTOR_AI_ROO_SIGNING_SECRET: ${{ secrets.VICTOR_AI_ROO_SIGNING_SECRET }}
         COMMUNITY_CHAT_EMAIL_CODE_PEPPER: ${{ secrets.COMMUNITY_CHAT_EMAIL_CODE_PEPPER }}
         COMMUNITY_CHAT_EMAIL_CODE_DELIVERY_SECRET: ${{ secrets.COMMUNITY_CHAT_EMAIL_CODE_DELIVERY_SECRET }}
@@ -420,6 +449,7 @@ jobs:
           echo "::error::Required repository secret ROO_SIM_PATIENT_KEY is not configured"
           exit 1
         fi
+        python scripts/validate_linear_channel_issue_deploy_config.py
         if [ "${#VICTOR_AI_ROO_SIGNING_SECRET}" -lt 32 ]; then
           echo "::error::Required repository secret VICTOR_AI_ROO_SIGNING_SECRET is missing or shorter than 32 characters"
           exit 1

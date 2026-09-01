@@ -3,25 +3,29 @@
 from urllib.parse import urlencode
 
 from django.conf import settings
+from django.db import DatabaseError
 from django.urls import reverse
 from rest_framework import status
 from rest_framework.exceptions import ValidationError
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from slack_sdk.errors import SlackApiError, SlackClientError
 
 from hospital.authentication import CustomJWTAuthentication
 from integrations.models import SlackDmMirrorGrant
 from integrations.services.slack_dm_mirror import (
     REQUIRED_SCOPES,
+    SlackDmMirrorCredentialError,
     SlackDmMirrorError,
+    SlackDmMirrorUpstreamError,
     activate_connection,
     active_grant_for_user,
     backfill_grant,
     open_slack_dm,
     pause_grant,
     resume_grant,
-    revoke_grant,
+    revoke_user_grant,
     search_slack_users,
     slack_connection_for_user,
     status_payload,
@@ -33,6 +37,91 @@ from .authentication import (
     CommunityChatBootstrapAuthentication,
 )
 from .throttles import CommunityChatScopedThrottle
+
+
+SLACK_AUTH_ERROR_CODES = frozenset(
+    {
+        "account_inactive",
+        "invalid_auth",
+        "missing_scope",
+        "no_permission",
+        "not_allowed_token_type",
+        "not_authed",
+        "org_login_required",
+        "token_expired",
+        "token_revoked",
+    }
+)
+
+
+def _slack_api_error_code(exc: SlackApiError) -> str:
+    response = getattr(exc, "response", None)
+    try:
+        return str(response.get("error") or "").strip().lower()
+    except (AttributeError, TypeError):
+        return ""
+
+
+def _slack_api_status_code(exc: SlackApiError) -> int:
+    response = getattr(exc, "response", None)
+    try:
+        return int(getattr(response, "status_code", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _slack_retry_after_seconds(exc: SlackApiError) -> int:
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", {}) or {}
+    try:
+        raw_value = headers.get("Retry-After") or headers.get("retry-after") or 1
+        return max(1, int(raw_value))
+    except (AttributeError, TypeError, ValueError):
+        return 1
+
+
+def _slack_endpoint_error_response(exc: Exception) -> Response:
+    """Translate infrastructure failures without exposing provider details."""
+
+    if isinstance(exc, DatabaseError):
+        return Response(
+            {"error": "slack_storage_unavailable"},
+            status=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+    if isinstance(exc, SlackDmMirrorCredentialError):
+        return Response(
+            {"error": "slack_reauthorization_required"},
+            status=status.HTTP_401_UNAUTHORIZED,
+        )
+    if isinstance(exc, SlackDmMirrorUpstreamError):
+        return Response(
+            {"error": "slack_upstream_unavailable"},
+            status=status.HTTP_502_BAD_GATEWAY,
+        )
+    if isinstance(exc, SlackApiError):
+        error_code = _slack_api_error_code(exc)
+        if error_code in SLACK_AUTH_ERROR_CODES:
+            return Response(
+                {"error": "slack_reauthorization_required"},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+        if error_code == "ratelimited" or _slack_api_status_code(exc) == 429:
+            retry_after = _slack_retry_after_seconds(exc)
+            response = Response(
+                {
+                    "error": "slack_rate_limited",
+                    "retry_after_seconds": retry_after,
+                },
+                status=status.HTTP_429_TOO_MANY_REQUESTS,
+            )
+            response["Retry-After"] = str(retry_after)
+            return response
+    if isinstance(exc, SlackClientError):
+        return Response(
+            {"error": "slack_upstream_unavailable"},
+            status=status.HTTP_502_BAD_GATEWAY,
+        )
+    raise exc
 
 
 class SlackDmMirrorApiView(APIView):
@@ -109,10 +198,12 @@ class SlackDmMirrorView(SlackDmMirrorApiView):
         )
 
     def patch(self, request):
+        grants = SlackDmMirrorGrant.objects.filter(user=request.user)
         grant = (
-            SlackDmMirrorGrant.objects.filter(user=request.user)
+            grants.filter(status="active", revoked_at__isnull=True)
             .order_by("-updated_at")
             .first()
+            or grants.order_by("-updated_at").first()
         )
         if grant is None:
             return Response(
@@ -132,8 +223,11 @@ class SlackDmMirrorView(SlackDmMirrorApiView):
             except SlackDmMirrorError as exc:
                 raise ValidationError({"slack": str(exc)}) from exc
         elif action == "backfill_all":
+            # Compatibility for desktop releases that predate the bounded
+            # import contract. The service deliberately treats this as the
+            # same rolling-window rescan as `backfill`.
             try:
-                backfill_grant(grant, full_history=True)
+                backfill_grant(grant)
             except SlackDmMirrorError as exc:
                 raise ValidationError({"slack": str(exc)}) from exc
         else:
@@ -150,13 +244,7 @@ class SlackDmMirrorView(SlackDmMirrorApiView):
         )
 
     def delete(self, request):
-        grant = (
-            SlackDmMirrorGrant.objects.filter(user=request.user)
-            .order_by("-updated_at")
-            .first()
-        )
-        if grant is not None:
-            revoke_grant(grant)
+        revoke_user_grant(request.user)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -176,8 +264,12 @@ class SlackUserDirectoryView(SlackDmMirrorApiView):
                 limit=limit,
                 cursor=request.query_params.get("cursor", ""),
             )
+        except (SlackDmMirrorCredentialError, SlackDmMirrorUpstreamError) as exc:
+            return _slack_endpoint_error_response(exc)
         except SlackDmMirrorError as exc:
             raise ValidationError({"slack": str(exc)}) from exc
+        except (SlackClientError, DatabaseError) as exc:
+            return _slack_endpoint_error_response(exc)
         return Response(payload)
 
 
@@ -211,6 +303,8 @@ class SlackDmStartView(SlackDmMirrorApiView):
                 slack_user_ids=slack_user_ids,
                 authenticated_public_key=public_key,
             )
+        except (SlackDmMirrorCredentialError, SlackDmMirrorUpstreamError) as exc:
+            return _slack_endpoint_error_response(exc)
         except SlackDmMirrorError as exc:
             raise ValidationError(
                 {
@@ -218,4 +312,6 @@ class SlackDmStartView(SlackDmMirrorApiView):
                     "code": getattr(exc, "code", "slack_dm_mirror_error"),
                 }
             ) from exc
+        except (SlackClientError, DatabaseError) as exc:
+            return _slack_endpoint_error_response(exc)
         return Response(payload, status=status.HTTP_200_OK)

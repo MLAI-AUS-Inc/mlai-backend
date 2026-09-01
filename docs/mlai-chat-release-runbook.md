@@ -233,20 +233,30 @@ receipts, message links, or relay events by hand during triage.
 
 ## Deployment order
 
-1. Apply additive database migrations.
-2. Provision independent `COMMUNITY_CHAT_EMAIL_CODE_PEPPER`,
+1. Deploy the membership adapter that advertises
+   `generation_cas_v2` from authenticated `GET /v1/capabilities` and implements
+   the v2 intent/CAS-mint endpoints. During this compatibility window it may
+   continue advertising and serving `legacy_v1` for the previous backend only.
+   Prove that a key delete between intent capture and mint rejects the stale
+   mint and leaves no member or bound invite before deploying the backend.
+2. Apply additive database migrations.
+3. Provision independent `COMMUNITY_CHAT_EMAIL_CODE_PEPPER`,
    `COMMUNITY_CHAT_EMAIL_CODE_DELIVERY_SECRET`, and
    `COMMUNITY_CHAT_ADAPTER_TOKEN` values, deploy the backend image by immutable
    digest, and start `run_email_code_worker`. Rotating the delivery secret
    cancels pending encrypted codes, so rotate only with the outbox empty or
    after intentionally invalidating those requests.
-3. Deploy the bridge adapter by immutable digest and confirm its dedicated
+   The new backend must fail closed unless `generation_cas_v2` is advertised
+   and must never fall back to the legacy invite POST. After its production
+   membership smoke is green, deploy a membership-adapter follow-up that
+   removes `legacy_v1`.
+4. Deploy the bridge adapter by immutable digest and confirm its dedicated
    public key matches client release configuration.
-4. Run health checks and one synthetic private adapter delivery.
-5. Set the protected `COMMUNITY_BRIDGE_PRODUCTION_ENABLED=true` deployment
+5. Run health checks and one synthetic private adapter delivery.
+6. Set the protected `COMMUNITY_BRIDGE_PRODUCTION_ENABLED=true` deployment
    variable only after the credential, topology, and mapping review is complete.
-6. Resume workers, then enable only the selected reviewed mapping.
-7. Observe receipt/delivery rates, retry/dead counts, callback rejections,
+7. Resume workers, then enable only the selected reviewed mapping.
+8. Observe receipt/delivery rates, retry/dead counts, callback rejections,
    password-email failures, membership denials, auth throttles, and latency
    before expanding the cohort.
 
