@@ -337,6 +337,17 @@ def write_linear_channel_issue(payload: dict[str, Any]) -> dict[str, Any]:
             operation=operation,
             value=value,
         )
+        # Catalogue resolution can require many upstream pages. Close that
+        # window before mutating so a concurrent human edit cannot be
+        # overwritten by an input built from a stale issue snapshot.
+        issue = _fetch_linear_channel_issue_detail(issue_id)
+        if not issue:
+            raise ValueError("Linear issue was not found.")
+        _require_writable_linear_channel_issue(issue, binding)
+        if str(issue.get("updatedAt") or "") != expected_updated_at:
+            raise LinearChannelIssueConflictError(
+                "The Linear issue changed while Roo resolved the edit target. Please review it and retry the edit."
+            )
         receipt_key = _claim_linear_channel_write_request(request_id, binding)
         updated = _run_linear_channel_write_with_receipt(
             receipt_key,

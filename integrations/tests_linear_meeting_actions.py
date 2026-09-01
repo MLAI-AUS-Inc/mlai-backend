@@ -121,6 +121,7 @@ class LinearMeetingActionsApiTests(SimpleTestCase):
             FakeLinearResponse({"data": {"team": {"id": "team-tech", "states": {"nodes": [
                 {"id": "state-progress", "name": "In Progress", "type": "started", "position": 2},
             ]}}}}),
+            FakeLinearResponse(issue_response),
             FakeLinearResponse({"data": {"issueUpdate": {"success": True, "issue": {
                 "id": "issue-29", "identifier": "TECH-29", "title": "Safe edits",
                 "updatedAt": "2026-09-01T01:00:01.000Z", "url": "https://linear.app/issue/TECH-29",
@@ -215,6 +216,44 @@ class LinearMeetingActionsApiTests(SimpleTestCase):
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.json()["code"], "linear_channel_issue_stale")
         self.assertEqual(mock_post.call_count, 2)
+
+    @patch.object(linear_service, "_update_linear_channel_issue")
+    @patch.object(
+        linear_service,
+        "_linear_channel_issue_update_input",
+        return_value={"stateId": "state-done"},
+    )
+    @patch.object(linear_service, "_fetch_linear_channel_issue_detail")
+    def test_write_rechecks_version_after_target_resolution(
+        self, mock_fetch, _mock_input, mock_update
+    ):
+        base_issue = {
+            "id": "issue-29",
+            "identifier": "TECH-29",
+            "archivedAt": None,
+            "team": {"id": "team-tech"},
+            "state": {"id": "state-todo"},
+            "labels": {"nodes": [], "pageInfo": {"hasNextPage": False}},
+        }
+        mock_fetch.side_effect = [
+            {**base_issue, "updatedAt": "version-1"},
+            {**base_issue, "updatedAt": "version-1"},
+            {**base_issue, "updatedAt": "version-2"},
+        ]
+
+        with self.assertRaises(linear_service.LinearChannelIssueConflictError):
+            linear_service.write_linear_channel_issue({
+                "slack_workspace_id": "TMLAI",
+                "slack_channel_id": "CTECH",
+                "requester_slack_id": "U123",
+                "issue_identifier": "TECH-29",
+                "operation": "set_status",
+                "value": "Done",
+                "expected_updated_at": "version-1",
+                "request_id": "Ev-catalogue-race",
+            })
+
+        mock_update.assert_not_called()
 
     @patch("integrations.services.linear_meeting_actions.http_requests.post")
     def test_ambiguous_partial_graphql_write_is_reported_as_uncertain(self, mock_post):
