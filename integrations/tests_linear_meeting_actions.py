@@ -183,6 +183,10 @@ class LinearMeetingActionsApiTests(SimpleTestCase):
 
         self.assertEqual(cache.get(lock_key), replacement_owner)
 
+    @override_settings(LINEAR_CHANNEL_ISSUE_WRITE_LOCK_SECONDS=30)
+    def test_issue_write_lock_rejects_unsafe_short_ttl(self):
+        self.assertEqual(linear_service._linear_channel_write_lock_ttl(), 600)
+
     @patch("integrations.services.linear_meeting_actions.http_requests.post")
     def test_write_rechecks_version_inside_issue_lock(self, mock_post):
         base_issue = {
@@ -413,6 +417,52 @@ class LinearMeetingActionsApiTests(SimpleTestCase):
         self.assertEqual([member["id"] for member in members], ["user-1", "user-2"])
         self.assertEqual(mock_graphql.call_args_list[0].args[1]["after"], None)
         self.assertEqual(mock_graphql.call_args_list[1].args[1]["after"], "cursor-1")
+
+    @patch.object(linear_service, "_graphql")
+    def test_cycle_catalogue_paginates_every_team_cycle(self, mock_graphql):
+        mock_graphql.side_effect = [
+            {"team": {
+                "id": "team-tech",
+                "cycles": {
+                    "nodes": [{"id": "cycle-1", "name": "First"}],
+                    "pageInfo": {"hasNextPage": True, "endCursor": "cursor-1"},
+                },
+            }},
+            {"team": {
+                "id": "team-tech",
+                "cycles": {
+                    "nodes": [{"id": "cycle-2", "name": "Second"}],
+                    "pageInfo": {"hasNextPage": False, "endCursor": None},
+                },
+            }},
+        ]
+
+        cycles = linear_service._list_linear_team_cycles("team-tech")
+
+        self.assertEqual([cycle["id"] for cycle in cycles], ["cycle-1", "cycle-2"])
+        self.assertEqual(mock_graphql.call_args_list[0].args[1]["after"], None)
+        self.assertEqual(mock_graphql.call_args_list[1].args[1]["after"], "cursor-1")
+
+    def test_write_completion_log_attributes_slack_requester_and_channel(self):
+        with self.assertLogs(
+            "integrations.services.linear_meeting_actions", level="INFO"
+        ) as captured:
+            linear_service._linear_channel_write_result(
+                {"identifier": "TECH-29", "updatedAt": "version-1"},
+                {
+                    "requester_slack_id": "U123",
+                    "slack_workspace_id": "TMLAI",
+                    "slack_channel_id": "CTECH",
+                },
+                "set_title",
+                {"id": "issue-29"},
+                "Ev-audit",
+            )
+
+        log_line = captured.output[0]
+        self.assertIn("requester_slack_id=U123", log_line)
+        self.assertIn("slack_workspace_id=TMLAI", log_line)
+        self.assertIn("slack_channel_id=CTECH", log_line)
 
     def test_conclusive_rate_limit_releases_processing_receipt(self):
         binding = {

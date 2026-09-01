@@ -288,7 +288,9 @@ def write_linear_channel_issue(payload: dict[str, Any]) -> dict[str, Any]:
                 receipt_key,
                 lambda: _create_linear_channel_issue_comment(issue_id, body),
             )
-            return _linear_channel_write_result(issue, operation, updated, request_id)
+            return _linear_channel_write_result(
+                issue, binding, operation, updated, request_id
+            )
 
         if operation == "mark_duplicate":
             related = _fetch_linear_channel_issue_detail(str(value or "").strip())
@@ -304,7 +306,9 @@ def write_linear_channel_issue(payload: dict[str, Any]) -> dict[str, Any]:
                     issue_id, str(related["id"])
                 ),
             )
-            return _linear_channel_write_result(issue, operation, updated, request_id)
+            return _linear_channel_write_result(
+                issue, binding, operation, updated, request_id
+            )
 
         mutation_input = _linear_channel_issue_update_input(
             issue=issue,
@@ -317,7 +321,9 @@ def write_linear_channel_issue(payload: dict[str, Any]) -> dict[str, Any]:
             receipt_key,
             lambda: _update_linear_channel_issue(issue_id, mutation_input),
         )
-        return _linear_channel_write_result(issue, operation, updated, request_id)
+        return _linear_channel_write_result(
+            issue, binding, operation, updated, request_id
+        )
     finally:
         _release_linear_channel_issue_write_lock(lock_key, lock_owner)
 
@@ -360,7 +366,7 @@ def _claim_linear_channel_write_request(
 
 def _linear_channel_write_lock_ttl() -> int:
     return max(
-        30,
+        600,
         min(
             int(
                 getattr(
@@ -611,13 +617,43 @@ def _linear_channel_issue_update_input(
 
 def _list_linear_team_cycles(team_id: str) -> list[dict[str, Any]]:
     query = """
-    query LinearChannelIssueCycles($teamId: String!) {
-      team(id: $teamId) { id cycles(first: 100) { nodes { id name number startsAt endsAt completedAt archivedAt } } }
+    query LinearChannelIssueCycles($teamId: String!, $first: Int!, $after: String) {
+      team(id: $teamId) {
+        id
+        cycles(first: $first, after: $after) {
+          nodes { id name number startsAt endsAt completedAt archivedAt }
+          pageInfo { hasNextPage endCursor }
+        }
+      }
     }
     """
-    data = _graphql(query, {"teamId": team_id}, operation_name="LinearChannelIssueCycles")
-    team = data.get("team") if isinstance(data.get("team"), dict) else {}
-    return [cycle for cycle in _connection_nodes(team.get("cycles")) if not cycle.get("archivedAt")]
+    cycles: list[dict[str, Any]] = []
+    cursor: str | None = None
+    for _page_number in range(20):
+        data = _graphql(
+            query,
+            {"teamId": team_id, "first": 100, "after": cursor},
+            operation_name="LinearChannelIssueCycles",
+        )
+        team = data.get("team") if isinstance(data.get("team"), dict) else {}
+        if str(team.get("id") or "") != team_id:
+            raise LinearChannelIssueAccessError("The configured Linear team was not found.")
+        connection = team.get("cycles") if isinstance(team.get("cycles"), dict) else {}
+        cycles.extend(
+            cycle
+            for cycle in _connection_nodes(connection)
+            if not cycle.get("archivedAt")
+        )
+        page_info = _page_info(connection)
+        cursor = str(page_info.get("endCursor") or "").strip() or None
+        if not page_info.get("hasNextPage") or not cursor:
+            break
+    else:
+        raise LinearMeetingGraphQLError(
+            "Linear team cycles exceeded the 20-page safety limit.",
+            operation="LinearChannelIssueCycles",
+        )
+    return cycles
 
 
 def _list_linear_team_members(team_id: str) -> list[dict[str, Any]]:
@@ -725,12 +761,22 @@ def _create_linear_channel_issue_duplicate_relation(issue_id: str, related_issue
     return {"relation": result["issueRelation"]}
 
 
-def _linear_channel_write_result(issue: dict[str, Any], operation: str, result: dict[str, Any], request_id: str) -> dict[str, Any]:
+def _linear_channel_write_result(
+    issue: dict[str, Any],
+    binding: dict[str, str],
+    operation: str,
+    result: dict[str, Any],
+    request_id: str,
+) -> dict[str, Any]:
     logger.info(
-        "linear_channel_issue_write_completed identifier=%s operation=%s request_id=%s",
+        "linear_channel_issue_write_completed identifier=%s operation=%s request_id=%s "
+        "requester_slack_id=%s slack_workspace_id=%s slack_channel_id=%s",
         issue.get("identifier"),
         operation,
         request_id[:255],
+        binding["requester_slack_id"][:255],
+        binding["slack_workspace_id"][:255],
+        binding["slack_channel_id"][:255],
     )
     return {"operation": operation, "requestId": request_id, "previousUpdatedAt": issue.get("updatedAt"), "issue": result}
 
@@ -778,6 +824,7 @@ def _linear_channel_issue_binding(payload: dict[str, Any]) -> dict[str, str]:
     return {
         "slack_workspace_id": workspace_id,
         "slack_channel_id": channel_id,
+        "requester_slack_id": requester_id,
         "linear_team_id": team_id,
         "linear_state_id": state_id,
         "display_name": str(raw_binding.get("display_name") or "Linear issues").strip(),
