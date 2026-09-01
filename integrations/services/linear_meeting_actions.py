@@ -284,8 +284,10 @@ def write_linear_channel_issue(payload: dict[str, Any]) -> dict[str, Any]:
         if operation == "add_comment":
             body = _required_write_text(value, field="comment", maximum=10000)
             receipt_key = _claim_linear_channel_write_request(request_id, binding)
-            updated = _create_linear_channel_issue_comment(issue_id, body)
-            _complete_linear_channel_write_request(receipt_key)
+            updated = _run_linear_channel_write_with_receipt(
+                receipt_key,
+                lambda: _create_linear_channel_issue_comment(issue_id, body),
+            )
             return _linear_channel_write_result(issue, operation, updated, request_id)
 
         if operation == "mark_duplicate":
@@ -296,10 +298,12 @@ def write_linear_channel_issue(payload: dict[str, Any]) -> dict[str, Any]:
             if str(related.get("id")) == issue_id:
                 raise ValueError("An issue cannot be marked as a duplicate of itself.")
             receipt_key = _claim_linear_channel_write_request(request_id, binding)
-            updated = _create_linear_channel_issue_duplicate_relation(
-                issue_id, str(related["id"])
+            updated = _run_linear_channel_write_with_receipt(
+                receipt_key,
+                lambda: _create_linear_channel_issue_duplicate_relation(
+                    issue_id, str(related["id"])
+                ),
             )
-            _complete_linear_channel_write_request(receipt_key)
             return _linear_channel_write_result(issue, operation, updated, request_id)
 
         mutation_input = _linear_channel_issue_update_input(
@@ -309,8 +313,10 @@ def write_linear_channel_issue(payload: dict[str, Any]) -> dict[str, Any]:
             value=value,
         )
         receipt_key = _claim_linear_channel_write_request(request_id, binding)
-        updated = _update_linear_channel_issue(issue_id, mutation_input)
-        _complete_linear_channel_write_request(receipt_key)
+        updated = _run_linear_channel_write_with_receipt(
+            receipt_key,
+            lambda: _update_linear_channel_issue(issue_id, mutation_input),
+        )
         return _linear_channel_write_result(issue, operation, updated, request_id)
     finally:
         _release_linear_channel_issue_write_lock(lock_key, lock_owner)
@@ -459,6 +465,21 @@ def _complete_linear_channel_write_request(receipt_key: str) -> None:
         ) from exc
 
 
+def _run_linear_channel_write_with_receipt(receipt_key: str, mutation: Any) -> Any:
+    try:
+        result = mutation()
+    except (LinearMeetingRateLimitError, LinearMeetingGraphQLError):
+        # These outcomes conclusively say Linear did not accept the mutation,
+        # so the same Slack delivery may safely retry after its backoff.
+        try:
+            _atomic_cache_compare_and_delete(receipt_key, "processing")
+        except Exception:
+            logger.exception("linear_channel_issue_write_receipt_release_failed")
+        raise
+    _complete_linear_channel_write_request(receipt_key)
+    return result
+
+
 def _list_linear_team_statuses(team_id: str) -> list[dict[str, Any]]:
     query = """
     query LinearChannelIssueStatuses($teamId: String!) {
@@ -546,8 +567,7 @@ def _linear_channel_issue_update_input(
     if operation == "set_assignee":
         if str(value or "").strip().casefold() in {"", "none", "clear", "unassigned"}:
             return {"assigneeId": None}
-        teams = [team for team in list_teams() if str(team.get("id")) == binding["linear_team_id"]]
-        members = _connection_nodes(teams[0].get("members")) if teams else []
+        members = _list_linear_team_members(binding["linear_team_id"])
         return {"assigneeId": _resolve_linear_write_target(members, value, kind="assignee")["id"]}
     if operation in {"add_label", "remove_label"}:
         current_labels = issue.get("labels") if isinstance(issue.get("labels"), dict) else {}
@@ -598,6 +618,47 @@ def _list_linear_team_cycles(team_id: str) -> list[dict[str, Any]]:
     data = _graphql(query, {"teamId": team_id}, operation_name="LinearChannelIssueCycles")
     team = data.get("team") if isinstance(data.get("team"), dict) else {}
     return [cycle for cycle in _connection_nodes(team.get("cycles")) if not cycle.get("archivedAt")]
+
+
+def _list_linear_team_members(team_id: str) -> list[dict[str, Any]]:
+    query = """
+    query LinearChannelIssueTeamMembers($teamId: String!, $first: Int!, $after: String) {
+      team(id: $teamId) {
+        id
+        members(first: $first, after: $after) {
+          nodes { id name displayName email active }
+          pageInfo { hasNextPage endCursor }
+        }
+      }
+    }
+    """
+    members: list[dict[str, Any]] = []
+    cursor: str | None = None
+    for _page_number in range(20):
+        data = _graphql(
+            query,
+            {"teamId": team_id, "first": 100, "after": cursor},
+            operation_name="LinearChannelIssueTeamMembers",
+        )
+        team = data.get("team") if isinstance(data.get("team"), dict) else {}
+        if str(team.get("id") or "") != team_id:
+            raise LinearChannelIssueAccessError("The configured Linear team was not found.")
+        connection = team.get("members") if isinstance(team.get("members"), dict) else {}
+        members.extend(
+            member
+            for member in _connection_nodes(connection)
+            if member.get("active") is not False
+        )
+        page_info = _page_info(connection)
+        cursor = str(page_info.get("endCursor") or "").strip() or None
+        if not page_info.get("hasNextPage") or not cursor:
+            break
+    else:
+        raise LinearMeetingGraphQLError(
+            "Linear team members exceeded the 20-page safety limit.",
+            operation="LinearChannelIssueTeamMembers",
+        )
+    return _dedupe_users(members)
 
 
 def _resolve_linear_write_target(

@@ -341,10 +341,11 @@ class LinearMeetingActionsApiTests(SimpleTestCase):
                 ),
                 {"stateId": "state-progress"},
             )
-        with patch.object(linear_service, "list_teams", return_value=[{
-            "id": "team-tech",
-            "members": {"nodes": [{"id": "user-1", "name": "Alex"}]},
-        }]):
+        with patch.object(
+            linear_service,
+            "_list_linear_team_members",
+            return_value=[{"id": "user-1", "name": "Alex"}],
+        ):
             self.assertEqual(
                 linear_service._linear_channel_issue_update_input(
                     issue=issue, binding=binding, operation="set_assignee", value="Alex"
@@ -387,6 +388,50 @@ class LinearMeetingActionsApiTests(SimpleTestCase):
                 ),
                 {"cycleId": "cycle-1"},
             )
+
+    @patch.object(linear_service, "_graphql")
+    def test_assignee_catalogue_paginates_every_team_member(self, mock_graphql):
+        mock_graphql.side_effect = [
+            {"team": {
+                "id": "team-tech",
+                "members": {
+                    "nodes": [{"id": "user-1", "name": "First", "active": True}],
+                    "pageInfo": {"hasNextPage": True, "endCursor": "cursor-1"},
+                },
+            }},
+            {"team": {
+                "id": "team-tech",
+                "members": {
+                    "nodes": [{"id": "user-2", "name": "Second", "active": True}],
+                    "pageInfo": {"hasNextPage": False, "endCursor": None},
+                },
+            }},
+        ]
+
+        members = linear_service._list_linear_team_members("team-tech")
+
+        self.assertEqual([member["id"] for member in members], ["user-1", "user-2"])
+        self.assertEqual(mock_graphql.call_args_list[0].args[1]["after"], None)
+        self.assertEqual(mock_graphql.call_args_list[1].args[1]["after"], "cursor-1")
+
+    def test_conclusive_rate_limit_releases_processing_receipt(self):
+        binding = {
+            "slack_workspace_id": "TMLAI",
+            "slack_channel_id": "CTECH",
+        }
+        receipt_key = linear_service._claim_linear_channel_write_request(
+            "Ev-rate-limit", binding
+        )
+
+        with self.assertRaises(linear_service.LinearMeetingRateLimitError):
+            linear_service._run_linear_channel_write_with_receipt(
+                receipt_key,
+                lambda: (_ for _ in ()).throw(
+                    linear_service.LinearMeetingRateLimitError(5)
+                ),
+            )
+
+        self.assertIsNone(cache.get(receipt_key))
 
     def test_label_edit_refuses_incomplete_current_label_page(self):
         issue = {
