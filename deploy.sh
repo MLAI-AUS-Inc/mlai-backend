@@ -646,7 +646,6 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     upsert_env_value ORG_MEMORY_ACTIONS_ENABLED "false"
     upsert_env_value ORG_MEMORY_ACTION_LINEAR_EXECUTION_ENABLED "false"
     upsert_env_value ORG_MEMORY_SELECTOR_EXPORT_ENABLED "false"
-    upsert_env_value ORG_MEMORY_SELECTOR_SHADOW_ENABLED "false"
     # Web concurrency: gunicorn sync-worker count (read by scripts/start-web.sh).
     # Sized to droplet RAM (~250MB/worker). 16 fits the 8GB/4vCPU droplet with headroom.
     upsert_env_value GUNICORN_WORKERS "16"
