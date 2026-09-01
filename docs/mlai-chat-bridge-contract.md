@@ -135,6 +135,7 @@ BUZZ_BRIDGE_ADAPTER_TOKEN=...
 BUZZ_BRIDGE_CALLBACK_SECRET=...
 SLACK_OAUTH_USER_SCOPES=channels:history,channels:read,groups:history,groups:read,im:history,im:read,im:write,mpim:history,mpim:read,mpim:write,chat:write,team:read,users:read,reactions:read,reactions:write,files:read
 SLACK_DM_MIRROR_HISTORY_DAYS=30
+SLACK_DM_MIRROR_DELIVERY_BATCH_SIZE=20
 SLACK_DM_MIRROR_SHADOW_SECRET=replace-with-a-long-random-secret
 ```
 
@@ -146,14 +147,31 @@ existing users to add `mpim:write`, `reactions:read`, `reactions:write`, and
 `files:write`. The OAuth callback marks DM discovery due after the new user
 token is stored.
 
-Each linked member receives an independent, owner-controlled mirror of every
-direct and supported multi-person Slack DM visible to their user token. The
-other participants are represented by deterministic shadow keys, so linking
-never gives an unconsenting participant access to imported history. A bounded
-history scan runs once for every discovered conversation, including mirrors
-created before the history marker was deployed. The worker scans one page every
-two seconds, persists the oldest timestamp boundary, and honors Slack's
-`Retry-After` response without blocking OAuth or Community Home.
+Each linked member receives an independent, owner-controlled mirror of direct
+and supported multi-person Slack DMs with activity in the configured history
+window. Discovery sorts Slack activity metadata newest-first and skips a
+conversation only when Slack explicitly reports that its latest activity is
+older than the cutoff. Missing or ambiguous activity metadata, and any channel
+with a staged live callback, fail open to the bounded history scan. The other
+participants are represented by deterministic shadow keys, so linking never
+gives an unconsenting participant access to imported history. Participant
+profiles are bulk-preloaded with `users.list` and fall back to `users.info` for
+any IDs Slack omitted.
+
+History requests fetch up to 1,000 messages, run at the 50-requests/minute
+baseline, persist the oldest timestamp boundary, and honor Slack's
+`Retry-After` response without blocking OAuth or Community Home. Each persisted
+page is released to delivery immediately, so a large scan becomes visible while
+older pages continue loading. Consecutive top-level creates for one private
+conversation are delivered in ordered batches of up to 20 through
+`POST /v1/private-deliveries/batch`; the adapter then uses the relay's
+trusted-private `POST /events/batch` route. One grant/conversation revocation
+fence and one adapter registration lease cover the whole batch, while every
+signed event still passes the normal relay ingest pipeline.
+During a rolling deployment, a backend that reaches an older adapter falls
+back to the same deterministic single-delivery endpoint; an adapter that
+reaches an older relay returns a retryable upstream failure until the relay is
+updated.
 Backfill status is complete only after every queued history delivery completes;
 transient dead rows are safely repopulated from Slack, while a permanently
 rejected adapter delivery stays fenced until explicit backfill or renewed
@@ -208,8 +226,9 @@ body.
 
 Community Chat exposes these owner-authenticated endpoints:
 
-- `GET /api/v1/community-chat/slack/` returns delivery-aware backfill,
-  identity-repair, device-capacity, and full-history status.
+- `GET /api/v1/community-chat/slack/` returns delivery-aware backfill (including
+  imported and queued message counts), identity-repair, device-capacity, and
+  bounded-history status.
 - `GET /api/v1/community-chat/slack/users/?q=...&limit=...&cursor=...` searches
   internal human Slack users. It excludes deleted, bot, app, Slack Connect, and
   owner rows and never returns email addresses or OAuth tokens.

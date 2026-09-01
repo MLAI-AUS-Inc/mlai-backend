@@ -122,6 +122,12 @@ _history_scan_available_at = 0.0
 GRANT_DISCOVERY_INTERVAL_SECONDS = 300
 HISTORY_RECONCILIATION_INTERVAL_SECONDS = 3600
 MAX_HISTORY_DAYS = 30
+HISTORY_PAGE_LIMIT = 1000
+HISTORY_REQUESTS_PER_MINUTE = 50
+HISTORY_REQUEST_INTERVAL_SECONDS = 60 / HISTORY_REQUESTS_PER_MINUTE
+PROFILE_BULK_PRELOAD_THRESHOLD = 4
+MAX_PRIVATE_DELIVERY_BATCH = 20
+MAX_PRIVATE_DELIVERY_BATCH_TEXT_BYTES = 700_000
 HISTORY_STATE_PREFIX = "history-state:"
 HISTORY_MAIN_STATE_ID = f"{HISTORY_STATE_PREFIX}main"
 DISCOVERY_CHECKPOINT_KEY = "slack_dm_mirror_discovery_v1"
@@ -1047,6 +1053,11 @@ def status_payload(
     backfill_counts = {
         "complete": complete,
         "pending": backfill_conversations.count() - complete,
+        "imported_messages": backfill_deliveries.filter(
+            status=CommunityBridgeDeliveryStatus.COMPLETED,
+        )
+        .exclude(metadata__history_outside_window=True)
+        .count(),
         "queued_messages": backfill_deliveries.filter(
             status__in=(
                 CommunityBridgeDeliveryStatus.PENDING,
@@ -2026,10 +2037,208 @@ def _discard_staged_events_for_channel(
         _discard_staged_events_locked(connection, channel_ids={channel_id})
 
 
+def _staged_slack_channel_ids(
+    connection: ExternalServiceConnection,
+) -> set[str]:
+    raw_pending = (connection.sync_cursor or {}).get(
+        PENDING_EVENT_CHECKPOINT_KEY,
+        [],
+    )
+    if not isinstance(raw_pending, list):
+        return set()
+    return {
+        str(item.get("channel_id") or "").strip()
+        for item in raw_pending
+        if isinstance(item, dict) and str(item.get("channel_id") or "").strip()
+    }
+
+
+def _slack_conversation_activity_seconds(raw: dict[str, Any]) -> int | None:
+    """Return Slack's best conversation-activity marker, if one is present."""
+
+    latest = raw.get("latest")
+    if isinstance(latest, dict):
+        latest = latest.get("ts")
+    latest_text = str(latest or "").strip()
+    if latest_text:
+        try:
+            return _slack_ts_sort_key(latest_text)[0]
+        except SlackDmMirrorError:
+            pass
+    try:
+        updated = int(float(str(raw.get("updated") or "").strip()))
+    except (TypeError, ValueError):
+        return None
+    # Slack conversation `updated` values are normally milliseconds while a
+    # few fixtures and older API responses use seconds.
+    if updated > 10_000_000_000:
+        updated //= 1000
+    return updated if updated > 0 else None
+
+
+def _slack_conversation_is_recent(
+    raw: dict[str, Any],
+    *,
+    activity_cutoff: int,
+    staged_channel_ids: set[str],
+) -> bool:
+    channel_id = str(raw.get("id") or "").strip()
+    if channel_id in staged_channel_ids:
+        return True
+    activity_seconds = _slack_conversation_activity_seconds(raw)
+    # Missing activity is deliberately fail-open. The bounded history query is
+    # the authoritative fallback and still cannot import content before cutoff.
+    return activity_seconds is None or activity_seconds >= activity_cutoff
+
+
+def _embedded_conversation_participant_ids(
+    raw_channels: list[dict[str, Any]],
+    *,
+    owner_slack_user_id: str,
+) -> set[str]:
+    participant_ids = {owner_slack_user_id}
+    for raw in raw_channels:
+        direct_user_id = str(raw.get("user") or "").strip()
+        if direct_user_id:
+            participant_ids.add(direct_user_id)
+        for value in raw.get("members") or []:
+            user_id = str(value or "").strip()
+            if user_id:
+                participant_ids.add(user_id)
+    return participant_ids
+
+
+def _preload_slack_profiles(
+    authority: _SlackGrantApiAuthority,
+    participant_ids: set[str],
+    cache: dict[str, dict[str, str]],
+) -> None:
+    missing_ids = {user_id for user_id in participant_ids if user_id not in cache}
+    if len(missing_ids) < PROFILE_BULK_PRELOAD_THRESHOLD:
+        return
+    cursor = ""
+    seen_cursors: set[str] = set()
+    while missing_ids:
+        response = _call_slack_with_grant_authority(
+            authority,
+            "users_list",
+            required_scopes=DIRECT_DM_SCOPES,
+            limit=200,
+            cursor=cursor,
+        )
+        members = response.get("members")
+        # Profile preloading is only an optimization. If Slack returns a
+        # partial/unexpected page, leave the missing users to the established
+        # per-user lookup path instead of failing discovery.
+        if not isinstance(members, list):
+            return
+        for user in members:
+            if not isinstance(user, dict):
+                continue
+            user_id = str(user.get("id") or "").strip()
+            if user_id not in missing_ids:
+                continue
+            cache[user_id] = _profile_from_slack_user(user)
+            missing_ids.discard(user_id)
+        next_cursor = str(
+            (response.get("response_metadata") or {}).get("next_cursor") or ""
+        ).strip()
+        if not next_cursor:
+            return
+        if next_cursor in seen_cursors:
+            raise SlackDmMirrorError("Slack user pagination made no progress.")
+        seen_cursors.add(next_cursor)
+        cursor = next_cursor
+
+
+def _complete_inactive_conversation_history(
+    authority: _SlackGrantApiAuthority,
+    *,
+    grant_id: int,
+    channel_id: str,
+) -> None:
+    """Finish an explicitly requested scan whose latest activity is too old."""
+
+    with transaction.atomic():
+        grant, _ = _lock_slack_grant_api_authority(
+            authority,
+            required_scopes=DIRECT_DM_SCOPES,
+        )
+        if grant.pk != grant_id:
+            return
+        conversation = (
+            SlackDmMirrorConversation.objects.select_for_update()
+            .filter(
+                grant=grant,
+                slack_conversation_id=channel_id,
+                status=SlackDmMirrorConversationStatus.LIVE,
+            )
+            .first()
+        )
+        if conversation is None or conversation.history_backfilled_at is not None:
+            return
+        rows = list(
+            SlackDmMirrorDelivery.objects.select_for_update()
+            .filter(
+                conversation=conversation,
+                metadata__backfill=True,
+                status__in=(
+                    CommunityBridgeDeliveryStatus.PENDING,
+                    CommunityBridgeDeliveryStatus.PROCESSING,
+                    CommunityBridgeDeliveryStatus.FAILED,
+                    CommunityBridgeDeliveryStatus.DEAD,
+                ),
+            )
+            .order_by("id")
+        )
+        now = timezone.now()
+        for row in rows:
+            metadata = dict(row.metadata or {})
+            metadata["history_outside_window"] = True
+            row.metadata = metadata
+            row.status = CommunityBridgeDeliveryStatus.COMPLETED
+            row.encrypted_text = ""
+            row.completed_at = now
+            row.available_at = now
+            row.last_error = ""
+            row.updated_at = now
+        if rows:
+            SlackDmMirrorDelivery.objects.bulk_update(
+                rows,
+                (
+                    "metadata",
+                    "status",
+                    "encrypted_text",
+                    "completed_at",
+                    "available_at",
+                    "last_error",
+                    "updated_at",
+                ),
+            )
+        _clear_history_scan_states([conversation.pk])
+        conversation.history_backfilled_at = now
+        conversation.oldest_synced_ts = ""
+        conversation.latest_synced_ts = ""
+        conversation.last_error = ""
+        conversation.save(
+            update_fields=(
+                "history_backfilled_at",
+                "oldest_synced_ts",
+                "latest_synced_ts",
+                "last_error",
+                "updated_at",
+            )
+        )
+
+
 def discover_conversations(
     grant: SlackDmMirrorGrant, *, force_backfill: bool = False
 ) -> int:
-    """Discover and provision every direct or group DM visible to the owner."""
+    """Discover owner-visible DMs with activity in the configured history window.
+
+    Slack sometimes omits conversation activity metadata. Those conversations
+    remain eligible so an incomplete list response can never hide a private DM.
+    """
 
     _, identity_repaired, _ = ensure_owner_identity(
         grant,
@@ -2078,6 +2287,10 @@ def discover_conversations(
         for slack_user_id, profile in stored_profiles.items():
             if isinstance(profile, dict):
                 profile_cache.setdefault(str(slack_user_id), profile)
+    staged_channel_ids = _staged_slack_channel_ids(grant.connection)
+    activity_cutoff = (
+        int(time.time()) - _bounded_history_days(grant.history_days) * 86_400
+    )
     while True:
         response = _call_slack_with_grant_authority(
             authority,
@@ -2088,7 +2301,31 @@ def discover_conversations(
             limit=200,
             cursor=cursor,
         )
-        for raw in response.get("channels") or []:
+        raw_channels = [
+            raw for raw in response.get("channels") or [] if isinstance(raw, dict)
+        ]
+        raw_channels.sort(
+            key=lambda raw: _slack_conversation_activity_seconds(raw) or -1,
+            reverse=True,
+        )
+        eligible_channels = [
+            raw
+            for raw in raw_channels
+            if _slack_conversation_is_recent(
+                raw,
+                activity_cutoff=activity_cutoff,
+                staged_channel_ids=staged_channel_ids,
+            )
+        ]
+        _preload_slack_profiles(
+            authority,
+            _embedded_conversation_participant_ids(
+                eligible_channels,
+                owner_slack_user_id=grant.slack_user_id,
+            ),
+            profile_cache,
+        )
+        for raw in raw_channels:
             if not isinstance(raw, dict):
                 continue
             channel_id = str(raw.get("id") or "").strip()
@@ -2113,6 +2350,22 @@ def discover_conversations(
                 )
                 _discard_staged_events_for_channel(authority, channel_id)
                 continue
+            conversation_is_recent = _slack_conversation_is_recent(
+                raw,
+                activity_cutoff=activity_cutoff,
+                staged_channel_ids=staged_channel_ids,
+            )
+            inactive_existing_conversation = bool(
+                not conversation_is_recent
+                and SlackDmMirrorConversation.objects.filter(
+                    grant=grant,
+                    slack_conversation_id=channel_id,
+                ).exists()
+            )
+            if not conversation_is_recent and not inactive_existing_conversation:
+                # Do not create a destination or read participant profiles for
+                # a DM Slack proves has no activity inside the import window.
+                continue
             conversation = None
             try:
                 conversation = _discover_conversation(
@@ -2125,10 +2378,20 @@ def discover_conversations(
                 )
                 if conversation is not None:
                     discovered += 1
-                    _drain_staged_events_for_conversation(
-                        authority,
-                        conversation.pk,
-                    )
+                    if inactive_existing_conversation:
+                        # Existing mirrors still refresh their device and
+                        # participant boundary, but no out-of-window history is
+                        # fetched or requeued.
+                        _complete_inactive_conversation_history(
+                            authority,
+                            grant_id=grant.pk,
+                            channel_id=channel_id,
+                        )
+                    else:
+                        _drain_staged_events_for_conversation(
+                            authority,
+                            conversation.pk,
+                        )
                 else:
                     _discard_staged_events_for_channel(authority, channel_id)
             except Exception as exc:
@@ -3212,7 +3475,7 @@ def ingest_mlai_dm_event(payload: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
-def process_ready_deliveries(limit: int = 20) -> int:
+def process_ready_deliveries(limit: int = 20, *, batch_size: int = 1) -> int:
     now = timezone.now()
     SlackDmMirrorDelivery.objects.filter(
         status=CommunityBridgeDeliveryStatus.PROCESSING,
@@ -3226,41 +3489,138 @@ def process_ready_deliveries(limit: int = 20) -> int:
         updated_at=now,
     )
     processed = 0
+    attempted = 0
     delivery_limit = max(1, min(int(limit), 100))
-    for _ in range(delivery_limit):
-        with transaction.atomic():
-            delivery = (
+    normalized_batch_size = max(
+        1,
+        min(int(batch_size), MAX_PRIVATE_DELIVERY_BATCH),
+    )
+    while attempted < delivery_limit:
+        claimed = _claim_ready_private_delivery_batch(
+            limit=min(normalized_batch_size, delivery_limit - attempted),
+        )
+        if not claimed:
+            break
+        attempted += len(claimed)
+        try:
+            if len(claimed) > 1:
+                _deliver_private_batch(claimed)
+            else:
+                _deliver_private(claimed[0])
+        except Exception as exc:  # worker boundary; retry with bounded backoff
+            for delivery in claimed:
+                _record_private_delivery_failure(delivery, exc)
+            logger.exception(
+                "slack_dm_mirror_delivery_failed delivery_ids=%s",
+                ",".join(str(delivery.pk) for delivery in claimed),
+            )
+            continue
+        processed += len(claimed)
+    return processed
+
+
+def _claim_ready_private_delivery_batch(*, limit: int) -> list[SlackDmMirrorDelivery]:
+    """Claim one conversation's next ordered work, batching simple creates."""
+
+    with transaction.atomic():
+        candidate_conversation_id = (
+            SlackDmMirrorDelivery.objects
+            .filter(
+                status=CommunityBridgeDeliveryStatus.PENDING,
+                available_at__lte=timezone.now(),
+                conversation__status=SlackDmMirrorConversationStatus.LIVE,
+                conversation__grant__status=SlackDmMirrorGrantStatus.ACTIVE,
+                conversation__grant__revoked_at__isnull=True,
+            )
+            .exclude(source_message_id__startswith=REGISTRATION_STATE_PREFIX)
+            .order_by("available_at", "id")
+            .values_list("conversation_id", flat=True)
+            .first()
+        )
+        if candidate_conversation_id is None:
+            return []
+        # Conversation-first locking prevents two worker processes from
+        # claiming different rows in the same DM and reversing their order.
+        conversation = (
+            SlackDmMirrorConversation.objects.select_for_update(skip_locked=True)
+            .select_related("grant__connection")
+            .filter(
+                pk=candidate_conversation_id,
+                status=SlackDmMirrorConversationStatus.LIVE,
+                grant__status=SlackDmMirrorGrantStatus.ACTIVE,
+                grant__revoked_at__isnull=True,
+            )
+            .first()
+        )
+        if conversation is None or SlackDmMirrorDelivery.objects.filter(
+            conversation=conversation,
+            status=CommunityBridgeDeliveryStatus.PROCESSING,
+        ).exists():
+            return []
+        seed = (
+            SlackDmMirrorDelivery.objects.select_for_update(
+                skip_locked=True,
+                of=("self",),
+            )
+            .filter(
+                conversation=conversation,
+                status=CommunityBridgeDeliveryStatus.PENDING,
+                available_at__lte=timezone.now(),
+            )
+            .exclude(source_message_id__startswith=REGISTRATION_STATE_PREFIX)
+            .order_by("available_at", "id")
+            .first()
+        )
+        if seed is None:
+            return []
+        seed.conversation = conversation
+        candidates = [seed]
+        if limit > 1 and _private_delivery_batch_eligible(seed):
+            candidates = list(
                 SlackDmMirrorDelivery.objects.select_for_update(
                     skip_locked=True,
                     of=("self",),
                 )
-                .select_related("conversation__grant__connection")
                 .filter(
+                    conversation=conversation,
                     status=CommunityBridgeDeliveryStatus.PENDING,
                     available_at__lte=timezone.now(),
-                    conversation__status=SlackDmMirrorConversationStatus.LIVE,
-                    conversation__grant__status=SlackDmMirrorGrantStatus.ACTIVE,
-                    conversation__grant__revoked_at__isnull=True,
                 )
                 .exclude(source_message_id__startswith=REGISTRATION_STATE_PREFIX)
-                .order_by("available_at", "id")
-                .first()
+                .order_by("available_at", "id")[:limit]
             )
-            if delivery is None:
-                break
+            bounded_candidates = []
+            text_bytes = 0
+            for candidate in candidates:
+                candidate.conversation = conversation
+                if not _private_delivery_batch_eligible(candidate):
+                    break
+                next_text_bytes = text_bytes + len(
+                    str(candidate.encrypted_text or "").encode("utf-8")
+                )
+                if (
+                    bounded_candidates
+                    and next_text_bytes > MAX_PRIVATE_DELIVERY_BATCH_TEXT_BYTES
+                ):
+                    break
+                bounded_candidates.append(candidate)
+                text_bytes = next_text_bytes
+            candidates = bounded_candidates or [seed]
+        for delivery in candidates:
             _prepare_outbound_echo_metadata(delivery)
             delivery.status = CommunityBridgeDeliveryStatus.PROCESSING
             delivery.save(update_fields=("metadata", "status", "updated_at"))
-        try:
-            _deliver_private(delivery)
-        except Exception as exc:  # worker boundary; retry with bounded backoff
-            _record_private_delivery_failure(delivery, exc)
-            logger.exception(
-                "slack_dm_mirror_delivery_failed delivery_id=%s", delivery.pk
-            )
-            continue
-        processed += 1
-    return processed
+        return candidates
+
+
+def _private_delivery_batch_eligible(delivery: SlackDmMirrorDelivery) -> bool:
+    metadata = delivery.metadata or {}
+    thread_ts = str(metadata.get("thread_ts") or "").strip()
+    return bool(
+        delivery.source_platform == CommunityBridgePlatform.SLACK
+        and delivery.operation == CommunityBridgeDeliveryType.CREATE
+        and (not thread_ts or thread_ts == delivery.source_message_id)
+    )
 
 
 def _prepare_outbound_echo_metadata(delivery: SlackDmMirrorDelivery) -> None:
@@ -4550,7 +4910,7 @@ def _enqueue_history_page(
 
     request_kwargs: dict[str, Any] = {
         "channel": slack_conversation_id,
-        "limit": 200,
+        "limit": HISTORY_PAGE_LIMIT,
     }
     if scan_authority.history_days > 0:
         request_kwargs["oldest"] = scan_authority.oldest
@@ -4689,7 +5049,10 @@ def _persist_history_page_locked(
         _slack_ts_sort_key(message_id)
         history.append(message)
     history.sort(key=lambda message: _slack_ts_sort_key(str(message.get("ts") or "")))
-    held_until = timezone.now() + timedelta(days=365)
+    # Release each fetched page immediately. Idempotent source keys and the
+    # per-conversation queue preserve mutation dependencies while the UI can
+    # begin receiving messages before a large scan has reached its last page.
+    held_until = timezone.now()
     for message in history:
         message = dict(message)
         parent_message_id = str(message.get("thread_ts") or "").strip()
@@ -4781,7 +5144,7 @@ def _enqueue_reply_page(
     request_kwargs: dict[str, Any] = {
         "channel": slack_conversation_id,
         "ts": parent_message_id,
-        "limit": 200,
+        "limit": HISTORY_PAGE_LIMIT,
     }
     cursor = str(metadata.get("cursor") or "").strip()
     if cursor:
@@ -4869,7 +5232,7 @@ def _persist_reply_page_locked(
             continue
         messages.append(message)
     messages.sort(key=lambda message: _slack_ts_sort_key(str(message.get("ts") or "")))
-    held_until = timezone.now() + timedelta(days=365)
+    held_until = timezone.now()
     for message in messages:
         message = dict(message)
         message["thread_ts"] = str(message.get("thread_ts") or parent_message_id)
@@ -5649,6 +6012,164 @@ def _deliver_private(delivery: SlackDmMirrorDelivery) -> None:
         raise SlackDmMirrorError(
             f"Unsupported private delivery source: {delivery.source_platform}"
         )
+
+
+def _deliver_private_batch(claimed: list[SlackDmMirrorDelivery]) -> None:
+    """Deliver ordered top-level Slack creates under one revocation fence."""
+
+    if not claimed or any(
+        delivery.conversation_id != claimed[0].conversation_id
+        or not _private_delivery_batch_eligible(delivery)
+        for delivery in claimed
+    ):
+        raise SlackDmMirrorError("Private delivery batch is invalid.")
+    conversation_id = claimed[0].conversation_id
+    grant_id = claimed[0].conversation.grant_id
+    grant_snapshot = (
+        SlackDmMirrorGrant.objects.select_related("connection")
+        .filter(pk=grant_id)
+        .first()
+    )
+    if grant_snapshot is None:
+        raise SlackDmMirrorAuthorizationError(
+            "The private delivery batch is no longer authorized."
+        )
+    _refresh_slack_grant_token_if_due(grant_snapshot)
+    claimed_ids = [delivery.pk for delivery in claimed]
+    with transaction.atomic():
+        grant = (
+            SlackDmMirrorGrant.objects.select_for_update(of=("self",))
+            .select_related("connection")
+            .filter(pk=grant_id)
+            .first()
+        )
+        if grant is None:
+            raise SlackDmMirrorAuthorizationError(
+                "The private delivery batch is no longer authorized."
+            )
+        conversation = (
+            SlackDmMirrorConversation.objects.select_for_update()
+            .filter(pk=conversation_id, grant=grant)
+            .first()
+        )
+        if conversation is None:
+            raise SlackDmMirrorAuthorizationError(
+                "The private delivery batch is no longer authorized."
+            )
+        conversation.grant = grant
+        deliveries_by_id = {
+            delivery.pk: delivery
+            for delivery in SlackDmMirrorDelivery.objects.select_for_update().filter(
+                pk__in=claimed_ids,
+                conversation=conversation,
+            )
+        }
+        deliveries = [deliveries_by_id.get(delivery_id) for delivery_id in claimed_ids]
+        if any(delivery is None for delivery in deliveries):
+            raise SlackDmMirrorAuthorizationError(
+                "The private delivery batch is no longer authorized."
+            )
+
+        payloads = []
+        source_metadata_by_id: dict[int, dict[str, Any]] = {}
+        for delivery in deliveries:
+            if delivery is None:
+                continue
+            delivery.conversation = conversation
+            _assert_private_delivery_authorized_locked(delivery)
+            if not _private_delivery_batch_eligible(delivery):
+                raise SlackDmMirrorError("Private delivery batch changed while claimed.")
+            linked_pubkey = str(
+                (conversation.participant_identity_map or {}).get(
+                    delivery.source_author_id
+                )
+                or ""
+            ).lower()
+            if not linked_pubkey:
+                raise SlackDmMirrorError(
+                    "Slack author is not part of this owner mirror."
+                )
+            profile = (conversation.participant_profiles or {}).get(
+                delivery.source_author_id
+            ) or {}
+            source_metadata = dict(delivery.metadata or {})
+            source_metadata_by_id[delivery.pk] = source_metadata
+            payloads.append(
+                {
+                    "delivery_id": str(delivery.pk),
+                    "created_at": _delivery_created_at(delivery),
+                    "operation": delivery.operation,
+                    "channel_id": str(conversation.mlai_channel_id),
+                    "participant_pubkeys": sorted(
+                        conversation.participant_buzz_pubkeys or []
+                    ),
+                    "text": delivery.encrypted_text,
+                    "source_workspace_id": conversation.slack_workspace_id,
+                    "source_channel_id": conversation.slack_conversation_id,
+                    "source_message_id": delivery.source_message_id,
+                    "source_author_id": delivery.source_author_id,
+                    "source_author_display_name": str(
+                        profile.get("display_name") or delivery.source_author_id
+                    ),
+                    "source_author_avatar_url": str(profile.get("avatar_url") or "")
+                    or None,
+                    "linked_pubkey": linked_pubkey,
+                    "target_message_id": None,
+                    "parent_message_id": None,
+                }
+            )
+        results = BuzzBridgeClient.deliver_private_batch(payloads)
+        if len(results) != len(deliveries):
+            raise SlackDmMirrorError("Private delivery batch response is incomplete.")
+
+        now = timezone.now()
+        latest_timestamp = ""
+        for delivery, result in zip(deliveries, results):
+            if delivery is None:
+                continue
+            _assert_private_delivery_authorized_locked(delivery)
+            source_metadata = source_metadata_by_id[delivery.pk]
+            delivery.status = CommunityBridgeDeliveryStatus.COMPLETED
+            delivery.encrypted_text = ""
+            delivery.metadata = {
+                **source_metadata,
+                "participant_hash": conversation.participant_hash,
+                "destination_message_id": str(result.get("message_id") or ""),
+                "destination_parent_message_id": str(
+                    result.get("parent_message_id") or ""
+                ),
+            }
+            delivery.completed_at = now
+            delivery.last_error = ""
+            delivery.save(
+                update_fields=(
+                    "status",
+                    "encrypted_text",
+                    "metadata",
+                    "completed_at",
+                    "last_error",
+                    "updated_at",
+                )
+            )
+            event_timestamp = str(
+                source_metadata.get("event_ts") or delivery.source_message_id
+            ).strip()
+            try:
+                _slack_ts_sort_key(event_timestamp)
+            except SlackDmMirrorError:
+                continue
+            if not latest_timestamp or _slack_ts_sort_key(
+                event_timestamp
+            ) > _slack_ts_sort_key(latest_timestamp):
+                latest_timestamp = event_timestamp
+        conversation.last_synced_at = now
+        if latest_timestamp:
+            conversation.latest_synced_ts = latest_timestamp
+        conversation.save(
+            update_fields=("last_synced_at", "latest_synced_ts", "updated_at")
+        )
+        grant.last_synced_at = now
+        grant.save(update_fields=("last_synced_at", "updated_at"))
 
 
 def _assert_private_delivery_authorized_locked(

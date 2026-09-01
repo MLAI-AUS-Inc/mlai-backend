@@ -1179,6 +1179,99 @@ class BuzzBridgeClientTests(TestCase):
         )
 
     @patch("integrations.services.community_bridge.buzz.requests.post")
+    def test_private_batch_uses_one_authenticated_adapter_request(self, mock_post):
+        channel_id = "922c3b22-8002-4c3c-a37b-ce406a5e606e"
+        deliveries = [
+            {
+                "delivery_id": str(index),
+                "created_at": 1785568000 + index,
+                "operation": "create",
+                "channel_id": channel_id,
+                "participant_pubkeys": ["1" * 64, "2" * 64],
+                "text": f"private {index}",
+                "source_workspace_id": "TMLAI",
+                "source_channel_id": "DONE",
+                "source_message_id": f"178556800{index}.000100",
+                "source_author_id": "UONE",
+                "source_author_display_name": "One",
+                "source_author_avatar_url": None,
+                "linked_pubkey": "1" * 64,
+                "target_message_id": None,
+                "parent_message_id": None,
+            }
+            for index in range(2)
+        ]
+        mock_post.return_value = SimpleNamespace(
+            ok=True,
+            status_code=200,
+            json=lambda: {
+                "deliveries": [
+                    {
+                        "channel_id": channel_id,
+                        "message_id": character * 64,
+                        "parent_message_id": "",
+                    }
+                    for character in ("a", "b")
+                ]
+            },
+        )
+
+        result = BuzzBridgeClient.deliver_private_batch(deliveries)
+
+        self.assertEqual([item["message_id"] for item in result], ["a" * 64, "b" * 64])
+        self.assertEqual(
+            mock_post.call_args.args[0],
+            "http://buzz-bridge-adapter:8090/v1/private-deliveries/batch",
+        )
+        self.assertEqual(mock_post.call_args.kwargs["json"], {"deliveries": deliveries})
+        self.assertEqual(mock_post.call_count, 1)
+
+    @patch("integrations.services.community_bridge.buzz.requests.post")
+    def test_private_batch_falls_back_during_an_adapter_rolling_deploy(self, mock_post):
+        channel_id = "922c3b22-8002-4c3c-a37b-ce406a5e606e"
+        deliveries = [
+            {
+                "delivery_id": str(index),
+                "channel_id": channel_id,
+                "text": f"private {index}",
+            }
+            for index in range(2)
+        ]
+        mock_post.side_effect = [
+            SimpleNamespace(ok=False, status_code=404),
+            SimpleNamespace(
+                ok=True,
+                status_code=200,
+                json=lambda: {
+                    "channel_id": channel_id,
+                    "message_id": "a" * 64,
+                    "parent_message_id": "",
+                },
+            ),
+            SimpleNamespace(
+                ok=True,
+                status_code=200,
+                json=lambda: {
+                    "channel_id": channel_id,
+                    "message_id": "b" * 64,
+                    "parent_message_id": "",
+                },
+            ),
+        ]
+
+        result = BuzzBridgeClient.deliver_private_batch(deliveries)
+
+        self.assertEqual([item["message_id"] for item in result], ["a" * 64, "b" * 64])
+        self.assertEqual(
+            [call.args[0] for call in mock_post.call_args_list],
+            [
+                "http://buzz-bridge-adapter:8090/v1/private-deliveries/batch",
+                "http://buzz-bridge-adapter:8090/v1/private-deliveries",
+                "http://buzz-bridge-adapter:8090/v1/private-deliveries",
+            ],
+        )
+
+    @patch("integrations.services.community_bridge.buzz.requests.post")
     def test_authentication_rejection_is_permanent(self, mock_post):
         mock_post.return_value = SimpleNamespace(ok=False, status_code=401)
 
