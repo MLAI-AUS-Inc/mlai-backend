@@ -239,7 +239,12 @@ def _validated_evidence(raw_evidence: Any) -> list[dict[str, str]]:
     return evidence
 
 
-def build_reconciliation_enrichment_context(*, organization, run_id: str = "") -> dict[str, Any]:
+def build_reconciliation_enrichment_context(
+    *,
+    organization,
+    run_id: str = "",
+    statement_line_ids: list[str] | set[str] | None = None,
+) -> dict[str, Any]:
     """Return immutable Stripe candidates plus Luma events and Linear projects.
 
     Gmail and Slack evidence is intentionally supplied by Valley's canonical
@@ -326,6 +331,7 @@ def build_reconciliation_enrichment_context(*, organization, run_id: str = "") -
         luma_events=luma_events,
         humanitix_events=humanitix_events,
         linear_projects=linear_projects,
+        statement_line_ids=statement_line_ids,
     )
     return {
         "organization_id": organization.id,

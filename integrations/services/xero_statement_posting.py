@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 from datetime import timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -34,13 +33,17 @@ from integrations.services.xero_reconciliation import (
     xero_has_settings_write_scope,
 )
 from integrations.services.xero_scopes import xero_has_payment_write_scope
-from integrations.services.xero_statement_reconciliation import normalize_statement_action
+from integrations.services.xero_statement_reconciliation import (
+    csv_statement_duplicate_count,
+    normalize_statement_action,
+)
 from integrations.services.reconciliation_rules import record_reconciliation_decision
 from integrations.services.reconciliation_tracking import (
     effective_tracking,
     effective_tracking_errors,
     xero_tracking_entry,
 )
+from integrations.services.reconciliation_bank_accounts import active_bank_account
 
 
 def _stable_json(value: Any) -> str:
@@ -49,12 +52,6 @@ def _stable_json(value: Any) -> str:
 
 def _hash_payload(value: Any) -> str:
     return hashlib.sha256(_stable_json(value).encode("utf-8")).hexdigest()
-
-
-def _normalized_xero_resource_id(value: Any) -> str:
-    """Compare UUID-shaped Xero IDs independently of casing and separators."""
-
-    return re.sub(r"[^0-9a-z]", "", str(value or "").strip().casefold())
 
 
 def _reference(line: XeroStatementLineSnapshot) -> str:
@@ -156,7 +153,7 @@ def _posting_payload(
     if operation == XeroStatementPosting.OPERATION_BILL_PAYMENT:
         return {
             "Invoice": {"InvoiceID": suggestion.matched_xero_bill_id},
-            "Account": {"AccountID": profile.xero_bank_account_id},
+            "Account": {"AccountID": line.bank_account_id},
             "Date": line.transaction_date.isoformat(),
             "Amount": float(line.amount),
             "Reference": _reference(line),
@@ -175,7 +172,7 @@ def _posting_payload(
     return {
         "Type": "SPEND" if line.direction == XeroStatementLineSnapshot.DIRECTION_DEBIT else "RECEIVE",
         "Contact": {"Name": suggestion.contact_name},
-        "BankAccount": {"AccountID": profile.xero_bank_account_id},
+        "BankAccount": {"AccountID": line.bank_account_id},
         "Date": line.transaction_date.isoformat(),
         "Reference": _reference(line),
         "CurrencyCode": line.currency,
@@ -230,12 +227,30 @@ def build_statement_posting_preview(suggestion: XeroStatementSuggestion) -> dict
         )
     if not operation:
         errors.append("This suggestion needs review and cannot be posted automatically.")
-    if not profile.xero_bank_account_id:
-        errors.append("Configure the Xero bank account before posting.")
-    elif _normalized_xero_resource_id(line.bank_account_id) != _normalized_xero_resource_id(
-        profile.xero_bank_account_id
-    ):
-        errors.append("The statement line belongs to a different Xero bank account.")
+    if operation:
+        if csv_statement_duplicate_count(line.statement_line_id) > 1:
+            errors.append(
+                "Identical CSV statement lines cannot be prepared automatically because "
+                "the report has no stable per-line identifier."
+            )
+        try:
+            scan_metadata = (
+                line.last_scan.capture_metadata
+                if line.last_scan_id and isinstance(line.last_scan.capture_metadata, dict)
+                else {}
+            )
+            selected_bank_account = active_bank_account(
+                profile,
+                line.bank_account_id,
+                allow_legacy_profile_account=scan_metadata.get("schema_version") != 2,
+            )
+        except ReconciliationValidationError as exc:
+            selected_bank_account = None
+            errors.extend(exc.errors)
+        if selected_bank_account is None and not any(
+            "bank-account catalogue" in error for error in errors
+        ):
+            errors.append("The statement line does not belong to an active Xero BANK account.")
     if operation == XeroStatementPosting.OPERATION_BANK_TRANSACTION:
         semantic_local_duplicate = XeroStatementPosting.objects.filter(
             organization=suggestion.organization,
