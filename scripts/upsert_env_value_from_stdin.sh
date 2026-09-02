@@ -3,7 +3,7 @@ set -euo pipefail
 
 key="${1:-}"
 case "$key" in
-  LINEAR_CHANNEL_ISSUE_BINDINGS_JSON|LINEAR_CHANNEL_ISSUE_MAX_COMMENTS) ;;
+  LINEAR_CHANNEL_ISSUE_BINDINGS_JSON|LINEAR_CHANNEL_ISSUE_MAX_COMMENTS|LINEAR_CHANNEL_ISSUE_WRITES_ENABLED) ;;
   *)
     echo "Unsupported production environment key" >&2
     exit 64
@@ -30,6 +30,12 @@ case "$key" in
   LINEAR_CHANNEL_ISSUE_MAX_COMMENTS)
     [[ "$value" =~ ^[1-9][0-9]*$ ]] || {
       echo "LINEAR_CHANNEL_ISSUE_MAX_COMMENTS must be a positive integer" >&2
+      exit 1
+    }
+    ;;
+  LINEAR_CHANNEL_ISSUE_WRITES_ENABLED)
+    [[ "$value" == "true" || "$value" == "false" ]] || {
+      echo "LINEAR_CHANNEL_ISSUE_WRITES_ENABLED must be true or false" >&2
       exit 1
     }
     ;;

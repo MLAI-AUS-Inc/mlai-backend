@@ -255,6 +255,18 @@ install_remote_env_secret COMMUNITY_CHAT_EMAIL_CODE_DELIVERY_SECRET "$COMMUNITY_
 install_remote_env_secret COMMUNITY_CHAT_ADAPTER_TOKEN "$COMMUNITY_CHAT_ADAPTER_TOKEN"
 echo "🔐 Updating Linear channel issue reader credential (value redacted)..."
 install_remote_env_secret LINEAR_API_KEY "$LINEAR_API_KEY"
+case "${LINEAR_CHANNEL_ISSUE_WRITES_ENABLED:-false}" in
+    1|[Tt][Rr][Uu][Ee]|[Yy][Ee][Ss]|[Oo][Nn])
+        linear_channel_writes_enabled_normalized="true"
+        ;;
+    *)
+        linear_channel_writes_enabled_normalized="false"
+        ;;
+esac
+if [ "$linear_channel_writes_enabled_normalized" = "true" ]; then
+    echo "🔐 Updating Linear channel issue writer credential (value redacted)..."
+    install_remote_env_secret LINEAR_WRITE_API_KEY "$LINEAR_WRITE_API_KEY"
+fi
 if [ "$bridge_present" -gt 0 ]; then
     install_remote_env_secret SLACK_BRIDGE_BOT_TOKEN "$SLACK_BRIDGE_BOT_TOKEN"
     install_remote_env_secret SLACK_BRIDGE_SIGNING_SECRET "$SLACK_BRIDGE_SIGNING_SECRET"
@@ -272,6 +284,7 @@ install_remote_env_value() {
 echo "🔧 Updating Linear channel issue reader configuration..."
 install_remote_env_value LINEAR_CHANNEL_ISSUE_BINDINGS_JSON "$LINEAR_CHANNEL_ISSUE_BINDINGS_JSON"
 install_remote_env_value LINEAR_CHANNEL_ISSUE_MAX_COMMENTS "$LINEAR_CHANNEL_ISSUE_MAX_COMMENTS"
+install_remote_env_value LINEAR_CHANNEL_ISSUE_WRITES_ENABLED "$linear_channel_writes_enabled_normalized"
 
 # Send the credential over SSH stdin rather than a command-line argument. The
 # remote shell updates .env using builtins, so the value is neither echoed nor

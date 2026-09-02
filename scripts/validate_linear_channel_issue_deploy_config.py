@@ -23,7 +23,7 @@ def fail(message: str) -> None:
     raise SystemExit(message)
 
 
-api_key = os.environ.get("LINEAR_API_KEY", "")
+api_key = os.environ.get("LINEAR_API_KEY", "").strip()
 if len(api_key) < 32:
     fail("LINEAR_API_KEY must be configured as a repository secret with at least 32 characters")
 
@@ -53,3 +53,13 @@ for slack_binding, binding in bindings.items():
 max_comments = os.environ.get("LINEAR_CHANNEL_ISSUE_MAX_COMMENTS", "")
 if not re.fullmatch(r"[1-9][0-9]*", max_comments):
     fail("LINEAR_CHANNEL_ISSUE_MAX_COMMENTS must be a positive integer")
+
+writes_enabled = os.environ.get("LINEAR_CHANNEL_ISSUE_WRITES_ENABLED", "false").lower() in {
+    "1", "true", "yes", "on"
+}
+if writes_enabled:
+    write_key = os.environ.get("LINEAR_WRITE_API_KEY", "").strip()
+    if len(write_key) < 32:
+        fail("LINEAR_WRITE_API_KEY must contain at least 32 characters when Linear writes are enabled")
+    if write_key == api_key:
+        fail("LINEAR_WRITE_API_KEY must be distinct from the Linear reader credential")

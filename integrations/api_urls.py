@@ -241,6 +241,21 @@ urlpatterns = [
         name='linear_channel_issue_detail',
     ),
     path(
+        'linear/channel-issues/statuses',
+        api_views_connectors.LinearChannelIssueStatusesView.as_view(),
+        name='linear_channel_issue_statuses',
+    ),
+    path(
+        'linear/channel-issues/write',
+        api_views_connectors.LinearChannelIssueWriteView.as_view(),
+        name='linear_channel_issue_write',
+    ),
+    path(
+        'linear/channel-issues/create',
+        api_views_connectors.LinearChannelIssueCreateView.as_view(),
+        name='linear_channel_issue_create',
+    ),
+    path(
         'linear/projects/resolve',
         api_views_connectors.LinearProjectResolveView.as_view(),
         name='linear_project_resolve',
