@@ -18,7 +18,6 @@ channel binding below:
 
 ```dotenv
 LINEAR_API_KEY=lin_api_replace_locally
-LINEAR_WRITE_API_KEY=lin_api_distinct_write_key
 LINEAR_CHANNEL_ISSUE_BINDINGS_JSON={"T05N9C1QSJC:C0BRM181EDV":{"display_name":"MLAI_TECH · Todo","team_name":"MLAI_TECH","state_name":"Todo","linear_team_id":"def24f5e-2990-4e28-9e06-e89db4a09f9f","linear_state_id":"f3591a1e-f7a2-4514-9280-000d43ea60e5"}}
 LINEAR_CHANNEL_ISSUE_MAX_COMMENTS=250
 LINEAR_CHANNEL_ISSUE_LIST_RATE=60/minute
@@ -44,8 +43,8 @@ control. No database migration is required for this feature.
 
 ## Production deployment configuration
 
-The backend deployment reads `LINEAR_API_KEY` and the distinct
-`LINEAR_WRITE_API_KEY` from GitHub Actions repository secrets. It reads
+The backend deployment reads `LINEAR_API_KEY` from a GitHub Actions repository
+secret for both read and write requests. It reads
 `LINEAR_CHANNEL_ISSUE_BINDINGS_JSON`, `LINEAR_CHANNEL_ISSUE_WRITES_ENABLED`, and
 `LINEAR_CHANNEL_ISSUE_MAX_COMMENTS` from repository variables. The deployment
 validates all three values before connecting to the production host, then

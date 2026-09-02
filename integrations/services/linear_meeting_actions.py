@@ -3674,11 +3674,7 @@ def _graphql_write(
 ) -> dict[str, Any]:
     """Send a Linear mutation once; uncertain transport outcomes are never retried."""
 
-    api_key = str(getattr(settings, "LINEAR_WRITE_API_KEY", "") or "").strip()
-    if not api_key:
-        raise LinearMeetingConfigurationError(
-            "Linear issue editing is missing its dedicated write credential."
-        )
+    api_key = _linear_api_key()
     connect_timeout = float(getattr(settings, "LINEAR_API_CONNECT_TIMEOUT_SECONDS", 3) or 3)
     read_timeout = float(getattr(settings, "LINEAR_API_READ_TIMEOUT_SECONDS", 20) or 20)
     try:

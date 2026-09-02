@@ -48,31 +48,16 @@ class LinearDeploymentWiringTests(unittest.TestCase):
         invalid_limit = self.validator_result(LINEAR_CHANNEL_ISSUE_MAX_COMMENTS="0")
         self.assertNotEqual(invalid_limit.returncode, 0)
 
-    def test_validator_requires_distinct_write_key_when_writes_enabled(self):
-        missing = self.validator_result(LINEAR_CHANNEL_ISSUE_WRITES_ENABLED="true")
-        self.assertNotEqual(missing.returncode, 0)
-        shared = self.validator_result(
-            LINEAR_CHANNEL_ISSUE_WRITES_ENABLED="true",
-            LINEAR_WRITE_API_KEY="linear-test-key-at-least-32-characters",
-        )
-        self.assertNotEqual(shared.returncode, 0)
-        padded_shared = self.validator_result(
-            LINEAR_CHANNEL_ISSUE_WRITES_ENABLED="true",
-            LINEAR_WRITE_API_KEY="  linear-test-key-at-least-32-characters  ",
-        )
-        self.assertNotEqual(padded_shared.returncode, 0)
+    def test_validator_uses_reader_key_when_writes_enabled(self):
+        enabled = self.validator_result(LINEAR_CHANNEL_ISSUE_WRITES_ENABLED="true")
+        self.assertEqual(enabled.returncode, 0, enabled.stderr)
         whitespace_reader = self.validator_result(LINEAR_API_KEY=" " * 40)
         self.assertNotEqual(whitespace_reader.returncode, 0)
-        distinct = self.validator_result(
-            LINEAR_CHANNEL_ISSUE_WRITES_ENABLED="true",
-            LINEAR_WRITE_API_KEY="distinct-write-key-at-least-32-characters",
-        )
-        self.assertEqual(distinct.returncode, 0, distinct.stderr)
 
     def test_workflow_passes_github_settings_to_deploy_script(self):
         workflow = (REPO_ROOT / ".github/workflows/deploy.yml").read_text()
         self.assertIn("LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}", workflow)
-        self.assertIn("LINEAR_WRITE_API_KEY: ${{ secrets.LINEAR_WRITE_API_KEY }}", workflow)
+        self.assertNotIn("LINEAR_WRITE_API_KEY", workflow)
         self.assertIn(
             "LINEAR_CHANNEL_ISSUE_BINDINGS_JSON: ${{ vars.LINEAR_CHANNEL_ISSUE_BINDINGS_JSON }}",
             workflow,
@@ -90,7 +75,7 @@ class LinearDeploymentWiringTests(unittest.TestCase):
     def test_deploy_installs_all_linear_values_via_stdin_helpers(self):
         deploy = (REPO_ROOT / "deploy.sh").read_text()
         self.assertIn('install_remote_env_secret LINEAR_API_KEY "$LINEAR_API_KEY"', deploy)
-        self.assertIn('install_remote_env_secret LINEAR_WRITE_API_KEY "$LINEAR_WRITE_API_KEY"', deploy)
+        self.assertNotIn("LINEAR_WRITE_API_KEY", deploy)
         self.assertIn(
             'install_remote_env_value LINEAR_CHANNEL_ISSUE_BINDINGS_JSON "$LINEAR_CHANNEL_ISSUE_BINDINGS_JSON"',
             deploy,
