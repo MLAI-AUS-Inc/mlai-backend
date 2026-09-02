@@ -471,6 +471,54 @@ class SlackLinkTests(TestCase):
         "integrations.services.notification_channels.SlackService.send_dm",
         return_value=(True, "1.0"),
     )
+    @patch("integrations.services.notification_channels.assign_direct_slack_identity")
+    @patch(
+        "integrations.services.notification_channels.SlackService.lookup_user_by_email"
+    )
+    def test_explicit_link_supplies_route_without_rewriting_canonical_owner(
+        self,
+        mock_lookup,
+        mock_assign,
+        mock_dm,
+    ):
+        slack_user = User.objects.create_user(
+            email="roo-account@example.com",
+            slack_id="UROOACCOUNT",
+            first_name="Roo",
+            last_name="Founder",
+        )
+        SlackFounderAccountLink.objects.create(
+            slack_user=slack_user,
+            founder_user=self.user,
+        )
+        canonical_owner = f"mlai_user:{self.user.pk}"
+        self.config.connected_slack_user_id = canonical_owner
+        self.config.save(update_fields=["connected_slack_user_id"])
+
+        channel = link_slack_channel(
+            organization=self.org,
+            user=self.user,
+            config=self.config,
+        )
+
+        self.user.refresh_from_db()
+        self.config.refresh_from_db()
+        self.assertEqual(channel.route_id, "UROOACCOUNT")
+        self.assertEqual(channel.display_name, "Roo Founder")
+        self.assertIsNone(self.user.slack_id)
+        self.assertEqual(self.config.connected_slack_user_id, canonical_owner)
+        mock_lookup.assert_not_called()
+        mock_assign.assert_not_called()
+        mock_dm.assert_called_once_with(
+            "UROOACCOUNT",
+            "You're set up to receive daily article topic suggestions here. "
+            "You can manage notification channels from your marketing dashboard.",
+        )
+
+    @patch(
+        "integrations.services.notification_channels.SlackService.send_dm",
+        return_value=(True, "1.0"),
+    )
     @patch(
         "integrations.services.notification_channels.SlackService.lookup_user_by_email",
         return_value={"slack_id": "U333", "real_name": "Founder"},

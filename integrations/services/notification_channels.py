@@ -26,6 +26,7 @@ from django.urls import reverse
 from django.utils import timezone
 
 from core.actor_ids import is_internal_actor_id
+from core.models import SlackFounderAccountLink
 from content_factory.models import (
     NotificationChannel,
     NotificationChannelType,
@@ -498,6 +499,23 @@ def link_slack_channel(*, organization, user, config=None) -> NotificationChanne
         if not is_internal_actor_id(configured_slack_id):
             slack_id = configured_slack_id
             slack_id_source = "config"
+    if not slack_id and user is not None:
+        explicit_link = (
+            SlackFounderAccountLink.objects.select_related("slack_user")
+            .filter(founder_user=user, slack_user__is_active=True)
+            .first()
+        )
+        linked_slack_id = str(
+            getattr(getattr(explicit_link, "slack_user", None), "slack_id", "") or ""
+        ).strip()
+        if linked_slack_id and not is_internal_actor_id(linked_slack_id):
+            slack_id = linked_slack_id
+            slack_id_source = "explicit_link"
+            profile = {
+                "real_name": str(
+                    getattr(explicit_link.slack_user, "full_name", "") or ""
+                )
+            }
     if not slack_id and user is not None and getattr(user, "email", ""):
         profile = SlackService.lookup_user_by_email(user.email)
         slack_id = str((profile or {}).get("slack_id") or "").strip()
@@ -510,9 +528,13 @@ def link_slack_channel(*, organization, user, config=None) -> NotificationChanne
         )
 
     identity_assignment_succeeded = slack_id_source == "user"
-    if user is not None and (
-        not getattr(user, "slack_id", None)
-        or is_internal_actor_id(getattr(user, "slack_id", None))
+    if (
+        user is not None
+        and slack_id_source != "explicit_link"
+        and (
+            not getattr(user, "slack_id", None)
+            or is_internal_actor_id(getattr(user, "slack_id", None))
+        )
     ):
         try:
             user = assign_direct_slack_identity(
