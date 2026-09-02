@@ -5,7 +5,9 @@ from django.db import transaction
 
 from roo.models import (
     CoworkingBooking,
+    Ledger,
     OfficeManagerAssignment,
+    OfficeManagerDay,
     OfficeManagerProvenanceReconciliation,
 )
 from roo.services import PointsService
@@ -37,10 +39,11 @@ class Command(BaseCommand):
 
         with transaction.atomic():
             try:
-                booking = (
-                    CoworkingBooking.objects.select_for_update()
-                    .select_related("ledger_entry")
-                    .get(pk=booking_id)
+                # Lock only the booking row. PostgreSQL rejects ``FOR UPDATE``
+                # when Django's ``select_related`` introduces a nullable outer
+                # join (``ledger_entry`` is nullable for legacy bookings).
+                booking = CoworkingBooking.objects.select_for_update().get(
+                    pk=booking_id
                 )
             except (ValueError, CoworkingBooking.DoesNotExist) as exc:
                 raise CommandError("Booking not found") from exc
@@ -59,7 +62,11 @@ class Command(BaseCommand):
                 raise CommandError(
                     "Purchased allocation must be between zero and the original debit"
                 )
-            ledger = booking.ledger_entry
+            ledger = (
+                Ledger.objects.filter(pk=booking.ledger_entry_id).first()
+                if booking.ledger_entry_id
+                else None
+            )
             if (
                 ledger is None
                 or ledger.user_id != booking.user_id
@@ -76,12 +83,28 @@ class Command(BaseCommand):
 
             assignments = list(
                 OfficeManagerAssignment.objects.select_for_update()
-                .select_related("day", "refund_ledger_entry")
                 .filter(booking=booking, points_refunded__gt=0)
                 .order_by("pk")
             )
+            day_by_id = {
+                day.pk: day
+                for day in OfficeManagerDay.objects.select_for_update().filter(
+                    pk__in={assignment.day_id for assignment in assignments}
+                )
+            }
+            refund_by_id = {
+                refund.pk: refund
+                for refund in Ledger.objects.filter(
+                    pk__in={
+                        assignment.refund_ledger_entry_id
+                        for assignment in assignments
+                        if assignment.refund_ledger_entry_id is not None
+                    }
+                )
+            }
             for assignment in assignments:
-                refund = assignment.refund_ledger_entry
+                day = day_by_id.get(assignment.day_id)
+                refund = refund_by_id.get(assignment.refund_ledger_entry_id)
                 expected_refund = PointsService.roo_to_microroo(
                     assignment.points_refunded
                 )
@@ -95,7 +118,8 @@ class Command(BaseCommand):
                     or refund.reference_id != str(assignment.day_id)
                     or expected_refund != total_microroo
                     or assignment.user_id != booking.user_id
-                    or assignment.day.date != booking.date
+                    or day is None
+                    or day.date != booking.date
                 ):
                     raise CommandError(
                         "The Office Manager assignment does not have a matching "
