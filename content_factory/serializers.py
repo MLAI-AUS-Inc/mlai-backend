@@ -49,7 +49,7 @@ from django.utils import timezone
 
 from .models import (
     ResearchedKeyword, KeywordVelocity, AISaturation, PAQuestion,
-    SemanticCluster, TopicMap, WrittenArticle, ResearchSession, TopicFeedback,
+    SemanticCluster, WrittenArticle, TopicFeedback,
     ContentIsland
 )
 
@@ -217,17 +217,6 @@ class ClusterBulkUpsertSerializer(serializers.Serializer):
     clusters = serializers.ListField(child=serializers.DictField())
 
 
-class TopicMapSerializer(serializers.ModelSerializer):
-    """Serializer for topic map snapshots."""
-
-    class Meta:
-        model = TopicMap
-        fields = [
-            'id', 'clustering_threshold', 'total_keywords',
-            'unclustered_keywords', 'created_at'
-        ]
-
-
 class WrittenArticleSerializer(serializers.ModelSerializer):
     """Serializer for written article records."""
 
@@ -257,17 +246,6 @@ class WrittenArticleCreateSerializer(serializers.Serializer):
     job_id = serializers.CharField(required=False, allow_null=True)
 
 
-class ResearchSessionSerializer(serializers.ModelSerializer):
-    """Serializer for research session records."""
-
-    class Meta:
-        model = ResearchSession
-        fields = [
-            'id', 'seed_keywords_used', 'competitors_analyzed',
-            'keywords_discovered', 'keywords_updated', 'clusters_created',
-            'geo_config', 'started_at', 'completed_at'
-        ]
-        read_only_fields = ['id', 'started_at']
 
 
 class KeywordStatusUpdateSerializer(serializers.Serializer):

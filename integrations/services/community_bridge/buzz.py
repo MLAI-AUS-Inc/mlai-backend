@@ -237,10 +237,22 @@ class BuzzBridgeClient:
                 "parent_message_id": str(parent_message_id or "") or None,
             },
         )
+        return cls._validated_private_delivery_result(
+            result,
+            channel_id=str(channel_id),
+        )
+
+    @classmethod
+    def _validated_private_delivery_result(
+        cls,
+        result: dict,
+        *,
+        channel_id: str,
+    ) -> dict:
         returned_channel = str(result.get("channel_id") or "").strip()
         message_id = str(result.get("message_id") or "").strip().lower()
         returned_parent_message_id = str(result.get("parent_message_id") or "").strip().lower()
-        if returned_channel != str(channel_id) or not EVENT_ID_RE.fullmatch(message_id):
+        if returned_channel != channel_id or not EVENT_ID_RE.fullmatch(message_id):
             raise BuzzBridgeError("MLAI Chat adapter returned an invalid private delivery")
         if returned_parent_message_id and not EVENT_ID_RE.fullmatch(returned_parent_message_id):
             raise BuzzBridgeError("MLAI Chat adapter returned an invalid private parent message")
@@ -249,6 +261,74 @@ class BuzzBridgeClient:
             "message_id": message_id,
             "parent_message_id": returned_parent_message_id,
         }
+
+    @classmethod
+    def deliver_private_batch(cls, deliveries: list[dict]) -> list[dict]:
+        """Deliver an ordered, single-conversation private batch."""
+
+        if not 1 <= len(deliveries) <= 20:
+            raise BuzzBridgePermanentError(
+                "Private delivery batches require 1-20 deliveries"
+            )
+        channel_ids = {
+            str(delivery.get("channel_id") or "").strip()
+            for delivery in deliveries
+        }
+        if len(channel_ids) != 1:
+            raise BuzzBridgePermanentError(
+                "Private delivery batches must target one channel"
+            )
+        try:
+            result = cls._post_adapter(
+                "v1/private-deliveries/batch",
+                {"deliveries": deliveries},
+            )
+        except BuzzBridgePermanentError as exc:
+            if "HTTP 404" not in str(exc) and "HTTP 405" not in str(exc):
+                raise
+            # Rolling deploy compatibility: an older adapter can safely accept
+            # the same deterministic deliveries one at a time until its batch
+            # route is available.
+            return [
+                cls._validated_private_delivery_result(
+                    cls._post_adapter("v1/private-deliveries", delivery),
+                    channel_id=str(delivery.get("channel_id") or ""),
+                )
+                for delivery in deliveries
+            ]
+        raw_results = result.get("deliveries")
+        if not isinstance(raw_results, list) or len(raw_results) != len(deliveries):
+            raise BuzzBridgeError("MLAI Chat adapter returned an invalid private batch")
+        validated = []
+        for delivery, raw_result in zip(deliveries, raw_results):
+            if not isinstance(raw_result, dict):
+                raise BuzzBridgeError(
+                    "MLAI Chat adapter returned an invalid private batch"
+                )
+            returned_channel = str(raw_result.get("channel_id") or "").strip()
+            message_id = str(raw_result.get("message_id") or "").strip().lower()
+            parent_message_id = str(
+                raw_result.get("parent_message_id") or ""
+            ).strip().lower()
+            if (
+                returned_channel != str(delivery.get("channel_id") or "")
+                or not EVENT_ID_RE.fullmatch(message_id)
+                or (
+                    parent_message_id
+                    and not EVENT_ID_RE.fullmatch(parent_message_id)
+                )
+            ):
+                raise BuzzBridgeError(
+                    "MLAI Chat adapter returned an invalid private batch delivery"
+                )
+            validated.append(
+                {
+                    "channel_id": returned_channel,
+                    "message_id": message_id,
+                    "parent_message_id": parent_message_id,
+                }
+            )
+        return validated
 
     @classmethod
     def _post_adapter(cls, path: str, payload: dict) -> dict:

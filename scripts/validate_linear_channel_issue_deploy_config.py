@@ -23,7 +23,7 @@ def fail(message: str) -> None:
     raise SystemExit(message)
 
 
-api_key = os.environ.get("LINEAR_API_KEY", "")
+api_key = os.environ.get("LINEAR_API_KEY", "").strip()
 if len(api_key) < 32:
     fail("LINEAR_API_KEY must be configured as a repository secret with at least 32 characters")
 

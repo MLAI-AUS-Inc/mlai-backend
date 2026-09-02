@@ -1,1 +1,0 @@
-from content_factory.urls_seo import urlpatterns

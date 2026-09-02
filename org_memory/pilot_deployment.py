@@ -830,7 +830,6 @@ def pilot_release_gate_report(
         "ORG_MEMORY_ACTIONS_ENABLED",
         "ORG_MEMORY_ACTION_LINEAR_EXECUTION_ENABLED",
         "ORG_MEMORY_SELECTOR_EXPORT_ENABLED",
-        "ORG_MEMORY_SELECTOR_SHADOW_ENABLED",
     )
     enabled_optional_count = sum(
         bool(getattr(settings, setting_name, False))
