@@ -708,6 +708,23 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
 
     docker network inspect mlai-shared >/dev/null 2>&1 || docker network create mlai-shared
 
+    # Preserve the exact currently running image IDs before Compose retags the
+    # service images during the build. This lets the ERR trap restore the last
+    # known-good runtime even after new containers have been created.
+    rollback_manifest=\$(mktemp)
+    rollback_tags=()
+    for service in "\${runtime_services[@]}"; do
+        container_id=\$(docker compose ps -q "\$service" || true)
+        if [ -n "\$container_id" ]; then
+            image_id=\$(docker inspect --format '{{.Image}}' "\$container_id")
+            image_ref=\$(docker inspect --format '{{.Config.Image}}' "\$container_id")
+            rollback_tag="mlai-backend-rollback-\${service}:$APP_RELEASE_SHORT"
+            docker image tag "\$image_id" "\$rollback_tag"
+            printf '%s|%s|%s|%s\n' "\$service" "\$image_id" "\$image_ref" "\$rollback_tag" >> "\$rollback_manifest"
+            rollback_tags+=("\$rollback_tag")
+        fi
+    done
+
     echo "🐘 Starting database..."
     docker compose up -d db
 
@@ -724,13 +741,26 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     echo "🧪 Running deployment preflight..."
     compose_run_web python manage.py deploy_preflight
 
-    paused_runtime_services=(web memory-worker memory-scheduler community-email-worker)
+    paused_runtime_services=(web scheduler memory-worker memory-scheduler community-email-worker)
     restore_runtime_on_error() {
-        echo "⚠️ Deployment failed after runtime services were paused; restoring them with the reviewed image."
-        docker compose up -d --force-recreate "\${paused_runtime_services[@]}" || true
+        trap - ERR
+        set +e
+        echo "⚠️ Deployment failed; restoring the last known-good runtime images."
+        restored_services=()
+        while IFS='|' read -r service image_id image_ref rollback_tag; do
+            [ -n "\$service" ] || continue
+            docker image tag "\$image_id" "\$image_ref"
+            restored_services+=("\$service")
+        done < "\$rollback_manifest"
+        if [ "\${#restored_services[@]}" -gt 0 ]; then
+            docker compose up -d --force-recreate "\${restored_services[@]}"
+        else
+            echo "⚠️ No prior runtime containers were recorded; leaving services stopped for operator recovery."
+        fi
+        rm -f "\$rollback_manifest"
     }
 
-    echo "⏸️ Pausing web and organisational-memory workers before DB migrations..."
+    echo "⏸️ Pausing web, scheduler, and organisational-memory workers before DB migrations..."
     docker compose stop "\${paused_runtime_services[@]}" || true
     trap restore_runtime_on_error ERR
 
@@ -920,8 +950,6 @@ PY
         echo "ℹ️ Skipping Admin Brain production staging and activation; query API remains disabled."
     fi
 
-    trap - ERR
-
     echo "🌐 Starting runtime services: \${runtime_services[*]}..."
     docker compose up -d --force-recreate "\${runtime_services[@]}"
 
@@ -1038,6 +1066,14 @@ if slugs != expected:
         exit 1
     fi
     rm -f "\$preflight_headers"
+
+    # All release and functional checks passed; rollback images are no longer
+    # needed. Keep the ERR trap active until this exact point.
+    trap - ERR
+    rm -f "\$rollback_manifest"
+    for rollback_tag in "\${rollback_tags[@]}"; do
+        docker image rm "\$rollback_tag" >/dev/null 2>&1 || true
+    done
 EOF
 
 echo "✅ Deployment complete! Check http://$DROPLET_IP or https://api.mlai.au"

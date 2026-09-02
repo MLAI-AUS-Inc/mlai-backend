@@ -1606,6 +1606,7 @@ class SlackFounderLinkApiTests(APITestCase):
             email="founder-tools@example.com",
         )
         self.start_url = reverse("slack_founder_link_start")
+        self.health_url = reverse("slack_founder_link_health")
         self.status_url = reverse("slack_founder_link_status")
         self.preview_url = reverse("slack_founder_link_preview")
         self.complete_url = reverse("slack_founder_link_complete")
@@ -1628,6 +1629,22 @@ class SlackFounderLinkApiTests(APITestCase):
             format="json",
         )
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_health_proves_service_contract_without_mutation(self):
+        denied = self.client.get(self.health_url)
+        response = self.client.get(
+            self.health_url,
+            HTTP_X_API_KEY="roo-link-key",
+        )
+
+        self.assertEqual(denied.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            response.data,
+            {"status": "ok", "contract": "slack-founder-link-v1"},
+        )
+        self.assertEqual(SlackFounderLinkRequest.objects.count(), 0)
+        self.assertEqual(SlackFounderAccountLink.objects.count(), 0)
 
     def test_start_returns_hashed_expiring_single_use_token(self):
         response = self._start()

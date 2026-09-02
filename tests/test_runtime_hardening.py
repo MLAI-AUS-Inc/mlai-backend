@@ -144,7 +144,7 @@ class RuntimeHardeningConfigTests(SimpleTestCase):
         deploy = (ROOT / "deploy.sh").read_text()
 
         self.assertIn(
-            'paused_runtime_services=(web memory-worker memory-scheduler community-email-worker)',
+            'paused_runtime_services=(web scheduler memory-worker memory-scheduler community-email-worker)',
             deploy,
         )
         self.assertIn('docker compose stop "\\${paused_runtime_services[@]}"', deploy)
@@ -221,6 +221,27 @@ class RuntimeHardeningConfigTests(SimpleTestCase):
         self.assertLess(
             deploy.index('docker compose stop "\\${paused_runtime_services[@]}"'),
             deploy.index('docker compose up -d --force-recreate "\\${runtime_services[@]}"'),
+        )
+
+    def test_deploy_restores_last_known_good_images_until_smoke_checks_pass(self):
+        deploy = (ROOT / "deploy.sh").read_text()
+
+        self.assertIn("rollback_manifest=\\$(mktemp)", deploy)
+        self.assertIn("docker inspect --format '{{.Image}}'", deploy)
+        self.assertIn('docker image tag "\\$image_id" "\\$rollback_tag"', deploy)
+        self.assertIn("restoring the last known-good runtime images", deploy)
+        self.assertIn('docker image tag "\\$image_id" "\\$image_ref"', deploy)
+        self.assertIn(
+            'docker compose up -d --force-recreate "\\${restored_services[@]}"',
+            deploy,
+        )
+        self.assertLess(
+            deploy.index("trap restore_runtime_on_error ERR"),
+            deploy.index("Verifying external Vibe Raising video upload CORS preflight"),
+        )
+        self.assertGreater(
+            deploy.rindex("trap - ERR"),
+            deploy.index("Verifying external Vibe Raising video upload CORS preflight"),
         )
 
     def test_bridge_deploy_validation_requires_explicit_production_activation(self):

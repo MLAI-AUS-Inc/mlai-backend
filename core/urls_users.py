@@ -10,6 +10,11 @@ urlpatterns = [
         name='slack_founder_link_start',
     ),
     path(
+        'slack-founder-link/health/',
+        views.SlackFounderLinkHealthView.as_view(),
+        name='slack_founder_link_health',
+    ),
+    path(
         'slack-founder-link/status/',
         views.SlackFounderLinkStatusView.as_view(),
         name='slack_founder_link_status',

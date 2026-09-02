@@ -1169,6 +1169,22 @@ class SlackFounderLinkStartView(SlackFounderLinkNoStoreMixin, APIView):
         )
 
 
+class SlackFounderLinkHealthView(SlackFounderLinkNoStoreMixin, APIView):
+    """Non-mutating service-key probe for coordinated companion rollout."""
+
+    authentication_classes = []
+    permission_classes = [HasStrictRooApiKey]
+
+    def get(self, request):
+        return Response(
+            {
+                "status": "ok",
+                "contract": "slack-founder-link-v1",
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
 class SlackFounderLinkStatusView(SlackFounderLinkNoStoreMixin, APIView):
     permission_classes = [IsAuthenticated]
 

@@ -234,3 +234,22 @@ class VibeMarketingAdminUsageTests(TestCase):
         self.client.force_authenticate(self.admin)
         body = self.client.get(USAGE_URL + "?range=surprise").json()
         self.assertEqual(body["range"]["key"], "30d")
+
+    def test_preserved_legacy_actor_resolves_without_organization_binding(self):
+        ContentFactoryRun.objects.create(
+            run_id="legacy-collision-run",
+            workflow="content_factory_discovery",
+            domain="",
+            organization=None,
+            slack_user_id=f"web_{self.founder.pk}",
+            status=ContentFactoryRunStatus.COMPLETED,
+        )
+
+        self.client.force_authenticate(self.admin)
+        body = self.client.get(USAGE_URL + "?range=30d").json()
+
+        self.assertEqual(body["summary"]["activeUsers"], 1)
+        self.assertEqual(
+            {item["key"]: item["users"] for item in body["funnel"]}["researched"],
+            1,
+        )
