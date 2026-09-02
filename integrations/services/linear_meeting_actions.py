@@ -1895,6 +1895,14 @@ def resolve_linear_project(query: str, *, limit: int = 100) -> dict[str, Any]:
             ):
                 score = 0.94
                 reason = f"Matched project by {field} containment"
+            elif field == "name" and _is_ordered_project_token_alias(query, value):
+                # People often omit the client/brand token from a Studio title,
+                # for example "[Studio] Master App" for
+                # "[Studio] Sansoni Master App". Rank an ordered token alias
+                # below containment and let the existing runner-up guard reject
+                # it when more than one project fits.
+                score = 0.92
+                reason = "Matched project by ordered name tokens"
             else:
                 similarity = SequenceMatcher(
                     None,
@@ -3487,6 +3495,23 @@ def _project_is_inactive(project: dict[str, Any], inactive_states: set[str]) -> 
 
 def _normalize_project_lookup_value(value: Any) -> str:
     return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
+
+
+def _is_ordered_project_token_alias(query: Any, candidate: Any) -> bool:
+    """Return true when a specific multi-token query is a candidate subsequence."""
+
+    query_tokens = re.findall(r"[a-z0-9]+", str(query or "").lower())
+    candidate_tokens = re.findall(r"[a-z0-9]+", str(candidate or "").lower())
+    if len(query_tokens) < 3 or len(query_tokens) >= len(candidate_tokens):
+        return False
+
+    candidate_index = 0
+    for query_token in query_tokens:
+        try:
+            candidate_index = candidate_tokens.index(query_token, candidate_index) + 1
+        except ValueError:
+            return False
+    return True
 
 
 def _project_lookup_summary(

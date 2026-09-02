@@ -1447,6 +1447,67 @@ class LinearMeetingActionsApiTests(SimpleTestCase):
             [10, 10],
         )
 
+    @override_settings(LINEAR_MEETING_REQUIRED_TEAM_KEYS=[])
+    @patch.object(linear_service, "_list_projects")
+    @patch.object(linear_service, "list_teams", return_value=[])
+    def test_project_resolve_matches_unique_ordered_title_alias(
+        self,
+        _mock_teams,
+        mock_projects,
+    ):
+        mock_projects.return_value = [
+            {
+                "id": "project-sansoni-master-app",
+                "name": "[Studio] Sansoni Master App",
+                "slugId": "sansoni-master-app",
+                "status": {"name": "In Progress", "type": "started"},
+            },
+            {
+                "id": "project-aaron-ai",
+                "name": "[Studio] Aaron AI",
+                "slugId": "aaron-ai",
+                "status": {"name": "In Progress", "type": "started"},
+            },
+        ]
+
+        result = linear_service.resolve_linear_project("[Studio] Master App")
+
+        self.assertEqual(result["status"], "matched")
+        self.assertEqual(result["project"]["id"], "project-sansoni-master-app")
+        self.assertEqual(result["confidence"], 0.92)
+        self.assertEqual(result["reason"], "Matched project by ordered name tokens")
+
+    @override_settings(LINEAR_MEETING_REQUIRED_TEAM_KEYS=[])
+    @patch.object(linear_service, "_list_projects")
+    @patch.object(linear_service, "list_teams", return_value=[])
+    def test_project_resolve_rejects_ambiguous_ordered_title_alias(
+        self,
+        _mock_teams,
+        mock_projects,
+    ):
+        mock_projects.return_value = [
+            {
+                "id": "project-sansoni-master-app",
+                "name": "[Studio] Sansoni Master App",
+                "slugId": "sansoni-master-app",
+            },
+            {
+                "id": "project-acme-master-app",
+                "name": "[Studio] Acme Master App",
+                "slugId": "acme-master-app",
+            },
+        ]
+
+        result = linear_service.resolve_linear_project("[Studio] Master App")
+
+        self.assertEqual(result["status"], "ambiguous")
+        self.assertIsNone(result["project"])
+        self.assertEqual(result["candidateCount"], 2)
+        self.assertEqual(
+            {candidate["name"] for candidate in result["candidates"]},
+            {"[Studio] Sansoni Master App", "[Studio] Acme Master App"},
+        )
+
     @patch("integrations.services.linear_meeting_actions.http_requests.post")
     def test_project_resolve_fails_closed_on_ambiguous_containment(self, mock_post):
         mock_post.side_effect = [
