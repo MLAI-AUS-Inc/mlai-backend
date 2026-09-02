@@ -32,7 +32,6 @@ class FakeLinearResponse:
 
 @override_settings(
     LINEAR_API_KEY="lin-api-key",
-    LINEAR_WRITE_API_KEY="lin-write-key",
     LINEAR_CHANNEL_ISSUE_WRITES_ENABLED=True,
     ROO_API_KEY="roo-api-key",
     INTERNAL_API_KEY="",
@@ -449,6 +448,7 @@ class LinearMeetingActionsApiTests(SimpleTestCase):
                 operation_name="LinearChannelIssueUpdate",
             )
         self.assertEqual(mock_post.call_count, 1)
+        self.assertEqual(mock_post.call_args.kwargs["headers"]["Authorization"], "lin-api-key")
 
     @patch("integrations.services.linear_meeting_actions.http_requests.post")
     def test_conclusive_partial_graphql_write_precedes_nested_rate_limit(self, mock_post):
