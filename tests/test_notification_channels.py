@@ -550,6 +550,35 @@ class SlackLinkTests(TestCase):
         self.assertEqual(ctx.exception.code, "slack_user_not_found")
         mock_dm.assert_not_called()
 
+    @patch(
+        "integrations.services.notification_channels.SlackService.send_dm",
+        return_value=(False, None),
+    )
+    @patch(
+        "integrations.services.notification_channels.SlackService.lookup_user_by_email",
+        return_value={"slack_id": "UVERIFIED"},
+    )
+    def test_failed_verification_dm_does_not_activate_channel(
+        self, mock_lookup, mock_dm
+    ):
+        with self.assertRaises(ChannelActionError) as ctx:
+            link_slack_channel(
+                organization=self.org,
+                user=self.user,
+                config=self.config,
+            )
+
+        self.assertEqual(ctx.exception.code, "send_failed")
+        self.assertEqual(ctx.exception.http_status, 502)
+        channel = NotificationChannel.objects.get(
+            organization=self.org,
+            channel_type=NotificationChannelType.SLACK,
+            route_id="UVERIFIED",
+        )
+        self.assertEqual(channel.consent_state, NotificationConsentState.PENDING)
+        mock_lookup.assert_called_once_with(self.user.email)
+        mock_dm.assert_called_once()
+
 
 class EnsureAutomationTests(TestCase):
     def setUp(self):

@@ -541,13 +541,22 @@ def link_slack_channel(*, organization, user, config=None) -> NotificationChanne
         route_id=slack_id,
         display_name=display_name,
     )
-    if channel.consent_state != NotificationConsentState.ACTIVE:
-        _activate_channel(channel)
-    SlackService.send_dm(
+    was_active = channel.consent_state == NotificationConsentState.ACTIVE
+    sent, _message_ts = SlackService.send_dm(
         slack_id,
         "You're set up to receive daily article topic suggestions here. "
         "You can manage notification channels from your marketing dashboard.",
     )
+    if not sent:
+        if not was_active:
+            channel.refresh_from_db()
+        raise ChannelActionError(
+            "send_failed",
+            "We found your Slack account but couldn't send a verification message. Try again shortly.",
+            http_status=502,
+        )
+    if not was_active:
+        _activate_channel(channel)
     return channel
 
 
