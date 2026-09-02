@@ -1,4 +1,5 @@
 from pathlib import Path
+import subprocess
 
 from django.test import SimpleTestCase
 
@@ -250,6 +251,46 @@ class RuntimeHardeningConfigTests(SimpleTestCase):
             deploy.rindex("trap - ERR"),
             deploy.index("Verifying external Vibe Raising video upload CORS preflight"),
         )
+        trapped_deploy = deploy[
+            deploy.index("trap restore_runtime_on_error ERR"):
+            deploy.rindex("trap - ERR")
+        ]
+        self.assertNotIn(
+            "exit 1",
+            trapped_deploy,
+            "explicit exit bypasses Bash ERR traps and therefore recovery",
+        )
+
+    def test_post_migration_failure_executes_safe_disabled_recovery(self):
+        deploy = (ROOT / "deploy.sh").read_text()
+        function_start = deploy.index("    restore_runtime_on_error() {")
+        function_end = deploy.index(
+            "\n    }\n\n    echo \"⏸️ Pausing",
+            function_start,
+        ) + len("\n    }")
+        recovery_function = deploy[function_start:function_end].replace("\\$", "$")
+        probe = recovery_function + r'''
+migration_started=1
+runtime_services=(web scheduler)
+rollback_manifest="$(mktemp)"
+docker_log="$(mktemp)"
+docker() {
+    printf '%s\n' "$*" >> "$docker_log"
+}
+trap restore_runtime_on_error ERR
+false
+grep -Fx 'compose stop web scheduler' "$docker_log"
+'''
+
+        completed = subprocess.run(
+            ["bash", "-c", probe],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("keeping all runtime writers safely disabled", completed.stdout)
 
     def test_bridge_deploy_validation_requires_explicit_production_activation(self):
         workflow = (ROOT / ".github" / "workflows" / "deploy.yml").read_text()

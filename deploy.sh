@@ -989,7 +989,9 @@ PY
     running_release=\$(docker compose exec -T web sh -lc 'printf "%s" "\$APP_RELEASE"' </dev/null)
     if [ "\$running_release" != "$APP_RELEASE" ]; then
         echo "Expected running web container APP_RELEASE=$APP_RELEASE but found \$running_release"
-        exit 1
+        # Fail through a command so the ERR trap keeps forward-only schemas
+        # paired with no writers until an operator completes recovery.
+        false
     fi
 
     echo "🩺 Verifying external health release..."
@@ -1005,7 +1007,7 @@ PY
     if [ "\$release_ok" != "1" ]; then
         echo "Expected /healthz/ready to report release $APP_RELEASE_SHORT for $APP_RELEASE"
         echo "\$health_body"
-        exit 1
+        false
     fi
 
     if [ "\$meeting_room_booking_enabled" = "true" ]; then
@@ -1044,7 +1046,7 @@ if slugs != expected:
     done
     if [ "\$admin_login_ok" != "1" ]; then
         echo "Expected Django admin login page to return HTTP 200"
-        exit 1
+        false
     fi
 
     admin_css_path=\$(
@@ -1058,7 +1060,7 @@ if slugs != expected:
     esac
     if ! curl -fsS -o /dev/null "https://api.mlai.au\$admin_css_path"; then
         echo "Expected Django admin stylesheet to be reachable at \$admin_css_path"
-        exit 1
+        false
     fi
 
     echo "🌐 Verifying external Vibe Raising video upload CORS preflight..."
@@ -1083,7 +1085,7 @@ if slugs != expected:
         echo "Expected video upload session preflight to return CORS headers"
         cat "\$preflight_headers"
         rm -f "\$preflight_headers"
-        exit 1
+        false
     fi
     rm -f "\$preflight_headers"
 
