@@ -25,6 +25,7 @@ from django.db import IntegrityError
 from django.urls import reverse
 from django.utils import timezone
 
+from core.actor_ids import is_internal_actor_id
 from content_factory.models import (
     NotificationChannel,
     NotificationChannelType,
@@ -66,7 +67,13 @@ VERIFICATION_FIELDS = [
 class ChannelActionError(Exception):
     """Raised by channel lifecycle actions; maps onto an HTTP error response."""
 
-    def __init__(self, code: str, detail: str, http_status: int = 400, extra: Optional[dict[str, Any]] = None):
+    def __init__(
+        self,
+        code: str,
+        detail: str,
+        http_status: int = 400,
+        extra: Optional[dict[str, Any]] = None,
+    ):
         super().__init__(detail)
         self.code = code
         self.detail = detail
@@ -91,10 +98,19 @@ def serialize_channel(
 ) -> dict[str, Any]:
     now = now or timezone.now()
     pending = None
-    if channel.consent_state == NotificationConsentState.PENDING and channel.verification_last_sent_at:
-        resend_available_at = channel.verification_last_sent_at + timedelta(seconds=OTP_RESEND_COOLDOWN_SECONDS)
+    if (
+        channel.consent_state == NotificationConsentState.PENDING
+        and channel.verification_last_sent_at
+    ):
+        resend_available_at = channel.verification_last_sent_at + timedelta(
+            seconds=OTP_RESEND_COOLDOWN_SECONDS
+        )
         pending = {
-            "expiresAt": channel.verification_expires_at.isoformat() if channel.verification_expires_at else None,
+            "expiresAt": (
+                channel.verification_expires_at.isoformat()
+                if channel.verification_expires_at
+                else None
+            ),
             "resendAvailableAt": resend_available_at.isoformat(),
             "attemptsRemaining": (
                 max(0, OTP_MAX_ATTEMPTS - int(channel.verification_attempts or 0))
@@ -110,12 +126,15 @@ def serialize_channel(
         "consentState": channel.consent_state,
         "deliveryEnabled": bool(channel.delivery_enabled),
         "verifiedAt": channel.verified_at.isoformat() if channel.verified_at else None,
-        "isPrimary": primary_channel_id is not None and channel.id == primary_channel_id,
+        "isPrimary": primary_channel_id is not None
+        and channel.id == primary_channel_id,
         "pendingVerification": pending,
     }
 
 
-def serialize_automation(automation: Optional[ResearchAutomation]) -> Optional[dict[str, Any]]:
+def serialize_automation(
+    automation: Optional[ResearchAutomation],
+) -> Optional[dict[str, Any]]:
     if automation is None:
         return None
     return {
@@ -213,7 +232,10 @@ def _enforce_send_limits(channel: NotificationChannel, now) -> None:
                 "resend_cooldown",
                 "Please wait a minute before requesting another code.",
                 http_status=429,
-                extra={"retry_after_seconds": int(OTP_RESEND_COOLDOWN_SECONDS - elapsed) or 1},
+                extra={
+                    "retry_after_seconds": int(OTP_RESEND_COOLDOWN_SECONDS - elapsed)
+                    or 1
+                },
             )
         if elapsed > 24 * 60 * 60:
             channel.verification_send_count = 0
@@ -229,11 +251,16 @@ def _enforce_send_limits(channel: NotificationChannel, now) -> None:
 # Email
 # ---------------------------------------------------------------------------
 
-def initiate_email_channel(*, organization, user, route_id: str = "") -> NotificationChannel:
+
+def initiate_email_channel(
+    *, organization, user, route_id: str = ""
+) -> NotificationChannel:
     account_email = str(getattr(user, "email", "") or "").strip().lower()
     requested_email = str(route_id or "").strip().lower() or account_email
     if not account_email or "@" not in account_email:
-        raise ChannelActionError("invalid_email", "Your account needs a valid email address.")
+        raise ChannelActionError(
+            "invalid_email", "Your account needs a valid email address."
+        )
     if requested_email != account_email:
         raise ChannelActionError(
             "email_must_match_account",
@@ -266,7 +293,13 @@ def send_email_verification(channel: NotificationChannel) -> None:
     _enforce_send_limits(channel, now)
     channel.verification_last_sent_at = now
     channel.verification_send_count = int(channel.verification_send_count or 0) + 1
-    channel.save(update_fields=["verification_last_sent_at", "verification_send_count", "updated_at"])
+    channel.save(
+        update_fields=[
+            "verification_last_sent_at",
+            "verification_send_count",
+            "updated_at",
+        ]
+    )
 
     verify_url = build_email_verification_url(channel)
     text = (
@@ -287,9 +320,17 @@ def send_email_verification(channel: NotificationChannel) -> None:
         idempotency_key=f"channel-verify:{channel.id}:{channel.verification_send_count}",
     )
     if not success:
-        error = response_payload.get("error") or response_payload.get("message") or response_payload
+        error = (
+            response_payload.get("error")
+            or response_payload.get("message")
+            or response_payload
+        )
         if str(error) == "email_not_configured" or "is not configured" in str(error):
-            raise ChannelActionError("email_not_configured", "Email sending is not configured.", http_status=503)
+            raise ChannelActionError(
+                "email_not_configured",
+                "Email sending is not configured.",
+                http_status=503,
+            )
         raise ChannelActionError(
             "send_failed",
             "Could not send the verification email. Try again shortly.",
@@ -312,7 +353,9 @@ def handle_email_verification_token(token: str) -> NotificationChannel:
         channel_type=NotificationChannelType.EMAIL,
     ).first()
     if not channel or channel.route_id != payload.get("route_id"):
-        raise ChannelActionError("invalid_token", "This verification link is no longer valid.")
+        raise ChannelActionError(
+            "invalid_token", "This verification link is no longer valid."
+        )
     if channel.consent_state != NotificationConsentState.ACTIVE:
         _activate_channel(channel)
     return channel
@@ -321,6 +364,7 @@ def handle_email_verification_token(token: str) -> NotificationChannel:
 # ---------------------------------------------------------------------------
 # WhatsApp
 # ---------------------------------------------------------------------------
+
 
 def normalize_e164(value: str) -> str:
     text = re.sub(r"[\s\-().]", "", str(value or ""))
@@ -352,7 +396,9 @@ def initiate_whatsapp_channel(*, organization, user, phone: str) -> Notification
 
 
 def send_whatsapp_otp(channel: NotificationChannel) -> dict[str, Any]:
-    content_sid = str(getattr(settings, "TWILIO_WHATSAPP_OTP_CONTENT_SID", "") or "").strip()
+    content_sid = str(
+        getattr(settings, "TWILIO_WHATSAPP_OTP_CONTENT_SID", "") or ""
+    ).strip()
     if not content_sid:
         # An approved WhatsApp authentication template is mandatory: free-form
         # text never delivers without an open 24h service window.
@@ -381,12 +427,20 @@ def send_whatsapp_otp(channel: NotificationChannel) -> dict[str, Any]:
     if not success:
         channel.verification_code_hash = ""
         channel.verification_expires_at = None
-        channel.save(update_fields=["verification_code_hash", "verification_expires_at", "updated_at"])
+        channel.save(
+            update_fields=[
+                "verification_code_hash",
+                "verification_expires_at",
+                "updated_at",
+            ]
+        )
         raise ChannelActionError(
             "send_failed",
             "Could not send the WhatsApp verification code. Check the number and try again.",
             http_status=502,
-            extra={"provider_error": str(response_payload.get("error") or response_payload)},
+            extra={
+                "provider_error": str(response_payload.get("error") or response_payload)
+            },
         )
     return {"expires_at": channel.verification_expires_at}
 
@@ -395,12 +449,18 @@ def verify_whatsapp_otp(channel: NotificationChannel, code: str) -> Notification
     now = timezone.now()
     candidate = str(code or "").strip()
     if not channel.verification_code_hash:
-        raise ChannelActionError("no_pending_code", "No verification code is pending. Request a new one.")
+        raise ChannelActionError(
+            "no_pending_code", "No verification code is pending. Request a new one."
+        )
     if channel.verification_expires_at and channel.verification_expires_at < now:
         raise ChannelActionError("expired", "That code has expired. Request a new one.")
     if int(channel.verification_attempts or 0) >= OTP_MAX_ATTEMPTS:
-        raise ChannelActionError("too_many_attempts", "Too many incorrect attempts. Request a new code.")
-    if not hmac.compare_digest(_hash_verification_code(channel, candidate), channel.verification_code_hash):
+        raise ChannelActionError(
+            "too_many_attempts", "Too many incorrect attempts. Request a new code."
+        )
+    if not hmac.compare_digest(
+        _hash_verification_code(channel, candidate), channel.verification_code_hash
+    ):
         channel.verification_attempts = int(channel.verification_attempts or 0) + 1
         if channel.verification_attempts >= OTP_MAX_ATTEMPTS:
             channel.verification_code_hash = ""
@@ -413,7 +473,9 @@ def verify_whatsapp_otp(channel: NotificationChannel, code: str) -> Notification
                     "updated_at",
                 ]
             )
-            raise ChannelActionError("too_many_attempts", "Too many incorrect attempts. Request a new code.")
+            raise ChannelActionError(
+                "too_many_attempts", "Too many incorrect attempts. Request a new code."
+            )
         channel.save(update_fields=["verification_attempts", "updated_at"])
         raise ChannelActionError("invalid_code", "That code is incorrect.")
     return _activate_channel(channel)
@@ -423,11 +485,17 @@ def verify_whatsapp_otp(channel: NotificationChannel, code: str) -> Notification
 # Slack
 # ---------------------------------------------------------------------------
 
+
 def link_slack_channel(*, organization, user, config=None) -> NotificationChannel:
-    slack_id = str(getattr(user, "slack_id", "") or "").strip()
+    user_slack_id = str(getattr(user, "slack_id", "") or "").strip()
+    slack_id = "" if is_internal_actor_id(user_slack_id) else user_slack_id
     profile = None
     if not slack_id and config is not None:
-        slack_id = str(getattr(config, "connected_slack_user_id", "") or "").strip()
+        configured_slack_id = str(
+            getattr(config, "connected_slack_user_id", "") or ""
+        ).strip()
+        if not is_internal_actor_id(configured_slack_id):
+            slack_id = configured_slack_id
     if not slack_id and user is not None and getattr(user, "email", ""):
         profile = SlackService.lookup_user_by_email(user.email)
         slack_id = str((profile or {}).get("slack_id") or "").strip()
@@ -437,14 +505,26 @@ def link_slack_channel(*, organization, user, config=None) -> NotificationChanne
             "We couldn't find your Slack account in the workspace. Join the workspace with this email, then try again.",
         )
 
-    if user is not None and not getattr(user, "slack_id", None):
+    if user is not None and (
+        not getattr(user, "slack_id", None)
+        or is_internal_actor_id(getattr(user, "slack_id", None))
+    ):
         try:
-            user = assign_direct_slack_identity(user, slack_id)
+            user = assign_direct_slack_identity(
+                user,
+                slack_id,
+                allow_reassignment=is_internal_actor_id(
+                    getattr(user, "slack_id", None)
+                ),
+            )
         except (ConflictingSlackFounderLinkError, IntegrityError):
             # Explicit account links and existing identity ownership must stay
             # unchanged. The notification route can still use this Slack ID.
             pass
-    if config is not None and not getattr(config, "connected_slack_user_id", None):
+    if config is not None and (
+        not getattr(config, "connected_slack_user_id", None)
+        or is_internal_actor_id(getattr(config, "connected_slack_user_id", None))
+    ):
         config.connected_slack_user_id = slack_id
         config.save(update_fields=["connected_slack_user_id", "updated_at"])
 
@@ -474,6 +554,7 @@ def link_slack_channel(*, organization, user, config=None) -> NotificationChanne
 # ---------------------------------------------------------------------------
 # Lifecycle
 # ---------------------------------------------------------------------------
+
 
 def deactivate_channel(
     channel: NotificationChannel,
@@ -519,24 +600,38 @@ def ensure_research_automation_for_org(
     channels = _active_org_channels(organization)
     if not channels:
         try:
-            channels = [link_slack_channel(organization=organization, user=user, config=config)]
+            channels = [
+                link_slack_channel(organization=organization, user=user, config=config)
+            ]
         except ChannelActionError:
             return None, []
 
     automation = (
-        ResearchAutomation.objects.filter(organization=organization).order_by("created_at").first()
+        ResearchAutomation.objects.filter(organization=organization)
+        .order_by("created_at")
+        .first()
     )
-    status = ResearchAutomationStatus.ACTIVE if enabled else ResearchAutomationStatus.PAUSED
+    status = (
+        ResearchAutomationStatus.ACTIVE if enabled else ResearchAutomationStatus.PAUSED
+    )
     if automation is None:
         primary = next(
-            (channel for channel in channels if channel.channel_type == NotificationChannelType.SLACK),
+            (
+                channel
+                for channel in channels
+                if channel.channel_type == NotificationChannelType.SLACK
+            ),
             channels[0],
         )
         automation = ResearchAutomation.objects.create(
             organization=organization,
             user=user,
             notification_channel=primary,
-            timezone=_coerce_timezone(timezone_name) if timezone_name else "Australia/Melbourne",
+            timezone=(
+                _coerce_timezone(timezone_name)
+                if timezone_name
+                else "Australia/Melbourne"
+            ),
             frequency_per_day=1,
             local_send_times=["08:00"],
             status=status,

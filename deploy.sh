@@ -686,6 +686,7 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     fi
     unset health_hack_key roo_sim_key roo_api_key victor_ai_roo_secret
 
+    all_runtime_writer_services=(web scheduler memory-worker memory-scheduler community-email-worker bridge-worker bridge-reconciler bridge-retention analytics-sync)
     runtime_services=(web scheduler memory-worker memory-scheduler community-email-worker)
     if [ "\$community_bridge_production_enabled" = "true" ] \
         && env_has_value SLACK_BRIDGE_BOT_TOKEN \
@@ -721,9 +722,11 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     # known-good runtime even after new containers have been created.
     rollback_manifest=\$(mktemp)
     rollback_tags=()
-    for service in "\${runtime_services[@]}"; do
+    running_writer_services=()
+    for service in "\${all_runtime_writer_services[@]}"; do
         container_id=\$(docker compose ps -q "\$service" || true)
         if [ -n "\$container_id" ]; then
+            running_writer_services+=("\$service")
             image_id=\$(docker inspect --format '{{.Image}}' "\$container_id")
             image_ref=\$(docker inspect --format '{{.Config.Image}}' "\$container_id")
             rollback_tag="mlai-backend-rollback-\${service}:$APP_RELEASE_SHORT"
@@ -749,7 +752,6 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     echo "🧪 Running deployment preflight..."
     compose_run_web python manage.py deploy_preflight
 
-    paused_runtime_services=(web scheduler memory-worker memory-scheduler community-email-worker)
     migration_started=0
     restore_runtime_on_error() {
         trap - ERR
@@ -759,7 +761,7 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
             # may still have committed earlier migration files, so starting an
             # old image could create legacy actor IDs against the new schema.
             echo "⚠️ Deployment failed after schema advancement began; keeping all runtime writers safely disabled."
-            docker compose stop "\${runtime_services[@]}" || true
+            docker compose stop "\${all_runtime_writer_services[@]}" || true
             echo "⚠️ Complete the documented forward recovery before restarting services."
             rm -f "\$rollback_manifest"
             return
@@ -779,8 +781,8 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
         rm -f "\$rollback_manifest"
     }
 
-    echo "⏸️ Pausing web, scheduler, and organisational-memory workers before DB migrations..."
-    docker compose stop "\${paused_runtime_services[@]}" || true
+    echo "⏸️ Pausing all runtime writers before DB migrations..."
+    docker compose stop "\${all_runtime_writer_services[@]}" || true
     trap restore_runtime_on_error ERR
 
     echo "🗄️ Running migrations..."
@@ -975,8 +977,8 @@ PY
 
     if [ "\$bridge_worker_enabled" != "1" ]; then
         echo "🧹 Stopping disabled community bridge services..."
-        docker compose stop bridge-worker bridge-reconciler || true
-        docker compose rm -f bridge-worker bridge-reconciler || true
+        docker compose stop bridge-worker bridge-reconciler bridge-retention || true
+        docker compose rm -f bridge-worker bridge-reconciler bridge-retention || true
     fi
 
     if [ "\$analytics_sync_enabled" != "1" ]; then
