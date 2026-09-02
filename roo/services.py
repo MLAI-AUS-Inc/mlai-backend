@@ -15,7 +15,7 @@ from typing import Optional, Tuple
 import requests
 from django.conf import settings
 from django.db import connection, transaction, IntegrityError, models
-from django.db.models import Count
+from django.db.models import Count, Q
 from django.utils import timezone
 
 from .models import (
@@ -565,7 +565,32 @@ class PointsService:
         account.earned_balance -= earned_debit
 
     @staticmethod
-    def _debit_account_microroo_balances(account: PointsAccount, delta_microroo: int) -> None:
+    def _debit_account_microroo_balances(
+        account: PointsAccount,
+        delta_microroo: int,
+        *,
+        purchased_delta_microroo: Optional[int] = None,
+    ) -> None:
+        if purchased_delta_microroo is not None:
+            earned_delta_microroo = (
+                delta_microroo - purchased_delta_microroo
+            )
+            if (
+                purchased_delta_microroo < 0
+                or earned_delta_microroo < 0
+                or account.purchased_topup_balance_microroo
+                < purchased_delta_microroo
+                or account.earned_balance_microroo < earned_delta_microroo
+            ):
+                raise InsufficientBalanceError(
+                    "The original purchased/earned point allocation is no "
+                    "longer available"
+                )
+            account.purchased_topup_balance_microroo -= (
+                purchased_delta_microroo
+            )
+            account.earned_balance_microroo -= earned_delta_microroo
+            return
         remaining = delta_microroo
         purchased_debit = min(account.purchased_topup_balance_microroo, remaining)
         account.purchased_topup_balance_microroo -= purchased_debit
@@ -888,6 +913,7 @@ class PointsService:
         idempotency_key: str,
         reference_type: Optional[str] = None,
         reference_id: Optional[str] = None,
+        purchased_delta_microroo: Optional[int] = None,
     ) -> Tuple[Ledger, bool]:
         """
         Spend points (deduct from balance) with balance check and idempotency.
@@ -912,6 +938,13 @@ class PointsService:
         if delta <= 0:
             raise ValueError("Spend delta must be positive")
         delta_microroo = PointsService.roo_to_microroo(delta)
+        if (
+            purchased_delta_microroo is not None
+            and not 0 <= purchased_delta_microroo <= delta_microroo
+        ):
+            raise ValueError(
+                "Purchased spend delta must be between zero and delta"
+            )
 
         def validate_existing(existing: Ledger) -> None:
             PointsService._validate_idempotent_ledger(
@@ -970,7 +1003,11 @@ class PointsService:
         
         # Update account
         account.balance_microroo -= delta_microroo
-        PointsService._debit_account_microroo_balances(account, delta_microroo)
+        PointsService._debit_account_microroo_balances(
+            account,
+            delta_microroo,
+            purchased_delta_microroo=purchased_delta_microroo,
+        )
         account.lifetime_spent_microroo += delta_microroo
         PointsService._sync_legacy_account(account)
         account.save()
@@ -1085,6 +1122,113 @@ class CoworkingService:
     """
 
     MAX_REPORT_DAYS = 366
+
+    @staticmethod
+    def validated_booking_debit_provenance(
+        booking: CoworkingBooking,
+    ) -> int:
+        """Return the purchased allocation only for a verified booking debit."""
+        ledger = booking.ledger_entry
+        expected_microroo = PointsService.roo_to_microroo(
+            max(0, int(booking.points_cost))
+        )
+        if (
+            ledger is None
+            or ledger.user_id != booking.user_id
+            or ledger.kind != 'SPEND'
+            or ledger.source != 'COWORKING'
+            or ledger.delta_microroo != -expected_microroo
+            or ledger.reference_type != 'COWORKING_BOOKING'
+        ):
+            raise ValueError(
+                'The original coworking charge could not be verified'
+            )
+        purchased_microroo = booking.purchased_points_cost_microroo
+        if (
+            purchased_microroo is None
+            or not 0 <= purchased_microroo <= expected_microroo
+        ):
+            raise ValueError(
+                'The original coworking charge allocation is unavailable'
+            )
+        return purchased_microroo
+
+    @staticmethod
+    @transaction.atomic
+    def transfer_user_ownership_for_merge(
+        *,
+        source: User,
+        target: User,
+    ) -> tuple[int, int]:
+        """Move bookings and their Office Manager ownership as one unit.
+
+        An active target booking on the same date is an ambiguous authority,
+        so the entire surrounding account merge must fail rather than deleting
+        the source-owned booking or assignment through ``CASCADE``.
+        """
+        if source.pk == target.pk:
+            return 0, 0
+        locked_users = {
+            user.pk: user
+            for user in User.objects.select_for_update()
+            .filter(pk__in=[source.pk, target.pk])
+            .order_by('pk')
+        }
+        if len(locked_users) != 2:
+            raise ValueError('Both merge principals must still exist')
+
+        bookings = list(
+            CoworkingBooking.objects.select_for_update()
+            .filter(user_id=source.pk)
+            .order_by('date', 'pk')
+        )
+        booking_ids = [booking.pk for booking in bookings]
+        assignments = list(
+            OfficeManagerAssignment.objects.select_for_update()
+            .filter(Q(user_id=source.pk) | Q(booking_id__in=booking_ids))
+            .order_by('day_id', 'pk')
+        )
+        booking_owner_by_id = {
+            booking.pk: booking.user_id for booking in bookings
+        }
+        for assignment in assignments:
+            if (
+                assignment.user_id != source.pk
+                or booking_owner_by_id.get(assignment.booking_id)
+                != source.pk
+            ):
+                raise ValueError(
+                    'Office Manager assignment and booking ownership disagree; '
+                    'the account merge was refused'
+                )
+
+        active_dates = [
+            booking.date for booking in bookings if booking.status == 'booked'
+        ]
+        conflicting_dates = list(
+            CoworkingBooking.objects.select_for_update()
+            .filter(
+                user_id=target.pk,
+                date__in=active_dates,
+                status='booked',
+            )
+            .order_by('date')
+            .values_list('date', flat=True)
+        )
+        if conflicting_dates:
+            rendered = ', '.join(day.isoformat() for day in conflicting_dates)
+            raise ValueError(
+                'Cannot merge independently active coworking bookings on: '
+                f'{rendered}'
+            )
+
+        assignment_count = OfficeManagerAssignment.objects.filter(
+            pk__in=[assignment.pk for assignment in assignments]
+        ).update(user_id=target.pk)
+        booking_count = CoworkingBooking.objects.filter(
+            pk__in=booking_ids
+        ).update(user_id=target.pk)
+        return booking_count, assignment_count
     
     @staticmethod
     def get_standard_coworking_cost() -> int:
@@ -1415,6 +1559,16 @@ class CoworkingService:
         # Get cost (discounted when the user's startup has a 'ready' monthly
         # update for the booking's month)
         cost = CoworkingService.get_coworking_cost(user=user, booking_date=booking_date)
+
+        account = PointsAccount.objects.select_for_update().filter(
+            user=user
+        ).first()
+        if account is not None:
+            PointsService._ensure_microroo_account(account)
+        purchased_points_cost_microroo = min(
+            account.purchased_topup_balance_microroo if account else 0,
+            PointsService.roo_to_microroo(cost),
+        )
         
         # A new booking after cancellation is a new charge. The active-booking
         # check above still makes retries idempotent while the booking is live.
@@ -1440,6 +1594,9 @@ class CoworkingService:
             date=booking_date,
             status='booked',
             points_cost=cost,
+            purchased_points_cost_microroo=(
+                purchased_points_cost_microroo
+            ),
             ledger_entry=ledger,
             slack_channel_id=slack_channel_id,
         )
@@ -1652,6 +1809,9 @@ class CoworkingService:
         
         # Check if refund is applicable
         if booking.points_cost > 0 and CoworkingService.is_refundable(booking.date):
+            purchased_points_cost_microroo = (
+                CoworkingService.validated_booking_debit_provenance(booking)
+            )
             idempotency_key = f"coworking_refund:{booking.id}"
             
             ledger, created = PointsService.refund(
@@ -1663,6 +1823,8 @@ class CoworkingService:
                 idempotency_key=idempotency_key,
                 reference_type='COWORKING_REFUND',
                 reference_id=str(booking.id),
+                purchased_delta_microroo=purchased_points_cost_microroo,
+                reverse_lifetime_spent=True,
             )
             
             booking.refund_ledger_entry = ledger

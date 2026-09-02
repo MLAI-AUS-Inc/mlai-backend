@@ -25,6 +25,97 @@ from startup_updates.monthly_update_reminders import run_monthly_update_reminder
 logger = logging.getLogger(__name__)
 
 
+_OFFICE_MANAGER_DELIVERY_BOOLEAN_KEYS = frozenset(
+    {
+        "announcement_sent",
+        "message_updated",
+        "winner_channel_announcement_sent",
+        "winner_dm_sent",
+        "end_of_day_reminder_sent",
+    }
+)
+_OFFICE_MANAGER_DELIVERY_CONTAINER_KEYS = frozenset(
+    {
+        "delivery_results",
+        "delivery_statuses",
+        "recovered_deliveries",
+        "winner_channel_retractions",
+    }
+)
+_OFFICE_MANAGER_FAILURE_CONTAINER_KEYS = frozenset(
+    {
+        "delivery_failures",
+        "failed_deliveries",
+        "exhausted_deliveries",
+    }
+)
+_OFFICE_MANAGER_TERMINAL_DELIVERY_STATES = frozenset(
+    {
+        "dead_letter",
+        "dead-letter",
+        "exhausted",
+        "failed",
+        "failure",
+        "permanent_failure",
+        "permanent-failure",
+        "terminal_failure",
+        "terminal-failure",
+    }
+)
+_OFFICE_MANAGER_DELIVERY_KEY_PARTS = (
+    "announcement",
+    "delivery",
+    "message",
+    "reminder",
+    "retraction",
+    "winner_dm",
+)
+
+
+def _office_manager_delivery_value_failed(value, *, delivery_context=False) -> bool:
+    """Return whether an explicit delivery result reports a required failure."""
+    if value is False and delivery_context:
+        return True
+    if isinstance(value, str) and delivery_context:
+        return value.strip().lower() in _OFFICE_MANAGER_TERMINAL_DELIVERY_STATES
+    if isinstance(value, dict):
+        for raw_key, nested_value in value.items():
+            key = str(raw_key).strip().lower()
+            if key in _OFFICE_MANAGER_FAILURE_CONTAINER_KEYS and nested_value:
+                return True
+            nested_delivery_context = delivery_context or (
+                key in _OFFICE_MANAGER_DELIVERY_CONTAINER_KEYS
+                or key in _OFFICE_MANAGER_DELIVERY_BOOLEAN_KEYS
+                or any(part in key for part in _OFFICE_MANAGER_DELIVERY_KEY_PARTS)
+            )
+            if _office_manager_delivery_value_failed(
+                nested_value,
+                delivery_context=nested_delivery_context,
+            ):
+                return True
+        return False
+    if isinstance(value, (list, tuple, set)):
+        return any(
+            _office_manager_delivery_value_failed(
+                item,
+                delivery_context=delivery_context,
+            )
+            for item in value
+        )
+    return False
+
+
+def _office_manager_scheduler_failed(result) -> bool:
+    """Keep business states non-fatal while propagating required I/O failure."""
+    if not isinstance(result, dict):
+        return True
+    if str(result.get("status") or "").strip().lower() in (
+        _OFFICE_MANAGER_TERMINAL_DELIVERY_STATES
+    ):
+        return True
+    return _office_manager_delivery_value_failed(result)
+
+
 class Command(BaseCommand):
     help = "Run the scheduled daily discovery selector or enqueue one specific replay target."
 
@@ -119,10 +210,8 @@ class Command(BaseCommand):
         ):
             try:
                 results[name] = runner()
-                if (
-                    name == "office_manager"
-                    and isinstance(results[name], dict)
-                    and results[name].get("status") == "failed"
+                if name == "office_manager" and _office_manager_scheduler_failed(
+                    results[name]
                 ):
                     failures.append(name)
             except Exception as exc:

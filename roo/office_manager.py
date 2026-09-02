@@ -21,6 +21,7 @@ from integrations.services.slack import SlackService
 from .models import (
     CoworkingBooking,
     OfficeManagerAssignment,
+    OfficeManagerClaimAttempt,
     OfficeManagerDay,
 )
 from .permissions import InsufficientBalanceError
@@ -45,10 +46,18 @@ class OfficeManagerConfigurationError(RuntimeError):
 
 
 class OfficeManagerClaimError(ValueError):
-    def __init__(self, code: str, message: str, *, assignee_slack_user_id: str = ""):
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        assignee_slack_user_id: str = "",
+        attempt_id: uuid.UUID | None = None,
+    ):
         super().__init__(message)
         self.code = code
         self.assignee_slack_user_id = assignee_slack_user_id
+        self.attempt_id = attempt_id
 
 
 @dataclass(frozen=True)
@@ -57,6 +66,17 @@ class OfficeManagerClaimResult:
     booking: CoworkingBooking
     status: str
     existing_booking_converted: bool
+    attempt_id: uuid.UUID | None = None
+    replayed: bool = False
+
+
+TERMINAL_CLAIM_OUTCOMES = {
+    "member_not_eligible",
+    "office_manager_day_not_found",
+    "already_claimed",
+    "claim_closed",
+    "refund_unavailable",
+}
 
 
 def _office_manager_enabled() -> bool:
@@ -307,6 +327,20 @@ def _winner_channel_announcement_text(
     )
 
 
+def _winner_channel_client_msg_id(
+    assignment: OfficeManagerAssignment,
+) -> str:
+    winning_attempt_id = (
+        assignment.claim_attempts.order_by("created_at", "attempt_id")
+        .values_list("attempt_id", flat=True)
+        .first()
+    )
+    return _slack_client_msg_id(
+        "winner",
+        winning_attempt_id or assignment.id,
+    )
+
+
 def _relinquished_winner_channel_text(
     assignment: OfficeManagerAssignment,
 ) -> str:
@@ -315,15 +349,10 @@ def _relinquished_winner_channel_text(
         if assignment.user.slack_id
         else "The previously selected member"
     )
-    availability = (
-        "The volunteer position is open again; use the button in Roo's daily "
-        "Office Manager announcement."
-        if assignment.day.status == "open"
-        else "The volunteer window is now closed for today."
-    )
     return (
         f"{mention} is no longer today's *Office Manager of the Day*. "
-        f"{availability}\n\n"
+        "Check Roo's daily Office Manager announcement for the current "
+        "assignment or volunteer availability.\n\n"
         f"{COWORKING_SELF_BOOK_REMINDER}\n\n"
         f"{NO_FOOD_REMINDER}"
     )
@@ -342,6 +371,176 @@ def _safe_slack_error(exc: Exception) -> str:
     return exc.__class__.__name__
 
 
+DELIVERY_LEASE_PREFIX = "office-manager-delivery-lease:"
+RETRACTION_LEASE_PREFIX = "office-manager-retraction-lease:"
+EXPIRED_DELIVERY_ERROR = "expired_after_local_date_rollover"
+CLOSED_DELIVERY_ERROR = "expired_after_volunteer_window_closed"
+RELINQUISHED_DELIVERY_ERROR = "assignment_relinquished_before_delivery"
+RETRYABLE_DELIVERY_STATUSES = ("pending", "sending", "failed", "unknown")
+TERMINAL_ASSIGNMENT_DELIVERY_ERRORS = (
+    EXPIRED_DELIVERY_ERROR,
+    RELINQUISHED_DELIVERY_ERROR,
+)
+PERMANENT_SLACK_ERRORS = {
+    "account_inactive",
+    "channel_not_found",
+    "invalid_auth",
+    "missing_scope",
+    "not_allowed_token_type",
+    "not_in_channel",
+    "token_revoked",
+}
+TRANSIENT_SLACK_ERRORS = {
+    "fatal_error",
+    "internal_error",
+    "ratelimited",
+    "rate_limited",
+    "request_timeout",
+    "service_unavailable",
+}
+TERMINAL_DELIVERY_ERROR_PREFIXES = ("permanent:", "exhausted:")
+
+
+def _delivery_lease_token() -> str:
+    """Encode an owner and timestamp in an existing per-delivery field."""
+    return (
+        f"{DELIVERY_LEASE_PREFIX}{uuid.uuid4().hex}:"
+        f"{timezone.now().timestamp():.6f}"
+    )
+
+
+def _retraction_lease_token() -> str:
+    return f"{RETRACTION_LEASE_PREFIX}{uuid.uuid4().hex}"
+
+
+def _slack_failure_is_transient(exc: Exception) -> bool:
+    if isinstance(exc, OfficeManagerConfigurationError):
+        return False
+    if not isinstance(exc, SlackApiError):
+        return True
+    error = _safe_slack_error(exc)
+    response = exc.response
+    status_code = int(getattr(response, "status_code", 0) or 0)
+    if error in PERMANENT_SLACK_ERRORS:
+        return False
+    if error in TRANSIENT_SLACK_ERRORS:
+        return True
+    return status_code in {408, 429} or status_code >= 500
+
+
+def _delivery_lease_is_live(
+    *,
+    status: str,
+    error_value: str,
+    legacy_updated_at: datetime,
+) -> bool:
+    """Recognise both fenced leases and legacy pre-upgrade sending rows."""
+    if status != "sending":
+        return False
+    acquired_at = legacy_updated_at
+    cleaned_error = str(error_value or "")
+    if cleaned_error.startswith(DELIVERY_LEASE_PREFIX):
+        try:
+            acquired_at = datetime.fromtimestamp(
+                float(cleaned_error.rsplit(":", 1)[1]),
+                tz=ZoneInfo("UTC"),
+            )
+        except (TypeError, ValueError, OverflowError):
+            acquired_at = legacy_updated_at
+    return acquired_at >= timezone.now() - timedelta(
+        seconds=OfficeManagerService.DELIVERY_LEASE_SECONDS
+    )
+
+
+def _delivery_error_is_terminal(error_value: str) -> bool:
+    cleaned = str(error_value or "")
+    return cleaned in {
+        EXPIRED_DELIVERY_ERROR,
+        CLOSED_DELIVERY_ERROR,
+        RELINQUISHED_DELIVERY_ERROR,
+    } or cleaned.startswith(TERMINAL_DELIVERY_ERROR_PREFIXES)
+
+
+def _delivery_attempt_is_due(
+    *,
+    status: str,
+    error_value: str,
+    next_attempt_at: datetime | None,
+    attempt_count: int,
+    legacy_updated_at: datetime,
+) -> bool:
+    if status == "sent" or _delivery_error_is_terminal(error_value):
+        return False
+    if attempt_count >= OfficeManagerService.DELIVERY_MAX_ATTEMPTS:
+        return False
+    if next_attempt_at and next_attempt_at > timezone.now():
+        return False
+    return not _delivery_lease_is_live(
+        status=status,
+        error_value=error_value,
+        legacy_updated_at=legacy_updated_at,
+    )
+
+
+def _finish_delivery_failure(
+    model,
+    object_id: int,
+    *,
+    status_field: str,
+    error_field: str,
+    attempt_count_field: str,
+    next_attempt_field: str,
+    lease_token: str,
+    exc: Exception,
+    uncertain: bool,
+) -> bool:
+    """Fence a worker's failure so it cannot overwrite a replacement."""
+    attempt_count = (
+        model.objects.filter(pk=object_id)
+        .values_list(attempt_count_field, flat=True)
+        .first()
+        or 0
+    )
+    transient = uncertain or _slack_failure_is_transient(exc)
+    exhausted = (
+        not transient
+        or attempt_count >= OfficeManagerService.DELIVERY_MAX_ATTEMPTS
+    )
+    error = _safe_slack_error(exc)
+    if exhausted:
+        error = (
+            f"exhausted:{error}"
+            if transient
+            else f"permanent:{error}"
+        )
+    backoff_seconds = min(
+        OfficeManagerService.DELIVERY_RETRY_BASE_SECONDS
+        * (2 ** max(attempt_count - 1, 0)),
+        OfficeManagerService.DELIVERY_RETRY_MAX_SECONDS,
+    )
+    updated = model.objects.filter(
+        pk=object_id,
+        **{
+            status_field: "sending",
+            error_field: lease_token,
+        },
+    ).update(
+        **{
+            status_field: (
+                "failed" if exhausted or not uncertain else "unknown"
+            ),
+            error_field: error,
+            next_attempt_field: (
+                None
+                if exhausted
+                else timezone.now() + timedelta(seconds=backoff_seconds)
+            ),
+            "updated_at": timezone.now(),
+        }
+    )
+    return updated == 1
+
+
 def _open_dm_channel(slack_client, slack_user_id: str) -> str:
     response = slack_client.conversations_open(users=[slack_user_id])
     channel_id = str((response.get("channel") or {}).get("id") or "")
@@ -352,7 +551,14 @@ def _open_dm_channel(slack_client, slack_user_id: str) -> str:
 
 class OfficeManagerService:
     DELIVERY_LEASE_SECONDS = 300
+    DELIVERY_MAX_ATTEMPTS = 5
+    DELIVERY_RETRY_BASE_SECONDS = 30
+    DELIVERY_RETRY_MAX_SECONDS = 900
     PENDING_RETRACTION_SWEEP_LIMIT = 100
+    PENDING_DELIVERY_SWEEP_LIMIT = 100
+    RETRACTION_MAX_ATTEMPTS = 5
+    RETRACTION_RETRY_BASE_SECONDS = 30
+    RETRACTION_RETRY_MAX_SECONDS = 900
 
     @staticmethod
     def resolve_member(slack_user_id: str) -> User:
@@ -538,18 +744,191 @@ class OfficeManagerService:
             )
 
     @staticmethod
+    def _normalize_attempt_id(value: uuid.UUID | str) -> uuid.UUID:
+        try:
+            return value if isinstance(value, uuid.UUID) else uuid.UUID(str(value))
+        except (TypeError, ValueError, AttributeError) as exc:
+            raise OfficeManagerClaimError(
+                "invalid_request",
+                "attempt_id must be a canonical UUID",
+            ) from exc
+
+    @staticmethod
+    def _assert_attempt_payload(
+        attempt: OfficeManagerClaimAttempt,
+        *,
+        slack_user_id: str,
+        booking_date: date,
+    ) -> None:
+        if (
+            attempt.slack_user_id != str(slack_user_id or "").strip()
+            or attempt.booking_date != booking_date
+        ):
+            raise OfficeManagerClaimError(
+                "attempt_payload_conflict",
+                "attempt_id is already bound to a different claim payload",
+                attempt_id=attempt.attempt_id,
+            )
+
+    @staticmethod
+    def _replay_attempt(
+        attempt: OfficeManagerClaimAttempt,
+        *,
+        slack_user_id: str,
+        booking_date: date,
+    ) -> OfficeManagerClaimResult:
+        OfficeManagerService._assert_attempt_payload(
+            attempt,
+            slack_user_id=slack_user_id,
+            booking_date=booking_date,
+        )
+        if attempt.outcome in {"claimed", "already_claimed_by_you"}:
+            if attempt.assignment_id is None:
+                raise OfficeManagerClaimError(
+                    "attempt_unavailable",
+                    "The stored claim result is incomplete",
+                    attempt_id=attempt.attempt_id,
+                )
+            assignment = (
+                OfficeManagerAssignment.objects.select_related("booking")
+                .get(pk=attempt.assignment_id)
+            )
+            return OfficeManagerClaimResult(
+                assignment=assignment,
+                booking=assignment.booking,
+                status=attempt.outcome,
+                existing_booking_converted=(
+                    attempt.existing_booking_converted
+                ),
+                attempt_id=attempt.attempt_id,
+                replayed=True,
+            )
+        raise OfficeManagerClaimError(
+            attempt.outcome,
+            attempt.message or "Office Manager claim rejected",
+            assignee_slack_user_id=attempt.assignee_slack_user_id,
+            attempt_id=attempt.attempt_id,
+        )
+
+    @staticmethod
+    def _persist_attempt(
+        *,
+        attempt_id: uuid.UUID,
+        slack_user_id: str,
+        booking_date: date,
+        outcome: str,
+        message: str = "",
+        assignee_slack_user_id: str = "",
+        assignment: OfficeManagerAssignment | None = None,
+        existing_booking_converted: bool = False,
+        points_refunded: int = 0,
+    ) -> tuple[OfficeManagerClaimAttempt, bool]:
+        try:
+            with transaction.atomic():
+                return (
+                    OfficeManagerClaimAttempt.objects.create(
+                        attempt_id=attempt_id,
+                        slack_user_id=str(slack_user_id or "").strip(),
+                        booking_date=booking_date,
+                        outcome=outcome,
+                        message=message,
+                        assignee_slack_user_id=assignee_slack_user_id,
+                        assignment=assignment,
+                        existing_booking_converted=existing_booking_converted,
+                        points_refunded=points_refunded,
+                    ),
+                    True,
+                )
+        except IntegrityError:
+            return (
+                OfficeManagerClaimAttempt.objects.select_related(
+                    "assignment__booking"
+                ).get(pk=attempt_id),
+                False,
+            )
+
+    @staticmethod
     def claim(
         *,
         slack_user_id: str,
         booking_date: date,
+        attempt_id: uuid.UUID | str | None = None,
         now: datetime | None = None,
     ) -> OfficeManagerClaimResult:
-        existing_claim = OfficeManagerService._recover_existing_claim(
-            slack_user_id=slack_user_id,
-            booking_date=booking_date,
+        """Claim once per Roo-owned attempt identity.
+
+        Service callers that omit ``attempt_id`` retain the legacy natural-key
+        recovery used by older internal tests.  The HTTP contract always
+        supplies an attempt id and therefore never conflates a later lifecycle
+        with a retry of an earlier one.
+        """
+        legacy_natural_key = attempt_id is None
+        normalized_attempt_id = (
+            uuid.uuid4()
+            if legacy_natural_key
+            else OfficeManagerService._normalize_attempt_id(attempt_id)
         )
-        if existing_claim is not None:
-            return existing_claim
+        existing_attempt = (
+            OfficeManagerClaimAttempt.objects.select_related(
+                "assignment__booking"
+            )
+            .filter(pk=normalized_attempt_id)
+            .first()
+        )
+        if existing_attempt is not None:
+            return OfficeManagerService._replay_attempt(
+                existing_attempt,
+                slack_user_id=slack_user_id,
+                booking_date=booking_date,
+            )
+
+        if legacy_natural_key:
+            existing_claim = OfficeManagerService._recover_existing_claim(
+                slack_user_id=slack_user_id,
+                booking_date=booking_date,
+            )
+            if existing_claim is not None:
+                return existing_claim
+
+        try:
+            return OfficeManagerService._claim_new_attempt(
+                slack_user_id=slack_user_id,
+                booking_date=booking_date,
+                attempt_id=normalized_attempt_id,
+                now=now,
+            )
+        except OfficeManagerClaimError as exc:
+            if legacy_natural_key or exc.code not in TERMINAL_CLAIM_OUTCOMES:
+                raise
+            attempt, created = OfficeManagerService._persist_attempt(
+                attempt_id=normalized_attempt_id,
+                slack_user_id=slack_user_id,
+                booking_date=booking_date,
+                outcome=exc.code,
+                message=str(exc),
+                assignee_slack_user_id=exc.assignee_slack_user_id,
+            )
+            if not created:
+                return OfficeManagerService._replay_attempt(
+                    attempt,
+                    slack_user_id=slack_user_id,
+                    booking_date=booking_date,
+                )
+            raise OfficeManagerClaimError(
+                attempt.outcome,
+                attempt.message,
+                assignee_slack_user_id=attempt.assignee_slack_user_id,
+                attempt_id=attempt.attempt_id,
+            ) from exc
+
+    @staticmethod
+    def _claim_new_attempt(
+        *,
+        slack_user_id: str,
+        booking_date: date,
+        attempt_id: uuid.UUID,
+        now: datetime | None = None,
+    ) -> OfficeManagerClaimResult:
 
         if not _office_manager_enabled():
             raise OfficeManagerClaimError(
@@ -582,6 +961,23 @@ class OfficeManagerService:
             )
             if active_assignment is not None:
                 if active_assignment.user_id == user.id:
+                    attempt, created = OfficeManagerService._persist_attempt(
+                        attempt_id=attempt_id,
+                        slack_user_id=slack_user_id,
+                        booking_date=booking_date,
+                        outcome="already_claimed_by_you",
+                        assignment=active_assignment,
+                        existing_booking_converted=bool(
+                            active_assignment.booking.ledger_entry_id
+                        ),
+                        points_refunded=active_assignment.points_refunded,
+                    )
+                    if not created:
+                        return OfficeManagerService._replay_attempt(
+                            attempt,
+                            slack_user_id=slack_user_id,
+                            booking_date=booking_date,
+                        )
                     return OfficeManagerClaimResult(
                         assignment=active_assignment,
                         booking=active_assignment.booking,
@@ -589,6 +985,7 @@ class OfficeManagerService:
                         existing_booking_converted=bool(
                             active_assignment.booking.ledger_entry_id
                         ),
+                        attempt_id=attempt_id,
                     )
                 raise OfficeManagerClaimError(
                     "already_claimed",
@@ -615,6 +1012,7 @@ class OfficeManagerService:
             )
             existing_booking_converted = booking is not None
             points_refunded = 0
+            purchased_points_refunded_microroo = 0
             refund_ledger = None
 
             if booking is None:
@@ -629,6 +1027,17 @@ class OfficeManagerService:
             else:
                 points_refunded = max(0, int(booking.points_cost))
                 if points_refunded:
+                    try:
+                        purchased_points_refunded_microroo = (
+                            CoworkingService.validated_booking_debit_provenance(
+                                booking
+                            )
+                        )
+                    except ValueError as exc:
+                        raise OfficeManagerClaimError(
+                            "refund_unavailable",
+                            str(exc),
+                        ) from exc
                     refund_ledger, _ = PointsService.refund(
                         user=user,
                         delta=points_refunded,
@@ -638,6 +1047,10 @@ class OfficeManagerService:
                         idempotency_key=f"office_manager_refund:{day.id}:{booking.id}",
                         reference_type="OFFICE_MANAGER_ASSIGNMENT",
                         reference_id=str(day.id),
+                        purchased_delta_microroo=(
+                            purchased_points_refunded_microroo
+                        ),
+                        reverse_lifetime_spent=True,
                     )
                     booking.refund_ledger_entry = refund_ledger
                 if booking.original_points_cost is None:
@@ -661,8 +1074,26 @@ class OfficeManagerService:
                 booking=booking,
                 status="active",
                 points_refunded=points_refunded,
+                purchased_points_refunded_microroo=(
+                    purchased_points_refunded_microroo
+                ),
                 refund_ledger_entry=refund_ledger,
             )
+            attempt, created = OfficeManagerService._persist_attempt(
+                attempt_id=attempt_id,
+                slack_user_id=slack_user_id,
+                booking_date=booking_date,
+                outcome="claimed",
+                assignment=assignment,
+                existing_booking_converted=existing_booking_converted,
+                points_refunded=points_refunded,
+            )
+            if not created:
+                return OfficeManagerService._replay_attempt(
+                    attempt,
+                    slack_user_id=slack_user_id,
+                    booking_date=booking_date,
+                )
             day.status = "claimed"
             day.closed_at = None
             day.message_update_pending = True
@@ -680,6 +1111,7 @@ class OfficeManagerService:
             booking=booking,
             status="claimed",
             existing_booking_converted=existing_booking_converted,
+            attempt_id=attempt_id,
         )
 
     @staticmethod
@@ -719,6 +1151,24 @@ class OfficeManagerService:
             return False, None, None
 
         if assignment.points_refunded and not assignment.refund_reversal_ledger_entry_id:
+            refund_ledger = assignment.refund_ledger_entry
+            expected_refund_microroo = PointsService.roo_to_microroo(
+                assignment.points_refunded
+            )
+            if (
+                refund_ledger is None
+                or refund_ledger.user_id != booking.user_id
+                or refund_ledger.kind != "REFUND"
+                or refund_ledger.source != "COWORKING"
+                or refund_ledger.delta_microroo != expected_refund_microroo
+                or refund_ledger.reference_type
+                != "OFFICE_MANAGER_ASSIGNMENT"
+                or refund_ledger.reference_id != str(day.id)
+            ):
+                raise ValueError(
+                    "The Office Manager refund cannot be safely reversed "
+                    "because its authoritative ledger entry is unavailable"
+                )
             try:
                 reversal_ledger, _ = PointsService.spend(
                     user=booking.user,
@@ -734,6 +1184,9 @@ class OfficeManagerService:
                     ),
                     reference_type="OFFICE_MANAGER_REFUND_REVERSAL",
                     reference_id=str(assignment.id),
+                    purchased_delta_microroo=(
+                        assignment.purchased_points_refunded_microroo
+                    ),
                 )
             except InsufficientBalanceError as exc:
                 raise ValueError(
@@ -755,14 +1208,39 @@ class OfficeManagerService:
             or assignment.winner_channel_announcement_status
             in {"sending", "sent", "unknown"}
         )
+        assignment.winner_channel_retraction_status = (
+            "pending"
+            if assignment.winner_channel_retraction_pending
+            else "not_required"
+        )
+        assignment.winner_channel_retraction_lease_token = ""
+        assignment.winner_channel_retraction_next_attempt_at = (
+            timezone.now()
+            if assignment.winner_channel_retraction_pending
+            else None
+        )
         assignment.save(
             update_fields=[
                 "status",
                 "relinquished_at",
                 "refund_reversal_ledger_entry",
                 "winner_channel_retraction_pending",
+                "winner_channel_retraction_status",
+                "winner_channel_retraction_lease_token",
+                "winner_channel_retraction_next_attempt_at",
                 "updated_at",
             ]
+        )
+        OfficeManagerClaimAttempt.objects.filter(
+            assignment=assignment,
+            outcome__in={"claimed", "already_claimed_by_you"},
+        ).update(
+            outcome="attempt_superseded",
+            message=(
+                "This Office Manager claim attempt was superseded by "
+                "cancellation and cannot be replayed"
+            ),
+            superseded_at=timezone.now(),
         )
 
         reopened = (
@@ -784,67 +1262,106 @@ class OfficeManagerService:
 
     @staticmethod
     def post_announcement(day_id: int) -> bool:
+        lease_token = _delivery_lease_token()
         with transaction.atomic():
             day = OfficeManagerDay.objects.select_for_update().get(pk=day_id)
-            if day.announcement_status in {"sent", "unknown"}:
-                return day.announcement_status == "sent"
-            lease_cutoff = timezone.now() - timedelta(
-                seconds=OfficeManagerService.DELIVERY_LEASE_SECONDS
-            )
-            if (
-                day.announcement_status == "sending"
-                and day.updated_at >= lease_cutoff
+            if day.announcement_status == "sent":
+                return True
+            if not _delivery_attempt_is_due(
+                status=day.announcement_status,
+                error_value=day.announcement_last_error,
+                next_attempt_at=day.announcement_next_attempt_at,
+                attempt_count=day.announcement_attempt_count,
+                legacy_updated_at=day.updated_at,
             ):
                 return False
             day.announcement_status = "sending"
             day.announcement_attempt_count += 1
-            day.announcement_last_error = ""
+            day.announcement_last_error = lease_token
+            day.announcement_next_attempt_at = None
             day.save(
                 update_fields=[
                     "announcement_status",
                     "announcement_attempt_count",
                     "announcement_last_error",
+                    "announcement_next_attempt_at",
                     "updated_at",
                 ]
             )
 
         try:
-            response = _office_manager_slack_client().chat_postMessage(
-                channel=day.slack_channel_id,
-                text=_announcement_text(day),
-                blocks=_announcement_blocks(day),
-                client_msg_id=_slack_client_msg_id("daily", day.id),
-                unfurl_links=False,
-                unfurl_media=False,
-            )
-            message_ts = str(response.get("ts") or "")
-            if not response.get("ok") or not message_ts:
-                raise SlackApiError("chat.postMessage failed", response)
+            with transaction.atomic():
+                day = OfficeManagerDay.objects.select_for_update().get(pk=day_id)
+                if (
+                    day.announcement_status != "sending"
+                    or day.announcement_last_error != lease_token
+                ):
+                    return day.announcement_status == "sent"
+                response = _office_manager_slack_client().chat_postMessage(
+                    channel=day.slack_channel_id,
+                    text=_announcement_text(day),
+                    blocks=_announcement_blocks(day),
+                    client_msg_id=_slack_client_msg_id("daily", day.id),
+                    unfurl_links=False,
+                    unfurl_media=False,
+                )
+                message_ts = str(response.get("ts") or "")
+                if not response.get("ok") or not message_ts:
+                    raise SlackApiError("chat.postMessage failed", response)
+                day.announcement_status = "sent"
+                day.slack_message_ts = message_ts
+                day.announced_at = timezone.now()
+                day.announcement_last_error = ""
+                day.announcement_next_attempt_at = None
+                day.save(
+                    update_fields=[
+                        "announcement_status",
+                        "slack_message_ts",
+                        "announced_at",
+                        "announcement_last_error",
+                        "announcement_next_attempt_at",
+                        "updated_at",
+                    ]
+                )
         except OfficeManagerConfigurationError as exc:
-            OfficeManagerDay.objects.filter(pk=day_id).update(
-                announcement_status="failed",
-                announcement_last_error=_safe_slack_error(exc),
+            _finish_delivery_failure(
+                OfficeManagerDay,
+                day_id,
+                status_field="announcement_status",
+                error_field="announcement_last_error",
+                attempt_count_field="announcement_attempt_count",
+                next_attempt_field="announcement_next_attempt_at",
+                lease_token=lease_token,
+                exc=exc,
+                uncertain=False,
             )
             return False
         except SlackApiError as exc:
-            OfficeManagerDay.objects.filter(pk=day_id).update(
-                announcement_status="failed",
-                announcement_last_error=_safe_slack_error(exc),
+            _finish_delivery_failure(
+                OfficeManagerDay,
+                day_id,
+                status_field="announcement_status",
+                error_field="announcement_last_error",
+                attempt_count_field="announcement_attempt_count",
+                next_attempt_field="announcement_next_attempt_at",
+                lease_token=lease_token,
+                exc=exc,
+                uncertain=False,
             )
             return False
         except Exception as exc:
-            OfficeManagerDay.objects.filter(pk=day_id).update(
-                announcement_status="unknown",
-                announcement_last_error=_safe_slack_error(exc),
+            _finish_delivery_failure(
+                OfficeManagerDay,
+                day_id,
+                status_field="announcement_status",
+                error_field="announcement_last_error",
+                attempt_count_field="announcement_attempt_count",
+                next_attempt_field="announcement_next_attempt_at",
+                lease_token=lease_token,
+                exc=exc,
+                uncertain=True,
             )
             return False
-
-        OfficeManagerDay.objects.filter(pk=day_id).update(
-            announcement_status="sent",
-            slack_message_ts=message_ts,
-            announced_at=timezone.now(),
-            announcement_last_error="",
-        )
         return True
 
     @staticmethod
@@ -882,6 +1399,7 @@ class OfficeManagerService:
 
     @staticmethod
     def deliver_winner_channel_announcement(assignment_id: int) -> bool:
+        lease_token = _delivery_lease_token()
         with transaction.atomic():
             assignment = (
                 OfficeManagerAssignment.objects.select_for_update()
@@ -890,58 +1408,136 @@ class OfficeManagerService:
             )
             if assignment.status != "active":
                 return False
-            if assignment.winner_channel_announcement_status in {
-                "sent",
-                "unknown",
-            }:
-                return (
-                    assignment.winner_channel_announcement_status == "sent"
-                )
-            lease_cutoff = timezone.now() - timedelta(
-                seconds=OfficeManagerService.DELIVERY_LEASE_SECONDS
-            )
-            if (
-                assignment.winner_channel_announcement_status == "sending"
-                and assignment.updated_at >= lease_cutoff
+            if assignment.winner_channel_announcement_status == "sent":
+                return True
+            if not _delivery_attempt_is_due(
+                status=assignment.winner_channel_announcement_status,
+                error_value=assignment.winner_channel_announcement_last_error,
+                next_attempt_at=(
+                    assignment.winner_channel_announcement_next_attempt_at
+                ),
+                attempt_count=(
+                    assignment.winner_channel_announcement_attempt_count
+                ),
+                legacy_updated_at=assignment.updated_at,
             ):
                 return False
             assignment.winner_channel_announcement_status = "sending"
-            assignment.winner_channel_announcement_last_error = ""
+            assignment.winner_channel_announcement_last_error = lease_token
+            assignment.winner_channel_announcement_attempt_count += 1
+            assignment.winner_channel_announcement_next_attempt_at = None
             assignment.save(
                 update_fields=[
                     "winner_channel_announcement_status",
                     "winner_channel_announcement_last_error",
+                    "winner_channel_announcement_attempt_count",
+                    "winner_channel_announcement_next_attempt_at",
                     "updated_at",
                 ]
             )
 
         try:
-            response = _office_manager_slack_client().chat_postMessage(
-                channel=assignment.day.slack_channel_id,
-                text=_winner_channel_announcement_text(assignment),
-                client_msg_id=_slack_client_msg_id("winner", assignment.id),
-                unfurl_links=False,
-                unfurl_media=False,
-            )
-            message_ts = str(response.get("ts") or "")
-            if not response.get("ok") or not message_ts:
-                raise SlackApiError("chat.postMessage failed", response)
+            with transaction.atomic():
+                assignment = (
+                    OfficeManagerAssignment.objects.select_for_update()
+                    .select_related("day", "user")
+                    .get(pk=assignment_id)
+                )
+                if (
+                    assignment.winner_channel_announcement_status != "sending"
+                    or assignment.winner_channel_announcement_last_error
+                    != lease_token
+                ):
+                    return (
+                        assignment.winner_channel_announcement_status == "sent"
+                    )
+                if assignment.status != "active":
+                    assignment.winner_channel_announcement_status = "failed"
+                    assignment.winner_channel_announcement_last_error = (
+                        RELINQUISHED_DELIVERY_ERROR
+                    )
+                    assignment.save(
+                        update_fields=[
+                            "winner_channel_announcement_status",
+                            "winner_channel_announcement_last_error",
+                            "updated_at",
+                        ]
+                    )
+                    return False
+                response = _office_manager_slack_client().chat_postMessage(
+                    channel=assignment.day.slack_channel_id,
+                    text=_winner_channel_announcement_text(assignment),
+                    client_msg_id=_winner_channel_client_msg_id(assignment),
+                    unfurl_links=False,
+                    unfurl_media=False,
+                )
+                message_ts = str(response.get("ts") or "")
+                if not response.get("ok") or not message_ts:
+                    raise SlackApiError("chat.postMessage failed", response)
+                assignment.winner_channel_announcement_status = "sent"
+                assignment.winner_channel_announcement_sent_at = timezone.now()
+                assignment.winner_channel_message_ts = message_ts
+                assignment.winner_channel_announcement_last_error = ""
+                assignment.winner_channel_announcement_next_attempt_at = None
+                assignment.save(
+                    update_fields=[
+                        "winner_channel_announcement_status",
+                        "winner_channel_announcement_sent_at",
+                        "winner_channel_message_ts",
+                        "winner_channel_announcement_last_error",
+                        "winner_channel_announcement_next_attempt_at",
+                        "updated_at",
+                    ]
+                )
         except OfficeManagerConfigurationError as exc:
-            OfficeManagerAssignment.objects.filter(pk=assignment_id).update(
-                winner_channel_announcement_status="failed",
-                winner_channel_announcement_last_error=_safe_slack_error(exc),
+            _finish_delivery_failure(
+                OfficeManagerAssignment,
+                assignment_id,
+                status_field="winner_channel_announcement_status",
+                error_field="winner_channel_announcement_last_error",
+                attempt_count_field=(
+                    "winner_channel_announcement_attempt_count"
+                ),
+                next_attempt_field=(
+                    "winner_channel_announcement_next_attempt_at"
+                ),
+                lease_token=lease_token,
+                exc=exc,
+                uncertain=False,
             )
             return False
         except SlackApiError as exc:
-            OfficeManagerAssignment.objects.filter(pk=assignment_id).update(
-                winner_channel_announcement_status="failed",
-                winner_channel_announcement_last_error=_safe_slack_error(exc),
+            _finish_delivery_failure(
+                OfficeManagerAssignment,
+                assignment_id,
+                status_field="winner_channel_announcement_status",
+                error_field="winner_channel_announcement_last_error",
+                attempt_count_field=(
+                    "winner_channel_announcement_attempt_count"
+                ),
+                next_attempt_field=(
+                    "winner_channel_announcement_next_attempt_at"
+                ),
+                lease_token=lease_token,
+                exc=exc,
+                uncertain=False,
             )
             return False
         except Exception as exc:
-            OfficeManagerAssignment.objects.filter(pk=assignment_id).update(
-                winner_channel_announcement_status="unknown",
-                winner_channel_announcement_last_error=_safe_slack_error(exc),
+            _finish_delivery_failure(
+                OfficeManagerAssignment,
+                assignment_id,
+                status_field="winner_channel_announcement_status",
+                error_field="winner_channel_announcement_last_error",
+                attempt_count_field=(
+                    "winner_channel_announcement_attempt_count"
+                ),
+                next_attempt_field=(
+                    "winner_channel_announcement_next_attempt_at"
+                ),
+                lease_token=lease_token,
+                exc=exc,
+                uncertain=True,
             )
             return False
 
@@ -951,18 +1547,10 @@ class OfficeManagerService:
                 .select_related("day", "user")
                 .get(pk=assignment_id)
             )
-            assignment.winner_channel_announcement_status = "sent"
-            assignment.winner_channel_announcement_sent_at = timezone.now()
-            assignment.winner_channel_message_ts = message_ts
-            assignment.winner_channel_announcement_last_error = ""
             if assignment.status != "active":
                 assignment.winner_channel_retraction_pending = True
             assignment.save(
                 update_fields=[
-                    "winner_channel_announcement_status",
-                    "winner_channel_announcement_sent_at",
-                    "winner_channel_message_ts",
-                    "winner_channel_announcement_last_error",
                     "winner_channel_retraction_pending",
                     "updated_at",
                 ]
@@ -977,6 +1565,8 @@ class OfficeManagerService:
 
     @staticmethod
     def retract_winner_channel_announcement(assignment_id: int) -> bool:
+        lease_token = _retraction_lease_token()
+        now = timezone.now()
         with transaction.atomic():
             assignment = (
                 OfficeManagerAssignment.objects.select_for_update()
@@ -984,63 +1574,189 @@ class OfficeManagerService:
                 .get(pk=assignment_id)
             )
             if not assignment.winner_channel_retraction_pending:
-                return True
-            channel_id = assignment.day.slack_channel_id
-            message_ts = assignment.winner_channel_message_ts
-            text = _relinquished_winner_channel_text(assignment)
-
-        if not message_ts:
-            try:
-                slack_client = _office_manager_slack_client()
-                response = slack_client.chat_postMessage(
-                    channel=channel_id,
-                    text=_winner_channel_announcement_text(assignment),
-                    client_msg_id=_slack_client_msg_id(
-                        "winner",
-                        assignment.id,
-                    ),
-                    unfurl_links=False,
-                    unfurl_media=False,
+                return assignment.winner_channel_retraction_status in {
+                    "not_required",
+                    "sent",
+                }
+            if (
+                assignment.winner_channel_retraction_next_attempt_at
+                and assignment.winner_channel_retraction_next_attempt_at > now
+            ):
+                return False
+            if (
+                assignment.winner_channel_retraction_status == "sending"
+                and assignment.updated_at
+                >= now
+                - timedelta(
+                    seconds=OfficeManagerService.DELIVERY_LEASE_SECONDS
                 )
-                message_ts = str(response.get("ts") or "")
-                if not response.get("ok") or not message_ts:
-                    raise SlackApiError("chat.postMessage failed", response)
-            except Exception as exc:
-                OfficeManagerAssignment.objects.filter(pk=assignment_id).update(
-                    winner_channel_retraction_last_error=_safe_slack_error(exc),
-                    updated_at=timezone.now(),
+            ):
+                return False
+            if (
+                assignment.winner_channel_retraction_attempt_count
+                >= OfficeManagerService.RETRACTION_MAX_ATTEMPTS
+            ):
+                assignment.winner_channel_retraction_pending = False
+                assignment.winner_channel_retraction_status = "exhausted"
+                assignment.winner_channel_retraction_last_error = (
+                    assignment.winner_channel_retraction_last_error
+                    or "retry_budget_exhausted"
+                )
+                assignment.winner_channel_retraction_lease_token = ""
+                assignment.save(
+                    update_fields=[
+                        "winner_channel_retraction_pending",
+                        "winner_channel_retraction_status",
+                        "winner_channel_retraction_last_error",
+                        "winner_channel_retraction_lease_token",
+                        "updated_at",
+                    ]
                 )
                 return False
-            OfficeManagerAssignment.objects.filter(pk=assignment_id).update(
-                winner_channel_announcement_status="sent",
-                winner_channel_announcement_sent_at=timezone.now(),
-                winner_channel_message_ts=message_ts,
-                winner_channel_announcement_last_error="",
-                updated_at=timezone.now(),
+            assignment.winner_channel_retraction_status = "sending"
+            assignment.winner_channel_retraction_lease_token = lease_token
+            assignment.winner_channel_retraction_attempt_count += 1
+            assignment.winner_channel_retraction_next_attempt_at = None
+            assignment.save(
+                update_fields=[
+                    "winner_channel_retraction_status",
+                    "winner_channel_retraction_lease_token",
+                    "winner_channel_retraction_attempt_count",
+                    "winner_channel_retraction_next_attempt_at",
+                    "updated_at",
+                ]
             )
+            channel_id = assignment.day.slack_channel_id
+            message_ts = assignment.winner_channel_message_ts
 
-        try:
-            slack_client = _office_manager_slack_client()
-        except OfficeManagerConfigurationError as exc:
-            OfficeManagerAssignment.objects.filter(pk=assignment_id).update(
-                winner_channel_retraction_last_error=_safe_slack_error(exc),
+        # Never create or re-create a public winner announcement merely to
+        # retract it. Unknown delivery without authoritative coordinates is an
+        # observable exhausted state requiring operator reconciliation.
+        if not message_ts:
+            OfficeManagerAssignment.objects.filter(
+                pk=assignment_id,
+                winner_channel_retraction_status="sending",
+                winner_channel_retraction_lease_token=lease_token,
+            ).update(
+                winner_channel_retraction_pending=False,
+                winner_channel_retraction_status="exhausted",
+                winner_channel_retraction_last_error=(
+                    "message_coordinates_unavailable"
+                ),
+                winner_channel_retraction_lease_token="",
                 updated_at=timezone.now(),
             )
             return False
-        success = SlackService.update_message(
-            channel_id,
-            message_ts,
-            text,
-            client=slack_client,
-        )
-        OfficeManagerAssignment.objects.filter(pk=assignment_id).update(
-            winner_channel_retraction_pending=not success,
-            winner_channel_retraction_last_error=(
-                "" if success else "slack_update_failed"
-            ),
+
+        try:
+            # Re-read the authoritative day and assignment after leasing and
+            # immediately before publishing. The copy deliberately makes no
+            # stale "open again" claim if a replacement has since won.
+            with transaction.atomic():
+                current = (
+                    OfficeManagerAssignment.objects.select_for_update()
+                    .select_related("day", "user")
+                    .get(pk=assignment_id)
+                )
+                if (
+                    current.winner_channel_retraction_status != "sending"
+                    or current.winner_channel_retraction_lease_token
+                    != lease_token
+                ):
+                    return current.winner_channel_retraction_status == "sent"
+                if current.status != "relinquished":
+                    current.winner_channel_retraction_pending = False
+                    current.winner_channel_retraction_status = "not_required"
+                    current.winner_channel_retraction_lease_token = ""
+                    current.save(
+                        update_fields=[
+                            "winner_channel_retraction_pending",
+                            "winner_channel_retraction_status",
+                            "winner_channel_retraction_lease_token",
+                            "updated_at",
+                        ]
+                    )
+                    return True
+                text = _relinquished_winner_channel_text(current)
+
+            slack_client = _office_manager_slack_client()
+            response = slack_client.chat_update(
+                channel=channel_id,
+                ts=message_ts,
+                text=text,
+            )
+            if not response.get("ok", True):
+                raise SlackApiError("chat.update failed", response)
+        except Exception as exc:
+            error = _safe_slack_error(exc)
+            if error == "message_not_found":
+                updated = OfficeManagerAssignment.objects.filter(
+                    pk=assignment_id,
+                    winner_channel_retraction_status="sending",
+                    winner_channel_retraction_lease_token=lease_token,
+                ).update(
+                    winner_channel_retraction_pending=False,
+                    winner_channel_retraction_status="sent",
+                    winner_channel_retraction_last_error="",
+                    winner_channel_retraction_lease_token="",
+                    winner_channel_retraction_next_attempt_at=None,
+                    updated_at=timezone.now(),
+                )
+                return updated == 1
+
+            transient = _slack_failure_is_transient(exc)
+            attempt_count = (
+                OfficeManagerAssignment.objects.filter(pk=assignment_id)
+                .values_list(
+                    "winner_channel_retraction_attempt_count",
+                    flat=True,
+                )
+                .first()
+                or 0
+            )
+            exhausted = (
+                not transient
+                or attempt_count
+                >= OfficeManagerService.RETRACTION_MAX_ATTEMPTS
+            )
+            backoff_seconds = min(
+                OfficeManagerService.RETRACTION_RETRY_BASE_SECONDS
+                * (2 ** max(attempt_count - 1, 0)),
+                OfficeManagerService.RETRACTION_RETRY_MAX_SECONDS,
+            )
+            OfficeManagerAssignment.objects.filter(
+                pk=assignment_id,
+                winner_channel_retraction_status="sending",
+                winner_channel_retraction_lease_token=lease_token,
+            ).update(
+                winner_channel_retraction_pending=not exhausted,
+                winner_channel_retraction_status=(
+                    "exhausted" if exhausted else "failed"
+                ),
+                winner_channel_retraction_last_error=error,
+                winner_channel_retraction_lease_token="",
+                winner_channel_retraction_next_attempt_at=(
+                    None
+                    if exhausted
+                    else timezone.now() + timedelta(seconds=backoff_seconds)
+                ),
+                updated_at=timezone.now(),
+            )
+            return False
+
+        updated = OfficeManagerAssignment.objects.filter(
+            pk=assignment_id,
+            winner_channel_retraction_status="sending",
+            winner_channel_retraction_lease_token=lease_token,
+        ).update(
+            winner_channel_retraction_pending=False,
+            winner_channel_retraction_status="sent",
+            winner_channel_retraction_last_error="",
+            winner_channel_retraction_lease_token="",
+            winner_channel_retraction_next_attempt_at=None,
             updated_at=timezone.now(),
         )
-        return success
+        return updated == 1
 
     @staticmethod
     def retry_pending_winner_retractions(
@@ -1055,6 +1771,13 @@ class OfficeManagerService:
         assignment_ids = list(
             OfficeManagerAssignment.objects.filter(
                 winner_channel_retraction_pending=True,
+                winner_channel_retraction_attempt_count__lt=(
+                    OfficeManagerService.RETRACTION_MAX_ATTEMPTS
+                ),
+            )
+            .filter(
+                Q(winner_channel_retraction_next_attempt_at__isnull=True)
+                | Q(winner_channel_retraction_next_attempt_at__lte=timezone.now())
             )
             .order_by("updated_at", "pk")
             .values_list("pk", flat=True)[:sweep_limit]
@@ -1067,7 +1790,199 @@ class OfficeManagerService:
         ]
 
     @staticmethod
+    def retry_pending_deliveries(
+        *,
+        now: datetime | None = None,
+        limit: int | None = None,
+    ) -> dict[str, dict[int, bool]]:
+        """Recover or explicitly expire durable deliveries across date gates."""
+        local_now = _local_now(now)
+        local_date = local_now.date()
+        sweep_limit = (
+            OfficeManagerService.PENDING_DELIVERY_SWEEP_LIMIT
+            if limit is None
+            else max(0, int(limit))
+        )
+        recovered: dict[str, dict[int, bool]] = {
+            "announcement": {},
+            "winner_channel": {},
+            "winner_dm": {},
+            "end_of_day": {},
+        }
+        if sweep_limit == 0:
+            return recovered
+
+        announcement_time = _setting_time(
+            "OFFICE_MANAGER_ANNOUNCEMENT_HOUR",
+            "OFFICE_MANAGER_ANNOUNCEMENT_MINUTE",
+            8,
+            30,
+        )
+        day_ids = list(
+            OfficeManagerDay.objects.filter(
+                date__lte=local_date,
+                announcement_status__in=RETRYABLE_DELIVERY_STATUSES,
+            )
+            .exclude(announcement_last_error=EXPIRED_DELIVERY_ERROR)
+            .exclude(announcement_last_error=CLOSED_DELIVERY_ERROR)
+            .order_by("date", "pk")
+            .values_list("pk", flat=True)[:sweep_limit]
+        )
+        for day_id in day_ids:
+            day = OfficeManagerDay.objects.get(pk=day_id)
+            if day.date < local_date:
+                OfficeManagerDay.objects.filter(
+                    pk=day_id,
+                    announcement_status__in=RETRYABLE_DELIVERY_STATUSES,
+                ).update(
+                    announcement_status="failed",
+                    announcement_last_error=EXPIRED_DELIVERY_ERROR,
+                    updated_at=timezone.now(),
+                )
+                recovered["announcement"][day_id] = False
+                continue
+            if day.date > local_date:
+                continue
+            cutoff_passed = local_now >= day.claim_cutoff_at.astimezone(
+                _timezone()
+            )
+            if day.status == "closed" or (
+                day.status == "open" and cutoff_passed
+            ):
+                OfficeManagerDay.objects.filter(
+                    pk=day_id,
+                    announcement_status__in=RETRYABLE_DELIVERY_STATUSES,
+                ).update(
+                    announcement_status="failed",
+                    announcement_last_error=CLOSED_DELIVERY_ERROR,
+                    updated_at=timezone.now(),
+                )
+                recovered["announcement"][day_id] = False
+                continue
+            if local_now.time().replace(tzinfo=None) >= announcement_time:
+                recovered["announcement"][day_id] = (
+                    OfficeManagerService.post_announcement(day_id)
+                )
+
+        reminder_time = _setting_time(
+            "OFFICE_MANAGER_END_OF_DAY_REMINDER_HOUR",
+            "OFFICE_MANAGER_END_OF_DAY_REMINDER_MINUTE",
+            16,
+            30,
+        )
+        assignments = list(
+            OfficeManagerAssignment.objects.filter(
+                day__date__lte=local_date,
+            )
+            .filter(
+                (
+                    Q(
+                        winner_channel_announcement_status__in=(
+                            RETRYABLE_DELIVERY_STATUSES
+                        )
+                    )
+                    & ~Q(
+                        winner_channel_announcement_last_error__in=(
+                            TERMINAL_ASSIGNMENT_DELIVERY_ERRORS
+                        )
+                    )
+                )
+                | (
+                    Q(winner_dm_status__in=RETRYABLE_DELIVERY_STATUSES)
+                    & ~Q(
+                        winner_dm_last_error__in=(
+                            TERMINAL_ASSIGNMENT_DELIVERY_ERRORS
+                        )
+                    )
+                )
+                | (
+                    Q(
+                        end_of_day_reminder_status__in=(
+                            RETRYABLE_DELIVERY_STATUSES
+                        )
+                    )
+                    & ~Q(
+                        end_of_day_reminder_last_error__in=(
+                            TERMINAL_ASSIGNMENT_DELIVERY_ERRORS
+                        )
+                    )
+                )
+            )
+            .select_related("day")
+            .order_by("day__date", "pk")[:sweep_limit]
+        )
+        delivery_fields = (
+            (
+                "winner_channel_announcement_status",
+                "winner_channel_announcement_last_error",
+                "winner_channel",
+            ),
+            ("winner_dm_status", "winner_dm_last_error", "winner_dm"),
+            (
+                "end_of_day_reminder_status",
+                "end_of_day_reminder_last_error",
+                "end_of_day",
+            ),
+        )
+        for assignment in assignments:
+            terminal_error = ""
+            if assignment.day.date < local_date:
+                terminal_error = EXPIRED_DELIVERY_ERROR
+            elif assignment.status != "active":
+                terminal_error = RELINQUISHED_DELIVERY_ERROR
+            if terminal_error:
+                for status_field, error_field, result_key in delivery_fields:
+                    if getattr(assignment, status_field) not in (
+                        RETRYABLE_DELIVERY_STATUSES
+                    ) or getattr(assignment, error_field) in (
+                        TERMINAL_ASSIGNMENT_DELIVERY_ERRORS
+                    ):
+                        continue
+                    model_filter = {
+                        "pk": assignment.pk,
+                        f"{status_field}__in": RETRYABLE_DELIVERY_STATUSES,
+                    }
+                    OfficeManagerAssignment.objects.filter(
+                        **model_filter
+                    ).update(
+                        **{
+                            status_field: "failed",
+                            error_field: terminal_error,
+                            "updated_at": timezone.now(),
+                        }
+                    )
+                    recovered[result_key][assignment.pk] = False
+                continue
+            if assignment.day.date > local_date:
+                continue
+            if assignment.winner_channel_announcement_status in (
+                RETRYABLE_DELIVERY_STATUSES
+            ):
+                recovered["winner_channel"][assignment.pk] = (
+                    OfficeManagerService.deliver_winner_channel_announcement(
+                        assignment.pk
+                    )
+                )
+            if assignment.winner_dm_status in RETRYABLE_DELIVERY_STATUSES:
+                recovered["winner_dm"][assignment.pk] = (
+                    OfficeManagerService.deliver_winner_dm(assignment.pk)
+                )
+            if (
+                local_now.time().replace(tzinfo=None) >= reminder_time
+                and assignment.end_of_day_reminder_status
+                in RETRYABLE_DELIVERY_STATUSES
+            ):
+                recovered["end_of_day"][assignment.pk] = (
+                    OfficeManagerService.deliver_end_of_day_reminder(
+                        assignment.pk
+                    )
+                )
+
+        return recovered
+
+    @staticmethod
     def deliver_winner_dm(assignment_id: int) -> bool:
+        lease_token = _delivery_lease_token()
         with transaction.atomic():
             assignment = (
                 OfficeManagerAssignment.objects.select_for_update()
@@ -1076,22 +1991,26 @@ class OfficeManagerService:
             )
             if assignment.status != "active":
                 return False
-            if assignment.winner_dm_status in {"sent", "unknown"}:
-                return assignment.winner_dm_status == "sent"
-            lease_cutoff = timezone.now() - timedelta(
-                seconds=OfficeManagerService.DELIVERY_LEASE_SECONDS
-            )
-            if (
-                assignment.winner_dm_status == "sending"
-                and assignment.updated_at >= lease_cutoff
+            if assignment.winner_dm_status == "sent":
+                return True
+            if not _delivery_attempt_is_due(
+                status=assignment.winner_dm_status,
+                error_value=assignment.winner_dm_last_error,
+                next_attempt_at=assignment.winner_dm_next_attempt_at,
+                attempt_count=assignment.winner_dm_attempt_count,
+                legacy_updated_at=assignment.updated_at,
             ):
                 return False
             assignment.winner_dm_status = "sending"
-            assignment.winner_dm_last_error = ""
+            assignment.winner_dm_last_error = lease_token
+            assignment.winner_dm_attempt_count += 1
+            assignment.winner_dm_next_attempt_at = None
             assignment.save(
                 update_fields=[
                     "winner_dm_status",
                     "winner_dm_last_error",
+                    "winner_dm_attempt_count",
+                    "winner_dm_next_attempt_at",
                     "updated_at",
                 ]
             )
@@ -1103,9 +2022,16 @@ class OfficeManagerService:
                 assignment.user.slack_id,
             )
         except Exception as exc:
-            OfficeManagerAssignment.objects.filter(pk=assignment_id).update(
-                winner_dm_status="failed",
-                winner_dm_last_error=_safe_slack_error(exc),
+            _finish_delivery_failure(
+                OfficeManagerAssignment,
+                assignment_id,
+                status_field="winner_dm_status",
+                error_field="winner_dm_last_error",
+                attempt_count_field="winner_dm_attempt_count",
+                next_attempt_field="winner_dm_next_attempt_at",
+                lease_token=lease_token,
+                exc=exc,
+                uncertain=False,
             )
             return False
 
@@ -1116,10 +2042,15 @@ class OfficeManagerService:
                     .select_related("user")
                     .get(pk=assignment_id)
                 )
+                if (
+                    assignment.winner_dm_status != "sending"
+                    or assignment.winner_dm_last_error != lease_token
+                ):
+                    return assignment.winner_dm_status == "sent"
                 if assignment.status != "active":
                     assignment.winner_dm_status = "failed"
                     assignment.winner_dm_last_error = (
-                        "assignment_relinquished_before_delivery"
+                        RELINQUISHED_DELIVERY_ERROR
                     )
                     assignment.save(
                         update_fields=[
@@ -1144,30 +2075,47 @@ class OfficeManagerService:
                 assignment.winner_dm_status = "sent"
                 assignment.winner_dm_sent_at = timezone.now()
                 assignment.winner_dm_last_error = ""
+                assignment.winner_dm_next_attempt_at = None
                 assignment.save(
                     update_fields=[
                         "winner_dm_status",
                         "winner_dm_sent_at",
                         "winner_dm_last_error",
+                        "winner_dm_next_attempt_at",
                         "updated_at",
                     ]
                 )
         except SlackApiError as exc:
-            OfficeManagerAssignment.objects.filter(pk=assignment_id).update(
-                winner_dm_status="failed",
-                winner_dm_last_error=_safe_slack_error(exc),
+            _finish_delivery_failure(
+                OfficeManagerAssignment,
+                assignment_id,
+                status_field="winner_dm_status",
+                error_field="winner_dm_last_error",
+                attempt_count_field="winner_dm_attempt_count",
+                next_attempt_field="winner_dm_next_attempt_at",
+                lease_token=lease_token,
+                exc=exc,
+                uncertain=False,
             )
             return False
         except Exception as exc:
-            OfficeManagerAssignment.objects.filter(pk=assignment_id).update(
-                winner_dm_status="unknown",
-                winner_dm_last_error=_safe_slack_error(exc),
+            _finish_delivery_failure(
+                OfficeManagerAssignment,
+                assignment_id,
+                status_field="winner_dm_status",
+                error_field="winner_dm_last_error",
+                attempt_count_field="winner_dm_attempt_count",
+                next_attempt_field="winner_dm_next_attempt_at",
+                lease_token=lease_token,
+                exc=exc,
+                uncertain=True,
             )
             return False
         return True
 
     @staticmethod
     def deliver_end_of_day_reminder(assignment_id: int) -> bool:
+        lease_token = _delivery_lease_token()
         with transaction.atomic():
             assignment = (
                 OfficeManagerAssignment.objects.select_for_update()
@@ -1176,22 +2124,26 @@ class OfficeManagerService:
             )
             if assignment.status != "active":
                 return False
-            if assignment.end_of_day_reminder_status in {"sent", "unknown"}:
-                return assignment.end_of_day_reminder_status == "sent"
-            lease_cutoff = timezone.now() - timedelta(
-                seconds=OfficeManagerService.DELIVERY_LEASE_SECONDS
-            )
-            if (
-                assignment.end_of_day_reminder_status == "sending"
-                and assignment.updated_at >= lease_cutoff
+            if assignment.end_of_day_reminder_status == "sent":
+                return True
+            if not _delivery_attempt_is_due(
+                status=assignment.end_of_day_reminder_status,
+                error_value=assignment.end_of_day_reminder_last_error,
+                next_attempt_at=assignment.end_of_day_reminder_next_attempt_at,
+                attempt_count=assignment.end_of_day_reminder_attempt_count,
+                legacy_updated_at=assignment.updated_at,
             ):
                 return False
             assignment.end_of_day_reminder_status = "sending"
-            assignment.end_of_day_reminder_last_error = ""
+            assignment.end_of_day_reminder_last_error = lease_token
+            assignment.end_of_day_reminder_attempt_count += 1
+            assignment.end_of_day_reminder_next_attempt_at = None
             assignment.save(
                 update_fields=[
                     "end_of_day_reminder_status",
                     "end_of_day_reminder_last_error",
+                    "end_of_day_reminder_attempt_count",
+                    "end_of_day_reminder_next_attempt_at",
                     "updated_at",
                 ]
             )
@@ -1203,9 +2155,16 @@ class OfficeManagerService:
                 assignment.user.slack_id,
             )
         except Exception as exc:
-            OfficeManagerAssignment.objects.filter(pk=assignment_id).update(
-                end_of_day_reminder_status="failed",
-                end_of_day_reminder_last_error=_safe_slack_error(exc),
+            _finish_delivery_failure(
+                OfficeManagerAssignment,
+                assignment_id,
+                status_field="end_of_day_reminder_status",
+                error_field="end_of_day_reminder_last_error",
+                attempt_count_field="end_of_day_reminder_attempt_count",
+                next_attempt_field="end_of_day_reminder_next_attempt_at",
+                lease_token=lease_token,
+                exc=exc,
+                uncertain=False,
             )
             return False
 
@@ -1216,10 +2175,15 @@ class OfficeManagerService:
                     .select_related("user")
                     .get(pk=assignment_id)
                 )
+                if (
+                    assignment.end_of_day_reminder_status != "sending"
+                    or assignment.end_of_day_reminder_last_error != lease_token
+                ):
+                    return assignment.end_of_day_reminder_status == "sent"
                 if assignment.status != "active":
                     assignment.end_of_day_reminder_status = "failed"
                     assignment.end_of_day_reminder_last_error = (
-                        "assignment_relinquished_before_delivery"
+                        RELINQUISHED_DELIVERY_ERROR
                     )
                     assignment.save(
                         update_fields=[
@@ -1244,24 +2208,40 @@ class OfficeManagerService:
                 assignment.end_of_day_reminder_status = "sent"
                 assignment.end_of_day_reminder_sent_at = timezone.now()
                 assignment.end_of_day_reminder_last_error = ""
+                assignment.end_of_day_reminder_next_attempt_at = None
                 assignment.save(
                     update_fields=[
                         "end_of_day_reminder_status",
                         "end_of_day_reminder_sent_at",
                         "end_of_day_reminder_last_error",
+                        "end_of_day_reminder_next_attempt_at",
                         "updated_at",
                     ]
                 )
         except SlackApiError as exc:
-            OfficeManagerAssignment.objects.filter(pk=assignment_id).update(
-                end_of_day_reminder_status="failed",
-                end_of_day_reminder_last_error=_safe_slack_error(exc),
+            _finish_delivery_failure(
+                OfficeManagerAssignment,
+                assignment_id,
+                status_field="end_of_day_reminder_status",
+                error_field="end_of_day_reminder_last_error",
+                attempt_count_field="end_of_day_reminder_attempt_count",
+                next_attempt_field="end_of_day_reminder_next_attempt_at",
+                lease_token=lease_token,
+                exc=exc,
+                uncertain=False,
             )
             return False
         except Exception as exc:
-            OfficeManagerAssignment.objects.filter(pk=assignment_id).update(
-                end_of_day_reminder_status="unknown",
-                end_of_day_reminder_last_error=_safe_slack_error(exc),
+            _finish_delivery_failure(
+                OfficeManagerAssignment,
+                assignment_id,
+                status_field="end_of_day_reminder_status",
+                error_field="end_of_day_reminder_last_error",
+                attempt_count_field="end_of_day_reminder_attempt_count",
+                next_attempt_field="end_of_day_reminder_next_attempt_at",
+                lease_token=lease_token,
+                exc=exc,
+                uncertain=True,
             )
             return False
         return True
@@ -1272,6 +2252,12 @@ def run_office_manager_scheduler(
     now: datetime | None = None,
     dry_run: bool = False,
 ) -> dict:
+    recovered_deliveries: dict[str, dict[int, bool]] = {
+        "announcement": {},
+        "winner_channel": {},
+        "winner_dm": {},
+        "end_of_day": {},
+    }
     winner_channel_retractions = (
         []
         if dry_run
@@ -1298,6 +2284,10 @@ def run_office_manager_scheduler(
             })
 
     local_now = _local_now(now)
+    if not dry_run:
+        recovered_deliveries = OfficeManagerService.retry_pending_deliveries(
+            now=local_now
+        )
     local_date = local_now.date()
     try:
         configured_weekdays = _configured_weekdays()
@@ -1377,6 +2367,10 @@ def run_office_manager_scheduler(
         "day_id": day.id,
         "local_date": local_date.isoformat(),
     }
+    if day.id in recovered_deliveries["announcement"]:
+        result["announcement_sent"] = recovered_deliveries["announcement"][
+            day.id
+        ]
 
     if local_now >= day.claim_cutoff_at.astimezone(_timezone()) and day.status == "open":
         OfficeManagerDay.objects.filter(pk=day.pk, status="open").update(
@@ -1390,10 +2384,13 @@ def run_office_manager_scheduler(
         day.announcement_status == "sending"
         or (
             day.status != "closed"
-            and day.announcement_status in {"pending", "failed"}
+            and day.announcement_status in {"pending", "failed", "unknown"}
         )
     )
-    if should_deliver_announcement:
+    if (
+        should_deliver_announcement
+        and day.id not in recovered_deliveries["announcement"]
+    ):
         result["announcement_sent"] = OfficeManagerService.post_announcement(day.id)
         day.refresh_from_db()
 
@@ -1408,18 +2405,31 @@ def run_office_manager_scheduler(
         day.assignments.filter(status="active").select_related("user").first()
     )
     if assignment is not None:
+        if assignment.id in recovered_deliveries["winner_channel"]:
+            result["winner_channel_announcement_sent"] = (
+                recovered_deliveries["winner_channel"][assignment.id]
+            )
         if assignment.winner_channel_announcement_status in {
             "pending",
             "failed",
             "sending",
-        }:
+            "unknown",
+        } and assignment.id not in recovered_deliveries["winner_channel"]:
             result["winner_channel_announcement_sent"] = (
                 OfficeManagerService.deliver_winner_channel_announcement(
                     assignment.id
                 )
             )
 
-        if assignment.winner_dm_status in {"pending", "failed", "sending"}:
+        if assignment.id in recovered_deliveries["winner_dm"]:
+            result["winner_dm_sent"] = recovered_deliveries["winner_dm"][
+                assignment.id
+            ]
+        if (
+            assignment.winner_dm_status
+            in {"pending", "failed", "sending", "unknown"}
+            and assignment.id not in recovered_deliveries["winner_dm"]
+        ):
             result["winner_dm_sent"] = OfficeManagerService.deliver_winner_dm(
                 assignment.id
             )
@@ -1433,11 +2443,16 @@ def run_office_manager_scheduler(
         if (
             local_now.time().replace(tzinfo=None) >= reminder_time
             and assignment.end_of_day_reminder_status
-            in {"pending", "failed", "sending"}
+            in {"pending", "failed", "sending", "unknown"}
+            and assignment.id not in recovered_deliveries["end_of_day"]
         ):
             result["end_of_day_reminder_sent"] = (
                 OfficeManagerService.deliver_end_of_day_reminder(assignment.id)
             )
+        elif assignment.id in recovered_deliveries["end_of_day"]:
+            result["end_of_day_reminder_sent"] = recovered_deliveries[
+                "end_of_day"
+            ][assignment.id]
 
     result["status"] = day.status
     return result

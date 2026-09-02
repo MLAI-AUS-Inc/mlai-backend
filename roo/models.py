@@ -831,6 +831,14 @@ class CoworkingBooking(models.Model):
         default='points',
     )
     original_points_cost = models.IntegerField(blank=True, null=True)
+    purchased_points_cost_microroo = models.PositiveBigIntegerField(
+        blank=True,
+        null=True,
+        help_text=(
+            "Exact purchased-points allocation consumed by the authoritative "
+            "booking debit; null means historical provenance is unavailable."
+        ),
+    )
     ledger_entry = models.ForeignKey(
         Ledger, 
         on_delete=models.SET_NULL, 
@@ -891,6 +899,7 @@ class OfficeManagerDay(models.Model):
     )
     announcement_attempt_count = models.PositiveIntegerField(default=0)
     announcement_last_error = models.TextField(blank=True, default='')
+    announcement_next_attempt_at = models.DateTimeField(blank=True, null=True)
     announced_at = models.DateTimeField(blank=True, null=True)
     claim_cutoff_at = models.DateTimeField()
     closed_at = models.DateTimeField(blank=True, null=True)
@@ -949,6 +958,8 @@ class OfficeManagerAssignment(models.Model):
     )
     winner_dm_sent_at = models.DateTimeField(blank=True, null=True)
     winner_dm_last_error = models.TextField(blank=True, default='')
+    winner_dm_attempt_count = models.PositiveIntegerField(default=0)
+    winner_dm_next_attempt_at = models.DateTimeField(blank=True, null=True)
     winner_channel_announcement_status = models.CharField(
         max_length=20,
         choices=DELIVERY_STATUS_CHOICES,
@@ -967,10 +978,41 @@ class OfficeManagerAssignment(models.Model):
         blank=True,
         default='',
     )
+    winner_channel_announcement_attempt_count = models.PositiveIntegerField(
+        default=0,
+    )
+    winner_channel_announcement_next_attempt_at = models.DateTimeField(
+        blank=True,
+        null=True,
+    )
     winner_channel_retraction_pending = models.BooleanField(default=False)
     winner_channel_retraction_last_error = models.TextField(
         blank=True,
         default='',
+    )
+    winner_channel_retraction_status = models.CharField(
+        max_length=20,
+        choices=(
+            ('not_required', 'Not required'),
+            ('pending', 'Pending'),
+            ('sending', 'Sending'),
+            ('sent', 'Sent'),
+            ('failed', 'Failed'),
+            ('exhausted', 'Exhausted'),
+        ),
+        default='not_required',
+    )
+    winner_channel_retraction_attempt_count = models.PositiveIntegerField(
+        default=0,
+    )
+    winner_channel_retraction_lease_token = models.CharField(
+        max_length=120,
+        blank=True,
+        default='',
+    )
+    winner_channel_retraction_next_attempt_at = models.DateTimeField(
+        blank=True,
+        null=True,
     )
     refund_reversal_ledger_entry = models.ForeignKey(
         Ledger,
@@ -979,6 +1021,13 @@ class OfficeManagerAssignment(models.Model):
         null=True,
         related_name='office_manager_refund_reversals',
     )
+    purchased_points_refunded_microroo = models.PositiveBigIntegerField(
+        default=0,
+        help_text=(
+            "Exact purchased-points portion restored by the Office Manager "
+            "refund and removed again if the booking is relinquished."
+        ),
+    )
     end_of_day_reminder_status = models.CharField(
         max_length=20,
         choices=DELIVERY_STATUS_CHOICES,
@@ -986,6 +1035,11 @@ class OfficeManagerAssignment(models.Model):
     )
     end_of_day_reminder_sent_at = models.DateTimeField(blank=True, null=True)
     end_of_day_reminder_last_error = models.TextField(blank=True, default='')
+    end_of_day_reminder_attempt_count = models.PositiveIntegerField(default=0)
+    end_of_day_reminder_next_attempt_at = models.DateTimeField(
+        blank=True,
+        null=True,
+    )
     claimed_at = models.DateTimeField(default=timezone.now)
     relinquished_at = models.DateTimeField(blank=True, null=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -1002,6 +1056,55 @@ class OfficeManagerAssignment(models.Model):
 
     def __str__(self):
         return f"{self.day.date}: {self.user} ({self.status})"
+
+
+class OfficeManagerClaimAttempt(models.Model):
+    """Immutable Roo request identity and its durable terminal outcome."""
+
+    OUTCOME_CHOICES = (
+        ('claimed', 'Claimed'),
+        ('already_claimed_by_you', 'Already claimed by requester'),
+        ('already_claimed', 'Already claimed by another member'),
+        ('claim_closed', 'Claim closed'),
+        ('office_manager_day_not_found', 'Office Manager day not found'),
+        ('member_not_eligible', 'Member not eligible'),
+        ('refund_unavailable', 'Refund unavailable'),
+        ('attempt_superseded', 'Attempt superseded by cancellation'),
+    )
+
+    attempt_id = models.UUIDField(primary_key=True, editable=False)
+    slack_user_id = models.CharField(max_length=50)
+    booking_date = models.DateField()
+    outcome = models.CharField(max_length=50, choices=OUTCOME_CHOICES)
+    message = models.TextField(blank=True, default='')
+    assignee_slack_user_id = models.CharField(
+        max_length=50,
+        blank=True,
+        default='',
+    )
+    assignment = models.ForeignKey(
+        OfficeManagerAssignment,
+        on_delete=models.PROTECT,
+        related_name='claim_attempts',
+        blank=True,
+        null=True,
+    )
+    existing_booking_converted = models.BooleanField(default=False)
+    points_refunded = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    superseded_at = models.DateTimeField(blank=True, null=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(
+                fields=['slack_user_id', 'booking_date'],
+                name='roo_om_attempt_actor_date',
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.attempt_id}: {self.outcome}"
 
 
 class MeetingRoom(models.Model):

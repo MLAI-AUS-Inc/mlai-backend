@@ -29,9 +29,43 @@ services:
 
   scheduler:
     build: .
-    command: sh -c "until python manage.py migrate --check --noinput; do echo 'Waiting for migrations to complete...'; sleep 5; done; while true; do python manage.py run_scheduled_discovery; sleep 60; done"
+    command: >-
+      sh -ec '
+        health_file=/tmp/mlai-scheduled-discovery.ok;
+        rm -f "$${health_file}";
+        case "$${SCHEDULED_DISCOVERY_POLL_SECONDS}" in
+          ""|*[!0-9]*) echo "SCHEDULED_DISCOVERY_POLL_SECONDS must be a positive integer" >&2; exit 64 ;;
+        esac;
+        test "$${SCHEDULED_DISCOVERY_POLL_SECONDS}" -gt 0 || {
+          echo "SCHEDULED_DISCOVERY_POLL_SECONDS must be greater than zero" >&2;
+          exit 64;
+        };
+        case "$${SCHEDULED_DISCOVERY_HEALTH_MAX_AGE_SECONDS}" in
+          ""|*[!0-9]*) echo "SCHEDULED_DISCOVERY_HEALTH_MAX_AGE_SECONDS must be a positive integer" >&2; exit 64 ;;
+        esac;
+        test "$${SCHEDULED_DISCOVERY_HEALTH_MAX_AGE_SECONDS}" -gt "$${SCHEDULED_DISCOVERY_POLL_SECONDS}" || {
+          echo "SCHEDULED_DISCOVERY_HEALTH_MAX_AGE_SECONDS must exceed the poll interval" >&2;
+          exit 64;
+        };
+        until python manage.py migrate --check --noinput; do
+          echo "Waiting for migrations to complete...";
+          sleep 5;
+        done;
+        while true; do
+          python manage.py run_scheduled_discovery || {
+            tick_status=$$?;
+            rm -f "$${health_file}";
+            echo "Scheduled discovery failed; exiting for container restart" >&2;
+            exit "$${tick_status}";
+          };
+          touch "$${health_file}";
+          sleep "$${SCHEDULED_DISCOVERY_POLL_SECONDS}";
+        done
+      '
     environment:
       APP_ENV: ${APP_ENV:-production}
+      SCHEDULED_DISCOVERY_POLL_SECONDS: ${SCHEDULED_DISCOVERY_POLL_SECONDS:-60}
+      SCHEDULED_DISCOVERY_HEALTH_MAX_AGE_SECONDS: ${SCHEDULED_DISCOVERY_HEALTH_MAX_AGE_SECONDS:-300}
       JOBS_SCHEDULER_ENABLED: ${JOBS_SCHEDULER_ENABLED:-true}
       JOBS_SCHEDULE_TIMEZONE: ${JOBS_SCHEDULE_TIMEZONE:-Australia/Melbourne}
       JOBS_SCHEDULE_HOUR: ${JOBS_SCHEDULE_HOUR:-7}
@@ -44,6 +78,13 @@ services:
     depends_on:
       - db
     restart: unless-stopped
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os,time; p='/tmp/mlai-scheduled-discovery.ok'; limit=float(os.environ['SCHEDULED_DISCOVERY_HEALTH_MAX_AGE_SECONDS']); raise SystemExit(0 if limit > 0 and os.path.isfile(p) and time.time() - os.path.getmtime(p) <= limit else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 90s
     networks:
       default:
       mlai-shared:

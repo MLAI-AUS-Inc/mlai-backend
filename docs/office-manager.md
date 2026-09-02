@@ -63,11 +63,20 @@ the cancellation fails without changing the booking or assignment. Standard
 cancellation and refund replays are idempotent.
 
 The backend stores the announcement channel and deterministic Slack message
-identifiers with the day/assignment. A relinquished winner's public message is
-retracted from durable state. Retraction repair runs even when
+identifiers with the day/assignment. Each outbound delivery is leased with a
+per-destination fencing token before Slack is called. A response-loss or
+`unknown` result is retried with the same message identity; a replaced worker
+cannot overwrite the newer worker's state, and live Slack calls are serialized
+under the destination row lock. Records that survive a Melbourne-local date
+rollover are explicitly marked expired without emitting stale messages.
+
+A relinquished winner's public message is retracted from durable state.
+Retraction repair runs even when
 `OFFICE_MANAGER_ENABLED=false`, so rollback cannot leave a former winner named
-publicly. Public messages may identify the winner, but private booking and
-points details belong only in the winner DM and the claim API response.
+publicly. Other pending deliveries remain durable while the feature is disabled
+and resume if it is re-enabled on the same local date. Public messages may
+identify the winner, but private booking and points details belong only in the
+winner DM and the claim API response.
 
 ## Configuration and rollout
 
@@ -80,21 +89,118 @@ Required backend settings are listed in `.env.example`:
 - `OFFICE_MANAGER_TIMEZONE`, weekday, announcement, cutoff, and reminder
   settings.
 - `OFFICE_MANAGER_ENABLED`: backend creation/claim gate, default off.
+- `SCHEDULED_DISCOVERY_POLL_SECONDS` and
+  `SCHEDULED_DISCOVERY_HEALTH_MAX_AGE_SECONDS`: the scheduler tick and health
+  freshness bounds. The command exits non-zero when a required Office Manager
+  delivery reports `false`, terminal failure, or retry exhaustion. The
+  container removes its success marker and exits rather than hiding the error
+  in an infinite loop; Compose restarts it, and deployment requires a fresh
+  successful tick before it can pass.
+
+Production also requires `ROO_API_KEY` and `INTERNAL_API_KEY` to be present,
+at least 32 characters, and different. The deploy installs both from separate
+secret-store entries. Enabling Office Manager additionally performs live,
+read-only checks of the Public Roo Slack token (`auth.test`), the configured
+public channel (`conversations.info`), and Public Roo's non-secret readiness
+contract. The companion must report the same Melbourne timezone and the exact
+backend claim path. After startup, a non-mutating `GET` smoke verifies that the
+Roo credential reaches the endpoint while internal and missing credentials are
+rejected; the accepted Roo request returns method-not-allowed because claims
+remain POST-only.
+
+### Historical migration identity audit
+
+The Office Manager branch was previously shared under colliding migration
+numbers before its append-only `0034`/`0035` identities were established.
+Before applying `0034`, `0035`, or the append-only `0036` recovery, run the
+read-only audit against **every persistent database**, including production,
+staging, preview databases with retained volumes, and developer databases:
+
+```bash
+python manage.py audit_office_manager_migrations
+```
+
+The audit is read-only. It reads `django_migrations`, database introspection,
+and the Office Manager day/assignment rows needed to prove the cross-table
+invariants that database constraints cannot express: every claimed day has
+exactly one active assignment, and every active assignment belongs to a
+claimed day. It reports all recorded Roo identities beginning `0029`, `0030`,
+`0031`, `0034`, `0035`, and `0036`, plus the schema markers needed by their
+current bodies. In particular, investigate these obsolete shared identities:
+
+- `0029_officemanagerday_coworkingbooking_booking_source_and_more`
+- `0030_officemanagerday_coworkingbooking_booking_source_and_more`
+- `0031_protect_office_manager_assignment_day`
+- `0030_meeting_room_booking`
+- `0031_small_and_big_meeting_rooms`
+
+The review lineage is: Office Manager first appeared as `0029` in
+`d3596cef3abedd13b71bcfae9f07889a954c2a5d`, was renamed to `0030` in
+`f5c6cebd67c2292b597dc8362206b02207b95d96`, and that body was edited in
+`593949aa5d5c45888ceb54783e11546002c2e513`; its `0031` protection migration
+appeared in `4c60295f5a93de8be4a112510998e9f79789c163`. Meeting rooms first used
+`0030` in `bd1e0ab920ef26232e134db63441e07836df876c`, whose body was later edited
+in `0ca68a0a2b48d64b46604e7e2de966e99950af18`; meeting-room `0030`/`0031`
+were renamed to canonical `0031`/`0032` in
+`753caded4dd8f760836e9f3199cdfb0143861944`. Office Manager reached canonical
+`0034`/`0035` in `fc60c7412ced9272eef85d41b714961339853e7f`.
+
+An `unsafe` result is a hard stop. Do not edit a shared migration or assume
+Django will rerun its changed body. Restore a database clone, compare the body
+that database actually ran, and prepare an explicitly reviewed, append-only
+schema/data repair. Quiesce every writer—including `web` and `scheduler—for the
+whole repair window. Only after the database schema is proven equivalent may
+an operator record the canonical replacement identities with Django's
+documented fake-migration mechanism. This is a manual maintenance action, not
+part of `deploy.sh`.
+
+If obsolete and canonical identities are both recorded and all required
+schema markers are complete, the audit returns `attestation_required` and a
+`report_sha256`. Two-person review should capture a JSON file outside the
+repository at
+`/root/mlai-backend-operations/office-manager-migration-attestation.json`:
+
+```json
+{
+  "version": 1,
+  "decision": "reviewed-compatible",
+  "report_sha256": "<exact audit fingerprint>",
+  "reviewed_by": "<operator identity>",
+  "reviewed_at": "2026-09-02T00:00:00+10:00"
+}
+```
+
+Re-run with `--attestation-file` and retain the complete JSON audit output with
+the change record. The attestation is bound to the exact recorder/schema
+fingerprint, so later drift fails closed. `deploy.sh` mounts this file
+read-only when present and always runs the audit before migrations.
 
 Roll out in this order:
 
-1. Review and explicitly approve
+1. Run the historical identity audit above for every persistent database.
+   Resolve every unsafe or unattested result before continuing.
+2. Review and explicitly approve
    `roo.0034_officemanagerday_coworkingbooking_booking_source_and_more` and
-   `roo.0035_protect_office_manager_assignment_day`. Deploy and apply them with
-   `OFFICE_MANAGER_ENABLED=false`.
-2. Configure the dedicated Public Roo Slack token and channel, then run the
-   scheduler dry-run/preflight. A missing token or channel must fail closed.
-3. Deploy companion Roo PR #210 with `OFFICE_MANAGER_ACTIONS_ENABLED=false`.
-4. Smoke-test the exact action ID `office_manager_volunteer_today`, signed
+   `roo.0035_protect_office_manager_assignment_day`, together with the new
+   append-only `roo.0036_office_manager_attempts_and_provenance` successor.
+   Deploy the backend and apply them with `OFFICE_MANAGER_ENABLED=false`.
+3. Configure the dedicated Public Roo Slack token and channel, keeping both
+   feature flags off. The token must belong to the app that owns the button.
+4. Deploy companion Roo PR #210 with `OFFICE_MANAGER_ACTIONS_ENABLED=false`.
+5. Smoke-test the exact action ID `office_manager_volunteer_today`, signed
    actor binding, private result delivery, and a duplicate click.
-5. Enable the Roo action consumer, then enable the backend scheduler. Monitor
-   claim results, pending Slack repairs, and scheduler failures.
+6. Enable the Roo action consumer first. Confirm its readiness contract names
+   the expected backend claim URL and `Australia/Melbourne`, then enable the
+   backend scheduler. The deployment will validate Slack, the companion
+   contract, endpoint authorization, and scheduler health. Monitor claim
+   results, pending Slack repairs, scheduler restarts, and container health.
 
-To roll back, disable new Roo actions and backend scheduling. Keep the backend
-scheduler process running so committed message retractions can continue. Do
-not remove either migration or delete Office Manager provenance rows.
+To roll back, disable new Roo actions first and then set
+`OFFICE_MANAGER_ENABLED=false`. Do **not** stop the backend scheduler process:
+it must drain committed winner-message retractions even while creation and new
+claims are disabled. Wait until retraction work is terminal, preserve the
+health signal, and investigate any restart loop. A failed deployment
+automatically writes the backend flag to false before restoring web, scheduler,
+and worker processes. Do not reverse shared migrations, remove `0034`–`0036`,
+or delete Office Manager accounting/provenance rows; roll application code
+forward with a new append-only migration when schema recovery is required.

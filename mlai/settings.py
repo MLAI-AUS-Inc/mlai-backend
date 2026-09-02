@@ -14,6 +14,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 import json
 import os
+import secrets
 import subprocess
 import sys
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -138,6 +139,33 @@ def _validate_health_hack_ai_modes(*, rate_mode: str, budget_mode: str, is_produ
     if is_production and budget_mode != 'enforce':
         raise ImproperlyConfigured(
             'HEALTH_HACK_AI_BUDGET_MODE must be enforce in production.'
+        )
+
+
+def _validate_roo_service_secret_boundaries(
+    *,
+    roo_api_key: str,
+    internal_api_key: str,
+    mlai_api_key: str,
+    is_production: bool,
+) -> None:
+    """Keep actor-selecting Roo calls outside broader service trust domains."""
+    if not is_production:
+        return
+    if len(roo_api_key) < 32:
+        raise ImproperlyConfigured(
+            'ROO_API_KEY must contain at least 32 characters in production.'
+        )
+    if len(internal_api_key) < 32:
+        raise ImproperlyConfigured(
+            'INTERNAL_API_KEY must contain at least 32 characters in production.'
+        )
+    if secrets.compare_digest(roo_api_key, internal_api_key) or (
+        mlai_api_key and secrets.compare_digest(roo_api_key, mlai_api_key)
+    ):
+        raise ImproperlyConfigured(
+            'ROO_API_KEY must be distinct from INTERNAL_API_KEY and '
+            'MLAI_API_KEY in production.'
         )
 
 
@@ -1544,8 +1572,14 @@ MEETING_ROOM_TIMEZONE = _validated_timezone_name(
 )
 
 # Internal API Key for service-to-service auth (e.g. from Roo agent)
-MLAI_API_KEY = os.environ.get('MLAI_API_KEY')
-INTERNAL_API_KEY = os.environ.get('INTERNAL_API_KEY') or ROO_API_KEY or MLAI_API_KEY
+MLAI_API_KEY = os.environ.get('MLAI_API_KEY', '').strip()
+INTERNAL_API_KEY = os.environ.get('INTERNAL_API_KEY', '').strip()
+_validate_roo_service_secret_boundaries(
+    roo_api_key=ROO_API_KEY,
+    internal_api_key=INTERNAL_API_KEY,
+    mlai_api_key=MLAI_API_KEY,
+    is_production=IS_PRODUCTION_ENV,
+)
 CONNECTOR_CREDENTIAL_KEYS = os.environ.get('CONNECTOR_CREDENTIAL_KEYS', '')
 CONNECTOR_CREDENTIAL_ACTIVE_KEY_ID = os.environ.get(
     'CONNECTOR_CREDENTIAL_ACTIVE_KEY_ID',

@@ -6,7 +6,7 @@ from roo.models import (
     PointsAccount, Ledger, Task, TaskSubmission, 
     CoworkingBooking, RewardRedemption, PointsAdmin, BoostPostAdmission
 )
-from roo.services import PointsService
+from roo.services import CoworkingService, PointsService
 from integrations.services import SlackService
 
 logger = logging.getLogger(__name__)
@@ -139,6 +139,7 @@ class Command(BaseCommand):
             if count:
                 self.stdout.write(f"  {rel.related_model._meta.label}: {count}")
 
+    @transaction.atomic
     def merge_users(self, source, target):
         """
         Merges source (the duplicates/slack-only user) INTO target (the email user).
@@ -148,6 +149,16 @@ class Command(BaseCommand):
         source is deleted.
         """
         
+        # Validate and move durable booking/Office Manager ownership before
+        # touching balances or identity fields. Any ambiguity aborts this
+        # entire account merge instead of cascading away an active owner.
+        moved_bookings, moved_assignments = (
+            CoworkingService.transfer_user_ownership_for_merge(
+                source=source,
+                target=target,
+            )
+        )
+
         # 1. Update Basic Info on Target
         if not target.slack_id:
             target.slack_id = source.slack_id
@@ -199,27 +210,11 @@ class Command(BaseCommand):
         count = TaskSubmission.objects.filter(user=source).update(user=target)
         self.stdout.write(f"  moved {count} TaskSubmissions")
         
-        # 4. Coworking
-        # Handle conflicts for unique constraint (user, date)
-        source_bookings = CoworkingBooking.objects.filter(user=source)
-        moved_bookings = 0
-        for booking in source_bookings:
-            # Check if target already has a booking for this date
-            if CoworkingBooking.objects.filter(user=target, date=booking.date, status='booked').exists():
-                 self.stdout.write(self.style.WARNING(f"  Skipping duplicate booking for date {booking.date}"))
-                 # Maybe delete the duplicate if it's redundant?
-                 # If we don't move it, and we delete source, it gets deleted (cascade).
-                 # That's probably fine if target already has one.
-                 pass
-            else:
-                booking.user = target
-                try:
-                    booking.save()
-                    moved_bookings += 1
-                except IntegrityError:
-                     self.stdout.write(self.style.WARNING(f"  IntegrityError moving booking {booking.date}"))
-
+        # 4. Coworking and Office Manager ownership moved together above.
         self.stdout.write(f"  moved {moved_bookings} CoworkingBookings")
+        self.stdout.write(
+            f"  moved {moved_assignments} OfficeManagerAssignments"
+        )
         
         # 5. Rewards
         count = RewardRedemption.objects.filter(user=source).update(user=target)

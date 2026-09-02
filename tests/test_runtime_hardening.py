@@ -144,7 +144,7 @@ class RuntimeHardeningConfigTests(SimpleTestCase):
         deploy = (ROOT / "deploy.sh").read_text()
 
         self.assertIn(
-            'paused_runtime_services=(web memory-worker memory-scheduler community-email-worker)',
+            'paused_runtime_services=(web scheduler memory-worker memory-scheduler community-email-worker)',
             deploy,
         )
         self.assertIn('docker compose stop "\\${paused_runtime_services[@]}"', deploy)
@@ -164,6 +164,10 @@ class RuntimeHardeningConfigTests(SimpleTestCase):
         )
         self.assertIn(
             'runtime_services=(web scheduler memory-worker memory-scheduler community-email-worker)',
+            deploy,
+        )
+        self.assertIn(
+            'if [ "\\$roo_status" != "405" ] || [ "\\$internal_status" != "401" ] || [ "\\$missing_status" != "401" ]; then',
             deploy,
         )
         self.assertIn("community-email-worker:", (ROOT / "docker-compose.yml").read_text())

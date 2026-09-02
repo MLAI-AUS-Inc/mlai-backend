@@ -3,6 +3,7 @@ import hmac
 import json
 import re
 import time
+import uuid
 
 from django.core.exceptions import ValidationError
 from rest_framework import viewsets, status, mixins
@@ -46,7 +47,12 @@ from .permissions import (
 )
 from .committee_candidates import CommitteeCandidateEmailService
 from core.models import User
-from core.permissions import HasAPIKey, HasRooApiKey, HasStrictRooApiKey
+from core.permissions import (
+    HasAPIKey,
+    HasOfficeManagerRooApiKey,
+    HasRooApiKey,
+    HasStrictRooApiKey,
+)
 from core.slack_users import resolve_existing_user_from_profile
 from integrations.services import SlackService
 from community_chat.authentication import CommunityChatAccountAuthentication
@@ -1546,8 +1552,10 @@ class CoworkingViewSet(viewsets.ViewSet):
         # This action is also wired through an explicit URL, so enforce its
         # narrower service credential here rather than relying on router-only
         # @action metadata.
-        if self.action in {'book_many', 'office_manager_claim'}:
+        if self.action == 'book_many':
             return [HasStrictRooApiKey()]
+        if self.action == 'office_manager_claim':
+            return [HasOfficeManagerRooApiKey()]
         return super().get_permissions()
 
     @action(detail=False, methods=['get'])
@@ -1855,11 +1863,14 @@ class CoworkingViewSet(viewsets.ViewSet):
         """Atomically select and book today's first Office Manager volunteer."""
         slack_user_id = clean_slack_id(request.data.get('slack_user_id'))
         booking_date_raw = str(request.data.get('date') or '').strip()
-        if not slack_user_id or not booking_date_raw:
+        attempt_id_raw = str(request.data.get('attempt_id') or '').strip()
+        if not slack_user_id or not booking_date_raw or not attempt_id_raw:
             return Response(
                 {
                     'code': 'invalid_request',
-                    'error': 'slack_user_id and date are required',
+                    'error': (
+                        'slack_user_id, date, and attempt_id are required'
+                    ),
                 },
                 status=status.HTTP_400_BAD_REQUEST,
             )
@@ -1873,11 +1884,24 @@ class CoworkingViewSet(viewsets.ViewSet):
                 },
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        try:
+            attempt_id = uuid.UUID(attempt_id_raw)
+        except (ValueError, AttributeError):
+            attempt_id = None
+        if attempt_id is None or attempt_id_raw != str(attempt_id):
+            return Response(
+                {
+                    'code': 'invalid_request',
+                    'error': 'attempt_id must be a canonical lowercase UUID',
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         try:
             result = OfficeManagerService.claim(
                 slack_user_id=slack_user_id,
                 booking_date=booking_date,
+                attempt_id=attempt_id,
             )
         except OfficeManagerClaimError as exc:
             if exc.code == 'claim_closed':
@@ -1891,8 +1915,16 @@ class CoworkingViewSet(viewsets.ViewSet):
                 'office_manager_day_not_found': status.HTTP_404_NOT_FOUND,
                 'already_claimed': status.HTTP_409_CONFLICT,
                 'claim_closed': status.HTTP_409_CONFLICT,
+                'attempt_payload_conflict': status.HTTP_409_CONFLICT,
+                'attempt_superseded': status.HTTP_409_CONFLICT,
+                'attempt_unavailable': status.HTTP_503_SERVICE_UNAVAILABLE,
+                'refund_unavailable': status.HTTP_409_CONFLICT,
             }
             response_data = {'code': exc.code, 'error': str(exc)}
+            if exc.attempt_id:
+                response_data['attempt_id'] = str(exc.attempt_id)
+            if exc.code == 'attempt_superseded':
+                response_data['status'] = 'superseded'
             if exc.assignee_slack_user_id:
                 response_data['assignee_slack_user_id'] = (
                     exc.assignee_slack_user_id
@@ -1912,6 +1944,8 @@ class CoworkingViewSet(viewsets.ViewSet):
         OfficeManagerService.deliver_winner_dm(result.assignment.id)
         response_data = {
             'status': result.status,
+            'attempt_id': str(result.attempt_id or attempt_id),
+            'replayed': result.replayed,
             'date': booking_date.isoformat(),
             'office_manager_slack_user_id': slack_user_id,
             'assignment_id': result.assignment.id,
@@ -1960,6 +1994,18 @@ class CoworkingViewSet(viewsets.ViewSet):
             return Response(
                 {'error': 'booking_id or date required'},
                 status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Standard coworking cancellation retains its existing service
+        # contract. Actor-changing Office Manager cancellation is narrower and
+        # must be authenticated by Roo's isolated credential.
+        if (
+            booking.booking_source == 'office_manager'
+            and not HasOfficeManagerRooApiKey().has_permission(request, self)
+        ):
+            return Response(
+                {'error': 'Office Manager cancellation requires Roo authorization'},
+                status=status.HTTP_403_FORBIDDEN,
             )
 
         # Check ownership (unless admin)

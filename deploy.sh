@@ -12,6 +12,8 @@ PROJECT_DIR="/root/mlai-backend"
 APP_RELEASE="${APP_RELEASE:-$(git rev-parse --short=12 HEAD 2>/dev/null || date +%Y%m%d%H%M)}"
 APP_RELEASE_SHORT="${APP_RELEASE:0:12}"
 MEETING_ROOM_BOOKING_ENABLED="${MEETING_ROOM_BOOKING_ENABLED:-false}"
+OFFICE_MANAGER_ENABLED="${OFFICE_MANAGER_ENABLED:-false}"
+OFFICE_MANAGER_TIMEZONE="${OFFICE_MANAGER_TIMEZONE:-Australia/Melbourne}"
 COMMUNITY_BRIDGE_PRODUCTION_ENABLED="${COMMUNITY_BRIDGE_PRODUCTION_ENABLED:-false}"
 ORG_MEMORY_PRODUCTION_DEPLOY_ENABLED="${ORG_MEMORY_PRODUCTION_DEPLOY_ENABLED:-false}"
 ORG_MEMORY_PRODUCTION_PUBLIC_CHANNEL_ADMIN_SCOPE_APPROVED="${ORG_MEMORY_PRODUCTION_PUBLIC_CHANNEL_ADMIN_SCOPE_APPROVED:-false}"
@@ -26,6 +28,16 @@ case "$MEETING_ROOM_BOOKING_ENABLED" in
         ;;
 esac
 export MEETING_ROOM_BOOKING_ENABLED
+
+case "$OFFICE_MANAGER_ENABLED" in
+    true|TRUE|True|1|yes|YES|Yes|on|ON|On) OFFICE_MANAGER_ENABLED=true ;;
+    false|FALSE|False|0|no|NO|No|off|OFF|Off|"") OFFICE_MANAGER_ENABLED=false ;;
+    *)
+        echo "❌ OFFICE_MANAGER_ENABLED must be true or false."
+        exit 1
+        ;;
+esac
+export OFFICE_MANAGER_ENABLED
 
 case "$COMMUNITY_BRIDGE_PRODUCTION_ENABLED" in
     true|TRUE|True|1|yes|YES|Yes|on|ON|On) COMMUNITY_BRIDGE_PRODUCTION_ENABLED=true ;;
@@ -60,6 +72,31 @@ export ORG_MEMORY_PRODUCTION_PUBLIC_CHANNEL_ADMIN_SCOPE_APPROVED
 if [ -z "${REDIS_URL:-}" ]; then
     echo "❌ REDIS_URL must be supplied by the deployment secret store."
     exit 1
+fi
+for service_secret_name in ROO_API_KEY INTERNAL_API_KEY; do
+    service_secret_value="${!service_secret_name:-}"
+    if [ "${#service_secret_value}" -lt 32 ]; then
+        echo "❌ ${service_secret_name} must be supplied by the deployment secret store and contain at least 32 characters."
+        exit 1
+    fi
+done
+if [ "$ROO_API_KEY" = "$INTERNAL_API_KEY" ]; then
+    echo "❌ ROO_API_KEY and INTERNAL_API_KEY must be distinct trust-domain credentials."
+    exit 1
+fi
+if [ "$OFFICE_MANAGER_ENABLED" = "true" ]; then
+    if [[ ! "${OFFICE_MANAGER_SLACK_BOT_TOKEN:-}" =~ ^xoxb-[A-Za-z0-9-]+$ ]]; then
+        echo "❌ OFFICE_MANAGER_SLACK_BOT_TOKEN must be the Public Roo xoxb token when Office Manager is enabled."
+        exit 1
+    fi
+    if [[ ! "${OFFICE_MANAGER_SLACK_CHANNEL_ID:-}" =~ ^C[A-Z0-9]+$ ]]; then
+        echo "❌ OFFICE_MANAGER_SLACK_CHANNEL_ID must be a public Slack channel ID when Office Manager is enabled."
+        exit 1
+    fi
+    if [ "$OFFICE_MANAGER_TIMEZONE" != "Australia/Melbourne" ]; then
+        echo "❌ OFFICE_MANAGER_TIMEZONE must match the companion Roo contract: Australia/Melbourne."
+        exit 1
+    fi
 fi
 for chat_secret_name in \
     COMMUNITY_CHAT_EMAIL_CODE_PEPPER \
@@ -255,6 +292,13 @@ install_remote_env_secret COMMUNITY_CHAT_EMAIL_CODE_DELIVERY_SECRET "$COMMUNITY_
 install_remote_env_secret COMMUNITY_CHAT_ADAPTER_TOKEN "$COMMUNITY_CHAT_ADAPTER_TOKEN"
 echo "🔐 Updating Linear channel issue reader credential (value redacted)..."
 install_remote_env_secret LINEAR_API_KEY "$LINEAR_API_KEY"
+echo "🔐 Updating distinct Roo and internal service credentials (values redacted)..."
+install_remote_env_secret ROO_API_KEY "$ROO_API_KEY"
+install_remote_env_secret INTERNAL_API_KEY "$INTERNAL_API_KEY"
+if [ -n "${OFFICE_MANAGER_SLACK_BOT_TOKEN:-}" ]; then
+    echo "🔐 Updating Public Roo Office Manager Slack credential (value redacted)..."
+    install_remote_env_secret OFFICE_MANAGER_SLACK_BOT_TOKEN "$OFFICE_MANAGER_SLACK_BOT_TOKEN"
+fi
 if [ "$bridge_present" -gt 0 ]; then
     install_remote_env_secret SLACK_BRIDGE_BOT_TOKEN "$SLACK_BRIDGE_BOT_TOKEN"
     install_remote_env_secret SLACK_BRIDGE_SIGNING_SECRET "$SLACK_BRIDGE_SIGNING_SECRET"
@@ -272,6 +316,11 @@ install_remote_env_value() {
 echo "🔧 Updating Linear channel issue reader configuration..."
 install_remote_env_value LINEAR_CHANNEL_ISSUE_BINDINGS_JSON "$LINEAR_CHANNEL_ISSUE_BINDINGS_JSON"
 install_remote_env_value LINEAR_CHANNEL_ISSUE_MAX_COMMENTS "$LINEAR_CHANNEL_ISSUE_MAX_COMMENTS"
+if [ -n "${OFFICE_MANAGER_SLACK_CHANNEL_ID:-}" ]; then
+    echo "🔧 Updating Office Manager Slack channel and timezone..."
+    install_remote_env_value OFFICE_MANAGER_SLACK_CHANNEL_ID "$OFFICE_MANAGER_SLACK_CHANNEL_ID"
+    install_remote_env_value OFFICE_MANAGER_TIMEZONE "$OFFICE_MANAGER_TIMEZONE"
+fi
 
 # Send the credential over SSH stdin rather than a command-line argument. The
 # remote shell updates .env using builtins, so the value is neither echoed nor
@@ -542,6 +591,7 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
 
     cd $PROJECT_DIR
     meeting_room_booking_enabled="$MEETING_ROOM_BOOKING_ENABLED"
+    office_manager_enabled="$OFFICE_MANAGER_ENABLED"
     community_bridge_production_enabled="$COMMUNITY_BRIDGE_PRODUCTION_ENABLED"
     org_memory_production_deploy_enabled="$ORG_MEMORY_PRODUCTION_DEPLOY_ENABLED"
 
@@ -576,6 +626,10 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     upsert_env_value CUSTOMERIO_COMMUNITY_CHAT_CODE_MESSAGE_ID "mlai_chat_sign_in_code"
     upsert_env_value COMMUNITY_CHAT_ALLOWED_ORIGINS "https://chat.mlai.au,tauri://localhost,http://tauri.localhost,mlaichat://callback"
     upsert_env_value MEETING_ROOM_BOOKING_ENABLED "\$meeting_room_booking_enabled"
+    # Stage every release with creation and new claims disabled. The reviewed
+    # target value is installed only after schema and companion checks pass.
+    # Retraction repair continues in the scheduler while this is false.
+    upsert_env_value OFFICE_MANAGER_ENABLED "false"
     upsert_env_value COMMUNITY_BRIDGE_PRODUCTION_ENABLED "\$community_bridge_production_enabled"
     if [ "$bridge_present" -gt 0 ]; then
         upsert_env_value SLACK_BRIDGE_BOT_USER_ID "$SLACK_BRIDGE_BOT_USER_ID"
@@ -650,7 +704,7 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     # Web concurrency: gunicorn sync-worker count (read by scripts/start-web.sh).
     # Sized to droplet RAM (~250MB/worker). 16 fits the 8GB/4vCPU droplet with headroom.
     upsert_env_value GUNICORN_WORKERS "16"
-    print_redacted_env_status CONTENT_FACTORY_URL GITHUB_APP_ID GITHUB_APP_PRIVATE_KEY VALLEY_HARNESS_URL REDIS_URL ROO_SERVICE_URL ROO_SIM_PATIENT_KEY HEALTH_HACK_API_KEY ROO_API_KEY VICTOR_AI_ROO_SIGNING_SECRET VICTOR_AI_ROO_ENABLED UMAMI_BASE_URL CONTENT_ANALYTICS_HOST_URL COMMUNITY_CHAT_ADAPTER_URL COMMUNITY_CHAT_ADAPTER_TOKEN COMMUNITY_CHAT_EMAIL_CODE_PEPPER COMMUNITY_CHAT_EMAIL_CODE_DELIVERY_SECRET CUSTOMERIO_API_KEY CUSTOMERIO_COMMUNITY_CHAT_CODE_MESSAGE_ID
+    print_redacted_env_status CONTENT_FACTORY_URL GITHUB_APP_ID GITHUB_APP_PRIVATE_KEY VALLEY_HARNESS_URL REDIS_URL ROO_SERVICE_URL ROO_SIM_PATIENT_KEY HEALTH_HACK_API_KEY ROO_API_KEY INTERNAL_API_KEY OFFICE_MANAGER_SLACK_BOT_TOKEN OFFICE_MANAGER_SLACK_CHANNEL_ID OFFICE_MANAGER_TIMEZONE VICTOR_AI_ROO_SIGNING_SECRET VICTOR_AI_ROO_ENABLED UMAMI_BASE_URL CONTENT_ANALYTICS_HOST_URL COMMUNITY_CHAT_ADAPTER_URL COMMUNITY_CHAT_ADAPTER_TOKEN COMMUNITY_CHAT_EMAIL_CODE_PEPPER COMMUNITY_CHAT_EMAIL_CODE_DELIVERY_SECRET CUSTOMERIO_API_KEY CUSTOMERIO_COMMUNITY_CHAT_CODE_MESSAGE_ID
     require_env_value CONTENT_FACTORY_URL "Set CONTENT_FACTORY_URL to http://<content-factory-private-ip>:8000 for the cross-droplet Content Factory deployment."
     require_env_value GITHUB_APP_ID "Set GITHUB_APP_ID to the MLAI Tools GitHub App id so Content Factory can receive installation tokens."
     require_env_value GITHUB_APP_PRIVATE_KEY "Set GITHUB_APP_PRIVATE_KEY to the MLAI Tools GitHub App private key with escaped newlines."
@@ -663,20 +717,34 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     require_env_value ROO_SIM_PATIENT_KEY "Set the GitHub Actions ROO_SIM_PATIENT_KEY repository secret to the same dedicated value configured on Roo."
     require_env_value HEALTH_HACK_API_KEY "Set HEALTH_HACK_API_KEY to the dedicated Cloudflare Worker credential."
     require_env_value ROO_API_KEY "Set ROO_API_KEY to the separate credential Roo uses to record diagnosis verdicts."
+    require_env_value INTERNAL_API_KEY "Set INTERNAL_API_KEY to a credential that is distinct from Roo's mutation credential."
     require_env_value VICTOR_AI_ROO_SIGNING_SECRET "Set the GitHub Actions VICTOR_AI_ROO_SIGNING_SECRET repository secret to the same dedicated value configured on Roo."
     health_hack_key=\$(read_env_value HEALTH_HACK_API_KEY)
     roo_sim_key=\$(read_env_value ROO_SIM_PATIENT_KEY)
     roo_api_key=\$(read_env_value ROO_API_KEY)
+    internal_api_key=\$(read_env_value INTERNAL_API_KEY)
     victor_ai_roo_secret=\$(read_env_value VICTOR_AI_ROO_SIGNING_SECRET)
-    if [ "\${#health_hack_key}" -lt 32 ] || [ "\${#roo_sim_key}" -lt 32 ] || [ "\${#roo_api_key}" -lt 32 ] || [ "\${#victor_ai_roo_secret}" -lt 32 ]; then
-        echo "❌ HEALTH_HACK_API_KEY, ROO_SIM_PATIENT_KEY, ROO_API_KEY, and VICTOR_AI_ROO_SIGNING_SECRET must each contain at least 32 characters."
+    if [ "\${#health_hack_key}" -lt 32 ] || [ "\${#roo_sim_key}" -lt 32 ] || [ "\${#roo_api_key}" -lt 32 ] || [ "\${#internal_api_key}" -lt 32 ] || [ "\${#victor_ai_roo_secret}" -lt 32 ]; then
+        echo "❌ HEALTH_HACK_API_KEY, ROO_SIM_PATIENT_KEY, ROO_API_KEY, INTERNAL_API_KEY, and VICTOR_AI_ROO_SIGNING_SECRET must each contain at least 32 characters."
         exit 1
     fi
-    if [ "\$health_hack_key" = "\$roo_sim_key" ] || [ "\$health_hack_key" = "\$roo_api_key" ] || [ "\$health_hack_key" = "\$victor_ai_roo_secret" ] || [ "\$roo_sim_key" = "\$roo_api_key" ] || [ "\$roo_sim_key" = "\$victor_ai_roo_secret" ] || [ "\$roo_api_key" = "\$victor_ai_roo_secret" ]; then
-        echo "❌ HEALTH_HACK_API_KEY, ROO_SIM_PATIENT_KEY, ROO_API_KEY, and VICTOR_AI_ROO_SIGNING_SECRET must be distinct credentials."
+    if [ "\$health_hack_key" = "\$roo_sim_key" ] || [ "\$health_hack_key" = "\$roo_api_key" ] || [ "\$health_hack_key" = "\$victor_ai_roo_secret" ] || [ "\$roo_sim_key" = "\$roo_api_key" ] || [ "\$roo_sim_key" = "\$victor_ai_roo_secret" ] || [ "\$roo_api_key" = "\$victor_ai_roo_secret" ] || [ "\$roo_api_key" = "\$internal_api_key" ]; then
+        echo "❌ Roo, internal, Health Hack, simulated-patient, and Victor AI credentials must preserve their documented trust-domain boundaries."
         exit 1
     fi
-    unset health_hack_key roo_sim_key roo_api_key victor_ai_roo_secret
+    unset health_hack_key roo_sim_key roo_api_key internal_api_key victor_ai_roo_secret
+
+    if [ "\$office_manager_enabled" = "true" ]; then
+        require_env_value OFFICE_MANAGER_SLACK_BOT_TOKEN "Configure the Public Roo bot token before enabling Office Manager."
+        require_env_value OFFICE_MANAGER_SLACK_CHANNEL_ID "Configure the coworking channel before enabling Office Manager."
+        require_env_value OFFICE_MANAGER_TIMEZONE "Configure the companion-agreed Office Manager timezone."
+        office_manager_timezone=\$(read_env_value OFFICE_MANAGER_TIMEZONE)
+        if [ "\$office_manager_timezone" != "Australia/Melbourne" ]; then
+            echo "❌ OFFICE_MANAGER_TIMEZONE must be Australia/Melbourne."
+            exit 1
+        fi
+        unset office_manager_timezone
+    fi
 
     runtime_services=(web scheduler memory-worker memory-scheduler community-email-worker)
     if [ "\$community_bridge_production_enabled" = "true" ] \
@@ -714,6 +782,18 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     echo "🏗️ Building runtime images: \${runtime_services[*]}..."
     docker compose build "\${runtime_services[@]}"
 
+    # The existing container retains its old environment. Stop it before the
+    # historical audit so a failed enable/disable deploy cannot leave the old
+    # scheduler creating new Office Manager work under a stale flag. If a
+    # preflight fails, restart only this process with the staged false flag; it
+    # will wait on migrate --check until a later successful deployment.
+    restore_staged_scheduler() {
+        docker compose up -d --force-recreate scheduler || true
+    }
+    trap 'deployment_status=\$?; if [ "\$deployment_status" != "0" ]; then restore_staged_scheduler; fi' EXIT
+    echo "⏸️ Staging the scheduler in a disabled state before preflight..."
+    docker compose stop scheduler || true
+
     # Every pre-migration gate (Redis security state, production URLs and
     # service connectivity, memory provider governance, PostgreSQL vector
     # support, GitHub App credentials) plus the migration plan, in one
@@ -724,15 +804,107 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     echo "🧪 Running deployment preflight..."
     compose_run_web python manage.py deploy_preflight
 
-    paused_runtime_services=(web memory-worker memory-scheduler community-email-worker)
+    echo "🧬 Auditing historical Roo migration identities before schema changes..."
+    office_manager_attestation=/root/mlai-backend-operations/office-manager-migration-attestation.json
+    if [ -s "\$office_manager_attestation" ]; then
+        docker compose run -T --rm --no-deps \
+            -v "\$office_manager_attestation:/run/office-manager-migration-attestation.json:ro" \
+            web python manage.py audit_office_manager_migrations \
+            --attestation-file /run/office-manager-migration-attestation.json \
+            </dev/null
+    else
+        compose_run_web python manage.py audit_office_manager_migrations
+    fi
+
+    if [ "\$office_manager_enabled" = "true" ]; then
+        echo "🧪 Verifying the actual Public Roo Slack app and coworking channel..."
+        office_manager_slack_token=\$(read_env_value OFFICE_MANAGER_SLACK_BOT_TOKEN)
+        office_manager_channel_id=\$(read_env_value OFFICE_MANAGER_SLACK_CHANNEL_ID)
+        slack_auth_body=\$(curl -fsS --max-time 10 \
+            -H "Authorization: Bearer \$office_manager_slack_token" \
+            https://slack.com/api/auth.test)
+        printf '%s' "\$slack_auth_body" | python3 -c '
+import json
+import sys
+
+payload = json.load(sys.stdin)
+if payload.get("ok") is not True or not payload.get("bot_id"):
+    reason = payload.get("error", "unknown")
+    raise SystemExit(f"Public Roo Slack auth.test failed: {reason}")
+'
+        slack_channel_body=\$(curl -fsS --max-time 10 \
+            -H "Authorization: Bearer \$office_manager_slack_token" \
+            --get --data-urlencode "channel=\$office_manager_channel_id" \
+            https://slack.com/api/conversations.info)
+        printf '%s' "\$slack_channel_body" | python3 -c '
+import json
+import sys
+
+payload = json.load(sys.stdin)
+channel = payload.get("channel") or {}
+if payload.get("ok") is not True:
+    raise SystemExit("Public Roo cannot inspect the configured Office Manager channel")
+if channel.get("id") != sys.argv[1]:
+    raise SystemExit("Slack returned a different Office Manager channel")
+if channel.get("is_archived") is True or channel.get("is_channel") is not True:
+    raise SystemExit("Office Manager channel must be an active public channel")
+' "\$office_manager_channel_id"
+
+        echo "🧪 Verifying the live Public Roo Office Manager companion contract..."
+        roo_service_url=\$(read_env_value ROO_SERVICE_URL)
+        roo_health_body=\$(curl -fsS --max-time 10 \
+            "\${roo_service_url%/}/healthz/ready")
+        printf '%s' "\$roo_health_body" | python3 -c '
+import json
+import sys
+from urllib.parse import urlparse
+
+payload = json.load(sys.stdin)
+contract = payload.get("office_manager") or {}
+if payload.get("status") != "ok" or payload.get("surface") != "public":
+    raise SystemExit("Office Manager companion is not a ready Public Roo service")
+if contract.get("actions_enabled") is not True:
+    raise SystemExit("Public Roo Office Manager actions must be enabled before backend scheduling")
+if contract.get("timezone") != "Australia/Melbourne":
+    raise SystemExit("Public Roo and backend Office Manager timezones do not match")
+backend_base_url = str(contract.get("backend_base_url") or "")
+parsed = urlparse(backend_base_url)
+allowed_authorities = {
+    ("https", "api.mlai.au", None),
+    ("http", "10.126.0.2", None),
+    ("http", "10.126.0.2", 8000),
+}
+if (parsed.scheme, parsed.hostname, parsed.port) not in allowed_authorities:
+    raise SystemExit("Public Roo Office Manager backend URL targets an unexpected service")
+if parsed.path not in {"", "/"}:
+    raise SystemExit("Public Roo Office Manager backend URL must be a base URL")
+if contract.get("claim_path") != "/api/v1/points/coworking/office-manager/claim/":
+    raise SystemExit("Public Roo Office Manager claim URL path does not match the backend contract")
+if parsed.username or parsed.password or parsed.query or parsed.fragment:
+    raise SystemExit("Public Roo Office Manager claim URL must not contain credentials or parameters")
+'
+        unset office_manager_slack_token office_manager_channel_id
+        unset slack_auth_body slack_channel_body roo_service_url roo_health_body
+    fi
+
+    trap - EXIT
+
+    paused_runtime_services=(web scheduler memory-worker memory-scheduler community-email-worker)
+    runtime_restore_attempted=0
     restore_runtime_on_error() {
-        echo "⚠️ Deployment failed after runtime services were paused; restoring them with the reviewed image."
+        if [ "\$runtime_restore_attempted" = "1" ]; then
+            return
+        fi
+        runtime_restore_attempted=1
+        echo "⚠️ Deployment failed after runtime services were paused; disabling Office Manager creation and restoring runtime processes."
+        upsert_env_value OFFICE_MANAGER_ENABLED "false" || true
         docker compose up -d --force-recreate "\${paused_runtime_services[@]}" || true
     }
 
-    echo "⏸️ Pausing web and organisational-memory workers before DB migrations..."
+    echo "⏸️ Pausing web, schedulers, and workers before DB migrations..."
     docker compose stop "\${paused_runtime_services[@]}" || true
     trap restore_runtime_on_error ERR
+    trap 'deployment_status=\$?; if [ "\$deployment_status" != "0" ]; then restore_runtime_on_error; fi' EXIT
 
     echo "🗄️ Running migrations..."
     compose_run_web python manage.py migrate --noinput
@@ -920,7 +1092,8 @@ PY
         echo "ℹ️ Skipping Admin Brain production staging and activation; query API remains disabled."
     fi
 
-    trap - ERR
+    echo "🚩 Applying the reviewed Office Manager activation state..."
+    upsert_env_value OFFICE_MANAGER_ENABLED "\$office_manager_enabled"
 
     echo "🌐 Starting runtime services: \${runtime_services[*]}..."
     docker compose up -d --force-recreate "\${runtime_services[@]}"
@@ -958,6 +1131,51 @@ PY
         echo "Expected /healthz/ready to report release $APP_RELEASE_SHORT for $APP_RELEASE"
         echo "\$health_body"
         exit 1
+    fi
+
+    echo "🩺 Verifying the required scheduler reached a healthy successful tick..."
+    scheduler_ok=0
+    for attempt in \$(seq 1 24); do
+        scheduler_container_id=\$(docker compose ps -q scheduler)
+        if [ -n "\$scheduler_container_id" ]; then
+            scheduler_health=\$(docker inspect --format \
+                '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' \
+                "\$scheduler_container_id" 2>/dev/null || true)
+            scheduler_running=\$(docker inspect --format '{{.State.Running}}' \
+                "\$scheduler_container_id" 2>/dev/null || true)
+            if [ "\$scheduler_running" = "true" ] && [ "\$scheduler_health" = "healthy" ]; then
+                scheduler_ok=1
+                break
+            fi
+        fi
+        sleep 5
+    done
+    if [ "\$scheduler_ok" != "1" ]; then
+        echo "Required scheduler did not report a recent successful tick."
+        docker compose ps scheduler || true
+        docker compose logs --tail 80 scheduler || true
+        exit 1
+    fi
+
+    if [ "\$office_manager_enabled" = "true" ]; then
+        echo "🔐 Verifying the live Office Manager endpoint enforces the strict Roo credential..."
+        office_manager_roo_key=\$(read_env_value ROO_API_KEY)
+        office_manager_internal_key=\$(read_env_value INTERNAL_API_KEY)
+        office_manager_claim_url=https://api.mlai.au/api/v1/points/coworking/office-manager/claim/
+        roo_status=\$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 \
+            -H "X-API-Key: \$office_manager_roo_key" \
+            "\$office_manager_claim_url")
+        internal_status=\$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 \
+            -H "X-API-Key: \$office_manager_internal_key" \
+            "\$office_manager_claim_url")
+        missing_status=\$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 \
+            "\$office_manager_claim_url")
+        if [ "\$roo_status" != "405" ] || [ "\$internal_status" != "401" ] || [ "\$missing_status" != "401" ]; then
+            echo "Office Manager auth smoke failed (roo=\$roo_status internal=\$internal_status missing=\$missing_status)."
+            exit 1
+        fi
+        unset office_manager_roo_key office_manager_internal_key
+        unset office_manager_claim_url roo_status internal_status missing_status
     fi
 
     if [ "\$meeting_room_booking_enabled" = "true" ]; then
@@ -1038,6 +1256,7 @@ if slugs != expected:
         exit 1
     fi
     rm -f "\$preflight_headers"
+    trap - ERR EXIT
 EOF
 
 echo "✅ Deployment complete! Check http://$DROPLET_IP or https://api.mlai.au"

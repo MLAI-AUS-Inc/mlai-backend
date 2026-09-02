@@ -69,6 +69,7 @@ jobs:
         HEALTH_HACK_API_KEY: ci-health-hack-worker-key-32-characters-minimum
         ROO_SIM_PATIENT_KEY: ci-roo-sim-patient-key-32-characters-minimum
         ROO_API_KEY: ci-roo-diagnosis-record-key-32-characters-minimum
+        INTERNAL_API_KEY: ci-internal-service-key-32-characters-minimum
       run: python manage.py check --deploy --fail-level WARNING
 
     - name: Validate organisational-memory governance
@@ -130,6 +131,7 @@ jobs:
         HEALTH_HACK_API_KEY: ci-health-hack-worker-key-32-characters-minimum
         ROO_SIM_PATIENT_KEY: ci-roo-sim-patient-key-32-characters-minimum
         ROO_API_KEY: ci-roo-diagnosis-record-key-32-characters-minimum
+        INTERNAL_API_KEY: ci-internal-service-key-32-characters-minimum
         # ops.mlai.au is the only credentialed operations origin. Plane's
         # admin.mlai.au origin must remain untrusted by the MLAI API. MLAI Chat
         # has its own separately required credentialed origin.
@@ -184,6 +186,7 @@ jobs:
           integrations.tests_community_bridge_contracts \
           core.tests.test_auth_contract \
           tests.test_runtime_hardening \
+          tests.test_scheduled_discovery_operability \
           tests.test_ci_reuse_pr_checks \
           integrations.tests_fields \
           integrations.tests_github_installation_reconciliation \
@@ -390,6 +393,12 @@ jobs:
         REDIS_URL: ${{ secrets.REDIS_URL }}
         XERO_OAUTH_SCOPES: ${{ vars.XERO_OAUTH_SCOPES || '' }}
         ROO_SIM_PATIENT_KEY: ${{ secrets.ROO_SIM_PATIENT_KEY }}
+        ROO_API_KEY: ${{ secrets.ROO_API_KEY }}
+        INTERNAL_API_KEY: ${{ secrets.INTERNAL_API_KEY }}
+        OFFICE_MANAGER_SLACK_BOT_TOKEN: ${{ secrets.OFFICE_MANAGER_SLACK_BOT_TOKEN }}
+        OFFICE_MANAGER_SLACK_CHANNEL_ID: ${{ vars.OFFICE_MANAGER_SLACK_CHANNEL_ID || '' }}
+        OFFICE_MANAGER_TIMEZONE: ${{ vars.OFFICE_MANAGER_TIMEZONE || 'Australia/Melbourne' }}
+        OFFICE_MANAGER_ENABLED: ${{ vars.OFFICE_MANAGER_ENABLED || 'false' }}
         LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
         LINEAR_CHANNEL_ISSUE_BINDINGS_JSON: ${{ vars.LINEAR_CHANNEL_ISSUE_BINDINGS_JSON }}
         LINEAR_CHANNEL_ISSUE_MAX_COMMENTS: ${{ vars.LINEAR_CHANNEL_ISSUE_MAX_COMMENTS || '250' }}
@@ -444,6 +453,41 @@ jobs:
         if [ -z "$ROO_SIM_PATIENT_KEY" ]; then
           echo "::error::Required repository secret ROO_SIM_PATIENT_KEY is not configured"
           exit 1
+        fi
+        if [ "${#ROO_API_KEY}" -lt 32 ]; then
+          echo "::error::Required repository secret ROO_API_KEY is missing or shorter than 32 characters"
+          exit 1
+        fi
+        if [ "${#INTERNAL_API_KEY}" -lt 32 ]; then
+          echo "::error::Required repository secret INTERNAL_API_KEY is missing or shorter than 32 characters"
+          exit 1
+        fi
+        if [ "$ROO_API_KEY" = "$INTERNAL_API_KEY" ]; then
+          echo "::error::ROO_API_KEY and INTERNAL_API_KEY must be distinct trust-domain credentials"
+          exit 1
+        fi
+        case "$OFFICE_MANAGER_ENABLED" in
+          true|TRUE|True|1|yes|YES|Yes|on|ON|On) OFFICE_MANAGER_ENABLED=true ;;
+          false|FALSE|False|0|no|NO|No|off|OFF|Off|"") OFFICE_MANAGER_ENABLED=false ;;
+          *)
+            echo "::error::OFFICE_MANAGER_ENABLED must be true or false"
+            exit 1
+            ;;
+        esac
+        export OFFICE_MANAGER_ENABLED
+        if [ "$OFFICE_MANAGER_ENABLED" = "true" ]; then
+          if [[ ! "$OFFICE_MANAGER_SLACK_BOT_TOKEN" =~ ^xoxb-[A-Za-z0-9-]+$ ]]; then
+            echo "::error::OFFICE_MANAGER_SLACK_BOT_TOKEN must be a Public Roo xoxb token"
+            exit 1
+          fi
+          if [[ ! "$OFFICE_MANAGER_SLACK_CHANNEL_ID" =~ ^C[A-Z0-9]+$ ]]; then
+            echo "::error::OFFICE_MANAGER_SLACK_CHANNEL_ID must be a public channel ID"
+            exit 1
+          fi
+          if [ "$OFFICE_MANAGER_TIMEZONE" != "Australia/Melbourne" ]; then
+            echo "::error::OFFICE_MANAGER_TIMEZONE must be Australia/Melbourne"
+            exit 1
+          fi
         fi
         python scripts/validate_linear_channel_issue_deploy_config.py
         if [ "${#VICTOR_AI_ROO_SIGNING_SECRET}" -lt 32 ]; then

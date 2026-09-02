@@ -7,6 +7,7 @@ from django.db import transaction
 from content_factory.models import OrganizationContentConfig
 from integrations.models import UserIntegration
 from integrations.services.slack import SlackService
+from roo.models import CoworkingBooking, OfficeManagerAssignment
 
 
 class Command(BaseCommand):
@@ -60,9 +61,47 @@ class Command(BaseCommand):
             self.stdout.write(f"{slack_id}: link to {email}")
             if not commit:
                 continue
-            with transaction.atomic():
-                if slack_user and slack_user.pk != email_user.pk:
-                    slack_user.slack_id = None
-                    slack_user.save(update_fields=["slack_id"])
-                email_user.slack_id = slack_id
-                email_user.save(update_fields=["slack_id"])
+            try:
+                with transaction.atomic():
+                    locked_ids = [email_user.pk]
+                    if slack_user and slack_user.pk != email_user.pk:
+                        locked_ids.append(slack_user.pk)
+                    locked_users = {
+                        user.pk: user
+                        for user in User.objects.select_for_update()
+                        .filter(pk__in=locked_ids)
+                        .order_by("pk")
+                    }
+                    locked_email_user = locked_users[email_user.pk]
+                    locked_slack_user = (
+                        locked_users.get(slack_user.pk)
+                        if slack_user and slack_user.pk != email_user.pk
+                        else None
+                    )
+                    if locked_slack_user is not None:
+                        has_coworking_ownership = (
+                            CoworkingBooking.objects.select_for_update()
+                            .filter(user=locked_slack_user)
+                            .exists()
+                        )
+                        has_office_manager_ownership = (
+                            OfficeManagerAssignment.objects.select_for_update()
+                            .filter(user=locked_slack_user)
+                            .exists()
+                        )
+                        if (
+                            has_coworking_ownership
+                            or has_office_manager_ownership
+                        ):
+                            raise ValueError(
+                                "durable coworking/Office Manager ownership "
+                                "requires the atomic cleanup_users merge"
+                            )
+                        locked_slack_user.slack_id = None
+                        locked_slack_user.save(update_fields=["slack_id"])
+                    locked_email_user.slack_id = slack_id
+                    locked_email_user.save(update_fields=["slack_id"])
+            except ValueError as exc:
+                self.stdout.write(
+                    self.style.WARNING(f"{slack_id}: reconciliation refused ({exc})")
+                )
