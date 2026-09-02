@@ -74,6 +74,14 @@ def _migration_attestation_fingerprint(error):
     return fingerprint
 
 
+def _raw_delete_historical_models(*models):
+    """Clear migration fixtures without traversing models removed on main."""
+    with connection.constraint_checks_disabled():
+        for model in models:
+            queryset = model.objects.all()
+            queryset._raw_delete(queryset.db)
+
+
 class SlackFounderLinkSettingsTests(SimpleTestCase):
     def test_token_ttl_cannot_exceed_frontend_cookie_lifetime(self):
         environment = os.environ.copy()
@@ -723,7 +731,7 @@ class SlackFounderActorMigrationHistoryGuardTests(TransactionTestCase):
         # A fail-closed migration deliberately leaves 0064 unapplied. Remove
         # the synthetic ambiguous state before restoring the graph for the next
         # migration test.
-        for model in (
+        _raw_delete_historical_models(
             self.ContentFactoryJob,
             self.ContentFactoryRun,
             self.ScheduledDiscoveryDispatch,
@@ -731,8 +739,7 @@ class SlackFounderActorMigrationHistoryGuardTests(TransactionTestCase):
             self.UserIntegration,
             self.Organization,
             self.User,
-        ):
-            model.objects.all().delete()
+        )
         executor = MigrationExecutor(connection)
         executor.migrate(executor.loader.graph.leaf_nodes())
         super().tearDown()
@@ -1069,14 +1076,13 @@ class SlackFounderActorMigrationAlreadyAppliedGuardTests(TransactionTestCase):
         )
 
     def tearDown(self):
-        for model in (
+        _raw_delete_historical_models(
             self.ContentFactoryJob,
             self.OrganizationContentConfig,
             self.UserIntegration,
             self.Organization,
             self.User,
-        ):
-            model.objects.all().delete()
+        )
         executor = MigrationExecutor(connection)
         executor.migrate(executor.loader.graph.leaf_nodes())
         super().tearDown()
@@ -1165,7 +1171,7 @@ class SlackFounderActorOrphanedPrincipalGuardTests(TransactionTestCase):
         )
 
     def tearDown(self):
-        for model in (
+        _raw_delete_historical_models(
             self.ContentFactoryJob,
             self.ContentFactoryRun,
             self.ScheduledDiscoveryDispatch,
@@ -1173,8 +1179,7 @@ class SlackFounderActorOrphanedPrincipalGuardTests(TransactionTestCase):
             self.UserIntegration,
             self.Organization,
             self.User,
-        ):
-            model.objects.all().delete()
+        )
         executor = MigrationExecutor(connection)
         executor.migrate(executor.loader.graph.leaf_nodes())
         super().tearDown()
@@ -1410,9 +1415,11 @@ class SlackFounderActorDeletedBeforeHistoryGuardTests(TransactionTestCase):
         )
 
     def tearDown(self):
-        self.ContentFactoryJob.objects.all().delete()
-        self.UserIntegration.objects.all().delete()
-        self.User.objects.all().delete()
+        _raw_delete_historical_models(
+            self.ContentFactoryJob,
+            self.UserIntegration,
+            self.User,
+        )
         executor = MigrationExecutor(connection)
         executor.migrate(executor.loader.graph.leaf_nodes())
         super().tearDown()
