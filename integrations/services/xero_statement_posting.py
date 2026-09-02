@@ -182,7 +182,12 @@ def _posting_payload(
     }
 
 
-def build_statement_posting_preview(suggestion: XeroStatementSuggestion) -> dict[str, Any]:
+def build_statement_posting_preview(
+    suggestion: XeroStatementSuggestion,
+    *,
+    profile: ReconciliationProfile | None = None,
+    active_bank_accounts: list[dict[str, str]] | None = None,
+) -> dict[str, Any]:
     """Validate and durably preview the Xero object for one suggestion."""
 
     suggestion = XeroStatementSuggestion.objects.select_related(
@@ -192,12 +197,13 @@ def build_statement_posting_preview(suggestion: XeroStatementSuggestion) -> dict
     operation = _operation_for(suggestion)
     errors: list[str] = []
     warnings: list[str] = []
-    try:
-        profile = ReconciliationProfile.objects.select_related("xero_connection").get(
-            organization=suggestion.organization
-        )
-    except ReconciliationProfile.DoesNotExist:
-        raise ReconciliationValidationError("Reconciliation profile is not configured.")
+    if profile is None:
+        try:
+            profile = ReconciliationProfile.objects.select_related("xero_connection").get(
+                organization=suggestion.organization
+            )
+        except ReconciliationProfile.DoesNotExist:
+            raise ReconciliationValidationError("Reconciliation profile is not configured.")
 
     connection = profile.xero_connection
     if not profile.enabled:
@@ -242,6 +248,7 @@ def build_statement_posting_preview(suggestion: XeroStatementSuggestion) -> dict
             selected_bank_account = active_bank_account(
                 profile,
                 line.bank_account_id,
+                accounts=active_bank_accounts,
                 allow_legacy_profile_account=scan_metadata.get("schema_version") != 2,
             )
         except ReconciliationValidationError as exc:

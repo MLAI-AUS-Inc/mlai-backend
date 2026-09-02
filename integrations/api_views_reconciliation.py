@@ -2648,10 +2648,33 @@ class ReconciliationAgentRunPreviewView(ReconciliationAdminView):
         run, suggestions = _agent_run_suggestions(organization=organization, run_id=run_id)
         if run is None:
             return Response({"error": "Reconciliation agent run was not found."}, status=status.HTTP_404_NOT_FOUND)
+        suggestions = list(suggestions)
+        profile = ReconciliationProfile.objects.select_related("xero_connection").filter(
+            organization=organization,
+        ).first()
+        requires_live_bank_accounts = any(
+            isinstance(suggestion.statement_line.last_scan.capture_metadata, dict)
+            and suggestion.statement_line.last_scan.capture_metadata.get("schema_version") == 2
+            for suggestion in suggestions
+            if suggestion.statement_line.last_scan_id
+        )
+        active_bank_accounts = None
+        if profile is not None and requires_live_bank_accounts:
+            try:
+                active_bank_accounts = fetch_active_xero_bank_accounts(profile)
+            except ReconciliationValidationError:
+                # Preserve the existing per-suggestion validation response when
+                # Xero's catalogue cannot be refreshed. The success path must
+                # share one catalogue across the whole run.
+                active_bank_accounts = []
         results = []
         for suggestion in suggestions:
             try:
-                preview = build_statement_posting_preview(suggestion)
+                preview = build_statement_posting_preview(
+                    suggestion,
+                    profile=profile,
+                    active_bank_accounts=active_bank_accounts,
+                )
             except ReconciliationValidationError as exc:
                 preview = {"ready": False, "errors": exc.errors or [str(exc)]}
             serialized = serialize_statement_suggestion(suggestion)

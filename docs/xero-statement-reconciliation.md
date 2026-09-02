@@ -30,7 +30,9 @@ line survived a later export.
 
 The posting preview uses the statement line's own bank-account ID. For a
 schema-version 2 capture, it refreshes Xero's active bank-account catalogue and
-rejects a line whose account is no longer active. The preview retains the
+rejects a line whose account is no longer active. An aggregate agent-run preview
+refreshes that catalogue once and reuses the verified result for every line in
+the run. The preview retains the
 existing source-hash, confidence-axis, accounting, tax, duplicate, document,
 and Event-or-Project tracking gates. Execution creates the authorised Xero item
 that appears as a green candidate; it never presses the final Match/OK action.
