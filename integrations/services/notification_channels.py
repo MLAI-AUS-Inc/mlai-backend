@@ -489,6 +489,7 @@ def verify_whatsapp_otp(channel: NotificationChannel, code: str) -> Notification
 def link_slack_channel(*, organization, user, config=None) -> NotificationChannel:
     user_slack_id = str(getattr(user, "slack_id", "") or "").strip()
     slack_id = "" if is_internal_actor_id(user_slack_id) else user_slack_id
+    slack_id_source = "user" if slack_id else ""
     profile = None
     if not slack_id and config is not None:
         configured_slack_id = str(
@@ -496,15 +497,19 @@ def link_slack_channel(*, organization, user, config=None) -> NotificationChanne
         ).strip()
         if not is_internal_actor_id(configured_slack_id):
             slack_id = configured_slack_id
+            slack_id_source = "config"
     if not slack_id and user is not None and getattr(user, "email", ""):
         profile = SlackService.lookup_user_by_email(user.email)
         slack_id = str((profile or {}).get("slack_id") or "").strip()
+        if slack_id:
+            slack_id_source = "email_lookup"
     if not slack_id:
         raise ChannelActionError(
             "slack_user_not_found",
             "We couldn't find your Slack account in the workspace. Join the workspace with this email, then try again.",
         )
 
+    identity_assignment_succeeded = slack_id_source == "user"
     if user is not None and (
         not getattr(user, "slack_id", None)
         or is_internal_actor_id(getattr(user, "slack_id", None))
@@ -517,13 +522,25 @@ def link_slack_channel(*, organization, user, config=None) -> NotificationChanne
                     getattr(user, "slack_id", None)
                 ),
             )
+            identity_assignment_succeeded = True
         except (ConflictingSlackFounderLinkError, IntegrityError):
             # Explicit account links and existing identity ownership must stay
-            # unchanged. The notification route can still use this Slack ID.
-            pass
-    if config is not None and (
-        not getattr(config, "connected_slack_user_id", None)
-        or is_internal_actor_id(getattr(config, "connected_slack_user_id", None))
+            # unchanged. A pre-existing notification route may remain usable,
+            # but an email-discovered identity must fail closed rather than
+            # retargeting migration-preserved Content Factory ownership.
+            if slack_id_source == "email_lookup":
+                raise ChannelActionError(
+                    "slack_identity_conflict",
+                    "That Slack account is already connected elsewhere. Contact MLAI support before changing this connection.",
+                    http_status=409,
+                )
+    if (
+        config is not None
+        and (
+            not getattr(config, "connected_slack_user_id", None)
+            or is_internal_actor_id(getattr(config, "connected_slack_user_id", None))
+        )
+        and identity_assignment_succeeded
     ):
         config.connected_slack_user_id = slack_id
         config.save(update_fields=["connected_slack_user_id", "updated_at"])

@@ -23,6 +23,7 @@ from content_factory.models import (
     ResearchAutomationStatus,
 )
 from core.models import SlackFounderAccountLink
+from core.slack_founder_links import ConflictingSlackFounderLinkError
 from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
 from integrations.services.notification_channels import (
     ChannelActionError,
@@ -535,6 +536,49 @@ class SlackLinkTests(TestCase):
         self.assertIsNone(self.user.slack_id)
         self.assertEqual(self.config.connected_slack_user_id, f"web_{self.user.pk}")
         mock_lookup.assert_called_once_with(self.user.email)
+        mock_dm.assert_not_called()
+
+    @patch("integrations.services.notification_channels.SlackService.send_dm")
+    @patch(
+        "integrations.services.notification_channels.assign_direct_slack_identity",
+        side_effect=ConflictingSlackFounderLinkError(),
+    )
+    @patch(
+        "integrations.services.notification_channels.SlackService.lookup_user_by_email",
+        return_value={"slack_id": "UOTHER", "real_name": "Other Founder"},
+    )
+    def test_lookup_identity_conflict_preserves_migration_attested_owner(
+        self,
+        mock_lookup,
+        mock_assign,
+        mock_dm,
+    ):
+        preserved_owner = f"web_{self.user.pk}"
+        self.config.connected_slack_user_id = preserved_owner
+        self.config.save(update_fields=["connected_slack_user_id"])
+
+        with self.assertRaises(ChannelActionError) as ctx:
+            link_slack_channel(
+                organization=self.org,
+                user=self.user,
+                config=self.config,
+            )
+
+        self.assertEqual(ctx.exception.code, "slack_identity_conflict")
+        self.assertEqual(ctx.exception.http_status, 409)
+        self.config.refresh_from_db()
+        self.user.refresh_from_db()
+        self.assertEqual(self.config.connected_slack_user_id, preserved_owner)
+        self.assertIsNone(self.user.slack_id)
+        self.assertFalse(
+            NotificationChannel.objects.filter(
+                organization=self.org,
+                channel_type=NotificationChannelType.SLACK,
+                route_id="UOTHER",
+            ).exists()
+        )
+        mock_lookup.assert_called_once_with(self.user.email)
+        mock_assign.assert_called_once()
         mock_dm.assert_not_called()
 
     @patch("integrations.services.notification_channels.SlackService.send_dm")
