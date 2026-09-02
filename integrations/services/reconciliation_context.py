@@ -244,6 +244,7 @@ def build_reconciliation_enrichment_context(
     organization,
     run_id: str = "",
     statement_line_ids: list[str] | set[str] | None = None,
+    include_statement_external_evidence: bool = True,
 ) -> dict[str, Any]:
     """Return immutable Stripe candidates plus Luma events and Linear projects.
 
@@ -328,6 +329,7 @@ def build_reconciliation_enrichment_context(
 
     statement_context = build_statement_reconciliation_context(
         organization=organization,
+        include_external_evidence=include_statement_external_evidence,
         luma_events=luma_events,
         humanitix_events=humanitix_events,
         linear_projects=linear_projects,
