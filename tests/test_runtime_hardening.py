@@ -223,13 +223,20 @@ class RuntimeHardeningConfigTests(SimpleTestCase):
             deploy.index('docker compose up -d --force-recreate "\\${runtime_services[@]}"'),
         )
 
-    def test_deploy_restores_last_known_good_images_until_smoke_checks_pass(self):
+    def test_deploy_restores_only_before_forward_only_schema_advancement(self):
         deploy = (ROOT / "deploy.sh").read_text()
 
         self.assertIn("rollback_manifest=\\$(mktemp)", deploy)
         self.assertIn("docker inspect --format '{{.Image}}'", deploy)
         self.assertIn('docker image tag "\\$image_id" "\\$rollback_tag"', deploy)
+        self.assertIn('migration_started=0', deploy)
+        self.assertIn('migration_started=1', deploy)
         self.assertIn("restoring the last known-good runtime images", deploy)
+        self.assertIn(
+            "keeping all runtime writers safely disabled",
+            deploy,
+        )
+        self.assertIn('docker compose stop "\\${runtime_services[@]}"', deploy)
         self.assertIn('docker image tag "\\$image_id" "\\$image_ref"', deploy)
         self.assertIn(
             'docker compose up -d --force-recreate "\\${restored_services[@]}"',

@@ -750,10 +750,21 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     compose_run_web python manage.py deploy_preflight
 
     paused_runtime_services=(web scheduler memory-worker memory-scheduler community-email-worker)
+    migration_started=0
     restore_runtime_on_error() {
         trap - ERR
         set +e
-        echo "⚠️ Deployment failed; restoring the last known-good runtime images."
+        if [ "\$migration_started" = "1" ]; then
+            # The actor migrations are forward-only. A failed migrate command
+            # may still have committed earlier migration files, so starting an
+            # old image could create legacy actor IDs against the new schema.
+            echo "⚠️ Deployment failed after schema advancement began; keeping all runtime writers safely disabled."
+            docker compose stop "\${runtime_services[@]}" || true
+            echo "⚠️ Complete the documented forward recovery before restarting services."
+            rm -f "\$rollback_manifest"
+            return
+        fi
+        echo "⚠️ Deployment failed before schema advancement; restoring the last known-good runtime images."
         restored_services=()
         while IFS='|' read -r service image_id image_ref rollback_tag; do
             [ -n "\$service" ] || continue
@@ -773,6 +784,7 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     trap restore_runtime_on_error ERR
 
     echo "🗄️ Running migrations..."
+    migration_started=1
     compose_run_web python manage.py migrate --noinput
 
     # Migration readiness, vector installation, memory index rebuild, startup

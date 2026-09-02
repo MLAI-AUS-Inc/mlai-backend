@@ -112,3 +112,11 @@ guard therefore never treats reference placement as migration provenance.
 Rollback is forward-only: `0063`, `0064`, `0065`, and `0066` intentionally have
 no reverse data mutation. If recovery cannot be proven, leave deployment
 stopped and escalate to the data owner.
+
+The deployment trap restores prior runtime images only when failure occurs
+before migration execution starts. From the moment `manage.py migrate` begins,
+it treats the schema as potentially advanced and keeps every runtime writer
+stopped on failure. Do not start the previous release against that state: it
+can still emit legacy `web_<id>` actors after `0061` has cleared their matching
+user aliases. Complete the forward recovery and deployment checks with the new
+release before re-enabling services.
