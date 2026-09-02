@@ -507,8 +507,41 @@ class SlackLinkTests(TestCase):
         self.user.refresh_from_db()
         self.config.refresh_from_db()
         self.assertEqual(self.user.slack_id, "UVERIFIED")
-        self.assertEqual(self.config.connected_slack_user_id, "UVERIFIED")
+        self.assertEqual(
+            self.config.connected_slack_user_id,
+            f"mlai_user:{self.user.pk}",
+        )
         mock_lookup.assert_called_once_with(self.user.email)
+        mock_dm.assert_called_once()
+
+    @patch(
+        "integrations.services.notification_channels.SlackService.send_dm",
+        return_value=(True, "1.0"),
+    )
+    @patch(
+        "integrations.services.notification_channels.SlackService.lookup_user_by_email"
+    )
+    def test_real_slack_route_preserves_migration_attested_owner(
+        self,
+        mock_lookup,
+        mock_dm,
+    ):
+        preserved_owner = f"web_{self.user.pk}"
+        self.user.slack_id = "UVERIFIED"
+        self.user.save(update_fields=["slack_id"])
+        self.config.connected_slack_user_id = preserved_owner
+        self.config.save(update_fields=["connected_slack_user_id"])
+
+        channel = link_slack_channel(
+            organization=self.org,
+            user=self.user,
+            config=self.config,
+        )
+
+        self.config.refresh_from_db()
+        self.assertEqual(channel.route_id, "UVERIFIED")
+        self.assertEqual(self.config.connected_slack_user_id, preserved_owner)
+        mock_lookup.assert_not_called()
         mock_dm.assert_called_once()
 
     @patch("integrations.services.notification_channels.SlackService.send_dm")

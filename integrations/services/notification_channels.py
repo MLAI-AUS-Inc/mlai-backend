@@ -536,10 +536,7 @@ def link_slack_channel(*, organization, user, config=None) -> NotificationChanne
                 )
     if (
         config is not None
-        and (
-            not getattr(config, "connected_slack_user_id", None)
-            or is_internal_actor_id(getattr(config, "connected_slack_user_id", None))
-        )
+        and not getattr(config, "connected_slack_user_id", None)
         and identity_assignment_succeeded
     ):
         config.connected_slack_user_id = slack_id
