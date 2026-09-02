@@ -370,6 +370,8 @@ jobs:
           core.tests_slack_founder_links.SlackFounderActorReferenceMigrationTests \
           core.tests_slack_founder_links.SlackFounderActorMigrationHistoryGuardTests \
           core.tests_slack_founder_links.SlackFounderActorMigrationAlreadyAppliedGuardTests \
+          core.tests_slack_founder_links.SlackFounderActorOrphanedPrincipalGuardTests \
+          core.tests_slack_founder_links.SlackFounderActorDeletedBeforeHistoryGuardTests \
           org_memory.tests.test_migrations \
           --verbosity 2
 

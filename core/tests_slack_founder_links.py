@@ -333,7 +333,7 @@ class SlackFounderActorReferenceMigrationTests(TransactionTestCase):
         ("workflow_runs", "0005_contentfactoryrun_reconciled_at"),
     ]
     migrate_to = [
-        ("core", "0065_recheck_legacy_actor_migration_attestation")
+        ("core", "0066_guard_orphaned_actor_migration_history")
     ]
 
     def setUp(self):
@@ -489,15 +489,33 @@ class SlackFounderActorReferenceMigrationTests(TransactionTestCase):
         )
         self.blank_collision_config_pk = blank_collision_config.pk
 
+        attestation = ""
+        observed_attestations = []
+        observed_failures = []
+        for _attempt in range(3):
+            with override_settings(
+                CORE_ACTOR_MIGRATION_HISTORY_ATTESTATION=attestation
+            ):
+                executor = MigrationExecutor(connection)
+                try:
+                    executor.migrate(self.migrate_to)
+                except RuntimeError as raised:
+                    observed_failures.append(str(raised))
+                    attestation = _migration_attestation_fingerprint(raised)
+                    observed_attestations.append(attestation)
+                else:
+                    break
+        else:
+            self.fail("actor migration did not pass after two attestations")
+
+        self.assertEqual(len(observed_attestations), 2)
+        self.assertTrue(
+            any("core.0064" in failure for failure in observed_failures)
+        )
+        self.assertTrue(
+            any("core.0066" in failure for failure in observed_failures)
+        )
         executor = MigrationExecutor(connection)
-        with self.assertRaises(RuntimeError) as raised:
-            executor.migrate(self.migrate_to)
-        fingerprint = _migration_attestation_fingerprint(raised.exception)
-        with override_settings(
-            CORE_ACTOR_MIGRATION_HISTORY_ATTESTATION=fingerprint
-        ):
-            executor = MigrationExecutor(connection)
-            executor.migrate(self.migrate_to)
         self.apps = executor.loader.project_state(self.migrate_to).apps
 
     def tearDown(self):
@@ -1113,6 +1131,316 @@ class SlackFounderActorMigrationAlreadyAppliedGuardTests(TransactionTestCase):
         self.assertTrue(
             self.UserIntegration.objects.filter(pk=canonical_actor_id).exists()
         )
+
+
+class SlackFounderActorOrphanedPrincipalGuardTests(TransactionTestCase):
+    migrate_from = [
+        ("core", "0065_recheck_legacy_actor_migration_attestation")
+    ]
+    migrate_to = [
+        ("core", "0066_guard_orphaned_actor_migration_history")
+    ]
+
+    def setUp(self):
+        super().setUp()
+        executor = MigrationExecutor(connection)
+        executor.migrate(self.migrate_from)
+        self.apps = executor.loader.project_state(self.migrate_from).apps
+        self.User = self.apps.get_model("core", "User")
+        self.Organization = self.apps.get_model("organizations", "Organization")
+        self.OrganizationContentConfig = self.apps.get_model(
+            "content_factory", "OrganizationContentConfig"
+        )
+        self.ContentFactoryJob = self.apps.get_model(
+            "content_factory", "ContentFactoryJob"
+        )
+        self.ContentFactoryRun = self.apps.get_model(
+            "workflow_runs", "ContentFactoryRun"
+        )
+        self.ScheduledDiscoveryDispatch = self.apps.get_model(
+            "content_factory", "ScheduledDiscoveryDispatch"
+        )
+        self.UserIntegration = self.apps.get_model(
+            "integrations", "UserIntegration"
+        )
+
+    def tearDown(self):
+        for model in (
+            self.ContentFactoryJob,
+            self.ContentFactoryRun,
+            self.ScheduledDiscoveryDispatch,
+            self.OrganizationContentConfig,
+            self.UserIntegration,
+            self.Organization,
+            self.User,
+        ):
+            model.objects.all().delete()
+        executor = MigrationExecutor(connection)
+        executor.migrate(executor.loader.graph.leaf_nodes())
+        super().tearDown()
+
+    def _migrate_forward(self):
+        executor = MigrationExecutor(connection)
+        executor.migrate(self.migrate_to)
+        return executor.loader.project_state(self.migrate_to).apps
+
+    def test_deleted_principal_is_discovered_from_every_surviving_reference(self):
+        user = self.User.objects.create(email="deleted-actor@example.com")
+        actor_id = f"mlai_user:{user.pk}"
+        organization = self.Organization.objects.create(
+            name="Deleted Actor Company",
+            domain="deleted-actor.example",
+        )
+        config = self.OrganizationContentConfig.objects.create(
+            organization=organization,
+            connected_slack_user_id=actor_id,
+        )
+        dispatch = self.ScheduledDiscoveryDispatch.objects.create(
+            slack_user_id=actor_id,
+            domain=organization.domain,
+            local_date=date.today(),
+        )
+        job = self.ContentFactoryJob.objects.create(
+            job_id="deleted-actor-job",
+            slack_user_id=actor_id,
+            domain=organization.domain,
+            request_meta={
+                "requested_by_slack_user_id": actor_id,
+                "topic": actor_id,
+            },
+        )
+        run = self.ContentFactoryRun.objects.create(
+            run_id="deleted-actor-run",
+            workflow="repo_scan",
+            slack_user_id=actor_id,
+            domain=organization.domain,
+            run_request={"requested_by_slack_user_id": actor_id},
+        )
+        integration = self.UserIntegration.objects.create(
+            slack_user_id=actor_id,
+            github_access_token="deleted-owner-access-token",
+            github_refresh_token="deleted-owner-refresh-token",
+            github_repo="deleted-owner/repository",
+        )
+        deleted_user_pk = user.pk
+        user.delete()
+
+        with self.assertRaises(RuntimeError) as raised:
+            self._migrate_forward()
+        message = str(raised.exception)
+        self.assertIn("core.0066", message)
+        self.assertIn("OrganizationContentConfig", message)
+        self.assertIn("ScheduledDiscoveryDispatch", message)
+        self.assertIn("ContentFactoryJob.slack_user_id", message)
+        self.assertIn("ContentFactoryJob.request_meta", message)
+        self.assertIn("ContentFactoryRun.slack_user_id", message)
+        self.assertIn("ContentFactoryRun.run_request", message)
+        self.assertIn("UserIntegration.slack_user_id", message)
+        self.assertNotIn("deleted-owner-access-token", message)
+        self.assertNotIn("deleted-owner-refresh-token", message)
+        fingerprint = _migration_attestation_fingerprint(raised.exception)
+
+        with override_settings(
+            CORE_ACTOR_MIGRATION_HISTORY_ATTESTATION=fingerprint
+        ):
+            self._migrate_forward()
+
+        self.assertTrue(
+            self.OrganizationContentConfig.objects.filter(pk=config.pk).exists()
+        )
+        self.assertTrue(
+            self.ScheduledDiscoveryDispatch.objects.filter(pk=dispatch.pk).exists()
+        )
+        self.assertTrue(self.ContentFactoryJob.objects.filter(pk=job.pk).exists())
+        self.assertTrue(self.ContentFactoryRun.objects.filter(pk=run.pk).exists())
+        self.assertTrue(self.UserIntegration.objects.filter(pk=integration.pk).exists())
+
+        from integrations.services.github_installations import (
+            resolve_user_for_actor_id,
+        )
+
+        self.assertFalse(self.User.objects.filter(pk=deleted_user_pk).exists())
+        self.assertIsNone(resolve_user_for_actor_id(actor_id))
+
+    def test_attestation_is_invalidated_when_orphaned_state_changes(self):
+        user = self.User.objects.create(email="orphan-state@example.com")
+        actor_id = f"web_{user.pk}"
+        self.UserIntegration.objects.create(
+            slack_user_id=actor_id,
+            github_access_token="orphan-state-access-token",
+        )
+        job = self.ContentFactoryJob.objects.create(
+            job_id="orphan-state-job",
+            slack_user_id=actor_id,
+            domain="orphan-state.example",
+            request_meta={"requested_by_slack_user_id": actor_id},
+        )
+        user.delete()
+
+        with self.assertRaises(RuntimeError) as first_failure:
+            self._migrate_forward()
+        stale_fingerprint = _migration_attestation_fingerprint(
+            first_failure.exception
+        )
+
+        job.request_meta = {
+            "requested_by_slack_user_id": actor_id,
+            "recovery_note": "ownership evidence changed",
+        }
+        job.save(update_fields=["request_meta"])
+
+        with override_settings(
+            CORE_ACTOR_MIGRATION_HISTORY_ATTESTATION=stale_fingerprint
+        ):
+            with self.assertRaises(RuntimeError) as changed_failure:
+                self._migrate_forward()
+
+        self.assertNotEqual(
+            _migration_attestation_fingerprint(changed_failure.exception),
+            stale_fingerprint,
+        )
+
+    def test_trimmed_integration_key_cannot_evade_reference_discovery(self):
+        user = self.User.objects.create(email="padded-actor@example.com")
+        actor_id = f" mlai_user:{user.pk} "
+        self.UserIntegration.objects.create(
+            slack_user_id=actor_id,
+            github_repo="padded-owner/repository",
+        )
+        user.delete()
+
+        with self.assertRaises(RuntimeError) as raised:
+            self._migrate_forward()
+
+        self.assertIn("core.0066", str(raised.exception))
+        self.assertIn("UserIntegration.slack_user_id", str(raised.exception))
+
+    def test_verified_repointing_restores_production_resolution(self):
+        deleted_user = self.User.objects.create(email="old-owner@example.com")
+        orphaned_actor_id = f"mlai_user:{deleted_user.pk}"
+        self.UserIntegration.objects.create(
+            slack_user_id=orphaned_actor_id,
+            github_access_token="verified-owner-access-token",
+            github_repo="verified-owner/repository",
+        )
+        job = self.ContentFactoryJob.objects.create(
+            job_id="verified-owner-job",
+            slack_user_id=orphaned_actor_id,
+            domain="verified-owner.example",
+            request_meta={
+                "requested_by_slack_user_id": orphaned_actor_id,
+            },
+        )
+        deleted_user.delete()
+
+        with self.assertRaises(RuntimeError):
+            self._migrate_forward()
+
+        verified_user = self.User.objects.create(email="verified-owner@example.com")
+        verified_actor_id = f"mlai_user:{verified_user.pk}"
+        self.UserIntegration.objects.filter(pk=orphaned_actor_id).update(
+            slack_user_id=verified_actor_id
+        )
+        self.ContentFactoryJob.objects.filter(pk=job.pk).update(
+            slack_user_id=verified_actor_id,
+            request_meta={
+                "requested_by_slack_user_id": verified_actor_id,
+            },
+        )
+
+        self._migrate_forward()
+
+        from integrations.services.github_installations import (
+            resolve_user_for_actor_id,
+        )
+
+        self.assertFalse(
+            self.UserIntegration.objects.filter(pk=orphaned_actor_id).exists()
+        )
+        self.assertTrue(
+            self.UserIntegration.objects.filter(pk=verified_actor_id).exists()
+        )
+        self.assertEqual(
+            resolve_user_for_actor_id(verified_actor_id).pk,
+            verified_user.pk,
+        )
+
+    def test_inactive_existing_principal_passes_without_attestation(self):
+        user = self.User.objects.create(
+            email="inactive-actor@example.com",
+            is_active=False,
+        )
+        actor_id = f"mlai_user:{user.pk}"
+        self.UserIntegration.objects.create(
+            slack_user_id=actor_id,
+            github_repo="inactive-owner/repository",
+        )
+
+        self._migrate_forward()
+
+        from integrations.services.github_installations import (
+            resolve_user_for_actor_id,
+        )
+
+        self.assertEqual(resolve_user_for_actor_id(actor_id).pk, user.pk)
+
+
+class SlackFounderActorDeletedBeforeHistoryGuardTests(TransactionTestCase):
+    migrate_from = [
+        ("core", "0062_slackfounderlinkrequest_created_index"),
+        ("content_factory", "0037_content_islands"),
+        ("integrations", "0041_linear_project_sizing_runs"),
+        ("workflow_runs", "0005_contentfactoryrun_reconciled_at"),
+    ]
+    migrate_to = [
+        ("core", "0066_guard_orphaned_actor_migration_history")
+    ]
+
+    def setUp(self):
+        super().setUp()
+        executor = MigrationExecutor(connection)
+        executor.migrate(self.migrate_from)
+        self.apps = executor.loader.project_state(self.migrate_from).apps
+        self.User = self.apps.get_model("core", "User")
+        self.ContentFactoryJob = self.apps.get_model(
+            "content_factory", "ContentFactoryJob"
+        )
+        self.UserIntegration = self.apps.get_model(
+            "integrations", "UserIntegration"
+        )
+
+    def tearDown(self):
+        self.ContentFactoryJob.objects.all().delete()
+        self.UserIntegration.objects.all().delete()
+        self.User.objects.all().delete()
+        executor = MigrationExecutor(connection)
+        executor.migrate(executor.loader.graph.leaf_nodes())
+        super().tearDown()
+
+    def test_deleted_before_0063_legacy_references_do_not_silently_pass(self):
+        user = self.User.objects.create(email="deleted-before-0063@example.com")
+        actor_id = f"web_{user.pk}"
+        self.UserIntegration.objects.create(
+            slack_user_id=actor_id,
+            github_repo="deleted-before-0063/repository",
+        )
+        job = self.ContentFactoryJob.objects.create(
+            job_id="deleted-before-0063-job",
+            slack_user_id=actor_id,
+            domain="deleted-before-0063.example",
+            request_meta={"requested_by_slack_user_id": actor_id},
+        )
+        user.delete()
+
+        executor = MigrationExecutor(connection)
+        with self.assertRaises(RuntimeError) as raised:
+            executor.migrate(self.migrate_to)
+
+        message = str(raised.exception)
+        self.assertIn("core.0066", message)
+        self.assertIn(actor_id, message)
+        job.refresh_from_db()
+        self.assertEqual(job.slack_user_id, actor_id)
 
 
 class SlackFounderLinkLegacyCommandTests(TransactionTestCase):
