@@ -25,7 +25,7 @@ from typing import Optional, Tuple
 from .models import (
     PointsAdmin, Minter, Task, Ledger, PointsAccount, BoostPostAdmission,
     TaskAssignment, TaskSubmission, CoworkingBooking, CoworkingDayCapacity,
-    OfficeManagerDay, RewardsCatalog, RewardRedemption, TaskTemplate,
+    OfficeManagerAssignment, OfficeManagerDay, RewardsCatalog, RewardRedemption, TaskTemplate,
     PointsRequest, PointsPurchase,
 )
 
@@ -1974,6 +1974,9 @@ class CoworkingViewSet(viewsets.ViewSet):
             return Response({'error': 'slack_user_id is required'}, status=status.HTTP_400_BAD_REQUEST)
 
         user = PointsService.get_user_by_slack_id(slack_user_id)
+        office_manager_authorized = (
+            HasOfficeManagerRooApiKey().has_permission(request, self)
+        )
 
         # Find booking by ID or date
         if booking_id:
@@ -2001,7 +2004,7 @@ class CoworkingViewSet(viewsets.ViewSet):
         # must be authenticated by Roo's isolated credential.
         if (
             booking.booking_source == 'office_manager'
-            and not HasOfficeManagerRooApiKey().has_permission(request, self)
+            and not office_manager_authorized
         ):
             return Response(
                 {'error': 'Office Manager cancellation requires Roo authorization'},
@@ -2013,7 +2016,11 @@ class CoworkingViewSet(viewsets.ViewSet):
             return Response({'error': 'Not authorized to cancel this booking'}, status=status.HTTP_403_FORBIDDEN)
 
         try:
-            booking, refunded = CoworkingService.cancel(str(booking.id), slack_user_id)
+            booking, refunded = CoworkingService.cancel(
+                str(booking.id),
+                slack_user_id,
+                office_manager_authorized=office_manager_authorized,
+            )
             office_manager_day_id = getattr(
                 booking,
                 '_office_manager_day_id',
@@ -2026,9 +2033,20 @@ class CoworkingViewSet(viewsets.ViewSet):
                 '_office_manager_assignment_id',
                 None,
             )
+            retraction_delivered = None
+            retraction_status = None
             if office_manager_assignment_id:
-                OfficeManagerService.retract_winner_channel_announcement(
-                    office_manager_assignment_id
+                retraction_delivered = bool(
+                    OfficeManagerService.retract_winner_channel_announcement(
+                        office_manager_assignment_id
+                    )
+                )
+                retraction_status = (
+                    OfficeManagerAssignment.objects.filter(
+                        pk=office_manager_assignment_id
+                    ).values_list(
+                        'winner_channel_retraction_status', flat=True
+                    ).first()
                 )
             return Response({
                 'booking': CoworkingBookingSerializer(booking).data,
@@ -2044,7 +2062,11 @@ class CoworkingViewSet(viewsets.ViewSet):
                         False,
                     )
                 ),
+                'office_manager_retraction_delivered': retraction_delivered,
+                'office_manager_retraction_status': retraction_status,
             })
+        except PermissionDeniedError as e:
+            return Response({'error': str(e)}, status=status.HTTP_403_FORBIDDEN)
         except ValueError as e:
             return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
 

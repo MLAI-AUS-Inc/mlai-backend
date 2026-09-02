@@ -1,8 +1,10 @@
 from datetime import date
 from io import StringIO
+from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.core.management import CommandError, call_command
+from django.db import OperationalError
 from django.test import TestCase
 
 from roo.models import (
@@ -146,3 +148,25 @@ class MergePairTests(TestCase):
                 "--target-slack-id=UTARGET",
                 stdout=StringIO(),
             )
+
+    def test_merge_retries_whole_transaction_after_deadlock(self):
+        from core.management.commands.cleanup_users import Command
+
+        error = OperationalError("deadlock detected")
+        error.pgcode = "40P01"
+        command = Command()
+        with (
+            patch.object(
+                command,
+                "merge_users",
+                side_effect=[error, None],
+            ) as merge_users,
+            patch("core.management.commands.cleanup_users.time.sleep") as sleep,
+        ):
+            command.merge_users_with_retry(
+                source_id=self.source.pk,
+                target_id=self.target.pk,
+            )
+
+        self.assertEqual(merge_users.call_count, 2)
+        sleep.assert_called_once_with(0.05)

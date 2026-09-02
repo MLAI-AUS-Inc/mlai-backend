@@ -1,0 +1,156 @@
+from __future__ import annotations
+
+from django.core.management.base import BaseCommand, CommandError
+from django.db import transaction
+
+from roo.models import (
+    CoworkingBooking,
+    OfficeManagerAssignment,
+    OfficeManagerProvenanceReconciliation,
+)
+from roo.services import PointsService
+
+
+class Command(BaseCommand):
+    help = (
+        "Verify and record an operator-audited purchased/earned allocation for "
+        "one historical coworking booking. No value is inferred."
+    )
+
+    def add_arguments(self, parser):
+        parser.add_argument("--booking-id", required=True)
+        parser.add_argument(
+            "--purchased-microroo",
+            required=True,
+            type=int,
+            help="Exact purchased-point portion of the original debit/refund.",
+        )
+        parser.add_argument("--reviewed-by", required=True)
+        parser.add_argument("--commit", action="store_true")
+
+    def handle(self, *args, **options):
+        booking_id = str(options["booking_id"]).strip()
+        purchased_microroo = int(options["purchased_microroo"])
+        reviewed_by = str(options["reviewed_by"]).strip()
+        if not reviewed_by:
+            raise CommandError("--reviewed-by must name the accountable operator")
+
+        with transaction.atomic():
+            try:
+                booking = (
+                    CoworkingBooking.objects.select_for_update()
+                    .select_related("ledger_entry")
+                    .get(pk=booking_id)
+                )
+            except (ValueError, CoworkingBooking.DoesNotExist) as exc:
+                raise CommandError("Booking not found") from exc
+
+            original_cost = (
+                booking.original_points_cost
+                if booking.booking_source == "office_manager"
+                else booking.points_cost
+            )
+            total_microroo = PointsService.roo_to_microroo(
+                max(0, int(original_cost or 0))
+            )
+            if total_microroo <= 0:
+                raise CommandError("Booking has no historical paid debit to reconcile")
+            if not 0 <= purchased_microroo <= total_microroo:
+                raise CommandError(
+                    "Purchased allocation must be between zero and the original debit"
+                )
+            ledger = booking.ledger_entry
+            if (
+                ledger is None
+                or ledger.user_id != booking.user_id
+                or ledger.kind != "SPEND"
+                or ledger.source != "COWORKING"
+                or ledger.delta_microroo != -total_microroo
+                or ledger.reference_type != "COWORKING_BOOKING"
+                or ledger.reference_id
+                not in {str(booking.pk), str(booking.date)}
+            ):
+                raise CommandError(
+                    "The booking does not have a matching authoritative debit ledger"
+                )
+
+            assignments = list(
+                OfficeManagerAssignment.objects.select_for_update()
+                .select_related("day", "refund_ledger_entry")
+                .filter(booking=booking, points_refunded__gt=0)
+                .order_by("pk")
+            )
+            for assignment in assignments:
+                refund = assignment.refund_ledger_entry
+                expected_refund = PointsService.roo_to_microroo(
+                    assignment.points_refunded
+                )
+                if (
+                    refund is None
+                    or refund.user_id != booking.user_id
+                    or refund.kind != "REFUND"
+                    or refund.source != "COWORKING"
+                    or refund.delta_microroo != expected_refund
+                    or refund.reference_type != "OFFICE_MANAGER_ASSIGNMENT"
+                    or refund.reference_id != str(assignment.day_id)
+                    or expected_refund != total_microroo
+                    or assignment.user_id != booking.user_id
+                    or assignment.day.date != booking.date
+                ):
+                    raise CommandError(
+                        "The Office Manager assignment does not have a matching "
+                        "authoritative refund ledger"
+                    )
+
+            refund_snapshot = [
+                {
+                    "assignment_id": assignment.pk,
+                    "refund_ledger_id": assignment.refund_ledger_entry_id,
+                    "refund_microroo": PointsService.roo_to_microroo(
+                        assignment.points_refunded
+                    ),
+                }
+                for assignment in assignments
+            ]
+
+            existing_evidence = (
+                OfficeManagerProvenanceReconciliation.objects.select_for_update()
+                .filter(booking=booking)
+                .first()
+            )
+            if existing_evidence is not None and (
+                existing_evidence.purchased_microroo != purchased_microroo
+                or existing_evidence.debit_ledger_id != ledger.pk
+                or existing_evidence.assignment_refund_snapshot != refund_snapshot
+            ):
+                raise CommandError(
+                    "Booking already has different immutable reconciliation evidence"
+                )
+
+            self.stdout.write(
+                "Verified booking "
+                f"{booking.pk}: total={total_microroo}, "
+                f"purchased={purchased_microroo}, reviewed_by={reviewed_by}"
+            )
+            if not options["commit"]:
+                transaction.set_rollback(True)
+                self.stdout.write("Dry run only; re-run with --commit to persist")
+                return
+
+            booking.purchased_points_cost_microroo = purchased_microroo
+            booking.save(update_fields=["purchased_points_cost_microroo"])
+            if assignments:
+                OfficeManagerAssignment.objects.filter(
+                    pk__in=[assignment.pk for assignment in assignments]
+                ).update(
+                    purchased_points_refunded_microroo=purchased_microroo
+                )
+            if existing_evidence is None:
+                OfficeManagerProvenanceReconciliation.objects.create(
+                    booking=booking,
+                    debit_ledger=ledger,
+                    purchased_microroo=purchased_microroo,
+                    reviewed_by=reviewed_by,
+                    assignment_refund_snapshot=refund_snapshot,
+                )
+            self.stdout.write(self.style.SUCCESS("Provenance reconciled"))

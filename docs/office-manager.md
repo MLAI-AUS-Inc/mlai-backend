@@ -81,8 +81,10 @@ rollover are explicitly marked expired without emitting stale messages.
 A relinquished winner's public message is retracted from durable state.
 Retraction repair runs even when
 `OFFICE_MANAGER_ENABLED=false`, so rollback cannot leave a former winner named
-publicly. Other pending deliveries remain durable while the feature is disabled
-and resume if it is re-enabled on the same local date. Public messages may
+publicly. Already-committed winner and reminder deliveries also continue for
+the same local date while disabled; the scheduler does not create a new daily
+announcement. Unrecoverable retractions remain visible as a health failure on
+every scheduler tick until repaired. Public messages may
 identify the winner, but private booking and points details belong only in the
 winner DM and the claim API response.
 
@@ -96,7 +98,10 @@ Required backend settings are listed in `.env.example`:
   versioned claim path itself, and backend activation rejects a path-prefixed
   companion URL.
 - `OFFICE_MANAGER_SLACK_BOT_TOKEN`: Public Roo app bot token. The app that posts
-  the button must also receive its interaction callback.
+  the button must also receive its interaction callback and have permission to
+  read the configured public channel's message history. The backend uses
+  `conversations.history` plus deterministic `client_msg_id` values to recover
+  accepted Slack posts whose HTTP response was lost.
 - `OFFICE_MANAGER_SLACK_CHANNEL_ID`: coworking channel to announce in.
 - `OFFICE_MANAGER_TIMEZONE`, weekday, announcement, cutoff, and reminder
   settings.
@@ -124,7 +129,8 @@ remain POST-only.
 
 The Office Manager branch was previously shared under colliding migration
 numbers before its append-only `0034`/`0035` identities were established.
-Before applying `0034`, `0035`, or the append-only `0036` recovery, run the
+Before applying `0034`, `0035`, `0036`, or the append-only `0037` provenance
+recovery, run the
 read-only audit against **every persistent database**, including production,
 staging, preview databases with retained volumes, and developer databases:
 
@@ -137,7 +143,7 @@ and the Office Manager day/assignment rows needed to prove the cross-table
 invariants that database constraints cannot express: every claimed day has
 exactly one active assignment, and every active assignment belongs to a
 claimed day. It reports all recorded Roo identities beginning `0029`, `0030`,
-`0031`, `0034`, `0035`, and `0036`, plus the schema markers needed by their
+`0031`, `0034`, `0035`, `0036`, and `0037`, plus the schema markers needed by their
 current bodies. In particular, investigate these obsolete shared identities:
 
 - `0029_officemanagerday_coworkingbooking_booking_source_and_more`
@@ -187,6 +193,24 @@ the change record. The attestation is bound to the exact recorder/schema
 fingerprint, so later drift fails closed. `deploy.sh` mounts this file
 read-only when present and always runs the audit before migrations.
 
+`0037` makes unknown historical point-bucket allocations explicit. It
+preserves a 0036-era assignment only when its booking provenance and exact
+refund ledger agree; otherwise the value becomes null and the audit blocks
+activation. An operator must verify the original debit and refund, then record
+the exact allocation and durable reviewer evidence with:
+
+```bash
+python manage.py reconcile_office_manager_provenance \
+  --booking-id <uuid> \
+  --purchased-microroo <exact-value> \
+  --reviewed-by <operator-identity> \
+  --commit
+```
+
+Run it without `--commit` first. The command never infers a bucket split and
+refuses mismatched ledgers or conflicting prior evidence. Re-run the migration
+audit after every reconciliation.
+
 Roll out in this order:
 
 1. Run the historical identity audit above for every persistent database.
@@ -194,7 +218,8 @@ Roll out in this order:
 2. Review and explicitly approve
    `roo.0034_officemanagerday_coworkingbooking_booking_source_and_more` and
    `roo.0035_protect_office_manager_assignment_day`, together with the new
-   append-only `roo.0036_office_manager_attempts_and_provenance` successor.
+   append-only `roo.0036_office_manager_attempts_and_provenance` and
+   `roo.0037_quarantine_legacy_office_manager_provenance` successors.
    Deploy the backend and apply them with `OFFICE_MANAGER_ENABLED=false`.
 3. Configure the dedicated Public Roo Slack token and channel, keeping both
    feature flags off. The token must belong to the app that owns the button.
@@ -220,6 +245,6 @@ the host environment for the next replacement; the preserved container keeps
 the complete last-known-good environment until then. Once migrations and
 post-migration gates succeed and replacement begins, failure recovery may
 recreate the new image with the staged-off flag, but it still requires a fresh
-scheduler tick. Do not reverse shared migrations, remove `0034`–`0036`, or
+scheduler tick. Do not reverse shared migrations, remove `0034`–`0037`, or
 delete Office Manager accounting/provenance rows; roll application code forward
 with a new append-only migration when schema recovery is required.

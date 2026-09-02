@@ -1,6 +1,7 @@
 import logging
+import time
 from django.core.management.base import BaseCommand, CommandError
-from django.db import transaction, IntegrityError
+from django.db import OperationalError, transaction
 from core.models import User
 from roo.models import (
     PointsAccount, Ledger, Task, TaskSubmission, 
@@ -10,6 +11,19 @@ from roo.services import CoworkingService, PointsService
 from integrations.services import SlackService
 
 logger = logging.getLogger(__name__)
+
+MERGE_TRANSACTION_RETRY_ATTEMPTS = 3
+
+
+def _retryable_transaction_error(exc):
+    cause = getattr(exc, '__cause__', None)
+    code = (
+        getattr(exc, 'pgcode', None)
+        or getattr(exc, 'sqlstate', None)
+        or getattr(cause, 'pgcode', None)
+        or getattr(cause, 'sqlstate', None)
+    )
+    return code in {'40P01', '40001'}
 
 class Command(BaseCommand):
     help = 'Clean up duplicate users by merging Slack users into Email users'
@@ -95,7 +109,10 @@ class Command(BaseCommand):
                 ))
                 
                 if commit:
-                    self.merge_users(source=slack_user, target=target_user)
+                    self.merge_users_with_retry(
+                        source_id=slack_user.pk,
+                        target_id=target_user.pk,
+                    )
                 
                 merged_count += 1
                 
@@ -105,7 +122,6 @@ class Command(BaseCommand):
 
         self.stdout.write(self.style.SUCCESS(f"Done. Updated Emails: {updated_count}, Merged Users: {merged_count}, Skipped/Error: {skipped_count}"))
 
-    @transaction.atomic
     def merge_pair(self, source_slack_id, target_slack_id, commit):
         """Merge one known duplicate pair, without consulting the Slack API."""
         if not source_slack_id or not target_slack_id:
@@ -128,9 +144,37 @@ class Command(BaseCommand):
             self.report_related(source)
             return
 
-        with transaction.atomic():
-            self.merge_users(source=source, target=target)
+        self.merge_users_with_retry(
+            source_id=source.pk,
+            target_id=target.pk,
+        )
         self.stdout.write(self.style.SUCCESS('Merge complete'))
+
+    def merge_users_with_retry(self, *, source_id, target_id):
+        """Retry only whole merge transactions aborted by PostgreSQL."""
+        for attempt in range(MERGE_TRANSACTION_RETRY_ATTEMPTS):
+            try:
+                with transaction.atomic():
+                    principals = {
+                        user.pk: user
+                        for user in User.objects.select_for_update()
+                        .filter(pk__in=sorted([source_id, target_id]))
+                        .order_by('pk')
+                    }
+                    if len(principals) != 2:
+                        raise CommandError('Both merge principals must still exist')
+                    self.merge_users(
+                        source=principals[source_id],
+                        target=principals[target_id],
+                    )
+                return
+            except OperationalError as exc:
+                if (
+                    not _retryable_transaction_error(exc)
+                    or attempt + 1 >= MERGE_TRANSACTION_RETRY_ATTEMPTS
+                ):
+                    raise
+                time.sleep(0.05 * (2 ** attempt))
 
     def report_related(self, user):
         """List every row still pointing at this user, so nothing is merged blind."""
@@ -176,10 +220,22 @@ class Command(BaseCommand):
         target.save()
 
         # 2. Merge Points Data
-        # PointsAccount
+        # PointsAccount. Follow the global user -> booking -> account lock order
+        # and lock both accounts deterministically before changing balances.
+        accounts = {
+            account.user_id: account
+            for account in PointsAccount.objects.select_for_update()
+            .filter(user_id__in=sorted([source.pk, target.pk]))
+            .order_by('user_id')
+        }
         try:
-            source_account = PointsAccount.objects.get(user=source)
-            target_account, created = PointsAccount.objects.get_or_create(user=target)
+            source_account = accounts[source.pk]
+            target_account = accounts.get(target.pk)
+            if target_account is None:
+                PointsAccount.objects.create(user=target)
+                target_account = PointsAccount.objects.select_for_update().get(
+                    user=target
+                )
             
             # Add exact balances; legacy whole-Roo projections are derived.
             PointsService._ensure_microroo_account(source_account)
@@ -196,7 +252,7 @@ class Command(BaseCommand):
             
             self.stdout.write(f"  Merged PointsAccount: +{source_account.balance} pts to target. New balance: {target_account.balance}")
             source_account.delete() 
-        except PointsAccount.DoesNotExist:
+        except KeyError:
             self.stdout.write("  No source PointsAccount to merge.")
             
         # Ledger

@@ -802,15 +802,18 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
 
     echo "🧬 Auditing historical Roo migration identities before schema changes..."
     office_manager_attestation=/root/mlai-backend-operations/office-manager-migration-attestation.json
-    if [ -s "\$office_manager_attestation" ]; then
-        docker compose run -T --rm --no-deps \
-            -v "\$office_manager_attestation:/run/office-manager-migration-attestation.json:ro" \
-            web python manage.py audit_office_manager_migrations \
-            --attestation-file /run/office-manager-migration-attestation.json \
-            </dev/null
-    else
-        compose_run_web python manage.py audit_office_manager_migrations
-    fi
+    run_office_manager_migration_audit() {
+        if [ -s "\$office_manager_attestation" ]; then
+            docker compose run -T --rm --no-deps \
+                -v "\$office_manager_attestation:/run/office-manager-migration-attestation.json:ro" \
+                web python manage.py audit_office_manager_migrations \
+                --attestation-file /run/office-manager-migration-attestation.json \
+                </dev/null
+        else
+            compose_run_web python manage.py audit_office_manager_migrations
+        fi
+    }
+    run_office_manager_migration_audit
 
     if [ "\$office_manager_enabled" = "true" ]; then
         echo "🧪 Verifying the actual Public Roo Slack app and coworking channel..."
@@ -845,6 +848,23 @@ if channel.get("id") != sys.argv[1]:
 if channel.get("is_archived") is True or channel.get("is_channel") is not True:
     raise SystemExit("Office Manager channel must be an active public channel")
 ' "\$office_manager_channel_id"
+
+        slack_history_body=\$(curl -fsS --max-time 10 \
+            -H "Authorization: Bearer \$office_manager_slack_token" \
+            --get --data-urlencode "channel=\$office_manager_channel_id" \
+            --data-urlencode "limit=1" \
+            https://slack.com/api/conversations.history)
+        printf '%s' "\$slack_history_body" | python3 -c '
+import json
+import sys
+
+payload = json.load(sys.stdin)
+if payload.get("ok") is not True:
+    reason = payload.get("error", "unknown")
+    raise SystemExit(
+        f"Public Roo cannot inspect Office Manager message history: {reason}"
+    )
+'
 
         echo "🧪 Verifying the live Public Roo Office Manager companion contract..."
         roo_service_url=\$(read_env_value ROO_SERVICE_URL)
@@ -882,7 +902,8 @@ if parsed.username or parsed.password or parsed.query or parsed.fragment:
     raise SystemExit("Public Roo Office Manager claim URL must not contain credentials or parameters")
 '
         unset office_manager_slack_token office_manager_channel_id
-        unset slack_auth_body slack_channel_body roo_service_url roo_health_body
+        unset slack_auth_body slack_channel_body slack_history_body
+        unset roo_service_url roo_health_body
     fi
 
     paused_runtime_services=(web scheduler memory-worker memory-scheduler community-email-worker)
@@ -967,6 +988,7 @@ if parsed.username or parsed.password or parsed.query or parsed.fragment:
 
     runtime_restore_attempted=0
     new_runtime_replacement_started=0
+    post_migration_quarantine_recovery=0
     restore_runtime_on_error() {
         if [ "\$runtime_restore_attempted" = "1" ]; then
             return
@@ -974,7 +996,8 @@ if parsed.username or parsed.password or parsed.query or parsed.fragment:
         runtime_restore_attempted=1
         echo "⚠️ Deployment failed after runtime services were paused; staging Office Manager disabled and restoring runtime processes."
         upsert_env_value OFFICE_MANAGER_ENABLED "false" || true
-        if [ "\$new_runtime_replacement_started" != "1" ]; then
+        if [ "\$new_runtime_replacement_started" != "1" ] \
+            && [ "\$post_migration_quarantine_recovery" != "1" ]; then
             # These stopped containers still reference the last known-good images
             # and carry the environment that was validated with that release. Do
             # not replace them with the just-built image: a pre/post-migration
@@ -1007,6 +1030,20 @@ if parsed.username or parsed.password or parsed.query or parsed.fragment:
 
     echo "🗄️ Running migrations..."
     compose_run_web python manage.py migrate --noinput
+
+    echo "🧬 Re-auditing Office Manager provenance after migrations..."
+    if ! run_office_manager_migration_audit; then
+        echo "❌ Post-migration Office Manager data requires operator reconciliation." >&2
+        # The nullable quarantine is understood only by the new image. Keep the
+        # feature off and start that image so an older binary cannot reverse an
+        # allocation whose provenance 0037 marked unknown.
+        upsert_env_value OFFICE_MANAGER_ENABLED "false"
+        post_migration_quarantine_recovery=1
+        docker compose up -d --force-recreate "\${paused_runtime_services[@]}"
+        verify_scheduler_recovery_tick "" "" 0
+        runtime_restore_attempted=1
+        exit 1
+    fi
 
     # Migration readiness, vector installation, memory index rebuild, startup
     # update schema, Vibe Raising upload routes, Firebase Storage CORS and the

@@ -8,13 +8,20 @@ race conditions and duplicate transactions.
 import calendar
 import logging
 import re
+import time
 import uuid
 from collections import OrderedDict
 from datetime import date, datetime, timedelta
 from typing import Optional, Tuple
 import requests
 from django.conf import settings
-from django.db import connection, transaction, IntegrityError, models
+from django.db import (
+    IntegrityError,
+    OperationalError,
+    connection,
+    models,
+    transaction,
+)
 from django.db.models import Count, Q
 from django.utils import timezone
 
@@ -33,12 +40,31 @@ from core.models import User
 logger = logging.getLogger(__name__)
 
 
+DATABASE_TRANSACTION_RETRY_ATTEMPTS = 3
+
+
+def _retryable_transaction_error(exc: OperationalError) -> bool:
+    """Return true only for PostgreSQL deadlock/serialization aborts."""
+    cause = getattr(exc, "__cause__", None)
+    code = (
+        getattr(exc, "pgcode", None)
+        or getattr(exc, "sqlstate", None)
+        or getattr(cause, "pgcode", None)
+        or getattr(cause, "sqlstate", None)
+    )
+    return code in {"40P01", "40001"}
+
+
 class CoworkingBatchBookingError(ValueError):
     """Raised when an admin coworking batch fails preflight."""
 
     def __init__(self, message: str, errors: Optional[list[dict]] = None):
         super().__init__(message)
         self.errors = errors or []
+
+
+class _CancellationOwnerChanged(RuntimeError):
+    """Internal signal to restart after a concurrent identity merge."""
 
 
 class PointsPurchaseService:
@@ -635,6 +661,11 @@ class PointsService:
             validate_existing(existing)
             return existing, False
 
+        # Global mutation lock order starts with the user row. Identity merges
+        # take the same lock before bookings/accounts, preventing FK/deadlock
+        # cycles with concurrent ledger writes.
+        User.objects.select_for_update().get(pk=user.pk)
+
         account = PointsAccount.objects.select_for_update().filter(user=user).first()
         if not account:
             account = PointsAccount.objects.create(user=user)
@@ -793,6 +824,8 @@ class PointsService:
         if existing:
             validate_existing(existing)
             return existing, False
+
+        User.objects.select_for_update().get(pk=user.pk)
         
         # Lock the account row for update
         account = PointsAccount.objects.select_for_update().filter(user=user).first()
@@ -868,6 +901,8 @@ class PointsService:
         if existing:
             validate_existing(existing)
             return existing, False
+
+        User.objects.select_for_update().get(pk=user.pk)
 
         account = PointsAccount.objects.select_for_update().filter(user=user).first()
         if not account:
@@ -963,6 +998,8 @@ class PointsService:
         if existing:
             validate_existing(existing)
             return existing, False
+
+        User.objects.select_for_update().get(pk=user.pk)
         
         # Lock the account row for update
         account = PointsAccount.objects.select_for_update().filter(user=user).first()
@@ -1074,7 +1111,9 @@ class PointsService:
         if existing:
             validate_existing(existing)
             return existing, False
-        
+
+        User.objects.select_for_update().get(pk=user.pk)
+
         account = PointsAccount.objects.select_for_update().filter(user=user).first()
         if not account:
             account = PointsAccount.objects.create(user=user)
@@ -1176,6 +1215,16 @@ class CoworkingService:
         }
         if len(locked_users) != 2:
             raise ValueError('Both merge principals must still exist')
+
+        # Booking mutations use user -> date -> booking -> account. Lock all
+        # involved date namespaces in a stable order before taking row locks.
+        merge_dates = sorted(set(
+            CoworkingBooking.objects.filter(
+                user_id__in=[source.pk, target.pk]
+            ).values_list('date', flat=True)
+        ))
+        for booking_date in merge_dates:
+            CoworkingService._lock_booking_date(booking_date)
 
         bookings = list(
             CoworkingBooking.objects.select_for_update()
@@ -1540,6 +1589,7 @@ class CoworkingService:
         if booking_date > today + timedelta(days=max_advance_days):
             raise ValueError(f"Cannot book more than {max_advance_days} days in advance")
 
+        User.objects.select_for_update().get(pk=user.pk)
         CoworkingService._lock_booking_date(booking_date)
         
         # Check if user already has a booking for this date
@@ -1623,6 +1673,7 @@ class CoworkingService:
 
         if not unique_users:
             raise CoworkingBatchBookingError("At least one target user is required")
+        unique_users.sort(key=lambda user: str(user.pk))
 
         today = timezone.now().date()
         max_advance_days = getattr(settings, 'COWORKING_BOOKING_ADVANCE_DAYS', 30)
@@ -1635,6 +1686,11 @@ class CoworkingService:
                 f"Cannot book more than {max_advance_days} days in advance"
             )
 
+        list(
+            User.objects.select_for_update()
+            .filter(pk__in=[user.pk for user in unique_users])
+            .order_by('pk')
+        )
         CoworkingService._lock_booking_date(booking_date)
 
         existing_bookings = {
@@ -1679,7 +1735,7 @@ class CoworkingService:
             account.user_id: account
             for account in PointsAccount.objects.select_for_update().filter(
                 user__in=users_to_book
-            )
+            ).order_by('user_id')
         }
         balance_errors = []
         for user in users_to_book:
@@ -1717,10 +1773,42 @@ class CoworkingService:
         return results
     
     @staticmethod
-    @transaction.atomic
     def cancel(
         booking_id: str,
         requester_slack_id: str,
+        *,
+        office_manager_authorized: bool = False,
+    ) -> Tuple[CoworkingBooking, bool]:
+        """Cancel with a bounded retry for transaction-level aborts."""
+        for attempt in range(DATABASE_TRANSACTION_RETRY_ATTEMPTS):
+            try:
+                return CoworkingService._cancel_once(
+                    booking_id,
+                    requester_slack_id,
+                    office_manager_authorized=office_manager_authorized,
+                )
+            except _CancellationOwnerChanged:
+                if attempt + 1 >= DATABASE_TRANSACTION_RETRY_ATTEMPTS:
+                    raise OperationalError(
+                        "Booking owner kept changing during cancellation"
+                    )
+                continue
+            except OperationalError as exc:
+                if (
+                    not _retryable_transaction_error(exc)
+                    or attempt + 1 >= DATABASE_TRANSACTION_RETRY_ATTEMPTS
+                ):
+                    raise
+                time.sleep(0.05 * (2 ** attempt))
+        raise AssertionError("unreachable")
+
+    @staticmethod
+    @transaction.atomic
+    def _cancel_once(
+        booking_id: str,
+        requester_slack_id: str,
+        *,
+        office_manager_authorized: bool = False,
     ) -> Tuple[CoworkingBooking, bool]:
         """
         Cancel a booking with conditional refund.
@@ -1736,13 +1824,35 @@ class CoworkingService:
             ValueError: If booking not found
         """
         try:
-            booking_date = CoworkingBooking.objects.values_list(
+            booking_snapshot = CoworkingBooking.objects.values(
                 'date',
-                flat=True,
+                'user_id',
             ).get(id=booking_id)
         except CoworkingBooking.DoesNotExist:
             raise ValueError(f"Booking {booking_id} not found")
 
+        booking_date = booking_snapshot['date']
+        requester_id = (
+            User.objects
+            .filter(slack_id=str(requester_slack_id or '').strip())
+            .values_list('pk', flat=True)
+            .first()
+        )
+        locked_users = {
+            user.pk: user
+            for user in User.objects.select_for_update()
+            .filter(
+                pk__in=sorted(
+                    {
+                        booking_snapshot['user_id'],
+                        *([requester_id] if requester_id is not None else []),
+                    }
+                )
+            )
+            .order_by('pk')
+        }
+        requester = locked_users.get(requester_id)
+        requester_is_admin = is_points_admin(requester_slack_id)
         CoworkingService._lock_booking_date(booking_date)
 
         from .office_manager import OfficeManagerService
@@ -1764,6 +1874,25 @@ class CoworkingService:
             )
 
         booking = CoworkingBooking.objects.select_for_update().get(id=booking_id)
+        if booking.user_id != booking_snapshot['user_id']:
+            # The owner changed between discovery and the ordered user locks.
+            # Roll back and retry so the new owner is locked before the date.
+            raise _CancellationOwnerChanged
+
+        # Revalidate authority only after locking/reloading the mutable booking.
+        # This closes both points->Office-Manager conversion and identity-merge
+        # races between the view's lookup and the transactional mutation.
+        if (
+            booking.user_id != getattr(requester, 'pk', None)
+            and not requester_is_admin
+        ):
+            raise PermissionDeniedError(
+                'Not authorized to cancel this booking'
+            )
+        if booking.booking_source == 'office_manager' and not office_manager_authorized:
+            raise PermissionDeniedError(
+                'Office Manager cancellation requires Roo authorization'
+            )
 
         booking._already_cancelled = booking.status == 'cancelled'
         booking._office_manager_day_reopened = False

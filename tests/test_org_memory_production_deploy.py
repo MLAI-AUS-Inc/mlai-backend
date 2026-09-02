@@ -170,6 +170,25 @@ class OrgMemoryProductionDeployTests(SimpleTestCase):
             deploy.index("compose_run_web python manage.py audit_office_manager_migrations"),
             deploy.index('docker compose stop "\\${paused_runtime_services[@]}"'),
         )
+        post_migration_audit = deploy.index(
+            "Re-auditing Office Manager provenance after migrations"
+        )
+        self.assertGreater(
+            post_migration_audit,
+            deploy.index("compose_run_web python manage.py migrate --noinput"),
+        )
+        self.assertLess(
+            post_migration_audit,
+            deploy.index("compose_run_web python manage.py deploy_postmigrate"),
+        )
+        self.assertIn(
+            'upsert_env_value OFFICE_MANAGER_ENABLED "false"',
+            deploy[post_migration_audit:],
+        )
+        self.assertIn(
+            'docker compose up -d --force-recreate "\\${paused_runtime_services[@]}"',
+            deploy[post_migration_audit:],
+        )
         self.assertGreater(
             deploy.index("new_runtime_replacement_started=1"),
             deploy.index("compose_run_web python manage.py deploy_postmigrate"),
@@ -200,9 +219,18 @@ class OrgMemoryProductionDeployTests(SimpleTestCase):
         self.assertIn("returns `200` with `status: already_claimed_by_you`", docs)
         self.assertIn("`https://api.mlai.au` in production", docs)
         self.assertIn("with no `/api/v1` path", docs)
+        self.assertIn("`conversations.history`", docs)
+        self.assertIn("reconcile_office_manager_provenance", docs)
+        self.assertIn("roo.0037_quarantine_legacy_office_manager_provenance", docs)
 
         workflow = (ROOT / ".github" / "workflows" / "deploy.yml").read_text()
         self.assertIn("run: bash -n deploy.sh", workflow)
+        deploy = (ROOT / "deploy.sh").read_text()
+        self.assertIn("https://slack.com/api/conversations.history", deploy)
+        self.assertIn(
+            "Public Roo cannot inspect Office Manager message history",
+            deploy,
+        )
 
     def test_remote_deployment_script_is_valid_bash(self):
         deploy = (ROOT / "deploy.sh").read_text()

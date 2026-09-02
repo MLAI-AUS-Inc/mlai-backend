@@ -1022,10 +1022,12 @@ class OfficeManagerAssignment(models.Model):
         related_name='office_manager_refund_reversals',
     )
     purchased_points_refunded_microroo = models.PositiveBigIntegerField(
-        default=0,
+        blank=True,
+        null=True,
         help_text=(
             "Exact purchased-points portion restored by the Office Manager "
-            "refund and removed again if the booking is relinquished."
+            "refund and removed again if the booking is relinquished; null "
+            "means historical provenance must be reconciled."
         ),
     )
     end_of_day_reminder_status = models.CharField(
@@ -1105,6 +1107,28 @@ class OfficeManagerClaimAttempt(models.Model):
 
     def __str__(self):
         return f"{self.attempt_id}: {self.outcome}"
+
+
+class OfficeManagerProvenanceReconciliation(models.Model):
+    """Immutable operator evidence for one historical bucket allocation."""
+
+    booking = models.OneToOneField(
+        CoworkingBooking,
+        on_delete=models.PROTECT,
+        related_name="office_manager_provenance_reconciliation",
+    )
+    debit_ledger = models.ForeignKey(
+        Ledger,
+        on_delete=models.PROTECT,
+        related_name="office_manager_provenance_reconciliations",
+    )
+    purchased_microroo = models.PositiveBigIntegerField()
+    reviewed_by = models.CharField(max_length=255)
+    assignment_refund_snapshot = models.JSONField(default=list)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at", "-pk"]
 
 
 class MeetingRoom(models.Model):

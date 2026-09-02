@@ -1,7 +1,9 @@
 import hashlib
 import json
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
@@ -17,6 +19,7 @@ MIGRATION_PREFIXES = (
     "0034",
     "0035",
     "0036",
+    "0037",
 )
 CANONICAL_IDENTITIES = {
     "boost": "0029_boostpostadmission_and_more",
@@ -27,7 +30,20 @@ CANONICAL_IDENTITIES = {
     ),
     "office_manager_protect": "0035_protect_office_manager_assignment_day",
     "office_manager_successor": "0036_office_manager_attempts_and_provenance",
+    "office_manager_recovery": (
+        "0037_quarantine_legacy_office_manager_provenance"
+    ),
 }
+
+
+def _uuid_text(value) -> str:
+    """Return stable hyphenated UUID text across SQLite and PostgreSQL."""
+    try:
+        return str(uuid.UUID(str(value)))
+    except (ValueError, TypeError, AttributeError):
+        return str(value)
+
+
 HISTORICAL_IDENTITIES = {
     "0029_officemanagerday_coworkingbooking_booking_source_and_more": (
         "0034_officemanagerday_coworkingbooking_booking_source_and_more"
@@ -169,15 +185,30 @@ def _disk_0036_identities() -> list[str]:
     return sorted(path.stem for path in migration_dir.glob("0036_*.py"))
 
 
+def _disk_0037_identities() -> list[str]:
+    migration_dir = Path(settings.BASE_DIR) / "roo" / "migrations"
+    return sorted(path.stem for path in migration_dir.glob("0037_*.py"))
+
+
 def _office_manager_data_invariants() -> dict:
     """Read cross-table invariants that database constraints cannot express."""
     table_names = set(connection.introspection.table_names())
-    required = {"roo_officemanagerday", "roo_officemanagerassignment"}
+    required = {
+        "roo_coworkingbooking",
+        "roo_ledger",
+        "roo_officemanagerday",
+        "roo_officemanagerassignment",
+    }
     if not required.issubset(table_names):
         return {
             "checked": False,
             "claimed_days_without_exactly_one_active_assignment": [],
             "active_assignments_on_non_claimed_days": [],
+            "office_manager_bookings_without_assignment": [],
+            "assignment_booking_identity_mismatches": [],
+            "unreconciled_paid_bookings": [],
+            "unreconciled_office_manager_refunds": [],
+            "invalid_office_manager_refund_ledgers": [],
         }
 
     with connection.cursor() as cursor:
@@ -229,10 +260,192 @@ def _office_manager_data_invariants() -> dict:
             }
             for assignment_id, day_id, booking_date, day_status in cursor.fetchall()
         ]
+        cursor.execute(
+            """
+            SELECT b.id, b.user_id, b.date, b.status
+            FROM roo_coworkingbooking b
+            LEFT JOIN roo_officemanagerassignment a ON a.booking_id = b.id
+            WHERE b.booking_source = %s AND a.id IS NULL
+            ORDER BY b.date, b.id
+            """,
+            ["office_manager"],
+        )
+        orphan_bookings = [
+            {
+                "booking_id": _uuid_text(booking_id),
+                "user_id": str(user_id),
+                "date": booking_date.isoformat(),
+                "status": str(booking_status),
+            }
+            for booking_id, user_id, booking_date, booking_status
+            in cursor.fetchall()
+        ]
+        cursor.execute(
+            """
+            SELECT a.id, a.user_id, b.user_id, d.date, b.date
+            FROM roo_officemanagerassignment a
+            INNER JOIN roo_officemanagerday d ON d.id = a.day_id
+            INNER JOIN roo_coworkingbooking b ON b.id = a.booking_id
+            WHERE a.user_id <> b.user_id OR d.date <> b.date
+            ORDER BY d.date, a.id
+            """
+        )
+        identity_mismatches = [
+            {
+                "assignment_id": int(assignment_id),
+                "assignment_user_id": str(assignment_user_id),
+                "booking_user_id": str(booking_user_id),
+                "day_date": day_date.isoformat(),
+                "booking_date": booking_date.isoformat(),
+            }
+            for (
+                assignment_id,
+                assignment_user_id,
+                booking_user_id,
+                day_date,
+                booking_date,
+            ) in cursor.fetchall()
+        ]
+        booking_columns = {
+            str(column.name)
+            for column in connection.introspection.get_table_description(
+                cursor, "roo_coworkingbooking"
+            )
+        }
+        assignment_columns = {
+            str(column.name)
+            for column in connection.introspection.get_table_description(
+                cursor, "roo_officemanagerassignment"
+            )
+        }
+        unreconciled_paid_bookings = []
+        unreconciled_refunds = []
+        if "purchased_points_cost_microroo" in booking_columns:
+            local_date = datetime.now(
+                ZoneInfo("Australia/Melbourne")
+            ).date()
+            cursor.execute(
+                """
+                SELECT b.id, b.user_id, b.date, b.points_cost
+                FROM roo_coworkingbooking b
+                WHERE b.status = %s
+                  AND b.booking_source = %s
+                  AND b.points_cost > 0
+                  AND b.date >= %s
+                  AND b.purchased_points_cost_microroo IS NULL
+                ORDER BY b.date, b.id
+                """,
+                ["booked", "points", local_date],
+            )
+            unreconciled_paid_bookings = [
+                {
+                    "booking_id": _uuid_text(booking_id),
+                    "user_id": str(user_id),
+                    "date": booking_date.isoformat(),
+                    "points_cost": int(points_cost),
+                }
+                for booking_id, user_id, booking_date, points_cost
+                in cursor.fetchall()
+            ]
+        if (
+            "purchased_points_refunded_microroo" in assignment_columns
+            and "purchased_points_cost_microroo" in booking_columns
+        ):
+            cursor.execute(
+                """
+                SELECT a.id, a.booking_id, a.points_refunded,
+                       a.purchased_points_refunded_microroo,
+                       b.purchased_points_cost_microroo
+                FROM roo_officemanagerassignment a
+                INNER JOIN roo_coworkingbooking b ON b.id = a.booking_id
+                WHERE a.points_refunded > 0 AND (
+                    a.purchased_points_refunded_microroo IS NULL
+                    OR b.purchased_points_cost_microroo IS NULL
+                    OR a.purchased_points_refunded_microroo
+                       <> b.purchased_points_cost_microroo
+                    OR b.original_points_cost <> a.points_refunded
+                )
+                  AND a.refund_reversal_ledger_entry_id IS NULL
+                ORDER BY a.id
+                """
+            )
+            unreconciled_refunds = [
+                {
+                    "assignment_id": int(assignment_id),
+                    "booking_id": _uuid_text(booking_id),
+                    "points_refunded": int(points_refunded),
+                    "assignment_purchased_microroo": assignment_purchased,
+                    "booking_purchased_microroo": booking_purchased,
+                }
+                for (
+                    assignment_id,
+                    booking_id,
+                    points_refunded,
+                    assignment_purchased,
+                    booking_purchased,
+                )
+                in cursor.fetchall()
+            ]
+        ledger_columns = {
+            str(column.name)
+            for column in connection.introspection.get_table_description(
+                cursor, "roo_ledger"
+            )
+        }
+        required_ledger_columns = {
+            "id",
+            "user_id",
+            "kind",
+            "source",
+            "delta_microroo",
+            "reference_type",
+            "reference_id",
+        }
+        if required_ledger_columns.issubset(ledger_columns):
+            cursor.execute(
+                """
+                SELECT a.id, a.booking_id, a.refund_ledger_entry_id
+                FROM roo_officemanagerassignment a
+                LEFT JOIN roo_ledger l ON l.id = a.refund_ledger_entry_id
+                WHERE a.points_refunded > 0 AND (
+                    l.id IS NULL
+                    OR l.user_id <> a.user_id
+                    OR l.kind <> %s
+                    OR l.source <> %s
+                    OR l.delta_microroo <> (a.points_refunded * 1000000)
+                    OR l.reference_type <> %s
+                    OR l.reference_id <> CAST(a.day_id AS TEXT)
+                )
+                ORDER BY a.id
+                """,
+                ["REFUND", "COWORKING", "OFFICE_MANAGER_ASSIGNMENT"],
+            )
+            invalid_refund_ledgers = [
+                {
+                    "assignment_id": int(assignment_id),
+                    "booking_id": _uuid_text(booking_id),
+                    "refund_ledger_entry_id": (
+                        int(ledger_id) if ledger_id is not None else None
+                    ),
+                }
+                for assignment_id, booking_id, ledger_id in cursor.fetchall()
+            ]
+        else:
+            invalid_refund_ledgers = [{
+                "reason": "required ledger columns are unavailable",
+                "missing_columns": sorted(
+                    required_ledger_columns - ledger_columns
+                ),
+            }]
     return {
         "checked": True,
         "claimed_days_without_exactly_one_active_assignment": claimed_mismatches,
         "active_assignments_on_non_claimed_days": inverse_mismatches,
+        "office_manager_bookings_without_assignment": orphan_bookings,
+        "assignment_booking_identity_mismatches": identity_mismatches,
+        "unreconciled_paid_bookings": unreconciled_paid_bookings,
+        "unreconciled_office_manager_refunds": unreconciled_refunds,
+        "invalid_office_manager_refund_ledgers": invalid_refund_ledgers,
     }
 
 
@@ -243,6 +456,7 @@ def _build_report() -> dict:
     schema_groups = _schema_group_report(schema)
     data_invariants = _office_manager_data_invariants()
     disk_0036 = _disk_0036_identities()
+    disk_0037 = _disk_0037_identities()
     issues = []
     histories = []
 
@@ -270,7 +484,7 @@ def _build_report() -> dict:
         )
 
     for group, identity in CANONICAL_IDENTITIES.items():
-        if group == "office_manager_protect":
+        if group in {"office_manager_protect", "office_manager_recovery"}:
             continue
         marker = schema_groups[group]
         if identity in applied_set and not marker["complete"]:
@@ -319,6 +533,27 @@ def _build_report() -> dict:
     if applied_0036 and protect_identity not in applied_set:
         issues.append(f"{applied_0036[0]} is recorded without {protect_identity}")
 
+    recovery_identity = CANONICAL_IDENTITIES["office_manager_recovery"]
+    applied_0037 = [name for name in applied if name.startswith("0037_")]
+    if disk_0037 != [recovery_identity]:
+        issues.append(
+            "the reviewed source tree must contain exactly the canonical "
+            "append-only roo.0037 recovery migration"
+        )
+    if len(applied_0037) > 1:
+        issues.append("multiple roo.0037 migration identities are recorded")
+    if applied_0037 and applied_0037 != disk_0037:
+        issues.append(
+            "recorded roo.0037 identity does not match the reviewed source tree"
+        )
+    if recovery_identity in applied_set and CANONICAL_IDENTITIES[
+        "office_manager_successor"
+    ] not in applied_set:
+        issues.append(
+            f"{recovery_identity} is recorded without "
+            f"{CANONICAL_IDENTITIES['office_manager_successor']}"
+        )
+
     historical_applied = sorted(
         name for name in HISTORICAL_IDENTITIES if name in applied_set
     )
@@ -332,6 +567,26 @@ def _build_report() -> dict:
         issues.append(
             "active Office Manager assignments must belong to claimed days"
         )
+    if data_invariants["office_manager_bookings_without_assignment"]:
+        issues.append(
+            "Office Manager bookings must retain their assignment and day graph"
+        )
+    if data_invariants["assignment_booking_identity_mismatches"]:
+        issues.append(
+            "Office Manager assignments, bookings, users, and dates must agree"
+        )
+    if data_invariants["unreconciled_paid_bookings"]:
+        issues.append(
+            "active paid coworking bookings require reconciled point-bucket provenance"
+        )
+    if data_invariants["unreconciled_office_manager_refunds"]:
+        issues.append(
+            "historical Office Manager refunds require reconciled point-bucket provenance"
+        )
+    if data_invariants["invalid_office_manager_refund_ledgers"]:
+        issues.append(
+            "Office Manager refunds require an exact authoritative ledger entry"
+        )
     return {
         "report_version": REPORT_VERSION,
         "database_vendor": connection.vendor,
@@ -339,6 +594,7 @@ def _build_report() -> dict:
         "applied_identities": applied,
         "canonical_identities": CANONICAL_IDENTITIES,
         "disk_0036_identities": disk_0036,
+        "disk_0037_identities": disk_0037,
         "historical_identities": histories,
         "historical_applied": historical_applied,
         "schema": schema,
