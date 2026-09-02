@@ -69,7 +69,6 @@ class OrgMemoryProductionDeployTests(SimpleTestCase):
             'ORG_MEMORY_ACTIONS_ENABLED "false"',
             'ORG_MEMORY_ACTION_LINEAR_EXECUTION_ENABLED "false"',
             'ORG_MEMORY_SELECTOR_EXPORT_ENABLED "false"',
-            'ORG_MEMORY_SELECTOR_SHADOW_ENABLED "false"',
         }
         for setting in required_settings:
             self.assertIn(f"upsert_env_value {setting}", deploy)

@@ -37,7 +37,7 @@ the relevant deployment runbook, not in this document.
 | `founder_tools`, `startup_updates`, `vibe_raising` | Founder-facing product data and workflows |
 | `content_factory`, `content_analytics` | Content generation contracts, delivery, and analytics |
 | `integrations` | OAuth and external connector surfaces |
-| `community_chat` | Dormant identity, membership, and bridge code for the inactive Buzz/MLAI Chat experiment |
+| `community_chat` | Community chat identity, membership, and the live Slack bridge (dedicated bridge workers run in production) |
 | `org_memory` | Governed organisational memory ingestion and retrieval |
 | `roo` | Points and Roo-facing backend APIs |
 | `jobs` | Job discovery and scheduled job operations |

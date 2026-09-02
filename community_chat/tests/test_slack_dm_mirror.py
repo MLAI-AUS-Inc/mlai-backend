@@ -1118,6 +1118,108 @@ class SlackDmMirrorOwnerTests(APITestCase):
     @patch(
         "integrations.services.slack_dm_mirror.BuzzBridgeClient.provision_private_conversation"
     )
+    @patch("integrations.services.slack_dm_mirror.WebClient")
+    def test_discovery_prioritizes_recent_dms_and_bulk_preloads_profiles(
+        self,
+        web_client,
+        provision,
+    ):
+        now = int(timezone.now().timestamp())
+        client = web_client.return_value
+        client.conversations_list.return_value = {
+            "channels": [
+                {"id": "DOLD", "user": "UOLD", "latest": f"{now - 31 * 86_400}.1"},
+                {"id": "DRECENT2", "user": "URECENT2", "latest": f"{now - 20}.1"},
+                {"id": "DRECENT1", "user": "URECENT1", "latest": f"{now - 10}.1"},
+                {"id": "DRECENT3", "user": "URECENT3", "latest": f"{now - 30}.1"},
+            ],
+            "response_metadata": {"next_cursor": ""},
+        }
+        client.users_list.return_value = {
+            "members": [
+                {
+                    "id": user_id,
+                    "profile": {"display_name": user_id.title()},
+                }
+                for user_id in ("UONE", "URECENT1", "URECENT2", "URECENT3")
+            ],
+            "response_metadata": {"next_cursor": ""},
+        }
+        provision.side_effect = lambda pubkeys, **_: {
+            "channel_id": str(uuid.uuid4()),
+            "participant_pubkeys": pubkeys,
+        }
+
+        grant = activate_connection(self.first_connection)
+
+        self.assertEqual(discover_conversations(grant), 3)
+        self.assertEqual(
+            list(
+                SlackDmMirrorConversation.objects.filter(grant=grant)
+                .order_by("id")
+                .values_list("slack_conversation_id", flat=True)
+            ),
+            ["DRECENT1", "DRECENT2", "DRECENT3"],
+        )
+        client.users_list.assert_called_once_with(limit=200, cursor="")
+        client.users_info.assert_not_called()
+        client.conversations_history.assert_not_called()
+
+    @patch(
+        "integrations.services.slack_dm_mirror.BuzzBridgeClient.deliver_private_batch"
+    )
+    @patch(
+        "integrations.services.slack_dm_mirror.BuzzBridgeClient.deliver_private"
+    )
+    def test_ready_top_level_slack_messages_use_one_ordered_private_batch(
+        self,
+        deliver_private,
+        deliver_private_batch,
+    ):
+        _, conversation = self._live_conversation()
+        for offset in range(3):
+            conversation.deliveries.create(
+                source_platform=CommunityBridgePlatform.SLACK,
+                source_message_id=f"178790000{offset}.000100",
+                source_author_id="UTWO",
+                operation=CommunityBridgeDeliveryType.CREATE,
+                encrypted_text=f"message {offset}",
+                metadata={
+                    "backfill": True,
+                    "event_ts": f"178790000{offset}.000100",
+                    "participant_hash": conversation.participant_hash,
+                },
+                available_at=timezone.now() + timedelta(microseconds=offset),
+            )
+        deliver_private_batch.return_value = [
+            {"message_id": character * 64, "parent_message_id": ""}
+            for character in ("a", "b", "c")
+        ]
+
+        self.assertEqual(
+            process_ready_deliveries(limit=3, batch_size=20),
+            3,
+        )
+
+        deliver_private.assert_not_called()
+        payloads = deliver_private_batch.call_args.args[0]
+        self.assertEqual(
+            [payload["text"] for payload in payloads],
+            ["message 0", "message 1", "message 2"],
+        )
+        self.assertEqual(
+            list(
+                conversation.deliveries.order_by("id").values_list(
+                    "status", flat=True
+                )
+            ),
+            [CommunityBridgeDeliveryStatus.COMPLETED] * 3,
+        )
+        self.assertEqual(status_payload(self.first)["backfill"]["imported_messages"], 3)
+
+    @patch(
+        "integrations.services.slack_dm_mirror.BuzzBridgeClient.provision_private_conversation"
+    )
     @patch("integrations.services.slack_dm_mirror.BuzzBridgeClient.deliver_private")
     @patch("integrations.services.slack_dm_mirror.WebClient")
     def test_discovery_resumes_durable_cursor_after_page_failure(
@@ -1996,7 +2098,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
             {
                 "channel": "DONE",
                 "ts": root_ts,
-                "limit": 200,
+                "limit": 1000,
                 "oldest": web_client.return_value.conversations_history.call_args.kwargs[
                     "oldest"
                 ],
@@ -2012,7 +2114,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
             {
                 "channel": "DONE",
                 "ts": root_ts,
-                "limit": 200,
+                "limit": 1000,
                 "cursor": "reply-page-2",
                 "oldest": web_client.return_value.conversations_history.call_args.kwargs[
                     "oldest"
@@ -2023,7 +2125,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
         web_client.return_value.conversations_replies.assert_called_with(
             channel="DONE",
             ts=root_ts,
-            limit=200,
+            limit=1000,
             cursor="reply-page-2",
             oldest=web_client.return_value.conversations_history.call_args.kwargs[
                 "oldest"

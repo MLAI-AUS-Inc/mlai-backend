@@ -7278,7 +7278,7 @@ class ContentFactoryCallbackView(APIView):
 
 from content_factory.models import (
     ResearchedKeyword, KeywordVelocity, AISaturation, PAQuestion,
-    SemanticCluster, ClusterMembership, TopicMap, WrittenArticle, ResearchSession,
+    SemanticCluster, ClusterMembership, WrittenArticle,
     KeywordStatus, TopicFeedback,
     ContentIsland, ContentIslandKeyword, ContentIslandOrigin,
     ContentIslandRefreshDispatch, ContentIslandRefreshDispatchStatus,
@@ -7296,8 +7296,8 @@ from content_factory.content_islands import (
 from content_factory.serializers import (
     ResearchedKeywordListSerializer, ResearchedKeywordDetailSerializer,
     KeywordBulkUpsertSerializer, SemanticClusterSerializer,
-    ClusterBulkUpsertSerializer, TopicMapSerializer, WrittenArticleSerializer,
-    WrittenArticleCreateSerializer, ResearchSessionSerializer,
+    ClusterBulkUpsertSerializer, WrittenArticleSerializer,
+    WrittenArticleCreateSerializer,
     KeywordStatusUpdateSerializer, SEODashboardSerializer,
     ResearchFeedbackSerializer, TopicFeedbackRequestSerializer,
     ContentIslandSerializer,

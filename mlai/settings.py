@@ -462,6 +462,8 @@ REST_FRAMEWORK = {
         'org_memory_actions': os.getenv('ORG_MEMORY_ACTION_RATE', '30/minute'),
         'linear_channel_issue_list': os.getenv('LINEAR_CHANNEL_ISSUE_LIST_RATE', '60/minute'),
         'linear_channel_issue_detail': os.getenv('LINEAR_CHANNEL_ISSUE_DETAIL_RATE', '20/minute'),
+        'linear_channel_issue_statuses': os.getenv('LINEAR_CHANNEL_ISSUE_STATUSES_RATE', '30/minute'),
+        'linear_channel_issue_write': os.getenv('LINEAR_CHANNEL_ISSUE_WRITE_RATE', '10/minute'),
         # Unauthenticated auth entry points (core.throttles). Bound
         # credential-enumeration and magic-link email spam. Disabled under the
         # test runner so suites that issue many auth calls in a loop aren't
@@ -1462,6 +1464,13 @@ SLACK_SYNC_REPLY_PAGE_BUDGET = int(os.environ.get("SLACK_SYNC_REPLY_PAGE_BUDGET"
 SLACK_DM_MIRROR_HISTORY_DAYS = max(
     1, min(int(os.environ.get("SLACK_DM_MIRROR_HISTORY_DAYS", "30") or 30), 30)
 )
+SLACK_DM_MIRROR_DELIVERY_BATCH_SIZE = max(
+    1,
+    min(
+        int(os.environ.get("SLACK_DM_MIRROR_DELIVERY_BATCH_SIZE", "20") or 20),
+        20,
+    ),
+)
 SLACK_DM_MIRROR_SHADOW_SECRET = os.environ.get("SLACK_DM_MIRROR_SHADOW_SECRET", "")
 SLACK_API_CONNECT_TIMEOUT_SECONDS = float(os.environ.get("SLACK_API_CONNECT_TIMEOUT_SECONDS", "3") or 3)
 SLACK_API_READ_TIMEOUT_SECONDS = float(os.environ.get("SLACK_API_READ_TIMEOUT_SECONDS", "8") or 8)
@@ -1485,6 +1494,15 @@ LINEAR_CHANNEL_ISSUE_BINDINGS_JSON = os.environ.get(
 )
 LINEAR_CHANNEL_ISSUE_MAX_COMMENTS = int(
     os.environ.get("LINEAR_CHANNEL_ISSUE_MAX_COMMENTS", "250") or 250
+)
+LINEAR_CHANNEL_ISSUE_WRITES_ENABLED = os.environ.get(
+    "LINEAR_CHANNEL_ISSUE_WRITES_ENABLED", "false"
+).strip().lower() in {"1", "true", "yes", "on"}
+LINEAR_CHANNEL_ISSUE_WRITE_RECEIPT_TTL_SECONDS = int(
+    os.environ.get("LINEAR_CHANNEL_ISSUE_WRITE_RECEIPT_TTL_SECONDS", "86400") or 86400
+)
+LINEAR_CHANNEL_ISSUE_WRITE_LOCK_SECONDS = int(
+    os.environ.get("LINEAR_CHANNEL_ISSUE_WRITE_LOCK_SECONDS", "600") or 600
 )
 LINEAR_TASK_SIZING_ENFORCEMENT_MODE = os.environ.get(
     "LINEAR_TASK_SIZING_ENFORCEMENT_MODE"
@@ -1685,10 +1703,6 @@ ORG_MEMORY_SELECTOR_EXPORT_ENABLED = _env_is_true(
     'ORG_MEMORY_SELECTOR_EXPORT_ENABLED',
     False,
 )
-ORG_MEMORY_SELECTOR_SHADOW_ENABLED = _env_is_true(
-    'ORG_MEMORY_SELECTOR_SHADOW_ENABLED',
-    False,
-)
 ORG_MEMORY_SELECTOR_EXPORT_SECRET = os.environ.get(
     'ORG_MEMORY_SELECTOR_EXPORT_SECRET',
     '',
@@ -1698,12 +1712,6 @@ ORG_MEMORY_SELECTOR_MIN_LABELED_TRACES = int(
 )
 ORG_MEMORY_SELECTOR_SHADOW_LIMIT = int(
     os.environ.get('ORG_MEMORY_SELECTOR_SHADOW_LIMIT', '10000')
-)
-ORG_MEMORY_SELECTOR_MIN_NDCG_GAIN = float(
-    os.environ.get('ORG_MEMORY_SELECTOR_MIN_NDCG_GAIN', '0.02')
-)
-ORG_MEMORY_SELECTOR_ARTIFACT_MAX_BYTES = int(
-    os.environ.get('ORG_MEMORY_SELECTOR_ARTIFACT_MAX_BYTES', '262144')
 )
 ORG_MEMORY_QUERY_CANDIDATE_LIMIT = int(
     os.environ.get('ORG_MEMORY_QUERY_CANDIDATE_LIMIT', '100')
@@ -2015,6 +2023,3 @@ HUMANITIX_API_BASE_URL = os.environ.get(
     'HUMANITIX_API_BASE_URL',
     'https://api.humanitix.com/v1',
 )
-
-# MedHack Game Configuration
-MEDHACK_ADMIN_IDS = [s.strip() for s in os.getenv('MEDHACK_ADMIN_IDS', '').split(',') if s.strip()]

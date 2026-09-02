@@ -1193,6 +1193,78 @@ class XeroReconciliationWorkflowTests(TestCase):
             XeroStatementScan.STATUS_INCOMPLETE,
         )
 
+    def test_equivalent_xero_account_ids_merge_current_queue_without_false_confirmation(self):
+        hyphenated_id = "feb39489-f354-4852-88df-266a69b627d7"
+        compact_id = "FEB39489F354485288DF266A69B627D7"
+        import_xero_statement_lines(
+            organization=self.organization,
+            bank_account_id=hyphenated_id,
+            expected_count=2,
+            lines=[{
+                "statement_line_id": "shared-row",
+                "date": "30 Jun 2026",
+                "narration": "Shared",
+                "direction": "debit",
+                "amount": "10.00",
+            }, {
+                "statement_line_id": "old-row",
+                "date": "30 Jun 2026",
+                "narration": "Old",
+                "direction": "debit",
+                "amount": "20.00",
+            }],
+        )
+
+        imported = import_xero_statement_lines(
+            organization=self.organization,
+            bank_account_id=compact_id,
+            expected_count=2,
+            lines=[{
+                "statement_line_id": "shared-row",
+                "date": "30 Jun 2026",
+                "narration": "Shared current",
+                "direction": "debit",
+                "amount": "10.00",
+            }, {
+                "statement_line_id": "new-row",
+                "date": "1 Jul 2026",
+                "narration": "New",
+                "direction": "debit",
+                "amount": "30.00",
+            }],
+        )
+
+        self.assertEqual({line.bank_account_id for line in imported}, {compact_id})
+        active = XeroStatementLineSnapshot.objects.filter(active=True)
+        self.assertEqual(
+            set(active.values_list("statement_line_id", flat=True)),
+            {"shared-row", "new-row"},
+        )
+        alias = XeroStatementLineSnapshot.objects.get(
+            bank_account_id=hyphenated_id,
+            statement_line_id="shared-row",
+        )
+        self.assertFalse(alias.active)
+        self.assertEqual(alias.queue_state, XeroStatementLineSnapshot.QUEUE_INACTIVE)
+        old = XeroStatementLineSnapshot.objects.get(statement_line_id="old-row")
+        self.assertFalse(old.active)
+        self.assertEqual(old.queue_state, XeroStatementLineSnapshot.QUEUE_RECONCILED)
+
+        # Legacy duplicates are also suppressed defensively before the next
+        # complete capture gets a chance to retire them.
+        alias.active = True
+        alias.queue_state = XeroStatementLineSnapshot.QUEUE_ACTIVE
+        alias.save(update_fields=["active", "queue_state", "last_seen_at"])
+        context = build_statement_reconciliation_context(
+            organization=self.organization,
+            include_external_evidence=False,
+            statement_line_ids={"shared-row", "new-row"},
+        )
+        self.assertEqual(
+            [item["statement_line_id"] for item in context["statement_candidates"]],
+            ["shared-row", "new-row"],
+        )
+
     def test_complete_scan_count_mismatch_does_not_change_queue(self):
         import_xero_statement_lines(
             organization=self.organization,
@@ -1838,6 +1910,66 @@ class XeroReconciliationWorkflowTests(TestCase):
         self.assertEqual(body["Contact"], {"ContactID": "contact-uber"})
         self.assertEqual(body["LineItems"][0]["UnitAmount"], 31.07)
 
+    @patch("integrations.services.reconciliation_bank_accounts.http_client.get")
+    def test_statement_preview_uses_the_lines_live_active_bank_account(self, get_mock):
+        accounts = Mock()
+        accounts.raise_for_status.return_value = None
+        accounts.json.return_value = {
+            "Accounts": [
+                {"AccountID": "bank-1", "Name": "Everyday", "Type": "BANK", "Status": "ACTIVE"},
+                {"AccountID": "bank-2", "Name": "Event Receipts", "Type": "BANK", "Status": "ACTIVE"},
+                {"AccountID": "bank-old", "Name": "Closed", "Type": "BANK", "Status": "ARCHIVED"},
+            ]
+        }
+        get_mock.return_value = accounts
+        suggestion = self._statement_suggestion(line_id="multi-bank-preview")
+        suggestion.statement_line.bank_account_id = "bank-2"
+        suggestion.statement_line.save(update_fields=["bank_account_id"])
+
+        preview = build_statement_posting_preview(suggestion)
+
+        self.assertTrue(preview["ready"])
+        self.assertEqual(
+            preview["xero_payload"]["BankAccount"],
+            {"AccountID": "bank-2"},
+        )
+
+    @patch("integrations.services.reconciliation_bank_accounts.http_client.get")
+    def test_statement_preview_rejects_a_non_active_bank_account(self, get_mock):
+        accounts = Mock()
+        accounts.raise_for_status.return_value = None
+        accounts.json.return_value = {
+            "Accounts": [
+                {"AccountID": "bank-1", "Name": "Everyday", "Type": "BANK", "Status": "ACTIVE"},
+            ]
+        }
+        get_mock.return_value = accounts
+        suggestion = self._statement_suggestion(line_id="inactive-bank-preview")
+        suggestion.statement_line.bank_account_id = "bank-old"
+        suggestion.statement_line.save(update_fields=["bank_account_id"])
+
+        preview = build_statement_posting_preview(suggestion)
+
+        self.assertFalse(preview["ready"])
+        self.assertIn(
+            "The statement line does not belong to an active Xero BANK account.",
+            preview["errors"],
+        )
+
+    def test_statement_preview_never_executes_identical_csv_duplicates(self):
+        suggestion = self._statement_suggestion(
+            line_id=f"csv-{'a' * 40}-1-of-2",
+        )
+
+        preview = build_statement_posting_preview(suggestion)
+
+        self.assertFalse(preview["ready"])
+        self.assertIn(
+            "Identical CSV statement lines cannot be prepared automatically because "
+            "the report has no stable per-line identifier.",
+            preview["errors"],
+        )
+
     def test_dimension_scores_can_be_executable_when_document_confidence_is_low(self):
         suggestion = self._statement_suggestion(line_id="luiz-aaron", confidence=0.62)
         suggestion.identity_confidence = 0.98
@@ -2223,6 +2355,11 @@ class ReconciliationWorkflowApiTests(APITestCase):
             domain=self.organization.domain,
             organization=self.organization,
             status=ContentFactoryRunStatus.COMPLETED,
+            run_request={
+                "statement_scan_id": line.last_scan_id,
+                "statement_scan_ids": [line.last_scan_id],
+                "statement_line_ids": [line.statement_line_id],
+            },
         )
         suggestion = XeroStatementSuggestion.objects.create(
             organization=self.organization,
@@ -2261,6 +2398,42 @@ class ReconciliationWorkflowApiTests(APITestCase):
             "Reconnect Xero with accounting.payments before paying existing bills.",
             response.data["warnings"],
         )
+
+    @patch("integrations.api_views_reconciliation.fetch_active_xero_bank_accounts")
+    @patch("core.permissions.HasRooApiKey.has_permission", return_value=True)
+    def test_bank_account_catalog_is_live_xero_scoped(self, _permission, fetch_accounts):
+        connection = ExternalServiceConnection.objects.create(
+            provider=ExternalServiceProvider.XERO,
+            user=self.user,
+            organization=self.organization,
+            access_token="access-token",
+            external_account_id="tenant-catalog",
+            account_label="MLAI AU",
+        )
+        ReconciliationProfile.objects.create(
+            organization=self.organization,
+            xero_connection=connection,
+        )
+        fetch_accounts.return_value = [
+            {"bank_account_id": "bank-1", "name": "Everyday"},
+            {"bank_account_id": "bank-2", "name": "Event Receipts"},
+        ]
+
+        response = self.client.get(
+            reverse("reconciliation_bank_accounts"),
+            {"slack_user_id": "UADMIN", "domain": "mlai.au"},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data, {
+            "schema_version": 1,
+            "tenant_id": "tenant-catalog",
+            "organisation_name": "MLAI AU",
+            "accounts": [
+                {"bank_account_id": "bank-1", "name": "Everyday"},
+                {"bank_account_id": "bank-2", "name": "Event Receipts"},
+            ],
+        })
 
     @patch("core.permissions.HasRooApiKey.has_permission", return_value=True)
     def test_reconciliation_readiness_reports_catalog_drift(self, _permission):
@@ -2392,6 +2565,166 @@ class ReconciliationWorkflowApiTests(APITestCase):
         self.assertEqual(
             response.data["recommended_next_action"],
             "Start Xero reconciliation in preview-only mode.",
+        )
+
+    @patch("integrations.services.valley_harness.notify_valley_run_created")
+    @patch("core.permissions.HasRooApiKey.has_permission", return_value=True)
+    def test_all_account_capture_drives_one_agent_run_for_every_accounts_candidates(
+        self, _permission, notify_valley
+    ):
+        connection = ExternalServiceConnection.objects.create(
+            provider=ExternalServiceProvider.XERO,
+            user=self.user,
+            organization=self.organization,
+            access_token="access-token",
+            external_account_id="tenant-all-accounts",
+            scopes=["accounting.banktransactions", "accounting.payments"],
+        )
+        ReconciliationProfile.objects.create(
+            organization=self.organization,
+            xero_connection=connection,
+            event_tracking_category_id="event-category",
+            project_tracking_category_id="project-category",
+        )
+        hyphenated_id = "feb39489-f354-4852-88df-266a69b627d7"
+        compact_id = "FEB39489F354485288DF266A69B627D7"
+        account_ids = [hyphenated_id, "bank-2"]
+        # The browser and Xero API can spell the same account UUID
+        # differently. A prior compact scan must not break the all-account
+        # capture group whose evidence contains the hyphenated API spelling.
+        import_xero_statement_lines(
+            organization=self.organization,
+            bank_account_id=compact_id,
+            expected_count=0,
+            lines=[],
+        )
+
+        def metadata(position, label):
+            return {
+                "schema_version": 2,
+                "capture_source": "xero_uncoded_statement_lines_csv",
+                "capture_id": "csv-all-accounts-fixture",
+                "scan_id": f"csv-all-accounts-fixture-{position}",
+                "source_sha256": "a" * 64,
+                "account_source_sha256": str(position) * 64,
+                "report_format": "uncoded_statement_lines",
+                "tenant_id": "tenant-all-accounts",
+                "organisation_name": "MLAI",
+                "bank_account_label": label,
+                "account_position": position,
+                "account_count": 2,
+                "active_bank_account_ids": account_ids,
+                "all_accounts_requested": True,
+                "full_organisation_coverage_confirmed": True,
+                "period_start": "2026-01-01",
+                "period_end": "2026-08-31",
+                "date_range_confirmed": True,
+                "derived_complete": True,
+                "blocking_reasons": [],
+            }
+
+        first = import_xero_statement_lines(
+            organization=self.organization,
+            bank_account_id=hyphenated_id,
+            expected_count=1,
+            requested_by="UADMIN",
+            capture_metadata=metadata(1, "Everyday"),
+            lines=[{
+                "statement_line_id": "all-account-line-1",
+                "date": "20 Jul 2026",
+                "narration": "Supplier one",
+                "direction": "debit",
+                "amount": "10.00",
+            }],
+        )[0]
+        second = import_xero_statement_lines(
+            organization=self.organization,
+            bank_account_id="bank-2",
+            expected_count=1,
+            requested_by="UADMIN",
+            capture_metadata=metadata(2, "Event Receipts"),
+            lines=[{
+                "statement_line_id": "all-account-line-2",
+                "date": "21 Jul 2026",
+                "narration": "Supplier two",
+                "direction": "debit",
+                "amount": "20.00",
+            }],
+        )[0]
+
+        readiness = self.client.get(
+            reverse("reconciliation_readiness"),
+            {"slack_user_id": "UADMIN", "domain": "mlai.au"},
+        )
+        started = self.client.post(
+            reverse("reconciliation_agent_runs"),
+            {
+                "slack_user_id": "UADMIN",
+                "domain": "mlai.au",
+                "analysis_mode": "external_agent",
+            },
+            format="json",
+        )
+
+        self.assertTrue(readiness.data["ready_to_start"])
+        self.assertTrue(readiness.data["all_account_capture"])
+        self.assertEqual(readiness.data["latest_statement_scan"]["candidate_count"], 2)
+        self.assertEqual(
+            {item["id"] for item in readiness.data["latest_statement_scans"]},
+            {first.last_scan_id, second.last_scan_id},
+        )
+        self.assertEqual(started.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(started.data["requested_line_count"], 2)
+        notify_valley.assert_not_called()
+
+    @patch("core.permissions.HasRooApiKey.has_permission", return_value=True)
+    def test_partial_all_account_capture_blocks_readiness(self, _permission):
+        import_xero_statement_lines(
+            organization=self.organization,
+            bank_account_id="bank-1",
+            expected_count=1,
+            requested_by="UADMIN",
+            capture_metadata={
+                "schema_version": 2,
+                "capture_source": "xero_uncoded_statement_lines_csv",
+                "capture_id": "csv-partial-fixture",
+                "scan_id": "csv-partial-fixture-1",
+                "source_sha256": "a" * 64,
+                "account_source_sha256": "b" * 64,
+                "report_format": "uncoded_statement_lines",
+                "tenant_id": "tenant-partial",
+                "organisation_name": "MLAI",
+                "bank_account_label": "Everyday",
+                "account_position": 1,
+                "account_count": 2,
+                "active_bank_account_ids": ["bank-1", "bank-2"],
+                "all_accounts_requested": True,
+                "full_organisation_coverage_confirmed": True,
+                "period_start": "2026-01-01",
+                "period_end": "2026-08-31",
+                "date_range_confirmed": True,
+                "derived_complete": True,
+                "blocking_reasons": [],
+            },
+            lines=[{
+                "statement_line_id": "partial-all-account-line-1",
+                "date": "20 Jul 2026",
+                "narration": "Supplier one",
+                "direction": "debit",
+                "amount": "10.00",
+            }],
+        )
+
+        readiness = self.client.get(
+            reverse("reconciliation_readiness"),
+            {"slack_user_id": "UADMIN", "domain": "mlai.au"},
+        )
+
+        self.assertFalse(readiness.data["ready_to_start"])
+        self.assertTrue(readiness.data["all_account_capture"])
+        self.assertIn(
+            "The latest all-account Xero capture stopped before every account was imported.",
+            readiness.data["blockers"],
         )
 
     @patch("integrations.services.valley_harness.notify_valley_run_created")
@@ -2693,6 +3026,7 @@ class ReconciliationWorkflowApiTests(APITestCase):
             status=XeroStatementPosting.STATUS_MATCH_READY,
             xero_bank_transaction_id="bt-agent-approved",
             xero_payment_id="",
+            xero_bill_id="",
         )
         with patch(
             "integrations.api_views_reconciliation.execute_statement_posting",
@@ -2755,6 +3089,48 @@ class ReconciliationWorkflowApiTests(APITestCase):
             preview.data["results"][0]["suggestion"]["approval"]["status"],
             "stale",
         )
+
+    @patch("core.permissions.HasRooApiKey.has_permission", return_value=True)
+    def test_agent_run_execution_blocks_when_the_statement_queue_changes(self, _permission):
+        run, suggestion = self._agent_run_suggestion(
+            run_id="xero-agent-stale-queue",
+            line_id="agent-stale-queue-line",
+        )
+        approval = self.client.post(
+            reverse("reconciliation_agent_run_decisions", kwargs={"run_id": run.run_id}),
+            {
+                "slack_user_id": "UADMIN",
+                "domain": "mlai.au",
+                "confirm": True,
+                "approve_all_ready": True,
+            },
+            format="json",
+        )
+        self.assertEqual(approval.data["recorded_count"], 1)
+        import_xero_statement_lines(
+            organization=self.organization,
+            bank_account_id="bank-1",
+            expected_count=1,
+            requested_by="UADMIN",
+            lines=[{
+                "statement_line_id": suggestion.statement_line.statement_line_id,
+                "date": "20 Jul 2026",
+                "narration": "Transfer To CONTRACTOR ONE",
+                "direction": "debit",
+                "amount": "845.00",
+            }],
+        )
+
+        with patch("integrations.api_views_reconciliation.execute_statement_posting") as execute_mock:
+            response = self.client.post(
+                reverse("reconciliation_agent_run_execute", kwargs={"run_id": run.run_id}),
+                {"slack_user_id": "UADMIN", "domain": "mlai.au", "confirm": True},
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assertIn("queue changed", response.data["error"])
+        execute_mock.assert_not_called()
 
     @patch("core.permissions.HasRooApiKey.has_permission", return_value=True)
     def test_agent_run_decision_rejects_hashes_that_differ_from_reviewed_preview(self, _permission):
@@ -2949,6 +3325,23 @@ class ReconciliationWorkflowApiTests(APITestCase):
                 "amount": "845.00",
             }],
         )[0]
+        google_connection = GoogleConnection.objects.create(
+            user=self.user,
+            organization=self.organization,
+            google_email="treasurer@mlai.au",
+            refresh_token="google-refresh-token",
+            scope="gmail.readonly",
+        )
+        GmailMessageArtifact.objects.create(
+            organization=self.organization,
+            google_connection=google_connection,
+            gmail_message_id="external-agent-contractor-email",
+            gmail_thread_id="external-agent-contractor-thread",
+            internal_date=datetime(2026, 7, 20, 9, tzinfo=timezone.utc),
+            subject="Contractor One invoice",
+            from_address="contractor@example.com",
+            snippet="Contractor One total AUD 845.00",
+        )
 
         started = self.client.post(
             reverse("reconciliation_agent_runs"),
@@ -2980,6 +3373,11 @@ class ReconciliationWorkflowApiTests(APITestCase):
             [item["statement_line_id"] for item in context.data["statement_candidates"]],
             [line.statement_line_id],
         )
+        self.assertEqual(
+            context.data["statement_external_evidence_source"],
+            "client_local_mailboxes",
+        )
+        self.assertEqual(context.data["statement_candidates"][0]["context_evidence"], [])
         self.assertIn("months", context.data["monthly_timeline"])
 
         submitted = self.client.post(

@@ -613,7 +613,6 @@ def build_pilot_readiness_report(
             settings.ORG_MEMORY_ACTION_LINEAR_EXECUTION_ENABLED
         ),
         "selector_export": bool(settings.ORG_MEMORY_SELECTOR_EXPORT_ENABLED),
-        "selector_shadow": bool(settings.ORG_MEMORY_SELECTOR_SHADOW_ENABLED),
     }
     optional_features_off = not any(optional_flags.values())
     checks.append(
