@@ -790,18 +790,6 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     echo "🏗️ Building runtime images: \${runtime_services[*]}..."
     docker compose build "\${runtime_services[@]}"
 
-    # The existing container retains its old environment. Stop it before the
-    # historical audit so a failed enable/disable deploy cannot leave the old
-    # scheduler creating new Office Manager work under a stale flag. If a
-    # preflight fails, restart only this process with the staged false flag; it
-    # will wait on migrate --check until a later successful deployment.
-    restore_staged_scheduler() {
-        docker compose up -d --force-recreate scheduler || true
-    }
-    trap 'deployment_status=\$?; if [ "\$deployment_status" != "0" ]; then restore_staged_scheduler; fi' EXIT
-    echo "⏸️ Staging the scheduler in a disabled state before preflight..."
-    docker compose stop scheduler || true
-
     # Every pre-migration gate (Redis security state, production URLs and
     # service connectivity, memory provider governance, PostgreSQL vector
     # support, GitHub App credentials) plus the migration plan, in one
@@ -885,7 +873,9 @@ allowed_authorities = {
 if (parsed.scheme, parsed.hostname, parsed.port) not in allowed_authorities:
     raise SystemExit("Public Roo Office Manager backend URL targets an unexpected service")
 if parsed.path not in {"", "/"}:
-    raise SystemExit("Public Roo Office Manager backend URL must be a base URL")
+    raise SystemExit(
+        "Public Roo Office Manager backend URL must be a root origin without an /api/v1 path"
+    )
 if contract.get("claim_path") != "/api/v1/points/coworking/office-manager/claim/":
     raise SystemExit("Public Roo Office Manager claim URL path does not match the backend contract")
 if parsed.username or parsed.password or parsed.query or parsed.fragment:
@@ -895,24 +885,125 @@ if parsed.username or parsed.password or parsed.query or parsed.fragment:
         unset slack_auth_body slack_channel_body roo_service_url roo_health_body
     fi
 
-    trap - EXIT
-
     paused_runtime_services=(web scheduler memory-worker memory-scheduler community-email-worker)
+    previous_runtime_container_ids=()
+    previous_scheduler_container_id=""
+    previous_scheduler_image_id=""
+    previous_scheduler_tick_mtime=0
+    for service in "\${paused_runtime_services[@]}"; do
+        service_container_id=\$(docker compose ps -q "\$service" || true)
+        if [ -n "\$service_container_id" ]; then
+            previous_runtime_container_ids+=("\$service_container_id")
+            if [ "\$service" = "scheduler" ]; then
+                previous_scheduler_container_id="\$service_container_id"
+                previous_scheduler_image_id=\$(
+                    docker inspect --format '{{.Image}}' "\$service_container_id"
+                )
+                previous_scheduler_tick_mtime=\$(
+                    docker exec "\$service_container_id" sh -c \
+                        'stat -c %Y /tmp/mlai-scheduled-discovery.ok 2>/dev/null || printf 0' \
+                        2>/dev/null || printf 0
+                )
+            fi
+        fi
+    done
+    unset service service_container_id
+
+    verify_scheduler_recovery_tick() {
+        local expected_container_id="\$1"
+        local expected_image_id="\$2"
+        local previous_tick_mtime="\$3"
+        local scheduler_container_id=""
+        local scheduler_image_id=""
+        local scheduler_running=""
+        local scheduler_health=""
+        local scheduler_tick_mtime=0
+        local attempt
+
+        for attempt in \$(seq 1 24); do
+            scheduler_container_id=\$(docker compose ps -q scheduler || true)
+            if [ -n "\$scheduler_container_id" ]; then
+                scheduler_image_id=\$(
+                    docker inspect --format '{{.Image}}' "\$scheduler_container_id" \
+                        2>/dev/null || true
+                )
+                scheduler_running=\$(
+                    docker inspect --format '{{.State.Running}}' "\$scheduler_container_id" \
+                        2>/dev/null || true
+                )
+                scheduler_health=\$(
+                    docker inspect --format \
+                        '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' \
+                        "\$scheduler_container_id" 2>/dev/null || true
+                )
+                scheduler_tick_mtime=\$(
+                    docker exec "\$scheduler_container_id" sh -c \
+                        'stat -c %Y /tmp/mlai-scheduled-discovery.ok 2>/dev/null || printf 0' \
+                        2>/dev/null || printf 0
+                )
+                if { [ -z "\$expected_container_id" ] \
+                        || [ "\$scheduler_container_id" = "\$expected_container_id" ]; } \
+                    && { [ -z "\$expected_image_id" ] \
+                        || [ "\$scheduler_image_id" = "\$expected_image_id" ]; } \
+                    && [ "\$scheduler_running" = "true" ] \
+                    && [ "\$scheduler_health" = "healthy" ] \
+                    && [ "\$scheduler_tick_mtime" -gt "\$previous_tick_mtime" ]; then
+                    echo "✅ Scheduler recovery produced a fresh successful tick."
+                    return 0
+                fi
+            fi
+            sleep 5
+        done
+
+        echo "❌ Scheduler recovery did not produce a fresh successful tick." >&2
+        if [ -n "\$scheduler_container_id" ]; then
+            docker inspect --format \
+                'container={{.Id}} image={{.Image}} running={{.State.Running}} health={{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' \
+                "\$scheduler_container_id" 2>/dev/null || true
+        fi
+        docker compose logs --tail 80 scheduler || true
+        return 1
+    }
+
     runtime_restore_attempted=0
+    new_runtime_replacement_started=0
     restore_runtime_on_error() {
         if [ "\$runtime_restore_attempted" = "1" ]; then
             return
         fi
         runtime_restore_attempted=1
-        echo "⚠️ Deployment failed after runtime services were paused; disabling Office Manager creation and restoring runtime processes."
+        echo "⚠️ Deployment failed after runtime services were paused; staging Office Manager disabled and restoring runtime processes."
         upsert_env_value OFFICE_MANAGER_ENABLED "false" || true
+        if [ "\$new_runtime_replacement_started" != "1" ]; then
+            # These stopped containers still reference the last known-good images
+            # and carry the environment that was validated with that release. Do
+            # not replace them with the just-built image: a pre/post-migration
+            # failure can leave that image waiting forever on migrate --check.
+            if [ "\${#previous_runtime_container_ids[@]}" -gt 0 ]; then
+                docker start "\${previous_runtime_container_ids[@]}" >/dev/null || true
+            fi
+            if [ -n "\$previous_scheduler_container_id" ]; then
+                verify_scheduler_recovery_tick \
+                    "\$previous_scheduler_container_id" \
+                    "\$previous_scheduler_image_id" \
+                    "\$previous_scheduler_tick_mtime" || true
+            else
+                echo "⚠️ No prior scheduler container was available to restore." >&2
+            fi
+            return
+        fi
+
+        # Once replacement has begun the schema and post-migration gates have
+        # succeeded, so the new image is safe to recreate with the staged-off
+        # feature flag. Still require a fresh scheduler tick after recovery.
         docker compose up -d --force-recreate "\${paused_runtime_services[@]}" || true
+        verify_scheduler_recovery_tick "" "" 0 || true
     }
 
     echo "⏸️ Pausing web, schedulers, and workers before DB migrations..."
-    docker compose stop "\${paused_runtime_services[@]}" || true
     trap restore_runtime_on_error ERR
     trap 'deployment_status=\$?; if [ "\$deployment_status" != "0" ]; then restore_runtime_on_error; fi' EXIT
+    docker compose stop "\${paused_runtime_services[@]}"
 
     echo "🗄️ Running migrations..."
     compose_run_web python manage.py migrate --noinput
@@ -1104,6 +1195,7 @@ PY
     upsert_env_value OFFICE_MANAGER_ENABLED "\$office_manager_enabled"
 
     echo "🌐 Starting runtime services: \${runtime_services[*]}..."
+    new_runtime_replacement_started=1
     docker compose up -d --force-recreate "\${runtime_services[@]}"
 
     if [ "\$bridge_worker_enabled" != "1" ]; then

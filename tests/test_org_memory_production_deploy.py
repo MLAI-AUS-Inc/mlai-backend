@@ -2,6 +2,7 @@ import contextlib
 import importlib.util
 import io
 import json
+import subprocess
 import tempfile
 from pathlib import Path
 
@@ -116,6 +117,13 @@ class OrgMemoryProductionDeployTests(SimpleTestCase):
             'docker compose up -d --force-recreate "\\${paused_runtime_services[@]}"',
             deploy,
         )
+        self.assertIn("previous_scheduler_container_id", deploy)
+        self.assertIn("previous_scheduler_image_id", deploy)
+        self.assertIn("previous_scheduler_tick_mtime", deploy)
+        self.assertIn('docker start "\\${previous_runtime_container_ids[@]}"', deploy)
+        self.assertIn("verify_scheduler_recovery_tick", deploy)
+        self.assertNotIn("restore_staged_scheduler", deploy)
+        self.assertNotIn("docker compose stop scheduler", deploy)
         self.assertIn("schedule_org_memory_reextraction", deploy)
         self.assertIn("reconcile_org_memory_auto_activation", deploy)
         self.assertIn("refresh_org_memory_daily_reconciliation", deploy)
@@ -155,6 +163,18 @@ class OrgMemoryProductionDeployTests(SimpleTestCase):
             deploy.index("recover_org_memory_stopped_worker_work"),
         )
         self.assertLess(
+            deploy.index("compose_run_web python manage.py deploy_preflight"),
+            deploy.index('docker compose stop "\\${paused_runtime_services[@]}"'),
+        )
+        self.assertLess(
+            deploy.index("compose_run_web python manage.py audit_office_manager_migrations"),
+            deploy.index('docker compose stop "\\${paused_runtime_services[@]}"'),
+        )
+        self.assertGreater(
+            deploy.index("new_runtime_replacement_started=1"),
+            deploy.index("compose_run_web python manage.py deploy_postmigrate"),
+        )
+        self.assertLess(
             deploy.index("schedule_org_memory_reextraction"),
             deploy.index("stage_org_memory_pilot"),
         )
@@ -170,6 +190,34 @@ class OrgMemoryProductionDeployTests(SimpleTestCase):
             deploy.index("request_org_memory_reprocess"),
             deploy.index("check_org_memory_pilot_access_matrix"),
         )
+
+    def test_office_manager_contract_docs_include_attempt_and_replay_semantics(self):
+        docs = (ROOT / "docs" / "office-manager.md").read_text()
+
+        self.assertIn('"attempt_id": "4482112f-79e1-4ca0-940b-06b24903f796"', docs)
+        self.assertIn("a replay of the winning attempt is still `201`", docs)
+        self.assertIn("A genuinely new `attempt_id` from", docs)
+        self.assertIn("returns `200` with `status: already_claimed_by_you`", docs)
+        self.assertIn("`https://api.mlai.au` in production", docs)
+        self.assertIn("with no `/api/v1` path", docs)
+
+        workflow = (ROOT / ".github" / "workflows" / "deploy.yml").read_text()
+        self.assertIn("run: bash -n deploy.sh", workflow)
+
+    def test_remote_deployment_script_is_valid_bash(self):
+        deploy = (ROOT / "deploy.sh").read_text()
+        remote = deploy.split('ssh "$DEPLOY_SSH_TARGET" <<EOF\n', 1)[1]
+        remote = remote.rsplit("\nEOF", 1)[0].replace("\\$", "$")
+
+        result = subprocess.run(
+            ["bash", "-n"],
+            input=remote,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_admin_brain_staging_awaiting_evidence_skips_but_stays_fail_closed(self):
         deploy = (ROOT / "deploy.sh").read_text()

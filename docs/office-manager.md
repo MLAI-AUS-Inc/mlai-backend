@@ -18,28 +18,35 @@ The request body is:
 ```json
 {
   "slack_user_id": "U0123456789",
-  "date": "2026-09-01"
+  "date": "2026-09-01",
+  "attempt_id": "4482112f-79e1-4ca0-940b-06b24903f796"
 }
 ```
 
 `slack_user_id` must come from Slack's verified action payload, never from the
 button value. `date` is the Melbourne-local date encoded in the backend's
-button value. Roo must reject stale dates before calling this endpoint.
+button value. `attempt_id` is Roo's canonical lowercase UUID for one durable
+click and must remain unchanged across transport, response-loss, or restart
+retries. Roo must reject stale dates before calling this endpoint.
 
 ## Claim responses
 
-The first accepted claim returns `201` with `status: claimed`. An exact replay
-by the winning Slack member returns `200` with
-`status: already_claimed_by_you`. Both responses include the authoritative
-date, assignment, booking, points-refund amount, and booking provenance. A
-committed same-member result is recovered before current-date, feature-flag,
-or Slack-profile checks so response-loss retries remain truthful.
+The first accepted claim returns `201` with `status: claimed` and
+`replayed: false`. Repeating the exact same `attempt_id`, Slack member, and date
+returns that stored result: a replay of the winning attempt is still `201` with
+`status: claimed`, now with `replayed: true`. A genuinely new `attempt_id` from
+the same winning member returns `200` with `status: already_claimed_by_you`.
+Replaying that later attempt returns the same `200` status with
+`replayed: true`. All successful responses include the authoritative attempt
+ID, date, assignment, booking, points-refund amount, and booking provenance. A
+committed attempt is recovered before current-date, feature-flag, or
+Slack-profile checks so response-loss retries remain truthful.
 
 Terminal rejections use these codes:
 
 | HTTP | `code` | Meaning |
 | --- | --- | --- |
-| 400 | `invalid_request` | Missing or malformed Slack ID/date |
+| 400 | `invalid_request` | Missing or malformed Slack ID/date/attempt ID |
 | 403 | `member_not_eligible` | Slack member cannot hold the role |
 | 404 | `office_manager_day_not_found` | No announcement/day exists |
 | 409 | `already_claimed` | Another member won |
@@ -49,9 +56,10 @@ Terminal rejections use these codes:
 
 `503` with `code: slack_profile_unavailable`, HTTP `408`, `429`, other `5xx`
 responses, transport errors, and malformed success bodies are retryable. Roo
-must retry the same Slack member/date payload from its durable outbox. It must
-not substitute the current date or another identity. Permission, validation,
-conflict, expiry, and insufficient-balance responses are terminal.
+must retry the same attempt ID, Slack member, and date payload from its durable
+outbox. It must not substitute the current date, another identity, or a new
+attempt ID. Permission, validation, conflict, expiry, and insufficient-balance
+responses are terminal.
 
 ## Points, cancellation, and Slack messages
 
@@ -83,6 +91,10 @@ winner DM and the claim API response.
 Required backend settings are listed in `.env.example`:
 
 - `ROO_API_KEY`: dedicated caller credential shared only with Public Roo.
+- Public Roo's `MLAI_BACKEND_URL` must be the root origin
+  (`https://api.mlai.au` in production), with no `/api/v1` path. Roo appends the
+  versioned claim path itself, and backend activation rejects a path-prefixed
+  companion URL.
 - `OFFICE_MANAGER_SLACK_BOT_TOKEN`: Public Roo app bot token. The app that posts
   the button must also receive its interaction callback.
 - `OFFICE_MANAGER_SLACK_CHANNEL_ID`: coworking channel to announce in.
@@ -199,8 +211,15 @@ To roll back, disable new Roo actions first and then set
 `OFFICE_MANAGER_ENABLED=false`. Do **not** stop the backend scheduler process:
 it must drain committed winner-message retractions even while creation and new
 claims are disabled. Wait until retraction work is terminal, preserve the
-health signal, and investigate any restart loop. A failed deployment
-automatically writes the backend flag to false before restoring web, scheduler,
-and worker processes. Do not reverse shared migrations, remove `0034`–`0036`,
-or delete Office Manager accounting/provenance rows; roll application code
-forward with a new append-only migration when schema recovery is required.
+health signal, and investigate any restart loop. Deployment preflight leaves
+the last-known-good scheduler running. If a failure occurs after services are
+paused but before replacement begins, the deploy restarts the preserved
+containers and verifies that the scheduler is still using its prior image and
+has produced a fresh successful tick. It stages the backend flag as false in
+the host environment for the next replacement; the preserved container keeps
+the complete last-known-good environment until then. Once migrations and
+post-migration gates succeed and replacement begins, failure recovery may
+recreate the new image with the staged-off flag, but it still requires a fresh
+scheduler tick. Do not reverse shared migrations, remove `0034`–`0036`, or
+delete Office Manager accounting/provenance rows; roll application code forward
+with a new append-only migration when schema recovery is required.
