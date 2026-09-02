@@ -108,7 +108,7 @@ class OrgMemoryProductionDeployTests(SimpleTestCase):
             self.assertNotIn(flag, deploy)
 
         self.assertIn(
-            "paused_runtime_services=(web memory-worker memory-scheduler community-email-worker)",
+            "paused_runtime_services=(web scheduler memory-worker memory-scheduler community-email-worker)",
             deploy,
         )
         self.assertIn('docker compose stop "\\${paused_runtime_services[@]}"', deploy)
