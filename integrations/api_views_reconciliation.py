@@ -822,14 +822,26 @@ class ReconciliationEnrichmentContextView(APIView):
             for item in request_payload.get("statement_line_ids") or []
             if str(item or "").strip()
         }
+        external_agent_run = bool(
+            run.workflow == RECONCILIATION_AGENT_WORKFLOW
+            and request_payload.get("analysis_mode") == "external_agent"
+        )
         context = build_reconciliation_enrichment_context(
             organization=organization,
             run_id=run_id,
+            # The desktop external agent injects bounded evidence from its two
+            # explicitly authorized local Gmail stores. Repeating the backend's
+            # Gmail/Slack scan for every statement line is both duplicative and
+            # can exceed the API worker timeout on a complete bank queue.
+            include_statement_external_evidence=not external_agent_run,
             statement_line_ids=(
                 selected_line_ids
                 if run.workflow == RECONCILIATION_AGENT_WORKFLOW
                 else None
             ),
+        )
+        context["statement_external_evidence_source"] = (
+            "client_local_mailboxes" if external_agent_run else "backend_artifacts"
         )
         expected_catalog_hashes = request_payload.get("catalog_source_hashes") or {}
         context["catalog_status"] = build_reconciliation_catalog_status(

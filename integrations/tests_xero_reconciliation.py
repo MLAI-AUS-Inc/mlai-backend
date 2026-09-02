@@ -3325,6 +3325,23 @@ class ReconciliationWorkflowApiTests(APITestCase):
                 "amount": "845.00",
             }],
         )[0]
+        google_connection = GoogleConnection.objects.create(
+            user=self.user,
+            organization=self.organization,
+            google_email="treasurer@mlai.au",
+            refresh_token="google-refresh-token",
+            scope="gmail.readonly",
+        )
+        GmailMessageArtifact.objects.create(
+            organization=self.organization,
+            google_connection=google_connection,
+            gmail_message_id="external-agent-contractor-email",
+            gmail_thread_id="external-agent-contractor-thread",
+            internal_date=datetime(2026, 7, 20, 9, tzinfo=timezone.utc),
+            subject="Contractor One invoice",
+            from_address="contractor@example.com",
+            snippet="Contractor One total AUD 845.00",
+        )
 
         started = self.client.post(
             reverse("reconciliation_agent_runs"),
@@ -3356,6 +3373,11 @@ class ReconciliationWorkflowApiTests(APITestCase):
             [item["statement_line_id"] for item in context.data["statement_candidates"]],
             [line.statement_line_id],
         )
+        self.assertEqual(
+            context.data["statement_external_evidence_source"],
+            "client_local_mailboxes",
+        )
+        self.assertEqual(context.data["statement_candidates"][0]["context_evidence"], [])
         self.assertIn("months", context.data["monthly_timeline"])
 
         submitted = self.client.post(
