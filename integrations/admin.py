@@ -1,6 +1,7 @@
 from django.contrib import admin
 from .models import (
     CommunityBridgeChannel,
+    CommunityBridgeDeletionRequest,
     CommunityBridgeDelivery,
     CommunityBridgeIdentityLink,
     CommunityBridgeMessageLink,
@@ -167,6 +168,28 @@ class CommunityBridgeDeliveryAdmin(admin.ModelAdmin):
     search_fields = ("source_event_key", "source_message_id", "target_channel_id", "last_error")
     list_filter = ("delivery_type", "source_platform", "target_platform", "status", "updated_at")
     readonly_fields = ("created_at", "updated_at", "locked_at", "completed_at")
+
+@admin.register(CommunityBridgeDeletionRequest)
+class CommunityBridgeDeletionRequestAdmin(admin.ModelAdmin):
+    list_display = (
+        "user",
+        "slack_workspace_id",
+        "slack_channel_id",
+        "slack_message_id",
+        "status",
+        "created_at",
+    )
+    search_fields = (
+        "user__email",
+        "slack_workspace_id",
+        "slack_channel_id",
+        "slack_message_id",
+        "buzz_event_id",
+    )
+    list_filter = ("status", "created_at")
+    readonly_fields = tuple(
+        field.name for field in CommunityBridgeDeletionRequest._meta.fields
+    )
 
 @admin.register(GoogleConnection)
 class GoogleConnectionAdmin(admin.ModelAdmin):

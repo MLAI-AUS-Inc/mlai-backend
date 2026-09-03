@@ -23,6 +23,7 @@ class CommunityBridgeDeliveryType(models.TextChoices):
 
 class CommunityBridgeDeliveryStatus(models.TextChoices):
     PENDING = "pending", "Pending"
+    WAITING_FOR_PARENT = "waiting_parent", "Waiting for parent"
     PROCESSING = "processing", "Processing"
     COMPLETED = "completed", "Completed"
     FAILED = "failed", "Failed"
@@ -34,6 +35,13 @@ class CommunityBridgeReceiptStatus(models.TextChoices):
     ENQUEUED = "enqueued", "Enqueued"
     IGNORED = "ignored", "Ignored"
     DUPLICATE = "duplicate", "Duplicate"
+    FAILED = "failed", "Failed"
+
+
+class CommunityBridgeDeletionRequestStatus(models.TextChoices):
+    PROCESSING = "processing", "Processing"
+    SUCCEEDED = "succeeded", "Succeeded"
+    ALREADY_DELETED = "already_deleted", "Already deleted"
     FAILED = "failed", "Failed"
 
 
@@ -810,6 +818,8 @@ class CommunityBridgeDelivery(models.Model):
     payload = models.JSONField(default=dict, blank=True)
     attempts = models.PositiveSmallIntegerField(default=0)
     max_attempts = models.PositiveSmallIntegerField(default=5)
+    dependency_attempts = models.PositiveSmallIntegerField(default=0)
+    dependency_first_seen_at = models.DateTimeField(null=True, blank=True)
     available_at = models.DateTimeField(db_index=True)
     locked_at = models.DateTimeField(null=True, blank=True)
     completed_at = models.DateTimeField(null=True, blank=True)
@@ -832,6 +842,59 @@ class CommunityBridgeDelivery(models.Model):
             f" -> {self.target_platform} ({self.status})"
         )
 
+
+class CommunityBridgeDeletionRequest(models.Model):
+    """Audit one MLAI member request to delete their Slack-origin message."""
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="community_bridge_deletion_requests",
+    )
+    message_link = models.ForeignKey(
+        CommunityBridgeMessageLink,
+        on_delete=models.PROTECT,
+        related_name="deletion_requests",
+    )
+    idempotency_key = models.UUIDField(default=uuid.uuid4)
+    status = models.CharField(
+        max_length=24,
+        choices=CommunityBridgeDeletionRequestStatus.choices,
+        default=CommunityBridgeDeletionRequestStatus.PROCESSING,
+        db_index=True,
+    )
+    slack_workspace_id = models.CharField(max_length=100)
+    slack_channel_id = models.CharField(max_length=100)
+    slack_message_id = models.CharField(max_length=100)
+    buzz_event_id = models.CharField(max_length=100)
+    error_code = models.CharField(max_length=100, blank=True, default="")
+    provider_response = models.JSONField(default=dict, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "community_bridge_deletion_request"
+        ordering = ["-created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["user", "idempotency_key"],
+                name="bridge_delete_user_idem_unique",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=["slack_workspace_id", "slack_message_id"],
+                name="bridge_delete_slack_msg_idx",
+            ),
+            models.Index(
+                fields=["buzz_event_id", "status"],
+                name="bridge_delete_buzz_status_idx",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.user_id}:{self.slack_message_id} ({self.status})"
 
 class ReconciliationProfile(models.Model):
     """Per-organisation accounting policy for Stripe payout reconciliation.

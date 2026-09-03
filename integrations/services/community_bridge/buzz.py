@@ -64,6 +64,7 @@ class BuzzBridgeClient:
         source_author_display_name: str = "",
         source_author_avatar_url: str = "",
         linked_pubkey: str = "",
+        linked_profile_id: str = "",
         source_created_at: int = 0,
         broadcast: bool = False,
     ) -> dict:
@@ -86,6 +87,7 @@ class BuzzBridgeClient:
             "source_author_display_name": str(source_author_display_name or "") or None,
             "source_author_avatar_url": str(source_author_avatar_url or "") or None,
             "linked_pubkey": str(linked_pubkey or "") or None,
+            "linked_profile_id": str(linked_profile_id or "") or None,
             "source_created_at": int(source_created_at or 0) or None,
             "broadcast": bool(broadcast),
         }
