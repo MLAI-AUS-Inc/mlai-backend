@@ -1,13 +1,11 @@
 import uuid
 
-from django.conf import settings
 from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
 
     dependencies = [
-        migrations.swappable_dependency(settings.AUTH_USER_MODEL),
         ('roo', '0033_meeting_room_purchased_cost_microroo'),
     ]
 
@@ -21,7 +19,6 @@ class Migration(migrations.Migration):
                 ('response_payload', models.JSONField()),
                 ('http_status', models.PositiveSmallIntegerField(default=200)),
                 ('created_at', models.DateTimeField(auto_now_add=True)),
-                ('subjects', models.ManyToManyField(blank=True, related_name='coworking_booking_operations', to=settings.AUTH_USER_MODEL)),
             ],
             options={
                 'verbose_name': 'Coworking booking operation',
