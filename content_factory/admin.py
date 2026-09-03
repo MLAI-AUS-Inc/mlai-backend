@@ -16,11 +16,9 @@ from .models import (
     KeywordVelocity,
     OrganizationContentConfig,
     PAQuestion,
-    ResearchSession,
     ResearchedKeyword,
     ScheduledDiscoveryDispatch,
     SemanticCluster,
-    TopicMap,
     VibeMarketingComponentComment,
     WrittenArticle,
 )
@@ -550,33 +548,6 @@ class ContentIslandRefreshDispatchAdmin(admin.ModelAdmin):
     list_select_related = ('organization',)
     ordering = ('-local_date', '-updated_at')
     readonly_fields = ('created_at', 'updated_at')
-
-    def organization_domain(self, obj):
-        return obj.organization.domain
-    organization_domain.short_description = 'Domain'
-
-
-@admin.register(TopicMap)
-class TopicMapAdmin(admin.ModelAdmin):
-    """Admin for topic map snapshots."""
-    list_display = ('organization_domain', 'total_keywords', 'clustering_threshold', 'created_at')
-    list_filter = ('organization', 'created_at')
-    list_select_related = ('organization',)
-    ordering = ('-created_at',)
-
-    def organization_domain(self, obj):
-        return obj.organization.domain
-    organization_domain.short_description = 'Domain'
-
-
-@admin.register(ResearchSession)
-class ResearchSessionAdmin(admin.ModelAdmin):
-    """Admin for research session tracking."""
-    list_display = ('organization_domain', 'keywords_discovered', 'keywords_updated', 'clusters_created', 'started_at', 'completed_at')
-    list_filter = ('organization', 'started_at')
-    list_select_related = ('organization',)
-    ordering = ('-started_at',)
-    readonly_fields = ('started_at',)
 
     def organization_domain(self, obj):
         return obj.organization.domain

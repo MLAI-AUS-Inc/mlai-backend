@@ -40,6 +40,7 @@ from integrations.services.xero_scopes import xero_has_payment_write_scope
 from integrations.services.xero_statement_reconciliation import (
     StatementCaptureSelection,
     StatementCaptureValidationError,
+    csv_statement_duplicate_count,
     normalize_statement_action,
     validate_current_statement_line_capture,
 )
@@ -49,6 +50,9 @@ from integrations.services.reconciliation_tracking import (
     effective_tracking_errors,
     xero_tracking_entry,
 )
+from integrations.services.reconciliation_bank_accounts import active_bank_account
+
+
 def _stable_json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
 
@@ -188,6 +192,8 @@ def _posting_payload(
 def build_statement_posting_preview(
     suggestion: XeroStatementSuggestion,
     *,
+    profile: ReconciliationProfile | None = None,
+    active_bank_accounts: list[dict[str, str]] | None = None,
     capture_selection: StatementCaptureSelection | None = None,
 ) -> dict[str, Any]:
     """Validate and durably preview the Xero object for one suggestion."""
@@ -199,12 +205,13 @@ def build_statement_posting_preview(
     operation = _operation_for(suggestion)
     errors: list[str] = []
     warnings: list[str] = []
-    try:
-        profile = ReconciliationProfile.objects.select_related("xero_connection").get(
-            organization=suggestion.organization
-        )
-    except ReconciliationProfile.DoesNotExist:
-        raise ReconciliationValidationError("Reconciliation profile is not configured.")
+    if profile is None:
+        try:
+            profile = ReconciliationProfile.objects.select_related("xero_connection").get(
+                organization=suggestion.organization
+            )
+        except ReconciliationProfile.DoesNotExist:
+            raise ReconciliationValidationError("Reconciliation profile is not configured.")
 
     connection = profile.xero_connection
     if not profile.enabled:
@@ -243,6 +250,31 @@ def build_statement_posting_preview(
         )
     except StatementCaptureValidationError as exc:
         errors.append(str(exc))
+    if operation:
+        if csv_statement_duplicate_count(line.statement_line_id) > 1:
+            errors.append(
+                "Identical CSV statement lines cannot be prepared automatically because "
+                "the report has no stable per-line identifier."
+            )
+        try:
+            scan_metadata = (
+                line.last_scan.capture_metadata
+                if line.last_scan_id and isinstance(line.last_scan.capture_metadata, dict)
+                else {}
+            )
+            selected_bank_account = active_bank_account(
+                profile,
+                line.bank_account_id,
+                accounts=active_bank_accounts,
+                allow_legacy_profile_account=scan_metadata.get("schema_version") != 2,
+            )
+        except ReconciliationValidationError as exc:
+            selected_bank_account = None
+            errors.extend(exc.errors)
+        if selected_bank_account is None and not any(
+            "bank-account catalogue" in error for error in errors
+        ):
+            errors.append("The statement line does not belong to an active Xero BANK account.")
     if operation == XeroStatementPosting.OPERATION_BANK_TRANSACTION:
         semantic_local_duplicate = XeroStatementPosting.objects.filter(
             organization=suggestion.organization,

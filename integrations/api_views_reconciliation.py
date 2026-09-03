@@ -6,6 +6,7 @@ import hashlib
 import json
 import uuid
 from datetime import date, datetime, time, timedelta, timezone
+from typing import Any
 
 import requests
 from django.conf import settings
@@ -96,6 +97,7 @@ from integrations.services.xero_tracking_catalog import active_xero_project_opti
 from integrations.services.xero_statement_reconciliation import (
     StatementCaptureValidationError,
     active_xero_bank_account_catalog,
+    canonical_bank_account_id,
     import_xero_statement_lines,
     merchant_key,
     prepare_verified_rule_suggestions,
@@ -132,8 +134,6 @@ from integrations.services.reconciliation_knowledge import (
 from integrations.services.reconciliation_catalogs import (
     build_reconciliation_catalog_status,
 )
-
-
 MAX_WINDOW_DAYS = 92
 DEFAULT_WINDOW_DAYS = 30
 
@@ -183,6 +183,90 @@ def _latest_statement_scan(organization):
     ).order_by("-started_at", "-id").first()
 
 
+def _current_statement_scan_group(organization) -> tuple[list[XeroStatementScan], list[str]]:
+    """Resolve one complete single-account scan or one exact all-account capture."""
+
+    latest = _latest_statement_scan(organization)
+    if latest is None:
+        return [], ["Import the current complete Xero bank-feed queue."]
+    metadata = latest.capture_metadata if isinstance(latest.capture_metadata, dict) else {}
+    if metadata.get("schema_version") != 2:
+        return [latest], []
+
+    capture_id = str(metadata.get("capture_id") or "").strip()
+    active_ids = [
+        str(value or "").strip()
+        for value in metadata.get("active_bank_account_ids") or []
+        if str(value or "").strip()
+    ]
+    active_keys = [canonical_bank_account_id(value) for value in active_ids]
+    try:
+        account_count = int(metadata.get("account_count") or 0)
+    except (TypeError, ValueError):
+        account_count = 0
+    if (
+        not capture_id
+        or account_count != len(active_ids)
+        or not active_ids
+        or len(set(active_keys)) != len(active_keys)
+    ):
+        return [], ["The latest all-account Xero capture metadata is incomplete."]
+
+    candidates = XeroStatementScan.objects.filter(
+        organization=organization,
+    ).order_by("-started_at", "-id")
+    by_account: dict[str, XeroStatementScan] = {}
+    for scan in candidates:
+        account_key = canonical_bank_account_id(scan.bank_account_id)
+        if account_key not in active_keys:
+            continue
+        scan_metadata = scan.capture_metadata if isinstance(scan.capture_metadata, dict) else {}
+        if str(scan_metadata.get("capture_id") or "") != capture_id:
+            continue
+        by_account.setdefault(account_key, scan)
+    scans = [by_account[account_key] for account_key in active_keys if account_key in by_account]
+    if len(scans) != account_count:
+        return [], ["The latest all-account Xero capture stopped before every account was imported."]
+
+    source_hash = str(metadata.get("source_sha256") or "")
+    group_identity = {
+        key: str(metadata.get(key) or "")
+        for key in (
+            "capture_source",
+            "report_format",
+            "tenant_id",
+            "organisation_name",
+            "period_start",
+            "period_end",
+        )
+    }
+    for expected_position, scan in enumerate(scans, start=1):
+        item = scan.capture_metadata if isinstance(scan.capture_metadata, dict) else {}
+        try:
+            position = int(item.get("account_position") or 0)
+        except (TypeError, ValueError):
+            position = 0
+        try:
+            item_account_count = int(item.get("account_count") or 0)
+        except (TypeError, ValueError):
+            item_account_count = 0
+        if (
+            item.get("schema_version") != 2
+            or item.get("full_organisation_coverage_confirmed") is not True
+            or item.get("date_range_confirmed") is not True
+            or item_account_count != account_count
+            or [
+                canonical_bank_account_id(value)
+                for value in item.get("active_bank_account_ids") or []
+            ] != active_keys
+            or str(item.get("source_sha256") or "") != source_hash
+            or position != expected_position
+            or any(str(item.get(key) or "") != value for key, value in group_identity.items())
+        ):
+            return [], ["The latest all-account Xero capture has inconsistent account evidence."]
+    return scans, []
+
+
 def _latest_monthly_context_run(organization):
     return ContentFactoryRun.objects.filter(
         organization=organization,
@@ -191,17 +275,15 @@ def _latest_monthly_context_run(organization):
     ).order_by("-updated_at", "-id").first()
 
 
-def _statement_scan_freshness(scan) -> tuple[bool, int]:
+def _statement_scan_group_freshness(scans) -> tuple[bool, int]:
     max_age_minutes = int(
         getattr(settings, "XERO_STATEMENT_SCAN_MAX_AGE_MINUTES", 30)
     )
-    fresh = bool(
-        scan
-        and scan.completed_at
-        and scan.completed_at
-        >= datetime.now(timezone.utc) - timedelta(minutes=max_age_minutes)
-    )
-    return fresh, max_age_minutes
+    threshold = datetime.now(timezone.utc) - timedelta(minutes=max_age_minutes)
+    return bool(
+        scans
+        and all(scan.completed_at and scan.completed_at >= threshold for scan in scans)
+    ), max_age_minutes
 
 
 def _reconciliation_request_fingerprint(
@@ -772,8 +854,33 @@ class ReconciliationEnrichmentContextView(APIView):
                     {"error": stale_run_error},
                     status=status.HTTP_409_CONFLICT,
                 )
-        context = build_reconciliation_enrichment_context(organization=organization, run_id=run_id)
         request_payload = run.run_request if isinstance(run.run_request, dict) else {}
+        selected_line_ids = {
+            str(item or "").strip()
+            for item in request_payload.get("statement_line_ids") or []
+            if str(item or "").strip()
+        }
+        external_agent_run = bool(
+            run.workflow == RECONCILIATION_AGENT_WORKFLOW
+            and request_payload.get("analysis_mode") == "external_agent"
+        )
+        context = build_reconciliation_enrichment_context(
+            organization=organization,
+            run_id=run_id,
+            # The desktop external agent injects bounded evidence from its two
+            # explicitly authorized local Gmail stores. Repeating the backend's
+            # Gmail/Slack scan for every statement line is both duplicative and
+            # can exceed the API worker timeout on a complete bank queue.
+            include_statement_external_evidence=not external_agent_run,
+            statement_line_ids=(
+                selected_line_ids
+                if run.workflow == RECONCILIATION_AGENT_WORKFLOW
+                else None
+            ),
+        )
+        context["statement_external_evidence_source"] = (
+            "client_local_mailboxes" if external_agent_run else "backend_artifacts"
+        )
         expected_catalog_hashes = request_payload.get("catalog_source_hashes") or {}
         context["catalog_status"] = build_reconciliation_catalog_status(
             organization=organization,
@@ -783,15 +890,6 @@ class ReconciliationEnrichmentContextView(APIView):
         if run.workflow == RECONCILIATION_AGENT_WORKFLOW:
             from startup_updates.services import build_timeline_payload
 
-            selected_line_ids = {
-                str(item or "").strip()
-                for item in (run.run_request or {}).get("statement_line_ids") or []
-                if str(item or "").strip()
-            }
-            context["statement_candidates"] = [
-                item for item in context.get("statement_candidates") or []
-                if str(item.get("statement_line_id") or "") in selected_line_ids
-            ]
             context["agent_instruction"] = str(request_payload.get("instruction") or "")
             context["base_monthly_run_id"] = str(request_payload.get("base_monthly_run_id") or "")
             context["monthly_timeline"] = build_timeline_payload(
@@ -1668,8 +1766,9 @@ class ReconciliationReadinessView(ReconciliationAdminView):
         warnings: list[str] = []
         capture_selection = select_current_statement_capture(organization)
         blockers.extend(capture_selection.blockers)
+        current_scans = list(capture_selection.scans)
         latest_scan = capture_selection.latest_scan
-        scan_fresh, max_age_minutes = _statement_scan_freshness(latest_scan)
+        scan_fresh, max_age_minutes = _statement_scan_group_freshness(current_scans)
         candidate_count = 0
         if capture_selection.all_account_capture:
             candidate_count = sum(
@@ -1722,7 +1821,7 @@ class ReconciliationReadinessView(ReconciliationAdminView):
             and connection.provider == ExternalServiceProvider.XERO
             and connection.status != "disconnected"
         )
-        bank_account_configured = bool(profile and profile.xero_bank_account_id)
+        bank_account_configured = bool(connection_active and current_scans)
         bank_transaction_scope = bool(
             connection_active and xero_has_bank_transaction_scope(connection.scopes)
         )
@@ -1870,6 +1969,17 @@ class ReconciliationReadinessView(ReconciliationAdminView):
                 if latest_scan
                 else None
             ),
+            "latest_statement_scans": [
+                {
+                    "id": scan.id,
+                    "status": scan.status,
+                    "bank_account_id": scan.bank_account_id,
+                    "completed_at": scan.completed_at,
+                    "expected_count": scan.expected_count,
+                    "observed_count": scan.observed_count,
+                }
+                for scan in current_scans
+            ],
             "monthly_context": (
                 {
                     "run_id": monthly_run.run_id,
@@ -2636,11 +2746,18 @@ class ReconciliationAgentRunPreviewView(ReconciliationAdminView):
                 {"error": stale_run_error},
                 status=status.HTTP_409_CONFLICT,
             )
+        suggestions = list(suggestions)
+        profile = ReconciliationProfile.objects.select_related("xero_connection").filter(
+            organization=organization,
+        ).first()
+        active_bank_accounts = list(capture_selection.active_bank_accounts)
         results = []
         for suggestion in suggestions:
             try:
                 preview = build_statement_posting_preview(
                     suggestion,
+                    profile=profile,
+                    active_bank_accounts=active_bank_accounts,
                     capture_selection=capture_selection,
                 )
             except ReconciliationValidationError as exc:
@@ -2982,6 +3099,7 @@ class ReconciliationAgentRunExecuteView(ReconciliationAdminView):
                     "status": posting.status,
                     "xero_bank_transaction_id": posting.xero_bank_transaction_id,
                     "xero_payment_id": posting.xero_payment_id,
+                    "xero_bill_id": posting.xero_bill_id,
                 })
             except ReconciliationValidationError as exc:
                 results.append({
@@ -3024,7 +3142,52 @@ class ReconciliationStatementScanView(ReconciliationAdminView):
         complete = request.data.get("complete", True)
         if not isinstance(complete, bool):
             return Response({"error": "complete must be a boolean"}, status=status.HTTP_400_BAD_REQUEST)
+        capture_metadata = request.data.get("capture_metadata")
         try:
+            if isinstance(capture_metadata, dict) and capture_metadata.get("schema_version") == 2:
+                catalog = active_xero_bank_account_catalog(organization)
+                active_accounts = list(catalog["accounts"])
+                selected_account = next(
+                    (
+                        account
+                        for account in active_accounts
+                        if canonical_bank_account_id(account["bank_account_id"])
+                        == canonical_bank_account_id(bank_account_id)
+                    ),
+                    None,
+                )
+                if selected_account is None:
+                    raise ValueError("bank_account_id is not an active Xero BANK account")
+                supplied_ids = capture_metadata.get("active_bank_account_ids")
+                if not isinstance(supplied_ids, list):
+                    raise ValueError("all-account capture requires active_bank_account_ids")
+                if {canonical_bank_account_id(value) for value in supplied_ids} != {
+                    canonical_bank_account_id(item["bank_account_id"])
+                    for item in active_accounts
+                }:
+                    raise ValueError(
+                        "all-account capture does not exactly match Xero's active BANK accounts"
+                    )
+                if canonical_bank_account_id(
+                    capture_metadata.get("tenant_id")
+                ) != canonical_bank_account_id(
+                    catalog["tenant_id"]
+                ):
+                    raise ValueError("all-account capture belongs to a different Xero tenant")
+                if (
+                    capture_metadata.get("all_accounts_requested") is not True
+                    or capture_metadata.get("full_organisation_coverage_confirmed") is not True
+                    or capture_metadata.get("date_range_confirmed") is not True
+                ):
+                    raise ValueError("all-account capture coverage was not explicitly confirmed")
+                if int(capture_metadata.get("account_count") or 0) != len(active_accounts):
+                    raise ValueError("all-account capture account_count is incomplete")
+                if canonical_bank_account_id(
+                    capture_metadata.get("bank_account_label")
+                ) != canonical_bank_account_id(
+                    selected_account["name"]
+                ):
+                    raise ValueError("all-account capture bank-account label does not match Xero")
             saved = import_xero_statement_lines(
                 organization=organization,
                 bank_account_id=bank_account_id,
@@ -3032,19 +3195,41 @@ class ReconciliationStatementScanView(ReconciliationAdminView):
                 currency=str(request.data.get("currency") or "AUD"),
                 expected_count=request.data.get("expected_count"),
                 complete_scan=complete,
-                source="browser",
+                source=(
+                    "xero_csv"
+                    if isinstance(capture_metadata, dict)
+                    and capture_metadata.get("schema_version") == 2
+                    else "browser"
+                ),
                 requested_by=slack_user_id,
-                capture_metadata=request.data.get("capture_metadata"),
+                capture_metadata=capture_metadata,
             )
-        except ValueError as exc:
+        except (ValueError, ReconciliationValidationError) as exc:
             return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except ConnectorOAuthError:
+            return Response(
+                {"error": "The selected Xero connection must be reauthorised."},
+                status=status.HTTP_409_CONFLICT,
+            )
+        except requests.RequestException:
+            return Response(
+                {"error": "Unable to verify the active Xero bank-account catalogue."},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
         scan = (
             saved[0].last_scan
             if saved
-            else XeroStatementScan.objects.filter(
-                organization=organization,
-                bank_account_id=bank_account_id,
-            ).order_by("-id").first()
+            else next(
+                (
+                    item
+                    for item in XeroStatementScan.objects.filter(
+                        organization=organization,
+                    ).order_by("-id")
+                    if canonical_bank_account_id(item.bank_account_id)
+                    == canonical_bank_account_id(bank_account_id)
+                ),
+                None,
+            )
         )
         return Response({
             "scan": {

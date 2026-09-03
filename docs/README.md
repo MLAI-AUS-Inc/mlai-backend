@@ -35,6 +35,7 @@ rollout sequence.
 - [`reconciliation-bill-binding.md`](reconciliation-bill-binding.md)
 - [`reconciliation-stripe-statement-binding.md`](reconciliation-stripe-statement-binding.md)
 - [`reconciliation-knowledge-export.md`](reconciliation-knowledge-export.md)
+- [`xero-statement-reconciliation.md`](xero-statement-reconciliation.md)
 - [`monthly-update-reminders.md`](monthly-update-reminders.md)
 
 ## HealthHack

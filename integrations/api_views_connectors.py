@@ -7,7 +7,7 @@ from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
-from core.permissions import HasRooApiKey
+from core.permissions import HasRooApiKey, HasStrictRooApiKey
 from integrations.services.external_connectors import (
     _ACTIVE_ORG,
     ConnectorConfigurationError,
@@ -36,6 +36,10 @@ from integrations.services.external_connectors import (
 )
 from integrations.services.linear_meeting_actions import (
     LinearChannelIssueAccessError,
+    LinearChannelIssueConflictError,
+    LinearChannelIssueRequestConflictError,
+    LinearChannelIssueWriteUncertainError,
+    LinearMeetingAccessError,
     LinearMeetingActionConflictError,
     LinearMeetingConfigurationError,
     LinearMeetingGraphQLError,
@@ -44,6 +48,7 @@ from integrations.services.linear_meeting_actions import (
     LinearMeetingSizingConflictError,
     apply_linear_project_sizing_run,
     cancel_linear_project_sizing_run,
+    create_linear_channel_issue,
     create_linear_meeting_action_batch,
     create_linear_meeting_issue,
     create_linear_meeting_project_update,
@@ -58,7 +63,9 @@ from integrations.services.linear_meeting_actions import (
     get_linear_project_sizing_run,
     get_linear_project_update_page,
     list_linear_channel_issues,
+    list_linear_channel_issue_statuses,
     resolve_linear_project,
+    write_linear_channel_issue,
 )
 from startup_updates.data_deletion import disconnect_gmail_for_user
 
@@ -78,6 +85,21 @@ def _linear_meeting_error_response(exc):
                 "code": "linear_channel_issue_access_denied",
             },
             status=status.HTTP_403_FORBIDDEN,
+        )
+    if isinstance(exc, LinearChannelIssueConflictError):
+        return Response(
+            {"detail": str(exc), "code": "linear_channel_issue_stale"},
+            status=status.HTTP_409_CONFLICT,
+        )
+    if isinstance(exc, LinearChannelIssueRequestConflictError):
+        return Response(
+            {"detail": str(exc), "code": "linear_channel_issue_write_conflict"},
+            status=status.HTTP_409_CONFLICT,
+        )
+    if isinstance(exc, LinearChannelIssueWriteUncertainError):
+        return Response(
+            {"detail": str(exc), "code": "linear_channel_issue_write_uncertain"},
+            status=status.HTTP_502_BAD_GATEWAY,
         )
     if isinstance(exc, LinearMeetingActionConflictError):
         return Response(
@@ -109,6 +131,14 @@ def _linear_meeting_error_response(exc):
             {
                 "detail": str(exc),
                 "code": "linear_not_configured",
+            },
+            status=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+    if isinstance(exc, LinearMeetingAccessError):
+        return Response(
+            {
+                "detail": str(exc),
+                "code": "linear_team_access_incomplete",
             },
             status=status.HTTP_503_SERVICE_UNAVAILABLE,
         )
@@ -798,6 +828,7 @@ class LinearMeetingContextView(APIView):
         try:
             payload = get_linear_meeting_context()
         except (
+            LinearMeetingAccessError,
             LinearMeetingConfigurationError,
             LinearMeetingRateLimitError,
             LinearMeetingGraphQLError,
@@ -846,6 +877,69 @@ class LinearChannelIssueDetailView(APIView):
         return Response(payload, status=status.HTTP_200_OK)
 
 
+class LinearChannelIssueStatusesView(APIView):
+    permission_classes = [HasRooApiKey]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "linear_channel_issue_statuses"
+
+    def post(self, request):
+        try:
+            payload = list_linear_channel_issue_statuses(request.data)
+        except (
+            LinearChannelIssueAccessError,
+            LinearMeetingConfigurationError,
+            LinearMeetingRateLimitError,
+            LinearMeetingGraphQLError,
+            ValueError,
+        ) as exc:
+            return _linear_meeting_error_response(exc)
+        return Response(payload, status=status.HTTP_200_OK)
+
+
+class LinearChannelIssueWriteView(APIView):
+    permission_classes = [HasStrictRooApiKey]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "linear_channel_issue_write"
+
+    def post(self, request):
+        try:
+            payload = write_linear_channel_issue(request.data)
+        except (
+            LinearChannelIssueAccessError,
+            LinearChannelIssueConflictError,
+            LinearChannelIssueRequestConflictError,
+            LinearChannelIssueWriteUncertainError,
+            LinearMeetingConfigurationError,
+            LinearMeetingRateLimitError,
+            LinearMeetingGraphQLError,
+            ValueError,
+        ) as exc:
+            return _linear_meeting_error_response(exc)
+        return Response(payload, status=status.HTTP_200_OK)
+
+
+class LinearChannelIssueCreateView(APIView):
+    permission_classes = [HasStrictRooApiKey]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "linear_channel_issue_write"
+
+    def post(self, request):
+        try:
+            payload = create_linear_channel_issue(request.data)
+        except (
+            LinearChannelIssueAccessError,
+            LinearChannelIssueConflictError,
+            LinearChannelIssueRequestConflictError,
+            LinearChannelIssueWriteUncertainError,
+            LinearMeetingConfigurationError,
+            LinearMeetingRateLimitError,
+            LinearMeetingGraphQLError,
+            ValueError,
+        ) as exc:
+            return _linear_meeting_error_response(exc)
+        return Response(payload, status=status.HTTP_201_CREATED)
+
+
 class LinearProjectResolveView(APIView):
     permission_classes = [HasRooApiKey]
 
@@ -853,6 +947,7 @@ class LinearProjectResolveView(APIView):
         try:
             payload = resolve_linear_project(request.query_params.get("query") or "")
         except (
+            LinearMeetingAccessError,
             LinearMeetingConfigurationError,
             LinearMeetingRateLimitError,
             LinearMeetingGraphQLError,

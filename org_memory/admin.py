@@ -60,8 +60,6 @@ from .models import (
     NotionBlockArtifact,
     NotionPageArtifact,
     MemoryQueryLog,
-    MemorySelectorShadowResult,
-    MemorySelectorShadowRun,
     MemoryEntity,
     MemoryEvidence,
     MemoryExtractionRun,
@@ -1066,46 +1064,6 @@ class MemoryPilotDeploymentAdmin(ReadOnlyKernelAdmin):
         field.name for field in MemoryPilotDeployment._meta.fields
     )
 
-
-@admin.register(MemorySelectorShadowRun)
-class MemorySelectorShadowRunAdmin(ReadOnlyKernelAdmin):
-    list_display = (
-        "created_at",
-        "organization",
-        "status",
-        "learned_selector_version",
-        "eligible_trace_count",
-        "labeled_trace_count",
-        "evaluated_trace_count",
-    )
-    search_fields = (
-        "organization__domain",
-        "dataset_hash",
-        "model_artifact_hash",
-        "learned_selector_version",
-    )
-    list_filter = ("status", "organization", "created_at")
-    readonly_fields = tuple(
-        field.name for field in MemorySelectorShadowRun._meta.fields
-    )
-
-
-@admin.register(MemorySelectorShadowResult)
-class MemorySelectorShadowResultAdmin(ReadOnlyKernelAdmin):
-    list_display = (
-        "created_at",
-        "run",
-        "query_ref",
-        "candidate_count",
-        "labeled_candidate_count",
-        "top_k_overlap",
-        "disagreement",
-    )
-    search_fields = ("query_ref", "run__organization__domain")
-    list_filter = ("disagreement", "run__status", "run__organization")
-    readonly_fields = tuple(
-        field.name for field in MemorySelectorShadowResult._meta.fields
-    )
 
 
 @admin.register(DriveInventoryManifest)
