@@ -856,6 +856,33 @@ class CoworkingBooking(models.Model):
         return f"{self.user.email} - {self.date} ({self.status})"
 
 
+class CoworkingBookingOperation(models.Model):
+    """Durable mapping from a caller operation to its committed response.
+
+    The booking itself is mutable (it can later be cancelled), while a retry
+    must recover the result that originally committed.  Keeping the operation
+    receipt separately prevents a lost-response retry from creating a new
+    booking after cancellation or after time/authorization has moved on.
+    """
+
+    KIND_CHOICES = (
+        ('single', 'Single'),
+        ('batch', 'Batch'),
+    )
+
+    id = models.UUIDField(primary_key=True, editable=False)
+    kind = models.CharField(max_length=10, choices=KIND_CHOICES)
+    request_fingerprint = models.CharField(max_length=64)
+    response_payload = models.JSONField()
+    http_status = models.PositiveSmallIntegerField(default=200)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Coworking booking operation"
+        verbose_name_plural = "Coworking booking operations"
+        ordering = ['-created_at']
+
+
 class MeetingRoom(models.Model):
     """A reservable room managed by Roo."""
 

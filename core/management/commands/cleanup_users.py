@@ -1,6 +1,7 @@
 import logging
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction, IntegrityError
+from django.db.models.functions import Trim
 from core.models import User
 from core.actor_ids import actor_ids_for_user
 from core.slack_founder_links import (
@@ -214,20 +215,22 @@ class Command(BaseCommand):
         references = []
         if GitHubInstallation.objects.filter(user=source).exists():
             references.append("GitHub installations")
-        if UserIntegration.objects.filter(pk__in=actor_ids).exists():
+        if UserIntegration.objects.annotate(
+            _clean_actor_id=Trim('slack_user_id')
+        ).filter(_clean_actor_id__in=actor_ids).exists():
             references.append("integration credentials")
-        if OrganizationContentConfig.objects.filter(
-            connected_slack_user_id__in=actor_ids
-        ).exists():
+        if OrganizationContentConfig.objects.annotate(
+            _clean_actor_id=Trim('connected_slack_user_id')
+        ).filter(_clean_actor_id__in=actor_ids).exists():
             references.append("Content Factory organization ownership")
-        if ScheduledDiscoveryDispatch.objects.filter(
-            slack_user_id__in=actor_ids
-        ).exists():
+        if ScheduledDiscoveryDispatch.objects.annotate(
+            _clean_actor_id=Trim('slack_user_id')
+        ).filter(_clean_actor_id__in=actor_ids).exists():
             references.append("scheduled discovery dispatches")
 
-        job_reference = ContentFactoryJob.objects.filter(
-            slack_user_id__in=actor_ids
-        ).exists()
+        job_reference = ContentFactoryJob.objects.annotate(
+            _clean_actor_id=Trim('slack_user_id')
+        ).filter(_clean_actor_id__in=actor_ids).exists()
         if not job_reference:
             job_reference = any(
                 self._payload_references_actor(payload, actor_ids)
@@ -238,9 +241,9 @@ class Command(BaseCommand):
         if job_reference:
             references.append("Content Factory jobs")
 
-        run_reference = ContentFactoryRun.objects.filter(
-            slack_user_id__in=actor_ids
-        ).exists()
+        run_reference = ContentFactoryRun.objects.annotate(
+            _clean_actor_id=Trim('slack_user_id')
+        ).filter(_clean_actor_id__in=actor_ids).exists()
         if not run_reference:
             run_reference = any(
                 self._payload_references_actor(payload, actor_ids)

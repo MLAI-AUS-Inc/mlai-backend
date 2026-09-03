@@ -4,6 +4,7 @@ import json
 import time
 from datetime import date, timedelta
 import threading
+from uuid import uuid4
 
 import requests
 
@@ -30,7 +31,7 @@ from .models import (
 )
 from django.contrib.auth import get_user_model
 from unittest.mock import Mock, patch
-from .services import PointsService
+from .services import CoworkingService, PointsService
 
 User = get_user_model()
 
@@ -2091,6 +2092,45 @@ class CoworkingViewSetTests(APITestCase):
         self.assertEqual(response.data['standard_points_cost'], 8)
         self.assertFalse(response.data['monthly_update_discount_applied'])
 
+    @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
+    def test_book_operation_replays_committed_snapshot_after_cancel_and_deactivation(
+        self,
+        mock_permission,
+    ):
+        booking_date = date.today() + timedelta(days=1)
+        operation_id = str(uuid4())
+        request_data = {
+            'slack_user_id': self.user.slack_id,
+            'date': booking_date.isoformat(),
+            'operation_id': operation_id,
+        }
+
+        first = self.client.post(self.url, request_data, format='json')
+        self.assertEqual(first.status_code, status.HTTP_201_CREATED)
+        booking = CoworkingBooking.objects.get(pk=first.data['id'])
+        CoworkingService.cancel(str(booking.id), self.user.slack_id)
+        self.user.is_active = False
+        self.user.save(update_fields=['is_active'])
+
+        replay = self.client.post(self.url, request_data, format='json')
+
+        self.assertEqual(replay.status_code, status.HTTP_200_OK)
+        self.assertEqual(replay.data['id'], first.data['id'])
+        self.assertEqual(replay.data['status'], 'booked')
+        self.assertTrue(replay.data['operation_replayed'])
+        self.assertEqual(CoworkingBooking.objects.count(), 1)
+        self.assertEqual(PointsAccount.objects.get(user=self.user).balance, 10)
+
+        conflict = self.client.post(
+            self.url,
+            {
+                **request_data,
+                'date': (booking_date + timedelta(days=1)).isoformat(),
+            },
+            format='json',
+        )
+        self.assertEqual(conflict.status_code, status.HTTP_409_CONFLICT)
+
     @patch('core.permissions.HasRooApiKey.has_permission', return_value=True)
     @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
     @patch('roo.views.SlackService.get_user_profile', return_value=None)
@@ -2559,6 +2599,37 @@ class CoworkingViewSetTests(APITestCase):
             CoworkingBooking.objects.filter(date=booking_date, status='booked').count(),
             2,
         )
+
+    @patch('core.permissions.HasStrictRooApiKey.has_permission', return_value=True)
+    def test_batch_operation_replays_after_cancellation_and_admin_revocation(
+        self,
+        mock_permission,
+    ):
+        target = self._create_member_with_points('UCOBATCHREPLAY', balance=10)
+        booking_date = date.today() + timedelta(days=1)
+        request_data = {
+            'admin_slack_user_id': self.admin_slack_id,
+            'target_slack_user_ids': [target.slack_id],
+            'date': booking_date.isoformat(),
+            'operation_id': str(uuid4()),
+        }
+        first = self.client.post(self.batch_url, request_data, format='json')
+        self.assertEqual(first.status_code, status.HTTP_201_CREATED)
+        booking = CoworkingBooking.objects.get(user=target, date=booking_date)
+        CoworkingService.cancel(str(booking.id), self.admin_slack_id)
+        PointsAdmin.objects.filter(slack_user_id=self.admin_slack_id).update(
+            is_active=False
+        )
+        target.is_active = False
+        target.save(update_fields=['is_active'])
+
+        replay = self.client.post(self.batch_url, request_data, format='json')
+
+        self.assertEqual(replay.status_code, status.HTTP_200_OK)
+        self.assertTrue(replay.data['operation_replayed'])
+        self.assertEqual(replay.data['results'][0]['booking']['id'], str(booking.id))
+        self.assertEqual(CoworkingBooking.objects.count(), 1)
+        self.assertEqual(PointsAccount.objects.get(user=target).balance, 10)
 
     @patch('core.permissions.HasStrictRooApiKey.has_permission', return_value=True)
     def test_batch_book_treats_existing_booking_as_idempotent(self, mock_permission):
