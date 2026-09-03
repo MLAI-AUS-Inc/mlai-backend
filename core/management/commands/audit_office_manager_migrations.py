@@ -948,8 +948,7 @@ def _office_manager_data_invariants() -> dict:
                 FROM roo_officemanagerclaimattempt ca
                 INNER JOIN roo_officemanagerday d
                   ON d.date = ca.booking_date
-                WHERE d.status = %s
-                  AND ca.generation < d.generation
+                WHERE ca.generation < d.generation
                   AND ca.outcome <> %s
                   AND EXISTS (
                     SELECT 1
@@ -958,7 +957,7 @@ def _office_manager_data_invariants() -> dict:
                   )
                 ORDER BY ca.booking_date, ca.attempt_id
                 """,
-                ["open", "attempt_superseded", "relinquished"],
+                ["attempt_superseded", "relinquished"],
             )
             stale_reopened_attempts = [
                 {
@@ -1215,7 +1214,14 @@ def _build_report(*, configured_office_manager_channel: str = "") -> dict:
             "pending Office Manager public delivery work targets a channel "
             "other than the configured recovery channel"
         )
-    if data_invariants["stale_reopened_office_manager_attempts"]:
+    # Before 0039, these rows are the repair migration's input and must remain
+    # visible without deadlocking deployment before `migrate` can run. Once
+    # 0039 is recorded, any remaining row is a real post-repair invariant
+    # violation and must stop rollout.
+    if (
+        attempt_repair_identity in applied_set
+        and data_invariants["stale_reopened_office_manager_attempts"]
+    ):
         issues.append(
             "reopened Office Manager days contain stale claim attempts that "
             "were not superseded"

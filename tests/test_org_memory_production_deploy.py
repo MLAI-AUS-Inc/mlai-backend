@@ -270,6 +270,21 @@ class OrgMemoryProductionDeployTests(SimpleTestCase):
             "Backend and Public Roo Office Manager Slack app identities do not match",
             deploy,
         )
+        identity_check = deploy.index(
+            "Backend and Public Roo Office Manager Slack app identities do not match"
+        )
+        action_gate = deploy.index(
+            'office_manager_enabled = sys.argv[3] == "true"'
+        )
+        self.assertIn(
+            '"\\$office_manager_slack_bot_id" "\\$office_manager_enabled"',
+            deploy,
+        )
+        self.assertGreater(identity_check, action_gate)
+        self.assertNotIn(
+            'if [ "\\$office_manager_enabled" = "true" ]; then',
+            deploy[deploy.index("Verifying the live Public Roo"):identity_check],
+        )
         self.assertGreaterEqual(
             deploy.count('"claim_generation_supported": True'),
             2,

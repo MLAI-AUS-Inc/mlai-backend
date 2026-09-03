@@ -9,7 +9,6 @@ def supersede_reopened_attempts(apps, schema_editor):
 
     reopened_day_ids = Assignment.objects.filter(
         status="relinquished",
-        day__status="open",
     ).values_list("day_id", flat=True)
     reopened_days = Day.objects.filter(pk__in=reopened_day_ids).values_list(
         "date",

@@ -260,48 +260,56 @@ class OfficeManagerAttemptRepairMigrationTests(TransactionTestCase):
         Assignment = old_apps.get_model("roo", "OfficeManagerAssignment")
         Attempt = old_apps.get_model("roo", "OfficeManagerClaimAttempt")
 
-        day = Day.objects.create(
-            date="2026-09-06",
-            status="open",
-            generation=2,
-            slack_channel_id="CCOWORK",
-            slack_message_ts="legacy-reopened.456",
-            announcement_status="sent",
-            message_update_pending=True,
-            claim_cutoff_at=datetime(2026, 9, 6, 10, tzinfo=MELBOURNE),
-        )
-        booking = Booking.objects.create(
-            user_id=self.user_id,
-            date=day.date,
-            status="cancelled",
-            points_cost=0,
-            booking_source="office_manager",
-            original_points_cost=0,
-        )
-        Assignment.objects.create(
-            day=day,
-            user_id=self.user_id,
-            booking=booking,
-            status="relinquished",
-        )
-        self.stale_attempt_id = uuid.uuid4()
-        Attempt.objects.create(
-            attempt_id=self.stale_attempt_id,
-            slack_user_id="USTALE0039",
-            booking_date=day.date,
-            generation=1,
-            outcome="already_claimed",
-            message="Another member already claimed this day",
-        )
-        self.current_attempt_id = uuid.uuid4()
-        Attempt.objects.create(
-            attempt_id=self.current_attempt_id,
-            slack_user_id="UCURRENT0039",
-            booking_date=day.date,
-            generation=2,
-            outcome="claim_closed",
-            message="Claims are closed",
-        )
+        self.stale_attempt_ids = []
+        self.current_attempt_ids = []
+        for offset, day_status in enumerate(("open", "closed", "claimed")):
+            booking_date = f"2026-09-{6 + offset:02d}"
+            day = Day.objects.create(
+                date=booking_date,
+                status=day_status,
+                generation=2,
+                slack_channel_id="CCOWORK",
+                slack_message_ts=f"legacy-reopened.{456 + offset}",
+                announcement_status="sent",
+                message_update_pending=True,
+                claim_cutoff_at=datetime(
+                    2026, 9, 6 + offset, 10, tzinfo=MELBOURNE
+                ),
+            )
+            booking = Booking.objects.create(
+                user_id=self.user_id,
+                date=day.date,
+                status="cancelled",
+                points_cost=0,
+                booking_source="office_manager",
+                original_points_cost=0,
+            )
+            Assignment.objects.create(
+                day=day,
+                user_id=self.user_id,
+                booking=booking,
+                status="relinquished",
+            )
+            stale_attempt_id = uuid.uuid4()
+            self.stale_attempt_ids.append(stale_attempt_id)
+            Attempt.objects.create(
+                attempt_id=stale_attempt_id,
+                slack_user_id=f"USTALE0039{offset}",
+                booking_date=day.date,
+                generation=1,
+                outcome="already_claimed",
+                message="Another member already claimed this day",
+            )
+            current_attempt_id = uuid.uuid4()
+            self.current_attempt_ids.append(current_attempt_id)
+            Attempt.objects.create(
+                attempt_id=current_attempt_id,
+                slack_user_id=f"UCURRENT0039{offset}",
+                booking_date=day.date,
+                generation=2,
+                outcome="claim_closed",
+                message="Claims are closed",
+            )
 
         executor = MigrationExecutor(connection)
         executor.migrate([self.migrate_to])
@@ -314,9 +322,11 @@ class OfficeManagerAttemptRepairMigrationTests(TransactionTestCase):
     def test_stale_attempt_is_superseded_without_touching_current_generation(self):
         Attempt = self.apps.get_model("roo", "OfficeManagerClaimAttempt")
 
-        stale = Attempt.objects.get(pk=self.stale_attempt_id)
-        current = Attempt.objects.get(pk=self.current_attempt_id)
-        self.assertEqual(stale.outcome, "attempt_superseded")
-        self.assertIsNotNone(stale.superseded_at)
-        self.assertEqual(current.outcome, "claim_closed")
-        self.assertIsNone(current.superseded_at)
+        for stale_attempt_id in self.stale_attempt_ids:
+            stale = Attempt.objects.get(pk=stale_attempt_id)
+            self.assertEqual(stale.outcome, "attempt_superseded")
+            self.assertIsNotNone(stale.superseded_at)
+        for current_attempt_id in self.current_attempt_ids:
+            current = Attempt.objects.get(pk=current_attempt_id)
+            self.assertEqual(current.outcome, "claim_closed")
+            self.assertIsNone(current.superseded_at)

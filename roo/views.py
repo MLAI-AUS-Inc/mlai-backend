@@ -2049,6 +2049,17 @@ class CoworkingViewSet(viewsets.ViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        try:
+            booking_id = uuid.UUID(str(booking_id))
+        except (ValueError, TypeError, AttributeError):
+            return Response(
+                {
+                    'code': 'invalid_request',
+                    'error': 'booking_id must be a valid UUID',
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         user = PointsService.get_user_by_slack_id(slack_user_id)
         office_manager_authorized = (
             HasOfficeManagerRooApiKey().has_permission(request, self)

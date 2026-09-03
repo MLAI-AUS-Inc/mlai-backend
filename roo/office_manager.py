@@ -407,10 +407,26 @@ def _end_of_day_dm_text(assignment: OfficeManagerAssignment) -> str:
 
 
 def _private_correction_text(assignment: OfficeManagerAssignment) -> str:
+    state = (
+        "has been cancelled"
+        if assignment.status == "relinquished"
+        else "is no longer current"
+    )
     return (
         "Your Office Manager assignment for "
-        f"{assignment.day.date.isoformat()} has been cancelled. Please ignore "
+        f"{assignment.day.date.isoformat()} {state}. Please ignore "
         "any earlier winner or end-of-day message for that date."
+    )
+
+
+def _expired_winner_channel_text(
+    assignment: OfficeManagerAssignment,
+) -> str:
+    return (
+        "The Office Manager assignment notice for "
+        f"{assignment.day.date.isoformat()} is no longer current. "
+        "Check Roo's latest daily Office Manager announcement for current "
+        "volunteer availability."
     )
 
 
@@ -2062,6 +2078,7 @@ class OfficeManagerService:
                 raise OfficeManagerDeliveryCoordinateUnknown(
                     "chat.postMessage accepted without ts"
                 )
+            post_send_local_now = _local_now(now)
             needs_reconcile = False
             with transaction.atomic():
                 current_day = OfficeManagerDay.objects.select_for_update().get(
@@ -2072,7 +2089,18 @@ class OfficeManagerService:
                     or current_day.announcement_last_error != lease_token
                 ):
                     return current_day.announcement_status == "sent"
-                needs_reconcile = (
+                crossed_delivery_boundary = (
+                    current_day.date != post_send_local_now.date()
+                    or (
+                        current_day.status == "open"
+                        and post_send_local_now
+                        >= current_day.claim_cutoff_at.astimezone(_timezone())
+                    )
+                )
+                if crossed_delivery_boundary and current_day.status == "open":
+                    current_day.status = "closed"
+                    current_day.closed_at = timezone.now()
+                needs_reconcile = crossed_delivery_boundary or (
                     _announcement_text(current_day) != rendered_text
                     or _announcement_blocks(current_day) != rendered_blocks
                 )
@@ -2090,6 +2118,8 @@ class OfficeManagerService:
                         "announcement_last_error",
                         "announcement_next_attempt_at",
                         "message_update_pending",
+                        "status",
+                        "closed_at",
                         "updated_at",
                     ]
                 )
@@ -2135,7 +2165,7 @@ class OfficeManagerService:
             )
             return False
         if needs_reconcile:
-            OfficeManagerService.reconcile_message(day_id)
+            return OfficeManagerService.reconcile_message(day_id)
         return True
 
     @staticmethod
@@ -2465,6 +2495,7 @@ class OfficeManagerService:
                 raise OfficeManagerDeliveryCoordinateUnknown(
                     "chat.postMessage accepted without ts"
                 )
+            post_send_local_date = _local_now(now).date()
             with transaction.atomic():
                 assignment = (
                     OfficeManagerAssignment.objects.select_for_update(of=("self",))
@@ -2484,7 +2515,10 @@ class OfficeManagerService:
                 assignment.winner_channel_message_ts = message_ts
                 assignment.winner_channel_announcement_last_error = ""
                 assignment.winner_channel_announcement_next_attempt_at = None
-                if assignment.status != "active":
+                if (
+                    assignment.status != "active"
+                    or assignment.day.date != post_send_local_date
+                ):
                     assignment.winner_channel_retraction_pending = True
                     assignment.winner_channel_retraction_status = "pending"
                     assignment.winner_channel_retraction_next_attempt_at = (
@@ -2682,7 +2716,11 @@ class OfficeManagerService:
                     != lease_token
                 ):
                     return current.winner_channel_retraction_status == "sent"
-                if current.status != "relinquished":
+                current_local_date = _local_now().date()
+                if (
+                    current.status != "relinquished"
+                    and current.day.date == current_local_date
+                ):
                     current.winner_channel_retraction_pending = False
                     current.winner_channel_retraction_status = "not_required"
                     current.winner_channel_retraction_lease_token = ""
@@ -2695,7 +2733,11 @@ class OfficeManagerService:
                         ]
                     )
                     return True
-                text = _relinquished_winner_channel_text(current)
+                text = (
+                    _relinquished_winner_channel_text(current)
+                    if current.status == "relinquished"
+                    else _expired_winner_channel_text(current)
+                )
 
             response = slack_client.chat_update(
                 channel=channel_id,
@@ -3484,9 +3526,14 @@ class OfficeManagerService:
                 raise OfficeManagerDeliveryCoordinateUnknown(
                     "chat.postMessage accepted without ts"
                 )
+            post_send_local_date = _local_now(now).date()
             with transaction.atomic():
-                assignment = OfficeManagerAssignment.objects.select_for_update(of=("self",)).get(
-                    pk=assignment_id
+                assignment = (
+                    OfficeManagerAssignment.objects.select_for_update(
+                        of=("self",)
+                    )
+                    .select_related("day")
+                    .get(pk=assignment_id)
                 )
                 if (
                     assignment.winner_dm_status != "sending"
@@ -3498,6 +3545,14 @@ class OfficeManagerService:
                 assignment.winner_dm_message_ts = message_ts
                 assignment.winner_dm_last_error = ""
                 assignment.winner_dm_next_attempt_at = None
+                if (
+                    assignment.status != "active"
+                    or assignment.day.date != post_send_local_date
+                ):
+                    assignment.private_correction_pending = True
+                    assignment.private_correction_status = "pending"
+                    assignment.private_correction_last_error = ""
+                    assignment.private_correction_next_attempt_at = timezone.now()
                 assignment.save(
                     update_fields=[
                         "winner_dm_status",
@@ -3505,11 +3560,19 @@ class OfficeManagerService:
                         "winner_dm_message_ts",
                         "winner_dm_last_error",
                         "winner_dm_next_attempt_at",
+                        "private_correction_pending",
+                        "private_correction_status",
+                        "private_correction_last_error",
+                        "private_correction_next_attempt_at",
                         "updated_at",
                     ]
                 )
-            if OfficeManagerService.queue_private_correction_if_relinquished(
-                assignment_id
+            if (
+                assignment.private_correction_pending
+                or OfficeManagerService.queue_private_correction_if_stale(
+                    assignment_id,
+                    now=now,
+                )
             ):
                 return OfficeManagerService.deliver_private_correction(
                     assignment_id
@@ -3528,8 +3591,9 @@ class OfficeManagerService:
                     updated_at=timezone.now(),
                 )
                 if updated == 1:
-                    if OfficeManagerService.queue_private_correction_if_relinquished(
-                        assignment_id
+                    if OfficeManagerService.queue_private_correction_if_stale(
+                        assignment_id,
+                        now=now,
                     ):
                         return OfficeManagerService.deliver_private_correction(
                             assignment_id
@@ -3676,10 +3740,11 @@ class OfficeManagerService:
                 raise OfficeManagerDeliveryCoordinateUnknown(
                     "chat.postMessage accepted without ts"
                 )
+            post_send_local_date = _local_now(now).date()
             with transaction.atomic():
                 assignment = OfficeManagerAssignment.objects.select_for_update(
                     of=("self",)
-                ).get(pk=assignment_id)
+                ).select_related("day").get(pk=assignment_id)
                 if (
                     assignment.end_of_day_reminder_status != "sending"
                     or assignment.end_of_day_reminder_last_error != lease_token
@@ -3690,6 +3755,14 @@ class OfficeManagerService:
                 assignment.end_of_day_reminder_message_ts = message_ts
                 assignment.end_of_day_reminder_last_error = ""
                 assignment.end_of_day_reminder_next_attempt_at = None
+                if (
+                    assignment.status != "active"
+                    or assignment.day.date != post_send_local_date
+                ):
+                    assignment.private_correction_pending = True
+                    assignment.private_correction_status = "pending"
+                    assignment.private_correction_last_error = ""
+                    assignment.private_correction_next_attempt_at = timezone.now()
                 assignment.save(
                     update_fields=[
                         "end_of_day_reminder_status",
@@ -3697,11 +3770,19 @@ class OfficeManagerService:
                         "end_of_day_reminder_message_ts",
                         "end_of_day_reminder_last_error",
                         "end_of_day_reminder_next_attempt_at",
+                        "private_correction_pending",
+                        "private_correction_status",
+                        "private_correction_last_error",
+                        "private_correction_next_attempt_at",
                         "updated_at",
                     ]
                 )
-            if OfficeManagerService.queue_private_correction_if_relinquished(
-                assignment_id
+            if (
+                assignment.private_correction_pending
+                or OfficeManagerService.queue_private_correction_if_stale(
+                    assignment_id,
+                    now=now,
+                )
             ):
                 return OfficeManagerService.deliver_private_correction(
                     assignment_id
@@ -3720,8 +3801,9 @@ class OfficeManagerService:
                     updated_at=timezone.now(),
                 )
                 if updated == 1:
-                    if OfficeManagerService.queue_private_correction_if_relinquished(
-                        assignment_id
+                    if OfficeManagerService.queue_private_correction_if_stale(
+                        assignment_id,
+                        now=now,
                     ):
                         return OfficeManagerService.deliver_private_correction(
                             assignment_id
@@ -3759,11 +3841,18 @@ class OfficeManagerService:
         return True
 
     @staticmethod
-    def queue_private_correction_if_relinquished(assignment_id: int) -> bool:
+    def queue_private_correction_if_stale(
+        assignment_id: int,
+        *,
+        now: datetime | None = None,
+    ) -> bool:
         return bool(
             OfficeManagerAssignment.objects.filter(
                 pk=assignment_id,
-                status="relinquished",
+            )
+            .filter(
+                Q(status="relinquished")
+                | ~Q(day__date=_local_now(now).date())
             ).update(
                 private_correction_pending=True,
                 private_correction_status="pending",

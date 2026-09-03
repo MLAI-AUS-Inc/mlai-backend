@@ -87,8 +87,11 @@ per-destination fencing token before Slack is called. A response-loss or
 `unknown` result is retried with the same message identity; a replaced worker
 cannot overwrite the newer worker's state. Provider I/O happens outside
 database row locks and finalization rechecks the lease and current state.
-Records that survive a Melbourne-local date
-rollover are explicitly marked expired without emitting stale messages.
+Records that survive a Melbourne-local date rollover are explicitly marked
+expired without emitting stale messages. Every provider return is followed by
+a fresh local-time and lease check; if a Slack call itself crosses the cutoff
+or midnight, the returned coordinate and a durable correction/retraction are
+stored together and Roo immediately replaces the stale content.
 Mutation lock order is user, date/capacity, Office Manager day, booking, then
 assignment. Delivery leases lock only their own assignment row; joined user or
 day rows are read after that short transaction so delivery cannot invert the
@@ -152,8 +155,8 @@ read-only checks of the Public Roo Slack token (`auth.test`), its declared
 `channels:history`, `channels:read`, `chat:write`, `im:history`, `im:write`,
 `users:read`, and `users:read.email` scopes, the configured public channel
 (`conversations.info`, including that the bot is already a member, and
-`conversations.history`), and—when new claims are
-enabled—Public Roo's non-secret readiness contract. The companion must report the same Melbourne timezone and the exact
+`conversations.history`), and Public Roo's non-secret readiness contract even
+when new claims are disabled. The companion must report the same Melbourne timezone and the exact
 backend claim path. It must also report the same non-secret Slack `team_id` and
 `bot_id` returned by the backend token's `auth.test`; this proves the app that
 posts the buttons is the app whose interactions are routed to Roo. After startup,
@@ -170,6 +173,12 @@ recovery, the append-only `0038` generation hardening, or the append-only
 `0039` stale-attempt repair, run the
 read-only audit against **every persistent database**, including production,
 staging, preview databases with retained volumes, and developer databases:
+
+Before `0039` is recorded, stale older-generation attempts remain visible in
+the report as migration input but do not block the migration that repairs
+them. After `0039` is recorded, any such row is unsafe. The repair and audit
+follow relinquished lifecycle evidence even if the reopened day has since
+closed or been claimed by a replacement.
 
 ```bash
 python manage.py audit_office_manager_migrations \

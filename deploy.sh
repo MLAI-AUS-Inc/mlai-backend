@@ -912,7 +912,10 @@ if payload.get("ok") is not True:
     )
 '
 
-        if [ "\$office_manager_enabled" = "true" ]; then
+        # Recovery work is intentionally drained while new Office Manager
+        # claims are disabled. Bind the backend token to the exact Public Roo
+        # app on every deploy so disabled-mode recovery cannot post through a
+        # different valid Slack bot.
         echo "🧪 Verifying the live Public Roo Office Manager companion contract..."
         roo_service_url=\$(read_env_value ROO_SERVICE_URL)
         roo_health_body=\$(curl -fsS --max-time 10 \
@@ -926,7 +929,8 @@ payload = json.load(sys.stdin)
 contract = payload.get("office_manager") or {}
 if payload.get("status") != "ok" or payload.get("surface") != "public":
     raise SystemExit("Office Manager companion is not a ready Public Roo service")
-if contract.get("actions_enabled") is not True:
+office_manager_enabled = sys.argv[3] == "true"
+if office_manager_enabled and contract.get("actions_enabled") is not True:
     raise SystemExit("Public Roo Office Manager actions must be enabled before backend scheduling")
 if contract.get("timezone") != "Australia/Melbourne":
     raise SystemExit("Public Roo and backend Office Manager timezones do not match")
@@ -972,8 +976,7 @@ if any(
     raise SystemExit("Public Roo reported an inconsistent Office Manager backend contract")
 if parsed.username or parsed.password or parsed.query or parsed.fragment:
     raise SystemExit("Public Roo Office Manager claim URL must not contain credentials or parameters")
-' "\$office_manager_slack_team_id" "\$office_manager_slack_bot_id"
-        fi
+' "\$office_manager_slack_team_id" "\$office_manager_slack_bot_id" "\$office_manager_enabled"
         unset office_manager_slack_token office_manager_channel_id
         unset office_manager_slack_team_id office_manager_slack_bot_id
         unset slack_auth_body slack_channel_body slack_history_body
