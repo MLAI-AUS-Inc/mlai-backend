@@ -2122,6 +2122,16 @@ class CoworkingViewSetTests(APITestCase):
         self.assertEqual(current.data[0]['status'], 'cancelled')
         self.user.is_active = False
         self.user.save(update_fields=['is_active'])
+        current_inactive = self.client.get(
+            reverse('coworking-my-bookings'),
+            {
+                'slack_user_id': request_data['slack_user_id'],
+                'booking_id': str(booking.id),
+            },
+        )
+        self.assertEqual(current_inactive.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(current_inactive.data), 1)
+        self.assertEqual(current_inactive.data[0]['status'], 'cancelled')
 
         replay = self.client.post(self.url, request_data, format='json')
 
@@ -2153,6 +2163,15 @@ class CoworkingViewSetTests(APITestCase):
         self.assertTrue(
             CoworkingBookingOperation.objects.filter(pk=operation_id).exists()
         )
+        current_deleted = self.client.get(
+            reverse('coworking-my-bookings'),
+            {
+                'slack_user_id': request_data['slack_user_id'],
+                'booking_id': str(booking.id),
+            },
+        )
+        self.assertEqual(current_deleted.status_code, status.HTTP_200_OK)
+        self.assertEqual(current_deleted.data, [])
         erased_replay = self.client.post(self.url, request_data, format='json')
         self.assertEqual(erased_replay.status_code, status.HTTP_200_OK)
         self.assertEqual(

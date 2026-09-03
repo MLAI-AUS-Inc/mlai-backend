@@ -2136,11 +2136,6 @@ class CoworkingViewSet(viewsets.ViewSet):
         if not slack_user_id:
             return Response({'error': 'slack_user_id required'}, status=status.HTTP_400_BAD_REQUEST)
 
-        user = PointsService.get_user_by_slack_id(slack_user_id)
-        if not user:
-            return Response({'error': 'User not found'}, status=status.HTTP_404_NOT_FOUND)
-
-        bookings = CoworkingBooking.objects.filter(user=user)
         if booking_id:
             try:
                 booking_uuid = UUID(str(booking_id).strip())
@@ -2149,9 +2144,17 @@ class CoworkingViewSet(viewsets.ViewSet):
                     {'error': 'booking_id must be a valid UUID'},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
-            bookings = bookings.filter(pk=booking_uuid)
-        else:
-            bookings = bookings.order_by('-date')[:20]
+            bookings = CoworkingBooking.objects.filter(
+                pk=booking_uuid,
+                user__slack_id=slack_user_id,
+            )
+            return Response(CoworkingBookingSerializer(bookings, many=True).data)
+
+        user = PointsService.get_user_by_slack_id(slack_user_id)
+        if not user:
+            return Response({'error': 'User not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        bookings = CoworkingBooking.objects.filter(user=user).order_by('-date')[:20]
         return Response(CoworkingBookingSerializer(bookings, many=True).data)
 
     @action(detail=False, methods=['post'], url_path='set-capacity')
