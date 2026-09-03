@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections import Counter
 from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
@@ -19,9 +20,12 @@ from integrations import http_client
 from integrations.models import (
     ExternalServiceConnection,
     ExternalServiceProvider,
+    HumanitixEvent,
     ReconciliationMapping,
     ReconciliationProfile,
+    ReconciliationSuggestion,
     StripePayoutReconciliation,
+    XeroStatementLineSnapshot,
 )
 from integrations.services.external_connectors import _xero_required_token
 from integrations.services.xero_scopes import normalize_xero_scopes, xero_has_payment_write_scope
@@ -205,25 +209,77 @@ def serialize_payout(record: StripePayoutReconciliation, *, include_payload: boo
     return result
 
 
-def _tracking(profile: ReconciliationProfile, mapping: ReconciliationMapping) -> list[dict[str, str]]:
-    values: list[dict[str, str]] = []
-    if mapping.event_tracking_option_id or mapping.event_tracking_option_name:
-        item = {
-            "TrackingCategoryID": profile.event_tracking_category_id,
-            "Name": profile.event_tracking_category_name,
-            "TrackingOptionID": mapping.event_tracking_option_id,
-            "Option": mapping.event_tracking_option_name,
+def _mapping_tracking_spec(
+    profile: ReconciliationProfile,
+    mapping: ReconciliationMapping,
+) -> dict[str, str] | None:
+    event_assigned = bool(
+        str(mapping.event_tracking_option_id or "").strip()
+        or str(mapping.event_tracking_option_name or "").strip()
+    )
+    project_assigned = bool(
+        str(mapping.project_tracking_option_id or "").strip()
+        or str(mapping.project_tracking_option_name or "").strip()
+        or str(mapping.project_source_id or "").strip()
+    )
+    if event_assigned and project_assigned:
+        raise ReconciliationValidationError(
+            "Stripe source mapping is not one-dimensional.",
+            errors=[
+                f"Mapping {mapping.source_type}:{mapping.source_id} must use Event xor Project tracking."
+            ],
+        )
+    if not event_assigned and not project_assigned:
+        return None
+    if event_assigned:
+        spec = {
+            "dimension": "event",
+            "category_id": str(profile.event_tracking_category_id or "").strip(),
+            "category_name": str(profile.event_tracking_category_name or "").strip(),
+            "option_id": str(mapping.event_tracking_option_id or "").strip(),
+            "option_name": str(mapping.event_tracking_option_name or "").strip(),
+            "id_field": "event_tracking_option_id",
         }
-        values.append({key: value for key, value in item.items() if value})
-    elif mapping.project_tracking_option_id or mapping.project_tracking_option_name:
-        item = {
-            "TrackingCategoryID": profile.project_tracking_category_id,
-            "Name": profile.project_tracking_category_name,
-            "TrackingOptionID": mapping.project_tracking_option_id,
-            "Option": mapping.project_tracking_option_name,
+    else:
+        spec = {
+            "dimension": "project",
+            "category_id": str(profile.project_tracking_category_id or "").strip(),
+            "category_name": str(profile.project_tracking_category_name or "").strip(),
+            "option_id": str(mapping.project_tracking_option_id or "").strip(),
+            "option_name": str(mapping.project_tracking_option_name or "").strip(),
+            "id_field": "project_tracking_option_id",
         }
-        values.append({key: value for key, value in item.items() if value})
-    return values
+    missing = [
+        label
+        for label in ("category_id", "category_name", "option_name")
+        if not spec[label]
+    ]
+    if missing:
+        raise ReconciliationValidationError(
+            "Stripe source mapping has incomplete Xero tracking metadata.",
+            errors=[
+                f"Mapping {mapping.source_type}:{mapping.source_id} is missing "
+                + ", ".join(missing)
+                + "."
+            ],
+        )
+    return spec
+
+
+def _tracking(
+    profile: ReconciliationProfile,
+    mapping: ReconciliationMapping,
+) -> list[dict[str, str]]:
+    spec = _mapping_tracking_spec(profile, mapping)
+    if spec is None:
+        return []
+    item = {
+        "TrackingCategoryID": spec["category_id"],
+        "Name": spec["category_name"],
+        "TrackingOptionID": spec["option_id"],
+        "Option": spec["option_name"],
+    }
+    return [{key: value for key, value in item.items() if value}]
 
 
 def _xero_line(*, description: str, cents: int, account_code: str, tax_type: str, tracking: list[dict[str, str]]) -> dict[str, Any]:
@@ -268,7 +324,153 @@ def _xero_payload_hash(payload: dict[str, Any]) -> str:
     ).hexdigest()
 
 
-def build_xero_preview(record: StripePayoutReconciliation) -> dict[str, Any]:
+def _stripe_preview_hash(
+    xero_payload: dict[str, Any], statement_binding: dict[str, str] | None
+) -> str:
+    """Bind approval to both the Xero payload and the exact bank statement row."""
+
+    return _xero_payload_hash(
+        {
+            "xero_payload": xero_payload,
+            "statement_binding": statement_binding,
+        }
+    )
+
+
+def _stripe_statement_binding_values(
+    *,
+    statement_line_id: str,
+    bank_account_id: str,
+    statement_source_hash: str,
+) -> dict[str, str]:
+    statement_line_id = str(statement_line_id or "").strip()
+    bank_account_id = str(bank_account_id or "").strip()
+    statement_source_hash = str(statement_source_hash or "").strip()
+    missing = [
+        name
+        for name, value in (
+            ("statement_line_id", statement_line_id),
+            ("bank_account_id", bank_account_id),
+            ("statement_source_hash", statement_source_hash),
+        )
+        if not value
+    ]
+    if missing:
+        raise ReconciliationValidationError(
+            "Stripe payout statement binding is incomplete.",
+            errors=["Provide " + ", ".join(missing) + "."],
+        )
+    if not re.fullmatch(r"[0-9a-f]{64}", statement_source_hash):
+        raise ReconciliationValidationError(
+            "Stripe payout statement binding is invalid.",
+            errors=["statement_source_hash must be a lowercase SHA-256 value."],
+        )
+    return {
+        "statement_line_id": statement_line_id,
+        "bank_account_id": bank_account_id,
+        "statement_source_hash": statement_source_hash,
+    }
+
+
+def _stripe_statement_binding(
+    record: StripePayoutReconciliation,
+    *,
+    statement_line_id: str,
+    bank_account_id: str,
+    statement_source_hash: str,
+    statement_capture_selection: Any = None,
+) -> XeroStatementLineSnapshot:
+    """Resolve the current inbound bank row that authorises one payout write."""
+
+    binding = _stripe_statement_binding_values(
+        statement_line_id=statement_line_id,
+        bank_account_id=bank_account_id,
+        statement_source_hash=statement_source_hash,
+    )
+    statement_line_id = binding["statement_line_id"]
+    bank_account_id = binding["bank_account_id"]
+    statement_source_hash = binding["statement_source_hash"]
+    statement_line = XeroStatementLineSnapshot.objects.filter(
+        organization=record.organization,
+        bank_account_id=bank_account_id,
+        statement_line_id=statement_line_id,
+    ).first()
+    if statement_line is None:
+        raise ReconciliationValidationError(
+            "Stripe payout statement binding is not current.",
+            errors=[
+                "The bound Xero statement line does not exist for this organisation and bank account."
+            ],
+        )
+
+    errors: list[str] = []
+    if statement_line.source_hash != statement_source_hash:
+        errors.append("The bound Xero statement line changed after preview.")
+    if statement_line.direction != XeroStatementLineSnapshot.DIRECTION_CREDIT:
+        errors.append("A Stripe payout must bind to a credit Xero statement line.")
+    arrival_date = record.arrival_date
+    if isinstance(arrival_date, str):
+        arrival_date = parse_date(arrival_date)
+    if arrival_date is None:
+        errors.append("The Stripe payout has no arrival date to bind to a statement line.")
+    elif statement_line.transaction_date != arrival_date:
+        errors.append(
+            f"The bound Xero statement line date is {statement_line.transaction_date}, "
+            f"not the Stripe payout arrival date {arrival_date}."
+        )
+    expected_amount = (Decimal(record.amount_cents) / Decimal("100")).quantize(
+        Decimal("0.01")
+    )
+    if statement_line.amount != expected_amount:
+        errors.append(
+            f"The bound Xero statement line amount is {statement_line.amount}, "
+            f"not the Stripe payout amount {expected_amount}."
+        )
+    if record.currency and statement_line.currency.casefold() != record.currency.casefold():
+        errors.append(
+            f"The bound Xero statement line currency is {statement_line.currency}, "
+            f"not the Stripe payout currency {record.currency}."
+        )
+    if not statement_line.active or (
+        statement_line.queue_state != XeroStatementLineSnapshot.QUEUE_ACTIVE
+    ):
+        errors.append("The bound Xero statement line is no longer active and unreconciled.")
+    if statement_line.is_green_match:
+        errors.append("The bound Xero statement line already has a green match.")
+    if statement_line.matched_xero_transaction_id:
+        errors.append(
+            "The bound Xero statement line already identifies a matched Xero transaction."
+        )
+
+    from integrations.services.xero_statement_reconciliation import (
+        StatementCaptureValidationError,
+        validate_current_statement_line_capture,
+    )
+
+    try:
+        validate_current_statement_line_capture(
+            statement_line,
+            expected_bank_account_id=bank_account_id,
+            expected_source_hash=statement_source_hash,
+            selection=statement_capture_selection,
+        )
+    except StatementCaptureValidationError as exc:
+        errors.append(str(exc))
+    if errors:
+        raise ReconciliationValidationError(
+            "Stripe payout statement binding is not current.", errors=errors
+        )
+    return statement_line
+
+
+def build_xero_preview(
+    record: StripePayoutReconciliation,
+    *,
+    statement_line_id: str = "",
+    bank_account_id: str = "",
+    statement_source_hash: str = "",
+    statement_capture_selection: Any = None,
+) -> dict[str, Any]:
     try:
         profile = ReconciliationProfile.objects.select_related("xero_connection").get(
             organization=record.organization
@@ -277,6 +479,20 @@ def build_xero_preview(record: StripePayoutReconciliation) -> dict[str, Any]:
         raise ReconciliationValidationError("Reconciliation profile is not configured.")
 
     errors: list[str] = []
+    selected_bank_account_id = profile.xero_bank_account_id
+    resolved_statement_binding: dict[str, str] | None = None
+    if statement_line_id or bank_account_id or statement_source_hash:
+        resolved_statement_binding = _stripe_statement_binding_values(
+            statement_line_id=statement_line_id,
+            bank_account_id=bank_account_id,
+            statement_source_hash=statement_source_hash,
+        )
+        statement_line = _stripe_statement_binding(
+            record,
+            **resolved_statement_binding,
+            statement_capture_selection=statement_capture_selection,
+        )
+        selected_bank_account_id = statement_line.bank_account_id
     connection = profile.xero_connection
     if not profile.enabled:
         errors.append("Reconciliation is disabled for this organisation.")
@@ -285,7 +501,7 @@ def build_xero_preview(record: StripePayoutReconciliation) -> dict[str, Any]:
     elif not xero_has_bank_transaction_scope(connection.scopes):
         errors.append("Reconnect Xero with the accounting.banktransactions scope before posting.")
     for label, value in (
-        ("Xero bank account", profile.xero_bank_account_id),
+        ("Xero bank account", selected_bank_account_id),
         ("revenue account code", profile.revenue_account_code),
         ("fee account code", profile.fee_account_code),
         ("refund account code", profile.refund_account_code),
@@ -323,7 +539,17 @@ def build_xero_preview(record: StripePayoutReconciliation) -> dict[str, Any]:
         if clearing and (not mapping.account_code or not mapping.tax_type):
             errors.append(f"Clearing treatment for {source_key[0]}:{source_key[1]} requires an explicit account code and tax type.")
             continue
-        tracking = _tracking(profile, mapping)
+        try:
+            tracking = _tracking(profile, mapping)
+        except ReconciliationValidationError as exc:
+            errors.extend(exc.errors)
+            continue
+        if profile.require_statement_tracking and not tracking:
+            errors.append(
+                f"Map {source_key[0]}:{source_key[1]} to exactly one Event, Project, "
+                "or MLAI core option."
+            )
+            continue
         gross = int(group.get("gross_cents") or 0)
         group_fee = int(group.get("stripe_fee_cents") or 0)
         treatment_label = "clearing" if clearing else "revenue"
@@ -347,6 +573,17 @@ def build_xero_preview(record: StripePayoutReconciliation) -> dict[str, Any]:
     if standalone_fee:
         fee_tracking = []
         if profile.standalone_fee_project_option_id or profile.standalone_fee_project_option_name:
+            if not all(
+                [
+                    profile.project_tracking_category_id,
+                    profile.project_tracking_category_name,
+                    profile.standalone_fee_project_option_name,
+                ]
+            ):
+                errors.append(
+                    "Standalone Stripe fee tracking requires the exact Project Name "
+                    "category ID/name and option name."
+                )
             fee_tracking_item = {
                 "TrackingCategoryID": profile.project_tracking_category_id,
                 "Name": profile.project_tracking_category_name,
@@ -356,6 +593,10 @@ def build_xero_preview(record: StripePayoutReconciliation) -> dict[str, Any]:
             fee_tracking = [
                 {key: value for key, value in fee_tracking_item.items() if value}
             ]
+        elif profile.require_statement_tracking:
+            errors.append(
+                "Standalone Stripe fees require an explicit Project or MLAI core option."
+            )
         lines.append(_xero_line(description="Stripe standalone fees", cents=-standalone_fee, account_code=profile.fee_account_code, tax_type=profile.fee_tax_type, tracking=fee_tracking))
         line_total_cents -= standalone_fee
 
@@ -375,9 +616,20 @@ def build_xero_preview(record: StripePayoutReconciliation) -> dict[str, Any]:
         if clearing and (not mapping.account_code or not mapping.tax_type):
             errors.append(f"Clearing treatment for refund {source_key[0]}:{source_key[1]} requires an explicit account code and tax type.")
             continue
+        try:
+            tracking = _tracking(profile, mapping)
+        except ReconciliationValidationError as exc:
+            errors.extend(exc.errors)
+            continue
+        if profile.require_statement_tracking and not tracking:
+            errors.append(
+                f"Map refund {source_key[0]}:{source_key[1]} to exactly one Event, "
+                "Project, or MLAI core option."
+            )
+            continue
         cents = int(adjustment.get("net_cents") or 0)
         adjustment_label = str(adjustment.get("source_label") or adjustment.get("description") or adjustment.get("id") or source_key[1])
-        lines.append(_xero_line(description=_contextual_description("Stripe refund/adjustment", adjustment_label, mapping), cents=cents, account_code=mapping.account_code if clearing else (mapping.account_code or profile.refund_account_code), tax_type=mapping.tax_type if clearing else (mapping.tax_type or profile.refund_tax_type), tracking=_tracking(profile, mapping)))
+        lines.append(_xero_line(description=_contextual_description("Stripe refund/adjustment", adjustment_label, mapping), cents=cents, account_code=mapping.account_code if clearing else (mapping.account_code or profile.refund_account_code), tax_type=mapping.tax_type if clearing else (mapping.tax_type or profile.refund_tax_type), tracking=tracking))
         line_total_cents += cents
 
     expected_cents = int(report.get("deposit_cents") or record.amount_cents)
@@ -390,7 +642,7 @@ def build_xero_preview(record: StripePayoutReconciliation) -> dict[str, Any]:
     payload = {
         "Type": "RECEIVE",
         "Contact": contact,
-        "BankAccount": {"AccountID": profile.xero_bank_account_id},
+        "BankAccount": {"AccountID": selected_bank_account_id},
         "Date": record.arrival_date.isoformat() if record.arrival_date else date.today().isoformat(),
         "Reference": record.payout_id,
         "CurrencyCode": record.currency,
@@ -405,12 +657,28 @@ def build_xero_preview(record: StripePayoutReconciliation) -> dict[str, Any]:
         "expected_total_cents": expected_cents,
         "line_total_cents": line_total_cents,
         "xero_payload": payload,
-        "payload_hash": _xero_payload_hash(payload),
+        "payload_hash": _stripe_preview_hash(payload, resolved_statement_binding),
+        "statement_binding": resolved_statement_binding,
         "context_notes": context_notes,
         "human_reconciliation_required": True,
         "note": "Posting creates a matching Receive Money transaction; a human must still click Match/OK on the Xero bank statement line.",
     }
-    record.preview_payload = preview
+    stored_preview = dict(preview)
+    if record.xero_bank_transaction_id:
+        durable_binding = (
+            record.preview_payload.get("statement_binding")
+            if isinstance(record.preview_payload, dict)
+            else None
+        )
+        # A later read-only unbound/correction preview must not erase—or
+        # retroactively invent—the exact row that authorised a posted payout.
+        stored_preview["statement_binding"] = (
+            dict(durable_binding) if isinstance(durable_binding, dict) else None
+        )
+        stored_preview["payload_hash"] = _stripe_preview_hash(
+            stored_preview["xero_payload"], stored_preview["statement_binding"]
+        )
+    record.preview_payload = stored_preview
     if record.status != StripePayoutReconciliation.STATUS_POSTED:
         record.status = StripePayoutReconciliation.STATUS_READY if preview["ready"] else StripePayoutReconciliation.STATUS_NEEDS_REVIEW
     record.save(update_fields=["preview_payload", "status", "updated_at"])
@@ -1333,6 +1601,291 @@ def _created_tracking_option(payload: Any) -> dict[str, Any]:
     return {}
 
 
+def _configured_tracking_category(
+    categories: list[dict[str, Any]],
+    *,
+    category_id: str,
+    category_name: str,
+) -> dict[str, Any]:
+    """Return one exact active configured category or fail closed."""
+
+    category_id = str(category_id or "").strip()
+    category_name = str(category_name or "").strip()
+    if not category_id or not category_name:
+        raise XeroPostingError(
+            "Configure both the Xero tracking category ID and name before posting."
+        )
+    matches = [
+        item
+        for item in categories
+        if str(item.get("TrackingCategoryID") or "").strip() == category_id
+    ]
+    if len(matches) != 1:
+        raise XeroPostingError(
+            f"Xero does not contain one exact tracking category with ID {category_id}."
+        )
+    category = matches[0]
+    observed_name = str(category.get("Name") or "").strip()
+    if observed_name.casefold() != category_name.casefold():
+        raise XeroPostingError(
+            f"Xero tracking category {category_id} is named {observed_name or '(blank)'}, "
+            f"not {category_name}."
+        )
+    if str(category.get("Status") or "").strip().upper() != "ACTIVE":
+        raise XeroPostingError(f"Xero tracking category {category_name} is archived.")
+    _require_unique_tracking_option_ids(category)
+    return category
+
+
+def _require_unique_tracking_option_ids(category: dict[str, Any]) -> None:
+    """Reject a malformed catalogue before resolving an option by name or ID."""
+
+    seen: dict[str, str] = {}
+    for option in category.get("Options") or []:
+        if not isinstance(option, dict):
+            continue
+        option_id = str(
+            option.get("TrackingOptionID") or option.get("OptionID") or ""
+        ).strip()
+        if not option_id:
+            continue
+        option_name = str(option.get("Name") or "").strip()
+        if option_id in seen:
+            raise XeroPostingError(
+                f"Xero returned more than one tracking option with ID {option_id} "
+                f"({seen[option_id] or '(blank)'} and {option_name or '(blank)'})."
+            )
+        seen[option_id] = option_name
+
+
+def _active_tracking_option_by_name(
+    category: dict[str, Any],
+    *,
+    option_name: str,
+) -> dict[str, Any] | None:
+    option_name = str(option_name or "").strip()
+    matches = [
+        item
+        for item in category.get("Options") or []
+        if isinstance(item, dict)
+        and str(item.get("Name") or "").strip().casefold() == option_name.casefold()
+        and str(item.get("Status") or "").strip().upper() == "ACTIVE"
+    ]
+    if len(matches) > 1:
+        raise XeroPostingError(
+            f"Xero contains more than one active tracking option named {option_name}."
+        )
+    return matches[0] if matches else None
+
+
+def _tracking_option_by_id(
+    category: dict[str, Any],
+    *,
+    option_id: str,
+    option_name: str,
+) -> dict[str, Any] | None:
+    matches = [
+        item
+        for item in category.get("Options") or []
+        if isinstance(item, dict)
+        and str(item.get("TrackingOptionID") or item.get("OptionID") or "").strip()
+        == option_id
+    ]
+    if not matches:
+        return None
+    if len(matches) != 1:
+        raise XeroPostingError(
+            f"Xero returned more than one tracking option with ID {option_id}."
+        )
+    option = matches[0]
+    observed_name = str(option.get("Name") or "").strip()
+    if observed_name.casefold() != option_name.casefold():
+        raise XeroPostingError(
+            f"Xero tracking option {option_id} is named {observed_name or '(blank)'}, "
+            f"not {option_name}."
+        )
+    if str(option.get("Status") or "").strip().upper() != "ACTIVE":
+        raise XeroPostingError(f"Xero tracking option {option_name} is archived.")
+    return option
+
+
+def _current_event_catalog_names(
+    *,
+    organization,
+    source_type: str,
+    source_id: str,
+) -> set[str]:
+    """Return names from rows that are currently eligible for reconciliation."""
+
+    from startup_updates.models import LumaEventSelection
+
+    if source_type == "luma":
+        return set(
+            LumaEventSelection.objects.filter(
+                organization=organization,
+                event_id=source_id,
+                selected=True,
+            ).values_list("event_name", flat=True)
+        )
+    if source_type == "humanitix":
+        return set(
+            HumanitixEvent.objects.filter(
+                organization=organization,
+                external_event_id=source_id,
+                archived=False,
+            ).values_list("event_name", flat=True)
+        )
+    raise XeroPostingError(
+        f"Unsupported canonical event source {source_type!r}; refresh and review the suggestion."
+    )
+
+
+def _current_linear_project_catalog_names(
+    *,
+    organization,
+    source_id: str,
+) -> set[str]:
+    """Return the current selected Linear name(s), preferring synced artifacts."""
+
+    from startup_updates.models import LinearProjectArtifact, LinearProjectSelection
+
+    selections = list(
+        LinearProjectSelection.objects.filter(
+            organization=organization,
+            linear_project_id=source_id,
+            selected=True,
+        ).only("connection_id", "project_name")
+    )
+    if not selections:
+        return set()
+    artifacts = {
+        item.connection_id: item.name
+        for item in LinearProjectArtifact.objects.filter(
+            organization=organization,
+            linear_project_id=source_id,
+            connection_id__in={item.connection_id for item in selections},
+        ).only("connection_id", "name")
+    }
+    return {
+        str(artifacts.get(item.connection_id) or item.project_name or "").strip()
+        for item in selections
+        if str(artifacts.get(item.connection_id) or item.project_name or "").strip()
+    }
+
+
+def _require_current_stripe_catalog_name(
+    *,
+    organization,
+    dimension: str,
+    source_type: str,
+    source_id: str,
+    option_name: str,
+) -> None:
+    """Re-read the canonical source immediately before a Stripe option write."""
+
+    if dimension == "event":
+        names = _current_event_catalog_names(
+            organization=organization,
+            source_type=source_type,
+            source_id=source_id,
+        )
+    elif dimension == "project" and source_type == "linear":
+        names = _current_linear_project_catalog_names(
+            organization=organization,
+            source_id=source_id,
+        )
+    else:
+        raise XeroPostingError(
+            f"Unsupported canonical {dimension} source {source_type!r}; "
+            "refresh and review the Stripe mapping."
+        )
+    normalized_names = {
+        str(name or "").strip().casefold() for name in names if str(name or "").strip()
+    }
+    expected_name = option_name.strip().casefold()
+    if not normalized_names:
+        raise XeroPostingError(
+            f"The canonical {source_type} {dimension} {source_id} no longer exists."
+        )
+    if normalized_names != {expected_name}:
+        raise XeroPostingError(
+            f"The canonical {source_type} {dimension} {source_id} name changed or is "
+            "ambiguous; refresh and review the Stripe mapping."
+        )
+
+
+def _validate_approved_stripe_tracking_creation(
+    record: StripePayoutReconciliation,
+    *,
+    profile: ReconciliationProfile,
+    mapping: ReconciliationMapping,
+    spec: dict[str, str],
+) -> None:
+    """Bind a missing option to an exact current approved payout suggestion."""
+
+    suggestion = ReconciliationSuggestion.objects.filter(
+        organization=record.organization,
+        payout=record,
+        source_type=mapping.source_type,
+        source_id=mapping.source_id,
+        status=ReconciliationSuggestion.STATUS_APPROVED,
+        source_hash=record.source_hash,
+    ).order_by("-reviewed_at", "-id").first()
+    option_name = spec["option_name"]
+    matches_current = False
+    if suggestion is not None:
+        if spec["dimension"] == "event":
+            matches_current = bool(
+                suggestion.allocation_mode == ReconciliationSuggestion.ALLOCATION_EVENT
+                and suggestion.event_source_id
+                and suggestion.event_tracking_option_name.strip().casefold()
+                == option_name.casefold()
+            )
+        elif (
+            suggestion.allocation_mode == ReconciliationSuggestion.ALLOCATION_MLAI_CORE
+            and option_name.casefold()
+            == str(profile.default_project_tracking_option_name or "").strip().casefold()
+        ):
+            matches_current = True
+        elif (
+            suggestion.allocation_mode == ReconciliationSuggestion.ALLOCATION_PROJECT
+            and suggestion.project_source_id
+            and suggestion.project_source_type == mapping.project_source_type
+            and suggestion.project_source_id == mapping.project_source_id
+            and suggestion.project_tracking_option_name.strip().casefold()
+            == option_name.casefold()
+        ):
+            matches_current = True
+    if not matches_current or suggestion is None:
+        raise XeroPostingError(
+            f"Missing tracking option {option_name} is not bound to a current approved "
+            f"suggestion for {mapping.source_type}:{mapping.source_id}."
+        )
+    if suggestion.allocation_mode == ReconciliationSuggestion.ALLOCATION_MLAI_CORE:
+        return
+    source_type = (
+        suggestion.event_source_type
+        if spec["dimension"] == "event"
+        else suggestion.project_source_type
+    )
+    source_id = (
+        suggestion.event_source_id
+        if spec["dimension"] == "event"
+        else suggestion.project_source_id
+    )
+    if spec["dimension"] == "project" and source_type == "xero_tracking":
+        raise XeroPostingError(
+            "A Project sourced from Xero must retain its existing tracking option ID."
+        )
+    _require_current_stripe_catalog_name(
+        organization=record.organization,
+        dimension=spec["dimension"],
+        source_type=str(source_type or "").strip().casefold(),
+        source_id=str(source_id or "").strip(),
+        option_name=option_name,
+    )
+
+
 def ensure_xero_tracking_options(
     record: StripePayoutReconciliation,
     *,
@@ -1369,20 +1922,41 @@ def ensure_xero_tracking_options(
         )
     )
     mappings = [mapping for mapping in mappings if (mapping.source_type, mapping.source_id) in source_keys]
-    missing: list[tuple[ReconciliationMapping, str, str, str]] = []
+    tracked: list[tuple[ReconciliationMapping, dict[str, str]]] = []
     for mapping in mappings:
-        if mapping.event_tracking_option_name and not mapping.event_tracking_option_id:
-            missing.append((mapping, "event_tracking_option_id", profile.event_tracking_category_id, mapping.event_tracking_option_name))
-        if mapping.project_tracking_option_name and not mapping.project_tracking_option_id:
-            missing.append((mapping, "project_tracking_option_id", profile.project_tracking_category_id, mapping.project_tracking_option_name))
-    if not missing:
+        spec = _mapping_tracking_spec(profile, mapping)
+        if spec is None:
+            if profile.require_statement_tracking:
+                raise ReconciliationValidationError(
+                    f"Mapping {mapping.source_type}:{mapping.source_id} requires exactly "
+                    "one Event, Project, or MLAI core allocation."
+                )
+            continue
+        tracked.append((mapping, spec))
+
+    standalone_fee = int(report.get("standalone_fee_cents") or 0)
+    standalone_spec: dict[str, str] | None = None
+    if standalone_fee and (
+        profile.standalone_fee_project_option_id
+        or profile.standalone_fee_project_option_name
+    ) and not profile.standalone_fee_project_option_id:
+        standalone_spec = {
+            "dimension": "project",
+            "category_id": str(profile.project_tracking_category_id or "").strip(),
+            "category_name": str(profile.project_tracking_category_name or "").strip(),
+            "option_id": str(profile.standalone_fee_project_option_id or "").strip(),
+            "option_name": str(profile.standalone_fee_project_option_name or "").strip(),
+            "id_field": "standalone_fee_project_option_id",
+        }
+        if not all(
+            standalone_spec[field]
+            for field in ("category_id", "category_name", "option_name")
+        ):
+            raise ReconciliationValidationError(
+                "Standalone Stripe fee tracking metadata is incomplete."
+            )
+    if not tracked and standalone_spec is None:
         return mappings
-    if not xero_has_settings_write_scope(connection.scopes):
-        raise ReconciliationValidationError(
-            "Reconnect Xero with accounting.settings before posting missing Event Name or Project Name options."
-        )
-    if any(not category_id for _mapping, _field, category_id, _name in missing):
-        raise ReconciliationValidationError("Configure the Xero Event Name and Project Name tracking category IDs.")
 
     headers = _xero_headers(connection)
     response = http_client.get(f"{XERO_API_URL}/TrackingCategories", headers=headers, timeout=(3, 30))
@@ -1390,29 +1964,87 @@ def ensure_xero_tracking_options(
     payload = response.json()
     categories = payload.get("TrackingCategories") if isinstance(payload, dict) else []
     categories = [item for item in categories or [] if isinstance(item, dict)]
-    for mapping, field_name, category_id, option_name in missing:
-        existing = next(
-            (
-                item for item in _tracking_category_options(categories, category_id)
-                if str(item.get("Name") or "").strip().casefold() == option_name.strip().casefold()
-            ),
-            None,
+    entries: list[
+        tuple[ReconciliationMapping | None, dict[str, str]]
+    ] = [*tracked]
+    if standalone_spec is not None:
+        entries.append((None, standalone_spec))
+    for mapping, spec in entries:
+        category = _configured_tracking_category(
+            categories,
+            category_id=spec["category_id"],
+            category_name=spec["category_name"],
         )
-        option = existing or {}
-        if not option:
+        option: dict[str, Any] | None
+        if spec["option_id"]:
+            option = _tracking_option_by_id(
+                category,
+                option_id=spec["option_id"],
+                option_name=spec["option_name"],
+            )
+            if option is None:
+                raise XeroPostingError(
+                    f"Xero tracking option ID {spec['option_id']} no longer exists in "
+                    f"{spec['category_name']}; refresh and review the mapping."
+                )
+        else:
+            option = _active_tracking_option_by_name(
+                category,
+                option_name=spec["option_name"],
+            )
+        if option is None:
+            if mapping is not None:
+                _validate_approved_stripe_tracking_creation(
+                    record,
+                    profile=profile,
+                    mapping=mapping,
+                    spec=spec,
+                )
+            elif spec["option_name"].casefold() != str(
+                profile.default_project_tracking_option_name or ""
+            ).strip().casefold():
+                raise XeroPostingError(
+                    "A missing standalone Stripe fee option may only use the explicitly "
+                    "configured MLAI core default."
+                )
+            if not xero_has_settings_write_scope(connection.scopes):
+                raise ReconciliationValidationError(
+                    "Reconnect Xero with accounting.settings before posting missing "
+                    "Event Name or Project Name options."
+                )
             create_response = http_client.put(
-                f"{XERO_API_URL}/TrackingCategories/{category_id}/Options",
+                f"{XERO_API_URL}/TrackingCategories/{spec['category_id']}/Options",
                 headers=headers,
-                json={"Options": [{"Name": option_name}]},
+                json={"Options": [{"Name": spec["option_name"]}]},
                 timeout=(3, 30),
             )
             create_response.raise_for_status()
             option = _created_tracking_option(create_response.json())
+            created_name = str(option.get("Name") or "").strip()
+            if created_name.casefold() != spec["option_name"].casefold():
+                raise XeroPostingError(
+                    f"Xero returned a different tracking option after creating "
+                    f"{spec['option_name']}."
+                )
+            if str(option.get("Status") or "").strip().upper() != "ACTIVE":
+                raise XeroPostingError(
+                    f"Xero returned an archived tracking option for {spec['option_name']}."
+                )
+            category.setdefault("Options", []).append(option)
+            _require_unique_tracking_option_ids(category)
         option_id = str(option.get("TrackingOptionID") or option.get("OptionID") or "").strip()
         if not option_id:
-            raise XeroPostingError(f"Xero did not return an ID for tracking option {option_name}.")
-        setattr(mapping, field_name, option_id)
-        mapping.save(update_fields=[field_name, "updated_at"])
+            raise XeroPostingError(
+                f"Xero did not return an ID for tracking option {spec['option_name']}."
+            )
+        if mapping is not None and getattr(mapping, spec["id_field"]) != option_id:
+            setattr(mapping, spec["id_field"], option_id)
+            mapping.save(update_fields=[spec["id_field"], "updated_at"])
+        elif mapping is None and profile.standalone_fee_project_option_id != option_id:
+            profile.standalone_fee_project_option_id = option_id
+            profile.save(
+                update_fields=["standalone_fee_project_option_id", "updated_at"]
+            )
     return mappings
 
 
@@ -1421,11 +2053,40 @@ def post_xero_bank_transaction(
     *,
     approved_by_slack_id: str,
     expected_payload_hash: str = "",
+    statement_line_id: str,
+    bank_account_id: str,
+    statement_source_hash: str,
 ) -> StripePayoutReconciliation:
+    binding = _stripe_statement_binding_values(
+        statement_line_id=statement_line_id,
+        bank_account_id=bank_account_id,
+        statement_source_hash=statement_source_hash,
+    )
     current = StripePayoutReconciliation.objects.get(pk=record.pk)
     if current.xero_bank_transaction_id:
+        stored_binding = (
+            current.preview_payload.get("statement_binding")
+            if isinstance(current.preview_payload, dict)
+            else None
+        )
+        if stored_binding != binding:
+            raise ReconciliationValidationError(
+                "The posted Stripe payout cannot be recovered from a different statement binding.",
+                errors=[
+                    "The stored posted payout binding does not match the requested statement row, account, and source hash."
+                ],
+            )
         return current
-    preview = build_xero_preview(record)
+    from integrations.services.xero_statement_reconciliation import (
+        select_current_statement_capture,
+    )
+
+    statement_capture_selection = select_current_statement_capture(record.organization)
+    bound_validation = {
+        **binding,
+        "statement_capture_selection": statement_capture_selection,
+    }
+    preview = build_xero_preview(record, **bound_validation)
     if not preview["ready"]:
         raise ReconciliationValidationError("Payout is not ready to post.", errors=preview["errors"])
     if expected_payload_hash and preview["payload_hash"] != expected_payload_hash:
@@ -1437,9 +2098,16 @@ def post_xero_bank_transaction(
     connection = profile.xero_connection
     if connection is None:
         raise ReconciliationValidationError("A Xero connection must be selected.")
+    _stripe_statement_binding(record, **bound_validation)
     ensure_xero_tracking_options(record, profile=profile)
     # Rebuild so the reviewed payload contains the resolved Xero option IDs.
-    preview = build_xero_preview(record)
+    preview = build_xero_preview(record, **bound_validation)
+    if expected_payload_hash and preview["payload_hash"] != expected_payload_hash:
+        raise ReconciliationValidationError(
+            "Payout preview changed after resolving Xero tracking options; "
+            "fetch and approve the new preview before posting.",
+            errors=["tracking_options_resolved_repreview_required"],
+        )
 
     with transaction.atomic():
         locked = StripePayoutReconciliation.objects.select_for_update().get(pk=record.pk)
@@ -1489,6 +2157,16 @@ def post_xero_bank_transaction(
                     ],
                 )
         if bank_transaction is None:
+            # Refresh the live account catalog and authoritative all-account
+            # capture at the last possible boundary before the single write.
+            fresh_statement_capture_selection = select_current_statement_capture(
+                record.organization
+            )
+            _stripe_statement_binding(
+                record,
+                **binding,
+                statement_capture_selection=fresh_statement_capture_selection,
+            )
             response = http_client.put(
                 f"{XERO_API_URL}/BankTransactions",
                 headers=headers,
