@@ -246,9 +246,10 @@ def build_statement_posting_preview(
         if line.last_scan_id and isinstance(line.last_scan.capture_metadata, dict)
         else {}
     )
+    validated_capture_selection = capture_selection
     if capture_selection is not None or scan_metadata.get("schema_version") == 2:
         try:
-            validate_current_statement_line_capture(
+            validated_capture_selection = validate_current_statement_line_capture(
                 line,
                 expected_bank_account_id=line.bank_account_id,
                 expected_source_hash=line.source_hash,
@@ -256,6 +257,8 @@ def build_statement_posting_preview(
             )
         except StatementCaptureValidationError as exc:
             errors.append(str(exc))
+    if active_bank_accounts is None and validated_capture_selection is not None:
+        active_bank_accounts = list(validated_capture_selection.active_bank_accounts)
     if operation:
         if csv_statement_duplicate_count(line.statement_line_id) > 1:
             errors.append(

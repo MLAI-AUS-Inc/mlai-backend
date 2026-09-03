@@ -4752,7 +4752,7 @@ class ReconciliationWorkflowApiTests(APITestCase):
         run = ContentFactoryRun.objects.get(run_id=response.data["run_id"])
         self.assertEqual(
             run.run_request["requested_statement_line_ids"],
-            [rule_line.statement_line_id, unresolved_line.statement_line_id],
+            [unresolved_line.statement_line_id, rule_line.statement_line_id],
         )
         self.assertEqual(
             run.run_request["statement_line_ids"],
