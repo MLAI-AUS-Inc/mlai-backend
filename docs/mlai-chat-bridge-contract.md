@@ -149,14 +149,15 @@ token is stored.
 
 Each linked member receives an independent, owner-controlled mirror of direct
 and supported multi-person Slack DMs with activity in the configured history
-window. Discovery sorts Slack activity metadata newest-first and skips a
-conversation only when Slack explicitly reports that its latest activity is
-older than the cutoff. Missing or ambiguous activity metadata, and any channel
-with a staged live callback, fail open to the bounded history scan. The other
-participants are represented by deterministic shadow keys, so linking never
-gives an unconsenting participant access to imported history. Participant
-profiles are bulk-preloaded with `users.list` and fall back to `users.info` for
-any IDs Slack omitted.
+window. Discovery sorts explicit Slack latest-message metadata newest-first and
+skips a conversation only when that marker proves its latest activity is older
+than the cutoff. The channel-metadata `updated` field is not treated as message
+activity. Missing or ambiguous activity metadata, and any channel with a staged
+live callback, fail open to the bounded history scan. The other participants
+are represented by deterministic shadow keys, so linking never gives an
+unconsenting participant access to imported history. Participant profiles are
+bulk-preloaded with `users.list` and fall back to `users.info` for any IDs Slack
+omitted.
 
 History requests fetch up to 1,000 messages, run at the 50-requests/minute
 baseline, persist the oldest timestamp boundary, and honor Slack's
@@ -178,7 +179,11 @@ rejected adapter delivery stays fenced until explicit backfill or renewed
 consent. History is always limited to the most recent 30 days. The legacy
 `backfill_all` action is accepted as a compatibility alias for the same bounded
 rescan, and every Slack history request includes an `oldest` parameter. The
-idempotency key prevents duplicate deliveries.
+idempotency key prevents duplicate deliveries. A queued or failed backfill row
+that ages past the rolling cutoff is completed as a content-free tombstone
+instead of being sent or retried. Periodic source reconciliation rehydrates any
+current row that an older importer incorrectly classified as outside the
+window.
 
 The backend also starts an hourly bounded reconciliation and immediately starts
 one after Slack reports `app_rate_limited`. A message that disappeared from an

@@ -756,6 +756,8 @@ class SlackDmMirrorApiTests(APITestCase):
 
 class SlackDmMirrorOwnerTests(APITestCase):
     def setUp(self):
+        slack_dm_mirror._history_expiration_cursor = 0
+        slack_dm_mirror._history_expiration_scan_available_at = 0.0
         self.first = get_user_model().objects.create_user(email="first@example.com")
         self.second = get_user_model().objects.create_user(email="second@example.com")
         for user, public_key in ((self.first, "1" * 64), (self.second, "2" * 64)):
@@ -1132,6 +1134,11 @@ class SlackDmMirrorOwnerTests(APITestCase):
                 {"id": "DRECENT2", "user": "URECENT2", "latest": f"{now - 20}.1"},
                 {"id": "DRECENT1", "user": "URECENT1", "latest": f"{now - 10}.1"},
                 {"id": "DRECENT3", "user": "URECENT3", "latest": f"{now - 30}.1"},
+                {
+                    "id": "DAMBIGUOUS",
+                    "user": "UAMBIGUOUS",
+                    "updated": (now - 31 * 86_400) * 1000,
+                },
             ],
             "response_metadata": {"next_cursor": ""},
         }
@@ -1141,7 +1148,13 @@ class SlackDmMirrorOwnerTests(APITestCase):
                     "id": user_id,
                     "profile": {"display_name": user_id.title()},
                 }
-                for user_id in ("UONE", "URECENT1", "URECENT2", "URECENT3")
+                for user_id in (
+                    "UONE",
+                    "UAMBIGUOUS",
+                    "URECENT1",
+                    "URECENT2",
+                    "URECENT3",
+                )
             ],
             "response_metadata": {"next_cursor": ""},
         }
@@ -1152,14 +1165,14 @@ class SlackDmMirrorOwnerTests(APITestCase):
 
         grant = activate_connection(self.first_connection)
 
-        self.assertEqual(discover_conversations(grant), 3)
+        self.assertEqual(discover_conversations(grant), 4)
         self.assertEqual(
             list(
                 SlackDmMirrorConversation.objects.filter(grant=grant)
                 .order_by("id")
                 .values_list("slack_conversation_id", flat=True)
             ),
-            ["DRECENT1", "DRECENT2", "DRECENT3"],
+            ["DRECENT1", "DRECENT2", "DRECENT3", "DAMBIGUOUS"],
         )
         client.users_list.assert_called_once_with(limit=200, cursor="")
         client.users_info.assert_not_called()
@@ -1216,6 +1229,109 @@ class SlackDmMirrorOwnerTests(APITestCase):
             [CommunityBridgeDeliveryStatus.COMPLETED] * 3,
         )
         self.assertEqual(status_payload(self.first)["backfill"]["imported_messages"], 3)
+
+    @patch(
+        "integrations.services.slack_dm_mirror.BuzzBridgeClient.deliver_private"
+    )
+    def test_ready_queue_expires_aged_out_history_and_continues(self, deliver_private):
+        _, conversation = self._live_conversation()
+        now_seconds = int(timezone.now().timestamp())
+        old = conversation.deliveries.create(
+            source_platform=CommunityBridgePlatform.SLACK,
+            source_message_id=f"{now_seconds - 31 * 86_400}.000100",
+            source_author_id="UTWO",
+            operation=CommunityBridgeDeliveryType.CREATE,
+            encrypted_text="outside the retained window",
+            metadata={
+                "backfill": True,
+                "event_ts": f"{now_seconds - 31 * 86_400}.000100",
+                "participant_hash": conversation.participant_hash,
+            },
+            available_at=timezone.now() - timedelta(seconds=1),
+        )
+        dead = conversation.deliveries.create(
+            source_platform=CommunityBridgePlatform.SLACK,
+            source_message_id=f"{now_seconds - 32 * 86_400}.000100",
+            source_author_id="UTWO",
+            operation=CommunityBridgeDeliveryType.CREATE,
+            encrypted_text="dead and outside the retained window",
+            metadata={
+                "backfill": True,
+                "event_ts": f"{now_seconds - 32 * 86_400}.000100",
+                "participant_hash": conversation.participant_hash,
+            },
+            status=CommunityBridgeDeliveryStatus.DEAD,
+            available_at=timezone.now() - timedelta(seconds=1),
+        )
+        current = conversation.deliveries.create(
+            source_platform=CommunityBridgePlatform.SLACK,
+            source_message_id=f"{now_seconds - 60}.000100",
+            source_author_id="UTWO",
+            operation=CommunityBridgeDeliveryType.CREATE,
+            encrypted_text="inside the retained window",
+            metadata={
+                "backfill": True,
+                "event_ts": f"{now_seconds - 60}.000100",
+                "participant_hash": conversation.participant_hash,
+            },
+            available_at=timezone.now(),
+        )
+        deliver_private.return_value = {
+            "message_id": "a" * 64,
+            "parent_message_id": "",
+        }
+
+        self.assertEqual(process_ready_deliveries(limit=1), 1)
+
+        old.refresh_from_db()
+        dead.refresh_from_db()
+        current.refresh_from_db()
+        self.assertEqual(old.status, CommunityBridgeDeliveryStatus.COMPLETED)
+        self.assertEqual(old.encrypted_text, "")
+        self.assertTrue(old.metadata["history_outside_window"])
+        self.assertEqual(dead.status, CommunityBridgeDeliveryStatus.COMPLETED)
+        self.assertEqual(dead.encrypted_text, "")
+        self.assertTrue(dead.metadata["history_outside_window"])
+        self.assertEqual(current.status, CommunityBridgeDeliveryStatus.COMPLETED)
+        deliver_private.assert_called_once()
+        self.assertEqual(status_payload(self.first)["backfill"]["queued_messages"], 0)
+        self.assertEqual(status_payload(self.first)["backfill"]["imported_messages"], 1)
+
+    def test_history_rescan_rehydrates_a_row_misclassified_outside_window(self):
+        _, conversation = self._live_conversation()
+        now_seconds = int(timezone.now().timestamp())
+        source_ts = f"{now_seconds - 60}.000100"
+        delivery = conversation.deliveries.create(
+            source_platform=CommunityBridgePlatform.SLACK,
+            source_message_id=source_ts,
+            source_author_id="UTWO",
+            operation=CommunityBridgeDeliveryType.CREATE,
+            encrypted_text="",
+            metadata={"backfill": True, "history_outside_window": True},
+            status=CommunityBridgeDeliveryStatus.COMPLETED,
+            completed_at=timezone.now(),
+            available_at=timezone.now(),
+        )
+
+        with transaction.atomic():
+            slack_dm_mirror._upsert_history_delivery(
+                conversation,
+                source_message_id=source_ts,
+                author_id="UTWO",
+                operation=CommunityBridgeDeliveryType.CREATE,
+                text="restored from Slack",
+                metadata={
+                    "backfill": True,
+                    "event_ts": source_ts,
+                    "participant_hash": conversation.participant_hash,
+                },
+                held_until=timezone.now(),
+            )
+
+        delivery.refresh_from_db()
+        self.assertEqual(delivery.status, CommunityBridgeDeliveryStatus.PENDING)
+        self.assertEqual(delivery.encrypted_text, "restored from Slack")
+        self.assertNotIn("history_outside_window", delivery.metadata)
 
     @patch(
         "integrations.services.slack_dm_mirror.BuzzBridgeClient.provision_private_conversation"
