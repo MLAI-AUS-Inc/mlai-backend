@@ -5,6 +5,8 @@ from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import models, transaction
 from django.db.models import Q
+from django.db.models.signals import pre_delete
+from django.dispatch import receiver
 from django.utils import timezone
 
 
@@ -875,12 +877,23 @@ class CoworkingBookingOperation(models.Model):
     request_fingerprint = models.CharField(max_length=64)
     response_payload = models.JSONField()
     http_status = models.PositiveSmallIntegerField(default=200)
+    subjects = models.ManyToManyField(
+        settings.AUTH_USER_MODEL,
+        related_name='coworking_booking_operations',
+        blank=True,
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         verbose_name = "Coworking booking operation"
         verbose_name_plural = "Coworking booking operations"
         ordering = ['-created_at']
+
+
+@receiver(pre_delete, sender=settings.AUTH_USER_MODEL)
+def delete_coworking_operation_receipts_for_user(sender, instance, **kwargs):
+    """Erase replay payloads when any person represented by them is deleted."""
+    CoworkingBookingOperation.objects.filter(subjects=instance).delete()
 
 
 class MeetingRoom(models.Model):

@@ -151,7 +151,7 @@ class MergePairTests(TestCase):
         )
         config = OrganizationContentConfig.objects.create(
             organization=organization,
-            connected_slack_user_id=f"  {actor_id}  ",
+            connected_slack_user_id=f"\t{actor_id}\n",
         )
         job = ContentFactoryJob.objects.create(
             job_id="source-identity-job",
@@ -166,7 +166,7 @@ class MergePairTests(TestCase):
         self.assertTrue(User.objects.filter(pk=self.source.pk).exists())
         self.assertEqual(
             OrganizationContentConfig.objects.get(pk=config.pk).connected_slack_user_id,
-            f"  {actor_id}  ",
+            f"\t{actor_id}\n",
         )
         self.assertEqual(
             ContentFactoryJob.objects.get(pk=job.pk).request_meta["nested"][

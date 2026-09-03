@@ -3,6 +3,7 @@ import hmac
 import json
 import re
 import time
+from copy import deepcopy
 
 from django.core.exceptions import ValidationError
 from rest_framework import viewsets, status, mixins
@@ -113,8 +114,44 @@ def _coworking_operation_receipt(*, raw_id, kind: str, request_fields: dict):
     return operation_id, fingerprint, receipt
 
 
+def _coworking_receipt_payload(response_data, *, kind):
+    """Keep the durable result needed by Roo without serializer user PII."""
+    payload = deepcopy(dict(response_data))
+    if kind == 'single':
+        payload.pop('user', None)
+        payload.pop('user_email', None)
+    else:
+        for row in payload.get('results', []):
+            booking = row.get('booking') if isinstance(row, dict) else None
+            if isinstance(booking, dict):
+                booking.pop('user', None)
+                booking.pop('user_email', None)
+    return payload
+
+
 def _coworking_replay_response(receipt):
-    payload = dict(receipt.response_payload)
+    payload = deepcopy(dict(receipt.response_payload))
+    if receipt.kind == 'single':
+        current_status = CoworkingBooking.objects.filter(
+            pk=payload.get('id')
+        ).values_list('status', flat=True).first()
+        payload['operation_booking_current_status'] = current_status or 'deleted'
+    else:
+        booking_rows = [
+            row.get('booking')
+            for row in payload.get('results', [])
+            if isinstance(row, dict) and isinstance(row.get('booking'), dict)
+        ]
+        current_statuses = {
+            str(booking_id): booking_status
+            for booking_id, booking_status in CoworkingBooking.objects.filter(
+                pk__in=[booking.get('id') for booking in booking_rows]
+            ).values_list('id', 'status')
+        }
+        for booking in booking_rows:
+            booking['operation_booking_current_status'] = current_statuses.get(
+                str(booking.get('id')), 'deleted'
+            )
     payload['idempotent'] = True
     payload['operation_replayed'] = True
     return Response(payload, status=status.HTTP_200_OK)
@@ -1781,11 +1818,15 @@ class CoworkingViewSet(viewsets.ViewSet):
                             defaults={
                                 'kind': 'single',
                                 'request_fingerprint': operation_fingerprint,
-                                'response_payload': response_data,
+                                'response_payload': _coworking_receipt_payload(
+                                    response_data, kind='single'
+                                ),
                                 'http_status': response_status,
                             },
                         )
                     )
+                    if receipt_created:
+                        receipt.subjects.set([user])
                     if not receipt_created:
                         if (
                             receipt.kind != 'single'
@@ -1979,11 +2020,21 @@ class CoworkingViewSet(viewsets.ViewSet):
                             defaults={
                                 'kind': 'batch',
                                 'request_fingerprint': operation_fingerprint,
-                                'response_payload': response_data,
+                                'response_payload': _coworking_receipt_payload(
+                                    response_data, kind='batch'
+                                ),
                                 'http_status': response_status,
                             },
                         )
                     )
+                    if receipt_created:
+                        receipt_subjects = list(target_users)
+                        admin_subject = User.objects.filter(
+                            slack_id=admin_slack_user_id
+                        ).first()
+                        if admin_subject is not None:
+                            receipt_subjects.append(admin_subject)
+                        receipt.subjects.set(receipt_subjects)
                     if not receipt_created:
                         if (
                             receipt.kind != 'batch'

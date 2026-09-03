@@ -17,6 +17,7 @@ from rest_framework.test import APIClient, APITestCase
 from .models import (
     ChannelFirstPost,
     CoworkingBooking,
+    CoworkingBookingOperation,
     CoworkingDayCapacity,
     Ledger,
     PointsAccount,
@@ -2117,9 +2118,16 @@ class CoworkingViewSetTests(APITestCase):
         self.assertEqual(replay.status_code, status.HTTP_200_OK)
         self.assertEqual(replay.data['id'], first.data['id'])
         self.assertEqual(replay.data['status'], 'booked')
+        self.assertEqual(
+            replay.data['operation_booking_current_status'], 'cancelled'
+        )
         self.assertTrue(replay.data['operation_replayed'])
         self.assertEqual(CoworkingBooking.objects.count(), 1)
         self.assertEqual(PointsAccount.objects.get(user=self.user).balance, 10)
+        receipt = CoworkingBookingOperation.objects.get(pk=operation_id)
+        self.assertNotIn('user', receipt.response_payload)
+        self.assertNotIn('user_email', receipt.response_payload)
+        self.assertEqual(list(receipt.subjects.all()), [self.user])
 
         conflict = self.client.post(
             self.url,
@@ -2130,6 +2138,11 @@ class CoworkingViewSetTests(APITestCase):
             format='json',
         )
         self.assertEqual(conflict.status_code, status.HTTP_409_CONFLICT)
+
+        self.user.delete()
+        self.assertFalse(
+            CoworkingBookingOperation.objects.filter(pk=operation_id).exists()
+        )
 
     @patch('core.permissions.HasRooApiKey.has_permission', return_value=True)
     @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
@@ -2628,8 +2641,21 @@ class CoworkingViewSetTests(APITestCase):
         self.assertEqual(replay.status_code, status.HTTP_200_OK)
         self.assertTrue(replay.data['operation_replayed'])
         self.assertEqual(replay.data['results'][0]['booking']['id'], str(booking.id))
+        self.assertEqual(
+            replay.data['results'][0]['booking'][
+                'operation_booking_current_status'
+            ],
+            'cancelled',
+        )
         self.assertEqual(CoworkingBooking.objects.count(), 1)
         self.assertEqual(PointsAccount.objects.get(user=target).balance, 10)
+        receipt = CoworkingBookingOperation.objects.get(pk=request_data['operation_id'])
+        stored_booking = receipt.response_payload['results'][0]['booking']
+        self.assertNotIn('user', stored_booking)
+        self.assertNotIn('user_email', stored_booking)
+        self.assertEqual(
+            set(receipt.subjects.all()), {target, self.admin_user}
+        )
 
     @patch('core.permissions.HasStrictRooApiKey.has_permission', return_value=True)
     def test_batch_book_treats_existing_booking_as_idempotent(self, mock_permission):

@@ -1,7 +1,6 @@
 import logging
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction, IntegrityError
-from django.db.models.functions import Trim
 from core.models import User
 from core.actor_ids import actor_ids_for_user
 from core.slack_founder_links import (
@@ -19,6 +18,16 @@ logger = logging.getLogger(__name__)
 
 class Command(BaseCommand):
     help = 'Clean up duplicate users by merging Slack users into Email users'
+
+    @staticmethod
+    def _scalar_model_references_actor(model, field, actor_ids):
+        """Match runtime actor resolution, whose Python strip handles all whitespace."""
+        return any(
+            str(value or '').strip() in actor_ids
+            for value in model.objects.values_list(field, flat=True).iterator(
+                chunk_size=500
+            )
+        )
 
     def add_arguments(self, parser):
         parser.add_argument(
@@ -215,22 +224,22 @@ class Command(BaseCommand):
         references = []
         if GitHubInstallation.objects.filter(user=source).exists():
             references.append("GitHub installations")
-        if UserIntegration.objects.annotate(
-            _clean_actor_id=Trim('slack_user_id')
-        ).filter(_clean_actor_id__in=actor_ids).exists():
+        if self._scalar_model_references_actor(
+            UserIntegration, 'slack_user_id', actor_ids
+        ):
             references.append("integration credentials")
-        if OrganizationContentConfig.objects.annotate(
-            _clean_actor_id=Trim('connected_slack_user_id')
-        ).filter(_clean_actor_id__in=actor_ids).exists():
+        if self._scalar_model_references_actor(
+            OrganizationContentConfig, 'connected_slack_user_id', actor_ids
+        ):
             references.append("Content Factory organization ownership")
-        if ScheduledDiscoveryDispatch.objects.annotate(
-            _clean_actor_id=Trim('slack_user_id')
-        ).filter(_clean_actor_id__in=actor_ids).exists():
+        if self._scalar_model_references_actor(
+            ScheduledDiscoveryDispatch, 'slack_user_id', actor_ids
+        ):
             references.append("scheduled discovery dispatches")
 
-        job_reference = ContentFactoryJob.objects.annotate(
-            _clean_actor_id=Trim('slack_user_id')
-        ).filter(_clean_actor_id__in=actor_ids).exists()
+        job_reference = self._scalar_model_references_actor(
+            ContentFactoryJob, 'slack_user_id', actor_ids
+        )
         if not job_reference:
             job_reference = any(
                 self._payload_references_actor(payload, actor_ids)
@@ -241,9 +250,9 @@ class Command(BaseCommand):
         if job_reference:
             references.append("Content Factory jobs")
 
-        run_reference = ContentFactoryRun.objects.annotate(
-            _clean_actor_id=Trim('slack_user_id')
-        ).filter(_clean_actor_id__in=actor_ids).exists()
+        run_reference = self._scalar_model_references_actor(
+            ContentFactoryRun, 'slack_user_id', actor_ids
+        )
         if not run_reference:
             run_reference = any(
                 self._payload_references_actor(payload, actor_ids)
