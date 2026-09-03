@@ -1419,8 +1419,19 @@ class CoworkingService:
         # update for the booking's month)
         cost = CoworkingService.get_coworking_cost(user=user, booking_date=booking_date)
         
-        # Create idempotency key
-        idempotency_key = f"coworking_book:{user.id}:{booking_date}"
+        # A booking UUID identifies one booking lifecycle. Repeated requests
+        # while that lifecycle is active return ``existing`` above, but a new
+        # lifecycle after cancellation must create a fresh debit. A user/date
+        # key would incorrectly reuse the first debit while each later booking
+        # could still receive its own refund.
+        booking = CoworkingBooking(
+            user=user,
+            date=booking_date,
+            status='booked',
+            points_cost=cost,
+            slack_channel_id=slack_channel_id,
+        )
+        idempotency_key = f"coworking_book:{booking.id}"
         
         # Spend points (this also validates balance)
         ledger, _ = PointsService.spend(
@@ -1431,18 +1442,13 @@ class CoworkingService:
             created_by_slack_id=created_by_slack_id,
             idempotency_key=idempotency_key,
             reference_type='COWORKING_BOOKING',
-            reference_id=str(booking_date),
+            reference_id=str(booking.id),
         )
         
-        # Create booking
-        booking = CoworkingBooking.objects.create(
-            user=user,
-            date=booking_date,
-            status='booked',
-            points_cost=cost,
-            ledger_entry=ledger,
-            slack_channel_id=slack_channel_id,
-        )
+        # Commit the lifecycle only after its debit is durable. The surrounding
+        # transaction rolls both records back together on any failure.
+        booking.ledger_entry = ledger
+        booking.save(force_insert=True)
         
         return booking, True
 

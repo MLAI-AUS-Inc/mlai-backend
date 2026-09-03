@@ -2,6 +2,7 @@ import logging
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction, IntegrityError
 from core.models import User
+from core.actor_ids import actor_ids_for_user
 from core.slack_founder_links import (
     invalidate_unused_slack_founder_link_requests,
     user_participates_in_slack_founder_link,
@@ -166,6 +167,96 @@ class Command(BaseCommand):
             if count:
                 self.stdout.write(f"  {rel.related_model._meta.label}: {count}")
 
+    @staticmethod
+    def _payload_references_actor(value, actor_ids, *, actor_field=False):
+        """Return whether identity-bearing JSON refers to a source actor."""
+        identity_keys = {
+            "actor_id",
+            "connected_slack_user_id",
+            "requested_by_slack_user_id",
+            "slack_user_id",
+        }
+        if actor_field and isinstance(value, str):
+            return value.strip() in actor_ids
+        if isinstance(value, list):
+            return any(
+                Command._payload_references_actor(item, actor_ids)
+                for item in value
+            )
+        if isinstance(value, dict):
+            return any(
+                Command._payload_references_actor(
+                    item,
+                    actor_ids,
+                    actor_field=key in identity_keys,
+                )
+                for key, item in value.items()
+            )
+        return False
+
+    def _assert_no_external_identity_state(self, source):
+        """Fail closed instead of deleting or orphaning external authority.
+
+        Content Factory ownership is partly relational and partly stored as
+        actor-id strings. Safely combining credential bundles and historical
+        ownership requires a dedicated, operator-reviewed reconciliation; a
+        generic duplicate-user cleanup must not guess which grant wins.
+        """
+        from content_factory.models import (
+            ContentFactoryJob,
+            OrganizationContentConfig,
+            ScheduledDiscoveryDispatch,
+        )
+        from integrations.models import GitHubInstallation, UserIntegration
+        from workflow_runs.models import ContentFactoryRun
+
+        actor_ids = set(actor_ids_for_user(source))
+        references = []
+        if GitHubInstallation.objects.filter(user=source).exists():
+            references.append("GitHub installations")
+        if UserIntegration.objects.filter(pk__in=actor_ids).exists():
+            references.append("integration credentials")
+        if OrganizationContentConfig.objects.filter(
+            connected_slack_user_id__in=actor_ids
+        ).exists():
+            references.append("Content Factory organization ownership")
+        if ScheduledDiscoveryDispatch.objects.filter(
+            slack_user_id__in=actor_ids
+        ).exists():
+            references.append("scheduled discovery dispatches")
+
+        job_reference = ContentFactoryJob.objects.filter(
+            slack_user_id__in=actor_ids
+        ).exists()
+        if not job_reference:
+            job_reference = any(
+                self._payload_references_actor(payload, actor_ids)
+                for payload in ContentFactoryJob.objects.values_list(
+                    "request_meta", flat=True
+                ).iterator(chunk_size=500)
+            )
+        if job_reference:
+            references.append("Content Factory jobs")
+
+        run_reference = ContentFactoryRun.objects.filter(
+            slack_user_id__in=actor_ids
+        ).exists()
+        if not run_reference:
+            run_reference = any(
+                self._payload_references_actor(payload, actor_ids)
+                for payload in ContentFactoryRun.objects.values_list(
+                    "run_request", flat=True
+                ).iterator(chunk_size=500)
+            )
+        if run_reference:
+            references.append("Content Factory runs")
+
+        if references:
+            raise CommandError(
+                "Cannot merge an account with external identity state "
+                f"({', '.join(references)}); manual support is required."
+            )
+
     def merge_users(self, source, target):
         """
         Merges source (the duplicates/slack-only user) INTO target (the email user).
@@ -190,6 +281,7 @@ class Command(BaseCommand):
                 "Cannot merge an account with an explicit Roo-Founder Tools link; "
                 "manual support is required."
             )
+        self._assert_no_external_identity_state(source)
         invalidate_unused_slack_founder_link_requests(source, target)
 
         # 1. Update Basic Info on Target
