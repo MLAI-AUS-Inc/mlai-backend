@@ -2132,6 +2132,7 @@ class CoworkingViewSet(viewsets.ViewSet):
     def my_bookings(self, request):
         """Get user's bookings."""
         slack_user_id = request.query_params.get('slack_user_id')
+        booking_id = request.query_params.get('booking_id')
         if not slack_user_id:
             return Response({'error': 'slack_user_id required'}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -2139,7 +2140,18 @@ class CoworkingViewSet(viewsets.ViewSet):
         if not user:
             return Response({'error': 'User not found'}, status=status.HTTP_404_NOT_FOUND)
 
-        bookings = CoworkingBooking.objects.filter(user=user).order_by('-date')[:20]
+        bookings = CoworkingBooking.objects.filter(user=user)
+        if booking_id:
+            try:
+                booking_uuid = UUID(str(booking_id).strip())
+            except (ValueError, TypeError, AttributeError):
+                return Response(
+                    {'error': 'booking_id must be a valid UUID'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            bookings = bookings.filter(pk=booking_uuid)
+        else:
+            bookings = bookings.order_by('-date')[:20]
         return Response(CoworkingBookingSerializer(bookings, many=True).data)
 
     @action(detail=False, methods=['post'], url_path='set-capacity')

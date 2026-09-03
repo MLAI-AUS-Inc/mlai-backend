@@ -2110,6 +2110,16 @@ class CoworkingViewSetTests(APITestCase):
         self.assertEqual(first.status_code, status.HTTP_201_CREATED)
         booking = CoworkingBooking.objects.get(pk=first.data['id'])
         CoworkingService.cancel(str(booking.id), self.user.slack_id)
+        current = self.client.get(
+            reverse('coworking-my-bookings'),
+            {
+                'slack_user_id': self.user.slack_id,
+                'booking_id': str(booking.id),
+            },
+        )
+        self.assertEqual(current.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(current.data), 1)
+        self.assertEqual(current.data[0]['status'], 'cancelled')
         self.user.is_active = False
         self.user.save(update_fields=['is_active'])
 
