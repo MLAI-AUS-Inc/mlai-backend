@@ -212,8 +212,14 @@ class CoworkingBookingAdmin(admin.ModelAdmin):
     list_display = ('id', 'user', 'date', 'status', 'points_cost', 'created_at', 'cancelled_at')
     list_filter = ('status', 'date', 'created_at')
     search_fields = ('user__email', 'user__slack_id')
-    readonly_fields = ('id', 'created_at', 'ledger_entry', 'refund_ledger_entry')
+    readonly_fields = [field.name for field in CoworkingBooking._meta.fields]
     ordering = ('-date',)
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
 
 
 @admin.register(MeetingRoom)

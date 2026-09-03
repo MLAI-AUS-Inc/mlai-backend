@@ -16,7 +16,7 @@ from .models import (
     CoworkingBooking, CoworkingDayCapacity, RewardsCatalog, RewardRedemption,
     PointsPurchase,
 )
-from .admin import LedgerAdmin, PointsAccountAdmin
+from .admin import CoworkingBookingAdmin, LedgerAdmin, PointsAccountAdmin
 from .services import PointsService, PointsPurchaseService, CoworkingService, TaskService, RewardsService, StartupUpdateRewardService
 from .permissions import (
     can_generate_coworking_reports,
@@ -527,6 +527,18 @@ class LedgerAdminSafetyTests(TestCase):
         model_admin = LedgerAdmin(Ledger, AdminSite())
         readonly = set(model_admin.get_readonly_fields(request=None))
         self.assertEqual(readonly, {field.name for field in Ledger._meta.fields})
+        self.assertFalse(model_admin.has_add_permission(request=None))
+        self.assertFalse(model_admin.has_delete_permission(request=None))
+
+
+class CoworkingBookingAdminSafetyTests(TestCase):
+    def test_every_transaction_field_is_read_only(self):
+        model_admin = CoworkingBookingAdmin(CoworkingBooking, AdminSite())
+        readonly = set(model_admin.get_readonly_fields(request=None))
+        self.assertEqual(
+            readonly,
+            {field.name for field in CoworkingBooking._meta.fields},
+        )
         self.assertFalse(model_admin.has_add_permission(request=None))
         self.assertFalse(model_admin.has_delete_permission(request=None))
 
