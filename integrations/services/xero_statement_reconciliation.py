@@ -78,6 +78,7 @@ STATEMENT_CAPTURE_REPORT_FORMATS = {
     STATEMENT_CAPTURE_SOURCE_CSV: {
         "xero-statement-lines-compact-v1",
         "xero-uncoded-lines-grouped-v1",
+        "uncoded_statement_lines",
     },
     STATEMENT_CAPTURE_SOURCE_BROWSER: {"xero_bank_reconciliation_dom"},
 }
@@ -1270,6 +1271,19 @@ def select_current_statement_capture(organization) -> StatementCaptureSelection:
             scans=(latest,),
             max_age_minutes=max_age_minutes,
             blockers=(f"The latest all-account capture metadata is invalid: {exc}",),
+        )
+    if (
+        latest.status != XeroStatementScan.STATUS_COMPLETE
+        or latest.expected_count is None
+        or latest.expected_count != latest.observed_count
+        or latest_metadata["derived_complete"] is not True
+    ):
+        return StatementCaptureSelection(
+            capture_id=latest_metadata["capture_id"],
+            capture_source=latest_metadata["capture_source"],
+            scans=(latest,),
+            max_age_minutes=max_age_minutes,
+            blockers=("The latest Xero statement scan is incomplete.",),
         )
     capture_id = latest_metadata["capture_id"]
     capture_source = latest_metadata["capture_source"]

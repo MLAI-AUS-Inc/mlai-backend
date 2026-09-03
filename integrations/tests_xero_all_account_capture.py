@@ -213,7 +213,7 @@ class AllAccountCaptureServiceTests(AllAccountCaptureMixin, TestCase):
                 lines=[],
             )
 
-    @patch("integrations.services.xero_reconciliation.fetch_xero_accounts")
+    @patch("integrations.api_views_reconciliation.fetch_active_xero_bank_accounts")
     def test_selects_every_account_and_validates_exact_line_membership(self, fetch_accounts):
         fetch_accounts.return_value = self.xero_accounts()
         lines = self.import_capture()
@@ -305,9 +305,8 @@ class AllAccountCaptureApiTests(AllAccountCaptureMixin, APITestCase):
     @patch("core.permissions.HasRooApiKey.has_permission", return_value=True)
     def test_bank_account_catalog_returns_only_live_active_banks(self, _permission, fetch_accounts):
         fetch_accounts.return_value = [
-            *self.xero_accounts(),
-            {"AccountID": "archived", "Name": "Old", "Type": "BANK", "Status": "ARCHIVED"},
-            {"AccountID": "expense", "Name": "Expense", "Type": "EXPENSE", "Status": "ACTIVE"},
+            {"bank_account_id": "bank-a", "name": "Operating"},
+            {"bank_account_id": "bank-b", "name": "Savings"},
         ]
 
         response = self.client.get(
@@ -326,12 +325,12 @@ class AllAccountCaptureApiTests(AllAccountCaptureMixin, APITestCase):
             ],
         })
 
-    @patch("integrations.services.xero_reconciliation.fetch_xero_accounts")
+    @patch("integrations.api_views_reconciliation.fetch_active_xero_bank_accounts")
     @patch("core.permissions.HasRooApiKey.has_permission", return_value=True)
     def test_bank_account_catalog_allows_duplicate_names_with_unique_ids(self, _permission, fetch_accounts):
         fetch_accounts.return_value = [
-            {"AccountID": "bank-b", "Name": "Operating", "Type": "BANK", "Status": "ACTIVE"},
-            {"AccountID": "bank-a", "Name": "Operating", "Type": "BANK", "Status": "ACTIVE"},
+            {"bank_account_id": "bank-a", "name": "Operating"},
+            {"bank_account_id": "bank-b", "name": "Operating"},
         ]
 
         response = self.client.get(

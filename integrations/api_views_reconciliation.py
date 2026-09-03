@@ -134,6 +134,12 @@ from integrations.services.reconciliation_knowledge import (
 from integrations.services.reconciliation_catalogs import (
     build_reconciliation_catalog_status,
 )
+from integrations.services.reconciliation_bank_accounts import (
+    active_bank_account,
+    fetch_active_xero_bank_accounts,
+)
+
+
 MAX_WINDOW_DAYS = 92
 DEFAULT_WINDOW_DAYS = 30
 
@@ -459,23 +465,38 @@ class ReconciliationBankAccountCatalogView(ReconciliationAdminView):
         _, organization, error = self.context(request)
         if error:
             return error
+        profile = ReconciliationProfile.objects.filter(
+            organization=organization
+        ).select_related("xero_connection").first()
+        if profile is None:
+            profile = ReconciliationProfile(organization=organization)
+        if profile.xero_connection_id is None:
+            connection = resolve_xero_connection(organization)
+            if connection:
+                profile.xero_connection = connection
         try:
-            return Response(active_xero_bank_account_catalog(organization))
-        except StatementCaptureValidationError as exc:
+            accounts = fetch_active_xero_bank_accounts(profile)
+        except ReconciliationValidationError as exc:
             return Response(
                 {"error": str(exc)},
                 status=status.HTTP_409_CONFLICT,
             )
-        except ConnectorOAuthError:
+        connection = profile.xero_connection
+        tenant_id = str(connection.external_account_id or "").strip()
+        organisation_name = str(
+            connection.account_label or organization.name or organization.domain
+        ).strip()
+        if not tenant_id or not organisation_name:
             return Response(
-                {"error": "The selected Xero connection must be reauthorised."},
+                {"error": "The Xero tenant ID and organisation name are required."},
                 status=status.HTTP_409_CONFLICT,
             )
-        except requests.RequestException:
-            return Response(
-                {"error": "Unable to read the active Xero bank-account catalogue."},
-                status=status.HTTP_502_BAD_GATEWAY,
-            )
+        return Response({
+            "schema_version": 1,
+            "tenant_id": tenant_id,
+            "organisation_name": organisation_name,
+            "accounts": accounts,
+        })
 
 
 class ReconciliationReportView(APIView):
@@ -3145,16 +3166,18 @@ class ReconciliationStatementScanView(ReconciliationAdminView):
         capture_metadata = request.data.get("capture_metadata")
         try:
             if isinstance(capture_metadata, dict) and capture_metadata.get("schema_version") == 2:
-                catalog = active_xero_bank_account_catalog(organization)
-                active_accounts = list(catalog["accounts"])
-                selected_account = next(
-                    (
-                        account
-                        for account in active_accounts
-                        if canonical_bank_account_id(account["bank_account_id"])
-                        == canonical_bank_account_id(bank_account_id)
-                    ),
-                    None,
+                profile = ReconciliationProfile.objects.filter(
+                    organization=organization
+                ).select_related("xero_connection").first()
+                if profile is None or profile.xero_connection is None:
+                    raise ValueError(
+                        "A Xero reconciliation profile and connection are required."
+                    )
+                active_accounts = fetch_active_xero_bank_accounts(profile)
+                selected_account = active_bank_account(
+                    profile,
+                    bank_account_id,
+                    accounts=active_accounts,
                 )
                 if selected_account is None:
                     raise ValueError("bank_account_id is not an active Xero BANK account")
@@ -3168,10 +3191,11 @@ class ReconciliationStatementScanView(ReconciliationAdminView):
                     raise ValueError(
                         "all-account capture does not exactly match Xero's active BANK accounts"
                     )
+                connection = profile.xero_connection
                 if canonical_bank_account_id(
                     capture_metadata.get("tenant_id")
                 ) != canonical_bank_account_id(
-                    catalog["tenant_id"]
+                    connection.external_account_id
                 ):
                     raise ValueError("all-account capture belongs to a different Xero tenant")
                 if (

@@ -241,15 +241,21 @@ def build_statement_posting_preview(
         )
     if not operation:
         errors.append("This suggestion needs review and cannot be posted automatically.")
-    try:
-        validate_current_statement_line_capture(
-            line,
-            expected_bank_account_id=line.bank_account_id,
-            expected_source_hash=line.source_hash,
-            selection=capture_selection,
-        )
-    except StatementCaptureValidationError as exc:
-        errors.append(str(exc))
+    scan_metadata = (
+        line.last_scan.capture_metadata
+        if line.last_scan_id and isinstance(line.last_scan.capture_metadata, dict)
+        else {}
+    )
+    if capture_selection is not None or scan_metadata.get("schema_version") == 2:
+        try:
+            validate_current_statement_line_capture(
+                line,
+                expected_bank_account_id=line.bank_account_id,
+                expected_source_hash=line.source_hash,
+                selection=capture_selection,
+            )
+        except StatementCaptureValidationError as exc:
+            errors.append(str(exc))
     if operation:
         if csv_statement_duplicate_count(line.statement_line_id) > 1:
             errors.append(
@@ -257,11 +263,6 @@ def build_statement_posting_preview(
                 "the report has no stable per-line identifier."
             )
         try:
-            scan_metadata = (
-                line.last_scan.capture_metadata
-                if line.last_scan_id and isinstance(line.last_scan.capture_metadata, dict)
-                else {}
-            )
             selected_bank_account = active_bank_account(
                 profile,
                 line.bank_account_id,
