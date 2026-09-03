@@ -1380,6 +1380,15 @@ class CoworkingService:
             ValueError: If date is invalid or no availability
             InsufficientBalanceError: If user doesn't have enough points
         """
+        locked_user = (
+            User.objects.select_for_update()
+            .filter(pk=user.pk, is_active=True)
+            .first()
+        )
+        if locked_user is None:
+            raise ValueError("An active Slack account is required to book coworking")
+        user = locked_user
+
         # Validate date range
         today = timezone.now().date()
         max_advance_days = getattr(settings, 'COWORKING_BOOKING_ADVANCE_DAYS', 30)
@@ -1457,6 +1466,17 @@ class CoworkingService:
 
         if not unique_users:
             raise CoworkingBatchBookingError("At least one target user is required")
+
+        active_users = list(
+            User.objects.select_for_update()
+            .filter(pk__in=[user.pk for user in unique_users], is_active=True)
+            .order_by("pk")
+        )
+        if len(active_users) != len(unique_users):
+            raise CoworkingBatchBookingError(
+                "All coworking attendees must have active Slack accounts"
+            )
+        unique_users = active_users
 
         today = timezone.now().date()
         max_advance_days = getattr(settings, 'COWORKING_BOOKING_ADVANCE_DAYS', 30)

@@ -3153,6 +3153,12 @@ class LinkedCoworkingEligibilityTests(APITestCase):
             ),
             8,
         )
+        with self.assertRaisesRegex(ValueError, "active Slack account"):
+            CoworkingService.book(
+                user=self.slack_user,
+                booking_date=self.booking_date,
+                created_by_slack_id=self.slack_user.slack_id,
+            )
 
         booking = self.client.post(
             reverse("coworking-book"),
