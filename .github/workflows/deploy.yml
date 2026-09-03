@@ -142,6 +142,7 @@ jobs:
         python manage.py test \
           roo.tests_api.TaskViewSetTests \
           roo.tests_api.CoworkingViewSetTests \
+          roo.tests.CoworkingBookingAdminSafetyTests \
           roo.tests_kimi_usage \
           roo.tests_meeting_rooms \
           core.tests.test_auth_contract \
