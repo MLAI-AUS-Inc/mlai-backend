@@ -2108,6 +2108,67 @@ class SlackFounderLinkApiTests(APITestCase):
         self.assertNotIn("slack_id", response.data)
         self.assertNotIn("email", response.data)
 
+    def test_status_treats_link_to_inactive_slack_account_as_disconnected(self):
+        SlackFounderAccountLink.objects.create(
+            slack_user=self.slack_user,
+            founder_user=self.founder_user,
+        )
+        self.slack_user.is_active = False
+        self.slack_user.save(update_fields=["is_active"])
+        self.client.force_authenticate(self.founder_user)
+
+        response = self.client.get(self.status_url)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            response.data,
+            {
+                "status": "not_connected",
+                "connection_type": None,
+                "can_link_separate_account": True,
+                "slack_display_name": None,
+                "verified_at": None,
+            },
+        )
+
+    def test_founder_can_replace_link_to_inactive_slack_account(self):
+        stale_link = SlackFounderAccountLink.objects.create(
+            slack_user=self.slack_user,
+            founder_user=self.founder_user,
+        )
+        self.slack_user.is_active = False
+        self.slack_user.save(update_fields=["is_active"])
+        replacement_user = User.objects.create_user(
+            email="replacement-slack-account@example.com",
+            slack_id="UREPLACEMENT1",
+            first_name="Replacement",
+            last_name="Founder",
+        )
+        start = start_slack_founder_link(replacement_user)
+        self.client.force_authenticate(self.founder_user)
+
+        preview = self.client.post(
+            self.preview_url,
+            {"token": start.raw_token},
+            format="json",
+        )
+        complete = self.client.post(
+            self.complete_url,
+            {"token": start.raw_token},
+            format="json",
+        )
+
+        self.assertEqual(preview.status_code, status.HTTP_200_OK)
+        self.assertEqual(preview.data["status"], "ready")
+        self.assertEqual(complete.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(complete.data, {"status": "linked"})
+        self.assertFalse(
+            SlackFounderAccountLink.objects.filter(pk=stale_link.pk).exists()
+        )
+        replacement_link = SlackFounderAccountLink.objects.get()
+        self.assertEqual(replacement_link.slack_user, replacement_user)
+        self.assertEqual(replacement_link.founder_user, self.founder_user)
+
     def test_status_does_not_offer_relinking_to_explicit_slack_side(self):
         SlackFounderAccountLink.objects.create(
             slack_user=self.slack_user,
@@ -3060,6 +3121,55 @@ class LinkedCoworkingEligibilityTests(APITestCase):
                 booking_date=self.booking_date,
             ),
             8,
+        )
+
+    @patch(
+        "roo.views.SlackService.get_user_profile",
+        return_value={
+            "slack_id": "UCOWLINK12",
+            "email": "roo-points@example.com",
+            "deleted": False,
+            "is_bot": False,
+        },
+    )
+    def test_inactive_slack_account_cannot_book_or_receive_linked_discount(
+        self,
+        _get_user_profile,
+    ):
+        from roo.models import CoworkingBooking, PointsAccount
+        from roo.services import CoworkingService, PointsService
+
+        self.slack_user.is_active = False
+        self.slack_user.save(update_fields=["is_active"])
+        starting_balance = PointsAccount.objects.get(user=self.slack_user).balance
+
+        self.assertIsNone(
+            PointsService.get_user_by_slack_id(self.slack_user.slack_id)
+        )
+        self.assertEqual(
+            CoworkingService.get_coworking_cost(
+                user=self.slack_user,
+                booking_date=self.booking_date,
+            ),
+            8,
+        )
+
+        booking = self.client.post(
+            reverse("coworking-book"),
+            {
+                "slack_user_id": self.slack_user.slack_id,
+                "date": self.booking_date.isoformat(),
+            },
+            format="json",
+            HTTP_X_API_KEY="internal-key",
+        )
+
+        self.assertEqual(booking.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(booking.data["code"], "slack_account_not_linked")
+        self.assertFalse(CoworkingBooking.objects.exists())
+        self.assertEqual(
+            PointsAccount.objects.get(user=self.slack_user).balance,
+            starting_balance,
         )
 
     def test_availability_and_booking_api_use_linked_eligibility(self):

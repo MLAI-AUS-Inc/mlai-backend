@@ -254,7 +254,7 @@ def resolve_existing_user_from_profile(
     with transaction.atomic():
         already_linked = (
             User.objects.select_for_update()
-            .filter(slack_id=requested_slack_id)
+            .filter(slack_id=requested_slack_id, is_active=True)
             .first()
         )
         if already_linked:
@@ -262,7 +262,7 @@ def resolve_existing_user_from_profile(
 
         user = (
             User.objects.select_for_update()
-            .filter(email__iexact=normalized_email)
+            .filter(email__iexact=normalized_email, is_active=True)
             .first()
         )
         if not user:

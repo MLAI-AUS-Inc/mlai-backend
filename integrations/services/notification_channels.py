@@ -488,18 +488,10 @@ def verify_whatsapp_otp(channel: NotificationChannel, code: str) -> Notification
 
 
 def link_slack_channel(*, organization, user, config=None) -> NotificationChannel:
-    user_slack_id = str(getattr(user, "slack_id", "") or "").strip()
-    slack_id = "" if is_internal_actor_id(user_slack_id) else user_slack_id
-    slack_id_source = "user" if slack_id else ""
     profile = None
-    if not slack_id and config is not None:
-        configured_slack_id = str(
-            getattr(config, "connected_slack_user_id", "") or ""
-        ).strip()
-        if not is_internal_actor_id(configured_slack_id):
-            slack_id = configured_slack_id
-            slack_id_source = "config"
-    if not slack_id and user is not None:
+    slack_id = ""
+    slack_id_source = ""
+    if user is not None:
         explicit_link = (
             SlackFounderAccountLink.objects.select_related("slack_user")
             .filter(founder_user=user, slack_user__is_active=True)
@@ -516,6 +508,18 @@ def link_slack_channel(*, organization, user, config=None) -> NotificationChanne
                     getattr(explicit_link.slack_user, "full_name", "") or ""
                 )
             }
+    if not slack_id:
+        user_slack_id = str(getattr(user, "slack_id", "") or "").strip()
+        if user_slack_id and not is_internal_actor_id(user_slack_id):
+            slack_id = user_slack_id
+            slack_id_source = "user"
+    if not slack_id and config is not None:
+        configured_slack_id = str(
+            getattr(config, "connected_slack_user_id", "") or ""
+        ).strip()
+        if not is_internal_actor_id(configured_slack_id):
+            slack_id = configured_slack_id
+            slack_id_source = "config"
     if not slack_id and user is not None and getattr(user, "email", ""):
         profile = SlackService.lookup_user_by_email(user.email)
         slack_id = str((profile or {}).get("slack_id") or "").strip()

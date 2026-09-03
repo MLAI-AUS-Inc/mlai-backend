@@ -1037,7 +1037,7 @@ class LinkSlackView(APIView):
 
         # An existing Slack link is authoritative and idempotent. Never move
         # that Slack identity to a different account based on a later email.
-        user = User.objects.filter(slack_id=slack_id).first()
+        user = User.objects.filter(slack_id=slack_id, is_active=True).first()
         if user:
             return Response(
                 {"user_id": user.id, "linked": True, "already_linked": True},

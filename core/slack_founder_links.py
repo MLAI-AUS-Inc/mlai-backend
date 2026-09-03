@@ -157,7 +157,7 @@ def _link_status(
         )
 
     user_ids = {slack_user.pk, founder_user.pk}
-    links = SlackFounderAccountLink.objects.filter(
+    links = SlackFounderAccountLink.objects.select_related("slack_user").filter(
         Q(slack_user_id__in=user_ids) | Q(founder_user_id__in=user_ids)
     )
     if for_update:
@@ -192,13 +192,23 @@ def _link_status(
     if same_link is not None:
         return "already_linked", same_link
 
-    if existing_links:
-        raise ConflictingSlackFounderLinkError()
-
     # A direct Slack identity is existing verified ownership. Linking a
     # different Slack identity to it would allow two Slack users to claim the
     # same Founder Tools eligibility.
     if founder_user.slack_id and founder_user.slack_id != slack_user.slack_id:
+        raise ConflictingSlackFounderLinkError()
+
+    if existing_links:
+        # An inactive Slack principal no longer has booking or eligibility
+        # authority. A founder who proves possession of a new active Slack
+        # identity may replace that one stale founder-side link atomically.
+        # Other collisions remain fail-closed.
+        if (
+            len(existing_links) == 1
+            and existing_links[0].founder_user_id == founder_user.pk
+            and not existing_links[0].slack_user.is_active
+        ):
+            return "ready", existing_links[0]
         raise ConflictingSlackFounderLinkError()
 
     return "ready", None
@@ -364,6 +374,8 @@ def complete_slack_founder_link(
     )
     created = status == "ready"
     if created:
+        if link is not None:
+            link.delete()
         link = SlackFounderAccountLink.objects.create(
             slack_user=slack_user,
             founder_user=locked_founder_user,
@@ -387,7 +399,13 @@ def complete_slack_founder_link(
 
 
 def founder_tools_explicitly_linked(user: User) -> bool:
-    return SlackFounderAccountLink.objects.filter(slack_user=user).exists()
+    return (
+        bool(user.is_active)
+        and SlackFounderAccountLink.objects.filter(
+            slack_user=user,
+            founder_user__is_active=True,
+        ).exists()
+    )
 
 
 def user_participates_in_slack_founder_link(user: User) -> bool:
@@ -413,6 +431,8 @@ def founder_tools_connection_type(
     *,
     explicitly_linked: bool | None = None,
 ) -> str | None:
+    if not user.is_active:
+        return None
     if explicitly_linked is None:
         explicitly_linked = founder_tools_explicitly_linked(user)
     if explicitly_linked:
@@ -470,7 +490,7 @@ def founder_account_connection_status(founder_user: User) -> dict:
         .filter(founder_user=founder_user)
         .first()
     )
-    if link is not None:
+    if link is not None and link.slack_user.is_active:
         return {
             "status": "connected",
             "connection_type": "explicit",
@@ -509,6 +529,8 @@ def founder_account_connection_status(founder_user: User) -> dict:
 
 def coworking_eligibility_user_ids(user: User) -> set[int]:
     """Return the single Founder Tools identity used for eligibility checks."""
+    if not user.is_active:
+        return set()
     link = (
         SlackFounderAccountLink.objects.select_related("founder_user")
         .filter(slack_user=user)

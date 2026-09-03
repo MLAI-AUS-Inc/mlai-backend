@@ -1801,7 +1801,10 @@ class CoworkingViewSet(viewsets.ViewSet):
 
         users_by_slack_id = {
             user.slack_id: user
-            for user in User.objects.filter(slack_id__in=target_slack_ids)
+            for user in User.objects.filter(
+                slack_id__in=target_slack_ids,
+                is_active=True,
+            )
         }
         missing_target_ids = [
             slack_id for slack_id in target_slack_ids if slack_id not in users_by_slack_id
@@ -1845,7 +1848,9 @@ class CoworkingViewSet(viewsets.ViewSet):
             SlackFounderAccountLink.objects.filter(
                 slack_user_id__in=[
                     booking.user_id for booking, _created in booking_results
-                ]
+                ],
+                slack_user__is_active=True,
+                founder_user__is_active=True,
             ).values_list('slack_user_id', flat=True)
         )
         results = []

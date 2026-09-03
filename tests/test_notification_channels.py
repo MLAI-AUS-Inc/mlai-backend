@@ -439,7 +439,7 @@ class SlackLinkTests(TestCase):
     @patch(
         "integrations.services.notification_channels.SlackService.lookup_user_by_email"
     )
-    def test_explicit_founder_link_does_not_gain_a_second_direct_identity(
+    def test_explicit_founder_link_routes_to_linked_slack_account_without_reassigning_identity(
         self,
         mock_lookup,
         mock_dm,
@@ -461,11 +461,17 @@ class SlackLinkTests(TestCase):
             config=self.config,
         )
 
-        self.assertEqual(channel.route_id, "UNOTIFY123")
+        self.assertEqual(channel.route_id, "UROOACCOUNT")
         self.user.refresh_from_db()
+        self.config.refresh_from_db()
         self.assertIsNone(self.user.slack_id)
+        self.assertEqual(self.config.connected_slack_user_id, "UNOTIFY123")
         mock_lookup.assert_not_called()
-        mock_dm.assert_called_once()
+        mock_dm.assert_called_once_with(
+            "UROOACCOUNT",
+            "You're set up to receive daily article topic suggestions here. "
+            "You can manage notification channels from your marketing dashboard.",
+        )
 
     @patch(
         "integrations.services.notification_channels.SlackService.send_dm",

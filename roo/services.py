@@ -667,7 +667,7 @@ class PointsService:
             User instance or None if not found
         """
         try:
-            return User.objects.get(slack_id=slack_id)
+            return User.objects.get(slack_id=slack_id, is_active=True)
         except User.DoesNotExist:
             return None
     
