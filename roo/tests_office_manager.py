@@ -4244,14 +4244,7 @@ class OfficeManagerClaimApiTests(APITestCase):
             1,
         )
 
-    def test_date_only_cancel_cannot_target_a_newer_rebooking(self):
-        CoworkingBooking.objects.create(
-            user=self.user,
-            date=self.now.date(),
-            status="cancelled",
-            cancelled_at=self.now,
-            points_cost=0,
-        )
+    def test_date_only_cancel_is_rejected_before_booking_lookup(self):
         current = CoworkingBooking.objects.create(
             user=self.user,
             date=self.now.date(),
@@ -4269,7 +4262,7 @@ class OfficeManagerClaimApiTests(APITestCase):
             HTTP_X_API_KEY="office-manager-test-key",
         )
 
-        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(response.data["code"], "booking_identity_required")
         current.refresh_from_db()
         self.assertEqual(current.status, "booked")
@@ -4402,6 +4395,64 @@ class OfficeManagerMigrationAuditInvariantTests(TestCase):
         )
 
         self.assertEqual(_office_manager_hardening_schema_issues(), [])
+
+    def test_audit_rejects_unsuperseded_attempt_from_reopened_generation(self):
+        user = User.objects.create_user(
+            email="stale-attempt-audit@example.com",
+            slack_id="USTALEATTEMPTAUDIT",
+        )
+        booking_date = melbourne_at(2026, 9, 7, 9).date()
+        day = OfficeManagerDay.objects.create(
+            date=booking_date,
+            status="open",
+            generation=2,
+            slack_channel_id="CCOWORK",
+            claim_cutoff_at=melbourne_at(2026, 9, 7, 10),
+            announcement_status="sent",
+            slack_message_ts="audit-reopened.123",
+        )
+        booking = CoworkingBooking.objects.create(
+            user=user,
+            date=booking_date,
+            status="cancelled",
+            points_cost=0,
+            booking_source="office_manager",
+        )
+        OfficeManagerAssignment.objects.create(
+            day=day,
+            user=user,
+            booking=booking,
+            status="relinquished",
+        )
+        attempt = OfficeManagerClaimAttempt.objects.create(
+            attempt_id=uuid.uuid4(),
+            slack_user_id="UOLDLOSER",
+            booking_date=booking_date,
+            generation=1,
+            outcome="already_claimed",
+        )
+        stdout = io.StringIO()
+
+        with self.assertRaises(CommandError):
+            call_command(
+                "audit_office_manager_migrations",
+                configured_office_manager_channel="CCOWORK",
+                stdout=stdout,
+            )
+
+        report = json.loads(stdout.getvalue().splitlines()[0])
+        self.assertEqual(
+            report["data_invariants"]
+            ["stale_reopened_office_manager_attempts"],
+            [
+                {
+                    "attempt_id": str(attempt.attempt_id),
+                    "date": booking_date.isoformat(),
+                    "attempt_generation": 1,
+                    "day_generation": 2,
+                }
+            ],
+        )
 
     def test_reconciliation_command_persists_immutable_operator_evidence(self):
         user = User.objects.create_user(

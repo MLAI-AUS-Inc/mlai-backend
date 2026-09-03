@@ -21,6 +21,7 @@ MIGRATION_PREFIXES = (
     "0036",
     "0037",
     "0038",
+    "0039",
 )
 CANONICAL_IDENTITIES = {
     "boost": "0029_boostpostadmission_and_more",
@@ -35,6 +36,9 @@ CANONICAL_IDENTITIES = {
         "0037_quarantine_legacy_office_manager_provenance"
     ),
     "office_manager_hardening": "0038_office_manager_claim_generation",
+    "office_manager_attempt_repair": (
+        "0039_supersede_reopened_office_manager_attempts"
+    ),
 }
 
 
@@ -383,6 +387,11 @@ def _disk_0038_identities() -> list[str]:
     return sorted(path.stem for path in migration_dir.glob("0038_*.py"))
 
 
+def _disk_0039_identities() -> list[str]:
+    migration_dir = Path(settings.BASE_DIR) / "roo" / "migrations"
+    return sorted(path.stem for path in migration_dir.glob("0039_*.py"))
+
+
 def _office_manager_data_invariants() -> dict:
     """Read cross-table invariants that database constraints cannot express."""
     table_names = set(connection.introspection.table_names())
@@ -407,6 +416,7 @@ def _office_manager_data_invariants() -> dict:
             "unattested_reversed_office_manager_refunds": [],
             "unrepaired_office_manager_refund_buckets": [],
             "pending_office_manager_delivery_channels": [],
+            "stale_reopened_office_manager_attempts": [],
         }
 
     with connection.cursor() as cursor:
@@ -911,6 +921,65 @@ def _office_manager_data_invariants() -> dict:
             for (channel_id,) in cursor.fetchall()
             if str(channel_id or "").strip()
         ]
+        if "roo_officemanagerclaimattempt" in table_names:
+            attempt_columns = {
+                str(column.name)
+                for column in connection.introspection.get_table_description(
+                    cursor,
+                    "roo_officemanagerclaimattempt",
+                )
+            }
+        else:
+            attempt_columns = set()
+        day_columns = {
+            str(column.name)
+            for column in connection.introspection.get_table_description(
+                cursor,
+                "roo_officemanagerday",
+            )
+        }
+        if {"attempt_id", "booking_date", "generation", "outcome"}.issubset(
+            attempt_columns
+        ) and {"date", "generation", "status"}.issubset(day_columns):
+            cursor.execute(
+                """
+                SELECT DISTINCT ca.attempt_id, ca.booking_date,
+                                ca.generation, d.generation
+                FROM roo_officemanagerclaimattempt ca
+                INNER JOIN roo_officemanagerday d
+                  ON d.date = ca.booking_date
+                WHERE d.status = %s
+                  AND ca.generation < d.generation
+                  AND ca.outcome <> %s
+                  AND EXISTS (
+                    SELECT 1
+                    FROM roo_officemanagerassignment a
+                    WHERE a.day_id = d.id AND a.status = %s
+                  )
+                ORDER BY ca.booking_date, ca.attempt_id
+                """,
+                ["open", "attempt_superseded", "relinquished"],
+            )
+            stale_reopened_attempts = [
+                {
+                    "attempt_id": _uuid_text(attempt_id),
+                    "date": (
+                        booking_date.isoformat()
+                        if hasattr(booking_date, "isoformat")
+                        else str(booking_date)
+                    ),
+                    "attempt_generation": int(attempt_generation),
+                    "day_generation": int(day_generation),
+                }
+                for (
+                    attempt_id,
+                    booking_date,
+                    attempt_generation,
+                    day_generation,
+                ) in cursor.fetchall()
+            ]
+        else:
+            stale_reopened_attempts = []
     return {
         "checked": True,
         "claimed_days_without_exactly_one_active_assignment": claimed_mismatches,
@@ -929,6 +998,7 @@ def _office_manager_data_invariants() -> dict:
             unrepaired_refund_buckets
         ),
         "pending_office_manager_delivery_channels": pending_delivery_channels,
+        "stale_reopened_office_manager_attempts": stale_reopened_attempts,
     }
 
 
@@ -941,6 +1011,7 @@ def _build_report(*, configured_office_manager_channel: str = "") -> dict:
     disk_0036 = _disk_0036_identities()
     disk_0037 = _disk_0037_identities()
     disk_0038 = _disk_0038_identities()
+    disk_0039 = _disk_0039_identities()
     issues = []
     histories = []
 
@@ -968,7 +1039,10 @@ def _build_report(*, configured_office_manager_channel: str = "") -> dict:
         )
 
     for group, identity in CANONICAL_IDENTITIES.items():
-        if group == "office_manager_protect":
+        if group in {
+            "office_manager_protect",
+            "office_manager_attempt_repair",
+        }:
             continue
         marker = schema_groups[group]
         if identity in applied_set and not marker["complete"]:
@@ -1060,6 +1134,26 @@ def _build_report(*, configured_office_manager_channel: str = "") -> dict:
     if hardening_identity in applied_set:
         issues.extend(_office_manager_hardening_schema_issues())
 
+    attempt_repair_identity = CANONICAL_IDENTITIES[
+        "office_manager_attempt_repair"
+    ]
+    applied_0039 = [name for name in applied if name.startswith("0039_")]
+    if disk_0039 != [attempt_repair_identity]:
+        issues.append(
+            "the reviewed source tree must contain exactly the canonical "
+            "append-only roo.0039 Office Manager attempt repair migration"
+        )
+    if len(applied_0039) > 1:
+        issues.append("multiple roo.0039 migration identities are recorded")
+    if applied_0039 and applied_0039 != disk_0039:
+        issues.append(
+            "recorded roo.0039 identity does not match the reviewed source tree"
+        )
+    if attempt_repair_identity in applied_set and hardening_identity not in applied_set:
+        issues.append(
+            f"{attempt_repair_identity} is recorded without {hardening_identity}"
+        )
+
     historical_applied = sorted(
         name for name in HISTORICAL_IDENTITIES if name in applied_set
     )
@@ -1121,6 +1215,11 @@ def _build_report(*, configured_office_manager_channel: str = "") -> dict:
             "pending Office Manager public delivery work targets a channel "
             "other than the configured recovery channel"
         )
+    if data_invariants["stale_reopened_office_manager_attempts"]:
+        issues.append(
+            "reopened Office Manager days contain stale claim attempts that "
+            "were not superseded"
+        )
     return {
         "report_version": REPORT_VERSION,
         "database_vendor": connection.vendor,
@@ -1130,6 +1229,7 @@ def _build_report(*, configured_office_manager_channel: str = "") -> dict:
         "disk_0036_identities": disk_0036,
         "disk_0037_identities": disk_0037,
         "disk_0038_identities": disk_0038,
+        "disk_0039_identities": disk_0039,
         "historical_identities": histories,
         "historical_applied": historical_applied,
         "schema": schema,

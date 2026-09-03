@@ -232,5 +232,91 @@ class OfficeManagerHardeningMigrationTests(TransactionTestCase):
             pk=self.reopened_losing_attempt_id
         )
         self.assertEqual(reopened_attempt.generation, 1)
-        self.assertEqual(reopened_attempt.outcome, "attempt_superseded")
-        self.assertIsNotNone(reopened_attempt.superseded_at)
+        self.assertEqual(reopened_attempt.outcome, "already_claimed")
+        self.assertIsNone(reopened_attempt.superseded_at)
+
+
+class OfficeManagerAttemptRepairMigrationTests(TransactionTestCase):
+    """Prove already-applied 0038 databases receive the 0039 repair."""
+
+    migrate_from = ("roo", "0038_office_manager_claim_generation")
+    migrate_to = (
+        "roo",
+        "0039_supersede_reopened_office_manager_attempts",
+    )
+
+    def setUp(self):
+        super().setUp()
+        self.user_id = User.objects.create_user(
+            email="office-manager-0039@example.com",
+            slack_id="UOFFICEMANAGER0039",
+        ).pk
+
+        executor = MigrationExecutor(connection)
+        executor.migrate([self.migrate_from])
+        old_apps = executor.loader.project_state([self.migrate_from]).apps
+        Booking = old_apps.get_model("roo", "CoworkingBooking")
+        Day = old_apps.get_model("roo", "OfficeManagerDay")
+        Assignment = old_apps.get_model("roo", "OfficeManagerAssignment")
+        Attempt = old_apps.get_model("roo", "OfficeManagerClaimAttempt")
+
+        day = Day.objects.create(
+            date="2026-09-06",
+            status="open",
+            generation=2,
+            slack_channel_id="CCOWORK",
+            slack_message_ts="legacy-reopened.456",
+            announcement_status="sent",
+            message_update_pending=True,
+            claim_cutoff_at=datetime(2026, 9, 6, 10, tzinfo=MELBOURNE),
+        )
+        booking = Booking.objects.create(
+            user_id=self.user_id,
+            date=day.date,
+            status="cancelled",
+            points_cost=0,
+            booking_source="office_manager",
+            original_points_cost=0,
+        )
+        Assignment.objects.create(
+            day=day,
+            user_id=self.user_id,
+            booking=booking,
+            status="relinquished",
+        )
+        self.stale_attempt_id = uuid.uuid4()
+        Attempt.objects.create(
+            attempt_id=self.stale_attempt_id,
+            slack_user_id="USTALE0039",
+            booking_date=day.date,
+            generation=1,
+            outcome="already_claimed",
+            message="Another member already claimed this day",
+        )
+        self.current_attempt_id = uuid.uuid4()
+        Attempt.objects.create(
+            attempt_id=self.current_attempt_id,
+            slack_user_id="UCURRENT0039",
+            booking_date=day.date,
+            generation=2,
+            outcome="claim_closed",
+            message="Claims are closed",
+        )
+
+        executor = MigrationExecutor(connection)
+        executor.migrate([self.migrate_to])
+        self.apps = executor.loader.project_state([self.migrate_to]).apps
+
+    def tearDown(self):
+        MigrationExecutor(connection).migrate([self.migrate_to])
+        super().tearDown()
+
+    def test_stale_attempt_is_superseded_without_touching_current_generation(self):
+        Attempt = self.apps.get_model("roo", "OfficeManagerClaimAttempt")
+
+        stale = Attempt.objects.get(pk=self.stale_attempt_id)
+        current = Attempt.objects.get(pk=self.current_attempt_id)
+        self.assertEqual(stale.outcome, "attempt_superseded")
+        self.assertIsNotNone(stale.superseded_at)
+        self.assertEqual(current.outcome, "claim_closed")
+        self.assertIsNone(current.superseded_at)

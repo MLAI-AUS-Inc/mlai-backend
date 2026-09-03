@@ -77,10 +77,9 @@ cancellation and refund replays are idempotent.
 
 Cancellation mutations must use the immutable `booking_id`. Roo may accept a
 date from a member, but it resolves that date to the member's one current
-booking before sending the mutation. The backend rejects ambiguous date-only
-cancellation after any prior booking for that member/date was cancelled. This
-prevents a delayed retry of cancellation N from cancelling a newer rebooking
-N+1.
+booking before sending the mutation. The backend rejects every date-only
+cancellation. This prevents a delayed retry of cancellation N from cancelling
+a newer rebooking N+1.
 
 The backend stores the announcement channel and deterministic Slack message
 identifiers with the day/assignment. Each outbound delivery is leased with a
@@ -167,7 +166,8 @@ rejected. It does not create a day, booking, or assignment.
 The Office Manager branch was previously shared under colliding migration
 numbers before its append-only `0034`/`0035` identities were established.
 Before applying `0034`, `0035`, `0036`, the append-only `0037` provenance
-recovery, or the append-only `0038` generation and repair hardening, run the
+recovery, the append-only `0038` generation hardening, or the append-only
+`0039` stale-attempt repair, run the
 read-only audit against **every persistent database**, including production,
 staging, preview databases with retained volumes, and developer databases:
 
@@ -181,7 +181,7 @@ and the Office Manager day/assignment rows needed to prove the cross-table
 invariants that database constraints cannot express: every claimed day has
 exactly one active assignment, and every active assignment belongs to a
 claimed day. It reports all recorded Roo identities beginning `0029`, `0030`,
-`0031`, `0034`, `0035`, `0036`, `0037`, and `0038`, plus the schema markers needed by their
+`0031`, `0034`, `0035`, `0036`, `0037`, `0038`, and `0039`, plus the schema markers needed by their
 current bodies. In particular, investigate these obsolete shared identities:
 
 - `0029_officemanagerday_coworkingbooking_booking_source_and_more`
@@ -281,7 +281,8 @@ Roll out in this order:
    `roo.0035_protect_office_manager_assignment_day`, together with the new
    append-only `roo.0036_office_manager_attempts_and_provenance` and
    `roo.0037_quarantine_legacy_office_manager_provenance` and
-   `roo.0038_office_manager_claim_generation` successors.
+   `roo.0038_office_manager_claim_generation` and
+   `roo.0039_supersede_reopened_office_manager_attempts` successors.
    Deploy the backend and apply them with `OFFICE_MANAGER_ENABLED=false`.
 3. Configure the dedicated Public Roo Slack token and channel, keeping both
    feature flags off. The token must belong to the app that owns the button.
@@ -311,6 +312,6 @@ scheduler tick. A failure after migration begins but before `migrate --check`
 succeeds leaves every writer stopped: Django may have committed only a prefix
 of the graph, so neither binary is assumed compatible. Treat the failed deploy
 as an operator alert, inspect the recorded migration/schema audit, and repair
-forward before restarting services. Do not reverse shared migrations, remove `0034`–`0038`, or
+forward before restarting services. Do not reverse shared migrations, remove `0034`–`0039`, or
 delete Office Manager accounting/provenance rows; roll application code forward
 with a new append-only migration when schema recovery is required.

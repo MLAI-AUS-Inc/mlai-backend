@@ -2036,66 +2036,28 @@ class CoworkingViewSet(viewsets.ViewSet):
         """Cancel a booking."""
         slack_user_id = request.data.get('slack_user_id')
         booking_id = request.data.get('booking_id')
-        booking_date = request.data.get('date')
 
         if not slack_user_id:
             return Response({'error': 'slack_user_id is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if not booking_id:
+            return Response(
+                {
+                    'code': 'booking_identity_required',
+                    'error': 'booking_id is required',
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         user = PointsService.get_user_by_slack_id(slack_user_id)
         office_manager_authorized = (
             HasOfficeManagerRooApiKey().has_permission(request, self)
         )
 
-        # Find booking by ID or date
-        if booking_id:
-            try:
-                booking = CoworkingBooking.objects.get(id=booking_id)
-            except CoworkingBooking.DoesNotExist:
-                return Response({'error': 'Booking not found'}, status=status.HTTP_404_NOT_FOUND)
-        elif booking_date and user:
-            try:
-                parsed_booking_date = date.fromisoformat(booking_date)
-            except (TypeError, ValueError):
-                return Response(
-                    {'error': 'Invalid date format. Use YYYY-MM-DD'},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-            if booking_date != parsed_booking_date.isoformat():
-                return Response(
-                    {'error': 'Invalid date format. Use YYYY-MM-DD'},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-            # A date alone is not a durable operation identity. Once a member
-            # has cancelled and rebooked the same date, a delayed replay of the
-            # old request must not cancel the new booking.
-            if CoworkingBooking.objects.filter(
-                user=user,
-                date=parsed_booking_date,
-                status='cancelled',
-            ).exists():
-                return Response(
-                    {
-                        'code': 'booking_identity_required',
-                        'error': (
-                            'This date has booking history. Retry using the '
-                            'current booking_id.'
-                        ),
-                    },
-                    status=status.HTTP_409_CONFLICT,
-                )
-            try:
-                booking = CoworkingBooking.objects.get(
-                    user=user,
-                    date=parsed_booking_date,
-                    status='booked'
-                )
-            except CoworkingBooking.DoesNotExist:
-                return Response({'error': 'Booking not found'}, status=status.HTTP_404_NOT_FOUND)
-        else:
-            return Response(
-                {'error': 'booking_id or date required'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+        try:
+            booking = CoworkingBooking.objects.get(id=booking_id)
+        except CoworkingBooking.DoesNotExist:
+            return Response({'error': 'Booking not found'}, status=status.HTTP_404_NOT_FOUND)
 
         # Standard coworking cancellation retains its existing service
         # contract. Actor-changing Office Manager cancellation is narrower and

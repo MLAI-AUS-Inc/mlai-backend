@@ -236,6 +236,10 @@ class OrgMemoryProductionDeployTests(SimpleTestCase):
         self.assertIn("reconcile_office_manager_provenance", docs)
         self.assertIn("roo.0037_quarantine_legacy_office_manager_provenance", docs)
         self.assertIn("roo.0038_office_manager_claim_generation", docs)
+        self.assertIn(
+            "roo.0039_supersede_reopened_office_manager_attempts",
+            docs,
+        )
 
         workflow = (ROOT / ".github" / "workflows" / "deploy.yml").read_text()
         self.assertIn("run: bash -n deploy.sh", workflow)
