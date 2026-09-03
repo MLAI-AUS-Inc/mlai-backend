@@ -3,6 +3,7 @@ import logging
 from datetime import date as calendar_date
 
 from django.core.management.base import BaseCommand, CommandError
+from django.utils import timezone
 
 from content_analytics.services.report_scheduler import run_daily_article_report_scheduler
 from content_factory.reconciliation import run_content_factory_reconciliation_sweep
@@ -20,6 +21,7 @@ from jobs.services.job_pipeline import run_daily_jobs_scheduler
 from hospital.sim_retention import run_scheduled_sim_conversation_cleanup
 from roo.coding import reconcile_coding_reservations
 from roo.office_manager import run_office_manager_scheduler
+from roo.models import ScheduledDiscoveryHeartbeat
 from startup_updates.monthly_update_reminders import run_monthly_update_reminder_scheduler
 
 logger = logging.getLogger(__name__)
@@ -160,6 +162,13 @@ class Command(BaseCommand):
                 raise CommandError(result.get("error") or "Scheduled discovery enqueue failed.")
             return
 
+        heartbeat, _ = ScheduledDiscoveryHeartbeat.objects.get_or_create(
+            name="scheduled_discovery",
+        )
+        heartbeat.last_started_at = timezone.now()
+        heartbeat.last_error = ""
+        heartbeat.save(update_fields=["last_started_at", "last_error", "updated_at"])
+
         results = {}
         failures = []
 
@@ -221,4 +230,19 @@ class Command(BaseCommand):
 
         self.stdout.write(json.dumps(results, sort_keys=True))
         if failures:
-            raise CommandError(f"Scheduled runner(s) failed: {', '.join(failures)}")
+            error = f"Scheduled runner(s) failed: {', '.join(failures)}"
+            ScheduledDiscoveryHeartbeat.objects.filter(
+                name="scheduled_discovery"
+            ).update(
+                last_failed_at=timezone.now(),
+                last_error=error,
+                updated_at=timezone.now(),
+            )
+            raise CommandError(error)
+        ScheduledDiscoveryHeartbeat.objects.filter(
+            name="scheduled_discovery"
+        ).update(
+            last_succeeded_at=timezone.now(),
+            last_error="",
+            updated_at=timezone.now(),
+        )

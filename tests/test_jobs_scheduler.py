@@ -8,6 +8,7 @@ from django.core.management.base import CommandError
 from django.test import TestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient
+from roo.models import ScheduledDiscoveryHeartbeat
 
 from jobs.models import JobListing, JobRun, SourceRunLog
 from jobs.conf import settings as jobs_settings
@@ -79,6 +80,12 @@ class JobsSchedulerTests(TestCase):
         self.assertIn('"daily_discovery": {"error": "discovery boom", "status": "failed"}', output)
         self.assertIn('"jobs": {"reason": "before_schedule_window", "status": "skipped"}', output)
         self.assertIn('"research_automations": {"queued": 0, "status": "ok"}', output)
+        heartbeat = ScheduledDiscoveryHeartbeat.objects.get(
+            name="scheduled_discovery"
+        )
+        self.assertIsNotNone(heartbeat.last_started_at)
+        self.assertIsNotNone(heartbeat.last_failed_at)
+        self.assertIn("daily_discovery", heartbeat.last_error)
 
     @patch("core.management.commands.run_scheduled_discovery.run_daily_jobs_scheduler")
     @patch("core.management.commands.run_scheduled_discovery.run_daily_discovery_scheduler")
@@ -99,6 +106,11 @@ class JobsSchedulerTests(TestCase):
         output = stdout.getvalue()
         self.assertIn('"research_automations"', output)
         self.assertIn('"queued": 2', output)
+        heartbeat = ScheduledDiscoveryHeartbeat.objects.get(
+            name="scheduled_discovery"
+        )
+        self.assertIsNotNone(heartbeat.last_succeeded_at)
+        self.assertEqual(heartbeat.last_error, "")
 
     def test_slack_payload_is_compact_and_capped_to_three_jobs(self):
         run = JobRun.objects.create(run_date="2026-05-04", run_id="2026-05-04-slack-test")

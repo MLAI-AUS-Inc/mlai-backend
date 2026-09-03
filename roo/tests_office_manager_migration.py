@@ -1,3 +1,4 @@
+import uuid
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -104,3 +105,118 @@ class OfficeManagerProvenanceMigrationTests(TransactionTestCase):
         self.assertEqual(known.purchased_points_refunded_microroo, 2_000_000)
         self.assertIsNone(unknown.purchased_points_refunded_microroo)
         self.assertEqual(Evidence.objects.count(), 0)
+
+
+class OfficeManagerHardeningMigrationTests(TransactionTestCase):
+    """Prove 0038 upgrades existing Office Manager rows append-only."""
+
+    migrate_from = (
+        "roo",
+        "0037_quarantine_legacy_office_manager_provenance",
+    )
+    migrate_to = ("roo", "0038_office_manager_claim_generation")
+
+    def setUp(self):
+        super().setUp()
+        self.user_id = User.objects.create_user(
+            email="office-manager-0038@example.com",
+            slack_id="UOFFICEMANAGER0038",
+        ).pk
+
+        executor = MigrationExecutor(connection)
+        executor.migrate([self.migrate_from])
+        old_apps = executor.loader.project_state([self.migrate_from]).apps
+        Booking = old_apps.get_model("roo", "CoworkingBooking")
+        Day = old_apps.get_model("roo", "OfficeManagerDay")
+        Assignment = old_apps.get_model("roo", "OfficeManagerAssignment")
+        Attempt = old_apps.get_model("roo", "OfficeManagerClaimAttempt")
+
+        day = Day.objects.create(
+            date="2026-09-04",
+            status="claimed",
+            slack_channel_id="CCOWORK",
+            claim_cutoff_at=datetime(2026, 9, 4, 10, tzinfo=MELBOURNE),
+        )
+        booking = Booking.objects.create(
+            user_id=self.user_id,
+            date=day.date,
+            status="booked",
+            points_cost=0,
+            booking_source="office_manager",
+            original_points_cost=0,
+        )
+        self.assignment_id = Assignment.objects.create(
+            day=day,
+            user_id=self.user_id,
+            booking=booking,
+        ).pk
+        self.attempt_id = uuid.uuid4()
+        Attempt.objects.create(
+            attempt_id=self.attempt_id,
+            slack_user_id="UOFFICEMANAGER0038",
+            booking_date=day.date,
+            outcome="claimed",
+            assignment_id=self.assignment_id,
+        )
+        reopened_day = Day.objects.create(
+            date="2026-09-05",
+            status="open",
+            slack_channel_id="CCOWORK",
+            slack_message_ts="legacy-reopened.123",
+            announcement_status="sent",
+            message_update_pending=False,
+            claim_cutoff_at=datetime(2026, 9, 5, 10, tzinfo=MELBOURNE),
+        )
+        reopened_booking = Booking.objects.create(
+            user_id=self.user_id,
+            date=reopened_day.date,
+            status="cancelled",
+            points_cost=0,
+            booking_source="office_manager",
+            original_points_cost=0,
+        )
+        self.reopened_day_id = reopened_day.pk
+        Assignment.objects.create(
+            day=reopened_day,
+            user_id=self.user_id,
+            booking=reopened_booking,
+            status="relinquished",
+        )
+
+        executor = MigrationExecutor(connection)
+        executor.migrate([self.migrate_to])
+        self.apps = executor.loader.project_state([self.migrate_to]).apps
+
+    def tearDown(self):
+        MigrationExecutor(connection).migrate([self.migrate_to])
+        super().tearDown()
+
+    def test_existing_rows_receive_safe_generation_and_correction_defaults(self):
+        Day = self.apps.get_model("roo", "OfficeManagerDay")
+        Assignment = self.apps.get_model("roo", "OfficeManagerAssignment")
+        Attempt = self.apps.get_model("roo", "OfficeManagerClaimAttempt")
+        BucketRepair = self.apps.get_model(
+            "roo", "OfficeManagerProvenanceBucketRepair"
+        )
+        ReversalEvidence = self.apps.get_model(
+            "roo", "OfficeManagerRefundReversalProvenance"
+        )
+        SchedulerHeartbeat = self.apps.get_model(
+            "roo", "ScheduledDiscoveryHeartbeat"
+        )
+
+        assignment = Assignment.objects.get(pk=self.assignment_id)
+        attempt = Attempt.objects.get(pk=self.attempt_id)
+        self.assertEqual(Day.objects.get(pk=assignment.day_id).generation, 1)
+        self.assertEqual(attempt.generation, 1)
+        self.assertFalse(assignment.private_correction_pending)
+        self.assertEqual(assignment.private_correction_status, "pending")
+        self.assertEqual(assignment.winner_dm_message_ts, "")
+        self.assertEqual(assignment.end_of_day_reminder_message_ts, "")
+        self.assertEqual(BucketRepair.objects.count(), 0)
+        self.assertEqual(ReversalEvidence.objects.count(), 0)
+        self.assertEqual(SchedulerHeartbeat.objects.count(), 0)
+
+        reopened_day = Day.objects.get(pk=self.reopened_day_id)
+        self.assertEqual(reopened_day.generation, 2)
+        self.assertTrue(reopened_day.message_update_pending)

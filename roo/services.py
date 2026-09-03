@@ -28,7 +28,7 @@ from django.utils import timezone
 from .models import (
     PointsAccount, Ledger, BoostPostAdmission, Task, TaskAssignment, TaskSubmission, TaskActivity,
     CoworkingBooking, CoworkingDayCapacity,
-    OfficeManagerAssignment, OfficeManagerDay,
+    OfficeManagerAssignment, OfficeManagerClaimAttempt, OfficeManagerDay,
     RewardsCatalog, RewardRedemption, PointsAdmin, PointsPurchase
 )
 from .permissions import (
@@ -1163,6 +1163,17 @@ class CoworkingService:
     MAX_REPORT_DAYS = 366
 
     @staticmethod
+    def booking_debit_reference_matches(
+        booking: CoworkingBooking,
+        reference_id: str,
+    ) -> bool:
+        """Accept the two authoritative reference formats used in production."""
+        return str(reference_id or "").strip() in {
+            str(booking.date),
+            str(booking.pk),
+        }
+
+    @staticmethod
     def validated_booking_debit_provenance(
         booking: CoworkingBooking,
     ) -> int:
@@ -1178,7 +1189,10 @@ class CoworkingService:
             or ledger.source != 'COWORKING'
             or ledger.delta_microroo != -expected_microroo
             or ledger.reference_type != 'COWORKING_BOOKING'
-            or ledger.reference_id != str(booking.date)
+            or not CoworkingService.booking_debit_reference_matches(
+                booking,
+                ledger.reference_id,
+            )
         ):
             raise ValueError(
                 'The original coworking charge could not be verified'
@@ -1238,6 +1252,23 @@ class CoworkingService:
             .filter(Q(user_id=source.pk) | Q(booking_id__in=booking_ids))
             .order_by('day_id', 'pk')
         )
+        source_slack_id = str(locked_users[source.pk].slack_id or '').strip()
+        target_slack_id = str(locked_users[target.pk].slack_id or '').strip()
+        if (
+            source_slack_id
+            and target_slack_id
+            and source_slack_id != target_slack_id
+            and (
+                assignments
+                or OfficeManagerClaimAttempt.objects.filter(
+                    slack_user_id=source_slack_id
+                ).exists()
+            )
+        ):
+            raise ValueError(
+                'Cannot merge different Slack identities while Office Manager '
+                'attempts or assignments still reference the source identity'
+            )
         booking_owner_by_id = {
             booking.pk: booking.user_id for booking in bookings
         }

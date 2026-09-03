@@ -84,19 +84,17 @@ if [ "$ROO_API_KEY" = "$INTERNAL_API_KEY" ]; then
     echo "❌ ROO_API_KEY and INTERNAL_API_KEY must be distinct trust-domain credentials."
     exit 1
 fi
-if [ "$OFFICE_MANAGER_ENABLED" = "true" ]; then
-    if [[ ! "${OFFICE_MANAGER_SLACK_BOT_TOKEN:-}" =~ ^xoxb-[A-Za-z0-9-]+$ ]]; then
-        echo "❌ OFFICE_MANAGER_SLACK_BOT_TOKEN must be the Public Roo xoxb token when Office Manager is enabled."
-        exit 1
-    fi
-    if [[ ! "${OFFICE_MANAGER_SLACK_CHANNEL_ID:-}" =~ ^C[A-Z0-9]+$ ]]; then
-        echo "❌ OFFICE_MANAGER_SLACK_CHANNEL_ID must be a public Slack channel ID when Office Manager is enabled."
-        exit 1
-    fi
-    if [ "$OFFICE_MANAGER_TIMEZONE" != "Australia/Melbourne" ]; then
-        echo "❌ OFFICE_MANAGER_TIMEZONE must match the companion Roo contract: Australia/Melbourne."
-        exit 1
-    fi
+if [[ ! "${OFFICE_MANAGER_SLACK_BOT_TOKEN:-}" =~ ^xoxb-[A-Za-z0-9-]+$ ]]; then
+    echo "❌ OFFICE_MANAGER_SLACK_BOT_TOKEN must be retained for durable Office Manager recovery."
+    exit 1
+fi
+if [[ ! "${OFFICE_MANAGER_SLACK_CHANNEL_ID:-}" =~ ^C[A-Z0-9]+$ ]]; then
+    echo "❌ OFFICE_MANAGER_SLACK_CHANNEL_ID must be retained for durable Office Manager recovery."
+    exit 1
+fi
+if [ "$OFFICE_MANAGER_TIMEZONE" != "Australia/Melbourne" ]; then
+    echo "❌ OFFICE_MANAGER_TIMEZONE must match the durable Office Manager contract: Australia/Melbourne."
+    exit 1
 fi
 for chat_secret_name in \
     COMMUNITY_CHAT_EMAIL_CODE_PEPPER \
@@ -295,10 +293,8 @@ install_remote_env_secret LINEAR_API_KEY "$LINEAR_API_KEY"
 echo "🔐 Updating distinct Roo and internal service credentials (values redacted)..."
 install_remote_env_secret ROO_API_KEY "$ROO_API_KEY"
 install_remote_env_secret INTERNAL_API_KEY "$INTERNAL_API_KEY"
-if [ -n "${OFFICE_MANAGER_SLACK_BOT_TOKEN:-}" ]; then
-    echo "🔐 Updating Public Roo Office Manager Slack credential (value redacted)..."
-    install_remote_env_secret OFFICE_MANAGER_SLACK_BOT_TOKEN "$OFFICE_MANAGER_SLACK_BOT_TOKEN"
-fi
+echo "🔐 Updating Public Roo Office Manager Slack credential (value redacted)..."
+install_remote_env_secret OFFICE_MANAGER_SLACK_BOT_TOKEN "$OFFICE_MANAGER_SLACK_BOT_TOKEN"
 case "${LINEAR_CHANNEL_ISSUE_WRITES_ENABLED:-false}" in
     1|[Tt][Rr][Uu][Ee]|[Yy][Ee][Ss]|[Oo][Nn])
         linear_channel_writes_enabled_normalized="true"
@@ -742,17 +738,15 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     fi
     unset health_hack_key roo_sim_key roo_api_key internal_api_key victor_ai_roo_secret
 
-    if [ "\$office_manager_enabled" = "true" ]; then
-        require_env_value OFFICE_MANAGER_SLACK_BOT_TOKEN "Configure the Public Roo bot token before enabling Office Manager."
-        require_env_value OFFICE_MANAGER_SLACK_CHANNEL_ID "Configure the coworking channel before enabling Office Manager."
-        require_env_value OFFICE_MANAGER_TIMEZONE "Configure the companion-agreed Office Manager timezone."
+    require_env_value OFFICE_MANAGER_SLACK_BOT_TOKEN "Retain the Public Roo bot token for durable Office Manager recovery."
+    require_env_value OFFICE_MANAGER_SLACK_CHANNEL_ID "Retain the coworking channel for durable Office Manager recovery."
+    require_env_value OFFICE_MANAGER_TIMEZONE "Retain the Office Manager timezone for durable recovery."
         office_manager_timezone=\$(read_env_value OFFICE_MANAGER_TIMEZONE)
         if [ "\$office_manager_timezone" != "Australia/Melbourne" ]; then
             echo "❌ OFFICE_MANAGER_TIMEZONE must be Australia/Melbourne."
             exit 1
         fi
         unset office_manager_timezone
-    fi
 
     runtime_services=(web scheduler memory-worker memory-scheduler community-email-worker)
     if [ "\$community_bridge_production_enabled" = "true" ] \
@@ -801,25 +795,33 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     compose_run_web python manage.py deploy_preflight
 
     echo "🧬 Auditing historical Roo migration identities before schema changes..."
-    office_manager_attestation=/root/mlai-backend-operations/office-manager-migration-attestation.json
+    office_manager_pre_attestation=/root/mlai-backend-operations/office-manager-migration-pre-attestation.json
+    office_manager_post_attestation=/root/mlai-backend-operations/office-manager-migration-post-attestation.json
     run_office_manager_migration_audit() {
+        local office_manager_attestation="\$1"
         if [ -s "\$office_manager_attestation" ]; then
             docker compose run -T --rm --no-deps \
                 -v "\$office_manager_attestation:/run/office-manager-migration-attestation.json:ro" \
                 web python manage.py audit_office_manager_migrations \
                 --attestation-file /run/office-manager-migration-attestation.json \
+                --configured-office-manager-channel \
+                "\$(read_env_value OFFICE_MANAGER_SLACK_CHANNEL_ID)" \
                 </dev/null
         else
-            compose_run_web python manage.py audit_office_manager_migrations
+            compose_run_web python manage.py audit_office_manager_migrations \
+                --configured-office-manager-channel \
+                "\$(read_env_value OFFICE_MANAGER_SLACK_CHANNEL_ID)"
         fi
     }
-    run_office_manager_migration_audit
+    run_office_manager_migration_audit "\$office_manager_pre_attestation"
 
-    if [ "\$office_manager_enabled" = "true" ]; then
+    if [ "true" = "true" ]; then
         echo "🧪 Verifying the actual Public Roo Slack app and coworking channel..."
         office_manager_slack_token=\$(read_env_value OFFICE_MANAGER_SLACK_BOT_TOKEN)
         office_manager_channel_id=\$(read_env_value OFFICE_MANAGER_SLACK_CHANNEL_ID)
+        slack_auth_headers=\$(mktemp)
         slack_auth_body=\$(curl -fsS --max-time 10 \
+            --dump-header "\$slack_auth_headers" \
             -H "Authorization: Bearer \$office_manager_slack_token" \
             https://slack.com/api/auth.test)
         printf '%s' "\$slack_auth_body" | python3 -c '
@@ -831,6 +833,32 @@ if payload.get("ok") is not True or not payload.get("bot_id"):
     reason = payload.get("error", "unknown")
     raise SystemExit(f"Public Roo Slack auth.test failed: {reason}")
 '
+        python3 -c '
+import sys
+
+required = {
+    "channels:history",
+    "channels:read",
+    "chat:write",
+    "im:history",
+    "im:write",
+    "users:read",
+    "users:read.email",
+}
+scopes = set()
+with open(sys.argv[1], encoding="utf-8", errors="replace") as handle:
+    for line in handle:
+        name, separator, value = line.partition(":")
+        if separator and name.strip().lower() == "x-oauth-scopes":
+            scopes = {scope.strip() for scope in value.split(",") if scope.strip()}
+missing = sorted(required - scopes)
+if missing:
+    raise SystemExit(
+        "Public Roo Slack token is missing required Office Manager scopes: "
+        + ", ".join(missing)
+    )
+' "\$slack_auth_headers"
+        rm -f "\$slack_auth_headers"
         slack_channel_body=\$(curl -fsS --max-time 10 \
             -H "Authorization: Bearer \$office_manager_slack_token" \
             --get --data-urlencode "channel=\$office_manager_channel_id" \
@@ -847,6 +875,10 @@ if channel.get("id") != sys.argv[1]:
     raise SystemExit("Slack returned a different Office Manager channel")
 if channel.get("is_archived") is True or channel.get("is_channel") is not True:
     raise SystemExit("Office Manager channel must be an active public channel")
+if channel.get("is_member") is not True:
+    raise SystemExit(
+        "Public Roo must already be a member of the Office Manager channel"
+    )
 ' "\$office_manager_channel_id"
 
         slack_history_body=\$(curl -fsS --max-time 10 \
@@ -866,6 +898,7 @@ if payload.get("ok") is not True:
     )
 '
 
+        if [ "\$office_manager_enabled" = "true" ]; then
         echo "🧪 Verifying the live Public Roo Office Manager companion contract..."
         roo_service_url=\$(read_env_value ROO_SERVICE_URL)
         roo_health_body=\$(curl -fsS --max-time 10 \
@@ -885,12 +918,15 @@ if contract.get("timezone") != "Australia/Melbourne":
     raise SystemExit("Public Roo and backend Office Manager timezones do not match")
 backend_base_url = str(contract.get("backend_base_url") or "")
 parsed = urlparse(backend_base_url)
+port = parsed.port
+if port is None:
+    port = 443 if parsed.scheme == "https" else 80
 allowed_authorities = {
-    ("https", "api.mlai.au", None),
-    ("http", "10.126.0.2", None),
+    ("https", "api.mlai.au", 443),
+    ("http", "10.126.0.2", 80),
     ("http", "10.126.0.2", 8000),
 }
-if (parsed.scheme, parsed.hostname, parsed.port) not in allowed_authorities:
+if (parsed.scheme, parsed.hostname, port) not in allowed_authorities:
     raise SystemExit("Public Roo Office Manager backend URL targets an unexpected service")
 if parsed.path not in {"", "/"}:
     raise SystemExit(
@@ -899,21 +935,23 @@ if parsed.path not in {"", "/"}:
 if contract.get("claim_path") != "/api/v1/points/coworking/office-manager/claim/":
     raise SystemExit("Public Roo Office Manager claim URL path does not match the backend contract")
 backend_contract = contract.get("backend_contract") or {}
-if backend_contract:
-    expected_backend_contract = {
-        "status": "ok",
-        "contract": "office-manager-v1",
-        "credential_scope": "strict_roo",
-        "timezone": "Australia/Melbourne",
-    }
-    if any(
-        backend_contract.get(key) != value
-        for key, value in expected_backend_contract.items()
-    ) or not isinstance(backend_contract.get("enabled"), bool):
-        raise SystemExit("Public Roo reported an inconsistent Office Manager backend contract")
+expected_backend_contract = {
+    "status": "ok",
+    "contract": "office-manager-v1",
+    "credential_scope": "strict_roo",
+    "claim_generation_supported": True,
+    "claim_generation_required": True,
+    "timezone": "Australia/Melbourne",
+}
+if any(
+    backend_contract.get(key) != value
+    for key, value in expected_backend_contract.items()
+) or not isinstance(backend_contract.get("enabled"), bool):
+    raise SystemExit("Public Roo reported an inconsistent Office Manager backend contract")
 if parsed.username or parsed.password or parsed.query or parsed.fragment:
     raise SystemExit("Public Roo Office Manager claim URL must not contain credentials or parameters")
 '
+        fi
         unset office_manager_slack_token office_manager_channel_id
         unset slack_auth_body slack_channel_body slack_history_body
         unset roo_service_url roo_health_body
@@ -1002,12 +1040,13 @@ if parsed.username or parsed.password or parsed.query or parsed.fragment:
     runtime_restore_attempted=0
     new_runtime_replacement_started=0
     schema_transition_started=0
+    schema_transition_completed=0
     restore_runtime_on_error() {
         if [ "\$runtime_restore_attempted" = "1" ]; then
             return
         fi
         runtime_restore_attempted=1
-        echo "⚠️ Deployment failed after runtime services were paused; staging Office Manager disabled and restoring runtime processes."
+        echo "⚠️ Deployment failed after runtime services were paused; staging Office Manager disabled and selecting fail-closed recovery."
         upsert_env_value OFFICE_MANAGER_ENABLED "false" || true
         if [ "\$new_runtime_replacement_started" != "1" ] \
             && [ "\$schema_transition_started" != "1" ]; then
@@ -1029,9 +1068,19 @@ if parsed.username or parsed.password or parsed.query or parsed.fragment:
             return
         fi
 
-        # Once replacement has begun the schema and post-migration gates have
-        # succeeded, so the new image is safe to recreate with the staged-off
-        # feature flag. Still require a fresh scheduler tick after recovery.
+        if [ "\$schema_transition_completed" != "1" ]; then
+            # Django commits migrations individually. A failing migrate can
+            # therefore leave a prefix applied while the new binary still
+            # requires later columns. Neither the previous nor the new runtime
+            # is proven compatible with that intermediate schema. Keep every
+            # writer stopped and make the failed deployment the operator alert.
+            echo "❌ CRITICAL: migration transition is incomplete; runtime services remain stopped for audited schema repair." >&2
+            return
+        fi
+
+        # Once the full migration graph has been checked (or replacement has
+        # begun), the new image is safe to recreate with the staged-off feature
+        # flag. Still require a fresh scheduler tick after recovery.
         docker compose up -d --force-recreate "\${paused_runtime_services[@]}" || true
         verify_scheduler_recovery_tick "" "" 0 || true
     }
@@ -1043,14 +1092,15 @@ if parsed.username or parsed.password or parsed.query or parsed.fragment:
 
     echo "🗄️ Running migrations..."
     # From this point a failed migrate may still have committed earlier
-    # append-only migrations. Never restore an older binary whose schema
-    # contract is now unknowable; recovery must use this schema-aware image
-    # with Office Manager disabled.
+    # append-only migrations. Never restore either binary until the complete
+    # migration graph is proven; an intermediate schema is operator-repair-only.
     schema_transition_started=1
     compose_run_web python manage.py migrate --noinput
+    compose_run_web python manage.py migrate --check --noinput
+    schema_transition_completed=1
 
     echo "🧬 Re-auditing Office Manager provenance after migrations..."
-    if ! run_office_manager_migration_audit; then
+    if ! run_office_manager_migration_audit "\$office_manager_post_attestation"; then
         echo "❌ Post-migration Office Manager data requires operator reconciliation." >&2
         # The nullable quarantine is understood only by the new image. Keep the
         # feature off and start that image so an older binary cannot reverse an
@@ -1311,8 +1361,7 @@ PY
         exit 1
     fi
 
-    if [ "\$office_manager_enabled" = "true" ]; then
-        echo "🔐 Verifying the live Office Manager endpoint enforces the strict Roo credential..."
+    echo "🔐 Verifying the live Office Manager endpoint enforces the strict Roo credential..."
         office_manager_roo_key=\$(read_env_value ROO_API_KEY)
         office_manager_internal_key=\$(read_env_value INTERNAL_API_KEY)
         office_manager_preflight_url=https://api.mlai.au/api/v1/points/coworking/office-manager/preflight/
@@ -1337,16 +1386,21 @@ expected = {
     "status": "ok",
     "contract": "office-manager-v1",
     "credential_scope": "strict_roo",
+    "claim_generation_supported": True,
+    "claim_generation_required": True,
     "timezone": "Australia/Melbourne",
-    "enabled": True,
 }
-if payload != expected:
+expected_enabled = sys.argv[1] == "true"
+if (
+    any(payload.get(key) != value for key, value in expected.items())
+    or payload.get("enabled") is not expected_enabled
+    or set(payload) != {*expected, "enabled"}
+):
     raise SystemExit("Live Office Manager preflight returned the wrong contract")
-'
+' "\$office_manager_enabled"
         unset office_manager_roo_key office_manager_internal_key
         unset office_manager_preflight_url office_manager_preflight_body
         unset internal_status missing_status
-    fi
 
     if [ "\$meeting_room_booking_enabled" = "true" ]; then
         echo "🏢 Verifying the enabled meeting-room API and active room catalogue..."

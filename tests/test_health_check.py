@@ -4,9 +4,12 @@ from unittest.mock import MagicMock, patch
 
 from django.db import OperationalError
 from django.http import HttpResponse
-from django.test import RequestFactory, SimpleTestCase, TestCase
+from django.test import RequestFactory, SimpleTestCase, TestCase, override_settings
+from django.utils import timezone
+from datetime import timedelta
 
 from core.middleware import PointsEndpointTimeoutMiddleware, RequestLoggingMiddleware
+from roo.models import ScheduledDiscoveryHeartbeat
 
 
 class HealthCheckTests(TestCase):
@@ -92,6 +95,43 @@ class HealthCheckTests(TestCase):
 
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.json()["status"], "error")
+
+    @override_settings(
+        IS_PRODUCTION_ENV=True,
+        SCHEDULED_DISCOVERY_HEALTH_MAX_AGE_SECONDS=300,
+    )
+    @patch("mlai.views.MigrationExecutor")
+    def test_health_ready_requires_recent_shared_scheduler_heartbeat(
+        self,
+        mock_executor_cls,
+    ):
+        mock_executor = MagicMock()
+        mock_executor.loader.graph.leaf_nodes.return_value = [("roo", "0038")]
+        mock_executor.migration_plan.return_value = []
+        mock_executor_cls.return_value = mock_executor
+
+        response = self.client.get("/healthz/ready")
+        self.assertEqual(response.status_code, 503)
+
+        heartbeat = ScheduledDiscoveryHeartbeat.objects.create(
+            name="scheduled_discovery",
+            last_succeeded_at=timezone.now() - timedelta(seconds=301),
+        )
+        response = self.client.get("/healthz/ready")
+        self.assertEqual(response.status_code, 503)
+
+        heartbeat.last_succeeded_at = timezone.now()
+        heartbeat.save(update_fields=["last_succeeded_at", "updated_at"])
+        response = self.client.get("/healthz/ready")
+        self.assertEqual(response.status_code, 200)
+
+        heartbeat.last_failed_at = timezone.now()
+        heartbeat.last_error = "scheduler failed"
+        heartbeat.save(
+            update_fields=["last_failed_at", "last_error", "updated_at"]
+        )
+        response = self.client.get("/healthz/ready")
+        self.assertEqual(response.status_code, 503)
 
     def test_health_points_returns_ok(self):
         response = self.client.get("/healthz/points")

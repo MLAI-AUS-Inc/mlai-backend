@@ -19,13 +19,16 @@ The request body is:
 {
   "slack_user_id": "U0123456789",
   "date": "2026-09-01",
+  "generation": 1,
   "attempt_id": "4482112f-79e1-4ca0-940b-06b24903f796"
 }
 ```
 
 `slack_user_id` must come from Slack's verified action payload, never from the
-button value. `date` is the Melbourne-local date encoded in the backend's
-button value. `attempt_id` is Roo's canonical lowercase UUID for one durable
+button value. `date` and `generation` are the Melbourne-local announcement
+epoch encoded in the backend's button value. A cancellation increments the
+generation, so an unseen or replayed button from the previous announcement
+cannot reclaim the reopened day. `attempt_id` is Roo's canonical lowercase UUID for one durable
 click and must remain unchanged across transport, response-loss, or restart
 retries. Roo must reject stale dates before calling this endpoint.
 
@@ -46,7 +49,7 @@ Terminal rejections use these codes:
 
 | HTTP | `code` | Meaning |
 | --- | --- | --- |
-| 400 | `invalid_request` | Missing or malformed Slack ID/date/attempt ID |
+| 400 | `invalid_request` | Missing or malformed Slack ID/date/attempt ID/generation |
 | 403 | `member_not_eligible` | Slack member cannot hold the role |
 | 404 | `office_manager_day_not_found` | No announcement/day exists |
 | 409 | `already_claimed` | Another member won |
@@ -116,17 +119,29 @@ delivery reports `false`, terminal failure, or retry exhaustion. The
 container removes its success marker and exits rather than hiding the error
 in an infinite loop; Compose restarts it, and deployment requires a fresh
 successful tick before it can pass.
+Every full tick also records start/success/failure timestamps in the shared
+database. Production `/healthz/ready` rejects a missing, stale, or more-recently
+failed scheduler heartbeat, so web readiness cannot hide a dead scheduler on a
+different container filesystem.
 
-Public message updates use fenced leases and a bounded retry budget. Permanent
+If cancellation races an accepted private winner or end-of-day message, the
+backend durably locates that deterministic Slack message and replaces its
+private booking details with a generic cancellation notice. Public and private
+message updates use fenced leases and a bounded retry budget. Permanent
 Slack errors and exhausted transient retries become scheduler-visible dead
 letters instead of being retried forever.
 
 Production also requires `ROO_API_KEY` and `INTERNAL_API_KEY` to be present,
 at least 32 characters, and different. The deploy installs both from separate
-secret-store entries. Enabling Office Manager additionally performs live,
-read-only checks of the Public Roo Slack token (`auth.test`), the configured
-public channel (`conversations.info`), and Public Roo's non-secret readiness
-contract. The companion must report the same Melbourne timezone and the exact
+secret-store entries. The Slack token, channel, and timezone must remain
+configured even while new Office Manager claims are disabled, because durable
+updates and retractions still need recovery. Every deploy performs live,
+read-only checks of the Public Roo Slack token (`auth.test`), its declared
+`channels:history`, `channels:read`, `chat:write`, `im:history`, `im:write`,
+`users:read`, and `users:read.email` scopes, the configured public channel
+(`conversations.info`, including that the bot is already a member, and
+`conversations.history`), and—when new claims are
+enabled—Public Roo's non-secret readiness contract. The companion must report the same Melbourne timezone and the exact
 backend claim path. After startup,
 `GET /api/v1/points/coworking/office-manager/preflight/` verifies the exact
 contract with the Roo credential while internal and missing credentials are
@@ -136,13 +151,14 @@ rejected. It does not create a day, booking, or assignment.
 
 The Office Manager branch was previously shared under colliding migration
 numbers before its append-only `0034`/`0035` identities were established.
-Before applying `0034`, `0035`, `0036`, or the append-only `0037` provenance
-recovery, run the
+Before applying `0034`, `0035`, `0036`, the append-only `0037` provenance
+recovery, or the append-only `0038` generation and repair hardening, run the
 read-only audit against **every persistent database**, including production,
 staging, preview databases with retained volumes, and developer databases:
 
 ```bash
-python manage.py audit_office_manager_migrations
+python manage.py audit_office_manager_migrations \
+  --configured-office-manager-channel "$OFFICE_MANAGER_SLACK_CHANNEL_ID"
 ```
 
 The audit is read-only. It reads `django_migrations`, database introspection,
@@ -150,7 +166,7 @@ and the Office Manager day/assignment rows needed to prove the cross-table
 invariants that database constraints cannot express: every claimed day has
 exactly one active assignment, and every active assignment belongs to a
 claimed day. It reports all recorded Roo identities beginning `0029`, `0030`,
-`0031`, `0034`, `0035`, `0036`, and `0037`, plus the schema markers needed by their
+`0031`, `0034`, `0035`, `0036`, `0037`, and `0038`, plus the schema markers needed by their
 current bodies. In particular, investigate these obsolete shared identities:
 
 - `0029_officemanagerday_coworkingbooking_booking_source_and_more`
@@ -181,9 +197,16 @@ part of `deploy.sh`.
 
 If obsolete and canonical identities are both recorded and all required
 schema markers are complete, the audit returns `attestation_required` and a
-`report_sha256`. Two-person review should capture a JSON file outside the
-repository at
-`/root/mlai-backend-operations/office-manager-migration-attestation.json`:
+`report_sha256`. Pre- and post-migration states have different fingerprints
+and therefore require two separately reviewed files outside the repository:
+
+- `/root/mlai-backend-operations/office-manager-migration-pre-attestation.json`
+- `/root/mlai-backend-operations/office-manager-migration-post-attestation.json`
+
+Generate the pre-state report against the live database. Generate the expected
+post-state report only against a restored clone after applying the exact
+reviewed migrations. Do not derive or auto-approve the second fingerprint in
+the production deploy. Each file uses this shape:
 
 ```json
 {
@@ -195,10 +218,11 @@ repository at
 }
 ```
 
-Re-run with `--attestation-file` and retain the complete JSON audit output with
-the change record. The attestation is bound to the exact recorder/schema
-fingerprint, so later drift fails closed. `deploy.sh` mounts this file
-read-only when present and always runs the audit before migrations.
+Re-run each state with its corresponding `--attestation-file` and retain both
+complete JSON audit outputs with the change record. Each attestation is bound
+to one exact recorder/schema fingerprint, so later drift fails closed.
+`deploy.sh` mounts the pre file before migrations and the post file after
+migrations. It never reuses one attestation across the transition.
 
 `0037` makes unknown historical point-bucket allocations explicit. It
 preserves a 0036-era assignment only when its booking provenance and exact
@@ -214,9 +238,24 @@ python manage.py reconcile_office_manager_provenance \
   --commit
 ```
 
+If any refund was already reversed, also provide one independently audited
+bucket split per reversed assignment:
+
+```bash
+  --reversal-purchased-microroo <assignment-id>:<exact-value>
+```
+
+Repeat the option for multiple reversals. The command validates the exact
+reversal ledger and persists separate immutable reversal-provenance evidence;
+it never assumes that the original refund buckets were still present when the
+reversal ran.
+
 Run it without `--commit` first. The command never infers a bucket split and
-refuses mismatched ledgers or conflicting prior evidence. Re-run the migration
-audit after every reconciliation.
+refuses mismatched ledgers or conflicting prior evidence. For a historical
+purchased refund, `0038` also records an immutable zero-value adjustment and
+reclassifies the exact purchased allocation from the earned bucket back to the
+purchased bucket. If that value is no longer safely available, it fails closed
+for operator review. Re-run the migration audit after every reconciliation.
 
 Roll out in this order:
 
@@ -226,7 +265,8 @@ Roll out in this order:
    `roo.0034_officemanagerday_coworkingbooking_booking_source_and_more` and
    `roo.0035_protect_office_manager_assignment_day`, together with the new
    append-only `roo.0036_office_manager_attempts_and_provenance` and
-   `roo.0037_quarantine_legacy_office_manager_provenance` successors.
+   `roo.0037_quarantine_legacy_office_manager_provenance` and
+   `roo.0038_office_manager_claim_generation` successors.
    Deploy the backend and apply them with `OFFICE_MANAGER_ENABLED=false`.
 3. Configure the dedicated Public Roo Slack token and channel, keeping both
    feature flags off. The token must belong to the app that owns the button.
@@ -252,6 +292,10 @@ the host environment for the next replacement; the preserved container keeps
 the complete last-known-good environment until then. Once migrations and
 post-migration gates succeed and replacement begins, failure recovery may
 recreate the new image with the staged-off flag, but it still requires a fresh
-scheduler tick. Do not reverse shared migrations, remove `0034`–`0037`, or
+scheduler tick. A failure after migration begins but before `migrate --check`
+succeeds leaves every writer stopped: Django may have committed only a prefix
+of the graph, so neither binary is assumed compatible. Treat the failed deploy
+as an operator alert, inspect the recorded migration/schema audit, and repair
+forward before restarting services. Do not reverse shared migrations, remove `0034`–`0038`, or
 delete Office Manager accounting/provenance rows; roll application code forward
 with a new append-only migration when schema recovery is required.

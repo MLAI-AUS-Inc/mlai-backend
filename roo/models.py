@@ -889,6 +889,9 @@ class OfficeManagerDay(models.Model):
     )
 
     date = models.DateField(unique=True)
+    # Incremented whenever cancellation reopens a day. Buttons from a prior
+    # lifecycle carry the older value and cannot claim the reopened slot.
+    generation = models.PositiveIntegerField(default=1)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='open')
     slack_channel_id = models.CharField(max_length=50)
     slack_message_ts = models.CharField(max_length=50, blank=True, default='')
@@ -957,6 +960,7 @@ class OfficeManagerAssignment(models.Model):
         default='pending',
     )
     winner_dm_sent_at = models.DateTimeField(blank=True, null=True)
+    winner_dm_message_ts = models.CharField(max_length=50, blank=True, default='')
     winner_dm_last_error = models.TextField(blank=True, default='')
     winner_dm_attempt_count = models.PositiveIntegerField(default=0)
     winner_dm_next_attempt_at = models.DateTimeField(blank=True, null=True)
@@ -1036,12 +1040,27 @@ class OfficeManagerAssignment(models.Model):
         default='pending',
     )
     end_of_day_reminder_sent_at = models.DateTimeField(blank=True, null=True)
+    end_of_day_reminder_message_ts = models.CharField(
+        max_length=50,
+        blank=True,
+        default='',
+    )
     end_of_day_reminder_last_error = models.TextField(blank=True, default='')
     end_of_day_reminder_attempt_count = models.PositiveIntegerField(default=0)
     end_of_day_reminder_next_attempt_at = models.DateTimeField(
         blank=True,
         null=True,
     )
+    private_correction_pending = models.BooleanField(default=False)
+    private_correction_status = models.CharField(
+        max_length=20,
+        choices=DELIVERY_STATUS_CHOICES,
+        default='pending',
+    )
+    private_correction_sent_at = models.DateTimeField(blank=True, null=True)
+    private_correction_last_error = models.TextField(blank=True, default='')
+    private_correction_attempt_count = models.PositiveIntegerField(default=0)
+    private_correction_next_attempt_at = models.DateTimeField(blank=True, null=True)
     claimed_at = models.DateTimeField(default=timezone.now)
     relinquished_at = models.DateTimeField(blank=True, null=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -1072,11 +1091,13 @@ class OfficeManagerClaimAttempt(models.Model):
         ('member_not_eligible', 'Member not eligible'),
         ('refund_unavailable', 'Refund unavailable'),
         ('attempt_superseded', 'Attempt superseded by cancellation'),
+        ('announcement_superseded', 'Announcement generation superseded'),
     )
 
     attempt_id = models.UUIDField(primary_key=True, editable=False)
     slack_user_id = models.CharField(max_length=50)
     booking_date = models.DateField()
+    generation = models.PositiveIntegerField(default=1)
     outcome = models.CharField(max_length=50, choices=OUTCOME_CHOICES)
     message = models.TextField(blank=True, default='')
     assignee_slack_user_id = models.CharField(
@@ -1129,6 +1150,62 @@ class OfficeManagerProvenanceReconciliation(models.Model):
 
     class Meta:
         ordering = ["-created_at", "-pk"]
+
+
+class OfficeManagerProvenanceBucketRepair(models.Model):
+    """Append-only evidence that a legacy refund was reclassified by bucket."""
+
+    reconciliation = models.OneToOneField(
+        OfficeManagerProvenanceReconciliation,
+        on_delete=models.PROTECT,
+        related_name="bucket_repair",
+    )
+    ledger = models.OneToOneField(
+        Ledger,
+        on_delete=models.PROTECT,
+        related_name="office_manager_bucket_repair",
+    )
+    purchased_microroo = models.PositiveBigIntegerField()
+    account_before = models.JSONField(default=dict)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at", "-pk"]
+
+
+class OfficeManagerRefundReversalProvenance(models.Model):
+    """Immutable operator evidence for a historical refund reversal's buckets."""
+
+    assignment = models.OneToOneField(
+        OfficeManagerAssignment,
+        on_delete=models.PROTECT,
+        related_name="refund_reversal_provenance",
+    )
+    reversal_ledger = models.OneToOneField(
+        Ledger,
+        on_delete=models.PROTECT,
+        related_name="office_manager_refund_reversal_provenance",
+    )
+    purchased_microroo = models.PositiveBigIntegerField()
+    reviewed_by = models.CharField(max_length=255)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at", "-pk"]
+
+
+class ScheduledDiscoveryHeartbeat(models.Model):
+    """Shared-database proof that the required scheduler completed a full tick."""
+
+    name = models.CharField(max_length=80, primary_key=True)
+    last_started_at = models.DateTimeField(blank=True, null=True)
+    last_succeeded_at = models.DateTimeField(blank=True, null=True)
+    last_failed_at = models.DateTimeField(blank=True, null=True)
+    last_error = models.TextField(blank=True, default="")
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["name"]
 
 
 class MeetingRoom(models.Model):

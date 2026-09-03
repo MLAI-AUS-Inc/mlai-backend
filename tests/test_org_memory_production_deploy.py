@@ -122,6 +122,19 @@ class OrgMemoryProductionDeployTests(SimpleTestCase):
         self.assertIn("previous_scheduler_tick_mtime", deploy)
         self.assertIn('docker start "\\${previous_runtime_container_ids[@]}"', deploy)
         self.assertIn("verify_scheduler_recovery_tick", deploy)
+        self.assertIn("schema_transition_completed=0", deploy)
+        self.assertIn(
+            'if [ "\\$schema_transition_completed" != "1" ]; then',
+            deploy,
+        )
+        self.assertIn(
+            "migration transition is incomplete; runtime services remain stopped",
+            deploy,
+        )
+        self.assertLess(
+            deploy.index("compose_run_web python manage.py migrate --check --noinput"),
+            deploy.index("schema_transition_completed=1"),
+        )
         self.assertNotIn("restore_staged_scheduler", deploy)
         self.assertNotIn("docker compose stop scheduler", deploy)
         self.assertIn("schedule_org_memory_reextraction", deploy)
@@ -222,6 +235,7 @@ class OrgMemoryProductionDeployTests(SimpleTestCase):
         self.assertIn("`conversations.history`", docs)
         self.assertIn("reconcile_office_manager_provenance", docs)
         self.assertIn("roo.0037_quarantine_legacy_office_manager_provenance", docs)
+        self.assertIn("roo.0038_office_manager_claim_generation", docs)
 
         workflow = (ROOT / ".github" / "workflows" / "deploy.yml").read_text()
         self.assertIn("run: bash -n deploy.sh", workflow)
@@ -230,6 +244,25 @@ class OrgMemoryProductionDeployTests(SimpleTestCase):
         self.assertIn(
             "Public Roo cannot inspect Office Manager message history",
             deploy,
+        )
+        for scope in (
+            "channels:history",
+            "channels:read",
+            "chat:write",
+            "im:history",
+            "im:write",
+            "users:read",
+            "users:read.email",
+        ):
+            self.assertIn(f'"{scope}"', deploy)
+        self.assertIn("x-oauth-scopes", deploy)
+        self.assertIn(
+            "Public Roo Slack token is missing required Office Manager scopes",
+            deploy,
+        )
+        self.assertGreaterEqual(
+            deploy.count('"claim_generation_supported": True'),
+            2,
         )
 
     def test_remote_deployment_script_is_valid_bash(self):

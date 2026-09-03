@@ -20,6 +20,7 @@ MIGRATION_PREFIXES = (
     "0035",
     "0036",
     "0037",
+    "0038",
 )
 CANONICAL_IDENTITIES = {
     "boost": "0029_boostpostadmission_and_more",
@@ -33,6 +34,7 @@ CANONICAL_IDENTITIES = {
     "office_manager_recovery": (
         "0037_quarantine_legacy_office_manager_provenance"
     ),
+    "office_manager_hardening": "0038_office_manager_claim_generation",
 }
 
 
@@ -130,6 +132,44 @@ REQUIRED_SCHEMA = {
             "reviewed_by",
             "assignment_refund_snapshot",
             "created_at",
+        },
+    },
+    "office_manager_hardening": {
+        "roo_officemanagerday": {"generation"},
+        "roo_officemanagerclaimattempt": {"generation"},
+        "roo_officemanagerassignment": {
+            "winner_dm_message_ts",
+            "end_of_day_reminder_message_ts",
+            "private_correction_pending",
+            "private_correction_status",
+            "private_correction_sent_at",
+            "private_correction_last_error",
+            "private_correction_attempt_count",
+            "private_correction_next_attempt_at",
+        },
+        "roo_officemanagerprovenancebucketrepair": {
+            "id",
+            "reconciliation_id",
+            "ledger_id",
+            "purchased_microroo",
+            "account_before",
+            "created_at",
+        },
+        "roo_officemanagerrefundreversalprovenance": {
+            "id",
+            "assignment_id",
+            "reversal_ledger_id",
+            "purchased_microroo",
+            "reviewed_by",
+            "created_at",
+        },
+        "roo_scheduleddiscoveryheartbeat": {
+            "name",
+            "last_started_at",
+            "last_succeeded_at",
+            "last_failed_at",
+            "last_error",
+            "updated_at",
         },
     },
 }
@@ -255,6 +295,79 @@ def _office_manager_recovery_schema_issues() -> list[str]:
     return issues
 
 
+def _office_manager_hardening_schema_issues() -> list[str]:
+    """Verify 0038's immutable repair evidence relationships and uniqueness."""
+    table_names = set(connection.introspection.table_names())
+    table_name = "roo_officemanagerprovenancebucketrepair"
+    reversal_table = "roo_officemanagerrefundreversalprovenance"
+    if table_name not in table_names:
+        return []
+
+    with connection.cursor() as cursor:
+        constraints = connection.introspection.get_constraints(
+            cursor,
+            table_name,
+        )
+
+    relationships = (
+        (
+            "reconciliation_id",
+            "roo_officemanagerprovenancereconciliation",
+            "reconciliation",
+        ),
+        ("ledger_id", "roo_ledger", "ledger"),
+    )
+    issues: list[str] = []
+    for column, foreign_table, label in relationships:
+        is_unique = any(
+            constraint.get("unique")
+            and constraint.get("columns") == [column]
+            for constraint in constraints.values()
+        )
+        has_foreign_key = any(
+            constraint.get("foreign_key") == (foreign_table, "id")
+            and constraint.get("columns") == [column]
+            for constraint in constraints.values()
+        )
+        if not is_unique:
+            issues.append(
+                "roo_officemanagerprovenancebucketrepair."
+                f"{column} must be unique"
+            )
+        if not has_foreign_key:
+            issues.append(
+                "roo_officemanagerprovenancebucketrepair."
+                f"{label} foreign key is missing"
+            )
+    if reversal_table in table_names:
+        with connection.cursor() as cursor:
+            reversal_constraints = connection.introspection.get_constraints(
+                cursor,
+                reversal_table,
+            )
+        for column, foreign_table in (
+            ("assignment_id", "roo_officemanagerassignment"),
+            ("reversal_ledger_id", "roo_ledger"),
+        ):
+            if not any(
+                constraint.get("unique")
+                and constraint.get("columns") == [column]
+                for constraint in reversal_constraints.values()
+            ):
+                issues.append(
+                    f"{reversal_table}.{column} must be unique"
+                )
+            if not any(
+                constraint.get("foreign_key") == (foreign_table, "id")
+                and constraint.get("columns") == [column]
+                for constraint in reversal_constraints.values()
+            ):
+                issues.append(
+                    f"{reversal_table}.{column} foreign key is missing"
+                )
+    return issues
+
+
 def _disk_0036_identities() -> list[str]:
     migration_dir = Path(settings.BASE_DIR) / "roo" / "migrations"
     return sorted(path.stem for path in migration_dir.glob("0036_*.py"))
@@ -263,6 +376,11 @@ def _disk_0036_identities() -> list[str]:
 def _disk_0037_identities() -> list[str]:
     migration_dir = Path(settings.BASE_DIR) / "roo" / "migrations"
     return sorted(path.stem for path in migration_dir.glob("0037_*.py"))
+
+
+def _disk_0038_identities() -> list[str]:
+    migration_dir = Path(settings.BASE_DIR) / "roo" / "migrations"
+    return sorted(path.stem for path in migration_dir.glob("0038_*.py"))
 
 
 def _office_manager_data_invariants() -> dict:
@@ -283,7 +401,12 @@ def _office_manager_data_invariants() -> dict:
             "assignment_booking_identity_mismatches": [],
             "unreconciled_paid_bookings": [],
             "unreconciled_office_manager_refunds": [],
+            "invalid_office_manager_debit_ledgers": [],
             "invalid_office_manager_refund_ledgers": [],
+            "invalid_office_manager_reversal_ledgers": [],
+            "unattested_reversed_office_manager_refunds": [],
+            "unrepaired_office_manager_refund_buckets": [],
+            "pending_office_manager_delivery_channels": [],
         }
 
     with connection.cursor() as cursor:
@@ -440,7 +563,6 @@ def _office_manager_data_invariants() -> dict:
                        <> b.purchased_points_cost_microroo
                     OR b.original_points_cost <> a.points_refunded
                 )
-                  AND a.refund_reversal_ledger_entry_id IS NULL
                 ORDER BY a.id
                 """
             )
@@ -479,6 +601,63 @@ def _office_manager_data_invariants() -> dict:
         if required_ledger_columns.issubset(ledger_columns):
             cursor.execute(
                 """
+                SELECT a.id, a.booking_id, a.points_refunded,
+                       b.original_points_cost, b.date, b.ledger_entry_id,
+                       l.id, l.user_id, b.user_id, l.kind, l.source,
+                       l.delta_microroo, l.reference_type, l.reference_id
+                FROM roo_officemanagerassignment a
+                INNER JOIN roo_coworkingbooking b ON b.id = a.booking_id
+                LEFT JOIN roo_ledger l ON l.id = b.ledger_entry_id
+                WHERE a.points_refunded > 0
+                ORDER BY a.id
+                """
+            )
+            invalid_debit_ledgers = []
+            for row in cursor.fetchall():
+                (
+                    assignment_id,
+                    booking_id,
+                    points_refunded,
+                    original_points_cost,
+                    booking_date,
+                    booking_ledger_entry_id,
+                    ledger_id,
+                    ledger_user_id,
+                    booking_user_id,
+                    kind,
+                    source,
+                    delta_microroo,
+                    reference_type,
+                    reference_id,
+                ) = row
+                reference_matches = (
+                    str(reference_id or "") == booking_date.isoformat()
+                    or _uuid_text(reference_id) == _uuid_text(booking_id)
+                )
+                if (
+                    int(original_points_cost or 0) != int(points_refunded)
+                    or booking_ledger_entry_id is None
+                    or ledger_id != booking_ledger_entry_id
+                    or ledger_user_id != booking_user_id
+                    or kind != "SPEND"
+                    or source != "COWORKING"
+                    or delta_microroo != -(int(points_refunded) * 1_000_000)
+                    or reference_type != "COWORKING_BOOKING"
+                    or not reference_matches
+                ):
+                    invalid_debit_ledgers.append(
+                        {
+                            "assignment_id": int(assignment_id),
+                            "booking_id": _uuid_text(booking_id),
+                            "debit_ledger_entry_id": (
+                                int(booking_ledger_entry_id)
+                                if booking_ledger_entry_id is not None
+                                else None
+                            ),
+                        }
+                    )
+            cursor.execute(
+                """
                 SELECT a.id, a.booking_id, a.refund_ledger_entry_id
                 FROM roo_officemanagerassignment a
                 LEFT JOIN roo_ledger l ON l.id = a.refund_ledger_entry_id
@@ -505,13 +684,233 @@ def _office_manager_data_invariants() -> dict:
                 }
                 for assignment_id, booking_id, ledger_id in cursor.fetchall()
             ]
+            cursor.execute(
+                """
+                SELECT a.id, a.booking_id, a.refund_reversal_ledger_entry_id
+                FROM roo_officemanagerassignment a
+                LEFT JOIN roo_ledger l
+                  ON l.id = a.refund_reversal_ledger_entry_id
+                WHERE a.refund_reversal_ledger_entry_id IS NOT NULL AND (
+                    l.id IS NULL
+                    OR l.user_id <> a.user_id
+                    OR l.kind <> %s
+                    OR l.source <> %s
+                    OR l.delta_microroo <> -(a.points_refunded * 1000000)
+                    OR l.reference_type <> %s
+                    OR l.reference_id <> CAST(a.id AS TEXT)
+                )
+                ORDER BY a.id
+                """,
+                ["SPEND", "COWORKING", "OFFICE_MANAGER_REFUND_REVERSAL"],
+            )
+            invalid_reversal_ledgers = [
+                {
+                    "assignment_id": int(assignment_id),
+                    "booking_id": _uuid_text(booking_id),
+                    "refund_reversal_ledger_entry_id": (
+                        int(ledger_id) if ledger_id is not None else None
+                    ),
+                }
+                for assignment_id, booking_id, ledger_id in cursor.fetchall()
+            ]
         else:
+            invalid_debit_ledgers = [{
+                "reason": "required ledger columns are unavailable",
+                "missing_columns": sorted(
+                    required_ledger_columns - ledger_columns
+                ),
+            }]
             invalid_refund_ledgers = [{
                 "reason": "required ledger columns are unavailable",
                 "missing_columns": sorted(
                     required_ledger_columns - ledger_columns
                 ),
             }]
+            invalid_reversal_ledgers = [{
+                "reason": "required ledger columns are unavailable",
+                "missing_columns": sorted(
+                    required_ledger_columns - ledger_columns
+                ),
+            }]
+        repair_table = "roo_officemanagerprovenancebucketrepair"
+        reconciliation_table = "roo_officemanagerprovenancereconciliation"
+        reversal_evidence_table = (
+            "roo_officemanagerrefundreversalprovenance"
+        )
+        if {
+            repair_table,
+            reconciliation_table,
+            reversal_evidence_table,
+        }.issubset(table_names):
+            cursor.execute(
+                """
+                SELECT a.id, a.booking_id, a.refund_reversal_ledger_entry_id
+                FROM roo_officemanagerassignment a
+                LEFT JOIN roo_officemanagerprovenancereconciliation r
+                  ON r.booking_id = a.booking_id
+                LEFT JOIN roo_officemanagerrefundreversalprovenance p
+                  ON p.assignment_id = a.id
+                WHERE a.refund_reversal_ledger_entry_id IS NOT NULL
+                  AND (
+                    r.id IS NULL
+                    OR p.id IS NULL
+                    OR p.reversal_ledger_id
+                       <> a.refund_reversal_ledger_entry_id
+                    OR p.purchased_microroo
+                       > (a.points_refunded * 1000000)
+                  )
+                ORDER BY a.id
+                """
+            )
+            unattested_reversed_refunds = [
+                {
+                    "assignment_id": int(assignment_id),
+                    "booking_id": _uuid_text(booking_id),
+                    "refund_reversal_ledger_entry_id": int(reversal_id),
+                }
+                for assignment_id, booking_id, reversal_id in cursor.fetchall()
+            ]
+            cursor.execute(
+                """
+                SELECT r.id, r.booking_id, r.purchased_microroo,
+                       r.assignment_refund_snapshot,
+                       p.id, p.purchased_microroo, l.id, l.user_id, b.user_id,
+                       l.kind, l.source, l.delta_microroo,
+                       l.reference_type, l.reference_id
+                FROM roo_officemanagerprovenancereconciliation r
+                INNER JOIN roo_coworkingbooking b ON b.id = r.booking_id
+                LEFT JOIN roo_officemanagerprovenancebucketrepair p
+                  ON p.reconciliation_id = r.id
+                LEFT JOIN roo_ledger l ON l.id = p.ledger_id
+                ORDER BY r.id
+                """
+            )
+            unrepaired_refund_buckets = []
+            reconciliation_rows = cursor.fetchall()
+            for row in reconciliation_rows:
+                (
+                    reconciliation_id,
+                    booking_id,
+                    purchased_microroo,
+                    refund_snapshot,
+                    repair_id,
+                    repair_purchased_microroo,
+                    ledger_id,
+                    ledger_user_id,
+                    booking_user_id,
+                    kind,
+                    source,
+                    delta_microroo,
+                    reference_type,
+                    reference_id,
+                ) = row
+                if isinstance(refund_snapshot, str):
+                    try:
+                        refund_snapshot = json.loads(refund_snapshot)
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        refund_snapshot = None
+                cursor.execute(
+                    """
+                    SELECT a.id, a.refund_ledger_entry_id,
+                           a.points_refunded,
+                           a.refund_reversal_ledger_entry_id,
+                           p.purchased_microroo
+                    FROM roo_officemanagerassignment a
+                    LEFT JOIN roo_officemanagerrefundreversalprovenance p
+                      ON p.assignment_id = a.id
+                    WHERE a.booking_id = %s AND a.points_refunded > 0
+                    ORDER BY a.day_id, a.id
+                    """,
+                    [booking_id],
+                )
+                assignment_rows = cursor.fetchall()
+                expected_snapshot = [
+                    {
+                        "assignment_id": int(assignment_id),
+                        "refund_ledger_id": (
+                            int(refund_ledger_id)
+                            if refund_ledger_id is not None
+                            else None
+                        ),
+                        "refund_microroo": int(points_refunded) * 1_000_000,
+                    }
+                    for (
+                        assignment_id,
+                        refund_ledger_id,
+                        points_refunded,
+                        _reversal_ledger_id,
+                        _reversal_purchased,
+                    ) in assignment_rows
+                ]
+                snapshot_valid = refund_snapshot == expected_snapshot
+                expected_repair = 0
+                for (
+                    _assignment_id,
+                    _refund_ledger_id,
+                    _points_refunded,
+                    reversal_ledger_id,
+                    reversal_purchased,
+                ) in assignment_rows:
+                    if reversal_ledger_id is None:
+                        expected_repair += int(purchased_microroo)
+                    elif reversal_purchased is None:
+                        snapshot_valid = False
+                    else:
+                        expected_repair += int(reversal_purchased)
+                repair_is_valid = False
+                if expected_repair == 0:
+                    repair_is_valid = repair_id is None
+                elif repair_id is not None:
+                    repair_is_valid = (
+                        repair_purchased_microroo == expected_repair
+                        and ledger_id is not None
+                        and ledger_user_id == booking_user_id
+                        and kind == "ADJUST"
+                        and source == "COWORKING"
+                        and delta_microroo == 0
+                        and reference_type == "OFFICE_MANAGER_BUCKET_REPAIR"
+                        and _uuid_text(reference_id) == _uuid_text(booking_id)
+                    )
+                if not snapshot_valid or not repair_is_valid:
+                    unrepaired_refund_buckets.append(
+                        {
+                            "reconciliation_id": int(reconciliation_id),
+                            "booking_id": _uuid_text(booking_id),
+                            "purchased_microroo": int(purchased_microroo),
+                            "expected_repair_microroo": (
+                                expected_repair if snapshot_valid else None
+                            ),
+                        }
+                    )
+        else:
+            unrepaired_refund_buckets = []
+            unattested_reversed_refunds = []
+
+        day_pending_clauses = [
+            "d.announcement_status IN ('pending', 'sending', 'unknown', 'failed')",
+            "d.message_update_pending = %s",
+        ]
+        assignment_pending_clauses = [
+            "a.winner_channel_announcement_status IN "
+            "('pending', 'sending', 'unknown', 'failed')",
+            "a.winner_channel_retraction_pending = %s",
+        ]
+        cursor.execute(
+            f"""
+            SELECT DISTINCT d.slack_channel_id
+            FROM roo_officemanagerday d
+            LEFT JOIN roo_officemanagerassignment a ON a.day_id = d.id
+            WHERE ({' OR '.join(day_pending_clauses)})
+               OR ({' OR '.join(assignment_pending_clauses)})
+            ORDER BY d.slack_channel_id
+            """,
+            [True, True],
+        )
+        pending_delivery_channels = [
+            str(channel_id)
+            for (channel_id,) in cursor.fetchall()
+            if str(channel_id or "").strip()
+        ]
     return {
         "checked": True,
         "claimed_days_without_exactly_one_active_assignment": claimed_mismatches,
@@ -520,11 +919,20 @@ def _office_manager_data_invariants() -> dict:
         "assignment_booking_identity_mismatches": identity_mismatches,
         "unreconciled_paid_bookings": unreconciled_paid_bookings,
         "unreconciled_office_manager_refunds": unreconciled_refunds,
+        "invalid_office_manager_debit_ledgers": invalid_debit_ledgers,
         "invalid_office_manager_refund_ledgers": invalid_refund_ledgers,
+        "invalid_office_manager_reversal_ledgers": invalid_reversal_ledgers,
+        "unattested_reversed_office_manager_refunds": (
+            unattested_reversed_refunds
+        ),
+        "unrepaired_office_manager_refund_buckets": (
+            unrepaired_refund_buckets
+        ),
+        "pending_office_manager_delivery_channels": pending_delivery_channels,
     }
 
 
-def _build_report() -> dict:
+def _build_report(*, configured_office_manager_channel: str = "") -> dict:
     applied = _applied_migration_names()
     applied_set = set(applied)
     schema = _schema_snapshot()
@@ -532,6 +940,7 @@ def _build_report() -> dict:
     data_invariants = _office_manager_data_invariants()
     disk_0036 = _disk_0036_identities()
     disk_0037 = _disk_0037_identities()
+    disk_0038 = _disk_0038_identities()
     issues = []
     histories = []
 
@@ -631,6 +1040,26 @@ def _build_report() -> dict:
     if recovery_identity in applied_set:
         issues.extend(_office_manager_recovery_schema_issues())
 
+    hardening_identity = CANONICAL_IDENTITIES["office_manager_hardening"]
+    applied_0038 = [name for name in applied if name.startswith("0038_")]
+    if disk_0038 != [hardening_identity]:
+        issues.append(
+            "the reviewed source tree must contain exactly the canonical "
+            "append-only roo.0038 Office Manager hardening migration"
+        )
+    if len(applied_0038) > 1:
+        issues.append("multiple roo.0038 migration identities are recorded")
+    if applied_0038 and applied_0038 != disk_0038:
+        issues.append(
+            "recorded roo.0038 identity does not match the reviewed source tree"
+        )
+    if hardening_identity in applied_set and recovery_identity not in applied_set:
+        issues.append(
+            f"{hardening_identity} is recorded without {recovery_identity}"
+        )
+    if hardening_identity in applied_set:
+        issues.extend(_office_manager_hardening_schema_issues())
+
     historical_applied = sorted(
         name for name in HISTORICAL_IDENTITIES if name in applied_set
     )
@@ -660,9 +1089,37 @@ def _build_report() -> dict:
         issues.append(
             "historical Office Manager refunds require reconciled point-bucket provenance"
         )
+    if data_invariants["invalid_office_manager_debit_ledgers"]:
+        issues.append(
+            "Office Manager refunds require an exact authoritative debit ledger entry"
+        )
     if data_invariants["invalid_office_manager_refund_ledgers"]:
         issues.append(
             "Office Manager refunds require an exact authoritative ledger entry"
+        )
+    if data_invariants["invalid_office_manager_reversal_ledgers"]:
+        issues.append(
+            "Office Manager refund reversals require an exact authoritative ledger entry"
+        )
+    if data_invariants["unattested_reversed_office_manager_refunds"]:
+        issues.append(
+            "historical reversed Office Manager refunds require immutable operator evidence"
+        )
+    if data_invariants["unrepaired_office_manager_refund_buckets"]:
+        issues.append(
+            "reconciled historical purchased refunds require immutable "
+            "bucket-repair evidence"
+        )
+    pending_channels = set(
+        data_invariants["pending_office_manager_delivery_channels"]
+    )
+    configured_channel = configured_office_manager_channel.strip()
+    if pending_channels and (
+        not configured_channel or pending_channels != {configured_channel}
+    ):
+        issues.append(
+            "pending Office Manager public delivery work targets a channel "
+            "other than the configured recovery channel"
         )
     return {
         "report_version": REPORT_VERSION,
@@ -672,12 +1129,14 @@ def _build_report() -> dict:
         "canonical_identities": CANONICAL_IDENTITIES,
         "disk_0036_identities": disk_0036,
         "disk_0037_identities": disk_0037,
+        "disk_0038_identities": disk_0038,
         "historical_identities": histories,
         "historical_applied": historical_applied,
         "schema": schema,
         "schema_groups": schema_groups,
         "data_invariants": data_invariants,
         "issues": sorted(set(issues)),
+        "configured_office_manager_channel": configured_channel,
     }
 
 
@@ -747,9 +1206,21 @@ class Command(BaseCommand):
                 "report fingerprint. The command never creates or changes it."
             ),
         )
+        parser.add_argument(
+            "--configured-office-manager-channel",
+            default="",
+            help=(
+                "Fail closed when pending public delivery work is not bound "
+                "to exactly this configured Slack channel."
+            ),
+        )
 
     def handle(self, *args, **options):
-        report = _build_report()
+        report = _build_report(
+            configured_office_manager_channel=str(
+                options.get("configured_office_manager_channel") or ""
+            )
+        )
         report_sha256 = _fingerprint(report)
         output = {
             **report,
@@ -762,7 +1233,8 @@ class Command(BaseCommand):
             self.stdout.write(json.dumps(output, sort_keys=True))
             raise CommandError(
                 "Office Manager migration history is unsafe; resolve the reported "
-                "schema/recorder mismatch before migrations."
+                "schema/recorder mismatch before migrations: "
+                + "; ".join(report["issues"])
             )
 
         if report["historical_applied"]:

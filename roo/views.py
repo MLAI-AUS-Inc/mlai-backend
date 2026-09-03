@@ -35,7 +35,11 @@ from .services import (
     TaskService, RewardsService,
 )
 from .coding import roo_decimal_string
-from .office_manager import OfficeManagerClaimError, OfficeManagerService
+from .office_manager import (
+    MAX_OFFICE_MANAGER_GENERATION,
+    OfficeManagerClaimError,
+    OfficeManagerService,
+)
 from .permissions import (
     can_list_committee_candidate_emails,
     can_generate_coworking_reports,
@@ -1870,6 +1874,8 @@ class CoworkingViewSet(viewsets.ViewSet):
                 'status': 'ok',
                 'contract': 'office-manager-v1',
                 'credential_scope': 'strict_roo',
+                'claim_generation_supported': True,
+                'claim_generation_required': True,
                 'timezone': str(
                     getattr(
                         settings,
@@ -1890,16 +1896,40 @@ class CoworkingViewSet(viewsets.ViewSet):
         slack_user_id = clean_slack_id(request.data.get('slack_user_id'))
         booking_date_raw = str(request.data.get('date') or '').strip()
         attempt_id_raw = str(request.data.get('attempt_id') or '').strip()
-        if not slack_user_id or not booking_date_raw or not attempt_id_raw:
+        generation_raw = request.data.get('generation')
+        if (
+            not slack_user_id
+            or not booking_date_raw
+            or not attempt_id_raw
+            or generation_raw is None
+        ):
             return Response(
                 {
                     'code': 'invalid_request',
                     'error': (
-                        'slack_user_id, date, and attempt_id are required'
+                        'slack_user_id, date, attempt_id, and generation are required'
                     ),
                 },
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        if isinstance(generation_raw, bool):
+            generation_text = ""
+        else:
+            generation_text = str(generation_raw).strip()
+        if (
+            not generation_text.isdigit()
+            or generation_text.startswith("0")
+            or len(generation_text) > 10
+            or int(generation_text) > MAX_OFFICE_MANAGER_GENERATION
+        ):
+            return Response(
+                {
+                    'code': 'invalid_request',
+                    'error': 'generation must be a canonical positive integer',
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        generation = int(generation_text)
         try:
             booking_date = date.fromisoformat(booking_date_raw)
         except ValueError:
@@ -1928,6 +1958,7 @@ class CoworkingViewSet(viewsets.ViewSet):
                 slack_user_id=slack_user_id,
                 booking_date=booking_date,
                 attempt_id=attempt_id,
+                generation=generation,
             )
         except OfficeManagerClaimError as exc:
             if exc.code == 'claim_closed':
@@ -1943,12 +1974,13 @@ class CoworkingViewSet(viewsets.ViewSet):
                 'claim_closed': status.HTTP_409_CONFLICT,
                 'attempt_payload_conflict': status.HTTP_409_CONFLICT,
                 'attempt_superseded': status.HTTP_409_CONFLICT,
+                'announcement_superseded': status.HTTP_409_CONFLICT,
                 'attempt_unavailable': status.HTTP_503_SERVICE_UNAVAILABLE,
                 'refund_unavailable': status.HTTP_409_CONFLICT,
             }
             response_data = {'code': exc.code, 'error': str(exc)}
-            if exc.attempt_id:
-                response_data['attempt_id'] = str(exc.attempt_id)
+            response_data['generation'] = generation
+            response_data['attempt_id'] = str(exc.attempt_id or attempt_id)
             if exc.code == 'attempt_superseded':
                 response_data['status'] = 'superseded'
             if exc.assignee_slack_user_id:
@@ -1973,6 +2005,7 @@ class CoworkingViewSet(viewsets.ViewSet):
             'attempt_id': str(result.attempt_id or attempt_id),
             'replayed': result.replayed,
             'date': booking_date.isoformat(),
+            'generation': generation,
             'office_manager_slack_user_id': slack_user_id,
             'assignment_id': result.assignment.id,
             'booking': CoworkingBookingSerializer(result.booking).data,
@@ -2067,6 +2100,13 @@ class CoworkingViewSet(viewsets.ViewSet):
                         office_manager_assignment_id
                     )
                 )
+                if OfficeManagerAssignment.objects.filter(
+                    pk=office_manager_assignment_id,
+                    private_correction_pending=True,
+                ).exists():
+                    OfficeManagerService.deliver_private_correction(
+                        office_manager_assignment_id
+                    )
                 retraction_status = (
                     OfficeManagerAssignment.objects.filter(
                         pk=office_manager_assignment_id

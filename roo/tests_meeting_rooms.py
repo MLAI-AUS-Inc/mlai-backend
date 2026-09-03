@@ -1,6 +1,7 @@
 import json
 import threading
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, time, timedelta
 from unittest import skipUnless
 from zoneinfo import ZoneInfo
@@ -28,6 +29,7 @@ from .models import (
     PointsAccount,
     PointsAdmin,
 )
+from .services import PointsService
 
 
 User = get_user_model()

@@ -292,6 +292,8 @@ jobs:
         python manage.py check_org_memory_search --require-vector --require-installed
         python manage.py test \
           roo.tests_office_manager \
+          roo.tests_office_manager_migration \
+          core.tests_user_merge \
           org_memory.tests.test_search_postgres \
           org_memory.tests.test_public_knowledge_embeddings \
           org_memory.tests.test_runtime_postgres \

@@ -3,6 +3,7 @@ from __future__ import annotations
 from django.contrib.auth import get_user_model
 from django.core.management.base import BaseCommand
 from django.core.management.base import CommandError
+from django.db.models import Q
 
 from content_factory.models import OrganizationContentConfig
 from integrations.models import UserIntegration
@@ -85,8 +86,8 @@ class Command(BaseCommand):
                 # No duplicate principal exists, so there is no durable ownership
                 # to transfer. Re-read before linking to avoid a stale profile row.
                 updated = User.objects.filter(
+                    Q(slack_id__isnull=True) | Q(slack_id=""),
                     pk=email_user.pk,
-                    slack_id__in=(None, ""),
                 ).update(slack_id=slack_id)
                 if updated != 1:
                     raise CommandError(

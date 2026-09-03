@@ -60,6 +60,7 @@ class Command(BaseCommand):
         merged_count = 0
         updated_count = 0
         skipped_count = 0
+        commit_failures = []
         
         for slack_user in slack_users:
             slack_id = slack_user.slack_id
@@ -119,8 +120,17 @@ class Command(BaseCommand):
             except Exception as e:
                 self.stdout.write(self.style.ERROR(f"Error processing {slack_user.email}: {e}"))
                 skipped_count += 1
+                if commit:
+                    commit_failures.append(
+                        f"{slack_id}: {e.__class__.__name__}"
+                    )
 
         self.stdout.write(self.style.SUCCESS(f"Done. Updated Emails: {updated_count}, Merged Users: {merged_count}, Skipped/Error: {skipped_count}"))
+        if commit_failures:
+            raise CommandError(
+                "User cleanup left unresolved committed merges: "
+                + "; ".join(commit_failures[:10])
+            )
 
     def merge_pair(self, source_slack_id, target_slack_id, commit):
         """Merge one known duplicate pair, without consulting the Slack API."""
@@ -201,6 +211,14 @@ class Command(BaseCommand):
                 remaining.append(
                     (rel.related_model._meta.label, field_name, count)
                 )
+        for field in User._meta.many_to_many:
+            through_model = field.remote_field.through
+            source_field_name = field.m2m_field_name()
+            count = through_model._base_manager.filter(
+                **{source_field_name: user}
+            ).count()
+            if count:
+                remaining.append((User._meta.label, field.name, count))
         return remaining
 
     def assert_no_unhandled_relations(self, user):
