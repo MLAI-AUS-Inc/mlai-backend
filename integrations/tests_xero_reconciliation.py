@@ -3046,6 +3046,68 @@ class ReconciliationWorkflowApiTests(APITestCase):
             automatic=False,
         )
 
+    @patch("integrations.api_views_reconciliation.fetch_active_xero_bank_accounts")
+    @patch("core.permissions.HasRooApiKey.has_permission", return_value=True)
+    def test_agent_run_preview_reuses_one_live_bank_account_catalog(
+        self, _permission, fetch_accounts
+    ):
+        run, _suggestion = self._agent_run_suggestion(
+            run_id="xero-agent-batch-preview",
+            line_id="agent-batch-line-1",
+        )
+        lines = import_xero_statement_lines(
+            organization=self.organization,
+            bank_account_id="bank-1",
+            expected_count=2,
+            requested_by="UADMIN",
+            lines=[
+                {
+                    "statement_line_id": "agent-batch-line-1",
+                    "date": "20 Jul 2026",
+                    "narration": "Transfer To CONTRACTOR ONE",
+                    "direction": "debit",
+                    "amount": "845.00",
+                },
+                {
+                    "statement_line_id": "agent-batch-line-2",
+                    "date": "21 Jul 2026",
+                    "narration": "Transfer To CONTRACTOR TWO",
+                    "direction": "debit",
+                    "amount": "745.00",
+                },
+            ],
+        )
+        scan = lines[0].last_scan
+        scan.capture_metadata = {"schema_version": 2}
+        scan.save(update_fields=["capture_metadata"])
+        second = lines[1]
+        XeroStatementSuggestion.objects.create(
+            organization=self.organization,
+            statement_line=second,
+            run_id=run.run_id,
+            proposed_action=XeroStatementSuggestion.ACTION_CREATE_BANK_TRANSACTION,
+            contact_name="Contractor Two",
+            account_code="405",
+            account_name="Contractor Expenses",
+            tax_type="GST Free Expenses",
+            description="Contractor work for the client project.",
+            confidence=0.99,
+            source_hash=second.source_hash,
+            evidence=[{"source_provider": "xero_ui", "source_record_id": second.statement_line_id}],
+        )
+        fetch_accounts.return_value = [
+            {"bank_account_id": "bank-1", "name": "Business account"},
+        ]
+
+        preview = self.client.get(
+            reverse("reconciliation_agent_run_preview", kwargs={"run_id": run.run_id}),
+            {"slack_user_id": "UADMIN", "domain": "mlai.au"},
+        )
+
+        self.assertEqual(preview.status_code, status.HTTP_200_OK)
+        self.assertEqual(preview.data["suggestion_count"], 2)
+        fetch_accounts.assert_called_once()
+
     @patch("core.permissions.HasRooApiKey.has_permission", return_value=True)
     def test_agent_run_execution_blocks_when_approved_payload_changes(self, _permission):
         run, suggestion = self._agent_run_suggestion(
