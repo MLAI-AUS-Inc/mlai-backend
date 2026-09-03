@@ -65,10 +65,12 @@ from integrations.services.reconciliation_catalogs import (
 from integrations.services.xero_statement_reconciliation import (
     STATEMENT_CAPTURE_SOURCE_BROWSER,
     build_statement_reconciliation_context,
+    canonical_bank_account_id,
     format_statement_browser_comment,
     import_xero_statement_lines,
     merchant_key,
     save_statement_suggestions,
+    select_current_statement_capture,
     serialize_statement_suggestion,
 )
 from integrations.services.xero_statement_posting import (
