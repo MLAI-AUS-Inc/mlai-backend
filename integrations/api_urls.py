@@ -20,6 +20,7 @@ urlpatterns = [
     path('luma/attendee-report', api_views_luma.LumaAttendeeReportView.as_view(), name='luma_attendee_report'),
     path('reconciliation/report', api_views_reconciliation.ReconciliationReportView.as_view(), name='reconciliation_report'),
     path('reconciliation/profile', api_views_reconciliation.ReconciliationProfileView.as_view(), name='reconciliation_profile'),
+    path('reconciliation/bank-accounts', api_views_reconciliation.ReconciliationBankAccountCatalogView.as_view(), name='reconciliation_bank_accounts'),
     path('reconciliation/mappings', api_views_reconciliation.ReconciliationMappingView.as_view(), name='reconciliation_mappings'),
     path('reconciliation/enrichment-context', api_views_reconciliation.ReconciliationEnrichmentContextView.as_view(), name='reconciliation_enrichment_context'),
     path('reconciliation/statement-lines', api_views_reconciliation.ReconciliationStatementLineListView.as_view(), name='reconciliation_statement_lines'),

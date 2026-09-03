@@ -1,10 +1,12 @@
-from datetime import date, datetime, timedelta, timezone
 from copy import deepcopy
+from datetime import date, datetime, timedelta, timezone
+import hashlib
+import json
 from unittest.mock import Mock, patch
 
 from django.contrib.auth import get_user_model
 from django.db import connection
-from django.test import SimpleTestCase, TestCase
+from django.test import SimpleTestCase, TestCase, override_settings
 from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 from rest_framework import status
@@ -33,6 +35,7 @@ from startup_updates.models import (
     GmailMessageArtifact,
     LinearProjectArtifact,
     LinearProjectMemberArtifact,
+    LinearProjectSelection,
     LumaEventSelection,
     SlackMessageArtifact,
 )
@@ -60,6 +63,7 @@ from integrations.services.reconciliation_catalogs import (
     build_reconciliation_catalog_status,
 )
 from integrations.services.xero_statement_reconciliation import (
+    STATEMENT_CAPTURE_SOURCE_BROWSER,
     build_statement_reconciliation_context,
     format_statement_browser_comment,
     import_xero_statement_lines,
@@ -68,6 +72,7 @@ from integrations.services.xero_statement_reconciliation import (
     serialize_statement_suggestion,
 )
 from integrations.services.xero_statement_posting import (
+    _resolved_tracking,
     build_statement_posting_preview,
     execute_statement_posting,
 )
@@ -265,6 +270,7 @@ class XeroReconciliationWorkflowTests(TestCase):
             refresh_token="refresh-token",
             token_expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
             external_account_id="tenant-1",
+            account_label="MLAI Tenant",
             scopes=[
                 "offline_access",
                 "accounting.banktransactions",
@@ -321,6 +327,7 @@ class XeroReconciliationWorkflowTests(TestCase):
             event_url="https://lu.ma/evt_1",
             registration_count=18,
             checked_in_count=14,
+            selected=True,
         )
         LinearProjectArtifact.objects.create(
             connection=self.linear_connection,
@@ -335,6 +342,22 @@ class XeroReconciliationWorkflowTests(TestCase):
             linear_project_id="lin_project_1",
             name="Community Events",
             description="Parent project for community event delivery",
+        )
+        LinearProjectSelection.objects.create(
+            connection=self.linear_connection,
+            user=self.user,
+            organization=self.organization,
+            linear_project_id="lin_event_1",
+            project_name="Luma Night",
+            selected=True,
+        )
+        LinearProjectSelection.objects.create(
+            connection=self.linear_connection,
+            user=self.user,
+            organization=self.organization,
+            linear_project_id="lin_project_1",
+            project_name="Community Events",
+            selected=True,
         )
         self.report = {
             "payouts": [{
@@ -362,6 +385,82 @@ class XeroReconciliationWorkflowTests(TestCase):
                 }],
                 "warnings": ["1 non-charge transaction(s) (refunds/adjustments) in this payout."],
             }],
+        }
+
+    @staticmethod
+    def _active_xero_bank_accounts():
+        return [{
+            "AccountID": "bank-1",
+            "Name": "Operating",
+            "Type": "BANK",
+            "Status": "ACTIVE",
+        }]
+
+    @staticmethod
+    def _active_event_tracking_categories_response():
+        response = Mock()
+        response.json.return_value = {
+            "TrackingCategories": [{
+                "TrackingCategoryID": "event-category-1",
+                "Name": "Event Name",
+                "Status": "ACTIVE",
+                "Options": [{
+                    "TrackingOptionID": "event-option-1",
+                    "Name": "Luma Night",
+                    "Status": "ACTIVE",
+                }],
+            }],
+        }
+        response.raise_for_status.return_value = None
+        return response
+
+    def _capture_stripe_statement_line(self, record):
+        raw_lines = [{
+            "statement_line_id": f"stripe-{record.payout_id}",
+            "date": record.arrival_date.strftime("%d %b %Y"),
+            "narration": f"Stripe payout {record.payout_id}",
+            "direction": "credit",
+            "amount": f"{record.amount_cents / 100:.2f}",
+            "currency": record.currency,
+        }]
+        account_source_sha256 = hashlib.sha256(
+            json.dumps(
+                raw_lines,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        line = import_xero_statement_lines(
+            organization=self.organization,
+            bank_account_id="bank-1",
+            expected_count=1,
+            complete_scan=True,
+            capture_metadata={
+                "schema_version": 2,
+                "capture_source": STATEMENT_CAPTURE_SOURCE_BROWSER,
+                "capture_id": f"stripe-capture-{record.pk}",
+                "scan_id": f"stripe-scan-{record.pk}",
+                "account_source_sha256": account_source_sha256,
+                "report_format": "xero_bank_reconciliation_dom",
+                "tenant_id": "tenant-1",
+                "organisation_name": "MLAI Tenant",
+                "bank_account_label": "Operating",
+                "account_position": 1,
+                "account_count": 1,
+                "active_bank_account_ids": ["bank-1"],
+                "all_accounts_requested": True,
+                "full_organisation_coverage_confirmed": True,
+                "date_range_confirmed": True,
+                "derived_complete": True,
+                "blocking_reasons": [],
+            },
+            lines=raw_lines,
+        )[0]
+        return {
+            "statement_line_id": line.statement_line_id,
+            "bank_account_id": line.bank_account_id,
+            "statement_source_hash": line.source_hash,
         }
 
     def test_persistent_ledger_is_idempotent_and_preview_ties_exactly(self):
@@ -611,22 +710,38 @@ class XeroReconciliationWorkflowTests(TestCase):
 
     def test_explicit_post_is_idempotent_and_records_xero_id(self):
         record = persist_report(organization=self.organization, report=self.report, stripe_account_id="acct_main")[0]
+        binding = self._capture_stripe_statement_line(record)
         empty = Mock()
         empty.json.return_value = {"BankTransactions": []}
         empty.raise_for_status.return_value = None
         created = Mock()
         created.json.return_value = {"BankTransactions": [{"BankTransactionID": "xero-bt-1", "HasErrors": False}]}
         created.raise_for_status.return_value = None
-        with patch("integrations.services.xero_reconciliation.http_client.get", return_value=empty) as get_mock, patch(
+        with patch(
+            "integrations.services.xero_reconciliation.fetch_xero_accounts",
+            return_value=self._active_xero_bank_accounts(),
+        ) as accounts_mock, patch(
+            "integrations.services.xero_reconciliation.http_client.get",
+            side_effect=[self._active_event_tracking_categories_response(), empty],
+        ) as get_mock, patch(
             "integrations.services.xero_reconciliation.http_client.put", return_value=created
         ) as put_mock:
-            posted = post_xero_bank_transaction(record, approved_by_slack_id="UFIN")
-            again = post_xero_bank_transaction(posted, approved_by_slack_id="UFIN")
+            posted = post_xero_bank_transaction(
+                record,
+                approved_by_slack_id="UFIN",
+                **binding,
+            )
+            again = post_xero_bank_transaction(
+                posted,
+                approved_by_slack_id="UFIN",
+                **binding,
+            )
         self.assertEqual(posted.xero_bank_transaction_id, "xero-bt-1")
         self.assertEqual(again.xero_bank_transaction_id, "xero-bt-1")
         self.assertEqual(posted.status, "posted")
-        self.assertEqual(get_mock.call_count, 1)
+        self.assertEqual(get_mock.call_count, 2)
         self.assertEqual(put_mock.call_count, 1)
+        self.assertEqual(accounts_mock.call_count, 1)
         body = put_mock.call_args.kwargs["json"]
         self.assertEqual(body["BankTransactions"][0]["Reference"], "po_ledger")
 
@@ -636,6 +751,7 @@ class XeroReconciliationWorkflowTests(TestCase):
             report=self.report,
             stripe_account_id="acct_main",
         )[0]
+        binding = self._capture_stripe_statement_line(record)
         existing = Mock()
         existing.json.return_value = {
             "BankTransactions": [{
@@ -653,8 +769,11 @@ class XeroReconciliationWorkflowTests(TestCase):
         }
         existing.raise_for_status.return_value = None
         with patch(
+            "integrations.services.xero_reconciliation.fetch_xero_accounts",
+            return_value=self._active_xero_bank_accounts(),
+        ), patch(
             "integrations.services.xero_reconciliation.http_client.get",
-            return_value=existing,
+            side_effect=[self._active_event_tracking_categories_response(), existing],
         ), patch(
             "integrations.services.xero_reconciliation.http_client.put"
         ) as put_mock:
@@ -662,7 +781,11 @@ class XeroReconciliationWorkflowTests(TestCase):
                 ReconciliationValidationError,
                 "already exists for this payout",
             ):
-                post_xero_bank_transaction(record, approved_by_slack_id="UFIN")
+                post_xero_bank_transaction(
+                    record,
+                    approved_by_slack_id="UFIN",
+                    **binding,
+                )
         put_mock.assert_not_called()
 
     def test_explicit_post_replaces_deleted_xero_transaction(self):
@@ -671,6 +794,7 @@ class XeroReconciliationWorkflowTests(TestCase):
             report=self.report,
             stripe_account_id="acct_main",
         )[0]
+        binding = self._capture_stripe_statement_line(record)
         deleted = Mock()
         deleted.json.return_value = {
             "BankTransactions": [{
@@ -689,8 +813,11 @@ class XeroReconciliationWorkflowTests(TestCase):
         }
         created.raise_for_status.return_value = None
         with patch(
+            "integrations.services.xero_reconciliation.fetch_xero_accounts",
+            return_value=self._active_xero_bank_accounts(),
+        ), patch(
             "integrations.services.xero_reconciliation.http_client.get",
-            return_value=deleted,
+            side_effect=[self._active_event_tracking_categories_response(), deleted],
         ), patch(
             "integrations.services.xero_reconciliation.http_client.put",
             return_value=created,
@@ -698,6 +825,7 @@ class XeroReconciliationWorkflowTests(TestCase):
             posted = post_xero_bank_transaction(
                 record,
                 approved_by_slack_id="UFIN",
+                **binding,
             )
         self.assertEqual(posted.xero_bank_transaction_id, "replacement-1")
         self.assertEqual(posted.status, "posted")
@@ -705,21 +833,40 @@ class XeroReconciliationWorkflowTests(TestCase):
 
     def test_explicit_post_creates_missing_project_tracking_option(self):
         record = persist_report(organization=self.organization, report=self.report, stripe_account_id="acct_main")[0]
+        self.mapping.event_tracking_option_id = ""
+        self.mapping.event_tracking_option_name = ""
         self.mapping.project_source_type = "linear"
         self.mapping.project_source_id = "lin_project_1"
         self.mapping.project_tracking_option_name = "Community Events"
         self.mapping.save(update_fields=[
+            "event_tracking_option_id",
+            "event_tracking_option_name",
             "project_source_type",
             "project_source_id",
             "project_tracking_option_name",
             "updated_at",
         ])
+        ReconciliationSuggestion.objects.create(
+            organization=self.organization,
+            payout=record,
+            run_id="approved-project-option",
+            source_type=self.mapping.source_type,
+            source_id=self.mapping.source_id,
+            allocation_mode=ReconciliationSuggestion.ALLOCATION_PROJECT,
+            project_source_type="linear",
+            project_source_id="lin_project_1",
+            project_tracking_option_name="Community Events",
+            source_hash=record.source_hash,
+            status=ReconciliationSuggestion.STATUS_APPROVED,
+            reviewed_at=datetime.now(timezone.utc),
+        )
         categories = Mock()
         categories.json.return_value = {
             "TrackingCategories": [
                 {
                     "TrackingCategoryID": "project-category-1",
                     "Name": "Project Name",
+                    "Status": "ACTIVE",
                     "Options": [],
                 }
             ]
@@ -727,7 +874,11 @@ class XeroReconciliationWorkflowTests(TestCase):
         categories.raise_for_status.return_value = None
         created = Mock()
         created.json.return_value = {
-            "Options": [{"TrackingOptionID": "project-option-1", "Name": "Community Events"}]
+            "Options": [{
+                "TrackingOptionID": "project-option-1",
+                "Name": "Community Events",
+                "Status": "ACTIVE",
+            }]
         }
         created.raise_for_status.return_value = None
         with patch("integrations.services.xero_reconciliation.http_client.get", return_value=categories), patch(
@@ -742,12 +893,220 @@ class XeroReconciliationWorkflowTests(TestCase):
         )
         self.assertEqual(put_mock.call_args.kwargs["json"], {"Options": [{"Name": "Community Events"}]})
 
+    def test_missing_stripe_option_requires_current_approved_suggestion(self):
+        record = persist_report(
+            organization=self.organization,
+            report=self.report,
+            stripe_account_id="acct_main",
+        )[0]
+        self.mapping.event_tracking_option_id = ""
+        self.mapping.save(update_fields=["event_tracking_option_id", "updated_at"])
+        categories = self._xero_response({
+            "TrackingCategories": [{
+                "TrackingCategoryID": "event-category-1",
+                "Name": "Event Name",
+                "Status": "ACTIVE",
+                "Options": [],
+            }],
+        })
+
+        with patch(
+            "integrations.services.xero_reconciliation.http_client.get",
+            return_value=categories,
+        ), patch(
+            "integrations.services.xero_reconciliation.http_client.put"
+        ) as put_mock:
+            with self.assertRaisesMessage(
+                XeroPostingError,
+                "not bound to a current approved suggestion",
+            ):
+                ensure_xero_tracking_options(record, profile=self.profile)
+
+        put_mock.assert_not_called()
+
+    def test_missing_stripe_option_rejects_unselected_canonical_event(self):
+        record = persist_report(
+            organization=self.organization,
+            report=self.report,
+            stripe_account_id="acct_main",
+        )[0]
+        self.mapping.event_tracking_option_id = ""
+        self.mapping.save(update_fields=["event_tracking_option_id", "updated_at"])
+        ReconciliationSuggestion.objects.create(
+            organization=self.organization,
+            payout=record,
+            run_id="approved-event-option",
+            source_type=self.mapping.source_type,
+            source_id=self.mapping.source_id,
+            allocation_mode=ReconciliationSuggestion.ALLOCATION_EVENT,
+            event_source_type="luma",
+            event_source_id="evt_1",
+            event_tracking_option_name="Luma Night",
+            source_hash=record.source_hash,
+            status=ReconciliationSuggestion.STATUS_APPROVED,
+            reviewed_at=datetime.now(timezone.utc),
+        )
+        LumaEventSelection.objects.filter(
+            organization=self.organization,
+            event_id="evt_1",
+        ).update(selected=False)
+        categories = self._xero_response({
+            "TrackingCategories": [{
+                "TrackingCategoryID": "event-category-1",
+                "Name": "Event Name",
+                "Status": "ACTIVE",
+                "Options": [],
+            }],
+        })
+
+        with patch(
+            "integrations.services.xero_reconciliation.http_client.get",
+            return_value=categories,
+        ), patch(
+            "integrations.services.xero_reconciliation.http_client.put"
+        ) as put_mock:
+            with self.assertRaisesMessage(XeroPostingError, "no longer exists"):
+                ensure_xero_tracking_options(record, profile=self.profile)
+
+        put_mock.assert_not_called()
+
+    def test_missing_stripe_option_does_not_reuse_an_older_approved_suggestion(self):
+        record = persist_report(
+            organization=self.organization,
+            report=self.report,
+            stripe_account_id="acct_main",
+        )[0]
+        self.mapping.event_tracking_option_id = ""
+        self.mapping.save(update_fields=["event_tracking_option_id", "updated_at"])
+        ReconciliationSuggestion.objects.create(
+            organization=self.organization,
+            payout=record,
+            run_id="older-approved-event",
+            source_type=self.mapping.source_type,
+            source_id=self.mapping.source_id,
+            allocation_mode=ReconciliationSuggestion.ALLOCATION_EVENT,
+            event_source_type="luma",
+            event_source_id="evt_1",
+            event_tracking_option_name="Luma Night",
+            source_hash=record.source_hash,
+            status=ReconciliationSuggestion.STATUS_APPROVED,
+            reviewed_at=datetime.now(timezone.utc) - timedelta(minutes=1),
+        )
+        ReconciliationSuggestion.objects.create(
+            organization=self.organization,
+            payout=record,
+            run_id="current-approved-unassigned",
+            source_type=self.mapping.source_type,
+            source_id=self.mapping.source_id,
+            allocation_mode=ReconciliationSuggestion.ALLOCATION_UNASSIGNED,
+            source_hash=record.source_hash,
+            status=ReconciliationSuggestion.STATUS_APPROVED,
+            reviewed_at=datetime.now(timezone.utc),
+        )
+        categories = self._xero_response({
+            "TrackingCategories": [{
+                "TrackingCategoryID": "event-category-1",
+                "Name": "Event Name",
+                "Status": "ACTIVE",
+                "Options": [],
+            }],
+        })
+
+        with patch(
+            "integrations.services.xero_reconciliation.http_client.get",
+            return_value=categories,
+        ), patch(
+            "integrations.services.xero_reconciliation.http_client.put"
+        ) as put_mock:
+            with self.assertRaisesMessage(
+                XeroPostingError,
+                "not bound to a current approved suggestion",
+            ):
+                ensure_xero_tracking_options(record, profile=self.profile)
+
+        put_mock.assert_not_called()
+
+    def test_stripe_tracking_catalog_rejects_category_name_mismatch(self):
+        record = persist_report(
+            organization=self.organization,
+            report=self.report,
+            stripe_account_id="acct_main",
+        )[0]
+        self.mapping.event_tracking_option_id = ""
+        self.mapping.save(update_fields=["event_tracking_option_id", "updated_at"])
+        categories = self._xero_response({
+            "TrackingCategories": [{
+                "TrackingCategoryID": "event-category-1",
+                "Name": "Wrong Category",
+                "Status": "ACTIVE",
+                "Options": [],
+            }],
+        })
+
+        with patch(
+            "integrations.services.xero_reconciliation.http_client.get",
+            return_value=categories,
+        ), patch(
+            "integrations.services.xero_reconciliation.http_client.put"
+        ) as put_mock:
+            with self.assertRaisesMessage(XeroPostingError, "Wrong Category"):
+                ensure_xero_tracking_options(record, profile=self.profile)
+
+        put_mock.assert_not_called()
+
+    def test_stripe_tracking_catalog_rejects_duplicate_option_ids(self):
+        record = persist_report(
+            organization=self.organization,
+            report=self.report,
+            stripe_account_id="acct_main",
+        )[0]
+        self.mapping.event_tracking_option_id = ""
+        self.mapping.save(update_fields=["event_tracking_option_id", "updated_at"])
+        categories = self._xero_response({
+            "TrackingCategories": [{
+                "TrackingCategoryID": "event-category-1",
+                "Name": "Event Name",
+                "Status": "ACTIVE",
+                "Options": [{
+                    "TrackingOptionID": "duplicate-option",
+                    "Name": "Luma Night",
+                    "Status": "ACTIVE",
+                }, {
+                    "TrackingOptionID": "duplicate-option",
+                    "Name": "Different Event",
+                    "Status": "ACTIVE",
+                }],
+            }],
+        })
+
+        with patch(
+            "integrations.services.xero_reconciliation.http_client.get",
+            return_value=categories,
+        ), patch(
+            "integrations.services.xero_reconciliation.http_client.put"
+        ) as put_mock:
+            with self.assertRaisesMessage(
+                XeroPostingError,
+                "more than one tracking option with ID duplicate-option",
+            ):
+                ensure_xero_tracking_options(record, profile=self.profile)
+
+        put_mock.assert_not_called()
+
     def test_post_rejects_unready_payout_without_network_call(self):
         record = persist_report(organization=self.organization, report=self.report, stripe_account_id="acct_main")[0]
+        binding = self._capture_stripe_statement_line(record)
         self.mapping.delete()
-        with patch("integrations.services.xero_reconciliation.http_client.put") as put_mock:
+        with patch(
+            "integrations.services.xero_reconciliation.fetch_xero_accounts",
+            return_value=self._active_xero_bank_accounts(),
+        ), patch("integrations.services.xero_reconciliation.http_client.put") as put_mock:
             with self.assertRaises(ReconciliationValidationError):
-                post_xero_bank_transaction(record, approved_by_slack_id="UFIN")
+                post_xero_bank_transaction(
+                    record,
+                    approved_by_slack_id="UFIN",
+                    **binding,
+                )
         put_mock.assert_not_called()
 
     def test_standalone_fee_allows_blank_or_verified_project_tracking(self):
@@ -799,17 +1158,23 @@ class XeroReconciliationWorkflowTests(TestCase):
             report=self.report,
             stripe_account_id="acct_main",
         )[0]
+        binding = self._capture_stripe_statement_line(record)
         preview = build_xero_preview(record)
         self.assertEqual(len(preview["payload_hash"]), 64)
-        with self.assertRaisesMessage(
-            ReconciliationValidationError,
-            "preview changed after review",
+        with patch(
+            "integrations.services.xero_reconciliation.fetch_xero_accounts",
+            return_value=self._active_xero_bank_accounts(),
         ):
-            post_xero_bank_transaction(
-                record,
-                approved_by_slack_id="UFIN",
-                expected_payload_hash="f" * 64,
-            )
+            with self.assertRaisesMessage(
+                ReconciliationValidationError,
+                "preview changed after review",
+            ):
+                post_xero_bank_transaction(
+                    record,
+                    approved_by_slack_id="UFIN",
+                    expected_payload_hash="f" * 64,
+                    **binding,
+                )
 
     def test_monthly_context_suggestion_adds_linear_project_and_review_note(self):
         record = persist_report(organization=self.organization, report=self.report, stripe_account_id="acct_main")[0]
@@ -832,7 +1197,7 @@ class XeroReconciliationWorkflowTests(TestCase):
                 "source_type": "luma_event",
                 "source_id": "evt_1",
                 "event": {"source_type": "luma", "source_id": "evt_1"},
-                "project": {"source_type": "linear", "source_id": "lin_project_1"},
+                "allocation_mode": "event",
                 "confidence": 0.96,
                 "rationale": "The Luma and Linear names match and Slack confirms the event workstream.",
                 "review_note": "Ticket revenue for the Luma Night project; confirmed in the event planning thread.",
@@ -843,6 +1208,7 @@ class XeroReconciliationWorkflowTests(TestCase):
         approved, mapping = approve_reconciliation_suggestion(suggestion, reviewed_by_slack_id="UFIN")
         self.assertEqual(approved.status, ReconciliationSuggestion.STATUS_APPROVED)
         self.assertEqual(mapping.event_tracking_option_name, "Luma Night")
+        self.assertEqual(mapping.event_tracking_option_id, "")
         self.assertEqual(mapping.project_source_id, "")
         self.assertEqual(mapping.project_tracking_option_name, "")
 
@@ -868,6 +1234,53 @@ class XeroReconciliationWorkflowTests(TestCase):
         self.assertNotIn("Project: Community Events", revenue_line["Description"])
         self.assertIn("confirmed in the event planning thread", revenue_line["Description"])
         self.assertEqual(preview["context_notes"][0]["project_name"], "")
+
+    def test_payout_suggestion_rejects_explicit_unassigned_with_event(self):
+        persist_report(
+            organization=self.organization,
+            report=self.report,
+            stripe_account_id="acct_main",
+        )
+
+        with self.assertRaisesMessage(
+            ValueError,
+            "allocation_mode does not match the selected allocation",
+        ):
+            save_reconciliation_suggestions(
+                organization=self.organization,
+                run_id="monthly-explicit-unassigned",
+                suggestions=[{
+                    "payout_id": "po_ledger",
+                    "source_type": "luma_event",
+                    "source_id": "evt_1",
+                    "allocation_mode": "unassigned",
+                    "event": {"source_type": "luma", "source_id": "evt_1"},
+                    "confidence": 0.1,
+                }],
+            )
+
+    def test_payout_suggestion_rejects_event_and_project_together(self):
+        persist_report(
+            organization=self.organization,
+            report=self.report,
+            stripe_account_id="acct_main",
+        )
+
+        with self.assertRaisesMessage(ValueError, "either an event or a project"):
+            save_reconciliation_suggestions(
+                organization=self.organization,
+                run_id="monthly-dual-allocation",
+                suggestions=[{
+                    "payout_id": "po_ledger",
+                    "source_type": "luma_event",
+                    "source_id": "evt_1",
+                    "event": {"source_type": "luma", "source_id": "evt_1"},
+                    "project": {
+                        "source_type": "linear",
+                        "source_id": "lin_project_1",
+                    },
+                }],
+            )
 
     @patch("integrations.services.reconciliation_context.active_xero_project_options")
     def test_context_deduplicates_linear_and_xero_projects_and_keeps_xero_only_options(self, options):
@@ -1076,6 +1489,61 @@ class XeroReconciliationWorkflowTests(TestCase):
             }],
         )[0]
         self.assertEqual(partial.contact_name, "Uber")
+
+        with self.assertRaisesMessage(
+            ValueError,
+            "allocation_mode does not match the selected allocation",
+        ):
+            save_statement_suggestions(
+                organization=self.organization,
+                run_id="monthly-statement-explicit-unassigned",
+                suggestions=[{
+                    "statement_line_id": "blank-uber",
+                    "proposed_action": "needs_review",
+                    "allocation_mode": "unassigned",
+                    "event": {"source_type": "luma", "source_id": "evt_1"},
+                    "confidence": 0.1,
+                }],
+            )
+
+    def test_mandatory_tracking_does_not_turn_uncertainty_into_mlai_core(self):
+        self.profile.require_statement_tracking = True
+        self.profile.default_project_tracking_option_name = "MLAI core"
+        self.profile.save(
+            update_fields=[
+                "require_statement_tracking",
+                "default_project_tracking_option_name",
+                "updated_at",
+            ]
+        )
+        line = import_xero_statement_lines(
+            organization=self.organization,
+            bank_account_id="bank-1",
+            lines=[{
+                "statement_line_id": "uncertain-allocation",
+                "date": "20 Jul 2026",
+                "narration": "UNKNOWN PURCHASE",
+                "direction": "debit",
+                "amount": "10.00",
+            }],
+        )[0]
+
+        suggestion = save_statement_suggestions(
+            organization=self.organization,
+            run_id="uncertain-allocation-run",
+            suggestions=[{
+                "statement_line_id": line.statement_line_id,
+                "proposed_action": "needs_review",
+                "allocation_mode": "unassigned",
+                "confidence": 0.0,
+            }],
+        )[0]
+
+        self.assertEqual(
+            suggestion.allocation_mode,
+            XeroStatementSuggestion.ALLOCATION_UNASSIGNED,
+        )
+        self.assertFalse(suggestion.execution_ready)
 
     def test_statement_backfill_accepts_snapshot_field_aliases(self):
         imported = import_xero_statement_lines(
@@ -1803,6 +2271,50 @@ class XeroReconciliationWorkflowTests(TestCase):
             source_hash=line.source_hash,
         )
 
+    @staticmethod
+    def _xero_response(payload):
+        response = Mock()
+        response.json.return_value = payload
+        response.raise_for_status.return_value = None
+        return response
+
+    def _event_statement_suggestion(self, *, line_id, option_name="Luma Night"):
+        suggestion = self._statement_suggestion(line_id=line_id)
+        suggestion.allocation_mode = XeroStatementSuggestion.ALLOCATION_EVENT
+        suggestion.event_source_type = "luma"
+        suggestion.event_source_id = "evt_1"
+        suggestion.event_tracking_option_name = option_name
+        suggestion.save(update_fields=[
+            "allocation_mode",
+            "event_source_type",
+            "event_source_id",
+            "event_tracking_option_name",
+            "updated_at",
+        ])
+        return suggestion
+
+    def _statement_execute_get_responses(self, *, category_id, options=None):
+        no_transactions = self._xero_response({"BankTransactions": []})
+        return [
+            no_transactions,
+            no_transactions,
+            self._xero_response({
+                "Contacts": [{"ContactID": "contact-uber", "Name": "uber"}],
+            }),
+            self._xero_response({
+                "TrackingCategories": [{
+                    "TrackingCategoryID": category_id,
+                    "Name": (
+                        "Event Name"
+                        if category_id == "event-category-1"
+                        else "Project Name"
+                    ),
+                    "Status": "ACTIVE",
+                    "Options": options or [],
+                }],
+            }),
+        ]
+
     def test_statement_bank_transaction_preview_and_post_are_idempotent(self):
         suggestion = self._statement_suggestion()
         preview = build_statement_posting_preview(suggestion)
@@ -1933,6 +2445,201 @@ class XeroReconciliationWorkflowTests(TestCase):
             "Choose exactly one Event Name or Project Name, not both.",
             preview["errors"],
         )
+
+    def test_statement_tracking_preview_never_creates_a_missing_option(self):
+        suggestion = self._event_statement_suggestion(line_id="event-option-preview")
+
+        with patch("integrations.services.xero_statement_posting.http_client.get") as get_mock, patch(
+            "integrations.services.xero_statement_posting.http_client.put"
+        ) as put_mock:
+            preview = build_statement_posting_preview(suggestion)
+
+        self.assertTrue(preview["ready"])
+        self.assertEqual(preview["effective_tracking"]["option_name"], "Luma Night")
+        get_mock.assert_not_called()
+        put_mock.assert_not_called()
+
+    def test_confirmed_statement_execute_creates_missing_canonical_event_option(self):
+        suggestion = self._event_statement_suggestion(line_id="event-option-create")
+        created_option = self._xero_response({
+            "Options": [{
+                "TrackingOptionID": "event-option-created",
+                "Name": "Luma Night",
+                "Status": "ACTIVE",
+            }],
+        })
+        created_transaction = self._xero_response({
+            "BankTransactions": [{"BankTransactionID": "bt-event-option"}],
+        })
+
+        with patch(
+            "integrations.services.xero_statement_posting.http_client.get",
+            side_effect=self._statement_execute_get_responses(category_id="event-category-1"),
+        ), patch(
+            "integrations.services.xero_statement_posting.http_client.put",
+            side_effect=[created_option, created_transaction],
+        ) as put_mock:
+            posting = execute_statement_posting(suggestion, requested_by_slack_id="UFIN")
+
+        self.assertEqual(posting.xero_bank_transaction_id, "bt-event-option")
+        self.assertEqual(put_mock.call_count, 2)
+        self.assertEqual(
+            put_mock.call_args_list[0].args[0],
+            "https://api.xero.com/api.xro/2.0/TrackingCategories/event-category-1/Options",
+        )
+        self.assertEqual(
+            put_mock.call_args_list[0].kwargs["json"],
+            {"Options": [{"Name": "Luma Night"}]},
+        )
+        tracking = put_mock.call_args_list[1].kwargs["json"]["BankTransactions"][0][
+            "LineItems"
+        ][0]["Tracking"]
+        self.assertEqual(tracking[0]["TrackingOptionID"], "event-option-created")
+
+    def test_statement_execute_rejects_stale_canonical_name_before_catalog_write(self):
+        suggestion = self._event_statement_suggestion(
+            line_id="event-option-stale",
+            option_name="Invented Event Name",
+        )
+
+        with patch(
+            "integrations.services.xero_statement_posting.http_client.get",
+            side_effect=self._statement_execute_get_responses(category_id="event-category-1"),
+        ), patch(
+            "integrations.services.xero_statement_posting.http_client.put"
+        ) as put_mock:
+            with self.assertRaisesMessage(XeroPostingError, "name changed or is ambiguous"):
+                execute_statement_posting(suggestion, requested_by_slack_id="UFIN")
+
+        put_mock.assert_not_called()
+
+    def test_statement_execute_requires_settings_scope_to_create_canonical_option(self):
+        self.connection.scopes = [
+            scope for scope in self.connection.scopes if scope != "accounting.settings"
+        ]
+        self.connection.save(update_fields=["scopes", "updated_at"])
+        suggestion = self._event_statement_suggestion(line_id="event-option-no-settings")
+
+        with patch(
+            "integrations.services.xero_statement_posting.http_client.get",
+            side_effect=self._statement_execute_get_responses(category_id="event-category-1"),
+        ), patch(
+            "integrations.services.xero_statement_posting.http_client.put"
+        ) as put_mock:
+            with self.assertRaisesMessage(XeroPostingError, "accounting.settings"):
+                execute_statement_posting(suggestion, requested_by_slack_id="UFIN")
+
+        put_mock.assert_not_called()
+
+    def test_execution_resolver_creates_missing_canonical_linear_project_option(self):
+        suggestion = self._statement_suggestion(line_id="project-option-create")
+        suggestion.allocation_mode = XeroStatementSuggestion.ALLOCATION_PROJECT
+        suggestion.project_source_type = "linear"
+        suggestion.project_source_id = "lin_project_1"
+        suggestion.project_tracking_option_name = "Community Events"
+        suggestion.save(update_fields=[
+            "allocation_mode",
+            "project_source_type",
+            "project_source_id",
+            "project_tracking_option_name",
+            "updated_at",
+        ])
+        categories = self._xero_response({
+            "TrackingCategories": [{
+                "TrackingCategoryID": "project-category-1",
+                "Name": "Project Name",
+                "Status": "ACTIVE",
+                "Options": [],
+            }],
+        })
+        created_option = self._xero_response({
+            "Options": [{
+                "TrackingOptionID": "project-option-created",
+                "Name": "Community Events",
+                "Status": "ACTIVE",
+            }],
+        })
+
+        with patch(
+            "integrations.services.xero_statement_posting.http_client.get",
+            return_value=categories,
+        ), patch(
+            "integrations.services.xero_statement_posting.http_client.put",
+            return_value=created_option,
+        ) as put_mock:
+            resolved = _resolved_tracking(
+                self.connection,
+                self.profile,
+                suggestion,
+            )
+
+        self.assertEqual(resolved[0]["TrackingOptionID"], "project-option-created")
+        self.assertEqual(
+            put_mock.call_args.args[0],
+            "https://api.xero.com/api.xro/2.0/TrackingCategories/project-category-1/Options",
+        )
+
+    def test_execution_resolver_never_recreates_missing_xero_sourced_project_option(self):
+        suggestion = self._statement_suggestion(line_id="xero-project-option-missing")
+        suggestion.allocation_mode = XeroStatementSuggestion.ALLOCATION_PROJECT
+        suggestion.project_source_type = "xero_tracking"
+        suggestion.project_source_id = "xero-option-missing"
+        suggestion.project_tracking_option_id = "xero-option-missing"
+        suggestion.project_tracking_option_name = "Archived Project"
+        suggestion.save(update_fields=[
+            "allocation_mode",
+            "project_source_type",
+            "project_source_id",
+            "project_tracking_option_id",
+            "project_tracking_option_name",
+            "updated_at",
+        ])
+        categories = self._xero_response({
+            "TrackingCategories": [{
+                "TrackingCategoryID": "project-category-1",
+                "Name": "Project Name",
+                "Status": "ACTIVE",
+                "Options": [],
+            }],
+        })
+
+        with patch(
+            "integrations.services.xero_statement_posting.http_client.get",
+            return_value=categories,
+        ), patch(
+            "integrations.services.xero_statement_posting.http_client.put"
+        ) as put_mock:
+            with self.assertRaisesMessage(
+                XeroPostingError,
+                "must retain its existing tracking option ID",
+            ):
+                _resolved_tracking(
+                    self.connection,
+                    self.profile,
+                    suggestion,
+                )
+
+        put_mock.assert_not_called()
+
+    @override_settings(XERO_STATEMENT_AUTO_POST_ENABLED=False)
+    def test_automatic_statement_execution_gate_blocks_before_tracking_or_transaction_writes(self):
+        suggestion = self._event_statement_suggestion(line_id="event-option-auto-disabled")
+
+        with patch("integrations.services.xero_statement_posting.http_client.get") as get_mock, patch(
+            "integrations.services.xero_statement_posting.http_client.put"
+        ) as put_mock:
+            with self.assertRaisesMessage(
+                ReconciliationValidationError,
+                "Automatic statement posting is disabled",
+            ):
+                execute_statement_posting(
+                    suggestion,
+                    requested_by_slack_id="monthly-update:test",
+                    automatic=True,
+                )
+
+        get_mock.assert_not_called()
+        put_mock.assert_not_called()
 
     def test_74_line_context_batches_gmail_and_slack_evidence_queries(self):
         XeroStatementLineSnapshot.objects.bulk_create([
@@ -4154,6 +4861,22 @@ class ReconciliationWorkflowApiTests(APITestCase):
         self.assertEqual(mapping_response.status_code, status.HTTP_200_OK)
         self.assertEqual(mapping_response.data["mappings"][0]["accounting_treatment"], "revenue")
 
+        mixed_mapping = self.client.put(
+            reverse("reconciliation_mappings"),
+            {
+                "slack_user_id": "UADMIN",
+                "domain": "mlai.au",
+                "source_type": "luma_event",
+                "source_id": "evt_api",
+                "project_source_type": "linear",
+                "project_source_id": "project-api",
+                "project_tracking_option_name": "API Project",
+            },
+            format="json",
+        )
+        self.assertEqual(mixed_mapping.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("Event xor Project", mixed_mapping.data["error"])
+
     @patch("core.permissions.HasRooApiKey.has_permission", return_value=True)
     def test_post_endpoint_requires_explicit_confirmation(self, _permission):
         StripePayoutReconciliation.objects.create(
@@ -4430,8 +5153,8 @@ class ReconciliationWorkflowApiTests(APITestCase):
                     "payout_id": payout.payout_id,
                     "source_type": "luma_event",
                     "source_id": "evt_agent",
+                    "allocation_mode": "event",
                     "event": {"source_type": "luma", "source_id": "evt_agent"},
-                    "project": {"source_type": "linear", "source_id": "lin_agent_project"},
                     "confidence": 0.97,
                     "review_note": "Agent Night ticket revenue, corroborated by Slack and email planning context.",
                     "evidence": [{"source_provider": "gmail", "source_record_id": "thread-agent"}],

@@ -417,13 +417,51 @@ def save_reconciliation_suggestions(
             if project_id and project is None:
                 raise ValueError(f"Unknown {project_source_type} project: {project_id}")
             if event_id and project_id:
-                project_id = ""
-                project = None
+                raise ValueError(
+                    f"Suggestion {source_type}:{source_id} must choose either an event "
+                    "or a project, not both"
+                )
+            requested_mode = str(item.get("allocation_mode") or "").strip()
             allocation_mode = (
                 ReconciliationSuggestion.ALLOCATION_EVENT if event_id
                 else ReconciliationSuggestion.ALLOCATION_PROJECT if project_id
-                else ReconciliationSuggestion.ALLOCATION_MLAI_CORE
+                else requested_mode or ReconciliationSuggestion.ALLOCATION_UNASSIGNED
             )
+            valid_modes = {
+                choice[0] for choice in ReconciliationSuggestion.ALLOCATION_CHOICES
+            }
+            if allocation_mode not in valid_modes:
+                raise ValueError(
+                    f"Invalid allocation_mode for {source_type}:{source_id}: "
+                    f"{allocation_mode}"
+                )
+            if requested_mode and requested_mode != allocation_mode:
+                raise ValueError(
+                    f"allocation_mode does not match the selected allocation for "
+                    f"{source_type}:{source_id}"
+                )
+            if allocation_mode == ReconciliationSuggestion.ALLOCATION_MLAI_CORE and (
+                event_id or project_id
+            ):
+                raise ValueError(
+                    f"MLAI core cannot be combined with a specific allocation for "
+                    f"{source_type}:{source_id}"
+                )
+            if allocation_mode == ReconciliationSuggestion.ALLOCATION_EVENT and not event_id:
+                raise ValueError(
+                    f"Event allocation requires a known event for {source_type}:{source_id}"
+                )
+            if allocation_mode == ReconciliationSuggestion.ALLOCATION_PROJECT and not project_id:
+                raise ValueError(
+                    f"Project allocation requires a known project for {source_type}:{source_id}"
+                )
+            if (
+                allocation_mode == ReconciliationSuggestion.ALLOCATION_MLAI_CORE
+                and not (profile and profile.default_project_tracking_option_name)
+            ):
+                raise ValueError(
+                    "Configure the default Project Name before explicitly using MLAI core"
+                )
 
             confidence = max(0.0, min(float(item.get("confidence") or 0.0), 1.0))
             evidence = _validated_evidence(item.get("evidence"))
@@ -458,17 +496,25 @@ def save_reconciliation_suggestions(
                 "event_tracking_option_name": str(event.get("name") if event else "")[:255],
                 "allocation_mode": allocation_mode,
                 "project_source_type": project_source_type if project else (
-                    "xero_tracking" if allocation_mode == ReconciliationSuggestion.ALLOCATION_MLAI_CORE else ""
+                    "xero_tracking"
+                    if allocation_mode == ReconciliationSuggestion.ALLOCATION_MLAI_CORE
+                    else ""
                 ),
                 "project_source_id": project_id if project else "",
                 "project_tracking_option_id": str(
                     (project.get("xero_tracking_option_id") or "") if project else (
-                        profile.default_project_tracking_option_id if profile else ""
+                        profile.default_project_tracking_option_id
+                        if profile
+                        and allocation_mode == ReconciliationSuggestion.ALLOCATION_MLAI_CORE
+                        else ""
                     )
                 )[:255],
                 "project_tracking_option_name": str(
                     project.get("name") if project else (
-                        (profile.default_project_tracking_option_name or "MLAI core") if profile else "MLAI core"
+                        profile.default_project_tracking_option_name
+                        if profile
+                        and allocation_mode == ReconciliationSuggestion.ALLOCATION_MLAI_CORE
+                        else ""
                     )
                 )[:255],
                 "confidence": confidence,
@@ -505,6 +551,10 @@ def approve_reconciliation_suggestion(
         )
         mapping.source_label = locked.source_label
         if locked.allocation_mode == ReconciliationSuggestion.ALLOCATION_EVENT:
+            # Suggestions bind an event by canonical source/name, not by a
+            # previously cached Xero option ID.  Force the confirmed write
+            # boundary to resolve or create the current exact option.
+            mapping.event_tracking_option_id = ""
             mapping.event_tracking_option_name = locked.event_tracking_option_name
             mapping.project_tracking_option_id = ""
             mapping.project_tracking_option_name = ""
@@ -520,6 +570,13 @@ def approve_reconciliation_suggestion(
             mapping.project_source_id = locked.project_source_id
             mapping.project_tracking_option_id = locked.project_tracking_option_id
             mapping.project_tracking_option_name = locked.project_tracking_option_name
+        else:
+            mapping.event_tracking_option_id = ""
+            mapping.event_tracking_option_name = ""
+            mapping.project_source_type = ""
+            mapping.project_source_id = ""
+            mapping.project_tracking_option_id = ""
+            mapping.project_tracking_option_name = ""
         if locked.review_note:
             mapping.reconciliation_note = locked.review_note
         mapping.active = True

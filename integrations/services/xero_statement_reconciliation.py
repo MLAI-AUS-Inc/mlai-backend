@@ -5,10 +5,12 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from datetime import datetime, timedelta
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+import requests
 from django.conf import settings
 from django.db import transaction
 from django.db.models import Q
@@ -42,6 +44,7 @@ from integrations.services.reconciliation_rules import (
     serialize_suggestion_approval,
 )
 from integrations.services.reconciliation_tracking import effective_tracking
+from integrations.services.external_connectors import ConnectorOAuthError
 from integrations.services.xero_tracking_catalog import active_xero_project_options
 
 
@@ -64,6 +67,99 @@ STATEMENT_EVIDENCE_LIMIT = 5
 STATEMENT_ENTITY_EVIDENCE_WINDOW_DAYS = 14
 STATEMENT_ENTITY_EVIDENCE_LIMIT = 5
 STATEMENT_NEARBY_EVENT_WINDOW_DAYS = 45
+STATEMENT_CAPTURE_SCHEMA_VERSION = 2
+STATEMENT_CAPTURE_SOURCE_CSV = "xero_uncoded_statement_lines_csv"
+STATEMENT_CAPTURE_SOURCE_BROWSER = "xero_browser_all_accounts"
+STATEMENT_CAPTURE_SOURCES = {
+    STATEMENT_CAPTURE_SOURCE_CSV,
+    STATEMENT_CAPTURE_SOURCE_BROWSER,
+}
+STATEMENT_CAPTURE_REPORT_FORMATS = {
+    STATEMENT_CAPTURE_SOURCE_CSV: {
+        "xero-statement-lines-compact-v1",
+        "xero-uncoded-lines-grouped-v1",
+    },
+    STATEMENT_CAPTURE_SOURCE_BROWSER: {"xero_bank_reconciliation_dom"},
+}
+_CAPTURE_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_GROUP_CAPTURE_KEYS = {
+    "capture_source",
+    "capture_id",
+    "source_sha256",
+    "account_source_sha256",
+    "report_format",
+    "tenant_id",
+    "organisation_name",
+    "bank_account_label",
+    "account_position",
+    "account_count",
+    "active_bank_account_ids",
+    "all_accounts_requested",
+    "full_organisation_coverage_confirmed",
+    "period_start",
+    "period_end",
+    "date_range_confirmed",
+}
+_CAPTURE_METADATA_KEYS = {
+    "schema_version",
+    "scan_id",
+    "source_started_at",
+    "source_completed_at",
+    "pages",
+    "derived_complete",
+    "blocking_reasons",
+    *_GROUP_CAPTURE_KEYS,
+}
+
+
+class StatementCaptureValidationError(ValueError):
+    """A statement capture cannot prove current, organisation-wide coverage."""
+
+
+@dataclass(frozen=True)
+class StatementCaptureSelection:
+    """The exact coherent scan set that may feed one reconciliation run."""
+
+    capture_id: str = ""
+    capture_source: str = ""
+    scans: tuple[XeroStatementScan, ...] = ()
+    active_bank_accounts: tuple[dict[str, str], ...] = ()
+    capture_fingerprint: str = ""
+    period_start: str = ""
+    period_end: str = ""
+    max_age_minutes: int = 30
+    blockers: tuple[str, ...] = ()
+
+    @property
+    def all_account_capture(self) -> bool:
+        return bool(self.scans and not self.blockers)
+
+    @property
+    def scan_ids(self) -> tuple[int, ...]:
+        return tuple(scan.id for scan in self.scans)
+
+    @property
+    def latest_scan(self) -> XeroStatementScan | None:
+        if not self.scans:
+            return None
+        return max(self.scans, key=lambda scan: (scan.started_at, scan.id))
+
+    def readiness_payload(self) -> dict[str, Any]:
+        return {
+            "schema_version": STATEMENT_CAPTURE_SCHEMA_VERSION,
+            "complete": self.all_account_capture,
+            "capture_id": self.capture_id,
+            "capture_source": self.capture_source,
+            "capture_fingerprint": self.capture_fingerprint,
+            "statement_scan_ids": list(self.scan_ids),
+            "active_bank_account_ids": [
+                account["bank_account_id"] for account in self.active_bank_accounts
+            ],
+            "period_start": self.period_start or None,
+            "period_end": self.period_end or None,
+            "max_age_minutes": self.max_age_minutes,
+            "blockers": list(self.blockers),
+        }
 _MERCHANT_NOISE = {
     "and",
     "app",
@@ -604,27 +700,138 @@ def _browser_ui_mode(raw: dict[str, Any], *, visible_fields: dict[str, str]) -> 
     return XeroStatementLineSnapshot.UI_BLANK_CREATE
 
 
-def _sanitize_capture_metadata(raw: dict[str, Any] | None) -> dict[str, Any]:
-    """Keep bounded completeness evidence and reject credential-shaped data."""
+def _required_capture_text(
+    raw: dict[str, Any],
+    field: str,
+    *,
+    limit: int = 255,
+) -> str:
+    raw_value = raw.get(field)
+    if not isinstance(raw_value, str):
+        raise ValueError(f"capture_metadata {field} must be a string")
+    value = raw_value.strip()
+    if not value:
+        raise ValueError(f"capture_metadata {field} is required")
+    if len(value) > limit:
+        raise ValueError(f"capture_metadata {field} is too long")
+    return value
+
+
+def _capture_boolean(raw: dict[str, Any], field: str) -> bool:
+    value = raw.get(field)
+    if not isinstance(value, bool):
+        raise ValueError(f"capture_metadata {field} must be a boolean")
+    return value
+
+
+def _capture_sha256(
+    raw: dict[str, Any],
+    field: str,
+    *,
+    required: bool,
+) -> str:
+    raw_value = raw.get(field)
+    if raw_value in (None, "") and not required:
+        return ""
+    if not isinstance(raw_value, str):
+        raise ValueError(f"capture_metadata {field} must be a SHA-256 hex digest")
+    value = raw_value.strip().lower()
+    if not value and not required:
+        return ""
+    if not _CAPTURE_SHA256_RE.fullmatch(value):
+        raise ValueError(f"capture_metadata {field} must be a SHA-256 hex digest")
+    return value
+
+
+def _capture_iso_date(raw: dict[str, Any], field: str) -> str:
+    raw_value = raw.get(field)
+    if raw_value in (None, ""):
+        return ""
+    if not isinstance(raw_value, str):
+        raise ValueError(f"capture_metadata {field} must use YYYY-MM-DD")
+    value = raw_value.strip()
+    if not value:
+        return ""
+    try:
+        return date.fromisoformat(value).isoformat()
+    except ValueError as exc:
+        raise ValueError(f"capture_metadata {field} must use YYYY-MM-DD") from exc
+
+
+def _metadata_contains_forbidden_key(value: Any) -> bool:
+    forbidden = {
+        "token",
+        "access_token",
+        "refresh_token",
+        "authorization",
+        "cookie",
+        "api_key",
+        "secret",
+        "lines",
+        "narration",
+        "reference",
+    }
+    if isinstance(value, dict):
+        return bool(forbidden.intersection(str(key).lower() for key in value)) or any(
+            _metadata_contains_forbidden_key(item) for item in value.values()
+        )
+    if isinstance(value, list):
+        return any(_metadata_contains_forbidden_key(item) for item in value)
+    return False
+
+
+def _sanitize_capture_metadata(
+    raw: dict[str, Any] | None,
+    *,
+    bank_account_id: str = "",
+    complete_scan: bool | None = None,
+) -> dict[str, Any]:
+    """Validate and retain only bounded queue-completeness evidence.
+
+    Schema v1 is the historical single-account browser envelope. Schema v2 is
+    an attestation covering every active BANK account in one capture and is
+    deliberately strict: dropping one field must never turn a partial capture
+    into something that looks complete.
+    """
     if raw is None:
         return {}
     if not isinstance(raw, dict):
         raise ValueError("capture_metadata must be an object")
-    forbidden = {
-        "token", "access_token", "refresh_token", "authorization", "cookie",
-        "api_key", "secret", "lines", "narration", "reference",
-    }
-    if forbidden.intersection(str(key).lower() for key in raw):
+    if _metadata_contains_forbidden_key(raw):
         raise ValueError("capture_metadata contains a forbidden sensitive field")
+    group_claimed = bool(_GROUP_CAPTURE_KEYS.intersection(raw)) or raw.get(
+        "schema_version"
+    ) == STATEMENT_CAPTURE_SCHEMA_VERSION
+    if group_claimed:
+        unknown = set(raw) - _CAPTURE_METADATA_KEYS
+        if unknown:
+            raise ValueError(
+                "capture_metadata schema v2 contains unsupported fields: "
+                + ", ".join(sorted(str(key) for key in unknown))
+            )
+        if type(raw.get("schema_version")) is not int or raw.get(
+            "schema_version"
+        ) != STATEMENT_CAPTURE_SCHEMA_VERSION:
+            raise ValueError("capture_metadata all-account fields require schema_version=2")
     pages = raw.get("pages") or []
     if not isinstance(pages, list) or len(pages) > 500:
         raise ValueError("capture_metadata pages must be a bounded list")
     safe_pages = []
+    page_numbers: set[int] = set()
     for page in pages:
         if not isinstance(page, dict):
             raise ValueError("capture_metadata page evidence must be an object")
+        if set(page) != {
+            "page_number", "page_count", "observed_count", "has_previous", "has_next",
+        }:
+            raise ValueError("capture_metadata page evidence has unexpected fields")
         if not isinstance(page.get("has_previous"), bool) or not isinstance(page.get("has_next"), bool):
             raise ValueError("capture_metadata pagination flags must be booleans")
+        if group_claimed and any(
+            type(page.get(field)) is not int
+            for field in ("page_number", "page_count", "observed_count")
+        ):
+            raise ValueError("capture_metadata page counts must be integers")
         try:
             safe_page = {
                 "page_number": int(page.get("page_number")),
@@ -639,13 +846,17 @@ def _sanitize_capture_metadata(raw: dict[str, Any] | None) -> dict[str, Any]:
             safe_page["page_number"] < 1
             or safe_page["page_count"] < 1
             or safe_page["observed_count"] < 0
+            or safe_page["page_number"] > safe_page["page_count"]
         ):
             raise ValueError("capture_metadata page counts are out of range")
+        if safe_page["page_number"] in page_numbers:
+            raise ValueError("capture_metadata page numbers must be unique")
+        page_numbers.add(safe_page["page_number"])
         safe_pages.append(safe_page)
     blockers = raw.get("blocking_reasons") or []
     if not isinstance(blockers, list) or len(blockers) > 20:
         raise ValueError("capture_metadata blocking_reasons must be a bounded list")
-    return {
+    safe = {
         "schema_version": 1,
         "scan_id": str(raw.get("scan_id") or "")[:128],
         "source_started_at": str(raw.get("source_started_at") or "")[:64],
@@ -654,6 +865,536 @@ def _sanitize_capture_metadata(raw: dict[str, Any] | None) -> dict[str, Any]:
         "derived_complete": raw.get("derived_complete") is True,
         "blocking_reasons": [str(reason)[:500] for reason in blockers],
     }
+    if not group_claimed:
+        return safe
+
+    capture_source = _required_capture_text(raw, "capture_source", limit=64)
+    if capture_source not in STATEMENT_CAPTURE_SOURCES:
+        raise ValueError("capture_metadata capture_source is not supported")
+    capture_id = _required_capture_text(raw, "capture_id", limit=128)
+    scan_id = _required_capture_text(raw, "scan_id", limit=128)
+    tenant_id = _required_capture_text(raw, "tenant_id")
+    organisation_name = _required_capture_text(raw, "organisation_name")
+    derived_complete = _capture_boolean(raw, "derived_complete")
+    raw_bank_account_label = raw.get("bank_account_label")
+    raw_report_format = raw.get("report_format")
+    if raw_bank_account_label is not None and not isinstance(raw_bank_account_label, str):
+        raise ValueError("capture_metadata bank_account_label must be a string")
+    if raw_report_format is not None and not isinstance(raw_report_format, str):
+        raise ValueError("capture_metadata report_format must be a string")
+    bank_account_label = (raw_bank_account_label or "").strip()
+    report_format = (raw_report_format or "").strip()
+    if derived_complete and (not bank_account_label or not report_format):
+        raise ValueError(
+            "A complete all-account capture requires bank_account_label and report_format"
+        )
+    if capture_source == STATEMENT_CAPTURE_SOURCE_CSV and not report_format:
+        raise ValueError("A CSV all-account capture requires report_format")
+    if len(bank_account_label) > 255 or len(report_format) > 64:
+        raise ValueError("capture_metadata bank account label or report format is too long")
+    if report_format and report_format not in STATEMENT_CAPTURE_REPORT_FORMATS[capture_source]:
+        raise ValueError(
+            "capture_metadata report_format does not match capture_source"
+        )
+    if type(raw.get("account_position")) is not int or type(
+        raw.get("account_count")
+    ) is not int:
+        raise ValueError(
+            "capture_metadata account_position and account_count must be integers"
+        )
+    account_position = raw["account_position"]
+    account_count = raw["account_count"]
+    if account_count < 1 or account_count > 100:
+        raise ValueError("capture_metadata account_count is out of range")
+    if account_position < 1 or account_position > account_count:
+        raise ValueError("capture_metadata account_position is out of range")
+    active_ids_raw = raw.get("active_bank_account_ids")
+    if not isinstance(active_ids_raw, list) or len(active_ids_raw) != account_count:
+        raise ValueError(
+            "capture_metadata active_bank_account_ids must match account_count"
+        )
+    if any(not isinstance(value, str) for value in active_ids_raw):
+        raise ValueError("capture_metadata active_bank_account_ids contains an invalid ID")
+    active_ids = [value.strip() for value in active_ids_raw]
+    if any(not value or len(value) > 255 for value in active_ids):
+        raise ValueError("capture_metadata active_bank_account_ids contains an invalid ID")
+    normalized_ids = [value.casefold() for value in active_ids]
+    if len(normalized_ids) != len(set(normalized_ids)):
+        raise ValueError("capture_metadata active_bank_account_ids must be unique")
+    if bank_account_id and str(bank_account_id).strip().casefold() not in normalized_ids:
+        raise ValueError(
+            "capture_metadata active_bank_account_ids does not contain bank_account_id"
+        )
+
+    all_accounts_requested = _capture_boolean(raw, "all_accounts_requested")
+    full_coverage = _capture_boolean(raw, "full_organisation_coverage_confirmed")
+    date_range_confirmed = _capture_boolean(raw, "date_range_confirmed")
+    if complete_scan is not None and derived_complete is not complete_scan:
+        raise ValueError(
+            "capture_metadata derived_complete must agree with complete"
+        )
+    if derived_complete and not (
+        all_accounts_requested and full_coverage and date_range_confirmed
+    ):
+        raise ValueError(
+            "A complete all-account capture must confirm account and date coverage"
+        )
+    if group_claimed and any(not isinstance(reason, str) for reason in blockers):
+        raise ValueError(
+            "capture_metadata blocking_reasons must contain only strings"
+        )
+    if derived_complete and blockers:
+        raise ValueError(
+            "A complete all-account capture cannot contain blocking_reasons"
+        )
+
+    period_start = _capture_iso_date(raw, "period_start")
+    period_end = _capture_iso_date(raw, "period_end")
+    if bool(period_start) != bool(period_end):
+        raise ValueError(
+            "capture_metadata period_start and period_end must be supplied together"
+        )
+    if capture_source == STATEMENT_CAPTURE_SOURCE_CSV and not (
+        period_start and period_end
+    ):
+        raise ValueError("CSV all-account captures require period_start and period_end")
+    if period_start and period_end and period_start > period_end:
+        raise ValueError("capture_metadata period_end precedes period_start")
+
+    source_sha256 = _capture_sha256(
+        raw,
+        "source_sha256",
+        required=capture_source == STATEMENT_CAPTURE_SOURCE_CSV,
+    )
+    account_source_sha256 = _capture_sha256(
+        raw,
+        "account_source_sha256",
+        required=derived_complete,
+    )
+    return {
+        **safe,
+        "schema_version": STATEMENT_CAPTURE_SCHEMA_VERSION,
+        "capture_source": capture_source,
+        "capture_id": capture_id,
+        "scan_id": scan_id,
+        "source_sha256": source_sha256,
+        "account_source_sha256": account_source_sha256,
+        "report_format": report_format,
+        "tenant_id": tenant_id,
+        "organisation_name": organisation_name,
+        "bank_account_label": bank_account_label,
+        "account_position": account_position,
+        "account_count": account_count,
+        "active_bank_account_ids": active_ids,
+        "all_accounts_requested": all_accounts_requested,
+        "full_organisation_coverage_confirmed": full_coverage,
+        "period_start": period_start,
+        "period_end": period_end,
+        "date_range_confirmed": date_range_confirmed,
+        "derived_complete": derived_complete,
+    }
+
+
+def active_xero_bank_account_catalog(organization) -> dict[str, Any]:
+    """Read and strictly validate the selected tenant's live active BANK accounts."""
+
+    try:
+        profile = ReconciliationProfile.objects.select_related("xero_connection").get(
+            organization=organization
+        )
+    except ReconciliationProfile.DoesNotExist as exc:
+        raise StatementCaptureValidationError(
+            "Reconciliation profile is not configured."
+        ) from exc
+    connection = profile.xero_connection
+    if connection is None:
+        raise StatementCaptureValidationError("A Xero connection must be selected.")
+    if (
+        connection.organization_id != organization.id
+        or connection.provider != ExternalServiceProvider.XERO
+        or connection.status == "disconnected"
+    ):
+        raise StatementCaptureValidationError(
+            "The selected Xero connection is not active for this organisation."
+        )
+    tenant_id = str(connection.external_account_id or "").strip()
+    organisation_name = str(connection.account_label or "").strip()
+    if not tenant_id or not organisation_name:
+        raise StatementCaptureValidationError(
+            "The selected Xero connection is missing its tenant identity."
+        )
+
+    # Local import avoids coupling the statement parser to Xero posting code at
+    # module import time while still using the established authenticated client.
+    from integrations.services.xero_reconciliation import fetch_xero_accounts
+
+    raw_accounts = fetch_xero_accounts(profile)
+    if not isinstance(raw_accounts, list):
+        raise StatementCaptureValidationError(
+            "Xero returned an invalid account catalogue."
+        )
+    accounts: list[dict[str, str]] = []
+    for raw_account in raw_accounts:
+        if not isinstance(raw_account, dict):
+            raise StatementCaptureValidationError(
+                "Xero returned an invalid account catalogue."
+            )
+        if str(raw_account.get("Type") or "").strip().upper() != "BANK":
+            continue
+        if str(raw_account.get("Status") or "").strip().upper() != "ACTIVE":
+            continue
+        account_id = str(raw_account.get("AccountID") or "").strip()
+        name = " ".join(str(raw_account.get("Name") or "").split())
+        if not account_id or not name or len(account_id) > 255 or len(name) > 255:
+            raise StatementCaptureValidationError(
+                "Xero returned an incomplete active bank-account record."
+            )
+        accounts.append({"bank_account_id": account_id, "name": name})
+    if not accounts:
+        raise StatementCaptureValidationError(
+            "Xero has no active BANK accounts available for reconciliation."
+        )
+    if len(accounts) > 100:
+        raise StatementCaptureValidationError(
+            "Xero returned more than 100 active BANK accounts; full coverage cannot be attested."
+        )
+    normalized_ids = [account["bank_account_id"].casefold() for account in accounts]
+    if len(normalized_ids) != len(set(normalized_ids)):
+        raise StatementCaptureValidationError(
+            "Xero returned duplicate active bank-account IDs."
+        )
+    accounts.sort(key=lambda account: (account["name"].casefold(), account["bank_account_id"].casefold()))
+    return {
+        "schema_version": 1,
+        "tenant_id": tenant_id,
+        "organisation_name": organisation_name,
+        "accounts": accounts,
+    }
+
+
+def _capture_fingerprint(
+    *,
+    metadata: dict[str, Any],
+    scans: list[XeroStatementScan],
+    accounts: list[dict[str, str]],
+) -> str:
+    payload = {
+        "schema_version": STATEMENT_CAPTURE_SCHEMA_VERSION,
+        "capture_id": metadata["capture_id"],
+        "capture_source": metadata["capture_source"],
+        "tenant_id": metadata["tenant_id"],
+        "organisation_name": metadata["organisation_name"],
+        "active_bank_accounts": accounts,
+        "period_start": metadata.get("period_start") or "",
+        "period_end": metadata.get("period_end") or "",
+        "source_sha256": metadata.get("source_sha256") or "",
+        "scans": [
+            {
+                "id": scan.id,
+                "bank_account_id": scan.bank_account_id,
+                "payload_hash": scan.payload_hash,
+                "expected_count": scan.expected_count,
+                "observed_count": scan.observed_count,
+                "scan_id": scan.capture_metadata.get("scan_id") or "",
+                "account_source_sha256": scan.capture_metadata.get(
+                    "account_source_sha256"
+                )
+                or "",
+            }
+            for scan in scans
+        ],
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def select_current_statement_capture(organization) -> StatementCaptureSelection:
+    """Select the newest exact, fresh, live-catalog-matched all-account batch."""
+
+    max_age_minutes = int(
+        getattr(settings, "XERO_STATEMENT_SCAN_MAX_AGE_MINUTES", 30)
+    )
+    recent_scans = list(
+        XeroStatementScan.objects.filter(organization=organization).order_by(
+            "-started_at", "-id"
+        )[:101]
+    )
+    if not recent_scans:
+        return StatementCaptureSelection(
+            max_age_minutes=max_age_minutes,
+            blockers=("Import the current complete all-account Xero bank-feed queue.",),
+        )
+    latest = recent_scans[0]
+    raw_latest = latest.capture_metadata if isinstance(latest.capture_metadata, dict) else {}
+    if raw_latest.get("schema_version") != STATEMENT_CAPTURE_SCHEMA_VERSION:
+        return StatementCaptureSelection(
+            scans=(latest,),
+            max_age_minutes=max_age_minutes,
+            blockers=(
+                "The latest Xero statement scan does not prove complete all-account coverage.",
+            ),
+        )
+    try:
+        latest_metadata = _sanitize_capture_metadata(
+            raw_latest,
+            bank_account_id=latest.bank_account_id,
+            complete_scan=latest.status == XeroStatementScan.STATUS_COMPLETE,
+        )
+    except ValueError as exc:
+        return StatementCaptureSelection(
+            scans=(latest,),
+            max_age_minutes=max_age_minutes,
+            blockers=(f"The latest all-account capture metadata is invalid: {exc}",),
+        )
+    capture_id = latest_metadata["capture_id"]
+    capture_source = latest_metadata["capture_source"]
+    account_count = latest_metadata["account_count"]
+    cohort_descending = recent_scans[:account_count]
+    blockers: list[str] = []
+    normalized_by_scan: dict[int, dict[str, Any]] = {}
+    if len(cohort_descending) != account_count:
+        blockers.append(
+            "The newest all-account capture is partial: its account positions are incomplete."
+        )
+    for offset, scan in enumerate(cohort_descending):
+        raw_metadata = (
+            scan.capture_metadata if isinstance(scan.capture_metadata, dict) else {}
+        )
+        if (
+            raw_metadata.get("schema_version") != STATEMENT_CAPTURE_SCHEMA_VERSION
+            or raw_metadata.get("capture_id") != capture_id
+        ):
+            blockers.append(
+                "The newest all-account capture is interrupted by a different scan batch."
+            )
+            continue
+        try:
+            normalized_by_scan[scan.id] = _sanitize_capture_metadata(
+                raw_metadata,
+                bank_account_id=scan.bank_account_id,
+                complete_scan=scan.status == XeroStatementScan.STATUS_COMPLETE,
+            )
+        except ValueError as exc:
+            blockers.append(f"All-account scan {scan.id} metadata is invalid: {exc}")
+            continue
+        expected_position = account_count - offset
+        if normalized_by_scan[scan.id]["account_position"] != expected_position:
+            blockers.append(
+                "The newest all-account capture is partial or its account positions are out of order."
+            )
+    if blockers:
+        return StatementCaptureSelection(
+            capture_id=capture_id,
+            capture_source=capture_source,
+            scans=tuple(reversed(cohort_descending)),
+            max_age_minutes=max_age_minutes,
+            blockers=tuple(dict.fromkeys(blockers)),
+        )
+    selected = list(reversed(cohort_descending))
+
+    try:
+        catalog = active_xero_bank_account_catalog(organization)
+    except StatementCaptureValidationError as exc:
+        blockers.append(str(exc))
+        catalog = {"tenant_id": "", "organisation_name": "", "accounts": []}
+    except (ConnectorOAuthError, requests.RequestException):
+        blockers.append(
+            "The active Xero BANK account catalogue could not be verified."
+        )
+        catalog = {"tenant_id": "", "organisation_name": "", "accounts": []}
+    accounts = list(catalog.get("accounts") or [])
+    catalog_ids = [account["bank_account_id"] for account in accounts]
+    catalog_by_id = {
+        account["bank_account_id"].casefold(): account for account in accounts
+    }
+    declared_ids = latest_metadata["active_bank_account_ids"]
+    if {value.casefold() for value in declared_ids} != {
+        value.casefold() for value in catalog_ids
+    }:
+        blockers.append(
+            "The active Xero BANK account catalogue changed after this capture."
+        )
+    if account_count != len(accounts):
+        blockers.append(
+            "The all-account capture count does not match the active Xero BANK account catalogue."
+        )
+    if latest_metadata["tenant_id"] != str(catalog.get("tenant_id") or ""):
+        blockers.append("The all-account capture belongs to a different Xero tenant.")
+    if latest_metadata["organisation_name"].casefold() != str(
+        catalog.get("organisation_name") or ""
+    ).casefold():
+        blockers.append("The all-account capture names a different Xero organisation.")
+
+    now = timezone.now()
+    freshness_cutoff = now - timedelta(minutes=max_age_minutes)
+    seen_account_ids: set[str] = set()
+    seen_scan_ids: set[str] = set()
+    common_fields = (
+        "capture_source",
+        "capture_id",
+        "tenant_id",
+        "organisation_name",
+        "account_count",
+        "active_bank_account_ids",
+        "all_accounts_requested",
+        "full_organisation_coverage_confirmed",
+        "date_range_confirmed",
+        "period_start",
+        "period_end",
+        "source_sha256",
+        "report_format",
+    )
+    for scan in selected:
+        metadata = normalized_by_scan[scan.id]
+        if any(metadata.get(field) != latest_metadata.get(field) for field in common_fields):
+            blockers.append("The newest all-account capture contains mixed metadata.")
+            break
+        account_id = scan.bank_account_id.casefold()
+        if account_id in seen_account_ids:
+            blockers.append("The newest all-account capture repeats a bank account.")
+        seen_account_ids.add(account_id)
+        external_scan_id = metadata["scan_id"]
+        if external_scan_id in seen_scan_ids:
+            blockers.append("The newest all-account capture repeats a source scan ID.")
+        seen_scan_ids.add(external_scan_id)
+        account = catalog_by_id.get(account_id)
+        if account and metadata["bank_account_label"].casefold() != account["name"].casefold():
+            blockers.append(
+                f"All-account scan {scan.id} has a bank-account label mismatch."
+            )
+        if (
+            scan.status != XeroStatementScan.STATUS_COMPLETE
+            or scan.expected_count is None
+            or scan.expected_count != scan.observed_count
+            or metadata["derived_complete"] is not True
+            or not metadata["all_accounts_requested"]
+            or not metadata["full_organisation_coverage_confirmed"]
+            or not metadata["date_range_confirmed"]
+        ):
+            blockers.append(
+                f"All-account scan {scan.id} is incomplete or lacks coverage confirmation."
+            )
+        if scan.completed_at is None or scan.completed_at < freshness_cutoff:
+            blockers.append(
+                f"All-account scan {scan.id} is older than {max_age_minutes} minutes."
+            )
+
+    if seen_account_ids != {value.casefold() for value in declared_ids}:
+        blockers.append(
+            "The newest all-account capture does not match its declared bank-account IDs."
+        )
+    if selected and len(seen_account_ids) != account_count:
+        blockers.append("The newest all-account capture does not contain every account once.")
+    active_lines = list(
+        XeroStatementLineSnapshot.objects.filter(
+            organization=organization,
+            active=True,
+            last_scan_id__in=[scan.id for scan in selected],
+        ).values_list("bank_account_id", "statement_line_id")
+    )
+    line_ids = [statement_line_id for _, statement_line_id in active_lines]
+    if len(line_ids) != len(set(line_ids)):
+        blockers.append(
+            "The all-account queue contains duplicate statement-line IDs across bank accounts."
+        )
+
+    unique_blockers = tuple(dict.fromkeys(blockers))
+    fingerprint = ""
+    if selected and not unique_blockers:
+        fingerprint = _capture_fingerprint(
+            metadata=latest_metadata,
+            scans=selected,
+            accounts=accounts,
+        )
+    return StatementCaptureSelection(
+        capture_id=capture_id,
+        capture_source=capture_source,
+        scans=tuple(selected),
+        active_bank_accounts=tuple(accounts),
+        capture_fingerprint=fingerprint,
+        period_start=latest_metadata.get("period_start") or "",
+        period_end=latest_metadata.get("period_end") or "",
+        max_age_minutes=max_age_minutes,
+        blockers=unique_blockers,
+    )
+
+
+def validate_current_statement_line_capture(
+    statement_line: XeroStatementLineSnapshot,
+    *,
+    expected_bank_account_id: str = "",
+    expected_source_hash: str = "",
+    selection: StatementCaptureSelection | None = None,
+) -> StatementCaptureSelection:
+    """Assert a row still belongs to the live authoritative capture and account."""
+
+    try:
+        current = XeroStatementLineSnapshot.objects.select_related("last_scan").get(
+            pk=statement_line.pk,
+            organization_id=statement_line.organization_id,
+        )
+    except XeroStatementLineSnapshot.DoesNotExist as exc:
+        raise StatementCaptureValidationError(
+            "The captured Xero statement line no longer exists."
+        ) from exc
+    if current.statement_line_id != statement_line.statement_line_id:
+        raise StatementCaptureValidationError(
+            "The captured Xero statement line identity changed."
+        )
+    if expected_bank_account_id and current.bank_account_id.casefold() != str(
+        expected_bank_account_id
+    ).strip().casefold():
+        raise StatementCaptureValidationError(
+            "The captured Xero statement line belongs to a different bank account."
+        )
+    if expected_source_hash and current.source_hash != expected_source_hash:
+        raise StatementCaptureValidationError(
+            "The captured Xero statement line changed after it was selected."
+        )
+    if not current.active:
+        raise StatementCaptureValidationError(
+            "The captured Xero statement line is no longer active."
+        )
+    selection = selection or select_current_statement_capture(current.organization)
+    if not selection.all_account_capture:
+        raise StatementCaptureValidationError(
+            selection.blockers[0]
+            if selection.blockers
+            else "A complete all-account Xero statement capture is required."
+        )
+    if any(scan.organization_id != current.organization_id for scan in selection.scans):
+        raise StatementCaptureValidationError(
+            "The selected all-account capture belongs to a different organisation."
+        )
+    latest_scan_id = XeroStatementScan.objects.filter(
+        organization_id=current.organization_id
+    ).order_by("-started_at", "-id").values_list("id", flat=True).first()
+    if latest_scan_id != selection.latest_scan.id:
+        raise StatementCaptureValidationError(
+            "The Xero statement queue changed after the all-account capture was validated."
+        )
+    freshness_cutoff = timezone.now() - timedelta(minutes=selection.max_age_minutes)
+    if any(
+        scan.completed_at is None or scan.completed_at < freshness_cutoff
+        for scan in selection.scans
+    ):
+        raise StatementCaptureValidationError(
+            f"The all-account capture is older than {selection.max_age_minutes} minutes."
+        )
+    if current.last_scan_id not in selection.scan_ids:
+        raise StatementCaptureValidationError(
+            "The captured Xero statement line is not in the current all-account capture."
+        )
+    active_account_ids = {
+        account["bank_account_id"].casefold()
+        for account in selection.active_bank_accounts
+    }
+    if current.bank_account_id.casefold() not in active_account_ids:
+        raise StatementCaptureValidationError(
+            "The captured Xero statement line's bank account is no longer active."
+        )
+    return selection
 
 
 def import_xero_statement_lines(
@@ -687,8 +1428,61 @@ def import_xero_statement_lines(
             raise ValueError(
                 f"Complete Xero scan expected {expected_count} rows but observed {len(lines)}"
             )
+    sanitized_capture_metadata = _sanitize_capture_metadata(
+        capture_metadata,
+        bank_account_id=bank_account_id,
+        complete_scan=complete_scan,
+    )
+    if sanitized_capture_metadata.get("schema_version") == STATEMENT_CAPTURE_SCHEMA_VERSION:
+        capture_source = sanitized_capture_metadata["capture_source"]
+        if capture_source == STATEMENT_CAPTURE_SOURCE_BROWSER and complete_scan:
+            browser_account_hash = hashlib.sha256(
+                json.dumps(
+                    lines,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+            if (
+                sanitized_capture_metadata["account_source_sha256"]
+                != browser_account_hash
+            ):
+                raise ValueError(
+                    "capture_metadata account_source_sha256 does not match the browser payload"
+                )
+        if capture_source == STATEMENT_CAPTURE_SOURCE_CSV:
+            expected_capture_id = "csv-" + hashlib.sha256(
+                (
+                    sanitized_capture_metadata["tenant_id"]
+                    + "\0"
+                    + sanitized_capture_metadata["source_sha256"]
+                ).encode("utf-8")
+            ).hexdigest()[:32]
+            if sanitized_capture_metadata["capture_id"] != expected_capture_id:
+                raise ValueError(
+                    "capture_metadata capture_id does not match the CSV source and tenant"
+                )
+            expected_scan_id = (
+                f"{expected_capture_id}-"
+                f"{sanitized_capture_metadata['account_source_sha256'][:16]}"
+            )
+            if sanitized_capture_metadata["scan_id"] != expected_scan_id:
+                raise ValueError(
+                    "capture_metadata scan_id does not match the CSV account source"
+                )
     saved: list[XeroStatementLineSnapshot] = []
     seen_ids: set[str] = set()
+    capture_period_start = (
+        date.fromisoformat(sanitized_capture_metadata["period_start"])
+        if sanitized_capture_metadata.get("period_start")
+        else None
+    )
+    capture_period_end = (
+        date.fromisoformat(sanitized_capture_metadata["period_end"])
+        if sanitized_capture_metadata.get("period_end")
+        else None
+    )
     with transaction.atomic():
         scan = XeroStatementScan.objects.create(
             organization=organization,
@@ -701,7 +1495,7 @@ def import_xero_statement_lines(
             payload_hash=hashlib.sha256(
                 json.dumps(lines, sort_keys=True, separators=(",", ":"), default=str).encode()
             ).hexdigest(),
-            capture_metadata=_sanitize_capture_metadata(capture_metadata),
+            capture_metadata=sanitized_capture_metadata,
         )
         for raw in lines:
             if not isinstance(raw, dict):
@@ -714,6 +1508,14 @@ def import_xero_statement_lines(
                 transaction_date = datetime.strptime(str(raw.get("date") or "").strip(), "%d %b %Y").date()
             except ValueError as exc:
                 raise ValueError(f"Invalid Xero statement date for {statement_line_id}") from exc
+            if (
+                capture_period_start
+                and capture_period_end
+                and not capture_period_start <= transaction_date <= capture_period_end
+            ):
+                raise ValueError(
+                    f"Statement date for {statement_line_id} is outside the attested capture period"
+                )
             try:
                 amount = Decimal(str(raw.get("amount") or "0").replace(",", "")).quantize(Decimal("0.01"))
             except InvalidOperation as exc:
@@ -1548,11 +2350,7 @@ def save_statement_suggestions(
                     "matched_xero_bill_id": "",
                     "event": None,
                     "project": None,
-                    "allocation_mode": (
-                        XeroStatementSuggestion.ALLOCATION_MLAI_CORE
-                        if profile and profile.require_statement_tracking
-                        else XeroStatementSuggestion.ALLOCATION_UNASSIGNED
-                    ),
+                    "allocation_mode": XeroStatementSuggestion.ALLOCATION_UNASSIGNED,
                     "description": "",
                     "review_note": "Conflicting verified reconciliation rules need an admin decision.",
                     "evidence": conflict_evidence,
@@ -1589,22 +2387,11 @@ def save_statement_suggestions(
                 else requested_mode
             )
             valid_modes = {choice[0] for choice in XeroStatementSuggestion.ALLOCATION_CHOICES}
-            if not allocation_mode or (
-                allocation_mode == XeroStatementSuggestion.ALLOCATION_UNASSIGNED
-                and profile
-                and profile.require_statement_tracking
-            ):
-                allocation_mode = (
-                    XeroStatementSuggestion.ALLOCATION_MLAI_CORE
-                    if profile and profile.require_statement_tracking
-                    else XeroStatementSuggestion.ALLOCATION_UNASSIGNED
-                )
+            if not allocation_mode:
+                allocation_mode = XeroStatementSuggestion.ALLOCATION_UNASSIGNED
             if allocation_mode not in valid_modes:
                 raise ValueError(f"Invalid allocation_mode for {line_id}: {allocation_mode}")
-            if requested_mode and requested_mode not in {
-                allocation_mode,
-                XeroStatementSuggestion.ALLOCATION_UNASSIGNED,
-            }:
+            if requested_mode and requested_mode != allocation_mode:
                 raise ValueError(f"allocation_mode does not match the selected allocation for {line_id}")
             if allocation_mode == XeroStatementSuggestion.ALLOCATION_MLAI_CORE and (event_id or project_id):
                 raise ValueError(f"MLAI core cannot be combined with a specific allocation for {line_id}")

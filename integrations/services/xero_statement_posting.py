@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 from datetime import timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -27,34 +26,35 @@ from integrations.services.xero_reconciliation import (
     XERO_API_URL,
     ReconciliationValidationError,
     XeroPostingError,
+    _active_tracking_option_by_name,
+    _configured_tracking_category,
     _created_tracking_option,
-    _tracking_category_options,
+    _current_event_catalog_names,
+    _current_linear_project_catalog_names,
+    _tracking_option_by_id,
     _xero_headers,
     xero_has_bank_transaction_scope,
     xero_has_settings_write_scope,
 )
 from integrations.services.xero_scopes import xero_has_payment_write_scope
-from integrations.services.xero_statement_reconciliation import normalize_statement_action
+from integrations.services.xero_statement_reconciliation import (
+    StatementCaptureSelection,
+    StatementCaptureValidationError,
+    normalize_statement_action,
+    validate_current_statement_line_capture,
+)
 from integrations.services.reconciliation_rules import record_reconciliation_decision
 from integrations.services.reconciliation_tracking import (
     effective_tracking,
     effective_tracking_errors,
     xero_tracking_entry,
 )
-
-
 def _stable_json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
 
 
 def _hash_payload(value: Any) -> str:
     return hashlib.sha256(_stable_json(value).encode("utf-8")).hexdigest()
-
-
-def _normalized_xero_resource_id(value: Any) -> str:
-    """Compare UUID-shaped Xero IDs independently of casing and separators."""
-
-    return re.sub(r"[^0-9a-z]", "", str(value or "").strip().casefold())
 
 
 def _reference(line: XeroStatementLineSnapshot) -> str:
@@ -156,7 +156,7 @@ def _posting_payload(
     if operation == XeroStatementPosting.OPERATION_BILL_PAYMENT:
         return {
             "Invoice": {"InvoiceID": suggestion.matched_xero_bill_id},
-            "Account": {"AccountID": profile.xero_bank_account_id},
+            "Account": {"AccountID": line.bank_account_id},
             "Date": line.transaction_date.isoformat(),
             "Amount": float(line.amount),
             "Reference": _reference(line),
@@ -175,7 +175,7 @@ def _posting_payload(
     return {
         "Type": "SPEND" if line.direction == XeroStatementLineSnapshot.DIRECTION_DEBIT else "RECEIVE",
         "Contact": {"Name": suggestion.contact_name},
-        "BankAccount": {"AccountID": profile.xero_bank_account_id},
+        "BankAccount": {"AccountID": line.bank_account_id},
         "Date": line.transaction_date.isoformat(),
         "Reference": _reference(line),
         "CurrencyCode": line.currency,
@@ -185,11 +185,15 @@ def _posting_payload(
     }
 
 
-def build_statement_posting_preview(suggestion: XeroStatementSuggestion) -> dict[str, Any]:
+def build_statement_posting_preview(
+    suggestion: XeroStatementSuggestion,
+    *,
+    capture_selection: StatementCaptureSelection | None = None,
+) -> dict[str, Any]:
     """Validate and durably preview the Xero object for one suggestion."""
 
     suggestion = XeroStatementSuggestion.objects.select_related(
-        "statement_line", "organization"
+        "statement_line", "statement_line__last_scan", "organization"
     ).get(pk=suggestion.pk)
     line = suggestion.statement_line
     operation = _operation_for(suggestion)
@@ -230,12 +234,15 @@ def build_statement_posting_preview(suggestion: XeroStatementSuggestion) -> dict
         )
     if not operation:
         errors.append("This suggestion needs review and cannot be posted automatically.")
-    if not profile.xero_bank_account_id:
-        errors.append("Configure the Xero bank account before posting.")
-    elif _normalized_xero_resource_id(line.bank_account_id) != _normalized_xero_resource_id(
-        profile.xero_bank_account_id
-    ):
-        errors.append("The statement line belongs to a different Xero bank account.")
+    try:
+        validate_current_statement_line_capture(
+            line,
+            expected_bank_account_id=line.bank_account_id,
+            expected_source_hash=line.source_hash,
+            selection=capture_selection,
+        )
+    except StatementCaptureValidationError as exc:
+        errors.append(str(exc))
     if operation == XeroStatementPosting.OPERATION_BANK_TRANSACTION:
         semantic_local_duplicate = XeroStatementPosting.objects.filter(
             organization=suggestion.organization,
@@ -440,11 +447,102 @@ def _resolve_tax_type(connection, tax_type: str, direction: str) -> str:
     return str(matches[0]["TaxType"])
 
 
-def resolve_xero_tracking_assignment(
+def _normalized_tracking_name(value: Any) -> str:
+    return str(value or "").strip().casefold()
+
+
+def _require_current_catalog_name(
+    *,
+    names: set[str],
+    expected_name: str,
+    source_label: str,
+) -> None:
+    normalized_names = {_normalized_tracking_name(name) for name in names}
+    normalized_expected = _normalized_tracking_name(expected_name)
+    if not normalized_names or normalized_names == {""}:
+        raise XeroPostingError(
+            f"The canonical {source_label} no longer exists. Refresh the reconciliation context "
+            "and review the suggestion again."
+        )
+    if normalized_names != {normalized_expected}:
+        raise XeroPostingError(
+            f"The canonical {source_label} name changed or is ambiguous. Refresh the reconciliation "
+            "context and review the suggestion again."
+        )
+
+
+def _validate_canonical_tracking_creation(
+    suggestion: XeroStatementSuggestion,
+    assignment: dict[str, Any],
+) -> None:
+    """Fail closed before creating a non-default option from a stale suggestion."""
+
+    option_name = str(assignment.get("option_name") or "").strip()
+    kind = str(assignment.get("kind") or "").strip().casefold()
+    organization = suggestion.organization
+    if kind == "event":
+        source_type = str(suggestion.event_source_type or "luma").strip().casefold()
+        source_id = str(suggestion.event_source_id or "").strip()
+        if not source_id:
+            raise XeroPostingError(
+                "A missing Event Name option can only be created from a canonical event ID."
+            )
+        names = _current_event_catalog_names(
+            organization=organization,
+            source_type=source_type,
+            source_id=source_id,
+        )
+        _require_current_catalog_name(
+            names=names,
+            expected_name=option_name,
+            source_label=f"{source_type} event {source_id}",
+        )
+        return
+
+    if kind == "project":
+        source_type = str(suggestion.project_source_type or "linear").strip().casefold()
+        source_id = str(suggestion.project_source_id or "").strip()
+        if source_type == "xero_tracking":
+            raise XeroPostingError(
+                "A Project sourced from Xero must retain its existing tracking option ID. "
+                "Refresh the Xero tracking catalogue and review the suggestion again."
+            )
+        if source_type != "linear":
+            raise XeroPostingError(
+                f"Unsupported canonical project source {source_type!r}; review the suggestion again."
+            )
+        if not source_id:
+            raise XeroPostingError(
+                "A missing Project Name option can only be created from a canonical Linear project ID."
+            )
+        names = _current_linear_project_catalog_names(
+            organization=organization,
+            source_id=source_id,
+        )
+        _require_current_catalog_name(
+            names=names,
+            expected_name=option_name,
+            source_label=f"Linear project {source_id}",
+        )
+        return
+
+    raise XeroPostingError("Only canonical Event Name or Project Name options may be created.")
+
+
+def _resolve_xero_tracking_assignment(
     connection,
     profile,
     assignment: dict[str, Any] | None,
+    *,
+    execution_suggestion: XeroStatementSuggestion | None = None,
 ) -> list[dict[str, str]]:
+    """Resolve tracking, creating only defaults or an execution-validated statement option.
+
+    Preview and bill-intake callers omit ``execution_suggestion`` and therefore
+    cannot create a non-default option. Statement execution supplies it only
+    after the existing readiness and automatic-post gates have passed.
+    """
+
     if not assignment:
         return []
     response = http_client.get(
@@ -458,24 +556,39 @@ def resolve_xero_tracking_assignment(
     category_name = str(assignment["category_name"])
     option_name = str(assignment["option_name"])
     option_id = str(assignment.get("option_id") or "")
-    options = _tracking_category_options(categories, category_id)
+    category = _configured_tracking_category(
+        categories,
+        category_id=category_id,
+        category_name=category_name,
+    )
     if option_id:
-        option = next((
-            item for item in options
-            if str(item.get("TrackingOptionID") or item.get("OptionID") or "") == option_id
-        ), None)
-        if option and str(option.get("Name") or "").strip().casefold() != option_name.casefold():
-            raise XeroPostingError("The selected Xero tracking option ID now has a different name.")
+        option = _tracking_option_by_id(
+            category,
+            option_id=option_id,
+            option_name=option_name,
+        )
+        if option is None:
+            if (
+                execution_suggestion is not None
+                and str(execution_suggestion.project_source_type or "")
+                .strip()
+                .casefold()
+                == "xero_tracking"
+            ):
+                _validate_canonical_tracking_creation(execution_suggestion, assignment)
+            raise XeroPostingError(
+                f"Xero tracking option ID {option_id} no longer exists in "
+                f"{category_name}; refresh and review the suggestion."
+            )
     else:
-        option = next((
-            item for item in options
-            if str(item.get("Name") or "").strip().casefold() == option_name.casefold()
-            and str(item.get("Status") or "ACTIVE").upper() == "ACTIVE"
-        ), None)
-    if option is not None and str(option.get("Status") or "ACTIVE").upper() != "ACTIVE":
-        raise XeroPostingError(f"Xero tracking option {option_name} is archived.")
+        option = _active_tracking_option_by_name(
+            category,
+            option_name=option_name,
+        )
     if option is None:
-        if assignment.get("default"):
+        if not assignment.get("default") and execution_suggestion is not None:
+            _validate_canonical_tracking_creation(execution_suggestion, assignment)
+        if assignment.get("default") or execution_suggestion is not None:
             if not xero_has_settings_write_scope(connection.scopes):
                 raise XeroPostingError(
                     f"Reconnect Xero with accounting.settings to create tracking option {option_name}."
@@ -488,6 +601,15 @@ def resolve_xero_tracking_assignment(
             )
             create.raise_for_status()
             option = _created_tracking_option(create.json())
+            created_name = str((option or {}).get("Name") or "").strip()
+            if created_name.casefold() != option_name.casefold():
+                raise XeroPostingError(
+                    f"Xero returned a different tracking option after creating {option_name}."
+                )
+            if str((option or {}).get("Status") or "").strip().upper() != "ACTIVE":
+                raise XeroPostingError(
+                    f"Xero returned an archived tracking option for {option_name}."
+                )
         else:
             raise XeroPostingError(f"Xero does not contain one active tracking option named {option_name}.")
     resolved_option_id = str((option or {}).get("TrackingOptionID") or (option or {}).get("OptionID") or "")
@@ -504,11 +626,22 @@ def resolve_xero_tracking_assignment(
     }]
 
 
+def resolve_xero_tracking_assignment(
+    connection,
+    profile,
+    assignment: dict[str, Any] | None,
+) -> list[dict[str, str]]:
+    """Resolve tracking without permission to create a non-default option."""
+
+    return _resolve_xero_tracking_assignment(connection, profile, assignment)
+
+
 def _resolved_tracking(connection, profile, suggestion) -> list[dict[str, str]]:
-    return resolve_xero_tracking_assignment(
+    return _resolve_xero_tracking_assignment(
         connection,
         profile,
         effective_tracking(profile, suggestion),
+        execution_suggestion=suggestion,
     )
 
 
@@ -714,12 +847,16 @@ def execute_statement_posting(
     *,
     requested_by_slack_id: str,
     automatic: bool = False,
+    capture_selection: StatementCaptureSelection | None = None,
 ) -> XeroStatementPosting:
     """Create the matching BankTransaction or Payment, exactly once."""
 
     if automatic and not getattr(settings, "XERO_STATEMENT_AUTO_POST_ENABLED", False):
         raise ReconciliationValidationError("Automatic statement posting is disabled.")
-    preview = build_statement_posting_preview(suggestion)
+    preview = build_statement_posting_preview(
+        suggestion,
+        capture_selection=capture_selection,
+    )
     if not preview["ready"]:
         raise ReconciliationValidationError("Statement suggestion is not ready to post.", errors=preview["errors"])
     posting_id = preview["posting_id"]

@@ -54,6 +54,36 @@ The human decision endpoint is
 `decision: approve` or `decision: reject`. Approval is rejected if the Stripe
 source hash changed after the proposal was generated.
 
+Statement-suggestion previews also remain read-only. During confirmed statement
+execution, a missing non-default Event Name or Project Name option may be
+created only when the stored source ID and option name still match the current
+Luma, Humanitix, or Linear catalogue and the Xero connection has
+`accounting.settings`. A Project sourced from Xero is never recreated under a
+new option ID. Scheduled execution remains subject to the statement auto-post
+feature gate.
+
+## All-account statement capture contract
+
+`GET /api/v1/integrations/reconciliation/bank-accounts` returns the selected
+Xero tenant and its live `ACTIVE` `BANK` accounts. The reconciliation agent uses
+that authoritative list when capturing the browser queue or importing Xero's
+Uncoded Statement Lines CSV. A schema-v2 scan import must retain one stable
+`capture_id`, a unique position for every active account, the exact active
+account-ID list, tenant and organisation identity, per-account source hashes,
+and explicit completeness confirmations. CSV captures must also declare one
+shared `period_start`/`period_end`; browser captures observe the whole visible
+unreconciled queue and may omit dates.
+
+Readiness reports `all_account_capture`, `selected_statement_scan_ids`, and a
+capture fingerprint. A partial, stale, mixed, wrong-tenant, or catalog-drifted
+batch is never replaced by an older apparently complete scan. Agent
+runs persist the exact scan set, fingerprint, and statement source hashes;
+context submission, retry, approval, and execution revalidate those values.
+Statement writes use the captured line's `bank_account_id`, not the profile's
+legacy default, and schema-v2 writes verify that account is still in the current
+complete capture and live Xero catalog. The final Match/OK action remains human
+only.
+
 ## First-time setup
 
 Run migrations `integrations.0024_stripe_xero_reconciliation` and
