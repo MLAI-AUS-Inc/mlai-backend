@@ -178,10 +178,43 @@ class Command(BaseCommand):
 
     def report_related(self, user):
         """List every row still pointing at this user, so nothing is merged blind."""
+        for label, _field_name, count in self.remaining_related(user):
+            self.stdout.write(f"  {label}: {count}")
+
+    def remaining_related(self, user):
+        """Return every durable relation that would be changed by deleting user.
+
+        The merge intentionally handles only relations whose conflict and
+        accounting semantics are known.  This repository has many additional
+        CASCADE, SET_NULL and PROTECT user relations; silently relying on their
+        ``on_delete`` behavior would either destroy history, orphan ownership,
+        or make the merge fail late.  Introspection makes new user relations
+        fail closed until their merge semantics are explicitly implemented.
+        """
+        remaining = []
         for rel in User._meta.related_objects:
-            count = rel.related_model.objects.filter(**{rel.field.name: user}).count()
+            field_name = rel.field.name
+            count = rel.related_model._base_manager.filter(
+                **{field_name: user}
+            ).count()
             if count:
-                self.stdout.write(f"  {rel.related_model._meta.label}: {count}")
+                remaining.append(
+                    (rel.related_model._meta.label, field_name, count)
+                )
+        return remaining
+
+    def assert_no_unhandled_relations(self, user):
+        remaining = self.remaining_related(user)
+        if not remaining:
+            return
+        details = ", ".join(
+            f"{label}.{field_name}={count}"
+            for label, field_name, count in remaining
+        )
+        raise CommandError(
+            "Refusing to delete merge source because durable user relations "
+            f"remain unhandled: {details}"
+        )
 
     @transaction.atomic
     def merge_users(self, source, target):
@@ -296,9 +329,10 @@ class Command(BaseCommand):
         count = BoostPostAdmission.objects.filter(user=source).update(user=target)
         self.stdout.write(f"  moved {count} BoostPostAdmissions")
 
-        # 8. Delete Source
-        # Anything still pointing at source is about to be cascaded away or
-        # orphaned by SET_NULL, so name it rather than lose it quietly.
-        self.report_related(source)
+        # 8. Delete Source. Fail closed if any relation was not deliberately
+        # transferred or reconciled above. The surrounding atomic transaction
+        # rolls back all earlier mutations, including Slack identity and
+        # balance changes, when this guard fires.
+        self.assert_no_unhandled_relations(source)
         self.stdout.write(f"  Deleting source user {source.id}")
         source.delete()
