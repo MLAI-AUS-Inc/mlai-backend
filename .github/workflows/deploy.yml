@@ -141,12 +141,14 @@ jobs:
       run: |
         python manage.py test \
           roo.tests_api.TaskViewSetTests \
+          roo.tests_api.CoworkingViewSetTests \
           roo.tests_kimi_usage \
           roo.tests_meeting_rooms \
           core.tests.test_auth_contract \
           core.tests.test_auth_session \
           core.test_slack_user_creation \
           core.tests_slack_founder_links \
+          core.tests_user_merge \
           core.tests.test_ops_domain_transition \
           core.tests.test_request_logging \
           org_memory.tests \

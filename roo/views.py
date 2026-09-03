@@ -121,15 +121,27 @@ def _coworking_receipt_payload(response_data, *, kind):
         payload.pop('user', None)
         payload.pop('user_email', None)
     else:
-        for row in payload.get('results', []):
+        rows = sorted(
+            payload.get('results', []),
+            key=lambda row: str(row.get('slack_user_id') or ''),
+        )
+        for row in rows:
+            row.pop('slack_user_id', None)
             booking = row.get('booking') if isinstance(row, dict) else None
             if isinstance(booking, dict):
                 booking.pop('user', None)
                 booking.pop('user_email', None)
+        payload['results'] = rows
+        payload.pop('admin_slack_user_id', None)
     return payload
 
 
-def _coworking_replay_response(receipt):
+def _coworking_replay_response(
+    receipt,
+    *,
+    admin_slack_user_id=None,
+    target_slack_user_ids=None,
+):
     payload = deepcopy(dict(receipt.response_payload))
     if receipt.kind == 'single':
         current_status = CoworkingBooking.objects.filter(
@@ -137,6 +149,12 @@ def _coworking_replay_response(receipt):
         ).values_list('status', flat=True).first()
         payload['operation_booking_current_status'] = current_status or 'deleted'
     else:
+        targets = sorted(
+            str(value).strip() for value in (target_slack_user_ids or [])
+        )
+        payload['admin_slack_user_id'] = str(admin_slack_user_id or '').strip()
+        for row, slack_user_id in zip(payload.get('results', []), targets):
+            row['slack_user_id'] = slack_user_id
         booking_rows = [
             row.get('booking')
             for row in payload.get('results', [])
@@ -1907,7 +1925,11 @@ class CoworkingViewSet(viewsets.ViewSet):
         except ValueError as exc:
             return Response({'error': str(exc)}, status=status.HTTP_409_CONFLICT)
         if operation_receipt:
-            return _coworking_replay_response(operation_receipt)
+            return _coworking_replay_response(
+                operation_receipt,
+                admin_slack_user_id=admin_slack_user_id,
+                target_slack_user_ids=target_slack_ids,
+            )
 
         if not is_points_admin(admin_slack_user_id):
             return Response(
@@ -2043,7 +2065,11 @@ class CoworkingViewSet(viewsets.ViewSet):
                             raise ValueError(
                                 'operation_id was already used for a different request'
                             )
-                        return _coworking_replay_response(receipt)
+                        return _coworking_replay_response(
+                            receipt,
+                            admin_slack_user_id=admin_slack_user_id,
+                            target_slack_user_ids=target_slack_ids,
+                        )
         except CoworkingBatchBookingError as e:
             return Response(
                 {'error': str(e), 'errors': e.errors},
