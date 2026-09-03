@@ -829,10 +829,24 @@ import json
 import sys
 
 payload = json.load(sys.stdin)
-if payload.get("ok") is not True or not payload.get("bot_id"):
+if (
+    payload.get("ok") is not True
+    or not payload.get("team_id")
+    or not payload.get("bot_id")
+):
     reason = payload.get("error", "unknown")
     raise SystemExit(f"Public Roo Slack auth.test failed: {reason}")
 '
+        office_manager_slack_team_id=\$(printf '%s' "\$slack_auth_body" | python3 -c '
+import json
+import sys
+print(json.load(sys.stdin)["team_id"])
+')
+        office_manager_slack_bot_id=\$(printf '%s' "\$slack_auth_body" | python3 -c '
+import json
+import sys
+print(json.load(sys.stdin)["bot_id"])
+')
         python3 -c '
 import sys
 
@@ -916,6 +930,14 @@ if contract.get("actions_enabled") is not True:
     raise SystemExit("Public Roo Office Manager actions must be enabled before backend scheduling")
 if contract.get("timezone") != "Australia/Melbourne":
     raise SystemExit("Public Roo and backend Office Manager timezones do not match")
+slack_identity = contract.get("slack_identity") or {}
+if (
+    slack_identity.get("team_id") != sys.argv[1]
+    or slack_identity.get("bot_id") != sys.argv[2]
+):
+    raise SystemExit(
+        "Backend and Public Roo Office Manager Slack app identities do not match"
+    )
 backend_base_url = str(contract.get("backend_base_url") or "")
 parsed = urlparse(backend_base_url)
 port = parsed.port
@@ -950,9 +972,10 @@ if any(
     raise SystemExit("Public Roo reported an inconsistent Office Manager backend contract")
 if parsed.username or parsed.password or parsed.query or parsed.fragment:
     raise SystemExit("Public Roo Office Manager claim URL must not contain credentials or parameters")
-'
+' "\$office_manager_slack_team_id" "\$office_manager_slack_bot_id"
         fi
         unset office_manager_slack_token office_manager_channel_id
+        unset office_manager_slack_team_id office_manager_slack_bot_id
         unset slack_auth_body slack_channel_body slack_history_body
         unset roo_service_url roo_health_body
     fi

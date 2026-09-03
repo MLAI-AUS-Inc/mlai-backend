@@ -30,7 +30,9 @@ epoch encoded in the backend's button value. A cancellation increments the
 generation, so an unseen or replayed button from the previous announcement
 cannot reclaim the reopened day. `attempt_id` is Roo's canonical lowercase UUID for one durable
 click and must remain unchanged across transport, response-loss, or restart
-retries. Roo must reject stale dates before calling this endpoint.
+retries. The wire representation is strict: `date` must be canonical
+`YYYY-MM-DD` and `generation` must be a JSON integer, not a numeric string.
+Roo must reject stale dates before calling this endpoint.
 
 ## Claim responses
 
@@ -73,6 +75,13 @@ Manager refund before cancellation; if the member no longer has those points,
 the cancellation fails without changing the booking or assignment. Standard
 cancellation and refund replays are idempotent.
 
+Cancellation mutations must use the immutable `booking_id`. Roo may accept a
+date from a member, but it resolves that date to the member's one current
+booking before sending the mutation. The backend rejects ambiguous date-only
+cancellation after any prior booking for that member/date was cancelled. This
+prevents a delayed retry of cancellation N from cancelling a newer rebooking
+N+1.
+
 The backend stores the announcement channel and deterministic Slack message
 identifiers with the day/assignment. Each outbound delivery is leased with a
 per-destination fencing token before Slack is called. A response-loss or
@@ -81,6 +90,10 @@ cannot overwrite the newer worker's state. Provider I/O happens outside
 database row locks and finalization rechecks the lease and current state.
 Records that survive a Melbourne-local date
 rollover are explicitly marked expired without emitting stale messages.
+Mutation lock order is user, date/capacity, Office Manager day, booking, then
+assignment. Delivery leases lock only their own assignment row; joined user or
+day rows are read after that short transaction so delivery cannot invert the
+mutation lock order.
 
 A relinquished winner's public message is retracted from durable state.
 Retraction repair runs even when
@@ -142,7 +155,9 @@ read-only checks of the Public Roo Slack token (`auth.test`), its declared
 (`conversations.info`, including that the bot is already a member, and
 `conversations.history`), and—when new claims are
 enabled—Public Roo's non-secret readiness contract. The companion must report the same Melbourne timezone and the exact
-backend claim path. After startup,
+backend claim path. It must also report the same non-secret Slack `team_id` and
+`bot_id` returned by the backend token's `auth.test`; this proves the app that
+posts the buttons is the app whose interactions are routed to Roo. After startup,
 `GET /api/v1/points/coworking/office-manager/preflight/` verifies the exact
 contract with the Roo credential while internal and missing credentials are
 rejected. It does not create a day, booking, or assignment.

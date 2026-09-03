@@ -182,6 +182,14 @@ class OfficeManagerHardeningMigrationTests(TransactionTestCase):
             booking=reopened_booking,
             status="relinquished",
         )
+        self.reopened_losing_attempt_id = uuid.uuid4()
+        Attempt.objects.create(
+            attempt_id=self.reopened_losing_attempt_id,
+            slack_user_id="ULEGACYLOSER0038",
+            booking_date=reopened_day.date,
+            outcome="already_claimed",
+            message="Another member already claimed this day",
+        )
 
         executor = MigrationExecutor(connection)
         executor.migrate([self.migrate_to])
@@ -220,3 +228,9 @@ class OfficeManagerHardeningMigrationTests(TransactionTestCase):
         reopened_day = Day.objects.get(pk=self.reopened_day_id)
         self.assertEqual(reopened_day.generation, 2)
         self.assertTrue(reopened_day.message_update_pending)
+        reopened_attempt = Attempt.objects.get(
+            pk=self.reopened_losing_attempt_id
+        )
+        self.assertEqual(reopened_attempt.generation, 1)
+        self.assertEqual(reopened_attempt.outcome, "attempt_superseded")
+        self.assertIsNotNone(reopened_attempt.superseded_at)

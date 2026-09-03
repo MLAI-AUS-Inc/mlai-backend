@@ -1576,7 +1576,7 @@ class OfficeManagerService:
             raise ValueError("Office Manager day lock does not match booking")
 
         assignment = (
-            OfficeManagerAssignment.objects.select_for_update()
+            OfficeManagerAssignment.objects.select_for_update(of=("self",))
             .filter(booking=booking, day=day, status="active")
             .first()
         )
@@ -1841,18 +1841,27 @@ class OfficeManagerService:
         ).exists()
 
     @staticmethod
-    def recover_winner_channel_coordinates(assignment_id: int) -> bool | None:
-        """Resolve an accepted winner post after its Slack response was lost."""
+    def recover_winner_channel_coordinates(
+        assignment_id: int,
+        *,
+        for_retraction: bool = False,
+    ) -> bool | None:
+        """Resolve an accepted winner post after its Slack response was lost.
+
+        A cancellation owns a separate bounded retraction budget. It must be
+        allowed to locate a possibly accepted winner post even after the
+        original posting worker exhausted its own coordinate-recovery budget.
+        """
         lease_token = _delivery_lease_token()
         with transaction.atomic():
             assignment = (
-                OfficeManagerAssignment.objects.select_for_update()
+                OfficeManagerAssignment.objects.select_for_update(of=("self",))
                 .select_related("day")
                 .get(pk=assignment_id)
             )
             if assignment.winner_channel_message_ts:
                 return True
-            if not _coordinate_recovery_is_due(
+            ordinary_recovery_due = _coordinate_recovery_is_due(
                 status=assignment.winner_channel_announcement_status,
                 error_value=assignment.winner_channel_announcement_last_error,
                 next_attempt_at=(
@@ -1862,7 +1871,26 @@ class OfficeManagerService:
                     assignment.winner_channel_announcement_attempt_count
                 ),
                 legacy_updated_at=assignment.updated_at,
-            ):
+            )
+            retraction_recovery_due = bool(
+                for_retraction
+                and _delivery_may_have_been_accepted(
+                    message_ts="",
+                    status=assignment.winner_channel_announcement_status,
+                    error_value=assignment.winner_channel_announcement_last_error,
+                )
+                and assignment.winner_channel_announcement_last_error
+                not in TERMINAL_ASSIGNMENT_DELIVERY_ERRORS
+                and not str(
+                    assignment.winner_channel_announcement_last_error or ""
+                ).startswith("permanent:")
+                and not _delivery_lease_is_live(
+                    status=assignment.winner_channel_announcement_status,
+                    error_value=assignment.winner_channel_announcement_last_error,
+                    legacy_updated_at=assignment.updated_at,
+                )
+            )
+            if not ordinary_recovery_due and not retraction_recovery_due:
                 return False
             assignment.winner_channel_announcement_status = "sending"
             if (
@@ -2351,7 +2379,7 @@ class OfficeManagerService:
         lease_token = _delivery_lease_token()
         with transaction.atomic():
             assignment = (
-                OfficeManagerAssignment.objects.select_for_update()
+                OfficeManagerAssignment.objects.select_for_update(of=("self",))
                 .select_related("day", "user")
                 .get(pk=assignment_id)
             )
@@ -2531,7 +2559,7 @@ class OfficeManagerService:
 
         with transaction.atomic():
             assignment = (
-                OfficeManagerAssignment.objects.select_for_update()
+                OfficeManagerAssignment.objects.select_for_update(of=("self",))
                 .select_related("day", "user")
                 .get(pk=assignment_id)
             )
@@ -2557,7 +2585,7 @@ class OfficeManagerService:
         now = timezone.now()
         with transaction.atomic():
             assignment = (
-                OfficeManagerAssignment.objects.select_for_update()
+                OfficeManagerAssignment.objects.select_for_update(of=("self",))
                 .select_related("day", "user")
                 .get(pk=assignment_id)
             )
@@ -2625,7 +2653,8 @@ class OfficeManagerService:
             if not message_ts:
                 recovered = (
                     OfficeManagerService.recover_winner_channel_coordinates(
-                        assignment_id
+                        assignment_id,
+                        for_retraction=True,
                     )
                 )
                 if recovered is False:
@@ -2643,7 +2672,7 @@ class OfficeManagerService:
             # stale "open again" claim if a replacement has since won.
             with transaction.atomic():
                 current = (
-                    OfficeManagerAssignment.objects.select_for_update()
+                    OfficeManagerAssignment.objects.select_for_update(of=("self",))
                     .select_related("day", "user")
                     .get(pk=assignment_id)
                 )
@@ -3356,7 +3385,7 @@ class OfficeManagerService:
         lease_token = _delivery_lease_token()
         with transaction.atomic():
             assignment = (
-                OfficeManagerAssignment.objects.select_for_update()
+                OfficeManagerAssignment.objects.select_for_update(of=("self",))
                 .select_related("user")
                 .get(pk=assignment_id)
             )
@@ -3546,7 +3575,7 @@ class OfficeManagerService:
         lease_token = _delivery_lease_token()
         with transaction.atomic():
             assignment = (
-                OfficeManagerAssignment.objects.select_for_update()
+                OfficeManagerAssignment.objects.select_for_update(of=("self",))
                 .select_related("user")
                 .get(pk=assignment_id)
             )
@@ -3648,9 +3677,9 @@ class OfficeManagerService:
                     "chat.postMessage accepted without ts"
                 )
             with transaction.atomic():
-                assignment = OfficeManagerAssignment.objects.select_for_update().get(
-                    pk=assignment_id
-                )
+                assignment = OfficeManagerAssignment.objects.select_for_update(
+                    of=("self",)
+                ).get(pk=assignment_id)
                 if (
                     assignment.end_of_day_reminder_status != "sending"
                     or assignment.end_of_day_reminder_last_error != lease_token
@@ -3750,7 +3779,7 @@ class OfficeManagerService:
         lease_token = _delivery_lease_token()
         with transaction.atomic():
             assignment = (
-                OfficeManagerAssignment.objects.select_for_update()
+                OfficeManagerAssignment.objects.select_for_update(of=("self",))
                 .select_related("user")
                 .get(pk=assignment_id)
             )

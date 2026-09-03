@@ -1912,10 +1912,11 @@ class CoworkingViewSet(viewsets.ViewSet):
                 },
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        if isinstance(generation_raw, bool):
-            generation_text = ""
-        else:
-            generation_text = str(generation_raw).strip()
+        generation_text = (
+            str(generation_raw)
+            if type(generation_raw) is int
+            else ""
+        )
         if (
             not generation_text.isdigit()
             or generation_text.startswith("0")
@@ -1933,6 +1934,14 @@ class CoworkingViewSet(viewsets.ViewSet):
         try:
             booking_date = date.fromisoformat(booking_date_raw)
         except ValueError:
+            return Response(
+                {
+                    'code': 'invalid_request',
+                    'error': 'Invalid date format. Use YYYY-MM-DD',
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if booking_date_raw != booking_date.isoformat():
             return Response(
                 {
                     'code': 'invalid_request',
@@ -2045,9 +2054,39 @@ class CoworkingViewSet(viewsets.ViewSet):
                 return Response({'error': 'Booking not found'}, status=status.HTTP_404_NOT_FOUND)
         elif booking_date and user:
             try:
+                parsed_booking_date = date.fromisoformat(booking_date)
+            except (TypeError, ValueError):
+                return Response(
+                    {'error': 'Invalid date format. Use YYYY-MM-DD'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if booking_date != parsed_booking_date.isoformat():
+                return Response(
+                    {'error': 'Invalid date format. Use YYYY-MM-DD'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            # A date alone is not a durable operation identity. Once a member
+            # has cancelled and rebooked the same date, a delayed replay of the
+            # old request must not cancel the new booking.
+            if CoworkingBooking.objects.filter(
+                user=user,
+                date=parsed_booking_date,
+                status='cancelled',
+            ).exists():
+                return Response(
+                    {
+                        'code': 'booking_identity_required',
+                        'error': (
+                            'This date has booking history. Retry using the '
+                            'current booking_id.'
+                        ),
+                    },
+                    status=status.HTTP_409_CONFLICT,
+                )
+            try:
                 booking = CoworkingBooking.objects.get(
                     user=user,
-                    date=date.fromisoformat(booking_date),
+                    date=parsed_booking_date,
                     status='booked'
                 )
             except CoworkingBooking.DoesNotExist:

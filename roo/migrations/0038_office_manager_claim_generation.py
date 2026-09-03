@@ -1,14 +1,31 @@
 from django.db import migrations, models
 import django.db.models.deletion
+from django.utils import timezone
 
 
 def fence_pre_generation_reopened_days(apps, schema_editor):
     Day = apps.get_model("roo", "OfficeManagerDay")
     Assignment = apps.get_model("roo", "OfficeManagerAssignment")
-    reopened_day_ids = Assignment.objects.filter(
-        status="relinquished",
-        day__status="open",
-    ).values_list("day_id", flat=True)
+    Attempt = apps.get_model("roo", "OfficeManagerClaimAttempt")
+    reopened_days = Day.objects.filter(
+        pk__in=Assignment.objects.filter(
+            status="relinquished",
+            day__status="open",
+        ).values_list("day_id", flat=True)
+    )
+    reopened_day_ids = reopened_days.values_list("pk", flat=True)
+    reopened_dates = reopened_days.values_list("date", flat=True)
+    Attempt.objects.filter(
+        booking_date__in=reopened_dates,
+        generation=1,
+    ).exclude(outcome="attempt_superseded").update(
+        outcome="attempt_superseded",
+        message=(
+            "This Office Manager claim attempt was superseded by "
+            "cancellation and cannot be replayed"
+        ),
+        superseded_at=timezone.now(),
+    )
     Day.objects.filter(pk__in=reopened_day_ids).update(
         generation=2,
         message_update_pending=True,

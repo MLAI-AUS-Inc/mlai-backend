@@ -260,6 +260,12 @@ class OrgMemoryProductionDeployTests(SimpleTestCase):
             "Public Roo Slack token is missing required Office Manager scopes",
             deploy,
         )
+        self.assertIn('json.load(sys.stdin)["team_id"]', deploy)
+        self.assertIn('json.load(sys.stdin)["bot_id"]', deploy)
+        self.assertIn(
+            "Backend and Public Roo Office Manager Slack app identities do not match",
+            deploy,
+        )
         self.assertGreaterEqual(
             deploy.count('"claim_generation_supported": True'),
             2,
