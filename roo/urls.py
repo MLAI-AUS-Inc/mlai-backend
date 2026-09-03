@@ -97,6 +97,11 @@ urlpatterns = [
     path('coworking/book/', CoworkingViewSet.as_view({'post': 'book'}), name='coworking-book'),
     path('coworking/book-many/', CoworkingViewSet.as_view({'post': 'book_many'}), name='coworking-book-many'),
     path(
+        'coworking/office-manager/preflight/',
+        CoworkingViewSet.as_view({'get': 'office_manager_preflight'}),
+        name='coworking-office-manager-preflight',
+    ),
+    path(
         'coworking/office-manager/claim/',
         CoworkingViewSet.as_view({'post': 'office_manager_claim'}),
         name='coworking-office-manager-claim',

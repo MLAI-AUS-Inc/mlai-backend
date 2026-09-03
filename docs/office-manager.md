@@ -74,8 +74,9 @@ The backend stores the announcement channel and deterministic Slack message
 identifiers with the day/assignment. Each outbound delivery is leased with a
 per-destination fencing token before Slack is called. A response-loss or
 `unknown` result is retried with the same message identity; a replaced worker
-cannot overwrite the newer worker's state, and live Slack calls are serialized
-under the destination row lock. Records that survive a Melbourne-local date
+cannot overwrite the newer worker's state. Provider I/O happens outside
+database row locks and finalization rechecks the lease and current state.
+Records that survive a Melbourne-local date
 rollover are explicitly marked expired without emitting stale messages.
 
 A relinquished winner's public message is retracted from durable state.
@@ -103,16 +104,22 @@ Required backend settings are listed in `.env.example`:
   `conversations.history` plus deterministic `client_msg_id` values to recover
   accepted Slack posts whose HTTP response was lost.
 - `OFFICE_MANAGER_SLACK_CHANNEL_ID`: coworking channel to announce in.
+- `SLACK_HTTP_TIMEOUT_SECONDS`: per-request Slack API timeout (default 10
+  seconds), preventing a stalled provider call from blocking scheduler health.
 - `OFFICE_MANAGER_TIMEZONE`, weekday, announcement, cutoff, and reminder
   settings.
 - `OFFICE_MANAGER_ENABLED`: backend creation/claim gate, default off.
 - `SCHEDULED_DISCOVERY_POLL_SECONDS` and
-  `SCHEDULED_DISCOVERY_HEALTH_MAX_AGE_SECONDS`: the scheduler tick and health
-  freshness bounds. The command exits non-zero when a required Office Manager
-  delivery reports `false`, terminal failure, or retry exhaustion. The
-  container removes its success marker and exits rather than hiding the error
-  in an infinite loop; Compose restarts it, and deployment requires a fresh
-  successful tick before it can pass.
+`SCHEDULED_DISCOVERY_HEALTH_MAX_AGE_SECONDS`: the scheduler tick and health
+freshness bounds. The command exits non-zero when a required Office Manager
+delivery reports `false`, terminal failure, or retry exhaustion. The
+container removes its success marker and exits rather than hiding the error
+in an infinite loop; Compose restarts it, and deployment requires a fresh
+successful tick before it can pass.
+
+Public message updates use fenced leases and a bounded retry budget. Permanent
+Slack errors and exhausted transient retries become scheduler-visible dead
+letters instead of being retried forever.
 
 Production also requires `ROO_API_KEY` and `INTERNAL_API_KEY` to be present,
 at least 32 characters, and different. The deploy installs both from separate
@@ -120,10 +127,10 @@ secret-store entries. Enabling Office Manager additionally performs live,
 read-only checks of the Public Roo Slack token (`auth.test`), the configured
 public channel (`conversations.info`), and Public Roo's non-secret readiness
 contract. The companion must report the same Melbourne timezone and the exact
-backend claim path. After startup, a non-mutating `GET` smoke verifies that the
-Roo credential reaches the endpoint while internal and missing credentials are
-rejected; the accepted Roo request returns method-not-allowed because claims
-remain POST-only.
+backend claim path. After startup,
+`GET /api/v1/points/coworking/office-manager/preflight/` verifies the exact
+contract with the Roo credential while internal and missing credentials are
+rejected. It does not create a day, booking, or assignment.
 
 ### Historical migration identity audit
 

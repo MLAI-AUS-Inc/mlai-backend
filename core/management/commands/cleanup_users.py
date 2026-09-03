@@ -205,8 +205,15 @@ class Command(BaseCommand):
 
         # 1. Update Basic Info on Target
         if not target.slack_id:
-            target.slack_id = source.slack_id
-            self.stdout.write(f"  Transferred slack_id {source.slack_id} to target")
+            transferred_slack_id = source.slack_id
+            if transferred_slack_id:
+                # ``slack_id`` is unique. Release it from the source before
+                # assigning it to the target; the outer atomic merge restores
+                # both rows if any later ownership transfer fails.
+                source.slack_id = None
+                source.save(update_fields=['slack_id'])
+            target.slack_id = transferred_slack_id
+            self.stdout.write(f"  Transferred slack_id {transferred_slack_id} to target")
         elif target.slack_id != source.slack_id:
              self.stdout.write(self.style.WARNING(f"  Target already has slack_id {target.slack_id} (Source has {source.slack_id}). Keeping Target's. Source's slack_id will be lost/unlinked."))
 

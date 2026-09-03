@@ -1554,7 +1554,7 @@ class CoworkingViewSet(viewsets.ViewSet):
         # @action metadata.
         if self.action == 'book_many':
             return [HasStrictRooApiKey()]
-        if self.action == 'office_manager_claim':
+        if self.action in {'office_manager_claim', 'office_manager_preflight'}:
             return [HasOfficeManagerRooApiKey()]
         return super().get_permissions()
 
@@ -1708,7 +1708,9 @@ class CoworkingViewSet(viewsets.ViewSet):
             # the single source of truth in get_standard_coworking_cost().
             standard_cost = CoworkingService.get_standard_coworking_cost()
             response_data["standard_points_cost"] = standard_cost
-            response_data["monthly_update_discount_applied"] = booking.points_cost < standard_cost
+            response_data["monthly_update_discount_applied"] = (
+                CoworkingService.monthly_update_discount_applied(booking)
+            )
             if not created:
                 response_data["already_booked"] = True
                 response_data["idempotent"] = True
@@ -1842,7 +1844,9 @@ class CoworkingViewSet(viewsets.ViewSet):
                 'booking': CoworkingBookingSerializer(booking).data,
                 'points_cost': booking.points_cost,
                 'standard_points_cost': standard_cost,
-                'monthly_update_discount_applied': booking.points_cost < standard_cost,
+                'monthly_update_discount_applied': (
+                    CoworkingService.monthly_update_discount_applied(booking)
+                ),
             })
 
         return Response(
@@ -1856,6 +1860,28 @@ class CoworkingViewSet(viewsets.ViewSet):
                 'results': results,
             },
             status=status.HTTP_201_CREATED if created_count else status.HTTP_200_OK,
+        )
+
+    @action(detail=False, methods=['get'], url_path='office-manager/preflight')
+    def office_manager_preflight(self, request):
+        """Authenticate Roo's isolated credential and publish the contract."""
+        return Response(
+            {
+                'status': 'ok',
+                'contract': 'office-manager-v1',
+                'credential_scope': 'strict_roo',
+                'timezone': str(
+                    getattr(
+                        settings,
+                        'OFFICE_MANAGER_TIMEZONE',
+                        'Australia/Melbourne',
+                    )
+                ),
+                'enabled': bool(
+                    getattr(settings, 'OFFICE_MANAGER_ENABLED', False)
+                ),
+            },
+            status=status.HTTP_200_OK,
         )
 
     @action(detail=False, methods=['post'], url_path='office-manager/claim')

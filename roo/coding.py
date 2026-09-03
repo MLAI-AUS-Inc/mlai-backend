@@ -27,6 +27,8 @@ from django.db import IntegrityError, transaction
 from django.db.models import Q
 from django.utils import timezone
 
+from core.models import User
+
 from .models import CodingModelCall, CodingPricingVersion, CodingTurn, PointsAccount
 from .permissions import IdempotencyConflictError, InsufficientBalanceError
 from .services import PointsService
@@ -637,6 +639,8 @@ def create_turn(*, user, account_session, idempotency_key, local_session_id, mod
             http_status=401,
         )
 
+    user = User.objects.select_for_update().get(pk=user.pk)
+
     now = timezone.now()
     for stale_turn in CodingTurn.objects.select_for_update().filter(
         user=user,
@@ -907,6 +911,19 @@ def settle_call(
     trace = str(trace_id or "").strip()
     if len(provider) > 255 or len(trace) > 255:
         raise CodingError("invalid_provider_reference", "Provider references must be 255 characters or fewer.")
+
+    turn_owner_id = (
+        CodingTurn.objects.filter(id=turn_uuid)
+        .values_list("user_id", flat=True)
+        .first()
+    )
+    if turn_owner_id is None:
+        raise CodingError(
+            "reservation_not_found",
+            "Call reservation was not found.",
+            http_status=404,
+        )
+    User.objects.select_for_update().get(pk=turn_owner_id)
 
     try:
         turn = CodingTurn.objects.select_for_update().select_related("pricing_version", "user").get(id=turn_uuid)

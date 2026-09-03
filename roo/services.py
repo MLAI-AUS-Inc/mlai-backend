@@ -1178,6 +1178,7 @@ class CoworkingService:
             or ledger.source != 'COWORKING'
             or ledger.delta_microroo != -expected_microroo
             or ledger.reference_type != 'COWORKING_BOOKING'
+            or ledger.reference_id != str(booking.date)
         ):
             raise ValueError(
                 'The original coworking charge could not be verified'
@@ -2070,6 +2071,13 @@ class BoostPostAdmissionService:
             poster_slack_id=poster_slack_id,
         )
 
+        # Resolve without a lock first so an unlinked member still receives
+        # the durable terminal admission result. When linked, lock the
+        # principal before the admission/account rows to match identity merge.
+        user = PointsService.get_user_by_slack_id(poster_slack_id)
+        if user is not None:
+            user = User.objects.select_for_update().get(pk=user.pk)
+
         admission, created = BoostPostAdmission.objects.select_for_update().get_or_create(
             submission_key=submission_key,
             defaults={
@@ -2100,7 +2108,6 @@ class BoostPostAdmissionService:
         if admission.status != 'processing':
             return admission, False
 
-        user = PointsService.get_user_by_slack_id(poster_slack_id)
         if user is None:
             admission.status = 'member_unlinked'
             admission.rejection_message = 'Slack member is not linked to a Roo Points account'
@@ -2658,6 +2665,7 @@ class TaskService:
         review_notes: str = "",
     ) -> Tuple[TaskAssignment, Ledger]:
         """Legacy/direct-award path where approval does not require a normal submission."""
+        user = User.objects.select_for_update().get(pk=user.pk)
         task = Task.objects.select_for_update().get(pk=task.pk)
         if not TaskService.can_review(task, approver_slack_id):
             raise PermissionDeniedError(f"{approver_slack_id} is not authorized to approve tasks")
@@ -2844,6 +2852,9 @@ class RewardsService:
             ValueError: If reward not found or not active
             InsufficientBalanceError: If user can't afford the reward (AUTO only)
         """
+        # Principal-first ordering keeps this points mutation compatible with
+        # account merges, which lock User before any owned/catalog rows.
+        user = User.objects.select_for_update().get(pk=user.pk)
         # Lock reward for update to handle stock concurrency
         try:
             reward = RewardsCatalog.objects.select_for_update().get(code=reward_code, is_active=True)

@@ -102,14 +102,37 @@ class MergePairTests(TestCase):
         self.assertEqual(booking.user_id, self.target.id)
 
     def test_points_accounts_are_summed(self):
-        PointsAccount.objects.create(user=self.source, balance=140, lifetime_earned=188)
-        PointsAccount.objects.create(user=self.target, balance=142, lifetime_earned=178)
+        PointsAccount.objects.create(
+            user=self.source,
+            balance=140,
+            lifetime_earned=188,
+            balance_microroo=140_000_000,
+            earned_balance_microroo=130_000_000,
+            purchased_topup_balance_microroo=10_000_000,
+            lifetime_earned_microroo=188_000_000,
+            lifetime_purchased_topup_microroo=10_000_000,
+            lifetime_spent_microroo=58_000_000,
+            microroo_initialized=True,
+        )
+        PointsAccount.objects.create(
+            user=self.target,
+            balance=142,
+            lifetime_earned=178,
+            balance_microroo=142_000_000,
+            earned_balance_microroo=122_000_000,
+            purchased_topup_balance_microroo=20_000_000,
+            lifetime_earned_microroo=178_000_000,
+            lifetime_purchased_topup_microroo=20_000_000,
+            lifetime_spent_microroo=56_000_000,
+            microroo_initialized=True,
+        )
 
         self.run_merge("--commit")
 
         account = PointsAccount.objects.get(user=self.target)
         self.assertEqual(account.balance, 282)
         self.assertEqual(account.lifetime_earned, 366)
+        self.assertEqual(account.purchased_topup_balance_microroo, 30_000_000)
         self.assertEqual(PointsAccount.objects.count(), 1)
 
     def test_duplicate_points_admin_row_is_removed(self):
@@ -170,3 +193,88 @@ class MergePairTests(TestCase):
 
         self.assertEqual(merge_users.call_count, 2)
         sleep.assert_called_once_with(0.05)
+
+
+class SlackEmailReconciliationTests(TestCase):
+    def test_commit_merges_slack_principal_into_matching_email_principal(self):
+        source = User.objects.create_user(
+            email="USOURCE@slack.placeholder.com",
+            slack_id="USOURCE",
+        )
+        target = User.objects.create_user(email="member@example.com")
+        booking = CoworkingBooking.objects.create(
+            user=source,
+            date=date(2026, 9, 2),
+            points_cost=8,
+        )
+
+        with patch(
+            "core.management.commands.reconcile_slack_users_by_email."
+            "SlackService.get_user_profile",
+            return_value={"email": target.email},
+        ):
+            call_command(
+                "reconcile_slack_users_by_email",
+                "--commit",
+                stdout=StringIO(),
+            )
+
+        self.assertFalse(User.objects.filter(pk=source.pk).exists())
+        target.refresh_from_db()
+        booking.refresh_from_db()
+        self.assertEqual(target.slack_id, "USOURCE")
+        self.assertEqual(booking.user_id, target.pk)
+
+    def test_commit_exits_nonzero_when_durable_merge_fails(self):
+        User.objects.create_user(
+            email="USOURCE@slack.placeholder.com",
+            slack_id="USOURCE",
+        )
+        target = User.objects.create_user(email="member@example.com")
+
+        with (
+            patch(
+                "core.management.commands.reconcile_slack_users_by_email."
+                "SlackService.get_user_profile",
+                return_value={"email": target.email},
+            ),
+            patch(
+                "core.management.commands.reconcile_slack_users_by_email."
+                "CleanupUsersCommand.merge_users_with_retry",
+                side_effect=ValueError("ambiguous ownership"),
+            ),
+            self.assertRaises(CommandError),
+        ):
+            call_command(
+                "reconcile_slack_users_by_email",
+                "--commit",
+                stdout=StringIO(),
+            )
+
+    def test_commit_exits_nonzero_on_conflicting_target_slack_identity(self):
+        User.objects.create_user(
+            email="USOURCE@slack.placeholder.com",
+            slack_id="USOURCE",
+        )
+        target = User.objects.create_user(
+            email="member@example.com",
+            slack_id="UOTHER",
+        )
+
+        with (
+            patch(
+                "core.management.commands.reconcile_slack_users_by_email."
+                "SlackService.get_user_profile",
+                side_effect=lambda slack_id: {
+                    "email": target.email
+                    if slack_id == "USOURCE"
+                    else "other@example.com"
+                },
+            ),
+            self.assertRaises(CommandError),
+        ):
+            call_command(
+                "reconcile_slack_users_by_email",
+                "--commit",
+                stdout=StringIO(),
+            )

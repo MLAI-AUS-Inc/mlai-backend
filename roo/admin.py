@@ -214,8 +214,14 @@ class CoworkingBookingAdmin(admin.ModelAdmin):
     list_display = ('id', 'user', 'date', 'status', 'points_cost', 'created_at', 'cancelled_at')
     list_filter = ('status', 'date', 'created_at')
     search_fields = ('user__email', 'user__slack_id')
-    readonly_fields = ('id', 'created_at', 'ledger_entry', 'refund_ledger_entry')
+    readonly_fields = [field.name for field in CoworkingBooking._meta.fields]
     ordering = ('-date',)
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
 
 
 @admin.register(MeetingRoom)
@@ -285,17 +291,8 @@ class OfficeManagerDayAdmin(admin.ModelAdmin):
         'announced_at', 'claim_cutoff_at',
     )
     list_filter = ('status', 'announcement_status', 'date')
-    readonly_fields = (
-        'slack_message_ts', 'announcement_attempt_count',
-        'announcement_last_error', 'announced_at', 'created_at', 'updated_at',
-    )
+    readonly_fields = [field.name for field in OfficeManagerDay._meta.fields]
     actions = ('close_open_days', 'reopen_closed_days')
-
-    def get_readonly_fields(self, request, obj=None):
-        fields = list(super().get_readonly_fields(request, obj))
-        if obj is not None:
-            fields.append('slack_channel_id')
-        return fields
 
     def has_delete_permission(self, request, obj=None):
         return False
@@ -339,18 +336,9 @@ class OfficeManagerAssignmentAdmin(admin.ModelAdmin):
         'end_of_day_reminder_status', 'claimed_at',
     )
     search_fields = ('user__email', 'user__slack_id')
-    readonly_fields = (
-        'day', 'user', 'booking', 'status', 'points_refunded',
-        'refund_ledger_entry', 'winner_dm_status', 'winner_dm_sent_at',
-        'winner_dm_last_error', 'winner_channel_announcement_status',
-        'winner_channel_announcement_sent_at', 'winner_channel_message_ts',
-        'winner_channel_announcement_last_error',
-        'winner_channel_retraction_pending',
-        'winner_channel_retraction_last_error',
-        'refund_reversal_ledger_entry', 'end_of_day_reminder_status',
-        'end_of_day_reminder_sent_at', 'end_of_day_reminder_last_error',
-        'claimed_at', 'relinquished_at',
-    )
+    readonly_fields = [
+        field.name for field in OfficeManagerAssignment._meta.fields
+    ]
 
     def has_add_permission(self, request):
         return False

@@ -898,6 +898,19 @@ if parsed.path not in {"", "/"}:
     )
 if contract.get("claim_path") != "/api/v1/points/coworking/office-manager/claim/":
     raise SystemExit("Public Roo Office Manager claim URL path does not match the backend contract")
+backend_contract = contract.get("backend_contract") or {}
+if backend_contract:
+    expected_backend_contract = {
+        "status": "ok",
+        "contract": "office-manager-v1",
+        "credential_scope": "strict_roo",
+        "timezone": "Australia/Melbourne",
+    }
+    if any(
+        backend_contract.get(key) != value
+        for key, value in expected_backend_contract.items()
+    ) or not isinstance(backend_contract.get("enabled"), bool):
+        raise SystemExit("Public Roo reported an inconsistent Office Manager backend contract")
 if parsed.username or parsed.password or parsed.query or parsed.fragment:
     raise SystemExit("Public Roo Office Manager claim URL must not contain credentials or parameters")
 '
@@ -988,7 +1001,7 @@ if parsed.username or parsed.password or parsed.query or parsed.fragment:
 
     runtime_restore_attempted=0
     new_runtime_replacement_started=0
-    post_migration_quarantine_recovery=0
+    schema_transition_started=0
     restore_runtime_on_error() {
         if [ "\$runtime_restore_attempted" = "1" ]; then
             return
@@ -997,7 +1010,7 @@ if parsed.username or parsed.password or parsed.query or parsed.fragment:
         echo "⚠️ Deployment failed after runtime services were paused; staging Office Manager disabled and restoring runtime processes."
         upsert_env_value OFFICE_MANAGER_ENABLED "false" || true
         if [ "\$new_runtime_replacement_started" != "1" ] \
-            && [ "\$post_migration_quarantine_recovery" != "1" ]; then
+            && [ "\$schema_transition_started" != "1" ]; then
             # These stopped containers still reference the last known-good images
             # and carry the environment that was validated with that release. Do
             # not replace them with the just-built image: a pre/post-migration
@@ -1029,6 +1042,11 @@ if parsed.username or parsed.password or parsed.query or parsed.fragment:
     docker compose stop "\${paused_runtime_services[@]}"
 
     echo "🗄️ Running migrations..."
+    # From this point a failed migrate may still have committed earlier
+    # append-only migrations. Never restore an older binary whose schema
+    # contract is now unknowable; recovery must use this schema-aware image
+    # with Office Manager disabled.
+    schema_transition_started=1
     compose_run_web python manage.py migrate --noinput
 
     echo "🧬 Re-auditing Office Manager provenance after migrations..."
@@ -1038,7 +1056,6 @@ if parsed.username or parsed.password or parsed.query or parsed.fragment:
         # feature off and start that image so an older binary cannot reverse an
         # allocation whose provenance 0037 marked unknown.
         upsert_env_value OFFICE_MANAGER_ENABLED "false"
-        post_migration_quarantine_recovery=1
         docker compose up -d --force-recreate "\${paused_runtime_services[@]}"
         verify_scheduler_recovery_tick "" "" 0
         runtime_restore_attempted=1
@@ -1298,21 +1315,37 @@ PY
         echo "🔐 Verifying the live Office Manager endpoint enforces the strict Roo credential..."
         office_manager_roo_key=\$(read_env_value ROO_API_KEY)
         office_manager_internal_key=\$(read_env_value INTERNAL_API_KEY)
-        office_manager_claim_url=https://api.mlai.au/api/v1/points/coworking/office-manager/claim/
-        roo_status=\$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 \
+        office_manager_preflight_url=https://api.mlai.au/api/v1/points/coworking/office-manager/preflight/
+        office_manager_preflight_body=\$(curl -fsS --max-time 10 \
             -H "X-API-Key: \$office_manager_roo_key" \
-            "\$office_manager_claim_url")
+            "\$office_manager_preflight_url")
         internal_status=\$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 \
             -H "X-API-Key: \$office_manager_internal_key" \
-            "\$office_manager_claim_url")
+            "\$office_manager_preflight_url")
         missing_status=\$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 \
-            "\$office_manager_claim_url")
-        if [ "\$roo_status" != "405" ] || [ "\$internal_status" != "401" ] || [ "\$missing_status" != "401" ]; then
-            echo "Office Manager auth smoke failed (roo=\$roo_status internal=\$internal_status missing=\$missing_status)."
+            "\$office_manager_preflight_url")
+        if [ "\$internal_status" != "401" ] || [ "\$missing_status" != "401" ]; then
+            echo "Office Manager auth smoke failed (internal=\$internal_status missing=\$missing_status)."
             exit 1
         fi
+        printf '%s' "\$office_manager_preflight_body" | python3 -c '
+import json
+import sys
+
+payload = json.load(sys.stdin)
+expected = {
+    "status": "ok",
+    "contract": "office-manager-v1",
+    "credential_scope": "strict_roo",
+    "timezone": "Australia/Melbourne",
+    "enabled": True,
+}
+if payload != expected:
+    raise SystemExit("Live Office Manager preflight returned the wrong contract")
+'
         unset office_manager_roo_key office_manager_internal_key
-        unset office_manager_claim_url roo_status internal_status missing_status
+        unset office_manager_preflight_url office_manager_preflight_body
+        unset internal_status missing_status
     fi
 
     if [ "\$meeting_room_booking_enabled" = "true" ]; then

@@ -25,10 +25,15 @@ from django.urls import reverse
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
+from slack_sdk.errors import SlackApiError
 
 from core.models import User
 
-from .admin import OfficeManagerDayAdmin
+from .admin import (
+    CoworkingBookingAdmin,
+    OfficeManagerAssignmentAdmin,
+    OfficeManagerDayAdmin,
+)
 from .models import (
     CoworkingBooking,
     CoworkingDayCapacity,
@@ -222,6 +227,29 @@ class OfficeManagerServiceTests(TestCase):
         self.assertIn(
             'slack_channel_id',
             day_admin.get_readonly_fields(None, self.day),
+        )
+
+    def test_admin_cannot_bypass_booking_or_assignment_state_machines(self):
+        booking_admin = CoworkingBookingAdmin(CoworkingBooking, AdminSite())
+        assignment_admin = OfficeManagerAssignmentAdmin(
+            OfficeManagerAssignment,
+            AdminSite(),
+        )
+        day_admin = OfficeManagerDayAdmin(OfficeManagerDay, AdminSite())
+
+        self.assertEqual(
+            set(booking_admin.get_readonly_fields(None)),
+            {field.name for field in CoworkingBooking._meta.fields},
+        )
+        self.assertFalse(booking_admin.has_add_permission(None))
+        self.assertFalse(booking_admin.has_delete_permission(None))
+        self.assertEqual(
+            set(assignment_admin.get_readonly_fields(None)),
+            {field.name for field in OfficeManagerAssignment._meta.fields},
+        )
+        self.assertEqual(
+            set(day_admin.get_readonly_fields(None)),
+            {field.name for field in OfficeManagerDay._meta.fields},
         )
 
     @override_settings(OFFICE_MANAGER_ENABLED=False)
@@ -551,6 +579,47 @@ class OfficeManagerServiceTests(TestCase):
             status="booked",
             points_cost=8,
             booking_source="points",
+        )
+
+        with self.assertRaises(OfficeManagerClaimError) as raised:
+            OfficeManagerService.claim(
+                slack_user_id=self.user.slack_id,
+                booking_date=self.now.date(),
+                attempt_id=uuid.uuid4(),
+                now=self.now,
+            )
+
+        self.assertEqual(raised.exception.code, "refund_unavailable")
+        self.assertFalse(OfficeManagerAssignment.objects.exists())
+        self.assertFalse(Ledger.objects.filter(kind="REFUND").exists())
+
+    def test_conversion_refuses_debit_from_a_different_booking_date(self):
+        PointsService.award(
+            user=self.user,
+            delta=8,
+            source="MANUAL",
+            description="Setup",
+            created_by_slack_id="UADMIN",
+            idempotency_key="wrong-date-refund-setup",
+        )
+        spend_ledger, _ = PointsService.spend(
+            user=self.user,
+            delta=8,
+            source="COWORKING",
+            description="Different coworking booking",
+            created_by_slack_id=self.user.slack_id,
+            idempotency_key="wrong-date-booking-spend",
+            reference_type="COWORKING_BOOKING",
+            reference_id=(self.now.date() + timedelta(days=1)).isoformat(),
+        )
+        CoworkingBooking.objects.create(
+            user=self.user,
+            date=self.now.date(),
+            status="booked",
+            points_cost=8,
+            booking_source="points",
+            purchased_points_cost_microroo=0,
+            ledger_entry=spend_ledger,
         )
 
         with self.assertRaises(OfficeManagerClaimError) as raised:
@@ -1468,6 +1537,63 @@ class OfficeManagerServiceTests(TestCase):
         result.assignment.day.refresh_from_db()
         self.assertEqual(result.assignment.day.status, "open")
         self.assertTrue(result.assignment.day.message_update_pending)
+        self.assertEqual(
+            result.assignment.day.announcement_last_error,
+            "message_update:retry:0:state_changed",
+        )
+
+    def test_reconcile_marks_permanent_slack_failure_terminal(self):
+        result = OfficeManagerService.claim(
+            slack_user_id=self.user.slack_id,
+            booking_date=self.now.date(),
+            now=self.now,
+        )
+        response = Mock(status_code=400)
+        response.get.side_effect = lambda key, default=None: (
+            "channel_not_found" if key == "error" else default
+        )
+
+        with patch(
+            "roo.office_manager.SlackService.update_message",
+            side_effect=SlackApiError("chat.update failed", response),
+        ):
+            updated = OfficeManagerService.reconcile_message(
+                result.assignment.day_id
+            )
+
+        self.assertFalse(updated)
+        result.assignment.day.refresh_from_db()
+        self.assertFalse(result.assignment.day.message_update_pending)
+        self.assertEqual(
+            result.assignment.day.announcement_last_error,
+            "permanent:message_update:channel_not_found",
+        )
+
+    def test_reconcile_exhausts_transient_slack_failures(self):
+        result = OfficeManagerService.claim(
+            slack_user_id=self.user.slack_id,
+            booking_date=self.now.date(),
+            now=self.now,
+        )
+
+        with patch(
+            "roo.office_manager.SlackService.update_message",
+            side_effect=TimeoutError("Slack timed out"),
+        ):
+            outcomes = [
+                OfficeManagerService.reconcile_message(
+                    result.assignment.day_id
+                )
+                for _ in range(OfficeManagerService.DELIVERY_MAX_ATTEMPTS)
+            ]
+
+        self.assertEqual(outcomes, [False] * 5)
+        result.assignment.day.refresh_from_db()
+        self.assertFalse(result.assignment.day.message_update_pending)
+        self.assertEqual(
+            result.assignment.day.announcement_last_error,
+            "exhausted:message_update:TimeoutError",
+        )
 
 
 @override_settings(
@@ -1542,6 +1668,25 @@ class OfficeManagerSchedulerTests(TestCase):
                 "reason": "slack_bot_token_not_configured",
             },
         )
+        self.assertFalse(OfficeManagerDay.objects.exists())
+
+    @override_settings(
+        OFFICE_MANAGER_ENABLED=False,
+        OFFICE_MANAGER_SLACK_BOT_TOKEN="",
+    )
+    def test_disabled_scheduler_without_backlog_does_not_require_slack_token(self):
+        with patch(
+            "roo.office_manager.SlackService.get_client"
+        ) as get_client:
+            result = run_office_manager_scheduler(
+                now=melbourne_at(2026, 8, 3, 8, 30)
+            )
+
+        self.assertEqual(
+            result,
+            {"status": "skipped", "reason": "disabled"},
+        )
+        get_client.assert_not_called()
         self.assertFalse(OfficeManagerDay.objects.exists())
 
     def test_scheduler_recovers_stale_sending_announcement(self):
@@ -1711,6 +1856,67 @@ class OfficeManagerSchedulerTests(TestCase):
         ):
             self.assertEqual(status_value, "failed")
             self.assertEqual(error_value, EXPIRED_DELIVERY_ERROR)
+
+    def test_scheduler_recovers_prior_date_winner_coordinates_before_expiry(self):
+        now = melbourne_at(2026, 8, 3, 8, 0)
+        prior_date = now.date() - timedelta(days=1)
+        day = office_manager_day(prior_date, status_value="claimed")
+        user = User.objects.create_user(
+            email="prior-response-loss@example.com",
+            slack_id="UPRIORRESPONSELOSS",
+        )
+        booking = CoworkingBooking.objects.create(
+            user=user,
+            date=prior_date,
+            points_cost=0,
+            booking_source="office_manager",
+        )
+        attempt = OfficeManagerClaimAttempt.objects.create(
+            attempt_id=uuid.uuid4(),
+            slack_user_id=user.slack_id,
+            booking_date=prior_date,
+            outcome="claimed",
+        )
+        assignment = OfficeManagerAssignment.objects.create(
+            day=day,
+            user=user,
+            booking=booking,
+            winner_channel_announcement_status="unknown",
+            winner_dm_status="sent",
+            end_of_day_reminder_status="sent",
+        )
+        attempt.assignment = assignment
+        attempt.save(update_fields=["assignment"])
+        fake_client = Mock()
+        fake_client.conversations_history.return_value = {
+            "ok": True,
+            "messages": [
+                {
+                    "client_msg_id": _slack_client_msg_id(
+                        "winner", attempt.attempt_id
+                    ),
+                    "ts": "recovered.prior.123",
+                }
+            ],
+        }
+
+        with patch(
+            "roo.office_manager.SlackService.get_client",
+            return_value=fake_client,
+        ):
+            result = run_office_manager_scheduler(now=now)
+
+        self.assertEqual(result["reason"], "before_announcement")
+        assignment.refresh_from_db()
+        self.assertEqual(
+            assignment.winner_channel_announcement_status,
+            "sent",
+        )
+        self.assertEqual(
+            assignment.winner_channel_message_ts,
+            "recovered.prior.123",
+        )
+        fake_client.chat_postMessage.assert_not_called()
 
     def test_committed_delivery_recovery_continues_while_disabled(self):
         now = melbourne_at(2026, 8, 3, 9, 0)
@@ -1890,6 +2096,29 @@ class OfficeManagerSchedulerTests(TestCase):
         self.assertEqual(weekend["reason"], "weekday_not_configured")
         self.assertEqual(early["reason"], "before_announcement")
         self.assertFalse(OfficeManagerDay.objects.exists())
+
+    def test_scheduler_surfaces_terminal_message_update_failure(self):
+        now = melbourne_at(2026, 8, 3, 9)
+        day = office_manager_day(now.date())
+        OfficeManagerDay.objects.filter(pk=day.pk).update(
+            announcement_last_error=(
+                "permanent:message_update:channel_not_found"
+            ),
+            message_update_pending=False,
+        )
+
+        result = run_office_manager_scheduler(now=now)
+
+        self.assertEqual(
+            result["delivery_failures"]["message_update_dead_letters"],
+            [
+                {
+                    "day_id": day.id,
+                    "date": now.date().isoformat(),
+                    "error": "permanent:message_update:channel_not_found",
+                }
+            ],
+        )
 
     @override_settings(OFFICE_MANAGER_WEEKDAYS="")
     def test_empty_weekday_configuration_pauses_announcements(self):
@@ -2344,6 +2573,33 @@ class OfficeManagerClaimApiTests(APITestCase):
         )
         self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
 
+    def test_preflight_proves_exact_isolated_roo_contract(self):
+        url = reverse("coworking-office-manager-preflight")
+        for api_key, expected_status in (
+            (None, status.HTTP_401_UNAUTHORIZED),
+            ("office-manager-internal-test-key", status.HTTP_401_UNAUTHORIZED),
+            ("office-manager-mlai-test-key", status.HTTP_401_UNAUTHORIZED),
+            ("office-manager-test-key", status.HTTP_200_OK),
+        ):
+            with self.subTest(api_key=api_key):
+                headers = {} if api_key is None else {"HTTP_X_API_KEY": api_key}
+                response = self.client.get(url, **headers)
+                self.assertEqual(response.status_code, expected_status)
+                if expected_status == status.HTTP_200_OK:
+                    self.assertEqual(response.data["status"], "ok")
+                    self.assertEqual(
+                        response.data["contract"],
+                        "office-manager-v1",
+                    )
+                    self.assertEqual(
+                        response.data["credential_scope"],
+                        "strict_roo",
+                    )
+                    self.assertEqual(
+                        response.data["timezone"],
+                        "Australia/Melbourne",
+                    )
+
     @override_settings(
         INTERNAL_API_KEY="legacy-internal-test-key",
         MLAI_API_KEY="legacy-mlai-test-key",
@@ -2715,6 +2971,13 @@ class OfficeManagerClaimApiTests(APITestCase):
 
 
 class OfficeManagerMigrationAuditInvariantTests(TestCase):
+    def test_recovery_migration_schema_has_required_constraints(self):
+        from core.management.commands.audit_office_manager_migrations import (
+            _office_manager_recovery_schema_issues,
+        )
+
+        self.assertEqual(_office_manager_recovery_schema_issues(), [])
+
     def test_reconciliation_command_persists_immutable_operator_evidence(self):
         user = User.objects.create_user(
             email="reconcile-provenance@example.com",

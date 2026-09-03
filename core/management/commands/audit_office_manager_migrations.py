@@ -118,6 +118,20 @@ REQUIRED_SCHEMA = {
             "assignment_id",
         },
     },
+    "office_manager_recovery": {
+        "roo_officemanagerassignment": {
+            "purchased_points_refunded_microroo",
+        },
+        "roo_officemanagerprovenancereconciliation": {
+            "id",
+            "booking_id",
+            "debit_ledger_id",
+            "purchased_microroo",
+            "reviewed_by",
+            "assignment_refund_snapshot",
+            "created_at",
+        },
+    },
 }
 
 
@@ -178,6 +192,67 @@ def _schema_group_report(snapshot: dict[str, list[str]]) -> dict[str, dict]:
             "required_artifact_count": len(requirements),
         }
     return report
+
+
+def _office_manager_recovery_schema_issues() -> list[str]:
+    """Verify 0037's nullability and relational constraints, not just names."""
+    table_names = set(connection.introspection.table_names())
+    assignment_table = "roo_officemanagerassignment"
+    reconciliation_table = "roo_officemanagerprovenancereconciliation"
+    if not {assignment_table, reconciliation_table}.issubset(table_names):
+        return []
+
+    issues: list[str] = []
+    with connection.cursor() as cursor:
+        assignment_columns = {
+            str(column.name): column
+            for column in connection.introspection.get_table_description(
+                cursor,
+                assignment_table,
+            )
+        }
+        provenance = assignment_columns.get(
+            "purchased_points_refunded_microroo"
+        )
+        if provenance is not None and not bool(provenance.null_ok):
+            issues.append(
+                "roo_officemanagerassignment."
+                "purchased_points_refunded_microroo must remain nullable"
+            )
+
+        constraints = connection.introspection.get_constraints(
+            cursor,
+            reconciliation_table,
+        )
+    unique_booking = any(
+        constraint.get("unique")
+        and constraint.get("columns") == ["booking_id"]
+        for constraint in constraints.values()
+    )
+    booking_fk = any(
+        constraint.get("foreign_key")
+        == ("roo_coworkingbooking", "id")
+        and constraint.get("columns") == ["booking_id"]
+        for constraint in constraints.values()
+    )
+    ledger_fk = any(
+        constraint.get("foreign_key") == ("roo_ledger", "id")
+        and constraint.get("columns") == ["debit_ledger_id"]
+        for constraint in constraints.values()
+    )
+    if not unique_booking:
+        issues.append(
+            "roo_officemanagerprovenancereconciliation.booking_id must be unique"
+        )
+    if not booking_fk:
+        issues.append(
+            "roo_officemanagerprovenancereconciliation.booking_id foreign key is missing"
+        )
+    if not ledger_fk:
+        issues.append(
+            "roo_officemanagerprovenancereconciliation.debit_ledger_id foreign key is missing"
+        )
+    return issues
 
 
 def _disk_0036_identities() -> list[str]:
@@ -484,7 +559,7 @@ def _build_report() -> dict:
         )
 
     for group, identity in CANONICAL_IDENTITIES.items():
-        if group in {"office_manager_protect", "office_manager_recovery"}:
+        if group == "office_manager_protect":
             continue
         marker = schema_groups[group]
         if identity in applied_set and not marker["complete"]:
@@ -553,6 +628,8 @@ def _build_report() -> dict:
             f"{recovery_identity} is recorded without "
             f"{CANONICAL_IDENTITIES['office_manager_successor']}"
         )
+    if recovery_identity in applied_set:
+        issues.extend(_office_manager_recovery_schema_issues())
 
     historical_applied = sorted(
         name for name in HISTORICAL_IDENTITIES if name in applied_set

@@ -2114,7 +2114,10 @@ class CoworkingViewSetTests(APITestCase):
 
         self.assertEqual(award_response.status_code, status.HTTP_200_OK)
         points_user = User.objects.get(slack_id=slack_id)
-        self.assertEqual(points_user.email, f'{slack_id}@slack.placeholder.com')
+        self.assertEqual(
+            points_user.email,
+            f'{slack_id.lower()}@slack.placeholder.com',
+        )
         self.assertEqual(PointsAccount.objects.get(user=points_user).balance, 10)
         mock_get_profile.assert_called_once_with(slack_id)
 
@@ -2394,6 +2397,30 @@ class CoworkingViewSetTests(APITestCase):
         )
         self.assertEqual(PointsAccount.objects.get(user=self.user).balance, 2)  # charged once at the standard 8
 
+    @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
+    def test_existing_office_manager_booking_is_not_reported_as_discounted(
+        self,
+        mock_permission,
+    ):
+        booking_date = date.today() + timedelta(days=1)
+        CoworkingBooking.objects.create(
+            user=self.user,
+            date=booking_date,
+            status='booked',
+            points_cost=0,
+            booking_source='office_manager',
+        )
+
+        response = self.client.post(
+            self.url,
+            {'slack_user_id': self.user.slack_id, 'date': booking_date.isoformat()},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data['already_booked'])
+        self.assertFalse(response.data['monthly_update_discount_applied'])
+
     @override_settings(ROO_API_KEY='roo-key', INTERNAL_API_KEY='internal-key')
     def test_batch_book_requires_dedicated_roo_api_key(self):
         target = self._create_member_with_points('UCOSTRICTKEY', balance=10)
@@ -2487,6 +2514,29 @@ class CoworkingViewSetTests(APITestCase):
         )
         self.assertEqual(PointsAccount.objects.get(user=discounted_target).balance, 0)
         self.assertEqual(PointsAccount.objects.get(user=standard_target).balance, 0)
+
+    @patch('core.permissions.HasStrictRooApiKey.has_permission', return_value=True)
+    def test_batch_existing_office_manager_booking_is_not_reported_as_discounted(
+        self,
+        mock_permission,
+    ):
+        target = self._create_member_with_points('UCOBATCHOM', balance=10)
+        booking_date = date.today() + timedelta(days=1)
+        CoworkingBooking.objects.create(
+            user=target,
+            date=booking_date,
+            status='booked',
+            points_cost=0,
+            booking_source='office_manager',
+        )
+
+        response = self._post_batch([target.slack_id], booking_date)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['created_count'], 0)
+        self.assertFalse(
+            response.data['results'][0]['monthly_update_discount_applied']
+        )
 
     @patch('core.permissions.HasStrictRooApiKey.has_permission', return_value=True)
     def test_batch_book_mixed_cost_preflight_is_all_or_nothing(self, mock_permission):

@@ -3,6 +3,7 @@ from __future__ import annotations
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 
+from core.models import User
 from roo.models import (
     CoworkingBooking,
     Ledger,
@@ -10,7 +11,7 @@ from roo.models import (
     OfficeManagerDay,
     OfficeManagerProvenanceReconciliation,
 )
-from roo.services import PointsService
+from roo.services import CoworkingService, PointsService
 
 
 class Command(BaseCommand):
@@ -37,16 +38,58 @@ class Command(BaseCommand):
         if not reviewed_by:
             raise CommandError("--reviewed-by must name the accountable operator")
 
+        try:
+            booking_snapshot = CoworkingBooking.objects.values(
+                "user_id", "date"
+            ).get(pk=booking_id)
+        except (ValueError, CoworkingBooking.DoesNotExist) as exc:
+            raise CommandError("Booking not found") from exc
+
         with transaction.atomic():
+            # Match live mutations: principal -> date namespace -> day ->
+            # assignment -> booking -> account. Reading identifiers before
+            # locking is safe because the date lock fences service writers;
+            # identity drift is rejected after the booking row is acquired.
             try:
-                # Lock only the booking row. PostgreSQL rejects ``FOR UPDATE``
-                # when Django's ``select_related`` introduces a nullable outer
-                # join (``ledger_entry`` is nullable for legacy bookings).
+                User.objects.select_for_update().get(
+                    pk=booking_snapshot["user_id"]
+                )
+            except User.DoesNotExist as exc:
+                raise CommandError("Booking owner not found") from exc
+            CoworkingService._lock_booking_date(booking_snapshot["date"])
+
+            assignment_refs = list(
+                OfficeManagerAssignment.objects.filter(
+                    booking_id=booking_id,
+                    points_refunded__gt=0,
+                )
+                .order_by("day_id", "pk")
+                .values("id", "day_id")
+            )
+            day_by_id = {
+                day.pk: day
+                for day in OfficeManagerDay.objects.select_for_update()
+                .filter(pk__in={row["day_id"] for row in assignment_refs})
+                .order_by("pk")
+            }
+            assignments = list(
+                OfficeManagerAssignment.objects.select_for_update()
+                .filter(pk__in=[row["id"] for row in assignment_refs])
+                .order_by("day_id", "pk")
+            )
+            try:
                 booking = CoworkingBooking.objects.select_for_update().get(
                     pk=booking_id
                 )
-            except (ValueError, CoworkingBooking.DoesNotExist) as exc:
+            except CoworkingBooking.DoesNotExist as exc:
                 raise CommandError("Booking not found") from exc
+            if (
+                booking.user_id != booking_snapshot["user_id"]
+                or booking.date != booking_snapshot["date"]
+            ):
+                raise CommandError(
+                    "Booking identity changed while acquiring locks; retry"
+                )
 
             original_cost = (
                 booking.original_points_cost
@@ -81,17 +124,6 @@ class Command(BaseCommand):
                     "The booking does not have a matching authoritative debit ledger"
                 )
 
-            assignments = list(
-                OfficeManagerAssignment.objects.select_for_update()
-                .filter(booking=booking, points_refunded__gt=0)
-                .order_by("pk")
-            )
-            day_by_id = {
-                day.pk: day
-                for day in OfficeManagerDay.objects.select_for_update().filter(
-                    pk__in={assignment.day_id for assignment in assignments}
-                )
-            }
             refund_by_id = {
                 refund.pk: refund
                 for refund in Ledger.objects.filter(

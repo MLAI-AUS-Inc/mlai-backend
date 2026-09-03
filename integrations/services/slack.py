@@ -15,8 +15,9 @@ class SlackService:
 
     @classmethod
     def get_client(cls, *, bot_token: str | None = None) -> WebClient:
+        timeout = int(getattr(settings, 'SLACK_HTTP_TIMEOUT_SECONDS', 10))
         if bot_token is not None:
-            return WebClient(token=bot_token)
+            return WebClient(token=bot_token, timeout=timeout)
         if cls._client is None:
             token = (
                 os.environ.get('SLACK_BOT_TOKEN')
@@ -26,7 +27,7 @@ class SlackService:
             )
             if not token:
                 logger.warning("SLACK_BOT_TOKEN or JOBS_SLACK_BOT_TOKEN not found in environment variables")
-            cls._client = WebClient(token=token)
+            cls._client = WebClient(token=token, timeout=timeout)
         return cls._client
 
     @classmethod
@@ -216,6 +217,7 @@ class SlackService:
         blocks: list = None,
         *,
         client: WebClient | None = None,
+        raise_errors: bool = False,
     ) -> bool:
         """
         Update an existing Slack message (e.g. to remove interactive buttons after click).
@@ -238,9 +240,13 @@ class SlackService:
             return True
         except SlackApiError as e:
             logger.error(f"Slack API error updating message in {channel_id}: {e.response['error']}")
+            if raise_errors:
+                raise
             return False
         except Exception as e:
             logger.error(f"Exception updating message in {channel_id}: {str(e)}")
+            if raise_errors:
+                raise
             return False
 
     @classmethod
