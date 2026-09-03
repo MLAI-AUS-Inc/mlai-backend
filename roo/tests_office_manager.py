@@ -4964,9 +4964,17 @@ class OfficeManagerPostgresConcurrencyTests(TransactionTestCase):
                 outcomes = [future.result(timeout=10) for future in outcomes]
 
         self.assertIn("cancelled", outcomes)
+        # If cancellation wins the date lock, the concurrent generation-1
+        # click is correctly fenced as belonging to the superseded announcement.
         self.assertTrue(
             set(outcomes).issubset(
-                {"cancelled", "claimed", "already_claimed", "claim_closed"}
+                {
+                    "cancelled",
+                    "claimed",
+                    "already_claimed",
+                    "claim_closed",
+                    "announcement_superseded",
+                }
             )
         )
         self.assertLessEqual(
