@@ -3085,6 +3085,21 @@ class ReconciliationWorkflowApiTests(APITestCase):
         profile = ReconciliationProfile.objects.filter(
             organization=self.organization
         ).select_related("xero_connection").first()
+        if profile is None:
+            connection = ExternalServiceConnection.objects.create(
+                provider=ExternalServiceProvider.XERO,
+                user=self.user,
+                organization=self.organization,
+                access_token="access-token",
+                external_account_id="tenant-test",
+                account_label=self.organization.name,
+                scopes=["accounting.banktransactions", "accounting.payments"],
+            )
+            profile = ReconciliationProfile.objects.create(
+                organization=self.organization,
+                xero_connection=connection,
+                xero_bank_account_id=bank_account_id,
+            )
         connection = profile.xero_connection if profile else None
         if connection is not None and not connection.account_label:
             connection.account_label = self.organization.name
@@ -3181,6 +3196,7 @@ class ReconciliationWorkflowApiTests(APITestCase):
             tax_type="GST Free Expenses",
             description="Contractor work for the client project.",
             confidence=0.99,
+            execution_ready=True,
             source_hash=line.source_hash,
             evidence=[{"source_provider": "xero_ui", "source_record_id": line.statement_line_id}],
         )
@@ -5606,6 +5622,7 @@ class ReconciliationWorkflowApiTests(APITestCase):
             tax_type="INPUT",
             description="Uber trip.",
             confidence=0.99,
+            execution_ready=True,
             source_hash=line.source_hash,
         )
 
