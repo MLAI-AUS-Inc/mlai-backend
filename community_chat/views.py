@@ -1144,7 +1144,7 @@ class LinkPreviewView(APIView):
     def get(self, request):
         raw_url = str(request.query_params.get("url") or "").strip()
         try:
-            slack_preview = fetch_slack_file_preview(raw_url)
+            slack_preview = fetch_slack_file_preview(raw_url, user=request.user)
             preview = slack_preview or fetch_link_preview(raw_url)
         except (LinkPreviewError, SlackFilePreviewError) as exc:
             return Response(
@@ -1179,7 +1179,10 @@ class LinkPreviewImageView(APIView):
         try:
             slack_file_id = str(request.query_params.get("slack_file") or "").strip()
             if slack_file_id:
-                content_type, body = fetch_slack_file_image(slack_file_id)
+                content_type, body = fetch_slack_file_image(
+                    slack_file_id,
+                    user=request.user,
+                )
             else:
                 content_type, body = fetch_preview_image(
                     str(request.query_params.get("url") or "").strip()

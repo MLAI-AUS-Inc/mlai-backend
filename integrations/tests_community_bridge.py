@@ -1122,6 +1122,9 @@ class BuzzCommunityBridgeEventViewTests(TestCase):
     BUZZ_BRIDGE_ADAPTER_TIMEOUT_SECONDS=12,
 )
 class BuzzBridgeClientTests(TestCase):
+    def setUp(self):
+        BuzzBridgeClient._private_batch_disabled_until = 0.0
+
     @patch("integrations.services.community_bridge.buzz.requests.post")
     def test_delivery_uses_private_authenticated_contract(self, mock_post):
         mock_post.return_value = SimpleNamespace(
@@ -1296,6 +1299,48 @@ class BuzzBridgeClientTests(TestCase):
                 "http://buzz-bridge-adapter:8090/v1/private-deliveries",
             ],
         )
+
+    @patch("integrations.services.community_bridge.buzz.requests.post")
+    def test_private_batch_falls_back_after_a_transient_adapter_failure(self, mock_post):
+        channel_id = "922c3b22-8002-4c3c-a37b-ce406a5e606e"
+        deliveries = [
+            {
+                "delivery_id": str(index),
+                "channel_id": channel_id,
+                "text": f"private {index}",
+            }
+            for index in range(2)
+        ]
+        mock_post.side_effect = [
+            SimpleNamespace(ok=False, status_code=502),
+            SimpleNamespace(
+                ok=True,
+                status_code=200,
+                json=lambda: {
+                    "channel_id": channel_id,
+                    "message_id": "a" * 64,
+                    "parent_message_id": "",
+                },
+            ),
+            SimpleNamespace(
+                ok=True,
+                status_code=200,
+                json=lambda: {
+                    "channel_id": channel_id,
+                    "message_id": "b" * 64,
+                    "parent_message_id": "",
+                },
+            ),
+        ]
+
+        result = BuzzBridgeClient.deliver_private_batch(deliveries)
+
+        self.assertEqual([item["message_id"] for item in result], ["a" * 64, "b" * 64])
+        self.assertGreater(
+            BuzzBridgeClient._private_batch_disabled_until,
+            time.monotonic(),
+        )
+        self.assertEqual(mock_post.call_count, 3)
 
     @patch("integrations.services.community_bridge.buzz.requests.post")
     def test_authentication_rejection_is_permanent(self, mock_post):

@@ -19,11 +19,13 @@ MLAI Chat is another client surface, not a one-time data migration.
   messages, and Slack Connect channels fail closed unless separately approved.
 - Attachments remain represented as safe provider-hosted links in the durable
   bridge event. For Slack image links, the authenticated MLAI Chat preview API
-  may fetch the image on demand with the bridge bot and return a bounded,
-  private-cache response. The proxy permits only supported image types shared
-  in enabled, public Slack channels mapped to MLAI Chat; it does not expose the
-  Slack token, store image bytes in bridge records/the database, or fetch
-  private/unmapped-channel files.
+  may fetch the image on demand and return a bounded, private-cache response.
+  Public-channel images use the bridge bot and must be shared in an enabled
+  Slack channel mapped to MLAI Chat. Private-DM images use the requesting
+  owner's current Slack grant and must belong to that owner's live or paused
+  private mirror. The proxy never exposes either Slack token or stores image
+  bytes in bridge records/the database; unsupported or out-of-scope files fail
+  closed.
 - Mirrored messages are visibly attributed to the source author and platform,
   but are signed/sent by a dedicated MLAI bridge identity.
 
