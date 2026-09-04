@@ -139,6 +139,25 @@ class LumaAttendeeReportService:
 
         return events[:count]
 
+    def list_all_events(self) -> List[Dict[str, Any]]:
+        """Return the complete managed calendar catalogue without guest PII.
+
+        Reconciliation needs future and in-progress events because tickets are
+        commonly sold before an event ends. Attendance metrics continue to use
+        the ended-event methods.
+        """
+
+        if not self.api_key:
+            raise LumaConfigurationError("Luma API key is not configured for this connection.")
+        return self._paginate(
+            "/v1/calendars/events/list",
+            params={
+                "pagination_limit": 100,
+                "sort_column": "start_at",
+                "sort_direction": "desc",
+            },
+        )
+
     def list_upcoming_events(
         self,
         *,
@@ -366,6 +385,20 @@ class LumaAttendeeReportService:
             "sort_direction": "asc",
         }
         return self._paginate("/v1/event/get-guests", params=params)
+
+    def get_guest(self, *, event_id: str, identifier: str) -> Dict[str, Any]:
+        """Fetch one detailed guest, including captured ticket orders."""
+
+        if not self.api_key:
+            raise LumaConfigurationError("Luma API key is not configured for this connection.")
+        event_id = str(event_id or "").strip()
+        identifier = str(identifier or "").strip()
+        if not event_id or not identifier:
+            raise LumaAPIError("Luma guest lookup requires an event and guest identifier.")
+        return self._get(
+            "/v1/events/guests/get",
+            params={"event_id": event_id, "id": identifier},
+        )
 
     def _paginate(self, path: str, *, params: Dict[str, Any]) -> List[Dict[str, Any]]:
         entries: List[Dict[str, Any]] = []

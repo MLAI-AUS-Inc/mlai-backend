@@ -11,7 +11,9 @@ Match/OK in Xero.
 
 1. `payout.reconciliation_completed` (or the daily backfill) retrieves the paid
    payout and every balance transaction included in it.
-2. Luma sales use the immutable `event_api_id` copied into Stripe metadata.
+2. Luma sales first use the immutable `event_api_id` copied into Stripe Charge
+   or PaymentIntent metadata. The PaymentIntent is followed when the balance
+   transaction source does not contain the metadata itself.
 3. Other Stripe payments are joined to invoices with `/v1/invoice_payments`.
    Roo Points purchases use their Stripe metadata. Refunds follow their original
    PaymentIntent back to the same source.
@@ -21,6 +23,14 @@ Match/OK in Xero.
    approves posting. Posting is deduplicated by payout ID locally and by Xero
    `Reference` before creation.
 
+For older metadata-poor Luma charges, attribution fails closed. The service
+loads Luma's complete managed event catalogue (including current and future
+events), requires a unique normalized event-name match, looks up the payer by
+the Stripe email, and accepts the match only when exactly one captured Luma
+ticket order has the same gross amount and currency. It stores the Luma order
+ID and match method as lineage, but not guest PII. Missing or ambiguous matches
+remain unattributed and cannot pass the Xero posting gate.
+
 ## Monthly-update enrichment
 
 The Valley monthly-update workflow runs `reconciliation_enrichment` immediately
@@ -29,6 +39,9 @@ the canonical timeline.
 
 - Luma is authoritative for **Event Name**. Stripe's immutable Luma event ID is
   resolved only against the organisation's refreshed Luma event catalogue.
+  The catalogue contains ended, in-progress, and future events because ticket
+  revenue commonly settles before an event is run; attendance metrics still
+  count ended events only.
 - Linear is authoritative for **Project Name**. A Linear record whose normalized
   name exactly matches a Luma event is marked as an `event_mirror`; it is useful
   corroboration for the event but is not automatically assigned as a project.

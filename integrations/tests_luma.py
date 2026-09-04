@@ -116,6 +116,47 @@ class LumaAttendeeReportServiceTests(SimpleTestCase):
             )
         )
 
+    def test_lists_complete_catalogue_and_reads_detailed_ticket_orders(self):
+        def handler(path, params):
+            if path == "/v1/calendars/events/list":
+                return {
+                    "entries": [{
+                        "id": "evt-future",
+                        "name": "Future paid event",
+                        "start_at": "2026-08-20T08:00:00Z",
+                    }],
+                    "has_more": False,
+                }
+            if path == "/v1/events/guests/get":
+                self.assertEqual(params["event_id"], "evt-future")
+                self.assertEqual(params["id"], "buyer@example.com")
+                return {
+                    "id": "gst-future",
+                    "event_ticket_orders": [{
+                        "id": "order-future",
+                        "amount": 12900,
+                        "currency": "aud",
+                        "is_captured": True,
+                        "amount_refunded": 0,
+                    }],
+                }
+            raise AssertionError(path)
+
+        service = LumaAttendeeReportService(
+            api_key="key",
+            base_url="https://luma.test",
+            session=FakeSession(handler),
+        )
+
+        events = service.list_all_events()
+        guest = service.get_guest(
+            event_id="evt-future",
+            identifier="buyer@example.com",
+        )
+
+        self.assertEqual([event["id"] for event in events], ["evt-future"])
+        self.assertEqual(guest["event_ticket_orders"][0]["id"], "order-future")
+
     def test_lists_only_allowlisted_public_upcoming_events(self):
         def handler(path, params):
             self.assertEqual(path, "/v1/calendar/list-events")
