@@ -32,7 +32,10 @@ from integrations.services.valley_harness import notify_valley_run_created
 from integrations.utils import normalize_domain
 from startup_updates.models import StartupMetricObservation, UserStartupBinding
 from integrations.models import ReconciliationProfile
-from integrations.services.reconciliation import ReconciliationReportService
+from integrations.services.reconciliation import (
+    ReconciliationReportService,
+    luma_api_key_for_organization,
+)
 from integrations.services.xero_reconciliation import persist_report
 
 User = get_user_model()
@@ -260,7 +263,9 @@ class StripeFinancialWebhookView(APIView):
                     status=status.HTTP_200_OK,
                 )
             try:
-                report = ReconciliationReportService().build_payout(payout_id)
+                report = ReconciliationReportService(
+                    luma_api_key=luma_api_key_for_organization(organization)
+                ).build_payout(payout_id)
                 profile = ReconciliationProfile.objects.filter(organization=organization).first()
                 records = persist_report(
                     organization=organization,

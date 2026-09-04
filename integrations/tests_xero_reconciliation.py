@@ -163,6 +163,8 @@ class StripeAttributionTests(SimpleTestCase):
             if path == "/v1/invoice_payments":
                 self.assertEqual(params["payment[payment_intent]"], "pi_invoice")
                 return {"data": [{"id": "ip_1", "invoice": "in_1"}], "has_more": False}
+            if path == "/v1/payment_intents/pi_invoice":
+                return {"id": "pi_invoice", "metadata": {}}
             if path == "/v1/invoices/in_1":
                 return {
                     "id": "in_1",

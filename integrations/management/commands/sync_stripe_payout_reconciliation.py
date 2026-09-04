@@ -6,7 +6,10 @@ from django.core.management.base import BaseCommand, CommandError
 
 from organizations.models import Organization
 from integrations.models import ReconciliationProfile
-from integrations.services.reconciliation import ReconciliationReportService
+from integrations.services.reconciliation import (
+    ReconciliationReportService,
+    luma_api_key_for_organization,
+)
 from integrations.services.xero_reconciliation import persist_report, serialize_payout
 
 
@@ -25,7 +28,9 @@ class Command(BaseCommand):
         if organization is None:
             raise CommandError("Organisation was not found")
         until = datetime.now(timezone.utc)
-        report = ReconciliationReportService().build_report(
+        report = ReconciliationReportService(
+            luma_api_key=luma_api_key_for_organization(organization)
+        ).build_report(
             since=until - timedelta(days=days),
             until=until,
             include_workbook=False,

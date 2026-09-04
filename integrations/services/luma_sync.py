@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 
 from django.db import transaction
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 
 from organizations.models import Organization
 from startup_updates.metric_catalog import LUMA_METRIC_KEYS, startup_update_metric_label
@@ -70,6 +71,25 @@ def sync_luma_connection(connection: ExternalServiceConnection) -> dict[str, Any
 
     service = LumaAttendeeReportService(api_key=connection.access_token)
     events = service.collect_ended_event_attendance()
+    # Ticket revenue can arrive weeks before an event ends. Keep the accounting
+    # catalogue complete even though monthly attendance metrics deliberately
+    # continue to count ended events only.
+    catalog_by_id = {
+        str(event.get("id") or "").strip(): {
+            "event": event,
+            "start_at": parse_datetime(str(event.get("start_at") or ""))
+            or parse_datetime(str(event.get("start_at_iso") or "")),
+            "registration_count": 0,
+            "checked_in_count": 0,
+        }
+        for event in service.list_all_events()
+        if str(event.get("id") or "").strip()
+    }
+    for item in events:
+        event_id = str((item.get("event") or {}).get("id") or "").strip()
+        if event_id:
+            catalog_by_id[event_id] = item
+    catalog_events_payload = list(catalog_by_id.values())
 
     synced_at = timezone.now()
     with transaction.atomic():
@@ -78,7 +98,7 @@ def sync_luma_connection(connection: ExternalServiceConnection) -> dict[str, Any
         )
         catalog_events = upsert_luma_event_catalog(
             connection=connection,
-            events=events,
+            events=catalog_events_payload,
             synced_at=synced_at,
         )
         metrics = publish_luma_event_metrics(

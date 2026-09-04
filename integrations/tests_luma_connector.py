@@ -255,6 +255,13 @@ class SyncLumaConnectionTests(TestCase):
     @patch("integrations.services.luma_sync.LumaAttendeeReportService")
     def test_sync_writes_metrics_and_updates_connection(self, mock_service_cls):
         mock_service_cls.return_value = SimpleNamespace(
+            list_all_events=lambda: [
+                {
+                    "id": "future-1",
+                    "name": "Future paid event",
+                    "start_at": "2026-09-05T03:00:00Z",
+                }
+            ],
             collect_ended_event_attendance=lambda **kwargs: [
                 {"event": {"id": "m1", "name": "March"}, "start_at": datetime(2026, 3, 5, 3, 0, tzinfo=ZoneInfo("UTC")), "registration_count": 12, "checked_in_count": 9},
             ]
@@ -265,7 +272,7 @@ class SyncLumaConnectionTests(TestCase):
 
         self.assertEqual(result["status"], "synced")
         self.assertEqual(result["eventsSynced"], 1)
-        self.assertEqual(result["catalogEventsSynced"], 1)
+        self.assertEqual(result["catalogEventsSynced"], 2)
         # Constructed with the founder's own key.
         mock_service_cls.assert_called_once_with(api_key="luma-secret")
         connection.refresh_from_db()
@@ -283,6 +290,12 @@ class SyncLumaConnectionTests(TestCase):
         self.assertEqual(event.registration_count, 12)
         self.assertEqual(event.checked_in_count, 9)
         self.assertFalse(event.selected)
+        future = LumaEventSelection.objects.get(
+            connection=connection,
+            event_id="future-1",
+        )
+        self.assertEqual(future.event_name, "Future paid event")
+        self.assertEqual(future.registration_count, 0)
 
     def test_sync_requires_linked_organization(self):
         from integrations.services.luma import LumaConfigurationError
@@ -348,6 +361,7 @@ class LumaConnectEndpointTests(TestCase):
             status=ExternalServiceConnectionStatus.CONNECTED,
         )
         mock_service_cls.return_value = SimpleNamespace(
+            list_all_events=lambda: [],
             collect_ended_event_attendance=lambda **kwargs: [
                 {"event": {"id": "m1"}, "start_at": datetime(2026, 3, 5, 3, 0, tzinfo=ZoneInfo("UTC")), "registration_count": 4, "checked_in_count": 2},
                 {"event": {"id": "a1"}, "start_at": datetime(2026, 4, 5, 3, 0, tzinfo=ZoneInfo("UTC")), "registration_count": 9, "checked_in_count": 3},
@@ -474,7 +488,10 @@ class LumaSelectionEndpointTests(TestCase):
                 {"event": {"id": "e2", "name": "E2"}, "start_at": datetime(2026, 3, 15, 3, 0, tzinfo=ZoneInfo("UTC")), "registration_count": 3, "checked_in_count": 1},
             ]
 
-        mock_service_cls.return_value = SimpleNamespace(collect_ended_event_attendance=_collect)
+        mock_service_cls.return_value = SimpleNamespace(
+            list_all_events=lambda: [],
+            collect_ended_event_attendance=_collect,
+        )
 
         sync_luma_connection(self.connection)
 
@@ -505,6 +522,7 @@ class LumaSelectionEndpointTests(TestCase):
         self.connection.provider_metadata = {"selected_metrics": ["eventsRun"]}
         self.connection.save(update_fields=["provider_metadata"])
         mock_service_cls.return_value = SimpleNamespace(
+            list_all_events=lambda: [],
             collect_ended_event_attendance=lambda **kwargs: [
                 {"event": {"id": "e1"}, "start_at": datetime(2026, 3, 5, 3, 0, tzinfo=ZoneInfo("UTC")), "registration_count": 5, "checked_in_count": 2},
             ]

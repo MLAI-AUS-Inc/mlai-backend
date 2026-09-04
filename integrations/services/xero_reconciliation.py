@@ -2221,10 +2221,15 @@ def run_daily_payout_reconciliation(*, now=None) -> dict[str, Any]:
         return {"status": "skipped", "reason": "already_run_today"}
 
     # Imported lazily so reconciliation model/service imports stay acyclic.
-    from integrations.services.reconciliation import ReconciliationReportService
+    from integrations.services.reconciliation import (
+        ReconciliationReportService,
+        luma_api_key_for_organization,
+    )
 
     try:
-        report = ReconciliationReportService().build_report(
+        report = ReconciliationReportService(
+            luma_api_key=luma_api_key_for_organization(organization)
+        ).build_report(
             since=now - timedelta(days=7),
             until=now,
             include_workbook=False,

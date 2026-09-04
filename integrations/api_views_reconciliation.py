@@ -67,6 +67,7 @@ from integrations.services.reconciliation import (
     ReconciliationReportService,
     StripeAPIError,
     StripeConfigurationError,
+    luma_api_key_for_organization,
 )
 from integrations.services.xero_reconciliation import (
     ReconciliationValidationError,
@@ -521,6 +522,10 @@ class ReconciliationReportView(APIView):
                 status=status.HTTP_403_FORBIDDEN,
             )
 
+        organization, error = _organization_or_response(request)
+        if error:
+            return error
+
         window, error_response = self._resolve_window(request.query_params)
         if error_response:
             return error_response
@@ -528,7 +533,9 @@ class ReconciliationReportView(APIView):
 
         include_workbook = self._parse_bool(request.query_params.get("include_workbook"), default=True)
 
-        service = ReconciliationReportService()
+        service = ReconciliationReportService(
+            luma_api_key=luma_api_key_for_organization(organization)
+        )
         try:
             report = service.build_report(since=since, until=until, include_workbook=include_workbook)
         except StripeConfigurationError as exc:
@@ -552,7 +559,9 @@ class ReconciliationReportView(APIView):
         if error:
             return error
         try:
-            report = ReconciliationReportService().build_report(
+            report = ReconciliationReportService(
+                luma_api_key=luma_api_key_for_organization(organization)
+            ).build_report(
                 since=window[0], until=window[1], include_workbook=False
             )
             profile = ReconciliationProfile.objects.filter(organization=organization).first()
