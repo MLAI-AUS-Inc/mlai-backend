@@ -41,6 +41,10 @@ rejected (for example, because the account has insufficient points), a later
 retry reuses the link. The booking service's existing per-user/date idempotency
 key ensures a response-loss retry does not charge the account twice.
 
+The Office Manager variant of coworking booking has a separate authenticated
+claim contract, points-refund lifecycle, and Slack delivery runbook. See
+[`office-manager.md`](office-manager.md).
+
 ## Roo-Founder Tools account-link API
 
 All four endpoints return `Cache-Control: no-store` and `Pragma: no-cache`.

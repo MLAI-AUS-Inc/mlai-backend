@@ -1,6 +1,7 @@
 import json
 import threading
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, time, timedelta
 from unittest import skipUnless
 from zoneinfo import ZoneInfo
@@ -28,6 +29,7 @@ from .models import (
     PointsAccount,
     PointsAdmin,
 )
+from .services import PointsService
 
 
 User = get_user_model()
@@ -1248,6 +1250,57 @@ class MeetingRoomConcurrencyTests(TransactionTestCase):
         self.assertEqual(sorted(results), ['booking_conflict', 'created'])
         self.assertEqual(MeetingRoomBooking.objects.filter(status='booked').count(), 1)
         self.assertEqual(Ledger.objects.filter(source='MEETING_ROOM').count(), 1)
+
+    def test_booking_and_points_award_share_principal_first_lock_order(self):
+        user = self.users[0]
+        starts_at = future_local(4, 9)
+        barrier = threading.Barrier(2)
+
+        def book_room():
+            connections.close_all()
+            try:
+                member = User.objects.get(pk=user.pk)
+                barrier.wait()
+                MeetingRoomService.book(
+                    user=member,
+                    requested_by_slack_id=member.slack_id,
+                    room_slug=self.room.slug,
+                    starts_at=starts_at,
+                    ends_at=starts_at + timedelta(hours=1),
+                    client_request_id=str(uuid.uuid4()),
+                    confirmation_expires_at=timezone.now() + timedelta(minutes=10),
+                )
+                return 'booked'
+            finally:
+                connections.close_all()
+
+        def award_points():
+            connections.close_all()
+            try:
+                member = User.objects.get(pk=user.pk)
+                barrier.wait()
+                PointsService.award(
+                    user=member,
+                    delta=1,
+                    source='MANUAL',
+                    description='concurrent lock-order probe',
+                    created_by_slack_id='UADMIN',
+                    idempotency_key=f'lock-order-award:{user.pk}',
+                )
+                return 'awarded'
+            finally:
+                connections.close_all()
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [executor.submit(book_room), executor.submit(award_points)]
+            outcomes = [future.result(timeout=10) for future in futures]
+
+        self.assertCountEqual(outcomes, ['booked', 'awarded'])
+        self.assertEqual(
+            MeetingRoomBooking.objects.filter(user=user, status='booked').count(),
+            1,
+        )
+        self.assertEqual(PointsAccount.objects.get(user=user).balance, 10)
 
     def test_concurrent_cross_room_requests_cannot_overlap_for_one_member(self):
         user = self.users[0]

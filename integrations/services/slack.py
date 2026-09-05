@@ -37,7 +37,10 @@ class SlackService:
     _channel_name_cache: Dict[str, str] = {}
 
     @classmethod
-    def get_client(cls) -> WebClient:
+    def get_client(cls, *, bot_token: str | None = None) -> WebClient:
+        timeout = int(getattr(settings, 'SLACK_HTTP_TIMEOUT_SECONDS', 10))
+        if bot_token is not None:
+            return WebClient(token=bot_token, timeout=timeout)
         if cls._client is None:
             token = (
                 os.environ.get('SLACK_BOT_TOKEN')
@@ -47,14 +50,19 @@ class SlackService:
             )
             if not token:
                 logger.warning("SLACK_BOT_TOKEN or JOBS_SLACK_BOT_TOKEN not found in environment variables")
-            cls._client = WebClient(token=token)
+            cls._client = WebClient(token=token, timeout=timeout)
         return cls._client
 
     @classmethod
-    def get_user_profile_strict(cls, slack_user_id: str) -> Dict[str, Any]:
+    def get_user_profile_strict(
+        cls,
+        slack_user_id: str,
+        *,
+        client: WebClient | None = None,
+    ) -> Dict[str, Any]:
         """Fetch a Slack profile while preserving not-found versus outage."""
         try:
-            client = cls.get_client()
+            client = client or cls.get_client()
             response = client.users_info(user=slack_user_id)
         except SlackApiError as exc:
             error_code = str(_response_value(exc.response, 'error') or '')
@@ -117,11 +125,18 @@ class SlackService:
             'image_url': profile.get('image_512') or profile.get('image_192'),
             'is_bot': user.get('is_bot', False),
             'deleted': user.get('deleted', False),
+            'is_restricted': user.get('is_restricted', False),
+            'is_ultra_restricted': user.get('is_ultra_restricted', False),
             'tz': user.get('tz'),
         }
 
     @classmethod
-    def get_user_profile(cls, slack_user_id: str) -> Optional[Dict[str, Any]]:
+    def get_user_profile(
+        cls,
+        slack_user_id: str,
+        *,
+        client: WebClient | None = None,
+    ) -> Optional[Dict[str, Any]]:
         """
         Fetch user profile from Slack.
         
@@ -130,7 +145,7 @@ class SlackService:
             Returns None if user not found or API error.
         """
         try:
-            return cls.get_user_profile_strict(slack_user_id)
+            return cls.get_user_profile_strict(slack_user_id, client=client)
         except SlackUserLookupError:
             return None
 
@@ -163,6 +178,8 @@ class SlackService:
                     'image_url': profile.get('image_512') or profile.get('image_192'),
                     'is_bot': user.get('is_bot', False),
                     'deleted': user.get('deleted', False),
+                    'is_restricted': user.get('is_restricted', False),
+                    'is_ultra_restricted': user.get('is_ultra_restricted', False),
                     'tz': user.get('tz'),
                 }
             logger.error(f"Slack API error looking up user by email: {response.get('error')}")
@@ -268,7 +285,16 @@ class SlackService:
             return False, None
 
     @classmethod
-    def update_message(cls, channel_id: str, ts: str, text: str, blocks: list = None) -> bool:
+    def update_message(
+        cls,
+        channel_id: str,
+        ts: str,
+        text: str,
+        blocks: list = None,
+        *,
+        client: WebClient | None = None,
+        raise_errors: bool = False,
+    ) -> bool:
         """
         Update an existing Slack message (e.g. to remove interactive buttons after click).
 
@@ -281,7 +307,7 @@ class SlackService:
         Returns:
             True if successful, False otherwise.
         """
-        client = cls.get_client()
+        client = client or cls.get_client()
         try:
             kwargs = {"channel": channel_id, "ts": ts, "text": text}
             if blocks is not None:
@@ -290,9 +316,13 @@ class SlackService:
             return True
         except SlackApiError as e:
             logger.error(f"Slack API error updating message in {channel_id}: {e.response['error']}")
+            if raise_errors:
+                raise
             return False
         except Exception as e:
             logger.error(f"Exception updating message in {channel_id}: {str(e)}")
+            if raise_errors:
+                raise
             return False
 
     @classmethod

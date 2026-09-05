@@ -182,6 +182,10 @@ class RuntimeHardeningConfigTests(SimpleTestCase):
             deploy,
         )
         self.assertIn(
+            'if [ "\\$internal_status" != "401" ] || [ "\\$missing_status" != "401" ]; then',
+            deploy,
+        )
+        self.assertIn(
             "community-email-worker:", (ROOT / "docker-compose.yml").read_text()
         )
         self.assertIn(
@@ -400,3 +404,17 @@ grep -Fx 'compose stop web scheduler memory-worker memory-scheduler community-em
             'docker compose run -T --rm --no-deps web "\\$@" </dev/null', deploy
         )
         self.assertIn("compose_run_web python manage.py migrate --noinput", deploy)
+
+    def test_office_manager_deploy_probes_exact_authenticated_contract(self):
+        deploy = (ROOT / "deploy.sh").read_text()
+
+        self.assertIn(
+            "/api/v1/points/coworking/office-manager/preflight/",
+            deploy,
+        )
+        self.assertIn('"credential_scope": "strict_roo"', deploy)
+        self.assertIn(
+            "Public Roo reported an inconsistent Office Manager backend contract",
+            deploy,
+        )
+        self.assertIn("Live Office Manager preflight returned the wrong contract", deploy)

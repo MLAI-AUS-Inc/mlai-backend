@@ -2,11 +2,15 @@ from __future__ import annotations
 
 from django.contrib.auth import get_user_model
 from django.core.management.base import BaseCommand
+from django.core.management.base import CommandError
 from django.db import transaction
+from django.db.models import Q
 
 from content_factory.models import OrganizationContentConfig
 from integrations.models import UserIntegration
 from integrations.services.slack import SlackService
+from core.management.commands.cleanup_users import Command as CleanupUsersCommand
+from core.models import SlackFounderLinkRequest
 
 from core.slack_founder_links import (
     invalidate_unused_slack_founder_link_requests,
@@ -39,6 +43,7 @@ class Command(BaseCommand):
             slack_ids = slack_ids[: options["limit"]]
 
         commit = bool(options["commit"])
+        failures = []
         self.stdout.write(f"{'Committing' if commit else 'Dry-run'} Slack/email reconciliation for {len(slack_ids)} Slack id(s).")
         service = SlackService()
         for slack_id in slack_ids:
@@ -46,10 +51,14 @@ class Command(BaseCommand):
                 profile = service.get_user_profile(slack_id)
             except Exception as exc:
                 self.stdout.write(self.style.WARNING(f"{slack_id}: unable to fetch profile email ({exc})"))
+                if commit:
+                    failures.append(f"{slack_id}: profile lookup failed")
                 continue
             email = str((profile or {}).get("email") or "").strip().lower()
             if not email:
                 self.stdout.write(f"{slack_id}: no profile email")
+                if commit:
+                    failures.append(f"{slack_id}: profile has no email")
                 continue
             email_user = User.objects.filter(email__iexact=email).first()
             slack_user = User.objects.filter(slack_id=slack_id).first()
@@ -61,6 +70,8 @@ class Command(BaseCommand):
                 continue
             if email_user.slack_id:
                 self.stdout.write(self.style.WARNING(f"{slack_id}: {email} already has Slack id {email_user.slack_id}"))
+                if commit:
+                    failures.append(f"{slack_id}: target already owns another Slack id")
                 continue
             if user_participates_in_slack_founder_link(email_user) or (
                 slack_user is not None
@@ -75,77 +86,126 @@ class Command(BaseCommand):
             self.stdout.write(f"{slack_id}: link to {email}")
             if not commit:
                 continue
-            with transaction.atomic():
-                user_ids = {email_user.pk}
-                if slack_user is not None:
-                    user_ids.add(slack_user.pk)
-                locked_users = {
-                    user.pk: user
-                    for user in User.objects.select_for_update()
-                    .filter(pk__in=sorted(user_ids))
-                    .order_by("pk")
-                }
-                locked_email_user = locked_users[email_user.pk]
-                locked_slack_user = (
-                    locked_users.get(slack_user.pk)
-                    if slack_user is not None
-                    else None
-                )
-                if user_participates_in_slack_founder_link(
-                    locked_email_user
-                ) or (
-                    locked_slack_user is not None
-                    and user_participates_in_slack_founder_link(
+            if slack_user and slack_user.pk != email_user.pk:
+                merger = CleanupUsersCommand()
+                merger.stdout = self.stdout
+                merger.stderr = self.stderr
+
+                def before_merge(locked_slack_user, locked_email_user):
+                    if user_participates_in_slack_founder_link(
+                        locked_email_user
+                    ) or user_participates_in_slack_founder_link(
                         locked_slack_user
-                    )
-                ):
-                    self.stdout.write(
-                        self.style.WARNING(
-                            f"{slack_id}: explicit Roo-Founder Tools link appeared; manual support required"
-                        )
-                    )
-                    continue
-                current_target_slack_id = str(
-                    locked_email_user.slack_id or ""
-                ).strip()
-                if current_target_slack_id:
-                    if current_target_slack_id == slack_id:
-                        self.stdout.write(
-                            f"{slack_id}: already linked while reconciliation was running"
-                        )
-                    else:
+                    ):
                         self.stdout.write(
                             self.style.WARNING(
-                                f"{slack_id}: target gained another Slack identity; "
+                                f"{slack_id}: explicit Roo-Founder Tools link appeared; "
                                 "manual support required"
                             )
                         )
-                    continue
-                if (
-                    locked_slack_user is not None
-                    and str(locked_slack_user.slack_id or "").strip()
-                    != slack_id
-                ):
-                    self.stdout.write(
-                        self.style.WARNING(
-                            f"{slack_id}: source Slack identity changed while "
-                            "reconciliation was running; manual support required"
+                        return False
+
+                    current_target_slack_id = str(
+                        locked_email_user.slack_id or ""
+                    ).strip()
+                    if current_target_slack_id:
+                        if current_target_slack_id == slack_id:
+                            self.stdout.write(
+                                f"{slack_id}: already linked while reconciliation was running"
+                            )
+                        else:
+                            self.stdout.write(
+                                self.style.WARNING(
+                                    f"{slack_id}: target gained another Slack identity; "
+                                    "manual support required"
+                                )
+                            )
+                        return False
+
+                    if str(locked_slack_user.slack_id or "").strip() != slack_id:
+                        self.stdout.write(
+                            self.style.WARNING(
+                                f"{slack_id}: source Slack identity changed while "
+                                "reconciliation was running; manual support required"
+                            )
                         )
+                        return False
+
+                    # Link-request rows are security audit history and must not
+                    # cascade away with a duplicate principal. Preserve the
+                    # source row in this rare case, invalidate any unused
+                    # capabilities, and transfer only the Slack identity.
+                    has_link_request_history = SlackFounderLinkRequest.objects.filter(
+                        Q(slack_user__in=[locked_slack_user, locked_email_user])
+                        | Q(
+                            consumed_by_user__in=[
+                                locked_slack_user,
+                                locked_email_user,
+                            ]
+                        )
+                    ).exists()
+                    if has_link_request_history:
+                        invalidate_unused_slack_founder_link_requests(
+                            locked_slack_user,
+                            locked_email_user,
+                        )
+                        locked_slack_user.slack_id = None
+                        locked_slack_user.save(update_fields=["slack_id"])
+                        locked_email_user.slack_id = slack_id
+                        locked_email_user.save(update_fields=["slack_id"])
+                        return False
+
+                    return True
+
+                try:
+                    merger.merge_users_with_retry(
+                        source_id=slack_user.pk,
+                        target_id=email_user.pk,
+                        before_merge=before_merge,
                     )
-                    continue
-                if (
-                    locked_slack_user is not None
-                    and locked_slack_user.pk != locked_email_user.pk
-                ):
-                    invalidate_unused_slack_founder_link_requests(
-                        locked_slack_user,
-                        locked_email_user,
+                except (ValueError, CommandError) as exc:
+                    raise CommandError(
+                        f"{slack_id}: durable identity reconciliation failed: {exc}"
+                    ) from exc
+            else:
+                # No duplicate principal exists, so there is no durable ownership
+                # to transfer. Lock and re-check the target before assigning the
+                # Slack identity, including links created during this sweep.
+                with transaction.atomic():
+                    locked_email_user = User.objects.select_for_update().get(
+                        pk=email_user.pk
                     )
-                    locked_slack_user.slack_id = None
-                    locked_slack_user.save(update_fields=["slack_id"])
-                else:
+                    if user_participates_in_slack_founder_link(locked_email_user):
+                        self.stdout.write(
+                            self.style.WARNING(
+                                f"{slack_id}: explicit Roo-Founder Tools link appeared; "
+                                "manual support required"
+                            )
+                        )
+                        continue
+                    current_target_slack_id = str(
+                        locked_email_user.slack_id or ""
+                    ).strip()
+                    if current_target_slack_id:
+                        if current_target_slack_id == slack_id:
+                            self.stdout.write(
+                                f"{slack_id}: already linked while reconciliation was running"
+                            )
+                        else:
+                            self.stdout.write(
+                                self.style.WARNING(
+                                    f"{slack_id}: target gained another Slack identity; "
+                                    "manual support required"
+                                )
+                            )
+                        continue
                     invalidate_unused_slack_founder_link_requests(
                         locked_email_user
                     )
-                locked_email_user.slack_id = slack_id
-                locked_email_user.save(update_fields=["slack_id"])
+                    locked_email_user.slack_id = slack_id
+                    locked_email_user.save(update_fields=["slack_id"])
+        if failures:
+            raise CommandError(
+                "Slack/email reconciliation left unresolved identities: "
+                + "; ".join(failures[:10])
+            )

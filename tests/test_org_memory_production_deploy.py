@@ -2,6 +2,7 @@ import contextlib
 import importlib.util
 import io
 import json
+import subprocess
 import tempfile
 from pathlib import Path
 
@@ -114,6 +115,26 @@ class OrgMemoryProductionDeployTests(SimpleTestCase):
         self.assertIn(
             'docker compose stop "\\${all_runtime_writer_services[@]}"', deploy
         )
+        self.assertIn("previous_scheduler_container_id", deploy)
+        self.assertIn("previous_scheduler_image_id", deploy)
+        self.assertIn("previous_scheduler_tick_mtime", deploy)
+        self.assertIn('docker start "\\${previous_runtime_container_ids[@]}"', deploy)
+        self.assertIn("verify_scheduler_recovery_tick", deploy)
+        self.assertIn("schema_transition_completed=0", deploy)
+        self.assertIn(
+            'if [ "\\$schema_transition_completed" != "1" ]; then',
+            deploy,
+        )
+        self.assertIn(
+            "migration transition is incomplete; runtime services remain stopped",
+            deploy,
+        )
+        self.assertLess(
+            deploy.index("compose_run_web python manage.py migrate --check --noinput"),
+            deploy.index("schema_transition_completed=1"),
+        )
+        self.assertNotIn("restore_staged_scheduler", deploy)
+        self.assertNotIn("docker compose stop scheduler", deploy)
         self.assertIn("schedule_org_memory_reextraction", deploy)
         self.assertIn("reconcile_org_memory_auto_activation", deploy)
         self.assertIn("refresh_org_memory_daily_reconciliation", deploy)
@@ -158,6 +179,37 @@ class OrgMemoryProductionDeployTests(SimpleTestCase):
             deploy.index("recover_org_memory_stopped_worker_work"),
         )
         self.assertLess(
+            deploy.index("compose_run_web python manage.py deploy_preflight"),
+            deploy.index('docker compose stop "\\${all_runtime_writer_services[@]}"'),
+        )
+        self.assertLess(
+            deploy.index("compose_run_web python manage.py audit_office_manager_migrations"),
+            deploy.index('docker compose stop "\\${all_runtime_writer_services[@]}"'),
+        )
+        post_migration_audit = deploy.index(
+            "Re-auditing Office Manager provenance after migrations"
+        )
+        self.assertGreater(
+            post_migration_audit,
+            deploy.index("compose_run_web python manage.py migrate --noinput"),
+        )
+        self.assertLess(
+            post_migration_audit,
+            deploy.index("compose_run_web python manage.py deploy_postmigrate"),
+        )
+        self.assertIn(
+            'upsert_env_value OFFICE_MANAGER_ENABLED "false"',
+            deploy[post_migration_audit:],
+        )
+        self.assertIn(
+            'docker compose up -d --force-recreate "\\${runtime_services[@]}"',
+            deploy[post_migration_audit:],
+        )
+        self.assertGreater(
+            deploy.index("new_runtime_replacement_started=1"),
+            deploy.index("compose_run_web python manage.py deploy_postmigrate"),
+        )
+        self.assertLess(
             deploy.index("schedule_org_memory_reextraction"),
             deploy.index("stage_org_memory_pilot"),
         )
@@ -173,6 +225,88 @@ class OrgMemoryProductionDeployTests(SimpleTestCase):
             deploy.index("request_org_memory_reprocess"),
             deploy.index("check_org_memory_pilot_access_matrix"),
         )
+
+    def test_office_manager_contract_docs_include_attempt_and_replay_semantics(self):
+        docs = (ROOT / "docs" / "office-manager.md").read_text()
+
+        self.assertIn('"attempt_id": "4482112f-79e1-4ca0-940b-06b24903f796"', docs)
+        self.assertIn("a replay of the winning attempt is still `201`", docs)
+        self.assertIn("A genuinely new `attempt_id` from", docs)
+        self.assertIn("returns `200` with `status: already_claimed_by_you`", docs)
+        self.assertIn("`https://api.mlai.au` in production", docs)
+        self.assertIn("with no `/api/v1` path", docs)
+        self.assertIn("`conversations.history`", docs)
+        self.assertIn("reconcile_office_manager_provenance", docs)
+        self.assertIn("roo.0037_quarantine_legacy_office_manager_provenance", docs)
+        self.assertIn("roo.0038_office_manager_claim_generation", docs)
+        self.assertIn(
+            "roo.0039_supersede_reopened_office_manager_attempts",
+            docs,
+        )
+
+        workflow = (ROOT / ".github" / "workflows" / "deploy.yml").read_text()
+        self.assertIn("run: bash -n deploy.sh", workflow)
+        deploy = (ROOT / "deploy.sh").read_text()
+        self.assertIn("https://slack.com/api/conversations.history", deploy)
+        self.assertIn(
+            "Public Roo cannot inspect Office Manager message history",
+            deploy,
+        )
+        for scope in (
+            "channels:history",
+            "channels:read",
+            "chat:write",
+            "im:history",
+            "im:write",
+            "users:read",
+            "users:read.email",
+        ):
+            self.assertIn(f'"{scope}"', deploy)
+        self.assertIn("x-oauth-scopes", deploy)
+        self.assertIn(
+            "Public Roo Slack token is missing required Office Manager scopes",
+            deploy,
+        )
+        self.assertIn('json.load(sys.stdin)["team_id"]', deploy)
+        self.assertIn('json.load(sys.stdin)["bot_id"]', deploy)
+        self.assertIn(
+            "Backend and Public Roo Office Manager Slack app identities do not match",
+            deploy,
+        )
+        identity_check = deploy.index(
+            "Backend and Public Roo Office Manager Slack app identities do not match"
+        )
+        action_gate = deploy.index(
+            'office_manager_enabled = sys.argv[3] == "true"'
+        )
+        self.assertIn(
+            '"\\$office_manager_slack_bot_id" "\\$office_manager_enabled"',
+            deploy,
+        )
+        self.assertGreater(identity_check, action_gate)
+        self.assertNotIn(
+            'if [ "\\$office_manager_enabled" = "true" ]; then',
+            deploy[deploy.index("Verifying the live Public Roo"):identity_check],
+        )
+        self.assertGreaterEqual(
+            deploy.count('"claim_generation_supported": True'),
+            2,
+        )
+
+    def test_remote_deployment_script_is_valid_bash(self):
+        deploy = (ROOT / "deploy.sh").read_text()
+        remote = deploy.split('ssh "$DEPLOY_SSH_TARGET" <<EOF\n', 1)[1]
+        remote = remote.rsplit("\nEOF", 1)[0].replace("\\$", "$")
+
+        result = subprocess.run(
+            ["bash", "-n"],
+            input=remote,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_admin_brain_staging_awaiting_evidence_skips_but_stays_fail_closed(self):
         deploy = (ROOT / "deploy.sh").read_text()

@@ -14,6 +14,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 import json
 import os
+import secrets
 import subprocess
 import sys
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -138,6 +139,33 @@ def _validate_health_hack_ai_modes(*, rate_mode: str, budget_mode: str, is_produ
     if is_production and budget_mode != 'enforce':
         raise ImproperlyConfigured(
             'HEALTH_HACK_AI_BUDGET_MODE must be enforce in production.'
+        )
+
+
+def _validate_roo_service_secret_boundaries(
+    *,
+    roo_api_key: str,
+    internal_api_key: str,
+    mlai_api_key: str,
+    is_production: bool,
+) -> None:
+    """Keep actor-selecting Roo calls outside broader service trust domains."""
+    if not is_production:
+        return
+    if len(roo_api_key) < 32:
+        raise ImproperlyConfigured(
+            'ROO_API_KEY must contain at least 32 characters in production.'
+        )
+    if len(internal_api_key) < 32:
+        raise ImproperlyConfigured(
+            'INTERNAL_API_KEY must contain at least 32 characters in production.'
+        )
+    if secrets.compare_digest(roo_api_key, internal_api_key) or (
+        mlai_api_key and secrets.compare_digest(roo_api_key, mlai_api_key)
+    ):
+        raise ImproperlyConfigured(
+            'ROO_API_KEY must be distinct from INTERNAL_API_KEY and '
+            'MLAI_API_KEY in production.'
         )
 
 
@@ -1073,6 +1101,13 @@ SCHEDULED_DISCOVERY_MAX_TARGETS = int(os.getenv('SCHEDULED_DISCOVERY_MAX_TARGETS
 JOBS_PUBLIC_BASE_URL = os.getenv('JOBS_PUBLIC_BASE_URL', DEFAULT_BACKEND_URL)
 JOBS_TRIGGER_TOKEN = os.getenv('JOBS_TRIGGER_TOKEN', '')
 JOBS_SCHEDULER_ENABLED = _env_is_true('JOBS_SCHEDULER_ENABLED', True)
+SCHEDULED_DISCOVERY_HEALTH_MAX_AGE_SECONDS = int(
+    os.getenv('SCHEDULED_DISCOVERY_HEALTH_MAX_AGE_SECONDS', '300')
+)
+if SCHEDULED_DISCOVERY_HEALTH_MAX_AGE_SECONDS <= 0:
+    raise ImproperlyConfigured(
+        'SCHEDULED_DISCOVERY_HEALTH_MAX_AGE_SECONDS must be positive.'
+    )
 JOBS_SCHEDULE_TIMEZONE = os.getenv('JOBS_SCHEDULE_TIMEZONE', 'Australia/Melbourne')
 JOBS_SCHEDULE_HOUR = int(os.getenv('JOBS_SCHEDULE_HOUR', '7'))
 JOBS_SCHEDULE_MINUTE = int(os.getenv('JOBS_SCHEDULE_MINUTE', '0'))
@@ -1587,6 +1622,29 @@ COWORKING_DAY_COST_POINTS = int(os.getenv('COWORKING_DAY_COST_POINTS', '8'))
 COWORKING_DAY_DISCOUNT_COST_POINTS = int(os.getenv('COWORKING_DAY_DISCOUNT_COST_POINTS', '4'))
 COWORKING_REFUND_CUTOFF_HOURS = int(os.getenv('COWORKING_REFUND_CUTOFF_HOURS', '18'))  # 6pm prev day
 COWORKING_BOOKING_ADVANCE_DAYS = int(os.environ.get('COWORKING_BOOKING_ADVANCE_DAYS', 30))
+OFFICE_MANAGER_ENABLED = _env_is_true('OFFICE_MANAGER_ENABLED', False)
+OFFICE_MANAGER_SLACK_CHANNEL_ID = os.getenv('OFFICE_MANAGER_SLACK_CHANNEL_ID', '')
+OFFICE_MANAGER_SLACK_BOT_TOKEN = os.getenv('OFFICE_MANAGER_SLACK_BOT_TOKEN', '')
+OFFICE_MANAGER_TIMEZONE = os.getenv('OFFICE_MANAGER_TIMEZONE', 'Australia/Melbourne')
+OFFICE_MANAGER_WEEKDAYS = os.getenv('OFFICE_MANAGER_WEEKDAYS', '0,1,2,3,4')
+OFFICE_MANAGER_ANNOUNCEMENT_HOUR = int(
+    os.getenv('OFFICE_MANAGER_ANNOUNCEMENT_HOUR', '8')
+)
+OFFICE_MANAGER_ANNOUNCEMENT_MINUTE = int(
+    os.getenv('OFFICE_MANAGER_ANNOUNCEMENT_MINUTE', '30')
+)
+OFFICE_MANAGER_CLAIM_CUTOFF_HOUR = int(
+    os.getenv('OFFICE_MANAGER_CLAIM_CUTOFF_HOUR', '10')
+)
+OFFICE_MANAGER_CLAIM_CUTOFF_MINUTE = int(
+    os.getenv('OFFICE_MANAGER_CLAIM_CUTOFF_MINUTE', '0')
+)
+OFFICE_MANAGER_END_OF_DAY_REMINDER_HOUR = int(
+    os.getenv('OFFICE_MANAGER_END_OF_DAY_REMINDER_HOUR', '16')
+)
+OFFICE_MANAGER_END_OF_DAY_REMINDER_MINUTE = int(
+    os.getenv('OFFICE_MANAGER_END_OF_DAY_REMINDER_MINUTE', '30')
+)
 
 # Roo meeting-room booking. Deploy the backend and Roo support first, then
 # enable this flag once the seeded room has been verified in production.
@@ -1606,8 +1664,14 @@ MEETING_ROOM_TIMEZONE = _validated_timezone_name(
 )
 
 # Internal API Key for service-to-service auth (e.g. from Roo agent)
-MLAI_API_KEY = os.environ.get('MLAI_API_KEY')
-INTERNAL_API_KEY = os.environ.get('INTERNAL_API_KEY') or ROO_API_KEY or MLAI_API_KEY
+MLAI_API_KEY = os.environ.get('MLAI_API_KEY', '').strip()
+INTERNAL_API_KEY = os.environ.get('INTERNAL_API_KEY', '').strip()
+_validate_roo_service_secret_boundaries(
+    roo_api_key=ROO_API_KEY,
+    internal_api_key=INTERNAL_API_KEY,
+    mlai_api_key=MLAI_API_KEY,
+    is_production=IS_PRODUCTION_ENV,
+)
 CONNECTOR_CREDENTIAL_KEYS = os.environ.get('CONNECTOR_CREDENTIAL_KEYS', '')
 CONNECTOR_CREDENTIAL_ACTIVE_KEY_ID = os.environ.get(
     'CONNECTOR_CREDENTIAL_ACTIVE_KEY_ID',

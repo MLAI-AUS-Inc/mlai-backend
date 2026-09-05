@@ -176,22 +176,48 @@ class HasStrictRooApiKey(permissions.BasePermission):
             if auth_header.startswith('Api-Key '):
                 api_key = auth_header.split('Api-Key ')[1].strip()
 
-        allowed_keys = [
-            getattr(settings, 'ROO_API_KEY', None),
-            os.environ.get('ROO_API_KEY'),
-        ]
-        allowed_keys = list({key for key in allowed_keys if key})
+        expected = str(getattr(settings, 'ROO_API_KEY', '') or '').strip()
 
         if not api_key:
             logger.warning("HasStrictRooApiKey: No HTTP_X_API_KEY or Authorization: Api-Key header found.")
             return False
 
-        if not allowed_keys:
+        if not expected:
             logger.error("HasStrictRooApiKey: No ROO_API_KEY configured on backend.")
             return False
 
-        if any(secrets.compare_digest(api_key, allowed_key) for allowed_key in allowed_keys):
+        if secrets.compare_digest(api_key, expected):
             return True
 
         logger.warning("HasStrictRooApiKey: Invalid Roo API key received.")
         return False
+
+
+class HasOfficeManagerRooApiKey(HasStrictRooApiKey):
+    """Require an isolated Roo credential for actor-selected mutations."""
+
+    def has_permission(self, request, view):
+        from django.conf import settings
+        import logging
+
+        logger = logging.getLogger(__name__)
+        roo_key = str(getattr(settings, 'ROO_API_KEY', '') or '').strip()
+        internal_key = str(
+            getattr(settings, 'INTERNAL_API_KEY', '') or ''
+        ).strip()
+        mlai_key = str(getattr(settings, 'MLAI_API_KEY', '') or '').strip()
+        if not roo_key or not internal_key:
+            logger.error(
+                'Office Manager requires both ROO_API_KEY and '
+                'INTERNAL_API_KEY to be configured.'
+            )
+            return False
+        if secrets.compare_digest(roo_key, internal_key) or (
+            mlai_key and secrets.compare_digest(roo_key, mlai_key)
+        ):
+            logger.error(
+                'Office Manager Roo credentials are aliased across trust '
+                'domains.'
+            )
+            return False
+        return super().has_permission(request, view)
