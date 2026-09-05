@@ -809,6 +809,67 @@ class PointsService:
 
     @staticmethod
     @transaction.atomic
+    def credit_volunteer(
+        user: User,
+        delta_microroo: int,
+        *,
+        idempotency_key: str,
+        reference_id: str,
+        description: str,
+        actor_id: str,
+        level_bonus: bool = False,
+    ) -> Tuple[Ledger, bool]:
+        """Credit exact Volunteer Roo, keeping milestone bonuses wallet-only.
+
+        The caller records canonical recognition and holds its member lock.
+        Existing gross lifetime semantics stay unchanged for ordinary awards;
+        bonuses neither buy credits nor inflate committee eligibility.
+        """
+        if isinstance(delta_microroo, bool) or not isinstance(delta_microroo, int) or delta_microroo <= 0:
+            raise ValueError("Award must be positive integer microroo")
+        reference_type = "VOLUNTEER_LEVEL_BONUS" if level_bonus else "VOLUNTEER_CONTRIBUTION"
+        account, _ = PointsAccount.objects.get_or_create(user=user)
+        account = PointsAccount.objects.select_for_update().get(pk=account.pk)
+        PointsService._ensure_microroo_account(account)
+        existing = Ledger.objects.filter(idempotency_key=idempotency_key).first()
+        if existing:
+            PointsService._validate_idempotent_ledger(existing, user=user, kind="EARN", source="MANUAL", delta=PointsService.microroo_to_legacy_whole(delta_microroo), delta_microroo=delta_microroo, reference_type=reference_type, reference_id=reference_id)
+            return existing, False
+        ledger = Ledger.objects.create(user=user, delta=PointsService.microroo_to_legacy_whole(delta_microroo), delta_microroo=delta_microroo, kind="EARN", source="MANUAL", reference_type=reference_type, reference_id=reference_id, description=description, created_by_slack_id=actor_id, idempotency_key=idempotency_key)
+        account.balance_microroo += delta_microroo
+        account.earned_balance_microroo += delta_microroo
+        if not level_bonus:
+            account.lifetime_earned_microroo += delta_microroo
+        PointsService._sync_legacy_account(account)
+        account.save()
+        return ledger, True
+
+    @staticmethod
+    @transaction.atomic
+    def reverse_volunteer(user: User, *, original: Ledger, actor_id: str, reason: str) -> Ledger:
+        """Audit an approved correction without spending purchased credit or debt.
+
+        Only the remaining earned balance can be recovered. The recognition
+        service separately removes the full invalid contribution from rank.
+        Gross lifetime-earned history and previously achieved milestones remain.
+        """
+        key = f"volunteer:reverse:{original.pk}"
+        account = PointsAccount.objects.select_for_update().get(user=user)
+        PointsService._ensure_microroo_account(account)
+        existing = Ledger.objects.filter(idempotency_key=key).first()
+        if existing:
+            return existing
+        amount = min(max(original.delta_microroo or 0, 0), max(account.earned_balance_microroo, 0), max(PointsService.get_available_microroo(user), 0))
+        ledger = Ledger.objects.create(user=user, delta=-PointsService.microroo_to_legacy_whole(amount), delta_microroo=-amount, kind="ADJUST", source="MANUAL", reference_type="VOLUNTEER_CORRECTION", reference_id=str(original.pk), description=reason, created_by_slack_id=actor_id, idempotency_key=key)
+        account.balance_microroo -= amount
+        account.earned_balance_microroo -= amount
+        account.expired_or_reversed_microroo += amount
+        PointsService._sync_legacy_account(account)
+        account.save()
+        return ledger
+
+    @staticmethod
+    @transaction.atomic
     def credit_purchased_topup(
         user: User,
         delta: int,
@@ -1880,6 +1941,10 @@ class StartupUpdateRewardService:
 
         month_key = month_bucket.strftime('%Y-%m')
         try:
+            if (getattr(settings, "COMMUNITY_CHAT_VOLUNTEER_ENABLED", False)
+                    and getattr(settings, "COMMUNITY_CHAT_VOLUNTEER_AWARDS_ENABLED", False)):
+                from community_chat.volunteer.receipts import award_startup_update
+                return award_startup_update(user, company, month_bucket, draft)
             _ledger, created = PointsService.award(
                 user=user,
                 delta=amount,

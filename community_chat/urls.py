@@ -1,4 +1,4 @@
-from django.urls import path
+from django.urls import include, path
 
 from .views import (
     AccountSessionLogoutView,
@@ -40,6 +40,7 @@ from .usage_views import (
 
 
 urlpatterns = [
+    path("volunteer/", include("community_chat.volunteer.urls")),
     path("home/", CommunityHomeView.as_view(), name="community_chat_home"),
     path("slack/", SlackDmMirrorView.as_view(), name="community_chat_slack"),
     path(
