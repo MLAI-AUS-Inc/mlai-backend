@@ -1,4 +1,4 @@
-"""Authenticated previews for files shared from mapped public Slack channels."""
+"""Authenticated previews for Slack files visible in MLAI Chat."""
 
 from __future__ import annotations
 
@@ -10,9 +10,18 @@ from urllib.parse import urlparse
 import requests
 from django.conf import settings
 from django.core.cache import cache
+from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
-from integrations.models import CommunityBridgeChannel, CommunityBridgePlatform
+from integrations.models import (
+    CommunityBridgeChannel,
+    CommunityBridgePlatform,
+    ExternalServiceConnectionStatus,
+    SlackDmMirrorConversation,
+    SlackDmMirrorConversationStatus,
+    SlackDmMirrorGrant,
+    SlackDmMirrorGrantStatus,
+)
 from integrations.services.community_bridge.slack import SlackBridgeClient
 
 
@@ -57,6 +66,13 @@ class SlackFilePreview:
         }
 
 
+@dataclass(frozen=True)
+class _AuthorizedSlackFile:
+    data: dict
+    access_token: str
+    cache_scope: str
+
+
 def slack_file_id_from_url(raw_url: str) -> str:
     """Return a Slack file ID for a canonical workspace file permalink."""
 
@@ -74,13 +90,13 @@ def slack_file_id_from_url(raw_url: str) -> str:
     return file_id if SLACK_FILE_ID_RE.fullmatch(file_id) else ""
 
 
-def fetch_slack_file_preview(raw_url: str) -> SlackFilePreview | None:
+def fetch_slack_file_preview(raw_url: str, *, user=None) -> SlackFilePreview | None:
     """Resolve a Slack permalink, or return ``None`` for a non-Slack URL."""
 
     file_id = slack_file_id_from_url(raw_url)
     if not file_id:
         return None
-    file_data = _authorized_file(file_id)
+    file_data = _authorized_file(file_id, user=user).data
     title = str(
         file_data.get("title") or file_data.get("name") or "Slack file"
     ).strip()
@@ -99,13 +115,14 @@ def fetch_slack_file_preview(raw_url: str) -> SlackFilePreview | None:
     )
 
 
-def fetch_slack_file_image(file_id: str) -> tuple[str, bytes]:
+def fetch_slack_file_image(file_id: str, *, user=None) -> tuple[str, bytes]:
     """Download one authorized Slack image without exposing the bot token."""
 
     normalized_file_id = str(file_id or "").strip().upper()
     if not SLACK_FILE_ID_RE.fullmatch(normalized_file_id):
         raise SlackFilePreviewError("A valid Slack file is required.")
-    file_data = _authorized_file(normalized_file_id)
+    authorized = _authorized_file(normalized_file_id, user=user)
+    file_data = authorized.data
     content_type = (
         str(file_data.get("mimetype") or "").split(";", 1)[0].strip().lower()
     )
@@ -113,7 +130,7 @@ def fetch_slack_file_image(file_id: str) -> tuple[str, bytes]:
         raise SlackFilePreviewError("The Slack file is not a supported image.")
 
     cache_key = "community-chat-slack-file-image:" + hashlib.sha256(
-        normalized_file_id.encode("utf-8")
+        f"{authorized.cache_scope}:{normalized_file_id}".encode("utf-8")
     ).hexdigest()
     cached = cache.get(cache_key)
     if isinstance(cached, dict) and isinstance(cached.get("body"), bytes):
@@ -126,7 +143,7 @@ def fetch_slack_file_image(file_id: str) -> tuple[str, bytes]:
     if not private_url.startswith("https://") or not private_host.endswith(".slack.com"):
         raise SlackFilePreviewError("The Slack image URL was unavailable.")
 
-    token = str(getattr(settings, "SLACK_BRIDGE_BOT_TOKEN", "") or "").strip()
+    token = authorized.access_token
     if not token:
         raise SlackFilePreviewError("Slack image previews are not configured.")
     session = requests.Session()
@@ -175,8 +192,30 @@ def fetch_slack_file_image(file_id: str) -> tuple[str, bytes]:
     return response_type, body
 
 
-def _authorized_file(file_id: str) -> dict:
-    file_data = _slack_file_info(file_id)
+def _authorized_file(file_id: str, *, user=None) -> _AuthorizedSlackFile:
+    bot_token = str(getattr(settings, "SLACK_BRIDGE_BOT_TOKEN", "") or "").strip()
+    file_data = None
+    if bot_token:
+        try:
+            file_data = _slack_file_info(file_id)
+        except SlackFilePreviewError:
+            file_data = None
+    if file_data is not None and _file_is_in_mapped_public_channel(file_data):
+        return _AuthorizedSlackFile(
+            data=file_data,
+            access_token=bot_token,
+            cache_scope="bot",
+        )
+
+    private_file = _authorized_private_file(file_id, user=user)
+    if private_file is not None:
+        return private_file
+    raise SlackFilePreviewError(
+        "The Slack file is not shared in an MLAI Chat conversation."
+    )
+
+
+def _file_is_in_mapped_public_channel(file_data: dict) -> bool:
     shared_channel_ids = {
         str(channel_id or "").strip()
         for channel_id in (file_data.get("channels") or [])
@@ -184,31 +223,101 @@ def _authorized_file(file_id: str) -> dict:
     }
     public_shares = (file_data.get("shares") or {}).get("public") or {}
     shared_channel_ids.update(str(channel_id).strip() for channel_id in public_shares)
-    if not shared_channel_ids:
-        raise SlackFilePreviewError("The Slack file is not shared in a public channel.")
-    is_mapped = CommunityBridgeChannel.objects.filter(
+    return bool(shared_channel_ids) and CommunityBridgeChannel.objects.filter(
         enabled=True,
         destination_platform=CommunityBridgePlatform.BUZZ,
         slack_channel_id__in=shared_channel_ids,
     ).exists()
-    if not is_mapped:
-        raise SlackFilePreviewError(
-            "The Slack file is not shared in an MLAI Chat channel."
+
+
+def _authorized_private_file(file_id: str, *, user=None) -> _AuthorizedSlackFile | None:
+    if user is None or not getattr(user, "is_authenticated", False):
+        return None
+    grant = (
+        SlackDmMirrorGrant.objects.select_related("connection")
+        .filter(
+            user=user,
+            status__in=(
+                SlackDmMirrorGrantStatus.ACTIVE,
+                SlackDmMirrorGrantStatus.PAUSED,
+            ),
+            revoked_at__isnull=True,
+            connection__status__in=(
+                ExternalServiceConnectionStatus.CONNECTED,
+                ExternalServiceConnectionStatus.SYNCING,
+            ),
         )
-    return file_data
+        .order_by("-updated_at")
+        .first()
+    )
+    if grant is None or "files:read" not in set(grant.connection.scopes or []):
+        return None
+    token = str(grant.connection.access_token or "").strip()
+    if not token:
+        return None
+    private_cache_scope = f"user:{user.pk}:workspace:{grant.slack_workspace_id}"
+    file_data = _slack_file_info(
+        file_id,
+        access_token=token,
+        cache_scope=private_cache_scope,
+    )
+    file_workspace_id = str(
+        file_data.get("team_id") or file_data.get("user_team") or ""
+    ).strip()
+    if file_workspace_id and file_workspace_id != grant.slack_workspace_id:
+        return None
+    private_channel_ids = {
+        str(channel_id or "").strip()
+        for field in ("ims", "groups")
+        for channel_id in (file_data.get(field) or [])
+        if str(channel_id or "").strip()
+    }
+    private_shares = (file_data.get("shares") or {}).get("private") or {}
+    private_channel_ids.update(
+        str(channel_id or "").strip()
+        for channel_id in private_shares
+        if str(channel_id or "").strip()
+    )
+    if not private_channel_ids:
+        return None
+    visible = SlackDmMirrorConversation.objects.filter(
+        grant=grant,
+        slack_conversation_id__in=private_channel_ids,
+        status__in=(
+            SlackDmMirrorConversationStatus.LIVE,
+            SlackDmMirrorConversationStatus.PAUSED,
+        ),
+    ).exists()
+    if not visible:
+        return None
+    return _AuthorizedSlackFile(
+        data=file_data,
+        access_token=token,
+        cache_scope=private_cache_scope,
+    )
 
 
-def _slack_file_info(file_id: str) -> dict:
+def _slack_file_info(
+    file_id: str,
+    *,
+    access_token: str = "",
+    cache_scope: str = "bot",
+) -> dict:
     cache_key = "community-chat-slack-file-info:" + hashlib.sha256(
-        file_id.encode("utf-8")
+        f"{cache_scope}:{file_id}".encode("utf-8")
     ).hexdigest()
     cached = cache.get(cache_key)
     if isinstance(cached, dict):
         return cached
-    if not SlackBridgeClient.is_configured():
+    if not access_token and not SlackBridgeClient.is_configured():
         raise SlackFilePreviewError("Slack image previews are not configured.")
     try:
-        response = SlackBridgeClient.get_client().files_info(file=file_id)
+        client = (
+            WebClient(token=access_token, timeout=SLACK_REQUEST_TIMEOUT[1])
+            if access_token
+            else SlackBridgeClient.get_client()
+        )
+        response = client.files_info(file=file_id)
     except SlackApiError as exc:
         raise SlackFilePreviewError("The Slack file could not be loaded.") from exc
     except Exception as exc:
