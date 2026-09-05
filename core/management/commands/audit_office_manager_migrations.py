@@ -40,6 +40,12 @@ CANONICAL_IDENTITIES = {
         "0039_supersede_reopened_office_manager_attempts"
     ),
 }
+REVIEWED_0036_IDENTITIES = frozenset(
+    {
+        CANONICAL_IDENTITIES["office_manager_successor"],
+        "0036_sanitize_coworking_operation_receipts",
+    }
+)
 
 
 def _uuid_text(value) -> str:
@@ -1077,18 +1083,29 @@ def _build_report(*, configured_office_manager_channel: str = "") -> dict:
         )
 
     applied_0036 = [name for name in applied if name.startswith("0036_")]
-    if len(disk_0036) != 1:
+    disk_0036_set = set(disk_0036)
+    applied_0036_set = set(applied_0036)
+    if disk_0036_set != REVIEWED_0036_IDENTITIES:
         issues.append(
-            "the reviewed source tree must contain exactly one append-only roo.0036 migration"
+            "the reviewed source tree must contain exactly the approved "
+            "append-only roo.0036 migration identities"
         )
-    if len(applied_0036) > 1:
-        issues.append("multiple roo.0036 migration identities are recorded")
-    if applied_0036 and applied_0036 != disk_0036:
+    if not applied_0036_set.issubset(REVIEWED_0036_IDENTITIES):
         issues.append(
-            "recorded roo.0036 identity does not match the reviewed source tree"
+            "an unapproved roo.0036 migration identity is recorded"
         )
-    if applied_0036 and protect_identity not in applied_set:
-        issues.append(f"{applied_0036[0]} is recorded without {protect_identity}")
+    if not applied_0036_set.issubset(disk_0036_set):
+        issues.append(
+            "recorded roo.0036 identity does not exist in the reviewed source tree"
+        )
+    office_manager_successor = CANONICAL_IDENTITIES["office_manager_successor"]
+    if (
+        office_manager_successor in applied_0036_set
+        and protect_identity not in applied_set
+    ):
+        issues.append(
+            f"{office_manager_successor} is recorded without {protect_identity}"
+        )
 
     recovery_identity = CANONICAL_IDENTITIES["office_manager_recovery"]
     applied_0037 = [name for name in applied if name.startswith("0037_")]
