@@ -4,6 +4,16 @@ from django.conf import settings
 from django.db import models
 from django.db.models import Q
 
+from .volunteer.models import (  # noqa: F401 -- Django model discovery
+    VolunteerAttendance,
+    VolunteerMemberState,
+    VolunteerMilestone,
+    VolunteerOpportunity,
+    VolunteerProject,
+    VolunteerRecognition,
+    VolunteerSourceReceipt,
+)
+
 
 class DeviceBindingStatus(models.TextChoices):
     PENDING = "pending", "Pending"

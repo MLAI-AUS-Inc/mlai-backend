@@ -271,6 +271,18 @@ def require_linked_points_admin(slack_user_id: Optional[str], *, action_label: s
 def award_first_channel_post_bonus(slack_user_id: str, channel_id: str) -> Tuple[bool, Optional[int]]:
     """Create the first-post marker and award the intro bonus atomically."""
     with transaction.atomic():
+        user = get_or_create_user_for_slack_id(slack_user_id)
+        user = User.objects.select_for_update().get(pk=user.pk)
+        # Keep native-first protection even after issuance flags are rolled
+        # back. No Volunteer table is queried before a native ledger exists.
+        if Ledger.objects.filter(user=user, reference_type="VOLUNTEER_CONTRIBUTION").exists():
+            from community_chat.volunteer.models import VolunteerRecognition
+            if VolunteerRecognition.objects.filter(user=user, action_key="introduce_yourself", status__in=("approved", "reversed")).exists():
+                ChannelFirstPost.objects.get_or_create(slack_user_id=slack_user_id, channel_id=channel_id)
+                return False, None
+        if getattr(settings, "COMMUNITY_CHAT_VOLUNTEER_ENABLED", False) and getattr(settings, "COMMUNITY_CHAT_VOLUNTEER_AWARDS_ENABLED", False):
+            from community_chat.volunteer.receipts import award_legacy_intro
+            return award_legacy_intro(user, slack_user_id, channel_id)
         _, created = ChannelFirstPost.objects.get_or_create(
             slack_user_id=slack_user_id,
             channel_id=channel_id,
@@ -278,7 +290,6 @@ def award_first_channel_post_bonus(slack_user_id: str, channel_id: str) -> Tuple
         if not created:
             return False, None
 
-        user = get_or_create_user_for_slack_id(slack_user_id)
         _, awarded = PointsService.award(
             user=user,
             delta=FIRST_CHANNEL_POST_POINTS,

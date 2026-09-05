@@ -7,6 +7,7 @@ subsystem-specific contracts and runbooks.
 ## Community chat APIs
 
 - [`community-chat-home.md`](community-chat-home.md)
+- [`volunteer-api.md`](volunteer-api.md) — gated member journey, recognition and Roo contracts
 
 ## Inactive Buzz / MLAI Chat experiment
 
