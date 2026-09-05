@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 
 from django.db import transaction
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 
 from organizations.models import Organization
 from startup_updates.metric_catalog import LUMA_METRIC_KEYS, startup_update_metric_label
@@ -47,26 +48,15 @@ def resolve_selected_metric_keys(connection: ExternalServiceConnection) -> list[
     return list(LUMA_METRIC_KEYS)
 
 
-def selected_event_ids(connection: ExternalServiceConnection) -> Optional[set[str]]:
-    """Selected event ids, or None when nothing is selected (→ count all events)."""
-    ids = {
-        str(event_id).strip()
-        for event_id in LumaEventSelection.objects.filter(
-            connection=connection, selected=True
-        ).values_list("event_id", flat=True)
-        if str(event_id).strip()
-    }
-    return ids or None
-
-
 def sync_luma_connection(connection: ExternalServiceConnection) -> dict[str, Any]:
-    """Pull a founder's selected Luma events and publish their chosen monthly metrics.
+    """Pull all ended Luma events and publish the founder's chosen monthly metrics.
 
-    Fetches attendance for the selected events (all past events when none are
-    selected), aggregates by month, upserts the selected StartupMetricObservation
-    rows, and removes any Luma rows no longer in the computed set. Raises
-    LumaConfigurationError / LumaAPIError on failure so the dispatcher can mark
-    the connection errored.
+    Event inclusion is automatic: every ended event is aggregated into its own
+    calendar month, and monthly-update drafting later reads only the selected
+    target month's observations. Legacy per-event selections are cleared so a
+    previous fixed list cannot silently exclude events from future updates.
+    Raises LumaConfigurationError / LumaAPIError on failure so the dispatcher can
+    mark the connection errored.
     """
     if connection.provider != ExternalServiceProvider.LUMA:
         raise LumaConfigurationError("Connection is not a Luma connection.")
@@ -77,17 +67,38 @@ def sync_luma_connection(connection: ExternalServiceConnection) -> dict[str, Any
     if organization is None:
         raise LumaConfigurationError("Luma connection is not linked to an organization.")
 
-    event_ids = selected_event_ids(connection)
     metric_keys = resolve_selected_metric_keys(connection)
 
     service = LumaAttendeeReportService(api_key=connection.access_token)
-    events = service.collect_ended_event_attendance(event_ids=event_ids)
+    events = service.collect_ended_event_attendance()
+    # Ticket revenue can arrive weeks before an event ends. Keep the accounting
+    # catalogue complete even though monthly attendance metrics deliberately
+    # continue to count ended events only.
+    catalog_by_id = {
+        str(event.get("id") or "").strip(): {
+            "event": event,
+            "start_at": parse_datetime(str(event.get("start_at") or ""))
+            or parse_datetime(str(event.get("start_at_iso") or "")),
+            "registration_count": 0,
+            "checked_in_count": 0,
+        }
+        for event in service.list_all_events()
+        if str(event.get("id") or "").strip()
+    }
+    for item in events:
+        event_id = str((item.get("event") or {}).get("id") or "").strip()
+        if event_id:
+            catalog_by_id[event_id] = item
+    catalog_events_payload = list(catalog_by_id.values())
 
     synced_at = timezone.now()
     with transaction.atomic():
+        LumaEventSelection.objects.filter(connection=connection, selected=True).update(
+            selected=False
+        )
         catalog_events = upsert_luma_event_catalog(
             connection=connection,
-            events=events,
+            events=catalog_events_payload,
             synced_at=synced_at,
         )
         metrics = publish_luma_event_metrics(
@@ -97,7 +108,7 @@ def sync_luma_connection(connection: ExternalServiceConnection) -> dict[str, Any
             observed_at=synced_at,
         )
         # Drop Luma rows that are no longer part of the freshly-computed set
-        # (deselected metrics, or months whose events are no longer selected).
+        # (deselected metrics, or months no longer returned by Luma).
         kept_ids = [metric.id for metric in metrics]
         StartupMetricObservation.objects.filter(
             organization=organization,
@@ -116,7 +127,8 @@ def sync_luma_connection(connection: ExternalServiceConnection) -> dict[str, Any
             "luma_catalog_events_synced": catalog_events,
             "luma_months_synced": months_synced,
             "luma_selected_metrics": metric_keys,
-            "luma_selected_event_count": (len(event_ids) if event_ids is not None else None),
+            "luma_selected_event_count": None,
+            "luma_event_scope": "target_month",
         }
         connection.save(
             update_fields=["status", "last_error", "last_synced_at", "sync_cursor", "updated_at"]
@@ -147,8 +159,8 @@ def upsert_luma_event_catalog(
 ) -> int:
     """Refresh reconciliation's Luma event catalogue from the metric sync payload.
 
-    ``selected`` is intentionally omitted from the defaults so a background sync
-    never changes the founder's event-selection preferences.
+    Event selection is automatic by target month, so legacy manual selections
+    are cleared while the catalogue is refreshed.
     """
     synced = 0
     for item in events:
@@ -166,6 +178,7 @@ def upsert_luma_event_catalog(
                 "event_name": str(event.get("name") or event_id).strip()[:255],
                 "event_url": str(event.get("url") or "").strip()[:512],
                 "start_at": start_at,
+                "selected": False,
                 "registration_count": int(item.get("registration_count") or 0),
                 "checked_in_count": int(item.get("checked_in_count") or 0),
                 "raw_payload": event,

@@ -148,14 +148,30 @@ class RuntimeHardeningConfigTests(SimpleTestCase):
             deploy,
         )
         self.assertIn('docker compose stop "\\${paused_runtime_services[@]}"', deploy)
-        self.assertIn("unique_active_booking_per_user_date is missing", deploy)
+
+        # The coworking booking guard is still verified on every deploy, but it
+        # now lives in deploy_postmigrate alongside the other post-migration
+        # checks instead of in its own `manage.py shell` container.
+        self.assertIn("compose_run_web python manage.py deploy_postmigrate", deploy)
+        postmigrate = (
+            ROOT / "core" / "management" / "commands" / "deploy_postmigrate.py"
+        ).read_text()
+        self.assertIn("unique_active_booking_per_user_date", postmigrate)
+        self.assertIn("to_regclass", postmigrate)
+        self.assertLess(
+            deploy.index('docker compose stop "\\${paused_runtime_services[@]}"'),
+            deploy.index("compose_run_web python manage.py deploy_postmigrate"),
+        )
         self.assertIn(
             'runtime_services=(web scheduler memory-worker memory-scheduler community-email-worker)',
             deploy,
         )
         self.assertIn("community-email-worker:", (ROOT / "docker-compose.yml").read_text())
         self.assertIn("run_email_code_worker", (ROOT / "docker-compose.yml").read_text())
-        self.assertIn('runtime_services+=(bridge-worker bridge-retention)', deploy)
+        self.assertIn(
+            'runtime_services+=(bridge-worker bridge-reconciler bridge-retention)',
+            deploy,
+        )
         self.assertIn(
             'COMMUNITY_BRIDGE_PRODUCTION_ENABLED="${COMMUNITY_BRIDGE_PRODUCTION_ENABLED:-false}"',
             deploy,
@@ -189,10 +205,17 @@ class RuntimeHardeningConfigTests(SimpleTestCase):
             '--destination-channel-id "$BUZZ_BRIDGE_DESTINATION_CHANNEL_ID"',
             deploy,
         )
-        self.assertIn('docker compose stop bridge-worker || true', deploy)
-        self.assertIn('docker compose rm -f bridge-worker || true', deploy)
+        self.assertIn(
+            'docker compose stop bridge-worker bridge-reconciler || true', deploy
+        )
+        self.assertIn(
+            'docker compose rm -f bridge-worker bridge-reconciler || true', deploy
+        )
+        # deploy_postmigrate verifies migration readiness as its first step, so
+        # the bridge mapping still cannot be written against a half-migrated
+        # database.
         self.assertLess(
-            deploy.index("compose_run_web python manage.py migrate --check --noinput"),
+            deploy.index("compose_run_web python manage.py deploy_postmigrate"),
             deploy.index("compose_run_web python manage.py upsert_community_bridge_channel"),
         )
         self.assertLess(
@@ -221,6 +244,51 @@ class RuntimeHardeningConfigTests(SimpleTestCase):
             "Community bridge production activation is disabled; staged bridge "
             "settings will not be installed.",
             workflow,
+        )
+
+    def test_bridge_reconciler_multiline_command_keeps_shell_continuations(self):
+        continued_fragments = (
+            "python manage.py reconcile_recent_community_bridge_slack",
+            "--lookback-seconds",
+            "--max-roots-per-channel",
+            "--maximum-history-messages",
+        )
+        for filename in ("docker-compose.yml", "docker-compose.local.yml"):
+            lines = (ROOT / filename).read_text().splitlines()
+            for fragment in continued_fragments:
+                matching = [line for line in lines if fragment in line]
+                self.assertEqual(len(matching), 1, f"{fragment} in {filename}")
+                self.assertTrue(
+                    matching[0].rstrip().endswith("\\"),
+                    f"{fragment} must continue in {filename}",
+                )
+
+    def test_meeting_room_feature_flag_is_deployment_managed_and_smoke_tested(self):
+        workflow = (ROOT / ".github" / "workflows" / "deploy.yml").read_text()
+        deploy = (ROOT / "deploy.sh").read_text()
+
+        self.assertIn(
+            "MEETING_ROOM_BOOKING_ENABLED: "
+            "${{ vars.MEETING_ROOM_BOOKING_ENABLED || 'false' }}",
+            workflow,
+        )
+        self.assertIn(
+            'MEETING_ROOM_BOOKING_ENABLED="${MEETING_ROOM_BOOKING_ENABLED:-false}"',
+            deploy,
+        )
+        self.assertIn(
+            'upsert_env_value MEETING_ROOM_BOOKING_ENABLED '
+            '"\\$meeting_room_booking_enabled"',
+            deploy,
+        )
+        self.assertIn(
+            "https://api.mlai.au/api/v1/points/meeting-rooms/rooms/",
+            deploy,
+        )
+        self.assertIn('expected = {"small-meeting-room", "big-meeting-room"}', deploy)
+        self.assertLess(
+            deploy.index("upsert_env_value MEETING_ROOM_BOOKING_ENABLED"),
+            deploy.index("compose_run_web python manage.py migrate --noinput"),
         )
 
     def test_deploy_compose_run_does_not_consume_ssh_stdin(self):

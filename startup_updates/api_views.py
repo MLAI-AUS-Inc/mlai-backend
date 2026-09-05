@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone as dt_timezone
+from functools import wraps
 from typing import Any, Optional, Tuple
 
 from django.conf import settings
@@ -35,7 +36,12 @@ from startup_updates.serializers import (
     StartupUpdateRunCreateSerializer,
     StartupUpdateThreadHydrationSerializer,
 )
-from integrations.models import ExternalServiceProvider, GoogleConnection
+from integrations.models import (
+    ExternalServiceConnection,
+    ExternalServiceConnectionStatus,
+    ExternalServiceProvider,
+    GoogleConnection,
+)
 from startup_updates.models import (
     ArtifactProcessingStatus,
     GmailAttachmentArtifact,
@@ -61,6 +67,8 @@ from integrations.services.external_connectors import (
     ConnectorConfigurationError,
     ConnectorOAuthError,
     ConnectorRateLimitError,
+    _lock_slack_connection_authority,
+    _slack_connection_authority,
     google_connection_for_org,
     sync_linear_connection_page,
     sync_slack_connection_page,
@@ -119,6 +127,14 @@ from startup_updates.services import (
     startup_update_run_matches_target_month,
     upsert_monthly_update_draft,
 )
+from startup_updates.slack_lineage import (
+    SlackRunAuthority,
+    pin_slack_run_authority,
+    slack_run_authority_for_connection,
+    slack_run_authority_from_request,
+    slack_run_authority_is_present,
+    slack_thread_public_id_matches_authority,
+)
 from integrations.services.valley_harness import notify_valley_run_created
 from integrations.services.google_analytics import (
     apply_classification_results as ga_apply_classification_results,
@@ -142,7 +158,7 @@ EMAIL_DRAFT_DISPLAY_STAGES = {
     "slack_backfill": "Scanning selected Slack channels",
     "slack_relevance_classification": "Filtering Slack highlights",
     "slack_event_extraction": "Extracting Slack highlights",
-    "linear_backfill": "Scanning selected Linear projects",
+    "linear_backfill": "Scanning recently active Linear projects",
     "linear_relevance_classification": "Filtering Linear project context",
     "linear_event_extraction": "Extracting Linear project highlights",
     "notion_backfill": "Scanning selected Notion workspace",
@@ -676,6 +692,16 @@ def _structured_memo_section_text(structured_memo, key: str) -> str:
     return _join_text_items_with_newlines((structured_memo or {}).get(key))
 
 
+def _structured_memo_financial_snapshot(structured_memo) -> Optional[dict]:
+    value = (structured_memo or {}).get("financial_snapshot") or (structured_memo or {}).get("financialSnapshot")
+    return value if isinstance(value, dict) else None
+
+
+def _structured_memo_concise_analysis(structured_memo) -> Optional[dict]:
+    value = (structured_memo or {}).get("concise_analysis") or (structured_memo or {}).get("conciseAnalysis")
+    return value if isinstance(value, dict) else None
+
+
 def _structured_memo_with_xero_metrics(draft) -> dict:
     # Merges connector-backed metrics (Xero + Luma) into the draft's kpi_snapshot.
     structured_memo = draft.structured_memo or {}
@@ -713,6 +739,11 @@ def _serialize_draft_for_editor(draft) -> dict:
         "next30Days": _structured_memo_section_text(structured_memo, "next_30_days"),
         "metrics": _extract_form_metrics(structured_memo),
         "metricSuggestions": _extract_metric_suggestions(structured_memo),
+        "financialSnapshot": _structured_memo_financial_snapshot(structured_memo),
+        "conciseAnalysis": _structured_memo_concise_analysis(structured_memo),
+        "presentationMode": str(
+            structured_memo.get("presentation_mode") or structured_memo.get("presentationMode") or ""
+        ),
     }
 
 
@@ -726,6 +757,11 @@ def _serialize_email_draft_month(draft) -> dict:
         "year": month_value.year,
         "metrics": _extract_form_metrics(structured_memo),
         "metricSuggestions": _extract_metric_suggestions(structured_memo),
+        "financialSnapshot": _structured_memo_financial_snapshot(structured_memo),
+        "conciseAnalysis": _structured_memo_concise_analysis(structured_memo),
+        "presentationMode": str(
+            structured_memo.get("presentation_mode") or structured_memo.get("presentationMode") or ""
+        ),
         "highlights": _join_named_sections(structured_memo, _HIGHLIGHT_SECTIONS),
         "challenges": _join_text_items_with_newlines(structured_memo.get("lowlights")),
         "asks": _join_named_sections(structured_memo, [
@@ -928,6 +964,26 @@ def _update_run_step(run: ContentFactoryRun, *, step_key: str):
     run.save(update_fields=["status", "current_step", "updated_at"])
 
 
+def _slack_authority_error_response(exc: Exception) -> Response:
+    return Response(
+        {"error": str(exc)},
+        status=status.HTTP_409_CONFLICT,
+    )
+
+
+def _slack_authority_guarded(callback):
+    """Map a mixed-source run's revoked Slack authority to a stable 409."""
+
+    @wraps(callback)
+    def wrapped(*args, **kwargs):
+        try:
+            return callback(*args, **kwargs)
+        except ConnectorOAuthError as exc:
+            return _slack_authority_error_response(exc)
+
+    return wrapped
+
+
 class StartupProfileView(APIView):
     authentication_classes = []
     permission_classes = [HasRooApiKey]
@@ -994,6 +1050,7 @@ class StartupUpdateRunView(APIView):
     authentication_classes = []
     permission_classes = [HasRooApiKey]
 
+    @_slack_authority_guarded
     def post(self, request):
         serializer = StartupUpdateRunCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -1158,16 +1215,19 @@ class StartupUpdateIngestNextPageView(APIView):
     authentication_classes = []
     permission_classes = [HasRooApiKey]
 
+    @_slack_authority_guarded
+    @transaction.atomic
     def post(self, request, run_id: str):
         serializer = StartupUpdateIngestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
 
-        run = _get_run_or_404(run_id)
+        run, organization, binding, google_connection, profile = (
+            _locked_pipeline_run_context(run_id)
+        )
         cancelled_response = _reject_if_run_cancelled(run)
         if cancelled_response is not None:
             return cancelled_response
-        organization, binding, google_connection, profile = _get_org_and_binding_for_run(run)
         if google_connection is None:
             return _gmail_connection_required_response()
         if not has_gmail_read_scope(google_connection):
@@ -1301,16 +1361,19 @@ class StartupUpdateHydrateThreadsView(APIView):
     authentication_classes = []
     permission_classes = [HasRooApiKey]
 
+    @_slack_authority_guarded
+    @transaction.atomic
     def post(self, request, run_id: str):
         serializer = StartupUpdateThreadHydrationSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
 
-        run = _get_run_or_404(run_id)
+        run, organization, binding, google_connection, profile = (
+            _locked_pipeline_run_context(run_id)
+        )
         cancelled_response = _reject_if_run_cancelled(run)
         if cancelled_response is not None:
             return cancelled_response
-        organization, binding, google_connection, profile = _get_org_and_binding_for_run(run)
         if google_connection is None:
             return _gmail_connection_required_response()
         if not has_gmail_read_scope(google_connection):
@@ -1370,16 +1433,19 @@ class StartupUpdateHydrationCandidatesView(APIView):
     authentication_classes = []
     permission_classes = [HasRooApiKey]
 
+    @_slack_authority_guarded
+    @transaction.atomic
     def get(self, request, run_id: str):
         serializer = StartupUpdateBatchQuerySerializer(data=request.query_params)
         serializer.is_valid(raise_exception=True)
         limit = serializer.validated_data["limit"]
 
-        run = _get_run_or_404(run_id)
+        run, organization, binding, google_connection, profile = (
+            _locked_pipeline_run_context(run_id)
+        )
         cancelled_response = _reject_if_run_cancelled(run)
         if cancelled_response is not None:
             return cancelled_response
-        organization, binding, google_connection, profile = _get_org_and_binding_for_run(run)
         if google_connection is None:
             return _gmail_connection_required_response()
         _update_run_step(run, step_key="thread_hydration")
@@ -1453,16 +1519,19 @@ class StartupUpdateClassificationBatchView(APIView):
     authentication_classes = []
     permission_classes = [HasRooApiKey]
 
+    @_slack_authority_guarded
+    @transaction.atomic
     def get(self, request, run_id: str):
         serializer = StartupUpdateBatchQuerySerializer(data=request.query_params)
         serializer.is_valid(raise_exception=True)
         limit = serializer.validated_data["limit"]
 
-        run = _get_run_or_404(run_id)
+        run, organization, binding, google_connection, profile = (
+            _locked_pipeline_run_context(run_id)
+        )
         cancelled_response = _reject_if_run_cancelled(run)
         if cancelled_response is not None:
             return cancelled_response
-        organization, binding, google_connection, profile = _get_org_and_binding_for_run(run)
         if google_connection is None:
             return _gmail_connection_required_response()
         _update_run_step(run, step_key="relevance_classification")
@@ -1511,15 +1580,18 @@ class StartupUpdateClassificationResultsView(APIView):
     authentication_classes = []
     permission_classes = [HasRooApiKey]
 
+    @_slack_authority_guarded
+    @transaction.atomic
     def post(self, request, run_id: str):
         serializer = ClassificationResultsSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
-        run = _get_run_or_404(run_id)
+        run, organization, binding, google_connection, profile = (
+            _locked_pipeline_run_context(run_id)
+        )
         cancelled_response = _reject_if_run_cancelled(run)
         if cancelled_response is not None:
             return cancelled_response
-        organization, binding, google_connection, profile = _get_org_and_binding_for_run(run)
         if google_connection is None:
             return _gmail_connection_required_response()
         _update_run_step(run, step_key="relevance_classification")
@@ -1562,16 +1634,19 @@ class StartupUpdateExtractionBatchView(APIView):
     authentication_classes = []
     permission_classes = [HasRooApiKey]
 
+    @_slack_authority_guarded
+    @transaction.atomic
     def get(self, request, run_id: str):
         serializer = StartupUpdateBatchQuerySerializer(data=request.query_params)
         serializer.is_valid(raise_exception=True)
         limit = serializer.validated_data["limit"]
 
-        run = _get_run_or_404(run_id)
+        run, organization, binding, google_connection, profile = (
+            _locked_pipeline_run_context(run_id)
+        )
         cancelled_response = _reject_if_run_cancelled(run)
         if cancelled_response is not None:
             return cancelled_response
-        organization, binding, google_connection, profile = _get_org_and_binding_for_run(run)
         if google_connection is None:
             return _gmail_connection_required_response()
         if not has_gmail_read_scope(google_connection):
@@ -1643,16 +1718,18 @@ class StartupUpdateExtractionResultsView(APIView):
     authentication_classes = []
     permission_classes = [HasRooApiKey]
 
+    @_slack_authority_guarded
     @transaction.atomic
     def post(self, request, run_id: str):
         serializer = ExtractionResultsSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
-        run = _get_run_or_404(run_id)
+        run, organization, binding, google_connection, profile = (
+            _locked_pipeline_run_context(run_id)
+        )
         cancelled_response = _reject_if_run_cancelled(run)
         if cancelled_response is not None:
             return cancelled_response
-        organization, binding, google_connection, profile = _get_org_and_binding_for_run(run)
         if google_connection is None:
             return _gmail_connection_required_response()
         _update_run_step(run, step_key="event_extraction")
@@ -1780,8 +1857,11 @@ class StartupUpdateExtractionResultsView(APIView):
         )
 
 
-def _slack_thread_public_id(thread: SlackThreadArtifact) -> str:
-    return f"slack:{thread.channel_id}:{thread.thread_ts}"
+def _slack_thread_public_id(
+    thread: SlackThreadArtifact,
+    authority: SlackRunAuthority,
+) -> str:
+    return authority.thread_public_id(thread.channel_id, thread.thread_ts)
 
 
 def _run_slack_channel_ids(run: ContentFactoryRun) -> list[str]:
@@ -1791,39 +1871,212 @@ def _run_slack_channel_ids(run: ContentFactoryRun) -> list[str]:
     return [str(item or "").strip() for item in raw_channel_ids if str(item or "").strip()]
 
 
+def _active_slack_connection_for_run(
+    *,
+    binding: UserStartupBinding,
+    organization: Organization,
+) -> Optional[ExternalServiceConnection]:
+    return (
+        ExternalServiceConnection.objects.filter(
+            user_id=binding.user_id,
+            organization=organization,
+            provider=ExternalServiceProvider.SLACK,
+        )
+        .exclude(status=ExternalServiceConnectionStatus.DISCONNECTED)
+        .order_by("-updated_at", "-id")
+        .first()
+    )
+
+
+def _resolve_run_slack_connection(
+    *,
+    run: ContentFactoryRun,
+    binding: UserStartupBinding,
+    organization: Organization,
+) -> tuple[ExternalServiceConnection, Optional[SlackRunAuthority]]:
+    expected = slack_run_authority_from_request(run.run_request)
+    if expected is None and slack_run_authority_is_present(run.run_request):
+        raise ConnectorOAuthError(
+            "This startup-update run has an invalid Slack authority. Start a new run."
+        )
+    if expected is not None:
+        if (
+            expected.user_id != binding.user_id
+            or expected.organization_id != organization.pk
+        ):
+            raise ConnectorOAuthError(
+                "This startup-update run is pinned to a different Slack authority."
+            )
+        connection = (
+            ExternalServiceConnection.objects.filter(
+                pk=expected.connection_id,
+                user_id=expected.user_id,
+                organization_id=expected.organization_id,
+                provider=ExternalServiceProvider.SLACK,
+            )
+            .first()
+        )
+        if connection is None:
+            raise ConnectorOAuthError(
+                "The Slack authority for this startup-update run is no longer available."
+            )
+    else:
+        connection = _active_slack_connection_for_run(
+            binding=binding,
+            organization=organization,
+        )
+        if connection is None:
+            raise ConnectorOAuthError("Slack is not connected.")
+    return connection, expected
+
+
+def _locked_slack_run_context(
+    run_id: str,
+) -> tuple[
+    ContentFactoryRun,
+    Organization,
+    UserStartupBinding,
+    Any,
+    ExternalServiceConnection,
+    SlackRunAuthority,
+]:
+    # Resolve immutable ids without locks, then follow the connector-wide
+    # canonical order user -> grants -> connection -> run. Disconnect uses the
+    # same order before erasing run lineage, avoiding a run/user deadlock.
+    initial_run = get_object_or_404(
+        ContentFactoryRun,
+        run_id=run_id,
+        workflow=STARTUP_UPDATE_WORKFLOW,
+    )
+    organization = get_object_or_404(
+        Organization,
+        domain=normalize_domain(initial_run.domain),
+    )
+    binding = get_object_or_404(
+        organization.user_startup_bindings.select_related("user"),
+        id=(initial_run.run_request or {}).get("binding_id"),
+    )
+    connection, initial_expected = _resolve_run_slack_connection(
+        run=initial_run,
+        binding=binding,
+        organization=organization,
+    )
+    locked_connection = _lock_slack_connection_authority(
+        _slack_connection_authority(connection)
+    )
+    authority = slack_run_authority_for_connection(locked_connection)
+    if initial_expected is not None and authority != initial_expected:
+        raise ConnectorOAuthError(
+            "Slack authorization changed after this startup-update run began. Start a new run."
+        )
+
+    run = get_object_or_404(
+        ContentFactoryRun.objects.select_for_update(),
+        pk=initial_run.pk,
+        run_id=run_id,
+        workflow=STARTUP_UPDATE_WORKFLOW,
+        domain=initial_run.domain,
+    )
+    locked_binding_id = (run.run_request or {}).get("binding_id")
+    if str(locked_binding_id or "") != str(binding.pk):
+        raise ConnectorOAuthError(
+            "The startup-update binding changed while Slack authority was being locked."
+        )
+    locked_expected = slack_run_authority_from_request(run.run_request)
+    if locked_expected is None and slack_run_authority_is_present(run.run_request):
+        raise ConnectorOAuthError(
+            "This startup-update run has an invalid Slack authority. Start a new run."
+        )
+    if locked_expected is not None and locked_expected != authority:
+        raise ConnectorOAuthError(
+            "Slack authorization changed after this startup-update run began. Start a new run."
+        )
+    if locked_expected is None:
+        run.run_request = pin_slack_run_authority(run.run_request, authority)
+        # A legacy run may have captured organization-wide selections. Replace
+        # them while the exact connection is locked so another Slack identity's
+        # channel ids can never be carried into this run.
+        run.run_request["slack_channel_ids"] = list(
+            SlackChannelSelection.objects.filter(
+                connection=locked_connection,
+                selected=True,
+            ).values_list("channel_id", flat=True)
+        )
+        run.save(update_fields=["run_request", "updated_at"])
+
+    organization, locked_binding, _google_connection, profile = (
+        _get_org_and_binding_for_run(run)
+    )
+    if locked_binding.pk != binding.pk:
+        raise ConnectorOAuthError(
+            "The startup-update binding changed while Slack authority was being locked."
+        )
+    return run, organization, locked_binding, profile, locked_connection, authority
+
+
+def _locked_pipeline_run_context(
+    run_id: str,
+) -> tuple[ContentFactoryRun, Organization, UserStartupBinding, Any, Any]:
+    """Lock a downstream run at its source-authority linearization point."""
+
+    initial_run = _get_run_or_404(run_id)
+    request_payload = initial_run.run_request or {}
+    input_sources = request_payload.get("input_sources") or []
+    if (
+        ExternalServiceProvider.SLACK in input_sources
+        or slack_run_authority_is_present(request_payload)
+    ):
+        (
+            run,
+            organization,
+            binding,
+            profile,
+            _connection,
+            _authority,
+        ) = _locked_slack_run_context(run_id)
+        _organization, _binding, google_connection, _profile = (
+            _get_org_and_binding_for_run(run)
+        )
+        return run, organization, binding, google_connection, profile
+
+    run = get_object_or_404(
+        ContentFactoryRun.objects.select_for_update(),
+        pk=initial_run.pk,
+        run_id=run_id,
+        workflow=STARTUP_UPDATE_WORKFLOW,
+    )
+    return (run, *_get_org_and_binding_for_run(run))
+
+
 class StartupUpdateSlackBackfillView(APIView):
     authentication_classes = []
     permission_classes = [HasRooApiKey]
 
     def post(self, request, run_id: str):
-        run = _get_run_or_404(run_id)
-        cancelled_response = _reject_if_run_cancelled(run)
-        if cancelled_response is not None:
-            return cancelled_response
-        organization, binding, google_connection, profile = _get_org_and_binding_for_run(run)
-        _update_run_step(run, step_key="slack_backfill")
-
-        channel_ids = _run_slack_channel_ids(run)
-        connection = (
-            binding.user.external_service_connections.filter(
-                provider="slack",
-                organization=organization,
-            )
-            .exclude(status="disconnected")
-            .order_by("-updated_at", "-id")
-            .first()
-        )
-        if connection is None:
-            return Response({"error": "Slack is not connected."}, status=status.HTTP_400_BAD_REQUEST)
-
-        if not channel_ids:
-            channel_ids = [
-                selection.channel_id
-                for selection in SlackChannelSelection.objects.filter(
-                    connection=connection,
-                    selected=True,
-                )
-            ]
+        try:
+            with transaction.atomic():
+                (
+                    run,
+                    _organization,
+                    _binding,
+                    _profile,
+                    connection,
+                    authority,
+                ) = _locked_slack_run_context(run_id)
+                cancelled_response = _reject_if_run_cancelled(run)
+                if cancelled_response is not None:
+                    return cancelled_response
+                _update_run_step(run, step_key="slack_backfill")
+                channel_ids = _run_slack_channel_ids(run)
+                if not channel_ids:
+                    channel_ids = list(
+                        SlackChannelSelection.objects.filter(
+                            connection=connection,
+                            selected=True,
+                        ).values_list("channel_id", flat=True)
+                    )
+        except ConnectorOAuthError as exc:
+            return _slack_authority_error_response(exc)
         try:
             sync_result = sync_slack_connection_page(
                 connection,
@@ -1857,16 +2110,35 @@ class StartupUpdateSlackBackfillView(APIView):
                 status=status.HTTP_503_SERVICE_UNAVAILABLE,
             )
 
-        run_request = dict(run.run_request or {})
-        run_request["slack_channel_ids"] = channel_ids
-        external_context = dict(run_request.get("external_context") or {})
-        slack_context = dict(external_context.get("slack") or {})
-        slack_context["selected_channel_ids"] = channel_ids
-        slack_context["last_sync"] = sync_result
-        external_context["slack"] = slack_context
-        run_request["external_context"] = external_context
-        run.run_request = run_request
-        run.save(update_fields=["run_request", "updated_at"])
+        try:
+            with transaction.atomic():
+                (
+                    run,
+                    _organization,
+                    _binding,
+                    _profile,
+                    locked_connection,
+                    locked_authority,
+                ) = _locked_slack_run_context(run_id)
+                if (
+                    locked_connection.pk != connection.pk
+                    or locked_authority != authority
+                ):
+                    raise ConnectorOAuthError(
+                        "Slack authorization changed while backfill was in progress."
+                    )
+                run_request = dict(run.run_request or {})
+                run_request["slack_channel_ids"] = channel_ids
+                external_context = dict(run_request.get("external_context") or {})
+                slack_context = dict(external_context.get("slack") or {})
+                slack_context["selected_channel_ids"] = channel_ids
+                slack_context["last_sync"] = sync_result
+                external_context["slack"] = slack_context
+                run_request["external_context"] = external_context
+                run.run_request = run_request
+                run.save(update_fields=["run_request", "updated_at"])
+        except ConnectorOAuthError as exc:
+            return _slack_authority_error_response(exc)
 
         return Response(
             {
@@ -1878,21 +2150,18 @@ class StartupUpdateSlackBackfillView(APIView):
         )
 
 
-def _slack_thread_from_public_id(slack_thread_id: str) -> Optional[Tuple[str, str]]:
-    parts = str(slack_thread_id or "").split(":", 2)
-    if len(parts) != 3 or parts[0] != "slack":
-        return None
-    return parts[1], parts[2]
-
-
 def _update_slack_filtering_summary(
     *,
     run: ContentFactoryRun,
     organization: Organization,
+    connection: ExternalServiceConnection,
     channel_ids: list[str],
     batch_context: Optional[dict] = None,
 ) -> None:
-    queryset = SlackThreadArtifact.objects.filter(organization=organization)
+    queryset = SlackThreadArtifact.objects.filter(
+        organization=organization,
+        connection=connection,
+    )
     if channel_ids:
         queryset = queryset.filter(channel_id__in=channel_ids)
     queryset = _apply_run_window(queryset, run, "latest_message_at")
@@ -1922,21 +2191,32 @@ class StartupUpdateSlackClassificationBatchView(APIView):
     authentication_classes = []
     permission_classes = [HasRooApiKey]
 
+    @transaction.atomic
     def get(self, request, run_id: str):
         serializer = StartupUpdateBatchQuerySerializer(data=request.query_params)
         serializer.is_valid(raise_exception=True)
         limit = serializer.validated_data["limit"]
 
-        run = _get_run_or_404(run_id)
+        try:
+            (
+                run,
+                organization,
+                _binding,
+                profile,
+                connection,
+                authority,
+            ) = _locked_slack_run_context(run_id)
+        except ConnectorOAuthError as exc:
+            return _slack_authority_error_response(exc)
         cancelled_response = _reject_if_run_cancelled(run)
         if cancelled_response is not None:
             return cancelled_response
-        organization, binding, google_connection, profile = _get_org_and_binding_for_run(run)
         _update_run_step(run, step_key="slack_relevance_classification")
 
         channel_ids = _run_slack_channel_ids(run)
         queryset = SlackThreadArtifact.objects.filter(
             organization=organization,
+            connection=connection,
             extraction_status__in=[ArtifactProcessingStatus.PENDING, ArtifactProcessingStatus.HYDRATED],
             relevance_label__in=[GmailRelevanceLabel.PENDING, GmailRelevanceLabel.AMBIGUOUS],
             classified_at__isnull=True,
@@ -1956,13 +2236,19 @@ class StartupUpdateSlackClassificationBatchView(APIView):
             if hard_filtered:
                 hard_filtered_count += 1
                 continue
-            bundles.append(compact_slack_thread_bundle(thread))
+            bundles.append(
+                compact_slack_thread_bundle(
+                    thread,
+                    slack_thread_id=_slack_thread_public_id(thread, authority),
+                )
+            )
             if len(bundles) >= limit:
                 break
 
         _update_slack_filtering_summary(
             run=run,
             organization=organization,
+            connection=connection,
             channel_ids=channel_ids,
             batch_context={
                 "stage": "classification_batch",
@@ -1985,29 +2271,48 @@ class StartupUpdateSlackClassificationResultsView(APIView):
     authentication_classes = []
     permission_classes = [HasRooApiKey]
 
+    @transaction.atomic
     def post(self, request, run_id: str):
         serializer = SlackClassificationResultsSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
-        run = _get_run_or_404(run_id)
+        try:
+            (
+                run,
+                organization,
+                _binding,
+                _profile,
+                connection,
+                authority,
+            ) = _locked_slack_run_context(run_id)
+        except ConnectorOAuthError as exc:
+            return _slack_authority_error_response(exc)
         cancelled_response = _reject_if_run_cancelled(run)
         if cancelled_response is not None:
             return cancelled_response
-        organization, binding, google_connection, profile = _get_org_and_binding_for_run(run)
         _update_run_step(run, step_key="slack_relevance_classification")
 
         updated = 0
         for item in serializer.validated_data["results"]:
-            parsed = _slack_thread_from_public_id(item["slack_thread_id"])
+            parsed = slack_thread_public_id_matches_authority(
+                item["slack_thread_id"],
+                authority,
+            )
             if parsed is None:
                 return Response(
-                    {"error": f"Invalid Slack thread id: {item['slack_thread_id']}"},
-                    status=status.HTTP_400_BAD_REQUEST,
+                    {
+                        "error": (
+                            "Slack thread id is invalid or belongs to a stale "
+                            "connector authority."
+                        )
+                    },
+                    status=status.HTTP_409_CONFLICT,
                 )
             channel_id, thread_ts = parsed
             thread = get_object_or_404(
-                SlackThreadArtifact,
+                SlackThreadArtifact.objects.select_for_update(),
                 organization=organization,
+                connection=connection,
                 channel_id=channel_id,
                 thread_ts=thread_ts,
             )
@@ -2049,6 +2354,7 @@ class StartupUpdateSlackClassificationResultsView(APIView):
         _update_slack_filtering_summary(
             run=run,
             organization=organization,
+            connection=connection,
             channel_ids=_run_slack_channel_ids(run),
             batch_context={"stage": "classification_results", "updated": updated},
         )
@@ -2065,21 +2371,32 @@ class StartupUpdateSlackExtractionBatchView(APIView):
     authentication_classes = []
     permission_classes = [HasRooApiKey]
 
+    @transaction.atomic
     def get(self, request, run_id: str):
         serializer = StartupUpdateBatchQuerySerializer(data=request.query_params)
         serializer.is_valid(raise_exception=True)
         limit = serializer.validated_data["limit"]
 
-        run = _get_run_or_404(run_id)
+        try:
+            (
+                run,
+                organization,
+                _binding,
+                _profile,
+                connection,
+                authority,
+            ) = _locked_slack_run_context(run_id)
+        except ConnectorOAuthError as exc:
+            return _slack_authority_error_response(exc)
         cancelled_response = _reject_if_run_cancelled(run)
         if cancelled_response is not None:
             return cancelled_response
-        organization, binding, google_connection, profile = _get_org_and_binding_for_run(run)
         _update_run_step(run, step_key="slack_event_extraction")
 
         channel_ids = _run_slack_channel_ids(run)
         queryset = SlackThreadArtifact.objects.filter(
             organization=organization,
+            connection=connection,
             extraction_status__in=[ArtifactProcessingStatus.PENDING, ArtifactProcessingStatus.HYDRATED],
             relevance_label__in=EXTRACTABLE_RELEVANCE_LABELS,
             needs_extraction=True,
@@ -2092,10 +2409,17 @@ class StartupUpdateSlackExtractionBatchView(APIView):
             "latest_message_at",
         )[:limit]
 
-        bundles = [compact_slack_thread_bundle(thread) for thread in queryset]
+        bundles = [
+            compact_slack_thread_bundle(
+                thread,
+                slack_thread_id=_slack_thread_public_id(thread, authority),
+            )
+            for thread in queryset
+        ]
         _update_slack_filtering_summary(
             run=run,
             organization=organization,
+            connection=connection,
             channel_ids=channel_ids,
             batch_context={"stage": "extraction_batch", "returned": len(bundles)},
         )
@@ -2118,11 +2442,20 @@ class StartupUpdateSlackExtractionResultsView(APIView):
         serializer = SlackExtractionResultsSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
-        run = _get_run_or_404(run_id)
+        try:
+            (
+                run,
+                organization,
+                _binding,
+                _profile,
+                connection,
+                authority,
+            ) = _locked_slack_run_context(run_id)
+        except ConnectorOAuthError as exc:
+            return _slack_authority_error_response(exc)
         cancelled_response = _reject_if_run_cancelled(run)
         if cancelled_response is not None:
             return cancelled_response
-        organization, binding, google_connection, profile = _get_org_and_binding_for_run(run)
         _update_run_step(run, step_key="slack_event_extraction")
 
         backups = get_startup_update_run_cancel_backups(run)
@@ -2131,13 +2464,25 @@ class StartupUpdateSlackExtractionResultsView(APIView):
         metric_count = 0
         for item in serializer.validated_data["results"]:
             slack_thread_id = item["slack_thread_id"]
-            parts = slack_thread_id.split(":", 2)
-            if len(parts) != 3 or parts[0] != "slack":
-                return Response({"error": f"Invalid Slack thread id: {slack_thread_id}"}, status=status.HTTP_400_BAD_REQUEST)
-            _prefix, channel_id, thread_ts = parts
+            parsed = slack_thread_public_id_matches_authority(
+                slack_thread_id,
+                authority,
+            )
+            if parsed is None:
+                return Response(
+                    {
+                        "error": (
+                            "Slack thread id is invalid or belongs to a stale "
+                            "connector authority."
+                        )
+                    },
+                    status=status.HTTP_409_CONFLICT,
+                )
+            channel_id, thread_ts = parsed
             thread_artifact = get_object_or_404(
-                SlackThreadArtifact,
+                SlackThreadArtifact.objects.select_for_update(),
                 organization=organization,
+                connection=connection,
                 channel_id=channel_id,
                 thread_ts=thread_ts,
             )
@@ -2156,6 +2501,8 @@ class StartupUpdateSlackExtractionResultsView(APIView):
                 "channel_id": thread_artifact.channel_id,
                 "channel_name": thread_artifact.channel_name,
                 "thread_ts": thread_artifact.thread_ts,
+                "slack_connection_id": authority.connection_id,
+                "slack_oauth_generation": authority.oauth_generation,
             }
 
             for event_data in item.get("events", []):
@@ -2181,7 +2528,14 @@ class StartupUpdateSlackExtractionResultsView(APIView):
                         "quantitative_facts": event_data.get("quantitative_facts", []),
                         "evidence_message_ids": event_data.get("evidence_message_ids", []),
                         "evidence_attachment_ids": event_data.get("evidence_attachment_ids", []),
-                        "source_thread_ids": event_data.get("source_thread_ids", []) or [slack_thread_id],
+                        "source_thread_ids": list(
+                            dict.fromkeys(
+                                [
+                                    slack_thread_id,
+                                    *(event_data.get("source_thread_ids") or []),
+                                ]
+                            )
+                        ),
                         "confidence": event_data.get("confidence", 0.0),
                         "status": event_data.get("status", "open"),
                         "needs_review": bool(event_data.get("needs_review", False)),
@@ -2292,12 +2646,15 @@ class StartupUpdateLinearBackfillView(APIView):
     authentication_classes = []
     permission_classes = [HasRooApiKey]
 
+    @_slack_authority_guarded
+    @transaction.atomic
     def post(self, request, run_id: str):
-        run = _get_run_or_404(run_id)
+        run, organization, binding, google_connection, profile = (
+            _locked_pipeline_run_context(run_id)
+        )
         cancelled_response = _reject_if_run_cancelled(run)
         if cancelled_response is not None:
             return cancelled_response
-        organization, binding, google_connection, profile = _get_org_and_binding_for_run(run)
         _update_run_step(run, step_key="linear_backfill")
 
         project_ids = _run_linear_project_ids(run)
@@ -2381,16 +2738,19 @@ class StartupUpdateLinearClassificationBatchView(APIView):
     authentication_classes = []
     permission_classes = [HasRooApiKey]
 
+    @_slack_authority_guarded
+    @transaction.atomic
     def get(self, request, run_id: str):
         serializer = StartupUpdateBatchQuerySerializer(data=request.query_params)
         serializer.is_valid(raise_exception=True)
         limit = serializer.validated_data["limit"]
 
-        run = _get_run_or_404(run_id)
+        run, organization, binding, google_connection, profile = (
+            _locked_pipeline_run_context(run_id)
+        )
         cancelled_response = _reject_if_run_cancelled(run)
         if cancelled_response is not None:
             return cancelled_response
-        organization, binding, google_connection, profile = _get_org_and_binding_for_run(run)
         _update_run_step(run, step_key="linear_relevance_classification")
 
         project_ids = _run_linear_project_ids(run)
@@ -2425,15 +2785,18 @@ class StartupUpdateLinearClassificationResultsView(APIView):
     authentication_classes = []
     permission_classes = [HasRooApiKey]
 
+    @_slack_authority_guarded
+    @transaction.atomic
     def post(self, request, run_id: str):
         serializer = LinearClassificationResultsSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
-        run = _get_run_or_404(run_id)
+        run, organization, binding, google_connection, profile = (
+            _locked_pipeline_run_context(run_id)
+        )
         cancelled_response = _reject_if_run_cancelled(run)
         if cancelled_response is not None:
             return cancelled_response
-        organization, binding, google_connection, profile = _get_org_and_binding_for_run(run)
         _update_run_step(run, step_key="linear_relevance_classification")
 
         updated = 0
@@ -2498,16 +2861,19 @@ class StartupUpdateLinearExtractionBatchView(APIView):
     authentication_classes = []
     permission_classes = [HasRooApiKey]
 
+    @_slack_authority_guarded
+    @transaction.atomic
     def get(self, request, run_id: str):
         serializer = StartupUpdateBatchQuerySerializer(data=request.query_params)
         serializer.is_valid(raise_exception=True)
         limit = serializer.validated_data["limit"]
 
-        run = _get_run_or_404(run_id)
+        run, organization, binding, google_connection, profile = (
+            _locked_pipeline_run_context(run_id)
+        )
         cancelled_response = _reject_if_run_cancelled(run)
         if cancelled_response is not None:
             return cancelled_response
-        organization, binding, google_connection, profile = _get_org_and_binding_for_run(run)
         _update_run_step(run, step_key="linear_event_extraction")
 
         project_ids = _run_linear_project_ids(run)
@@ -2542,16 +2908,18 @@ class StartupUpdateLinearExtractionResultsView(APIView):
     authentication_classes = []
     permission_classes = [HasRooApiKey]
 
+    @_slack_authority_guarded
     @transaction.atomic
     def post(self, request, run_id: str):
         serializer = LinearExtractionResultsSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
-        run = _get_run_or_404(run_id)
+        run, organization, binding, google_connection, profile = (
+            _locked_pipeline_run_context(run_id)
+        )
         cancelled_response = _reject_if_run_cancelled(run)
         if cancelled_response is not None:
             return cancelled_response
-        organization, binding, google_connection, profile = _get_org_and_binding_for_run(run)
         _update_run_step(run, step_key="linear_event_extraction")
 
         backups = get_startup_update_run_cancel_backups(run)
@@ -2817,12 +3185,15 @@ class StartupUpdateNotionBackfillView(APIView):
     authentication_classes = []
     permission_classes = [HasRooApiKey]
 
+    @_slack_authority_guarded
+    @transaction.atomic
     def post(self, request, run_id: str):
-        run = _get_run_or_404(run_id)
+        run, organization, binding, google_connection, profile = (
+            _locked_pipeline_run_context(run_id)
+        )
         cancelled_response = _reject_if_run_cancelled(run)
         if cancelled_response is not None:
             return cancelled_response
-        organization, binding, google_connection, profile = _get_org_and_binding_for_run(run)
         _update_run_step(run, step_key="notion_backfill")
 
         connection = _latest_notion_connection(binding.user, organization)
@@ -2958,15 +3329,18 @@ class StartupUpdateNotionClassificationBatchView(APIView):
     authentication_classes = []
     permission_classes = [HasRooApiKey]
 
+    @_slack_authority_guarded
+    @transaction.atomic
     def get(self, request, run_id: str):
         serializer = StartupUpdateBatchQuerySerializer(data=request.query_params)
         serializer.is_valid(raise_exception=True)
         limit = serializer.validated_data["limit"]
-        run = _get_run_or_404(run_id)
+        run, organization, binding, google_connection, profile = (
+            _locked_pipeline_run_context(run_id)
+        )
         cancelled_response = _reject_if_run_cancelled(run)
         if cancelled_response is not None:
             return cancelled_response
-        organization, binding, google_connection, profile = _get_org_and_binding_for_run(run)
         _update_run_step(run, step_key="notion_relevance_classification")
         connection = _latest_notion_connection(binding.user, organization)
         if connection is None:
@@ -2985,14 +3359,17 @@ class StartupUpdateNotionClassificationResultsView(APIView):
     authentication_classes = []
     permission_classes = [HasRooApiKey]
 
+    @_slack_authority_guarded
+    @transaction.atomic
     def post(self, request, run_id: str):
         serializer = NotionClassificationResultsSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        run = _get_run_or_404(run_id)
+        run, organization, binding, google_connection, profile = (
+            _locked_pipeline_run_context(run_id)
+        )
         cancelled_response = _reject_if_run_cancelled(run)
         if cancelled_response is not None:
             return cancelled_response
-        organization, binding, google_connection, profile = _get_org_and_binding_for_run(run)
         _update_run_step(run, step_key="notion_relevance_classification")
         connection = _latest_notion_connection(binding.user, organization)
         if connection is None:
@@ -3020,15 +3397,18 @@ class StartupUpdateNotionExtractionBatchView(APIView):
     authentication_classes = []
     permission_classes = [HasRooApiKey]
 
+    @_slack_authority_guarded
+    @transaction.atomic
     def get(self, request, run_id: str):
         serializer = StartupUpdateBatchQuerySerializer(data=request.query_params)
         serializer.is_valid(raise_exception=True)
         limit = serializer.validated_data["limit"]
-        run = _get_run_or_404(run_id)
+        run, organization, binding, google_connection, profile = (
+            _locked_pipeline_run_context(run_id)
+        )
         cancelled_response = _reject_if_run_cancelled(run)
         if cancelled_response is not None:
             return cancelled_response
-        organization, binding, google_connection, profile = _get_org_and_binding_for_run(run)
         _update_run_step(run, step_key="notion_event_extraction")
         connection = _latest_notion_connection(binding.user, organization)
         if connection is None:
@@ -3064,15 +3444,17 @@ class StartupUpdateNotionExtractionResultsView(APIView):
     authentication_classes = []
     permission_classes = [HasRooApiKey]
 
+    @_slack_authority_guarded
     @transaction.atomic
     def post(self, request, run_id: str):
         serializer = NotionExtractionResultsSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        run = _get_run_or_404(run_id)
+        run, organization, binding, google_connection, profile = (
+            _locked_pipeline_run_context(run_id)
+        )
         cancelled_response = _reject_if_run_cancelled(run)
         if cancelled_response is not None:
             return cancelled_response
-        organization, binding, google_connection, profile = _get_org_and_binding_for_run(run)
         _update_run_step(run, step_key="notion_event_extraction")
         connection = _latest_notion_connection(binding.user, organization)
         if connection is None:
@@ -3176,8 +3558,12 @@ class StartupUpdateGoogleAnalyticsBackfillView(APIView):
     authentication_classes = []
     permission_classes = [HasRooApiKey]
 
+    @_slack_authority_guarded
+    @transaction.atomic
     def post(self, request, run_id: str):
-        run = _get_run_or_404(run_id)
+        run, _organization, _binding, _google_connection, _profile = (
+            _locked_pipeline_run_context(run_id)
+        )
         cancelled_response = _reject_if_run_cancelled(run)
         if cancelled_response is not None:
             return cancelled_response
@@ -3224,11 +3610,15 @@ class StartupUpdateGoogleAnalyticsClassificationBatchView(APIView):
     authentication_classes = []
     permission_classes = [HasRooApiKey]
 
+    @_slack_authority_guarded
+    @transaction.atomic
     def get(self, request, run_id: str):
         serializer = StartupUpdateBatchQuerySerializer(data=request.query_params)
         serializer.is_valid(raise_exception=True)
         limit = serializer.validated_data["limit"]
-        run = _get_run_or_404(run_id)
+        run, _organization, _binding, _google_connection, _profile = (
+            _locked_pipeline_run_context(run_id)
+        )
         cancelled_response = _reject_if_run_cancelled(run)
         if cancelled_response is not None:
             return cancelled_response
@@ -3252,10 +3642,14 @@ class StartupUpdateGoogleAnalyticsClassificationResultsView(APIView):
     authentication_classes = []
     permission_classes = [HasRooApiKey]
 
+    @_slack_authority_guarded
+    @transaction.atomic
     def post(self, request, run_id: str):
         serializer = GoogleAnalyticsClassificationResultsSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        run = _get_run_or_404(run_id)
+        run, _organization, _binding, _google_connection, _profile = (
+            _locked_pipeline_run_context(run_id)
+        )
         cancelled_response = _reject_if_run_cancelled(run)
         if cancelled_response is not None:
             return cancelled_response
@@ -3280,11 +3674,15 @@ class StartupUpdateGoogleAnalyticsExtractionBatchView(APIView):
     authentication_classes = []
     permission_classes = [HasRooApiKey]
 
+    @_slack_authority_guarded
+    @transaction.atomic
     def get(self, request, run_id: str):
         serializer = StartupUpdateBatchQuerySerializer(data=request.query_params)
         serializer.is_valid(raise_exception=True)
         limit = serializer.validated_data["limit"]
-        run = _get_run_or_404(run_id)
+        run, _organization, _binding, _google_connection, _profile = (
+            _locked_pipeline_run_context(run_id)
+        )
         cancelled_response = _reject_if_run_cancelled(run)
         if cancelled_response is not None:
             return cancelled_response
@@ -3312,15 +3710,17 @@ class StartupUpdateGoogleAnalyticsExtractionResultsView(APIView):
     authentication_classes = []
     permission_classes = [HasRooApiKey]
 
+    @_slack_authority_guarded
     @transaction.atomic
     def post(self, request, run_id: str):
         serializer = GoogleAnalyticsExtractionResultsSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        run = _get_run_or_404(run_id)
+        run, organization, binding, google_connection, profile = (
+            _locked_pipeline_run_context(run_id)
+        )
         cancelled_response = _reject_if_run_cancelled(run)
         if cancelled_response is not None:
             return cancelled_response
-        organization, binding, google_connection, profile = _get_org_and_binding_for_run(run)
         _update_run_step(run, step_key="google_analytics_event_extraction")
         connection = resolve_google_analytics_connection_for_run(run)
         if connection is None:
@@ -3458,12 +3858,17 @@ class StartupUpdateCurationContextView(APIView):
     authentication_classes = []
     permission_classes = [HasRooApiKey]
 
+    @transaction.atomic
     def get(self, request, run_id: str):
-        run = _get_run_or_404(run_id)
+        try:
+            run, organization, binding, google_connection, profile = (
+                _locked_pipeline_run_context(run_id)
+            )
+        except ConnectorOAuthError as exc:
+            return _slack_authority_error_response(exc)
         cancelled_response = _reject_if_run_cancelled(run)
         if cancelled_response is not None:
             return cancelled_response
-        organization, binding, google_connection, profile = _get_org_and_binding_for_run(run)
         _update_run_step(run, step_key="candidate_curation")
         current_month = get_startup_update_run_target_month(run)
         prior_updates = []
@@ -3489,10 +3894,16 @@ class StartupUpdateCurationResultsView(APIView):
     authentication_classes = []
     permission_classes = [HasRooApiKey]
 
+    @transaction.atomic
     def post(self, request, run_id: str):
         serializer = CurationResultsSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        run = _get_run_or_404(run_id)
+        try:
+            run, _organization, _binding, _google_connection, _profile = (
+                _locked_pipeline_run_context(run_id)
+            )
+        except ConnectorOAuthError as exc:
+            return _slack_authority_error_response(exc)
         cancelled_response = _reject_if_run_cancelled(run)
         if cancelled_response is not None:
             return cancelled_response
@@ -3514,8 +3925,17 @@ class StartupUpdateReviewCandidatesView(APIView):
     authentication_classes = []
     permission_classes = [HasRooApiKey]
 
+    @transaction.atomic
     def get(self, request, run_id: str):
-        run = _get_run_or_404(run_id)
+        try:
+            run, _organization, _binding, _google_connection, _profile = (
+                _locked_pipeline_run_context(run_id)
+            )
+        except ConnectorOAuthError as exc:
+            return _slack_authority_error_response(exc)
+        cancelled_response = _reject_if_run_cancelled(run)
+        if cancelled_response is not None:
+            return cancelled_response
         return Response(
             {
                 "run": _serialize_run(run, request),
@@ -3529,8 +3949,14 @@ class StartupUpdateFounderReviewAutoApproveView(APIView):
     authentication_classes = []
     permission_classes = [HasRooApiKey]
 
+    @transaction.atomic
     def post(self, request, run_id: str):
-        run = _get_run_or_404(run_id)
+        try:
+            run, _organization, _binding, _google_connection, _profile = (
+                _locked_pipeline_run_context(run_id)
+            )
+        except ConnectorOAuthError as exc:
+            return _slack_authority_error_response(exc)
         cancelled_response = _reject_if_run_cancelled(run)
         if cancelled_response is not None:
             return cancelled_response
@@ -3575,12 +4001,20 @@ class StartupUpdateCuratedTimelineView(APIView):
     authentication_classes = []
     permission_classes = [HasRooApiKey]
 
+    @transaction.atomic
     def get(self, request, run_id: str):
-        run = _get_run_or_404(run_id)
+        try:
+            run, organization, binding, google_connection, profile = (
+                _locked_pipeline_run_context(run_id)
+            )
+        except ConnectorOAuthError as exc:
+            return _slack_authority_error_response(exc)
+        cancelled_response = _reject_if_run_cancelled(run)
+        if cancelled_response is not None:
+            return cancelled_response
         audience = str(request.query_params.get("audience") or "investor").strip().lower()
         if audience not in {"investor", "community"}:
             return Response({"error": "audience must be investor or community."}, status=status.HTTP_400_BAD_REQUEST)
-        organization, binding, google_connection, profile = _get_org_and_binding_for_run(run)
         candidates = _run_result_candidates(run)
         approved_event_ids = set()
         approved_metric_ids = set()
@@ -3620,12 +4054,17 @@ class StartupUpdateTimelineView(APIView):
     authentication_classes = []
     permission_classes = [HasRooApiKey]
 
+    @transaction.atomic
     def get(self, request, run_id: str):
-        run = _get_run_or_404(run_id)
+        try:
+            run, organization, binding, google_connection, profile = (
+                _locked_pipeline_run_context(run_id)
+            )
+        except ConnectorOAuthError as exc:
+            return _slack_authority_error_response(exc)
         cancelled_response = _reject_if_run_cancelled(run)
         if cancelled_response is not None:
             return cancelled_response
-        organization, binding, google_connection, profile = _get_org_and_binding_for_run(run)
         _update_run_step(run, step_key="timeline_merge")
         return Response(
             {
@@ -3640,8 +4079,17 @@ class StartupUpdateDraftResultsView(APIView):
     authentication_classes = []
     permission_classes = [HasRooApiKey]
 
+    @transaction.atomic
     def get(self, request, run_id: str):
-        run = _get_run_or_404(run_id)
+        try:
+            run, _organization, _binding, _google_connection, _profile = (
+                _locked_pipeline_run_context(run_id)
+            )
+        except ConnectorOAuthError as exc:
+            return _slack_authority_error_response(exc)
+        cancelled_response = _reject_if_run_cancelled(run)
+        if cancelled_response is not None:
+            return cancelled_response
         drafts = list(run.monthly_update_drafts.order_by("-month", "-updated_at"))
         payload = _serialize_draft_results_bundle(drafts)
         if payload is None:
@@ -3658,15 +4106,20 @@ class StartupUpdateDraftResultsView(APIView):
             status=status.HTTP_200_OK,
         )
 
+    @transaction.atomic
     def post(self, request, run_id: str):
         serializer = DraftResultsSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
-        run = _get_run_or_404(run_id)
+        try:
+            run, organization, binding, google_connection, profile = (
+                _locked_pipeline_run_context(run_id)
+            )
+        except ConnectorOAuthError as exc:
+            return _slack_authority_error_response(exc)
         cancelled_response = _reject_if_run_cancelled(run)
         if cancelled_response is not None:
             return cancelled_response
-        organization, binding, google_connection, profile = _get_org_and_binding_for_run(run)
         _update_run_step(run, step_key="draft_generation")
 
         replace_existing = bool((run.run_request or {}).get("force_regenerate"))
@@ -3716,6 +4169,7 @@ class StartupUpdateDraftResultsView(APIView):
         except OperationalError as exc:
             if not _is_transient_sqlite_lock(exc):
                 raise
+            transaction.set_rollback(True)
             return Response(
                 {
                     "error": "transient_database_lock",

@@ -1,5 +1,4 @@
 import csv
-from collections import Counter
 from io import StringIO
 from unittest.mock import patch
 
@@ -9,7 +8,7 @@ from django.test import SimpleTestCase, TestCase
 from rest_framework.test import APIClient
 
 from .models import Team
-from .views import SOLUTION_PATH, custom_score, find_label_episodes, map_state_label
+from .views import custom_score, find_label_episodes, load_ground_truth, map_state_label
 
 
 User = get_user_model()
@@ -38,23 +37,10 @@ class ScoringUnitTests(SimpleTestCase):
         )
 
 
-class AustralianGroundTruthTests(SimpleTestCase):
-    def test_solution_has_expected_new_holdout_composition(self):
-        label_counts = Counter()
-        usage_counts = Counter()
-        last_id = 0
-        with SOLUTION_PATH.open(encoding='utf-8-sig', newline='') as handle:
-            reader = csv.DictReader(handle)
-            self.assertEqual(reader.fieldnames, ['ID', 'predicted_label', 'Usage'])
-            for expected_id, row in enumerate(reader, start=1):
-                self.assertEqual(int(row['ID']), expected_id)
-                label_counts[int(row['predicted_label'])] += 1
-                usage_counts[row['Usage']] += 1
-                last_id = expected_id
-
-        self.assertEqual(last_id, 452_880)
-        self.assertEqual(label_counts, {0: 331_167, 1: 81_617, 2: 31_471, 3: 8_625})
-        self.assertEqual(usage_counts, {'Private': 272_160, 'Public': 180_720})
+    @patch('hospital.views.SOLUTION_PATH', None)
+    @patch('hospital.views._ground_truth_cache', None)
+    def test_ground_truth_is_unavailable_without_private_data_path(self):
+        self.assertEqual(load_ground_truth(), [])
 
 
 class SubmissionScoringTests(TestCase):
@@ -104,25 +90,6 @@ class SubmissionScoringTests(TestCase):
         self.assertEqual(payload['accuracy'], 1.0)
         self.assertEqual(payload['feedback']['class_stats']['3']['name'], 'Death')
         self.assertEqual(payload['feedback']['clinical_metrics']['patients_saved'], 1)
-        self.assertEqual(payload['feedback']['clinical_metrics']['false_alarms'], 0)
-
-    def test_endpoint_scores_full_australian_holdout(self):
-        rows = []
-        with SOLUTION_PATH.open(encoding='utf-8-sig', newline='') as handle:
-            for row in csv.DictReader(handle):
-                rows.append((row['ID'], row['predicted_label']))
-
-        response = self.upload(rows)
-
-        self.assertEqual(response.status_code, 200)
-        payload = response.json()
-        self.assertEqual(payload['score'], 283_522)
-        self.assertEqual(payload['accuracy'], 1.0)
-        self.assertEqual(payload['feedback']['class_stats']['0']['total'], 331_167)
-        self.assertEqual(payload['feedback']['class_stats']['1']['total'], 81_617)
-        self.assertEqual(payload['feedback']['class_stats']['2']['total'], 31_471)
-        self.assertEqual(payload['feedback']['class_stats']['3']['total'], 8_625)
-        self.assertEqual(payload['feedback']['missed_crises_total'], 0)
         self.assertEqual(payload['feedback']['clinical_metrics']['false_alarms'], 0)
 
     def test_endpoint_rejects_out_of_order_ids(self):

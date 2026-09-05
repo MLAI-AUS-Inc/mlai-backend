@@ -24,7 +24,7 @@ from .models import (
 )
 from .permissions import (
     is_points_admin, require_admin, 
-    PermissionDeniedError, InsufficientBalanceError
+    PermissionDeniedError, InsufficientBalanceError, IdempotencyConflictError
 )
 from core.models import User
 
@@ -384,6 +384,123 @@ class PointsService:
     Service class for points operations.
     All methods are idempotent and transaction-safe.
     """
+
+    MICROROO_PER_ROO = 1_000_000
+
+    @staticmethod
+    def roo_to_microroo(value: int) -> int:
+        return int(value) * PointsService.MICROROO_PER_ROO
+
+    @staticmethod
+    def microroo_to_legacy_whole(value: int) -> int:
+        """Return whole spendable Roo for compatibility APIs."""
+        return max(int(value), 0) // PointsService.MICROROO_PER_ROO
+
+    @staticmethod
+    def _validate_idempotent_ledger(
+        existing: Ledger,
+        *,
+        user: User,
+        kind: str,
+        source: str,
+        delta: Optional[int],
+        delta_microroo: int,
+        reference_type: Optional[str],
+        reference_id: Optional[str],
+    ) -> None:
+        """Reject an idempotency key that belongs to another operation.
+
+        An idempotency key identifies the complete balance mutation, not merely
+        a ledger row.  Returning a colliding row for another user, amount, kind,
+        source, or reference can make callers believe their requested mutation
+        succeeded even though a different mutation won the key.
+        """
+        if (
+            existing.user_id != user.id
+            or existing.kind != kind
+            or existing.source != source
+            or (delta is not None and existing.delta != delta)
+            or existing.delta_microroo != delta_microroo
+            or existing.reference_type != reference_type
+            or existing.reference_id != reference_id
+        ):
+            raise IdempotencyConflictError(
+                "That idempotency key belongs to a different points operation"
+            )
+
+    @staticmethod
+    def _ensure_microroo_account(account: PointsAccount) -> bool:
+        """Hydrate microroo fields for rows built by legacy code/tests.
+
+        Production rows are populated by the precision migration.  This lazy
+        bridge keeps old call sites that instantiate ``PointsAccount`` using
+        only integer Roo fields safe during the compatibility window.
+        """
+        if not account.microroo_initialized:
+            account.balance_microroo = PointsService.roo_to_microroo(account.balance)
+            account.earned_balance_microroo = PointsService.roo_to_microroo(account.earned_balance)
+            account.purchased_topup_balance_microroo = PointsService.roo_to_microroo(account.purchased_topup_balance)
+            account.lifetime_earned_microroo = PointsService.roo_to_microroo(account.lifetime_earned)
+            account.lifetime_purchased_topup_microroo = PointsService.roo_to_microroo(account.lifetime_purchased_topup)
+            account.lifetime_spent_microroo = PointsService.roo_to_microroo(account.lifetime_spent)
+            account.expired_or_reversed_microroo = PointsService.roo_to_microroo(account.expired_or_reversed_points)
+            account.microroo_initialized = True
+            return True
+        return False
+
+    @staticmethod
+    def _sync_legacy_account(account: PointsAccount) -> None:
+        account.microroo_initialized = True
+        account.balance = PointsService.microroo_to_legacy_whole(account.balance_microroo)
+        account.earned_balance = PointsService.microroo_to_legacy_whole(account.earned_balance_microroo)
+        account.purchased_topup_balance = PointsService.microroo_to_legacy_whole(account.purchased_topup_balance_microroo)
+        account.lifetime_earned = PointsService.microroo_to_legacy_whole(account.lifetime_earned_microroo)
+        account.lifetime_purchased_topup = PointsService.microroo_to_legacy_whole(account.lifetime_purchased_topup_microroo)
+        account.lifetime_spent = PointsService.microroo_to_legacy_whole(account.lifetime_spent_microroo)
+        account.expired_or_reversed_points = PointsService.microroo_to_legacy_whole(account.expired_or_reversed_microroo)
+
+    @staticmethod
+    def _reserved_microroo(user: User, *, exclude_turn_id=None) -> int:
+        # Imported lazily so the foundational points service remains usable
+        # while migrations are being applied.
+        from .models import CodingTurn
+
+        query = CodingTurn.objects.filter(
+            user=user,
+            status__in=(CodingTurn.Status.ACTIVE, CodingTurn.Status.RECONCILING),
+        )
+        if exclude_turn_id is not None:
+            query = query.exclude(id=exclude_turn_id)
+        return sum(
+            max(turn.reserved_microroo - turn.settled_microroo - turn.released_microroo, 0)
+            for turn in query.only(
+                "reserved_microroo", "settled_microroo", "released_microroo"
+            )
+        )
+
+    @staticmethod
+    def get_available_microroo(user: User, *, exclude_turn_id=None) -> int:
+        account = PointsService.get_or_create_account(user)
+        initialized = PointsService._ensure_microroo_account(account)
+        if initialized:
+            account.save(
+                update_fields=(
+                    "balance_microroo",
+                    "earned_balance_microroo",
+                    "purchased_topup_balance_microroo",
+                    "lifetime_earned_microroo",
+                    "lifetime_purchased_topup_microroo",
+                    "lifetime_spent_microroo",
+                    "expired_or_reversed_microroo",
+                    "microroo_initialized",
+                    "updated_at",
+                )
+            )
+        return max(
+            account.balance_microroo
+            - PointsService._reserved_microroo(user, exclude_turn_id=exclude_turn_id),
+            0,
+        )
     
     @staticmethod
     def get_or_create_account(user: User) -> PointsAccount:
@@ -411,6 +528,7 @@ class PointsService:
             Dict with balance, lifetime_earned, lifetime_spent
         """
         account = PointsService.get_or_create_account(user)
+        PointsService._ensure_microroo_account(account)
         return {
             'balance': account.balance,
             'earned_balance': account.earned_balance,
@@ -419,6 +537,13 @@ class PointsService:
             'lifetime_purchased_topup': account.lifetime_purchased_topup,
             'lifetime_spent': account.lifetime_spent,
             'expired_or_reversed_points': account.expired_or_reversed_points,
+            'balance_microroo': account.balance_microroo,
+            'earned_balance_microroo': account.earned_balance_microroo,
+            'purchased_topup_balance_microroo': account.purchased_topup_balance_microroo,
+            'lifetime_earned_microroo': account.lifetime_earned_microroo,
+            'lifetime_purchased_topup_microroo': account.lifetime_purchased_topup_microroo,
+            'lifetime_spent_microroo': account.lifetime_spent_microroo,
+            'expired_or_reversed_microroo': account.expired_or_reversed_microroo,
         }
 
     @staticmethod
@@ -436,6 +561,99 @@ class PointsService:
 
         earned_debit = min(account.earned_balance, remaining)
         account.earned_balance -= earned_debit
+
+    @staticmethod
+    def _debit_account_microroo_balances(account: PointsAccount, delta_microroo: int) -> None:
+        remaining = delta_microroo
+        purchased_debit = min(account.purchased_topup_balance_microroo, remaining)
+        account.purchased_topup_balance_microroo -= purchased_debit
+        remaining -= purchased_debit
+        earned_debit = min(account.earned_balance_microroo, remaining)
+        account.earned_balance_microroo -= earned_debit
+
+    @staticmethod
+    @transaction.atomic
+    def spend_microroo(
+        *,
+        user: User,
+        delta_microroo: int,
+        source: str,
+        description: str,
+        created_by_slack_id: str,
+        idempotency_key: str,
+        reference_type: Optional[str] = None,
+        reference_id: Optional[str] = None,
+        allow_reserved_turn_id=None,
+    ) -> Tuple[Ledger, bool]:
+        """Spend an exact microroo amount without allowing a negative balance."""
+        if delta_microroo <= 0:
+            raise ValueError("Microroo spend delta must be positive")
+        def validate_existing(existing: Ledger) -> None:
+            PointsService._validate_idempotent_ledger(
+                existing,
+                user=user,
+                kind="SPEND",
+                source=source,
+                # The legacy whole-Roo projection of a fractional debit depends
+                # on the balance boundary crossed by the original call.  The
+                # exact microroo delta below is the authoritative amount.
+                delta=None,
+                delta_microroo=-delta_microroo,
+                reference_type=reference_type,
+                reference_id=reference_id,
+            )
+
+        existing = Ledger.objects.filter(idempotency_key=idempotency_key).first()
+        if existing:
+            validate_existing(existing)
+            return existing, False
+
+        account = PointsAccount.objects.select_for_update().filter(user=user).first()
+        if not account:
+            account = PointsAccount.objects.create(user=user)
+            account = PointsAccount.objects.select_for_update().get(user=user)
+        PointsService._ensure_microroo_account(account)
+
+        reserved_elsewhere = PointsService._reserved_microroo(
+            user,
+            exclude_turn_id=allow_reserved_turn_id,
+        )
+        available = max(account.balance_microroo - reserved_elsewhere, 0)
+        if available < delta_microroo:
+            raise InsufficientBalanceError(
+                f"Insufficient microroo balance: {available} < {delta_microroo} required"
+            )
+
+        before_whole = PointsService.microroo_to_legacy_whole(account.balance_microroo)
+        account.balance_microroo -= delta_microroo
+        PointsService._debit_account_microroo_balances(account, delta_microroo)
+        account.lifetime_spent_microroo += delta_microroo
+        PointsService._sync_legacy_account(account)
+        after_whole = account.balance
+        legacy_delta = after_whole - before_whole
+
+        try:
+            # Use a savepoint: an idempotency race must not poison the outer
+            # transaction before we can safely load the winning row.
+            with transaction.atomic():
+                ledger = Ledger.objects.create(
+                    user=user,
+                    delta=legacy_delta,
+                    delta_microroo=-delta_microroo,
+                    kind='SPEND',
+                    source=source,
+                    reference_type=reference_type,
+                    reference_id=reference_id,
+                    description=description,
+                    created_by_slack_id=created_by_slack_id,
+                    idempotency_key=idempotency_key,
+                )
+        except IntegrityError:
+            existing = Ledger.objects.get(idempotency_key=idempotency_key)
+            validate_existing(existing)
+            return existing, False
+        account.save()
+        return ledger, True
     
     @staticmethod
     def get_user_by_slack_id(slack_id: str) -> Optional[User]:
@@ -529,10 +747,24 @@ class PointsService:
         """
         if delta <= 0:
             raise ValueError("Award delta must be positive")
-        
+        delta_microroo = PointsService.roo_to_microroo(delta)
+
+        def validate_existing(existing: Ledger) -> None:
+            PointsService._validate_idempotent_ledger(
+                existing,
+                user=user,
+                kind="EARN",
+                source=source,
+                delta=delta,
+                delta_microroo=delta_microroo,
+                reference_type=reference_type,
+                reference_id=reference_id,
+            )
+
         # Check for existing entry with same idempotency key
         existing = Ledger.objects.filter(idempotency_key=idempotency_key).first()
         if existing:
+            validate_existing(existing)
             return existing, False
         
         # Lock the account row for update
@@ -541,29 +773,36 @@ class PointsService:
             account = PointsAccount.objects.create(user=user)
             # Re-fetch with lock
             account = PointsAccount.objects.select_for_update().get(user=user)
+        PointsService._ensure_microroo_account(account)
         
         # Create ledger entry
         try:
-            ledger = Ledger.objects.create(
-                user=user,
-                delta=delta,
-                kind='EARN',
-                source=source,
-                reference_type=reference_type,
-                reference_id=reference_id,
-                description=description,
-                created_by_slack_id=created_by_slack_id,
-                idempotency_key=idempotency_key,
-            )
+            # The savepoint keeps the outer account transaction usable after a
+            # concurrent request wins the ledger key's unique constraint.
+            with transaction.atomic():
+                ledger = Ledger.objects.create(
+                    user=user,
+                    delta=delta,
+                    delta_microroo=delta_microroo,
+                    kind='EARN',
+                    source=source,
+                    reference_type=reference_type,
+                    reference_id=reference_id,
+                    description=description,
+                    created_by_slack_id=created_by_slack_id,
+                    idempotency_key=idempotency_key,
+                )
         except IntegrityError:
             # Race condition - another process created the entry
             existing = Ledger.objects.get(idempotency_key=idempotency_key)
+            validate_existing(existing)
             return existing, False
         
         # Update account
-        account.balance += delta
-        account.earned_balance += delta
-        account.lifetime_earned += delta
+        account.balance_microroo += delta_microroo
+        account.earned_balance_microroo += delta_microroo
+        account.lifetime_earned_microroo += delta_microroo
+        PointsService._sync_legacy_account(account)
         account.save()
         
         return ledger, True
@@ -584,35 +823,54 @@ class PointsService:
         """
         if delta <= 0:
             raise ValueError("Top-up credit delta must be positive")
+        delta_microroo = PointsService.roo_to_microroo(delta)
+
+        def validate_existing(existing: Ledger) -> None:
+            PointsService._validate_idempotent_ledger(
+                existing,
+                user=user,
+                kind="EARN",
+                source="purchased_topup",
+                delta=delta,
+                delta_microroo=delta_microroo,
+                reference_type=reference_type,
+                reference_id=reference_id,
+            )
 
         existing = Ledger.objects.filter(idempotency_key=idempotency_key).first()
         if existing:
+            validate_existing(existing)
             return existing, False
 
         account = PointsAccount.objects.select_for_update().filter(user=user).first()
         if not account:
             account = PointsAccount.objects.create(user=user)
             account = PointsAccount.objects.select_for_update().get(user=user)
+        PointsService._ensure_microroo_account(account)
 
         try:
-            ledger = Ledger.objects.create(
-                user=user,
-                delta=delta,
-                kind='EARN',
-                source='purchased_topup',
-                reference_type=reference_type,
-                reference_id=reference_id,
-                description=description,
-                created_by_slack_id=created_by_slack_id,
-                idempotency_key=idempotency_key,
-            )
+            with transaction.atomic():
+                ledger = Ledger.objects.create(
+                    user=user,
+                    delta=delta,
+                    delta_microroo=delta_microroo,
+                    kind='EARN',
+                    source='purchased_topup',
+                    reference_type=reference_type,
+                    reference_id=reference_id,
+                    description=description,
+                    created_by_slack_id=created_by_slack_id,
+                    idempotency_key=idempotency_key,
+                )
         except IntegrityError:
             existing = Ledger.objects.get(idempotency_key=idempotency_key)
+            validate_existing(existing)
             return existing, False
 
-        account.balance += delta
-        account.purchased_topup_balance += delta
-        account.lifetime_purchased_topup += delta
+        account.balance_microroo += delta_microroo
+        account.purchased_topup_balance_microroo += delta_microroo
+        account.lifetime_purchased_topup_microroo += delta_microroo
+        PointsService._sync_legacy_account(account)
         account.save()
 
         return ledger, True
@@ -651,10 +909,24 @@ class PointsService:
         """
         if delta <= 0:
             raise ValueError("Spend delta must be positive")
-        
+        delta_microroo = PointsService.roo_to_microroo(delta)
+
+        def validate_existing(existing: Ledger) -> None:
+            PointsService._validate_idempotent_ledger(
+                existing,
+                user=user,
+                kind="SPEND",
+                source=source,
+                delta=-delta,
+                delta_microroo=-delta_microroo,
+                reference_type=reference_type,
+                reference_id=reference_id,
+            )
+
         # Check for existing entry with same idempotency key
         existing = Ledger.objects.filter(idempotency_key=idempotency_key).first()
         if existing:
+            validate_existing(existing)
             return existing, False
         
         # Lock the account row for update
@@ -662,34 +934,43 @@ class PointsService:
         if not account:
             account = PointsAccount.objects.create(user=user)
             account = PointsAccount.objects.select_for_update().get(user=user)
+        PointsService._ensure_microroo_account(account)
         
         # Check balance
-        if account.balance < delta:
+        available_microroo = max(
+            account.balance_microroo - PointsService._reserved_microroo(user),
+            0,
+        )
+        if available_microroo < delta_microroo:
             raise InsufficientBalanceError(
-                f"Insufficient balance: {account.balance} < {delta} required"
+                f"Insufficient balance: {PointsService.microroo_to_legacy_whole(available_microroo)} < {delta} required"
             )
         
         # Create ledger entry (negative delta)
         try:
-            ledger = Ledger.objects.create(
-                user=user,
-                delta=-delta,
-                kind='SPEND',
-                source=source,
-                reference_type=reference_type,
-                reference_id=reference_id,
-                description=description,
-                created_by_slack_id=created_by_slack_id,
-                idempotency_key=idempotency_key,
-            )
+            with transaction.atomic():
+                ledger = Ledger.objects.create(
+                    user=user,
+                    delta=-delta,
+                    delta_microroo=-delta_microroo,
+                    kind='SPEND',
+                    source=source,
+                    reference_type=reference_type,
+                    reference_id=reference_id,
+                    description=description,
+                    created_by_slack_id=created_by_slack_id,
+                    idempotency_key=idempotency_key,
+                )
         except IntegrityError:
             existing = Ledger.objects.get(idempotency_key=idempotency_key)
+            validate_existing(existing)
             return existing, False
         
         # Update account
-        account.balance -= delta
-        PointsService._debit_account_balances(account, delta)
-        account.lifetime_spent += delta
+        account.balance_microroo -= delta_microroo
+        PointsService._debit_account_microroo_balances(account, delta_microroo)
+        account.lifetime_spent_microroo += delta_microroo
+        PointsService._sync_legacy_account(account)
         account.save()
         
         return ledger, True
@@ -705,43 +986,92 @@ class PointsService:
         idempotency_key: str,
         reference_type: Optional[str] = None,
         reference_id: Optional[str] = None,
+        purchased_delta: int = 0,
+        purchased_delta_microroo: Optional[int] = None,
+        reverse_lifetime_spent: bool = False,
     ) -> Tuple[Ledger, bool]:
         """
         Refund points to a user (restore previously spent points).
-        
+
+        ``purchased_delta_microroo`` preserves the exact original point buckets
+        when the caller recorded the spend allocation. ``purchased_delta`` is
+        retained for whole-Roo callers. ``reverse_lifetime_spent`` is reserved
+        for true reversals such as a pre-start booking cancellation.
         Similar to award but uses REFUND kind for audit trail clarity.
         """
         if delta <= 0:
             raise ValueError("Refund delta must be positive")
-        
+        delta_microroo = PointsService.roo_to_microroo(delta)
+
+        if purchased_delta_microroo is not None and purchased_delta:
+            raise ValueError(
+                "Specify either purchased_delta or purchased_delta_microroo, not both"
+            )
+        if purchased_delta_microroo is None:
+            purchased_delta_microroo = PointsService.roo_to_microroo(
+                purchased_delta
+            )
+        if (
+            purchased_delta_microroo < 0
+            or purchased_delta_microroo > delta_microroo
+        ):
+            raise ValueError(
+                "Purchased refund delta must be between zero and delta"
+            )
+
+        def validate_existing(existing: Ledger) -> None:
+            PointsService._validate_idempotent_ledger(
+                existing,
+                user=user,
+                kind="REFUND",
+                source=source,
+                delta=delta,
+                delta_microroo=delta_microroo,
+                reference_type=reference_type,
+                reference_id=reference_id,
+            )
+
         existing = Ledger.objects.filter(idempotency_key=idempotency_key).first()
         if existing:
+            validate_existing(existing)
             return existing, False
         
         account = PointsAccount.objects.select_for_update().filter(user=user).first()
         if not account:
             account = PointsAccount.objects.create(user=user)
             account = PointsAccount.objects.select_for_update().get(user=user)
+        PointsService._ensure_microroo_account(account)
         
         try:
-            ledger = Ledger.objects.create(
-                user=user,
-                delta=delta,
-                kind='REFUND',
-                source=source,
-                reference_type=reference_type,
-                reference_id=reference_id,
-                description=description,
-                created_by_slack_id=created_by_slack_id,
-                idempotency_key=idempotency_key,
-            )
+            with transaction.atomic():
+                ledger = Ledger.objects.create(
+                    user=user,
+                    delta=delta,
+                    delta_microroo=delta_microroo,
+                    kind='REFUND',
+                    source=source,
+                    reference_type=reference_type,
+                    reference_id=reference_id,
+                    description=description,
+                    created_by_slack_id=created_by_slack_id,
+                    idempotency_key=idempotency_key,
+                )
         except IntegrityError:
             existing = Ledger.objects.get(idempotency_key=idempotency_key)
+            validate_existing(existing)
             return existing, False
         
-        account.balance += delta
-        account.earned_balance += delta
-        # Note: Don't decrease lifetime_spent on refund - it's a historical record
+        account.balance_microroo += delta_microroo
+        account.purchased_topup_balance_microroo += purchased_delta_microroo
+        account.earned_balance_microroo += (
+            delta_microroo - purchased_delta_microroo
+        )
+        if reverse_lifetime_spent:
+            account.lifetime_spent_microroo = max(
+                0,
+                account.lifetime_spent_microroo - delta_microroo,
+            )
+        PointsService._sync_legacy_account(account)
         account.save()
         
         return ledger, True
@@ -1364,6 +1694,7 @@ class BoostPostAdmissionService:
         poster_slack_id: str,
         root_text: str,
         social_post_url: str,
+        recheck_insufficient_points: bool = False,
     ) -> tuple[BoostPostAdmission, bool]:
         # Campaign content is not an admission rule. Keep the first URL only as
         # optional metadata while points balance remains the sole business gate.
@@ -1399,6 +1730,10 @@ class BoostPostAdmissionService:
             raise BoostPostPayloadConflictError(
                 'submission_key is already bound to a different Slack root'
             )
+        if admission.status == 'insufficient_points' and recheck_insufficient_points:
+            admission.status = 'processing'
+            admission.rejection_message = ''
+            admission.save(update_fields=['status', 'rejection_message', 'updated_at'])
         if admission.status != 'processing':
             return admission, False
 

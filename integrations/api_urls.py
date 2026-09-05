@@ -20,6 +20,7 @@ urlpatterns = [
     path('luma/attendee-report', api_views_luma.LumaAttendeeReportView.as_view(), name='luma_attendee_report'),
     path('reconciliation/report', api_views_reconciliation.ReconciliationReportView.as_view(), name='reconciliation_report'),
     path('reconciliation/profile', api_views_reconciliation.ReconciliationProfileView.as_view(), name='reconciliation_profile'),
+    path('reconciliation/bank-accounts', api_views_reconciliation.ReconciliationBankAccountCatalogView.as_view(), name='reconciliation_bank_accounts'),
     path('reconciliation/mappings', api_views_reconciliation.ReconciliationMappingView.as_view(), name='reconciliation_mappings'),
     path('reconciliation/enrichment-context', api_views_reconciliation.ReconciliationEnrichmentContextView.as_view(), name='reconciliation_enrichment_context'),
     path('reconciliation/statement-lines', api_views_reconciliation.ReconciliationStatementLineListView.as_view(), name='reconciliation_statement_lines'),
@@ -35,6 +36,7 @@ urlpatterns = [
     path('reconciliation/agent-runs', api_views_reconciliation.ReconciliationAgentRunView.as_view(), name='reconciliation_agent_runs'),
     path('reconciliation/agent-runs/<str:run_id>', api_views_reconciliation.ReconciliationAgentRunDetailView.as_view(), name='reconciliation_agent_run_detail'),
     path('reconciliation/agent-runs/<str:run_id>/retry', api_views_reconciliation.ReconciliationAgentRunRetryView.as_view(), name='reconciliation_agent_run_retry'),
+    path('reconciliation/agent-runs/<str:run_id>/fail', api_views_reconciliation.ReconciliationAgentRunFailureView.as_view(), name='reconciliation_agent_run_fail'),
     path('reconciliation/agent-runs/<str:run_id>/preview', api_views_reconciliation.ReconciliationAgentRunPreviewView.as_view(), name='reconciliation_agent_run_preview'),
     path('reconciliation/agent-runs/<str:run_id>/decisions', api_views_reconciliation.ReconciliationAgentRunDecisionView.as_view(), name='reconciliation_agent_run_decisions'),
     path('reconciliation/agent-runs/<str:run_id>/execute', api_views_reconciliation.ReconciliationAgentRunExecuteView.as_view(), name='reconciliation_agent_run_execute'),
@@ -229,6 +231,36 @@ urlpatterns = [
         name='linear_meeting_context',
     ),
     path(
+        'linear/channel-issues/list',
+        api_views_connectors.LinearChannelIssueListView.as_view(),
+        name='linear_channel_issue_list',
+    ),
+    path(
+        'linear/channel-issues/detail',
+        api_views_connectors.LinearChannelIssueDetailView.as_view(),
+        name='linear_channel_issue_detail',
+    ),
+    path(
+        'linear/channel-issues/statuses',
+        api_views_connectors.LinearChannelIssueStatusesView.as_view(),
+        name='linear_channel_issue_statuses',
+    ),
+    path(
+        'linear/channel-issues/write',
+        api_views_connectors.LinearChannelIssueWriteView.as_view(),
+        name='linear_channel_issue_write',
+    ),
+    path(
+        'linear/channel-issues/create',
+        api_views_connectors.LinearChannelIssueCreateView.as_view(),
+        name='linear_channel_issue_create',
+    ),
+    path(
+        'linear/projects/resolve',
+        api_views_connectors.LinearProjectResolveView.as_view(),
+        name='linear_project_resolve',
+    ),
+    path(
         'linear/issues',
         api_views_connectors.LinearMeetingIssueCreateView.as_view(),
         name='linear_meeting_issue_create',
@@ -239,9 +271,54 @@ urlpatterns = [
         name='linear_meeting_issue_receipt',
     ),
     path(
+        'linear/action-batches',
+        api_views_connectors.LinearMeetingActionBatchCreateView.as_view(),
+        name='linear_meeting_action_batch_create',
+    ),
+    path(
+        'linear/action-batches/<uuid:batch_id>',
+        api_views_connectors.LinearMeetingActionBatchDetailView.as_view(),
+        name='linear_meeting_action_batch_detail',
+    ),
+    path(
+        'linear/action-batches/<uuid:batch_id>/decisions',
+        api_views_connectors.LinearMeetingActionBatchDecisionView.as_view(),
+        name='linear_meeting_action_batch_decision',
+    ),
+    path(
         'linear/projects/<str:project_id>/sizing-context',
         api_views_connectors.LinearProjectSizingContextView.as_view(),
         name='linear_project_sizing_context',
+    ),
+    path(
+        'linear/projects/<str:project_id>/issues',
+        api_views_connectors.LinearProjectIssueInventoryView.as_view(),
+        name='linear_project_issue_inventory',
+    ),
+    path(
+        'linear/projects/<str:project_id>/updates',
+        api_views_connectors.LinearProjectUpdateInventoryView.as_view(),
+        name='linear_project_update_inventory',
+    ),
+    path(
+        'linear/projects/<str:project_id>/sizing-runs',
+        api_views_connectors.LinearProjectSizingRunCreateView.as_view(),
+        name='linear_project_sizing_run_create',
+    ),
+    path(
+        'linear/project-sizing-runs/<uuid:run_id>',
+        api_views_connectors.LinearProjectSizingRunDetailView.as_view(),
+        name='linear_project_sizing_run_detail',
+    ),
+    path(
+        'linear/project-sizing-runs/<uuid:run_id>/apply',
+        api_views_connectors.LinearProjectSizingRunApplyView.as_view(),
+        name='linear_project_sizing_run_apply',
+    ),
+    path(
+        'linear/project-sizing-runs/<uuid:run_id>/cancel',
+        api_views_connectors.LinearProjectSizingRunCancelView.as_view(),
+        name='linear_project_sizing_run_cancel',
     ),
     path(
         'linear/project-updates',

@@ -15,6 +15,12 @@ from dotenv import load_dotenv
 import json
 import os
 import subprocess
+import sys
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+# True when invoked via the Django test runner (`manage.py test ...`). Used to
+# relax rate throttles that would otherwise trip loop-heavy test suites.
+_RUNNING_TESTS = 'test' in sys.argv
 from datetime import timedelta
 from corsheaders.defaults import default_headers
 
@@ -29,6 +35,16 @@ def _env_is_true(name: str, default: bool) -> bool:
     if raw is None:
         return default
     return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _validated_timezone_name(value: str, setting_name: str) -> str:
+    try:
+        ZoneInfo(value)
+    except (ValueError, ZoneInfoNotFoundError) as exc:
+        raise ImproperlyConfigured(
+            f'{setting_name} must be a valid IANA timezone name'
+        ) from exc
+    return value
 
 
 def _resolve_app_env(*, debug: bool, raw_env: str = "") -> str:
@@ -225,6 +241,7 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    'core.middleware.DesktopAuthCorsMiddleware',
     'corsheaders.middleware.CorsMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
@@ -443,17 +460,67 @@ REST_FRAMEWORK = {
         'watt_unity_ticket_redeem': os.getenv('WATT_UNITY_TICKET_REDEEM_RATE', '60/minute'),
         'public_knowledge': os.getenv('ORG_MEMORY_PUBLIC_RATE', '60/minute'),
         'org_memory_actions': os.getenv('ORG_MEMORY_ACTION_RATE', '30/minute'),
+        'linear_channel_issue_list': os.getenv('LINEAR_CHANNEL_ISSUE_LIST_RATE', '60/minute'),
+        'linear_channel_issue_detail': os.getenv('LINEAR_CHANNEL_ISSUE_DETAIL_RATE', '20/minute'),
+        'linear_channel_issue_statuses': os.getenv('LINEAR_CHANNEL_ISSUE_STATUSES_RATE', '30/minute'),
+        'linear_channel_issue_write': os.getenv('LINEAR_CHANNEL_ISSUE_WRITE_RATE', '10/minute'),
+        # Unauthenticated auth entry points (core.throttles). Bound
+        # credential-enumeration and magic-link email spam. Disabled under the
+        # test runner so suites that issue many auth calls in a loop aren't
+        # tripped; production/dev keep the limits.
+        'auth_endpoint': None if _RUNNING_TESTS else os.getenv('AUTH_ENDPOINT_RATE', '20/minute'),
+        'auth_magic_link': None if _RUNNING_TESTS else os.getenv('AUTH_MAGIC_LINK_RATE', '5/minute'),
         'community_chat_session': os.getenv('COMMUNITY_CHAT_SESSION_RATE', '120/minute'),
+        'community_chat_link_preview': os.getenv('COMMUNITY_CHAT_LINK_PREVIEW_RATE', '300/minute'),
+        'community_chat_home': os.getenv('COMMUNITY_CHAT_HOME_RATE', '60/minute'),
+        'community_chat_upcoming_events': os.getenv('COMMUNITY_CHAT_UPCOMING_EVENTS_RATE', '60/minute'),
         'community_chat_challenge': os.getenv('COMMUNITY_CHAT_CHALLENGE_RATE', '20/minute'),
         'community_chat_invite': os.getenv('COMMUNITY_CHAT_INVITE_RATE', '10/minute'),
         'community_chat_confirm': os.getenv('COMMUNITY_CHAT_CONFIRM_RATE', '30/minute'),
         'community_chat_revoke': os.getenv('COMMUNITY_CHAT_REVOKE_RATE', '10/minute'),
+        'token_usage_ingest': os.getenv('TOKEN_USAGE_INGEST_RATE', '120/minute'),
+        'token_usage_history': os.getenv('TOKEN_USAGE_HISTORY_RATE', '20/minute'),
+        'token_usage_token': os.getenv('TOKEN_USAGE_TOKEN_RATE', '10/minute'),
+        'token_usage_leaderboard': os.getenv('TOKEN_USAGE_LEADERBOARD_RATE', '60/minute'),
+        'community_chat_home': os.getenv('COMMUNITY_CHAT_HOME_RATE', '60/minute'),
+        'community_chat_slack_delete': os.getenv(
+            'COMMUNITY_CHAT_SLACK_DELETE_RATE', '20/minute'
+        ),
     }
 }
 
 # MLAI Chat device bootstrap. The adapter URL is private service-to-service;
 # only the public relay/client URLs are returned to browsers.
 COMMUNITY_CHAT_RELAY_URL = os.getenv('COMMUNITY_CHAT_RELAY_URL', 'wss://chat.mlai.au')
+# Handed to members in the reporter setup snippet. The tokenmaxer CLI appends
+# "/api/ingest" and "/api/history" to this value verbatim.
+TOKEN_USAGE_API_BASE = os.getenv(
+    'TOKEN_USAGE_API_BASE', 'https://api.mlai.au/api/v1/community-chat/usage'
+)
+TOKEN_USAGE_TIME_ZONE = _validated_timezone_name(
+    os.getenv('TOKEN_USAGE_TIME_ZONE', 'Australia/Melbourne'),
+    'TOKEN_USAGE_TIME_ZONE',
+)
+# The public Tokenmaxer board slices sessions by their UTC start date.  Keep
+# the federated board on the same calendar so local and upstream rows are
+# comparable instead of silently mixing two definitions of "Today".
+TOKEN_USAGE_LEADERBOARD_TIME_ZONE = _validated_timezone_name(
+    os.getenv('TOKEN_USAGE_LEADERBOARD_TIME_ZONE', 'UTC'),
+    'TOKEN_USAGE_LEADERBOARD_TIME_ZONE',
+)
+TOKENMAXER_FEDERATION_ENABLED = _env_is_true(
+    'TOKENMAXER_FEDERATION_ENABLED',
+    not _RUNNING_TESTS,
+)
+TOKENMAXER_PUBLIC_API_BASE = os.getenv(
+    'TOKENMAXER_PUBLIC_API_BASE', 'https://tokenmaxer.quest'
+).rstrip('/')
+TOKENMAXER_FEDERATION_TIMEOUT_SECONDS = float(
+    os.getenv('TOKENMAXER_FEDERATION_TIMEOUT_SECONDS', '3')
+)
+TOKENMAXER_FEDERATION_CACHE_SECONDS = int(
+    os.getenv('TOKENMAXER_FEDERATION_CACHE_SECONDS', '600')
+)
 COMMUNITY_CHAT_API_AUDIENCE = os.getenv('COMMUNITY_CHAT_API_AUDIENCE', 'https://api.mlai.au')
 COMMUNITY_CHAT_ADAPTER_URL = os.getenv(
     'COMMUNITY_CHAT_ADAPTER_URL', 'http://127.0.0.1:3100'
@@ -533,6 +600,10 @@ COMMUNITY_CHAT_PASSWORD_RESET_URL = os.getenv(
     'COMMUNITY_CHAT_PASSWORD_RESET_URL',
     'http://localhost:3001/#/reset-password' if DEBUG else 'https://chat.mlai.au/#/reset-password',
 )
+MEETING_ROOM_BOOKING_ENABLED = _env_is_true(
+    'MEETING_ROOM_BOOKING_ENABLED',
+    False,
+)
 PASSWORD_RESET_TTL_SECONDS = int(os.getenv('PASSWORD_RESET_TTL_SECONDS', '3600'))
 PASSWORD_RESET_MIN_RESPONSE_SECONDS = float(
     os.getenv('PASSWORD_RESET_MIN_RESPONSE_SECONDS', '0.12')
@@ -543,6 +614,10 @@ PASSWORD_RESET_DELIVERY_SECRET = os.getenv(
 )
 
 HEALTH_HACK_ACTIVE_CASE_ID = int(os.getenv('HEALTH_HACK_ACTIVE_CASE_ID', '1'))
+# Scoring truth is intentionally stored outside this public repository. The
+# configured file must use the ID,predicted_label,Usage contract validated by
+# hospital.views.load_ground_truth.
+HEALTH_HACK_SOLUTION_PATH = os.getenv('HEALTH_HACK_SOLUTION_PATH', '').strip()
 HEALTH_HACK_AI_BODY_MAX_BYTES = int(os.getenv('HEALTH_HACK_AI_BODY_MAX_BYTES', str(16 * 1024)))
 HEALTH_HACK_AI_UPSTREAM_MAX_BYTES = int(
     os.getenv('HEALTH_HACK_AI_UPSTREAM_MAX_BYTES', str(32 * 1024))
@@ -820,6 +895,48 @@ ROO_SERVICE_URL = os.getenv('ROO_SERVICE_URL', '').rstrip('/')
 ROO_SIM_PATIENT_KEY = os.getenv('ROO_SIM_PATIENT_KEY', '').strip()
 HEALTH_HACK_API_KEY = os.getenv('HEALTH_HACK_API_KEY', '').strip()
 ROO_API_KEY = os.getenv('ROO_API_KEY', '').strip()
+KIMI_ROO_POINTS_PER_PROMPT = int(os.getenv('KIMI_ROO_POINTS_PER_PROMPT', '1'))
+if not 1 <= KIMI_ROO_POINTS_PER_PROMPT <= 100:
+    raise ImproperlyConfigured(
+        'KIMI_ROO_POINTS_PER_PROMPT must be between 1 and 100.'
+    )
+# MLAI Coding uses short-lived, device-scoped Ed25519 tickets.  Keys remain
+# optional at process startup so non-Coding environments can run normally; the
+# Coding endpoints fail closed with 503 until a valid signing key is supplied.
+MLAI_CODING_PILOT_USER_IDS = _env_list('MLAI_CODING_PILOT_USER_IDS', [])
+MLAI_CODING_PILOT_EMAILS = _env_list('MLAI_CODING_PILOT_EMAILS', [])
+MLAI_CODING_PRICING_VERSION = os.getenv(
+    'MLAI_CODING_PRICING_VERSION',
+    'do-kimi-k3-2026-08',
+).strip()
+MLAI_CODING_TICKET_PRIVATE_KEY = os.getenv('MLAI_CODING_TICKET_PRIVATE_KEY', '')
+MLAI_CODING_TICKET_PUBLIC_KEY = os.getenv('MLAI_CODING_TICKET_PUBLIC_KEY', '')
+MLAI_CODING_TICKET_KEY_ID = os.getenv(
+    'MLAI_CODING_TICKET_KEY_ID',
+    'coding-2026-08',
+).strip()
+MLAI_CODING_TICKET_ISSUER = os.getenv(
+    'MLAI_CODING_TICKET_ISSUER',
+    'api.mlai.au',
+).strip()
+MLAI_CODING_TICKET_AUDIENCE = os.getenv(
+    'MLAI_CODING_TICKET_AUDIENCE',
+    'mlai-kimi-inference',
+).strip()
+MLAI_CODING_TICKET_TTL_SECONDS = int(
+    os.getenv('MLAI_CODING_TICKET_TTL_SECONDS', '300')
+)
+MLAI_CODING_DISPATCH_LEASE_SECONDS = int(
+    os.getenv('MLAI_CODING_DISPATCH_LEASE_SECONDS', '120')
+)
+if not 30 <= MLAI_CODING_DISPATCH_LEASE_SECONDS <= 300:
+    raise ImproperlyConfigured(
+        'MLAI_CODING_DISPATCH_LEASE_SECONDS must be between 30 and 300.'
+    )
+MLAI_CODING_INFERENCE_BASE_URL = os.getenv(
+    'MLAI_CODING_INFERENCE_BASE_URL',
+    'https://inference.mlai.au/v1',
+).rstrip('/')
 _validate_health_hack_service_secrets(
     health_hack_key=HEALTH_HACK_API_KEY,
     roo_sim_patient_key=ROO_SIM_PATIENT_KEY,
@@ -936,6 +1053,10 @@ JOBS_NOTION_API_VERSION = os.getenv('JOBS_NOTION_API_VERSION', '2022-06-28')
 JOBS_SLACK_CHANNEL = os.getenv('JOBS_SLACK_CHANNEL', '#jobs')
 JOBS_SLACK_WEBHOOK_URL = os.getenv('JOBS_SLACK_WEBHOOK_URL', '')
 SLACK_BOT_TOKEN = os.getenv('SLACK_BOT_TOKEN', '')
+COMMITTEE_REMUNERATION_ENABLED = _env_is_true('COMMITTEE_REMUNERATION_ENABLED', False)
+COMMITTEE_REMUNERATION_WEEKLY_POINTS = int(os.getenv('COMMITTEE_REMUNERATION_WEEKLY_POINTS', '40'))
+COMMITTEE_REMUNERATION_SLACK_CHANNEL = os.getenv('COMMITTEE_REMUNERATION_SLACK_CHANNEL', '#roo-testing')
+COMMITTEE_REMUNERATION_TIMEZONE = os.getenv('COMMITTEE_REMUNERATION_TIMEZONE', 'Australia/Melbourne')
 HOSPITAL_SLACK_CHANNEL_NAME = os.getenv('HOSPITAL_SLACK_CHANNEL_NAME', 'healthhack')
 HEALTHHACK_ANNOUNCEMENT_ADMIN_IDS = [
     value.strip()
@@ -965,6 +1086,12 @@ BUZZ_BRIDGE_CALLBACK_MAX_AGE_SECONDS = int(
 )
 COMMUNITY_BRIDGE_WORKER_POLL_SECONDS = float(
     os.getenv('COMMUNITY_BRIDGE_WORKER_POLL_SECONDS', '1')
+)
+COMMUNITY_BRIDGE_PARENT_DEPENDENCY_MAX_AGE_SECONDS = int(
+    os.getenv('COMMUNITY_BRIDGE_PARENT_DEPENDENCY_MAX_AGE_SECONDS', '3600')
+)
+COMMUNITY_BRIDGE_PARENT_DEPENDENCY_MAX_ATTEMPTS = int(
+    os.getenv('COMMUNITY_BRIDGE_PARENT_DEPENDENCY_MAX_ATTEMPTS', '360')
 )
 DISCORD_BRIDGE_BOT_TOKEN = os.getenv('DISCORD_BRIDGE_BOT_TOKEN', '')
 DISCORD_BRIDGE_APPLICATION_ID = os.getenv('DISCORD_BRIDGE_APPLICATION_ID', '')
@@ -1090,6 +1217,35 @@ CONTENT_ANALYTICS_REPORT_NOTIFICATIONS_ENABLED = _env_is_true(
 # Customer.io transactional template for the report email; inline HTML is the
 # fallback when unset (and Resend below that).
 CUSTOMERIO_REPORT_TEMPLATE_ID = os.environ.get("CUSTOMERIO_REPORT_TEMPLATE_ID", "").strip()
+
+# Content islands (the topic graph on founder-tools.marketing). Storage lives
+# here; content-factory computes the clusters and syncs them through
+# /api/seo/islands/. Off until the mlai.au pilot passes.
+CONTENT_ISLANDS_ENABLED = _env_is_true("CONTENT_ISLANDS_ENABLED", False)
+# Daily per-org refresh dispatcher inside the multi-runner tick.
+CONTENT_ISLANDS_SCHEDULER_ENABLED = _env_is_true("CONTENT_ISLANDS_SCHEDULER_ENABLED", False)
+CONTENT_ISLANDS_REFRESH_LOCAL_HOUR = int(
+    os.environ.get("CONTENT_ISLANDS_REFRESH_LOCAL_HOUR", "6") or 6
+)
+CONTENT_ISLANDS_REFRESH_MAX_PER_TICK = int(
+    os.environ.get("CONTENT_ISLANDS_REFRESH_MAX_PER_TICK", "3") or 3
+)
+# An emerging island becomes visible only once it carries this much demand.
+CONTENT_ISLANDS_PROMOTION_MIN_KEYWORDS = int(
+    os.environ.get("CONTENT_ISLANDS_PROMOTION_MIN_KEYWORDS", "5") or 5
+)
+CONTENT_ISLANDS_PROMOTION_MIN_VOLUME = int(
+    os.environ.get("CONTENT_ISLANDS_PROMOTION_MIN_VOLUME", "200") or 200
+)
+# Legibility cap on the graph; extra qualifiers stay emerging until a slot frees.
+CONTENT_ISLANDS_MAX_VISIBLE = int(os.environ.get("CONTENT_ISLANDS_MAX_VISIBLE", "12") or 12)
+# Distinct days an island may fail to re-form before it archives. Islands with
+# written articles are exempt.
+CONTENT_ISLANDS_ARCHIVE_AFTER_MISSES = int(
+    os.environ.get("CONTENT_ISLANDS_ARCHIVE_AFTER_MISSES", "5") or 5
+)
+CONTENT_ISLANDS_NEW_BADGE_DAYS = int(os.environ.get("CONTENT_ISLANDS_NEW_BADGE_DAYS", "7") or 7)
+
 GOOGLE_SEARCH_CONSOLE_SERVICE_ACCOUNT_JSON = os.environ.get(
     "GOOGLE_SEARCH_CONSOLE_SERVICE_ACCOUNT_JSON",
     "",
@@ -1263,8 +1419,18 @@ SLACK_OAUTH_SCOPES = _env_list(
         "channels:read",
         "groups:history",
         "groups:read",
+        "im:history",
+        "im:read",
+        "im:write",
+        "mpim:history",
+        "mpim:read",
+        "mpim:write",
+        "chat:write",
         "team:read",
         "users:read",
+        "reactions:read",
+        "reactions:write",
+        "files:read",
     ],
 )
 SLACK_OAUTH_USER_SCOPES = _env_list("SLACK_OAUTH_USER_SCOPES", SLACK_OAUTH_SCOPES)
@@ -1274,10 +1440,25 @@ SLACK_SYNC_HISTORY_PAGE_LIMIT = int(os.environ.get("SLACK_SYNC_HISTORY_PAGE_LIMI
 SLACK_SYNC_HISTORY_MAX_PAGES = int(os.environ.get("SLACK_SYNC_HISTORY_MAX_PAGES", "5") or 5)
 SLACK_SYNC_REPLY_MAX_PAGES = int(os.environ.get("SLACK_SYNC_REPLY_MAX_PAGES", "3") or 3)
 SLACK_SYNC_REPLY_PAGE_BUDGET = int(os.environ.get("SLACK_SYNC_REPLY_PAGE_BUDGET", "2") or 2)
+SLACK_DM_MIRROR_HISTORY_DAYS = max(
+    1, min(int(os.environ.get("SLACK_DM_MIRROR_HISTORY_DAYS", "30") or 30), 30)
+)
+SLACK_DM_MIRROR_DELIVERY_BATCH_SIZE = max(
+    1,
+    min(
+        int(os.environ.get("SLACK_DM_MIRROR_DELIVERY_BATCH_SIZE", "20") or 20),
+        20,
+    ),
+)
+SLACK_DM_MIRROR_SHADOW_SECRET = os.environ.get("SLACK_DM_MIRROR_SHADOW_SECRET", "")
 SLACK_API_CONNECT_TIMEOUT_SECONDS = float(os.environ.get("SLACK_API_CONNECT_TIMEOUT_SECONDS", "3") or 3)
 SLACK_API_READ_TIMEOUT_SECONDS = float(os.environ.get("SLACK_API_READ_TIMEOUT_SECONDS", "8") or 8)
 
 LINEAR_API_KEY = os.environ.get("LINEAR_API_KEY", "")
+LINEAR_MEETING_REQUIRED_TEAM_KEYS = _env_list(
+    "LINEAR_MEETING_REQUIRED_TEAM_KEYS",
+    [],
+)
 LINEAR_CLIENT_ID = os.environ.get("LINEAR_CLIENT_ID", "")
 LINEAR_CLIENT_SECRET = os.environ.get("LINEAR_CLIENT_SECRET", "")
 LINEAR_OAUTH_REDIRECT_URI = os.environ.get(
@@ -1290,12 +1471,48 @@ LINEAR_SYNC_ISSUE_PAGE_LIMIT = int(os.environ.get("LINEAR_SYNC_ISSUE_PAGE_LIMIT"
 LINEAR_SYNC_UPDATE_PAGE_LIMIT = int(os.environ.get("LINEAR_SYNC_UPDATE_PAGE_LIMIT", "20") or 20)
 LINEAR_API_CONNECT_TIMEOUT_SECONDS = float(os.environ.get("LINEAR_API_CONNECT_TIMEOUT_SECONDS", "3") or 3)
 LINEAR_API_READ_TIMEOUT_SECONDS = float(os.environ.get("LINEAR_API_READ_TIMEOUT_SECONDS", "20") or 20)
+LINEAR_CHANNEL_ISSUE_BINDINGS_JSON = os.environ.get(
+    "LINEAR_CHANNEL_ISSUE_BINDINGS_JSON",
+    "",
+)
+LINEAR_CHANNEL_ISSUE_MAX_COMMENTS = int(
+    os.environ.get("LINEAR_CHANNEL_ISSUE_MAX_COMMENTS", "250") or 250
+)
+LINEAR_CHANNEL_ISSUE_WRITES_ENABLED = os.environ.get(
+    "LINEAR_CHANNEL_ISSUE_WRITES_ENABLED", "false"
+).strip().lower() in {"1", "true", "yes", "on"}
+LINEAR_CHANNEL_ISSUE_WRITE_RECEIPT_TTL_SECONDS = int(
+    os.environ.get("LINEAR_CHANNEL_ISSUE_WRITE_RECEIPT_TTL_SECONDS", "86400") or 86400
+)
+LINEAR_CHANNEL_ISSUE_WRITE_LOCK_SECONDS = int(
+    os.environ.get("LINEAR_CHANNEL_ISSUE_WRITE_LOCK_SECONDS", "600") or 600
+)
+LINEAR_TASK_SIZING_ENFORCEMENT_MODE = os.environ.get(
+    "LINEAR_TASK_SIZING_ENFORCEMENT_MODE"
+)
+# Deprecated fallback retained for deployments that have not renamed the setting yet.
 LINEAR_STUDIO_SIZING_ENFORCEMENT_MODE = os.environ.get(
     "LINEAR_STUDIO_SIZING_ENFORCEMENT_MODE",
     "required",
 )
 LINEAR_STUDIO_RECEIPT_PENDING_TTL_SECONDS = int(
     os.environ.get("LINEAR_STUDIO_RECEIPT_PENDING_TTL_SECONDS", "300") or 300
+)
+LINEAR_PROJECT_SIZING_RUN_TTL_SECONDS = int(
+    os.environ.get("LINEAR_PROJECT_SIZING_RUN_TTL_SECONDS", "86400") or 86400
+)
+LINEAR_MEETING_ACTION_BATCH_TTL_SECONDS = int(
+    os.environ.get("LINEAR_MEETING_ACTION_BATCH_TTL_SECONDS", "86400") or 86400
+)
+LINEAR_PROJECT_SIZING_PROCESSING_TTL_SECONDS = int(
+    os.environ.get("LINEAR_PROJECT_SIZING_PROCESSING_TTL_SECONDS", "300") or 300
+)
+LINEAR_PROJECT_SIZING_MAX_ISSUES = int(
+    os.environ.get("LINEAR_PROJECT_SIZING_MAX_ISSUES", "500") or 500
+)
+LINEAR_PROJECT_SIZING_ADMIN_LINEAR_USER_IDS = os.environ.get(
+    "LINEAR_PROJECT_SIZING_ADMIN_LINEAR_USER_IDS",
+    "",
 )
 
 BASIQ_API_KEY = os.environ.get("BASIQ_API_KEY", "")
@@ -1328,6 +1545,23 @@ COWORKING_DAY_COST_POINTS = int(os.getenv('COWORKING_DAY_COST_POINTS', '8'))
 COWORKING_DAY_DISCOUNT_COST_POINTS = int(os.getenv('COWORKING_DAY_DISCOUNT_COST_POINTS', '4'))
 COWORKING_REFUND_CUTOFF_HOURS = int(os.getenv('COWORKING_REFUND_CUTOFF_HOURS', '18'))  # 6pm prev day
 COWORKING_BOOKING_ADVANCE_DAYS = int(os.environ.get('COWORKING_BOOKING_ADVANCE_DAYS', 30))
+
+# Roo meeting-room booking. Deploy the backend and Roo support first, then
+# enable this flag once the seeded room has been verified in production.
+MEETING_ROOM_BOOKING_ENABLED = _env_is_true('MEETING_ROOM_BOOKING_ENABLED', False)
+MEETING_ROOM_BOOKING_ADVANCE_DAYS = int(
+    os.environ.get('MEETING_ROOM_BOOKING_ADVANCE_DAYS', 30)
+)
+MEETING_ROOM_MAX_BOOKING_HOURS = int(
+    os.environ.get('MEETING_ROOM_MAX_BOOKING_HOURS', 2)
+)
+MEETING_ROOM_DAILY_MEMBER_HOURS = int(
+    os.environ.get('MEETING_ROOM_DAILY_MEMBER_HOURS', 4)
+)
+MEETING_ROOM_TIMEZONE = _validated_timezone_name(
+    os.environ.get('MEETING_ROOM_TIMEZONE', 'Australia/Melbourne').strip(),
+    'MEETING_ROOM_TIMEZONE',
+)
 
 # Internal API Key for service-to-service auth (e.g. from Roo agent)
 MLAI_API_KEY = os.environ.get('MLAI_API_KEY')
@@ -1452,10 +1686,6 @@ ORG_MEMORY_SELECTOR_EXPORT_ENABLED = _env_is_true(
     'ORG_MEMORY_SELECTOR_EXPORT_ENABLED',
     False,
 )
-ORG_MEMORY_SELECTOR_SHADOW_ENABLED = _env_is_true(
-    'ORG_MEMORY_SELECTOR_SHADOW_ENABLED',
-    False,
-)
 ORG_MEMORY_SELECTOR_EXPORT_SECRET = os.environ.get(
     'ORG_MEMORY_SELECTOR_EXPORT_SECRET',
     '',
@@ -1465,12 +1695,6 @@ ORG_MEMORY_SELECTOR_MIN_LABELED_TRACES = int(
 )
 ORG_MEMORY_SELECTOR_SHADOW_LIMIT = int(
     os.environ.get('ORG_MEMORY_SELECTOR_SHADOW_LIMIT', '10000')
-)
-ORG_MEMORY_SELECTOR_MIN_NDCG_GAIN = float(
-    os.environ.get('ORG_MEMORY_SELECTOR_MIN_NDCG_GAIN', '0.02')
-)
-ORG_MEMORY_SELECTOR_ARTIFACT_MAX_BYTES = int(
-    os.environ.get('ORG_MEMORY_SELECTOR_ARTIFACT_MAX_BYTES', '262144')
 )
 ORG_MEMORY_QUERY_CANDIDATE_LIMIT = int(
     os.environ.get('ORG_MEMORY_QUERY_CANDIDATE_LIMIT', '100')
@@ -1766,10 +1990,19 @@ if VICTOR_AI_ROO_ENABLED:
         )
 LUMA_API_KEY = os.environ.get('LUMA_API_KEY')
 LUMA_BASE_URL = os.environ.get('LUMA_BASE_URL', 'https://public-api.luma.com')
+LUMA_CALENDAR_URL = os.environ.get(
+    'LUMA_CALENDAR_URL',
+    'https://luma.com/mlai_au',
+).strip() or 'https://luma.com/mlai_au'
+LUMA_API_TIMEOUT_SECONDS = max(
+    0.1,
+    float(os.environ.get('LUMA_API_TIMEOUT_SECONDS', '5')),
+)
+LUMA_UPCOMING_EVENTS_CACHE_SECONDS = max(
+    0,
+    int(os.environ.get('LUMA_UPCOMING_EVENTS_CACHE_SECONDS', '300')),
+)
 HUMANITIX_API_BASE_URL = os.environ.get(
     'HUMANITIX_API_BASE_URL',
     'https://api.humanitix.com/v1',
 )
-
-# MedHack Game Configuration
-MEDHACK_ADMIN_IDS = [s.strip() for s in os.getenv('MEDHACK_ADMIN_IDS', '').split(',') if s.strip()]

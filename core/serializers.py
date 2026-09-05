@@ -84,12 +84,10 @@ from content_factory.serializers import (
     KeywordVelocitySerializer,
     PAQuestionSerializer,
     ResearchFeedbackSerializer,
-    ResearchSessionSerializer,
     ResearchedKeywordDetailSerializer,
     ResearchedKeywordListSerializer,
     SEODashboardSerializer,
     SemanticClusterSerializer,
-    TopicMapSerializer,
     WrittenArticleCreateSerializer,
     WrittenArticleSerializer,
 )

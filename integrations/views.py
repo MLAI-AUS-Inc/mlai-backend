@@ -8,6 +8,7 @@ from django.shortcuts import redirect
 from django.http import HttpResponseBadRequest, HttpResponse
 from django.contrib.auth import login as auth_login
 from django.utils import timezone
+from django.utils.html import escape
 from hospital.authentication import CustomJWTAuthentication
 from .models import GoogleConnection, UserIntegration
 from integrations.services.github_connections import (
@@ -21,6 +22,7 @@ from integrations.services.external_connectors import (
     ConnectorConfigurationError,
     ConnectorOAuthError,
     build_authorization_url,
+    connector_oauth_state_user_id,
     complete_oauth_callback,
     normalize_provider,
 )
@@ -39,6 +41,7 @@ GOOGLE_OAUTH_SUCCESS_PATH = "/settings?gmail_connected=true"
 # is bounced to login and the OAuth attempt is silently dropped.
 GOOGLE_CONNECT_TICKET_SALT = "integrations.google-connect-ticket"
 GOOGLE_CONNECT_TICKET_MAX_AGE_SECONDS = 900
+CONNECTOR_TICKET_SALT = "integrations.connector-ticket-v1"
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +50,17 @@ def mint_google_connect_ticket(user) -> str:
     from django.core import signing
 
     return signing.dumps({"uid": user.pk}, salt=GOOGLE_CONNECT_TICKET_SALT, compress=True)
+
+
+def mint_connector_connect_ticket(user, provider: str) -> str:
+    """Mint a short-lived, provider-bound ticket for a top-level OAuth navigation."""
+    from django.core import signing
+
+    return signing.dumps(
+        {"uid": user.pk, "provider": normalize_provider(provider)},
+        salt=CONNECTOR_TICKET_SALT,
+        compress=True,
+    )
 
 
 def _user_from_connect_ticket(ticket: Optional[str]):
@@ -61,6 +75,26 @@ def _user_from_connect_ticket(ticket: Optional[str]):
             max_age=GOOGLE_CONNECT_TICKET_MAX_AGE_SECONDS,
         )
     except signing.BadSignature:
+        return None
+    from django.contrib.auth import get_user_model
+
+    return get_user_model().objects.filter(pk=payload.get("uid"), is_active=True).first()
+
+
+def _user_from_connector_ticket(ticket: Optional[str], provider: str):
+    if not ticket:
+        return None
+    from django.core import signing
+
+    try:
+        payload = signing.loads(
+            ticket,
+            salt=CONNECTOR_TICKET_SALT,
+            max_age=GOOGLE_CONNECT_TICKET_MAX_AGE_SECONDS,
+        )
+    except signing.BadSignature:
+        return None
+    if payload.get("provider") != normalize_provider(provider):
         return None
     from django.contrib.auth import get_user_model
 
@@ -376,6 +410,10 @@ def connector_connect(request, provider):
 
     user = _resolve_google_oauth_user(request)
     if user is None:
+        user = _user_from_connector_ticket(request.GET.get("ticket"), normalized_provider)
+        if user is not None:
+            request.user = user
+    if user is None:
         return redirect(_vibe_raising_login_url(request.GET.get("next")))
 
     _ensure_django_session_for_user(request, user)
@@ -402,6 +440,15 @@ def connector_callback(request, provider):
         return google_callback(request)
 
     user = _resolve_google_oauth_user(request)
+    if user is None and normalized_provider == "slack":
+        from django.contrib.auth import get_user_model
+
+        user_id = connector_oauth_state_user_id(
+            provider=normalized_provider,
+            state=str(request.GET.get("state") or ""),
+        )
+        if user_id is not None:
+            user = get_user_model().objects.filter(id=user_id, is_active=True).first()
     if user is None:
         return redirect(_vibe_raising_login_url(None))
 
@@ -589,6 +636,27 @@ def github_callback(request):
 
         # Get or create config and update GitHub credentials
         config, _ = OrganizationContentConfig.objects.get_or_create(organization=org)
+
+        # Authorization gate: the OAuth-initiation endpoint (github_connect) is
+        # unauthenticated and trusts the caller-supplied `domain`/`slack_user_id`.
+        # The signed state only guarantees integrity through the redirect, not
+        # that this actor is entitled to bind credentials for this org. Refuse to
+        # overwrite an org already owned by a *different* founder -- otherwise
+        # anyone can rebind a victim org's GitHub token/repo to their own
+        # installation. First-connect (unowned org) is still permitted, matching
+        # the authenticated connect path (allow_unowned=True).
+        existing_owner = str(config.connected_slack_user_id or "").strip()
+        incoming_actor = str(slack_user_id or "").strip()
+        if existing_owner and existing_owner != incoming_actor:
+            logger.warning(
+                "github_callback_ownership_denied domain=%s existing_owner=%s incoming_actor=%s",
+                normalized_domain, existing_owner, incoming_actor,
+            )
+            return HttpResponse(
+                "This organization's GitHub connection is owned by another account.",
+                status=403,
+            )
+
         previous_repo = str(config.github_repo or "").strip()
         if not selected_repo and len(repo_names) > 1 and previous_repo:
             selected_repo = next(
@@ -754,11 +822,15 @@ def github_select_repo(request):
         from integrations.services.github import trigger_scan_async
         trigger_scan_async(slack_user_id)
         
+        # Escape user-controlled repo name before reflecting it into HTML.
+        # github_repo arrives from the POST body and is echoed straight back,
+        # so an unescaped value is a reflected-XSS sink.
+        safe_github_repo = escape(github_repo)
         return HttpResponse(f"""
         <html>
         <body style="font-family: sans-serif; text-align: center; padding-top: 50px;">
             <h1 style="color: green;">✅ Success!</h1>
-            <p>Repository <strong>{github_repo}</strong> has been linked.</p>
+            <p>Repository <strong>{safe_github_repo}</strong> has been linked.</p>
             <p>You can now close this window and return to Slack.</p>
         </body>
         </html>

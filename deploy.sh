@@ -11,9 +11,21 @@ DEPLOY_SSH_TARGET="${DEPLOY_SSH_TARGET:-root@$DROPLET_IP}"
 PROJECT_DIR="/root/mlai-backend"
 APP_RELEASE="${APP_RELEASE:-$(git rev-parse --short=12 HEAD 2>/dev/null || date +%Y%m%d%H%M)}"
 APP_RELEASE_SHORT="${APP_RELEASE:0:12}"
+MEETING_ROOM_BOOKING_ENABLED="${MEETING_ROOM_BOOKING_ENABLED:-false}"
 COMMUNITY_BRIDGE_PRODUCTION_ENABLED="${COMMUNITY_BRIDGE_PRODUCTION_ENABLED:-false}"
 ORG_MEMORY_PRODUCTION_DEPLOY_ENABLED="${ORG_MEMORY_PRODUCTION_DEPLOY_ENABLED:-false}"
 ORG_MEMORY_PRODUCTION_PUBLIC_CHANNEL_ADMIN_SCOPE_APPROVED="${ORG_MEMORY_PRODUCTION_PUBLIC_CHANNEL_ADMIN_SCOPE_APPROVED:-false}"
+LINEAR_CHANNEL_ISSUE_MAX_COMMENTS="${LINEAR_CHANNEL_ISSUE_MAX_COMMENTS:-250}"
+
+case "$MEETING_ROOM_BOOKING_ENABLED" in
+    true|TRUE|True|1|yes|YES|Yes|on|ON|On) MEETING_ROOM_BOOKING_ENABLED=true ;;
+    false|FALSE|False|0|no|NO|No|off|OFF|Off|"") MEETING_ROOM_BOOKING_ENABLED=false ;;
+    *)
+        echo "❌ MEETING_ROOM_BOOKING_ENABLED must be true or false."
+        exit 1
+        ;;
+esac
+export MEETING_ROOM_BOOKING_ENABLED
 
 case "$COMMUNITY_BRIDGE_PRODUCTION_ENABLED" in
     true|TRUE|True|1|yes|YES|Yes|on|ON|On) COMMUNITY_BRIDGE_PRODUCTION_ENABLED=true ;;
@@ -181,6 +193,7 @@ if [ "$VICTOR_AI_ROO_SIGNING_SECRET" = "$ROO_SIM_PATIENT_KEY" ]; then
     echo "❌ Victor AI and simulated-patient credentials must be distinct."
     exit 1
 fi
+python3 scripts/validate_linear_channel_issue_deploy_config.py
 if [ "$ORG_MEMORY_PRODUCTION_DEPLOY_ENABLED" = "true" ]; then
     if [[ ! "${ORG_MEMORY_PILOT_ALLOWLIST_KEY_VERSION:-}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]]; then
         echo "❌ ORG_MEMORY_PILOT_ALLOWLIST_KEY_VERSION must be supplied in the required format."
@@ -240,12 +253,35 @@ echo "🔐 Updating MLAI Chat credentials (values redacted)..."
 install_remote_env_secret COMMUNITY_CHAT_EMAIL_CODE_PEPPER "$COMMUNITY_CHAT_EMAIL_CODE_PEPPER"
 install_remote_env_secret COMMUNITY_CHAT_EMAIL_CODE_DELIVERY_SECRET "$COMMUNITY_CHAT_EMAIL_CODE_DELIVERY_SECRET"
 install_remote_env_secret COMMUNITY_CHAT_ADAPTER_TOKEN "$COMMUNITY_CHAT_ADAPTER_TOKEN"
+echo "🔐 Updating Linear channel issue credential (value redacted)..."
+install_remote_env_secret LINEAR_API_KEY "$LINEAR_API_KEY"
+case "${LINEAR_CHANNEL_ISSUE_WRITES_ENABLED:-false}" in
+    1|[Tt][Rr][Uu][Ee]|[Yy][Ee][Ss]|[Oo][Nn])
+        linear_channel_writes_enabled_normalized="true"
+        ;;
+    *)
+        linear_channel_writes_enabled_normalized="false"
+        ;;
+esac
 if [ "$bridge_present" -gt 0 ]; then
     install_remote_env_secret SLACK_BRIDGE_BOT_TOKEN "$SLACK_BRIDGE_BOT_TOKEN"
     install_remote_env_secret SLACK_BRIDGE_SIGNING_SECRET "$SLACK_BRIDGE_SIGNING_SECRET"
     install_remote_env_secret BUZZ_BRIDGE_ADAPTER_TOKEN "$BUZZ_BRIDGE_ADAPTER_TOKEN"
     install_remote_env_secret BUZZ_BRIDGE_CALLBACK_SECRET "$BUZZ_BRIDGE_CALLBACK_SECRET"
 fi
+
+install_remote_env_value() {
+    local key="$1"
+    local value="$2"
+    printf '%s' "$value" \
+        | ssh "$DEPLOY_SSH_TARGET" "$PROJECT_DIR/scripts/upsert_env_value_from_stdin.sh $key"
+}
+
+echo "🔧 Updating Linear channel issue reader configuration..."
+install_remote_env_value LINEAR_MEETING_REQUIRED_TEAM_KEYS "$LINEAR_MEETING_REQUIRED_TEAM_KEYS"
+install_remote_env_value LINEAR_CHANNEL_ISSUE_BINDINGS_JSON "$LINEAR_CHANNEL_ISSUE_BINDINGS_JSON"
+install_remote_env_value LINEAR_CHANNEL_ISSUE_MAX_COMMENTS "$LINEAR_CHANNEL_ISSUE_MAX_COMMENTS"
+install_remote_env_value LINEAR_CHANNEL_ISSUE_WRITES_ENABLED "$linear_channel_writes_enabled_normalized"
 
 # Send the credential over SSH stdin rather than a command-line argument. The
 # remote shell updates .env using builtins, so the value is neither echoed nor
@@ -515,6 +551,7 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     fi
 
     cd $PROJECT_DIR
+    meeting_room_booking_enabled="$MEETING_ROOM_BOOKING_ENABLED"
     community_bridge_production_enabled="$COMMUNITY_BRIDGE_PRODUCTION_ENABLED"
     org_memory_production_deploy_enabled="$ORG_MEMORY_PRODUCTION_DEPLOY_ENABLED"
 
@@ -545,9 +582,10 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     upsert_env_value COMMUNITY_CHAT_ADAPTER_URL "$COMMUNITY_CHAT_ADAPTER_URL"
     upsert_env_value COMMUNITY_CHAT_EMAIL_CODE_AUTH_ENABLED "true"
     upsert_env_value COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED "false"
-    upsert_env_value COMMUNITY_CHAT_DEVICE_AUTH_ENABLED "false"
+    upsert_env_value COMMUNITY_CHAT_DEVICE_AUTH_ENABLED "true"
     upsert_env_value CUSTOMERIO_COMMUNITY_CHAT_CODE_MESSAGE_ID "mlai_chat_sign_in_code"
     upsert_env_value COMMUNITY_CHAT_ALLOWED_ORIGINS "https://chat.mlai.au,tauri://localhost,http://tauri.localhost,mlaichat://callback"
+    upsert_env_value MEETING_ROOM_BOOKING_ENABLED "\$meeting_room_booking_enabled"
     upsert_env_value COMMUNITY_BRIDGE_PRODUCTION_ENABLED "\$community_bridge_production_enabled"
     if [ "$bridge_present" -gt 0 ]; then
         upsert_env_value SLACK_BRIDGE_BOT_USER_ID "$SLACK_BRIDGE_BOT_USER_ID"
@@ -618,7 +656,6 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     upsert_env_value ORG_MEMORY_ACTIONS_ENABLED "false"
     upsert_env_value ORG_MEMORY_ACTION_LINEAR_EXECUTION_ENABLED "false"
     upsert_env_value ORG_MEMORY_SELECTOR_EXPORT_ENABLED "false"
-    upsert_env_value ORG_MEMORY_SELECTOR_SHADOW_ENABLED "false"
     # Web concurrency: gunicorn sync-worker count (read by scripts/start-web.sh).
     # Sized to droplet RAM (~250MB/worker). 16 fits the 8GB/4vCPU droplet with headroom.
     upsert_env_value GUNICORN_WORKERS "16"
@@ -657,7 +694,7 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
             || { env_has_value BUZZ_BRIDGE_ADAPTER_URL \
                 && env_has_value BUZZ_BRIDGE_ADAPTER_TOKEN \
                 && env_has_value BUZZ_BRIDGE_CALLBACK_SECRET; }; }; then
-        runtime_services+=(bridge-worker bridge-retention)
+        runtime_services+=(bridge-worker bridge-reconciler bridge-retention)
         bridge_worker_enabled=1
     else
         bridge_worker_enabled=0
@@ -678,40 +715,6 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
         echo "ℹ️ Skipping analytics-sync startup because the Umami analytics contract is not fully configured."
     fi
 
-    migration_applied() {
-        local app_label="\$1"
-        local migration_name="\$2"
-        compose_run_web python manage.py shell -c "
-from django.db.migrations.recorder import MigrationRecorder
-from django.db import connections
-recorder = MigrationRecorder(connections['default'])
-print('yes' if recorder.migration_qs.filter(app='\${app_label}', name='\${migration_name}').exists() else 'no')
-" | tail -n 1
-    }
-
-    inspect_stale_migration() {
-        local app_label="\$1"
-        local migration_name="\$2"
-        local file_path="\$3"
-        local applied
-
-        applied=\$(migration_applied "\$app_label" "\$migration_name" || echo no)
-        applied=\$(printf "%s\n" "\$applied" | tail -n 1)
-        if [ -f "\$file_path" ] && [ "\$applied" != "yes" ]; then
-            echo "🧹 Removing stale unapplied migration \$app_label.\$migration_name (\$file_path)"
-            rm -f "\$file_path"
-            return
-        fi
-
-        if [ ! -f "\$file_path" ] && [ "\$applied" = "yes" ]; then
-            echo "❌ Migration \$app_label.\$migration_name is applied in the database but the file is missing on disk."
-            echo "   Restore the migration file before redeploying so Django sees a consistent graph."
-            exit 1
-        fi
-
-        return 0
-    }
-
     docker network inspect mlai-shared >/dev/null 2>&1 || docker network create mlai-shared
 
     echo "🐘 Starting database..."
@@ -720,33 +723,15 @@ print('yes' if recorder.migration_qs.filter(app='\${app_label}', name='\${migrat
     echo "🏗️ Building runtime images: \${runtime_services[*]}..."
     docker compose build "\${runtime_services[@]}"
 
-    echo "🧱 Validating shared Redis security state..."
-    compose_run_web python manage.py validate_health_hack_ai_cache
-
-    echo "🔗 Validating production URL configuration and service connectivity..."
-    compose_run_web python manage.py validate_prod_urls --check-connectivity --warn-connectivity --timeout 8
-
-    echo "🧠 Validating organisational-memory provider governance..."
-    compose_run_web python manage.py validate_org_memory_governance --environment production
-
-    echo "🔎 Preflighting PostgreSQL full-text and vector support..."
-    compose_run_web python manage.py check_org_memory_search --require-vector
-
-    echo "🔐 Verifying GitHub App server credentials..."
-    compose_run_web python manage.py check_github_app_credentials
-
-    echo "🔍 Inspecting for stale generated migrations..."
-    inspect_stale_migration \
-        core \
-        0035_rename_cf_run_workflow_status_idx_content_fac_workflo_10aee3_idx_and_more \
-        core/migrations/0035_rename_cf_run_workflow_status_idx_content_fac_workflo_10aee3_idx_and_more.py
-    inspect_stale_migration \
-        roo \
-        0016_rename_roo_pointsr_status_8f1eab_idx_roo_pointsr_status_1880e1_idx_and_more \
-        roo/migrations/0016_rename_roo_pointsr_status_8f1eab_idx_roo_pointsr_status_1880e1_idx_and_more.py
-
-    echo "🗺️ Migration plan..."
-    compose_run_web python manage.py migrate --plan
+    # Every pre-migration gate (Redis security state, production URLs and
+    # service connectivity, memory provider governance, PostgreSQL vector
+    # support, GitHub App credentials) plus the migration plan, in one
+    # container. They used to be six separate compose-run invocations that
+    # spent ~35s on cold Django starts to do a few seconds of work.
+    # (No backticks in this heredoc: it is unquoted, so they would be
+    # command-substituted on the deploying runner.)
+    echo "🧪 Running deployment preflight..."
+    compose_run_web python manage.py deploy_preflight
 
     paused_runtime_services=(web memory-worker memory-scheduler community-email-worker)
     restore_runtime_on_error() {
@@ -761,8 +746,13 @@ print('yes' if recorder.migration_qs.filter(app='\${app_label}', name='\${migrat
     echo "🗄️ Running migrations..."
     compose_run_web python manage.py migrate --noinput
 
-    echo "✅ Verifying migration readiness..."
-    compose_run_web python manage.py migrate --check --noinput
+    # Migration readiness, vector installation, memory index rebuild, startup
+    # update schema, Vibe Raising upload routes, Firebase Storage CORS and the
+    # coworking booking guard, in one container. These were seven separate
+    # compose-run invocations, each paying a cold Django start while web was
+    # stopped — so the boot overhead was production downtime.
+    echo "✅ Running post-migration deployment checks..."
+    compose_run_web python manage.py deploy_postmigrate
 
     if [ "$bridge_present" -gt 0 ]; then
         echo "🌉 Upserting the reviewed Slack to MLAI Chat channel mapping..."
@@ -775,35 +765,6 @@ print('yes' if recorder.migration_qs.filter(app='\${app_label}', name='\${migrat
             --destination-channel-id "$BUZZ_BRIDGE_DESTINATION_CHANNEL_ID" \
             --destination-channel-name "$BUZZ_BRIDGE_DESTINATION_CHANNEL_NAME"
     fi
-
-    echo "🧠 Verifying vector installation and rebuilding memory text indexes..."
-    compose_run_web python manage.py check_org_memory_search --require-vector --require-installed
-    compose_run_web python manage.py rebuild_memory_search_vectors
-
-    echo "🧩 Verifying startup update schema..."
-    compose_run_web python manage.py validate_startup_update_schema
-
-    echo "🧭 Verifying Vibe Raising video upload routes..."
-    compose_run_web python manage.py shell -c "
-from django.urls import resolve
-resolve('/api/v1/vibe-raising/uploads/video/session/')
-resolve('/api/v1/vibe-raising/uploads/video/complete/')
-print('vibe raising video upload routes ok')
-"
-
-    echo "🎞️ Configuring Firebase Storage CORS for direct video uploads..."
-    compose_run_web python manage.py configure_firebase_storage_cors
-
-    echo "🔒 Verifying coworking booking concurrency guard..."
-    compose_run_web python manage.py shell -c "
-from django.db import connection
-with connection.cursor() as cursor:
-    cursor.execute(\"SELECT to_regclass('public.unique_active_booking_per_user_date')\")
-    index_name = cursor.fetchone()[0]
-if not index_name:
-    raise SystemExit('unique_active_booking_per_user_date is missing')
-print(index_name)
-"
 
     if [ "\$org_memory_production_deploy_enabled" = "true" ]; then
         approval_manifest="/root/mlai-backend-operations/pilot-approval.json"
@@ -850,26 +811,13 @@ PY
             --operator-email "\$stage_operator" \
             --apply
 
-        echo "🧹 Reconciling versionless source-access-restored dead letters..."
-        compose_run_web python manage.py reconcile_org_memory_access_restored_dead_letters \
-            --organization-domain mlai.au \
-            --provider google_drive \
-            --operator-email "\$stage_operator" \
-            --apply
-
-        echo "🧹 Reconciling consolidation jobs affected by the outer-join lock bug..."
-        compose_run_web python manage.py reconcile_org_memory_consolidation_lock_dead_letters \
-            --organization-domain mlai.au \
-            --provider google_drive \
-            --operator-email "\$stage_operator" \
-            --apply
-
-        echo "🧹 Reconciling timezone-less claim datetime extraction dead letters..."
-        compose_run_web python manage.py reconcile_org_memory_naive_datetime_dead_letters \
-            --organization-domain mlai.au \
-            --provider google_drive \
-            --operator-email "\$stage_operator" \
-            --apply
+        # One-shot repairs for the versionless source-access-restored, the
+        # consolidation outer-join lock, and the timezone-less claim datetime
+        # dead letters were removed here. They drained on the deploy that
+        # shipped them and have reported "candidates": 0 on every deploy since,
+        # so they only added cold-start time to the window where web is
+        # stopped. Their management commands are still available to run by hand
+        # if a matching backlog ever reappears.
 
         echo "🧹 Cancelling queued extraction work for superseded targets..."
         compose_run_web python manage.py cancel_org_memory_superseded_extraction_work \
@@ -885,53 +833,13 @@ PY
             --operator-email "\$stage_operator" \
             --apply
 
-        echo "🧹 Reconciling superseded Admin Brain extraction dead letters..."
-        compose_run_web python manage.py reconcile_org_memory_extraction_dead_letters \
-            --organization-domain mlai.au \
-            --provider google_drive \
-            --superseded-schema-version org-memory-extraction-schema-v1 \
-            --operator-email "\$stage_operator" \
-            --apply
-
-        echo "🧹 Reconciling superseded quote-grounding extraction dead letters..."
-        compose_run_web python manage.py reconcile_org_memory_extraction_dead_letters \
-            --organization-domain mlai.au \
-            --provider google_drive \
-            --superseded-schema-version org-memory-extraction-schema-v2 \
-            --superseded-extractor-version org-memory-extractor-v1 \
-            --superseded-prompt-version org-memory-extraction-prompt-v1 \
-            --operator-email "\$stage_operator" \
-            --apply
-
-        echo "🧹 Reconciling extractor-v2 jobs claimed during the previous deploy handoff..."
-        compose_run_web python manage.py reconcile_org_memory_extraction_dead_letters \
-            --organization-domain mlai.au \
-            --provider google_drive \
-            --superseded-schema-version org-memory-extraction-schema-v2 \
-            --superseded-extractor-version org-memory-extractor-v2 \
-            --superseded-prompt-version org-memory-extraction-prompt-v2 \
-            --operator-email "\$stage_operator" \
-            --apply
-
-        echo "🧹 Reconciling extractor-v3 transcript-safety dead letters..."
-        compose_run_web python manage.py reconcile_org_memory_extraction_dead_letters \
-            --organization-domain mlai.au \
-            --provider google_drive \
-            --superseded-schema-version org-memory-extraction-schema-v2 \
-            --superseded-extractor-version org-memory-extractor-v3 \
-            --superseded-prompt-version org-memory-extraction-prompt-v2 \
-            --operator-email "\$stage_operator" \
-            --apply
-
-        echo "🧹 Reconciling extractor-v4 attributed-transcript dead letters..."
-        compose_run_web python manage.py reconcile_org_memory_extraction_dead_letters \
-            --organization-domain mlai.au \
-            --provider google_drive \
-            --superseded-schema-version org-memory-extraction-schema-v2 \
-            --superseded-extractor-version org-memory-extractor-v4 \
-            --superseded-prompt-version org-memory-extraction-prompt-v2 \
-            --operator-email "\$stage_operator" \
-            --apply
+        # Five per-version extraction dead-letter reconciliations (schema-v1,
+        # then extractor-v1 through v4) were removed here. The deployed
+        # extractor is v5 and each of these has reported "candidates": 0 on
+        # every deploy since its own, so they repaired backlogs that no longer
+        # exist. When the extractor version is next bumped, add a single
+        # reconciliation for the version being superseded and delete it again
+        # once it has drained.
 
         echo "🧠 Scheduling the reviewed extractor-v5 target for current Drive evidence..."
         compose_run_web python manage.py schedule_org_memory_reextraction \
@@ -1027,9 +935,9 @@ PY
     docker compose up -d --force-recreate "\${runtime_services[@]}"
 
     if [ "\$bridge_worker_enabled" != "1" ]; then
-        echo "🧹 Stopping disabled bridge-worker service..."
-        docker compose stop bridge-worker || true
-        docker compose rm -f bridge-worker || true
+        echo "🧹 Stopping disabled community bridge services..."
+        docker compose stop bridge-worker bridge-reconciler || true
+        docker compose rm -f bridge-worker bridge-reconciler || true
     fi
 
     if [ "\$analytics_sync_enabled" != "1" ]; then
@@ -1059,6 +967,29 @@ PY
         echo "Expected /healthz/ready to report release $APP_RELEASE_SHORT for $APP_RELEASE"
         echo "\$health_body"
         exit 1
+    fi
+
+    if [ "\$meeting_room_booking_enabled" = "true" ]; then
+        echo "🏢 Verifying the enabled meeting-room API and active room catalogue..."
+        meeting_room_api_key=\$(read_env_value ROO_API_KEY)
+        meeting_rooms_body=\$(curl -fsS --max-time 10 \
+            -H "X-API-Key: \$meeting_room_api_key" \
+            https://api.mlai.au/api/v1/points/meeting-rooms/rooms/)
+        printf '%s' "\$meeting_rooms_body" | python3 -c '
+import json
+import sys
+
+payload = json.load(sys.stdin)
+slugs = {
+    str(room.get("slug") or "")
+    for room in payload.get("rooms", [])
+    if isinstance(room, dict)
+}
+expected = {"small-meeting-room", "big-meeting-room"}
+if slugs != expected:
+    raise SystemExit(f"Expected active meeting rooms {sorted(expected)}, got {sorted(slugs)}")
+'
+        unset meeting_room_api_key meeting_rooms_body
     fi
 
     echo "🛠️ Verifying external Django admin assets..."

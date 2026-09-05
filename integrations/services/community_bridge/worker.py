@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import uuid
-from typing import Any, Optional
+from typing import Optional
 
 import discord
 from discord.ext import tasks
@@ -27,15 +27,29 @@ from integrations.services.community_bridge.store import (
     complete_create_delivery,
     complete_delivery,
     ingest_discord_event,
+    mark_delivery_waiting_for_parent,
     mark_delivery_retry,
     mark_link_deleted,
     reset_stale_processing_deliveries,
     resolve_mapped_message,
     resolve_message_link,
 )
-
+from integrations.services.slack_dm_mirror import (
+    HISTORY_REQUEST_INTERVAL_SECONDS,
+    discover_grants_if_due,
+    process_due_history_backfills,
+    process_ready_deliveries as process_slack_dm_deliveries,
+)
 
 logger = logging.getLogger(__name__)
+
+
+class ParentMappingPending(Exception):
+    """A reply arrived before its parent had a destination message mapping."""
+
+    def __init__(self, parent_message_id: str):
+        self.parent_message_id = str(parent_message_id or "").strip()
+        super().__init__(f"parent mapping is not ready: {self.parent_message_id}")
 
 
 class CommunityBridgeDiscordClient(discord.Client):
@@ -46,12 +60,17 @@ class CommunityBridgeDiscordClient(discord.Client):
         intents.message_content = True
         super().__init__(intents=intents, max_messages=5000)
         self._delivery_loop_started = False
+        self._slack_dm_maintenance_started = False
 
     async def setup_hook(self) -> None:
         await asyncio.to_thread(reset_stale_processing_deliveries)
         if not self._delivery_loop_started:
             self.delivery_loop.start()
             self._delivery_loop_started = True
+        if not self._slack_dm_maintenance_started:
+            self.slack_dm_discovery_loop.start()
+            self.slack_dm_history_loop.start()
+            self._slack_dm_maintenance_started = True
 
     async def on_ready(self) -> None:
         logger.info("community_bridge_discord_ready user=%s", getattr(self.user, "id", ""))
@@ -144,13 +163,46 @@ class CommunityBridgeDiscordClient(discord.Client):
 
     @tasks.loop(seconds=1.0)
     async def delivery_loop(self) -> None:
-        await self.process_pending_deliveries_once(limit=10)
+        await self.process_pending_deliveries_once(limit=20)
+
+    @tasks.loop(seconds=60.0)
+    async def slack_dm_discovery_loop(self) -> None:
+        await asyncio.to_thread(discover_grants_if_due)
+
+    @tasks.loop(seconds=HISTORY_REQUEST_INTERVAL_SECONDS)
+    async def slack_dm_history_loop(self) -> None:
+        # Stay within Slack's documented history baseline while Retry-After
+        # responses can pause this independently from delivery retries.
+        await asyncio.to_thread(process_due_history_backfills, 1)
 
     async def process_pending_deliveries_once(self, limit: int = 10) -> None:
+        private_batch_size = max(
+            1,
+            min(
+                int(getattr(settings, "SLACK_DM_MIRROR_DELIVERY_BATCH_SIZE", 20)),
+                20,
+            ),
+        )
+        await asyncio.to_thread(
+            process_slack_dm_deliveries,
+            limit,
+            batch_size=private_batch_size,
+        )
         deliveries = await asyncio.to_thread(claim_ready_deliveries, limit)
         for delivery in deliveries:
             try:
                 await self._process_delivery(delivery)
+            except ParentMappingPending as exc:
+                logger.info(
+                    "community_bridge_waiting_for_parent delivery_id=%s parent_message_id=%s",
+                    delivery["id"],
+                    exc.parent_message_id,
+                )
+                await asyncio.to_thread(
+                    mark_delivery_waiting_for_parent,
+                    delivery_id=delivery["id"],
+                    parent_message_id=exc.parent_message_id,
+                )
             except Exception as exc:
                 logger.exception(
                     "community_bridge_delivery_failed delivery_id=%s target_platform=%s",
@@ -187,11 +239,15 @@ class CommunityBridgeDiscordClient(discord.Client):
             source_platform=delivery["source_platform"],
             channel=delivery.get("channel"),
         )
+        body = await self._resolve_message_body(
+            payload,
+            source_platform=delivery["source_platform"],
+        )
         content = build_mirrored_text(
             destination_platform=CommunityBridgePlatform.DISCORD,
             source_platform=delivery["source_platform"],
             author_display_name=author_display_name,
-            body=str(payload.get("text") or ""),
+            body=body,
             attachments=payload.get("attachments") or [],
         )
 
@@ -433,12 +489,40 @@ class CommunityBridgeDiscordClient(discord.Client):
             slack_workspace_id=slack_workspace_id,
             slack_user_id=source_author_id,
         )
+        author_display_name = str(payload.get("source_author_display_name") or "").strip()
+        author_avatar_url = str(payload.get("source_author_avatar_url") or "").strip()
+        if (
+            delivery["source_platform"] == CommunityBridgePlatform.SLACK
+            and source_author_id
+            and operation
+            in {
+                CommunityBridgeDeliveryType.CREATE,
+                CommunityBridgeDeliveryType.EDIT,
+            }
+            and (not author_display_name or not author_avatar_url)
+        ):
+            slack_profile = await asyncio.to_thread(
+                SlackBridgeClient.get_user_profile,
+                source_author_id,
+            )
+            author_display_name = author_display_name or str(
+                slack_profile.get("display_name") or ""
+            ).strip()
+            author_avatar_url = author_avatar_url or str(
+                slack_profile.get("avatar_url") or ""
+            ).strip()
         provenance = {
             "source_workspace_id": slack_workspace_id,
             "source_channel_id": delivery["source_channel_id"],
             "source_message_id": provenance_message_id,
             "source_author_id": source_author_id,
+            "source_author_display_name": author_display_name,
+            "source_author_avatar_url": author_avatar_url,
             "linked_pubkey": str((identity or {}).get("buzz_pubkey") or ""),
+            "linked_profile_id": str(
+                (identity or {}).get("user_profile_id") or ""
+            ),
+            "source_created_at": int(payload_metadata.get("slack_created_at") or 0),
         }
         text = ""
         if operation not in {
@@ -446,16 +530,21 @@ class CommunityBridgeDiscordClient(discord.Client):
             CommunityBridgeDeliveryType.REACTION_ADD,
             CommunityBridgeDeliveryType.REACTION_REMOVE,
         }:
-            author_display_name = await self._resolve_author_display_name(
+            if not author_display_name:
+                author_display_name = await self._resolve_author_display_name(
+                    payload,
+                    source_platform=delivery["source_platform"],
+                    channel=channel,
+                )
+            body = await self._resolve_message_body(
                 payload,
                 source_platform=delivery["source_platform"],
-                channel=channel,
             )
             text = build_mirrored_text(
                 destination_platform=CommunityBridgePlatform.BUZZ,
                 source_platform=delivery["source_platform"],
                 author_display_name=author_display_name,
-                body=str(payload.get("text") or ""),
+                body=body,
                 attachments=payload.get("attachments") or [],
             )
 
@@ -472,6 +561,9 @@ class CommunityBridgeDiscordClient(discord.Client):
             response = await asyncio.to_thread(
                 BuzzBridgeClient.deliver,
                 delivery_id=str(delivery["id"]),
+                # Relay channel writes have a deliberate freshness floor. Keep
+                # the Nostr protocol timestamp fresh and carry Slack's trusted
+                # chronology in bridge-source-created-at instead.
                 created_at=int(delivery["created_at"]),
                 operation=operation,
                 channel_id=delivery["target_channel_id"],
@@ -482,6 +574,9 @@ class CommunityBridgeDiscordClient(discord.Client):
                     if operation == CommunityBridgeDeliveryType.REACTION_ADD
                     else ""
                 ),
+                broadcast=bool(payload_metadata.get("broadcast"))
+                if operation == CommunityBridgeDeliveryType.CREATE
+                else False,
                 **provenance,
             )
             await asyncio.to_thread(
@@ -492,6 +587,27 @@ class CommunityBridgeDiscordClient(discord.Client):
                 destination_parent_message_id=parent_message_id,
                 destination_payload=response,
             )
+            return
+
+        override_target_message_id = str(
+            payload_metadata.get("destination_message_id_override") or ""
+        ).strip().lower()
+        if override_target_message_id:
+            if operation != CommunityBridgeDeliveryType.DELETE or not _is_buzz_event_id(
+                override_target_message_id
+            ):
+                raise RuntimeError("Invalid reconciliation destination override")
+            await asyncio.to_thread(
+                BuzzBridgeClient.deliver,
+                delivery_id=str(delivery["id"]),
+                created_at=int(delivery["created_at"]),
+                operation=operation,
+                channel_id=delivery["target_channel_id"],
+                text="",
+                target_message_id=override_target_message_id,
+                **provenance,
+            )
+            await asyncio.to_thread(complete_delivery, delivery_id=delivery["id"])
             return
 
         link = await asyncio.to_thread(
@@ -540,8 +656,11 @@ class CommunityBridgeDiscordClient(discord.Client):
             destination_platform=delivery["target_platform"],
         )
         if not link:
-            return ""
-        return str(link.get("destination_message_id") or "").strip()
+            raise ParentMappingPending(source_parent_message_id)
+        destination_message_id = str(link.get("destination_message_id") or "").strip()
+        if not destination_message_id:
+            raise ParentMappingPending(source_parent_message_id)
+        return destination_message_id
 
     async def _get_channel_or_fetch(self, channel_id: str) -> Optional[discord.abc.Messageable]:
         normalized_channel_id = str(channel_id or "").strip()
@@ -574,10 +693,22 @@ class CommunityBridgeDiscordClient(discord.Client):
             )
             if identity:
                 return str(identity.get("display_name") or user_id)
-        if source_platform == CommunityBridgePlatform.SLACK:
-            if user_id:
-                return await asyncio.to_thread(SlackBridgeClient.get_user_display_name, user_id)
+        if source_platform == CommunityBridgePlatform.SLACK and user_id:
+            return await asyncio.to_thread(
+                SlackBridgeClient.get_user_display_name,
+                user_id,
+            )
         return user_id or "Unknown user"
+
+    async def _resolve_message_body(self, payload: dict, *, source_platform: str) -> str:
+        body = str(payload.get("text") or "")
+        if source_platform != CommunityBridgePlatform.SLACK:
+            return body
+        metadata = dict(payload.get("metadata") or {})
+        raw_text = str(metadata.get("slack_raw_text") or "")
+        if not raw_text:
+            return body
+        return await asyncio.to_thread(SlackBridgeClient.resolve_message_text, raw_text)
 
     def _should_process_message(self, message: discord.Message) -> bool:
         if message.guild is None:
@@ -609,6 +740,12 @@ def run_bridge_worker() -> None:
     asyncio.run(_run_headless_delivery_worker(client))
 
 
+def _is_buzz_event_id(value: str) -> bool:
+    return len(value) == 64 and all(
+        character.isdigit() or character in "abcdef" for character in value
+    )
+
+
 async def _run_headless_delivery_worker(client: CommunityBridgeDiscordClient) -> None:
     await asyncio.to_thread(reset_stale_processing_deliveries)
     poll_seconds = max(
@@ -616,6 +753,19 @@ async def _run_headless_delivery_worker(client: CommunityBridgeDiscordClient) ->
         min(float(getattr(settings, "COMMUNITY_BRIDGE_WORKER_POLL_SECONDS", 1.0)), 60.0),
     )
     logger.info("community_bridge_headless_worker_ready target=mlai_chat")
+    next_discovery_at = 0.0
+    next_history_at = 0.0
     while True:
-        await client.process_pending_deliveries_once(limit=10)
-        await asyncio.sleep(poll_seconds)
+        now = asyncio.get_running_loop().time()
+        if now >= next_discovery_at:
+            await asyncio.to_thread(discover_grants_if_due)
+            next_discovery_at = now + 60.0
+        if now >= next_history_at:
+            await asyncio.to_thread(process_due_history_backfills, 1)
+            next_history_at = now + HISTORY_REQUEST_INTERVAL_SECONDS
+        await client.process_pending_deliveries_once(limit=20)
+        history_delay = max(
+            0.05,
+            next_history_at - asyncio.get_running_loop().time(),
+        )
+        await asyncio.sleep(min(poll_seconds, history_delay))

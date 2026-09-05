@@ -6,8 +6,34 @@ on:
   push:
     branches: [ main ]
 
+permissions:
+  actions: read
+  contents: read
+  pull-requests: read
+
 jobs:
+  # Pull requests run the complete suite and record the exact Git tree that
+  # passed. A main push reuses that result only when GitHub associates the
+  # commit with the same PR and the deployed tree is byte-for-byte identical.
+  # Everything else (direct pushes, stale-base merges, missing/expired
+  # artifacts, or API errors) fails closed to the full suite below.
+  validation-route:
+    runs-on: ubuntu-latest
+    outputs:
+      reason: ${{ steps.route.outputs.reason }}
+      reuse_pr_checks: ${{ steps.route.outputs.reuse_pr_checks }}
+    steps:
+    - uses: actions/checkout@v6
+
+    - id: route
+      name: Select validation route
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+      run: python scripts/ci_reuse_pr_checks.py
+
   checks:
+    needs: validation-route
+    if: ${{ needs.validation-route.outputs.reuse_pr_checks != 'true' }}
     runs-on: ubuntu-latest
     env:
       DATABASE_URL: sqlite:////tmp/mlai_backend_ci.sqlite3
@@ -82,7 +108,7 @@ jobs:
         COMMUNITY_CHAT_ADAPTER_URL: http://10.126.0.9:3100
         COMMUNITY_CHAT_EMAIL_CODE_AUTH_ENABLED: "true"
         COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED: "false"
-        COMMUNITY_CHAT_DEVICE_AUTH_ENABLED: "false"
+        COMMUNITY_CHAT_DEVICE_AUTH_ENABLED: "true"
         CUSTOMERIO_COMMUNITY_CHAT_CODE_MESSAGE_ID: mlai_chat_sign_in_code
         CUSTOMERIO_API_KEY: ci-customerio-api-key-placeholder
         COMMUNITY_CHAT_EMAIL_CODE_PEPPER: ci-chat-code-pepper-independent-value
@@ -115,6 +141,8 @@ jobs:
       run: |
         python manage.py test \
           roo.tests_api.TaskViewSetTests \
+          roo.tests_kimi_usage \
+          roo.tests_meeting_rooms \
           core.tests.test_auth_contract \
           core.tests.test_auth_session \
           core.tests.test_ops_domain_transition \
@@ -124,6 +152,8 @@ jobs:
           tests.test_org_memory_production_deploy \
           tests.test_drive_transcript_inventory \
           tests.test_validate_prod_urls \
+          tests.test_deploy_command_wiring \
+          tests.test_linear_deployment_wiring \
           tests.test_health_check \
           tests.test_content_factory_org_config \
           tests.test_new_endpoints.EndpointTests \
@@ -133,18 +163,44 @@ jobs:
           tests.test_content_factory_status_contract \
           content_factory.tests_admin_metrics \
           tests.test_community_bridge_adapter_url \
+          community_chat.tests.test_account_sessions \
+          community_chat.tests.test_adapter \
+          community_chat.tests.test_api \
+          community_chat.tests.test_device_auth \
+          community_chat.tests.test_throttles \
+          community_chat.tests.test_link_previews \
+          community_chat.tests.test_token_usage \
+          community_chat.tests.test_tokenmaxer_federation \
+          community_chat.tests.test_home \
+          community_chat.tests.test_password_auth \
+          community_chat.tests.test_slack_dm_ineligible_retirement \
+          community_chat.tests.test_slack_dm_io_authority \
+          community_chat.tests.test_slack_dm_mirror \
+          community_chat.tests.test_slack_dm_registration_ledger \
+          community_chat.tests.test_slack_endpoint_errors \
           integrations.tests_community_bridge \
+          integrations.tests_community_bridge_avatar_backfill \
+          integrations.tests_community_bridge_mention_backfill \
           integrations.tests_community_bridge_contracts \
           core.tests.test_auth_contract \
           tests.test_runtime_hardening \
+          tests.test_ci_reuse_pr_checks \
           integrations.tests_fields \
           integrations.tests_github_installation_reconciliation \
           integrations.tests_github_app_probe \
           integrations.tests_connectors \
+          integrations.tests_slack_connector_authority \
+          integrations.tests_startup_updates.StartupUpdateSlackBackfillViewTest \
+          vibe_raising.tests.VibeRaisingApiTests.test_startup_update_run_maps_create_authority_error_to_connector_auth_response \
+          vibe_raising.tests.VibeRaisingApiTests.test_startup_update_run_maps_refresh_authority_error_to_connector_auth_response \
+          vibe_raising.tests.VibeRaisingApiTests.test_email_draft_start_maps_create_authority_error_to_connector_auth_response \
+          vibe_raising.tests.VibeRaisingApiTests.test_email_draft_start_maps_redispatch_refresh_authority_error_to_connector_auth_response \
+          vibe_raising.tests.VibeRaisingApiTests.test_email_draft_start_maps_active_refresh_authority_error_to_connector_auth_response \
           integrations.tests_humanitix \
           integrations.tests_xero_reconciliation \
           integrations.tests_smart_scan \
           integrations.tests_http_client \
+          integrations.tests_linear_meeting_actions \
           tests.test_teardown_company \
           tests.test_editorial_learning_loop \
           startup_updates.tests_monthly_update_reminders \
@@ -155,9 +211,40 @@ jobs:
           hospital.test_world_view \
           hospital.test_leaderboard_view \
           victor_ai \
+          --exclude-tag postgres-only \
           --verbosity 2
 
+    # The workflow-run conclusion covers the two parallel PostgreSQL jobs as
+    # well, so recording this inside the existing checks runner avoids paying
+    # for a fourth PR job solely to write the attestation.
+    - id: tested-tree
+      if: ${{ github.event_name == 'pull_request' }}
+      name: Resolve tested Git tree
+      run: echo "tree=$(git rev-parse 'HEAD^{tree}')" >> "$GITHUB_OUTPUT"
+
+    - if: ${{ github.event_name == 'pull_request' }}
+      name: Write validation metadata
+      env:
+        HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        PULL_REQUEST: ${{ github.event.pull_request.number }}
+        TESTED_TREE: ${{ steps.tested-tree.outputs.tree }}
+      run: |
+        mkdir -p "$RUNNER_TEMP/pr-validation"
+        printf 'pull_request=%s\nhead_sha=%s\ntested_tree=%s\nworkflow_run=%s\nrun_attempt=%s\n' \
+          "$PULL_REQUEST" "$HEAD_SHA" "$TESTED_TREE" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" \
+          > "$RUNNER_TEMP/pr-validation/attestation.txt"
+
+    - if: ${{ github.event_name == 'pull_request' }}
+      name: Record exact validated tree
+      uses: actions/upload-artifact@v4
+      with:
+        name: ci-validated-tree-${{ steps.tested-tree.outputs.tree }}-${{ github.event.pull_request.head.sha }}-${{ github.run_attempt }}
+        path: ${{ runner.temp }}/pr-validation/attestation.txt
+        retention-days: 14
+
   postgres-search:
+    needs: validation-route
+    if: ${{ needs.validation-route.outputs.reuse_pr_checks != 'true' }}
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -199,6 +286,7 @@ jobs:
         python manage.py check_org_memory_search --require-vector --require-installed
         python manage.py test \
           org_memory.tests.test_search_postgres \
+          org_memory.tests.test_public_knowledge_embeddings \
           org_memory.tests.test_runtime_postgres \
           org_memory.tests.test_runtime.MemoryRuntimeTests.test_legacy_access_restored_dead_letters_get_version_pinned_replacements \
           org_memory.tests.test_consolidation.MemoryConsolidationTests.test_consolidation_work_payload_is_identifier_only_and_idempotent \
@@ -216,10 +304,72 @@ jobs:
           org_memory.tests.test_drive_processing.DriveProcessingTests.test_unchanged_accessible_version_restores_policy_revoked_chunks \
           --verbosity 2
 
-  deploy:
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    - name: Run meeting-room PostgreSQL tests
+      run: python manage.py test roo.tests_meeting_rooms --verbosity 2
+
+    - name: Run privacy-boundary PostgreSQL tests
+      run: |
+        python manage.py test \
+          community_chat.tests.test_api.CommunityChatDeviceAuthorityTransactionTests \
+          community_chat.tests.test_slack_dm_io_authority.SlackDmIoAuthorityTransactionTests \
+          community_chat.tests.test_slack_dm_registration_ledger.SlackDmDeliveryLeaseTransactionTests \
+          integrations.tests_slack_connector_authority.SlackConnectorAuthorityPostgresTests \
+          integrations.tests_startup_updates.StartupUpdateSlackLineagePostgresTests \
+          --verbosity 2
+
+  # org_memory.tests.test_migrations rewinds the org_memory graph to 0001 and
+  # replays it, which costs ~116s of migration operations. That is the same on
+  # SQLite and PostgreSQL — the cost is the number of operations, not the
+  # engine — so it cannot be made cheap by moving it, only by keeping it off
+  # the other jobs' critical path. It runs on PostgreSQL because that is the
+  # engine the migration under test runs on in production.
+  migration-tests:
+    needs: validation-route
+    if: ${{ needs.validation-route.outputs.reuse_pr_checks != 'true' }}
     runs-on: ubuntu-latest
-    needs: [checks, postgres-search]
+    services:
+      postgres:
+        image: pgvector/pgvector:0.8.2-pg15-bookworm
+        env:
+          POSTGRES_DB: mlai_test
+          POSTGRES_USER: mlai
+          POSTGRES_PASSWORD: mlai_test_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U mlai -d mlai_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      DATABASE_URL: postgresql://mlai:mlai_test_password@127.0.0.1:5432/mlai_test
+      CONNECTOR_CREDENTIAL_KEYS: '{"ci-v1":"MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="}'
+      CONNECTOR_CREDENTIAL_ACTIVE_KEY_ID: ci-v1
+      ORG_MEMORY_EMBEDDING_MODEL: text-embedding-3-small
+      ORG_MEMORY_EMBEDDING_VERSION: openai-text-embedding-3-small-v1
+      ORG_MEMORY_EMBEDDING_DIMENSIONS: "1536"
+    steps:
+    - uses: actions/checkout@v6
+
+    - uses: actions/setup-python@v6
+      with:
+        python-version: "3.11"
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt -r requirements-engine.txt
+
+    - name: Run migration tests
+      run: |
+        python manage.py test \
+          org_memory.tests.test_migrations \
+          --verbosity 2
+
+  deploy:
+    if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.validation-route.result == 'success' && (needs.validation-route.outputs.reuse_pr_checks == 'true' || (needs.checks.result == 'success' && needs.postgres-search.result == 'success' && needs.migration-tests.result == 'success')) }}
+    runs-on: ubuntu-latest
+    needs: [validation-route, checks, postgres-search, migration-tests]
     steps:
     - uses: actions/checkout@v6
 
@@ -239,6 +389,12 @@ jobs:
         REDIS_URL: ${{ secrets.REDIS_URL }}
         XERO_OAUTH_SCOPES: ${{ vars.XERO_OAUTH_SCOPES || '' }}
         ROO_SIM_PATIENT_KEY: ${{ secrets.ROO_SIM_PATIENT_KEY }}
+        LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+        LINEAR_MEETING_REQUIRED_TEAM_KEYS: ${{ vars.LINEAR_MEETING_REQUIRED_TEAM_KEYS || 'TECH,STU,MLA' }}
+        LINEAR_VERIFY_TEAM_ACCESS: "true"
+        LINEAR_CHANNEL_ISSUE_BINDINGS_JSON: ${{ vars.LINEAR_CHANNEL_ISSUE_BINDINGS_JSON }}
+        LINEAR_CHANNEL_ISSUE_MAX_COMMENTS: ${{ vars.LINEAR_CHANNEL_ISSUE_MAX_COMMENTS || '250' }}
+        LINEAR_CHANNEL_ISSUE_WRITES_ENABLED: ${{ vars.LINEAR_CHANNEL_ISSUE_WRITES_ENABLED || 'false' }}
         VICTOR_AI_ROO_SIGNING_SECRET: ${{ secrets.VICTOR_AI_ROO_SIGNING_SECRET }}
         COMMUNITY_CHAT_EMAIL_CODE_PEPPER: ${{ secrets.COMMUNITY_CHAT_EMAIL_CODE_PEPPER }}
         COMMUNITY_CHAT_EMAIL_CODE_DELIVERY_SECRET: ${{ secrets.COMMUNITY_CHAT_EMAIL_CODE_DELIVERY_SECRET }}
@@ -256,6 +412,7 @@ jobs:
         BUZZ_BRIDGE_DESTINATION_WORKSPACE_ID: ${{ vars.BUZZ_BRIDGE_DESTINATION_WORKSPACE_ID }}
         BUZZ_BRIDGE_DESTINATION_CHANNEL_ID: ${{ vars.BUZZ_BRIDGE_DESTINATION_CHANNEL_ID }}
         BUZZ_BRIDGE_DESTINATION_CHANNEL_NAME: ${{ vars.BUZZ_BRIDGE_DESTINATION_CHANNEL_NAME }}
+        MEETING_ROOM_BOOKING_ENABLED: ${{ vars.MEETING_ROOM_BOOKING_ENABLED || 'false' }}
         COMMUNITY_BRIDGE_PRODUCTION_ENABLED: ${{ vars.COMMUNITY_BRIDGE_PRODUCTION_ENABLED || 'false' }}
         ORG_MEMORY_PRODUCTION_DEPLOY_ENABLED: ${{ vars.ORG_MEMORY_PRODUCTION_DEPLOY_ENABLED || 'false' }}
         ORG_MEMORY_PRODUCTION_PUBLIC_CHANNEL_ADMIN_SCOPE_APPROVED: ${{ vars.ORG_MEMORY_PRODUCTION_PUBLIC_CHANNEL_ADMIN_SCOPE_APPROVED || 'false' }}
@@ -290,6 +447,7 @@ jobs:
           echo "::error::Required repository secret ROO_SIM_PATIENT_KEY is not configured"
           exit 1
         fi
+        python scripts/validate_linear_channel_issue_deploy_config.py
         if [ "${#VICTOR_AI_ROO_SIGNING_SECRET}" -lt 32 ]; then
           echo "::error::Required repository secret VICTOR_AI_ROO_SIGNING_SECRET is missing or shorter than 32 characters"
           exit 1
@@ -313,6 +471,15 @@ jobs:
           echo "::error::Required repository variable COMMUNITY_CHAT_ADAPTER_URL is not configured"
           exit 1
         fi
+        case "$MEETING_ROOM_BOOKING_ENABLED" in
+          true|TRUE|True|1|yes|YES|Yes|on|ON|On) MEETING_ROOM_BOOKING_ENABLED=true ;;
+          false|FALSE|False|0|no|NO|No|off|OFF|Off|"") MEETING_ROOM_BOOKING_ENABLED=false ;;
+          *)
+            echo "::error::MEETING_ROOM_BOOKING_ENABLED must be true or false"
+            exit 1
+            ;;
+        esac
+        export MEETING_ROOM_BOOKING_ENABLED
         case "$COMMUNITY_BRIDGE_PRODUCTION_ENABLED" in
           true|TRUE|True|1|yes|YES|Yes|on|ON|On) COMMUNITY_BRIDGE_PRODUCTION_ENABLED=true ;;
           false|FALSE|False|0|no|NO|No|off|OFF|Off|"") COMMUNITY_BRIDGE_PRODUCTION_ENABLED=false ;;

@@ -677,22 +677,6 @@ RESOURCES = {
         content_org_policies("keyword__organization_id"),
         default_order_by=("-similarity_score",),
     ),
-    "topic_maps": model_resource(
-        "topic_maps",
-        cf_models.TopicMap,
-        "SEO topic map snapshots.",
-        simple_fields("id", "organization_id", "clustering_threshold", "total_keywords", "unclustered_keywords", "created_at"),
-        content_org_policies("organization_id"),
-        default_order_by=("-created_at",),
-    ),
-    "research_sessions": model_resource(
-        "research_sessions",
-        cf_models.ResearchSession,
-        "SEO research session metadata.",
-        simple_fields("id", "organization_id", "seed_keywords_used", "competitors_analyzed", "keywords_discovered", "keywords_updated", "clusters_created", "geo_config", "started_at", "completed_at"),
-        content_org_policies("organization_id"),
-        default_order_by=("-started_at",),
-    ),
     "content_factory_runs": model_resource(
         "content_factory_runs",
         ContentFactoryRun,

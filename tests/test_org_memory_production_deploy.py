@@ -54,6 +54,9 @@ def _blocked_staging_stdout(blockers):
 class OrgMemoryProductionDeployTests(SimpleTestCase):
     def test_admin_brain_deploy_is_explicit_direct_production_and_non_shadow(self):
         deploy = (ROOT / "deploy.sh").read_text()
+        postmigrate = (
+            ROOT / "core" / "management" / "commands" / "deploy_postmigrate.py"
+        ).read_text()
 
         required_settings = {
             'ORG_MEMORY_QUERY_API_ENABLED "true"',
@@ -66,27 +69,44 @@ class OrgMemoryProductionDeployTests(SimpleTestCase):
             'ORG_MEMORY_ACTIONS_ENABLED "false"',
             'ORG_MEMORY_ACTION_LINEAR_EXECUTION_ENABLED "false"',
             'ORG_MEMORY_SELECTOR_EXPORT_ENABLED "false"',
-            'ORG_MEMORY_SELECTOR_SHADOW_ENABLED "false"',
         }
         for setting in required_settings:
             self.assertIn(f"upsert_env_value {setting}", deploy)
 
         self.assertIn("stage_org_memory_pilot", deploy)
-        self.assertIn("reconcile_org_memory_access_restored_dead_letters", deploy)
         self.assertIn("recover_org_memory_stopped_worker_work", deploy)
-        self.assertIn("reconcile_org_memory_consolidation_lock_dead_letters", deploy)
         self.assertIn("cancel_org_memory_superseded_extraction_work", deploy)
         self.assertIn("cancel_org_memory_superseded_consolidation_work", deploy)
-        self.assertIn("reconcile_org_memory_extraction_dead_letters", deploy)
-        self.assertIn("--superseded-extractor-version org-memory-extractor-v1", deploy)
-        self.assertIn("--superseded-prompt-version org-memory-extraction-prompt-v1", deploy)
-        self.assertIn("--superseded-extractor-version org-memory-extractor-v2", deploy)
-        self.assertIn("--superseded-extractor-version org-memory-extractor-v3", deploy)
-        self.assertIn("--superseded-extractor-version org-memory-extractor-v4", deploy)
-        self.assertIn(
+
+        # The one-shot repairs that used to be pinned here have been removed
+        # from deploy.sh. Each drained on the deploy that shipped it and
+        # reported zero candidates on every deploy afterwards, so they only
+        # lengthened the window where web is stopped. What must stay is the
+        # recurring work: recovery from the worker this deploy stops, and
+        # cancellation of queued work whose target this deploy supersedes.
+        retired_incident_repairs = (
+            "reconcile_org_memory_access_restored_dead_letters",
+            "reconcile_org_memory_consolidation_lock_dead_letters",
             "reconcile_org_memory_naive_datetime_dead_letters",
-            deploy,
         )
+        for command in retired_incident_repairs:
+            self.assertNotIn(command, deploy)
+
+        # reconcile_org_memory_extraction_dead_letters itself is *not* banned:
+        # bumping the extractor version is expected to add one back for the
+        # version being superseded. What must not come back are the drained
+        # v1-v4 backlogs, so pin the superseded-version flags rather than the
+        # command name.
+        drained_extractor_versions = (
+            "--superseded-extractor-version org-memory-extractor-v1",
+            "--superseded-extractor-version org-memory-extractor-v2",
+            "--superseded-extractor-version org-memory-extractor-v3",
+            "--superseded-extractor-version org-memory-extractor-v4",
+            "--superseded-schema-version org-memory-extraction-schema-v1",
+        )
+        for flag in drained_extractor_versions:
+            self.assertNotIn(flag, deploy)
+
         self.assertIn(
             "paused_runtime_services=(web memory-worker memory-scheduler community-email-worker)",
             deploy,
@@ -110,16 +130,16 @@ class OrgMemoryProductionDeployTests(SimpleTestCase):
         self.assertIn('upsert_env_value ORG_MEMORY_QUERY_API_ENABLED "false"', deploy)
         self.assertIn('if [ "\\$org_memory_production_deploy_enabled" = "true" ]; then', deploy)
         self.assertNotIn("--environment staging", deploy)
+        # Admin Brain activation still runs after the generic post-migration
+        # setup, which now includes the Firebase Storage CORS step that used to
+        # anchor this assertion directly.
+        self.assertIn("configure_firebase_storage_cors", postmigrate)
         self.assertGreater(
             deploy.index("activate_org_memory_pilot"),
-            deploy.index("configure_firebase_storage_cors"),
+            deploy.index("compose_run_web python manage.py deploy_postmigrate"),
         )
         self.assertLess(
-            deploy.index("reconcile_org_memory_access_restored_dead_letters"),
-            deploy.index("stage_org_memory_pilot"),
-        )
-        self.assertLess(
-            deploy.index("reconcile_org_memory_consolidation_lock_dead_letters"),
+            deploy.index("recover_org_memory_stopped_worker_work"),
             deploy.index("stage_org_memory_pilot"),
         )
         self.assertLess(
@@ -132,15 +152,7 @@ class OrgMemoryProductionDeployTests(SimpleTestCase):
         )
         self.assertLess(
             deploy.index('docker compose stop "\\${paused_runtime_services[@]}"'),
-            deploy.index("reconcile_org_memory_access_restored_dead_letters"),
-        )
-        self.assertLess(
-            deploy.index('docker compose stop "\\${paused_runtime_services[@]}"'),
             deploy.index("recover_org_memory_stopped_worker_work"),
-        )
-        self.assertLess(
-            deploy.index("reconcile_org_memory_extraction_dead_letters"),
-            deploy.index("stage_org_memory_pilot"),
         )
         self.assertLess(
             deploy.index("schedule_org_memory_reextraction"),

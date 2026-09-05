@@ -4,30 +4,53 @@ MLAI accounts and Buzz/Nostr device keys remain separate security identities.
 The `community_chat` Django app binds them only after the logged-in MLAI user
 proves control of the device key with a short-lived Nostr event.
 
-## Browser-to-device account handoff
+## Browser-to-desktop account handoff
 
-Desktop and mobile clients do not receive the MLAI website's session cookie.
-Instead, they use a short-lived OAuth-style handoff that is bound to the exact
-device key, approved origin, random state, and PKCE S256 verifier:
+The desktop app never receives the browser's HttpOnly MLAI Chat cookies.
+Instead, it uses a short-lived OAuth-style handoff bound to the exact desktop
+key, installation metadata, approved Tauri origin, random state, and PKCE S256
+verifier:
 
-1. The app creates a device key, random state and PKCE verifier, then calls
-   `POST /api/v1/community-chat/auth/device/start/` with the public key,
-   approved origin, state and code challenge.
-2. The app opens the returned `/auth/callback?request=...` URL on
-   `chat.mlai.au`. An unauthenticated user first completes MLAI magic-link
-   authentication; the callback then calls
-   `POST .../auth/device/authorize/` using the browser's normal MLAI session.
-3. The app polls `POST .../auth/device/exchange/` with the request ID, original
-   state and verifier. Before browser approval it receives `202 pending`.
-4. After approval, one successful exchange returns a short-lived opaque
-   `mlai_chat_...` bearer credential. The request is consumed atomically, so
-   state, verifier, request ID, or origin replays fail closed.
-5. The credential authenticates only `community_chat` endpoints and is scoped
-   to the one public key. It cannot authenticate any other MLAI API or enrol a
-   different key, and it is never persisted by the client.
+1. The desktop creates a device key, installation ID, random state and PKCE
+   verifier. It calls `POST /api/v1/community-chat/auth/device/start/` with
+   `client_id=mlai-chat-desktop`, the device metadata, state, and S256 code
+   challenge. Exact `tauri://localhost` and `http://tauri.localhost` origins
+   receive credential-free CORS on the Community Chat API namespace; native
+   calls omit ambient cookies and authenticate with installation-scoped bearer
+   credentials after this start/exchange flow.
+2. The desktop opens the returned `/auth/desktop?request=...` URL on
+   `chat.mlai.au`. An unauthenticated user first completes the normal MLAI Chat
+   email-code sign-in in the browser. The callback then shows an explicit
+   approval action and calls `POST .../auth/device/authorize/` with that
+   browser's origin-bound MLAI Chat cookie session. The API returns a
+   purpose-salted, timestamped authorization code bound to that request and
+   browser user; the browser returns it only through
+   `mlaichat://auth/callback` (with a copyable callback URL as a manual
+   fallback).
+3. After receiving that callback, the desktop calls
+   `POST .../auth/device/exchange/` once with the signed authorization code,
+   request ID, original state and verifier, plus the same validated device
+   metadata. The code is not delivered to the app that merely knows or polls
+   the request UUID.
+4. One successful exchange atomically returns a short-lived
+   `mlai_chat_...` bootstrap credential and rotating, Chat-scoped native access
+   and refresh credentials. The desktop keeps the bootstrap credential only in
+   memory for enrollment and stores the account session in OS-protected
+   storage.
+5. The request is consumed once. The state, verifier, complete enrollment
+   context, request origin, signed-code request/user binding, expiry, and public
+   key are checked under a row lock before any credential is issued. The
+   callback contains the short-lived authorization code, but never the state,
+   verifier, bootstrap credential, or account access/refresh token; the code is
+   unusable without the desktop's PKCE verifier and becomes unusable when the
+   request is consumed.
 
-Hosted web clients already have access to the credentialed MLAI session and
-may skip this handoff. Both paths enter the same membership request flow below.
+The native account session cannot authenticate any non-Chat MLAI API and is
+bound to the registered desktop installation. Hosted web clients keep using
+HttpOnly cookies, while mobile clients retain their in-app email-code flow and
+the registered `mlaichat://callback` application origin. That mobile origin is
+an API enrollment boundary, not a browser CORS origin. All clients enter the
+same membership request flow below.
 
 ## Request flow
 
@@ -37,18 +60,40 @@ may skip this handoff. Both paths enter the same membership request flow below.
    `community-chat:enrol-device` action, API audience, and exact client origin.
 3. The client signs the returned unsigned kind `27235` event with the device
    key and sends it to `POST .../bootstrap/invite/`.
-4. The backend verifies the event id and BIP-340 signature, atomically consumes
-   the challenge, and asks the private adapter for a five-minute, one-use
-   `member` invite.
+4. The backend verifies the event id and BIP-340 signature and atomically
+   consumes the challenge. While holding the device-authority lock, it requires
+   the adapter's authenticated `generation_cas_v2` capability, captures the
+   current per-key generation with `POST /v2/member-invite-intents`, and passes
+   that exact `expected_generation` to `POST /v2/member-invites`. It never falls
+   back to the legacy one-request mint. The resulting five-minute, one-use
+   `member` invite ID is audited under the same lock; the invite code is not.
 5. The client claims the invite directly against `chat.mlai.au`, then calls
    `POST .../bootstrap/confirm/`. Only a relay role of exactly `member` is
    accepted.
-6. `DELETE .../devices/{pubkey}/` asks the adapter to remove exactly a
-   `member`, then marks the binding revoked while retaining its audit history.
+6. `DELETE .../devices/{pubkey}/` first cancels every unconfirmed audited invite,
+   then asks the adapter to remove exactly a `member` and advance that key's
+   durable enrollment generation. It marks the binding revoked while retaining
+   its audit history. Repeating the delete is safe and advances the same
+   delete-wins fence, including recovery after an adapter mint whose backend
+   transaction did not commit.
 
 The backend stores adapter invite IDs and expiry metadata, never invite codes,
 signed proof payloads, email addresses, raw chat content, or private keys in
 membership audit records.
+
+The adapter serializes invite mint, invite cancellation, membership claim, and
+member deletion by community and public key. A member delete durably advances a
+per-key generation before it returns. An older invite mint that finishes later
+cannot bind or redeem in that newer generation; an explicit later enrollment
+starts from the new generation. Generic operator-created relay invites are not
+bound to this device fence and are not deleted by these endpoints.
+
+The intent phase creates no invite or membership capability. If it times out
+and reaches the adapter only after a delete, its caller has no mint response and
+cannot continue. If the mint phase is delayed until after a delete, its captured
+generation is stale and the adapter returns `invite_attempt_revoked` without
+creating an invite. Capability discovery, intent capture, and mint all require
+the private adapter bearer token.
 
 ## Private adapter boundary
 

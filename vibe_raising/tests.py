@@ -13,6 +13,7 @@ from content_factory.models import OrganizationContentConfig
 from organizations.models import Organization
 from workflow_runs.models import ContentFactoryRun, ContentFactoryRunStatus, ContentFactoryStepStatus
 from integrations.models import ExternalServiceConnection, ExternalServiceProvider, GoogleConnection
+from integrations.services.external_connectors import ConnectorOAuthError
 from integrations.services.valley_harness import ValleyHarnessResult
 from startup_updates.models import (
     MonthlyUpdateDraft,
@@ -1453,6 +1454,45 @@ class VibeRaisingApiTests(TestCase):
             },
         )
 
+    def test_monthly_update_save_round_trips_financial_brief(self):
+        self.client.force_authenticate(user=self.user)
+        self._create_founder_company(domain="financial-brief.example", registered=True)
+        snapshot = {
+            "schemaVersion": "1",
+            "targetMonth": "2026-03-01",
+            "currency": "AUD",
+            "performance": [
+                {"month": "2026-03-01", "income": 10000, "expenses": 7000, "net": 3000},
+            ],
+            "revenueMix": [],
+            "eventContribution": [],
+            "overhead": [],
+        }
+        analysis = {"headline": "We finished March in surplus.", "bullets": ["Income exceeded expenses."]}
+
+        response = self.client.post(
+            "/api/v1/vibe-raising/updates/",
+            {
+                "month": "March",
+                "year": 2026,
+                "financialSnapshot": snapshot,
+                "conciseAnalysis": analysis,
+                "presentationMode": "financial_charts_concise",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 201)
+        draft = MonthlyUpdateDraft.objects.get(
+            organization__domain="financial-brief.example",
+            month=date(2026, 3, 1),
+        )
+        self.assertEqual(draft.structured_memo["financial_snapshot"], snapshot)
+        self.assertEqual(draft.structured_memo["concise_analysis"], analysis)
+        self.assertEqual(draft.structured_memo["presentation_mode"], "financial_charts_concise")
+        self.assertEqual(response.data["update"]["financialSnapshot"], snapshot)
+        self.assertEqual(response.data["update"]["conciseAnalysis"], analysis)
+
     def test_monthly_update_post_preserves_display_config_when_omitted(self):
         self.client.force_authenticate(user=self.user)
         self._create_founder_company(domain="acme.com", registered=True)
@@ -1845,6 +1885,41 @@ class VibeRaisingApiTests(TestCase):
         self.assertEqual(run.run_request["external_context"]["slack"]["selected_channel_ids"], ["C123"])
         self.assertIn("xero", run.run_request["external_context"])
 
+    def test_startup_update_run_maps_create_authority_error_to_connector_auth_response(self):
+        self.client.force_authenticate(user=self.user)
+        self._create_founder_company()
+        self._create_google_connection()
+
+        with patch(
+            "vibe_raising.views.create_startup_update_run",
+            side_effect=ConnectorOAuthError("Slack authority was revoked"),
+        ):
+            response = self.client.post(
+                "/api/v1/vibe-raising/startup-update/run/",
+                {"inputSources": ["gmail", "slack"]},
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.data, {"detail": "Slack authority was revoked"})
+
+    def test_startup_update_run_maps_refresh_authority_error_to_connector_auth_response(self):
+        self.client.force_authenticate(user=self.user)
+        self._create_active_gmail_run_with_slack_selection()
+
+        with patch(
+            "vibe_raising.views.refresh_startup_update_run_source_context",
+            side_effect=ConnectorOAuthError("Slack authority changed"),
+        ):
+            response = self.client.post(
+                "/api/v1/vibe-raising/startup-update/run/",
+                {"inputSources": ["gmail", "xero", "slack"]},
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.data, {"detail": "Slack authority changed"})
+
     def test_startup_update_status_returns_ready_with_form_shaped_draft(self):
         self.client.force_authenticate(user=self.user)
         _profile, company = self._create_founder_company()
@@ -1979,6 +2054,49 @@ class VibeRaisingApiTests(TestCase):
         run = ContentFactoryRun.objects.get(run_id=first.data["runId"])
         self.assertEqual(run.run_request["window_months"], DEFAULT_BACKFILL_MONTHS)
         self.assertEqual(run.run_request["google_connection_id"], google_connection.id)
+
+    @patch("vibe_raising.views.notify_valley_run_created")
+    @patch("vibe_raising.views.mark_sources_sync_requested")
+    @patch("vibe_raising.views.refresh_linear_activity_selections")
+    def test_email_draft_start_does_not_full_sync_linear_or_luma(
+        self,
+        mock_refresh_linear_scope,
+        mock_sync_sources,
+        mock_notify,
+    ):
+        self.client.force_authenticate(user=self.user)
+        self._create_founder_company()
+        organization, _profile = resolve_or_create_profile(domain="acme.com")
+        linear_connection = ExternalServiceConnection.objects.create(
+            user=self.user,
+            organization=organization,
+            provider=ExternalServiceProvider.LINEAR,
+            account_label="Acme Linear",
+            status="connected",
+        )
+        ExternalServiceConnection.objects.create(
+            user=self.user,
+            organization=organization,
+            provider=ExternalServiceProvider.LUMA,
+            account_label="Acme Luma",
+            status="connected",
+        )
+
+        response = self.client.post(
+            "/api/v1/vibe-raising/email-draft/start/",
+            {
+                "inputSources": ["linear", "luma"],
+                "targetMonth": "2026-03-01",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 201)
+        mock_refresh_linear_scope.assert_called_once_with(linear_connection)
+        mock_sync_sources.assert_not_called()
+        mock_notify.assert_called_once_with(response.data["runId"])
+        run = ContentFactoryRun.objects.get(run_id=response.data["runId"])
+        self.assertEqual(run.run_request["input_sources"], ["linear", "luma"])
 
     @patch("startup_updates.services.timezone.now")
     def test_email_draft_start_creates_single_target_month_run_with_partial_current_window(self, mock_now):
@@ -2225,6 +2343,69 @@ class VibeRaisingApiTests(TestCase):
         for step_key in ["timeline_merge", "draft_generation", "groundedness_review"]:
             self.assertEqual(steps_by_key[step_key].status, ContentFactoryStepStatus.PENDING)
             self.assertEqual(steps_by_key[step_key].attempts, 0)
+
+    def test_email_draft_start_maps_create_authority_error_to_connector_auth_response(self):
+        self.client.force_authenticate(user=self.user)
+        self._create_founder_company()
+        self._create_google_connection()
+
+        with patch(
+            "vibe_raising.views.create_startup_update_run",
+            side_effect=ConnectorOAuthError("Slack authority was revoked"),
+        ):
+            response = self.client.post(
+                "/api/v1/vibe-raising/email-draft/start/",
+                {"inputSources": ["gmail", "slack"]},
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.data, {"detail": "Slack authority was revoked"})
+
+    def test_email_draft_start_maps_redispatch_refresh_authority_error_to_connector_auth_response(self):
+        self.client.force_authenticate(user=self.user)
+        _organization, _binding, run = self._create_active_gmail_run_with_slack_selection()
+        run.status = ContentFactoryRunStatus.QUEUED
+        run.save(update_fields=["status", "updated_at"])
+        ContentFactoryRun.objects.filter(pk=run.pk).update(
+            updated_at=timezone.now() - timedelta(minutes=1)
+        )
+
+        with patch(
+            "vibe_raising.views.refresh_startup_update_run_source_context",
+            side_effect=ConnectorOAuthError("Slack redispatch authority changed"),
+        ):
+            response = self.client.post(
+                "/api/v1/vibe-raising/email-draft/start/",
+                {"inputSources": ["gmail", "xero", "slack"]},
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(
+            response.data,
+            {"detail": "Slack redispatch authority changed"},
+        )
+
+    def test_email_draft_start_maps_active_refresh_authority_error_to_connector_auth_response(self):
+        self.client.force_authenticate(user=self.user)
+        self._create_active_gmail_run_with_slack_selection()
+
+        with patch(
+            "vibe_raising.views.refresh_startup_update_run_source_context",
+            side_effect=ConnectorOAuthError("Slack active-run authority changed"),
+        ):
+            response = self.client.post(
+                "/api/v1/vibe-raising/email-draft/start/",
+                {"inputSources": ["gmail", "xero", "slack"]},
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(
+            response.data,
+            {"detail": "Slack active-run authority changed"},
+        )
 
     def test_email_draft_start_redispatches_stale_queued_run(self):
         self.client.force_authenticate(user=self.user)

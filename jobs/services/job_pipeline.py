@@ -326,6 +326,19 @@ def _summarize_run_issues(source_errors: list[str], slack_error: str | None) -> 
     return " | ".join(issues) if issues else None
 
 
+def _all_attempted_live_sources_failed(
+    run: JobRun,
+    *,
+    collect_live: bool,
+    source_errors: list[str],
+) -> bool:
+    if not collect_live or not source_errors:
+        return False
+
+    source_statuses = list(run.source_logs.values_list("status", flat=True))
+    return bool(source_statuses) and all(status == "error" for status in source_statuses)
+
+
 def enqueue_run_from_request(validated: dict[str, Any], *, trigger_source: str = "manual_api") -> JobRun:
     return create_run(
         collect_live=validated.get("collect_live", True),
@@ -609,7 +622,7 @@ def run_daily_jobs(
         raw_jobs, source_errors = fetch_raw_jobs(run, collect_live, source_names, max_pages, per_keyword_limit)
         run.fetched_count = len(raw_jobs)
 
-        if collect_live and source_errors and not raw_jobs:
+        if _all_attempted_live_sources_failed(run, collect_live=collect_live, source_errors=source_errors):
             raise RuntimeError("All live job sources failed. " + "; ".join(source_errors[:5]))
 
         matched = insert_matched_jobs(run, raw_jobs)
@@ -650,11 +663,6 @@ def run_daily_jobs(
         run.error_message = _summarize_run_issues(source_errors, slack_error)
         run.completed_at = timezone.now()
         run.save()
-        if run.status == "completed_no_results_with_source_errors":
-            try:
-                post_failure_alert(run.run_id, run.error_message or "Run completed with source errors")
-            except Exception:
-                logger.exception("Failed to send source error alert for jobs run %s", run.run_id)
     except Exception as exc:
         run.status = "failed"
         run.error_message = str(exc)

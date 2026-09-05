@@ -4,11 +4,11 @@ from dataclasses import dataclass
 from datetime import timedelta
 
 from django.conf import settings
+from django.contrib.auth import get_user_model
 from django.db import transaction
 from django.utils import timezone
 
 from .models import CommunityChatAccountSession
-
 
 ACCESS_TOKEN_PREFIX = "mlai_session_access_"
 REFRESH_TOKEN_PREFIX = "mlai_session_refresh_"
@@ -38,6 +38,11 @@ def issue_account_session(user, challenge):
     access_token = _new_token(ACCESS_TOKEN_PREFIX)
     refresh_token = _new_token(REFRESH_TOKEN_PREFIX)
     with transaction.atomic():
+        # Device DELETE owns this same user-first boundary before revoking all
+        # key/installation credentials. A session issuance that began earlier
+        # therefore commits before the delete and is revoked by it, or waits
+        # and becomes an explicit post-delete authorization.
+        get_user_model().objects.select_for_update().get(pk=user.pk)
         CommunityChatAccountSession.objects.filter(
             user=user,
             client_id=challenge.client_id,
@@ -96,7 +101,10 @@ def rotate_account_session(raw_refresh_token, *, required_origin=None):
     now = timezone.now()
     with transaction.atomic():
         session = (
-            CommunityChatAccountSession.objects.select_for_update()
+            # Lock only the credential row. Device authority transitions take
+            # the user lock before revoking sessions; locking the joined user
+            # here would invert that order (session->user vs user->session).
+            CommunityChatAccountSession.objects.select_for_update(of=("self",))
             .select_related("user")
             .filter(refresh_token_hash=_hash_token(raw_refresh_token))
             .first()
@@ -138,7 +146,7 @@ def revoke_account_session(raw_refresh_token, *, required_origin=None):
     now = timezone.now()
     with transaction.atomic():
         session = (
-            CommunityChatAccountSession.objects.select_for_update()
+            CommunityChatAccountSession.objects.select_for_update(of=("self",))
             .select_related("user")
             .filter(refresh_token_hash=_hash_token(raw_refresh_token))
             .first()

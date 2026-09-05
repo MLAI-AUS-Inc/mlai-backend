@@ -551,27 +551,32 @@ class JobsSchedulerTests(TestCase):
         self.assertEqual(response.data[0]["status_url"], f"/api/v1/jobs/runs/{newer.run_id}")
 
     @patch("jobs.services.job_pipeline.collect_from_source")
-    def test_disabled_careerone_source_is_skipped_without_an_error(
+    def test_disabled_sources_are_skipped_without_an_error(
         self,
         mock_collect_from_source,
     ):
-        run = JobRun.objects.create(
-            run_date="2026-05-31",
-            run_id="2026-05-31-disabled-careerone",
-        )
+        for source_name in ("CareerOne", "Matchstiq"):
+            with self.subTest(source_name=source_name):
+                run = JobRun.objects.create(
+                    run_date="2026-05-31",
+                    run_id=f"2026-05-31-disabled-{source_name.lower()}",
+                )
 
-        jobs, source_errors = job_pipeline.fetch_raw_jobs(
-            run,
-            collect_live=True,
-            source_names=["CareerOne"],
-            max_pages=1,
-            per_keyword_limit=1,
-        )
+                jobs, source_errors = job_pipeline.fetch_raw_jobs(
+                    run,
+                    collect_live=True,
+                    source_names=[source_name],
+                    max_pages=1,
+                    per_keyword_limit=1,
+                )
 
-        self.assertEqual(jobs, [])
-        self.assertEqual(source_errors, [])
+                self.assertEqual(jobs, [])
+                self.assertEqual(source_errors, [])
+                self.assertFalse(
+                    SourceRunLog.objects.filter(run=run, source_name=source_name).exists()
+                )
+
         mock_collect_from_source.assert_not_called()
-        self.assertFalse(SourceRunLog.objects.filter(run=run, source_name="CareerOne").exists())
 
     def test_daily_jobs_html_page_renders_populated_run(self):
         run = JobRun.objects.create(run_date="2026-05-31", run_id="2026-05-31-html-page")
@@ -661,6 +666,85 @@ class JobsSchedulerTests(TestCase):
         self.assertEqual(run.status, "completed_with_source_errors")
         self.assertIn("CareerOne", run.error_message)
         mock_post_failure_alert.assert_not_called()
+
+    @patch("jobs.services.job_pipeline.post_failure_alert")
+    @patch("jobs.services.job_pipeline.select_top_jobs", return_value=[])
+    @patch("jobs.services.job_pipeline.insert_matched_jobs", return_value=[])
+    @patch("jobs.services.job_pipeline.fetch_raw_jobs")
+    def test_partial_source_error_without_top_picks_does_not_send_failure_alert(
+        self,
+        mock_fetch_raw_jobs,
+        _mock_insert_matched_jobs,
+        _mock_select_top_jobs,
+        mock_post_failure_alert,
+    ):
+        run = JobRun.objects.create(
+            run_date="2026-05-04",
+            run_id="2026-05-04-partial-source-no-results",
+            post_to_notion=False,
+            post_to_slack=False,
+        )
+        SourceRunLog.objects.create(
+            run=run,
+            source_name="Startup.jobs",
+            status="ok",
+            fetched_count=0,
+        )
+        SourceRunLog.objects.create(
+            run=run,
+            source_name="Matchstiq",
+            status="error",
+            error_message="DNS failure",
+        )
+        mock_fetch_raw_jobs.return_value = ([], ["Matchstiq: DNS failure"])
+
+        job_pipeline.run_daily_jobs(
+            run.run_id,
+            collect_live=True,
+            post_to_slack=False,
+            post_to_notion=False,
+        )
+
+        run.refresh_from_db()
+        self.assertEqual(run.status, "completed_no_results_with_source_errors")
+        self.assertIn("Matchstiq", run.error_message)
+        mock_post_failure_alert.assert_not_called()
+
+    @patch("jobs.services.job_pipeline.post_failure_alert")
+    @patch("jobs.services.job_pipeline.fetch_raw_jobs")
+    def test_all_attempted_live_sources_failed_still_alerts(
+        self,
+        mock_fetch_raw_jobs,
+        mock_post_failure_alert,
+    ):
+        run = JobRun.objects.create(
+            run_date="2026-05-04",
+            run_id="2026-05-04-all-sources-failed",
+            post_to_notion=False,
+            post_to_slack=False,
+        )
+        SourceRunLog.objects.create(
+            run=run,
+            source_name="Example",
+            status="error",
+            error_message="DNS failure",
+        )
+        mock_fetch_raw_jobs.return_value = ([], ["Example: DNS failure"])
+
+        with self.assertRaisesMessage(RuntimeError, "All live job sources failed"):
+            job_pipeline.run_daily_jobs(
+                run.run_id,
+                collect_live=True,
+                post_to_slack=False,
+                post_to_notion=False,
+            )
+
+        run.refresh_from_db()
+        self.assertEqual(run.status, "failed")
+        mock_post_failure_alert.assert_called_once_with(
+            run.run_id,
+            "All live job sources failed. Example: DNS failure",
+        )
 
     @override_settings(SLACK_BOT_TOKEN="xoxb-primary", JOBS_SLACK_BOT_TOKEN="")
     def test_jobs_settings_accepts_primary_slack_bot_token(self):

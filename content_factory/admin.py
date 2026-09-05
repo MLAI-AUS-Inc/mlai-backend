@@ -7,15 +7,18 @@ from .models import (
     ComponentMapping,
     ContentFactoryHealingRecord,
     ContentFactoryJob,
+    ContentIsland,
+    ContentIslandEdge,
+    ContentIslandKeyword,
+    ContentIslandRefreshDispatch,
+    ContentIslandSnapshot,
     GeneratedComponent,
     KeywordVelocity,
     OrganizationContentConfig,
     PAQuestion,
-    ResearchSession,
     ResearchedKeyword,
     ScheduledDiscoveryDispatch,
     SemanticCluster,
-    TopicMap,
     VibeMarketingComponentComment,
     WrittenArticle,
 )
@@ -432,27 +435,119 @@ class SemanticClusterAdmin(admin.ModelAdmin):
     member_count.short_description = 'Members'
 
 
-@admin.register(TopicMap)
-class TopicMapAdmin(admin.ModelAdmin):
-    """Admin for topic map snapshots."""
-    list_display = ('organization_domain', 'total_keywords', 'clustering_threshold', 'created_at')
-    list_filter = ('organization', 'created_at')
+class ContentIslandKeywordInline(admin.TabularInline):
+    """Inline for island membership on island detail."""
+    model = ContentIslandKeyword
+    extra = 0
+    readonly_fields = ('keyword', 'similarity_score', 'is_centroid', 'created_at')
+    can_delete = False
+    max_num = 25
+    ordering = ('-is_centroid', '-similarity_score')
+
+
+@admin.register(ContentIsland)
+class ContentIslandAdmin(admin.ModelAdmin):
+    """Admin for durable content islands (the founder-facing topic graph)."""
+    list_display = (
+        'name', 'organization_domain', 'slug', 'status_badge', 'origin',
+        'keyword_count', 'total_volume', 'opportunity_score', 'articles_written',
+        'consecutive_misses', 'last_refreshed_at'
+    )
+    list_filter = ('status', 'origin', 'organization', 'last_refreshed_at')
+    search_fields = ('name', 'slug', 'pillar_keyword', 'organization__domain', 'organization__name')
     list_select_related = ('organization',)
-    ordering = ('-created_at',)
+    ordering = ('-opportunity_score',)
+    readonly_fields = ('created_at', 'updated_at', 'centroid_summary')
+    inlines = [ContentIslandKeywordInline]
+
+    fieldsets = (
+        ('Identity', {
+            'fields': ('organization', 'slug', 'name', 'description', 'pillar_keyword')
+        }),
+        ('Visuals', {
+            'fields': ('icon_key', 'color_key'),
+            'description': 'Stamped once at creation - never reassign, the frontend keys off these.'
+        }),
+        ('Lifecycle', {
+            'fields': ('status', 'origin', 'consecutive_misses', 'last_missed_on', 'last_matched_at', 'last_expanded_on')
+        }),
+        ('Metrics', {
+            'fields': ('keyword_count', 'total_volume', 'avg_difficulty', 'opportunity_score', 'ai_search_volume', 'articles_written')
+        }),
+        ('Centroid', {
+            'fields': ('centroid_summary',),
+            'classes': ('collapse',),
+        }),
+        ('Timestamps', {
+            'fields': ('first_seen_at', 'promoted_at', 'archived_at', 'last_refreshed_at', 'created_at', 'updated_at')
+        }),
+    )
+
+    def organization_domain(self, obj):
+        return obj.organization.domain
+    organization_domain.short_description = 'Domain'
+    organization_domain.admin_order_field = 'organization__domain'
+
+    def status_badge(self, obj):
+        colors = {
+            'emerging': '#ff9900',
+            'visible': '#00cc00',
+            'archived': '#999',
+        }
+        color = colors.get(obj.status, '#999')
+        return format_html(
+            '<span style="background: {}; color: white; padding: 2px 6px; border-radius: 3px; font-size: 11px;">{}</span>',
+            color, obj.status.upper()
+        )
+    status_badge.short_description = 'Status'
+
+    def centroid_summary(self, obj):
+        centroid = obj.centroid_embedding or []
+        if not centroid:
+            return "No centroid yet (content-factory fills it on the next refresh)"
+        preview = ', '.join(f'{float(value):.4f}' for value in centroid[:8])
+        return format_html('<code>{} dims: [{}, ...]</code>', len(centroid), preview)
+    centroid_summary.short_description = 'Centroid Embedding'
+
+
+@admin.register(ContentIslandKeyword)
+class ContentIslandKeywordAdmin(admin.ModelAdmin):
+    list_display = ('keyword', 'island', 'similarity_score', 'is_centroid')
+    list_filter = ('is_centroid', 'island__organization')
+    search_fields = ('keyword__keyword', 'island__slug', 'island__name')
+    list_select_related = ('island', 'keyword')
+
+
+@admin.register(ContentIslandEdge)
+class ContentIslandEdgeAdmin(admin.ModelAdmin):
+    list_display = ('organization_domain', 'island_a', 'island_b', 'similarity')
+    list_filter = ('organization',)
+    search_fields = ('island_a__slug', 'island_b__slug', 'organization__domain')
+    list_select_related = ('organization', 'island_a', 'island_b')
+    ordering = ('-similarity',)
 
     def organization_domain(self, obj):
         return obj.organization.domain
     organization_domain.short_description = 'Domain'
 
 
-@admin.register(ResearchSession)
-class ResearchSessionAdmin(admin.ModelAdmin):
-    """Admin for research session tracking."""
-    list_display = ('organization_domain', 'keywords_discovered', 'keywords_updated', 'clusters_created', 'started_at', 'completed_at')
-    list_filter = ('organization', 'started_at')
+@admin.register(ContentIslandSnapshot)
+class ContentIslandSnapshotAdmin(admin.ModelAdmin):
+    list_display = ('island', 'captured_on', 'status', 'keyword_count', 'total_volume', 'opportunity_score')
+    list_filter = ('status', 'captured_on')
+    search_fields = ('island__slug', 'island__name', 'island__organization__domain')
+    list_select_related = ('island',)
+    ordering = ('-captured_on',)
+
+
+@admin.register(ContentIslandRefreshDispatch)
+class ContentIslandRefreshDispatchAdmin(admin.ModelAdmin):
+    list_display = ('organization_domain', 'local_date', 'status', 'content_factory_run_id', 'updated_at')
+    list_filter = ('status', 'local_date')
+    search_fields = ('organization__domain', 'content_factory_run_id', 'idempotency_key')
     list_select_related = ('organization',)
-    ordering = ('-started_at',)
-    readonly_fields = ('started_at',)
+    ordering = ('-local_date', '-updated_at')
+    readonly_fields = ('created_at', 'updated_at')
 
     def organization_domain(self, obj):
         return obj.organization.domain

@@ -119,5 +119,4 @@ checks, all organisational-memory tests, and the PostgreSQL vector/FTS checks.
 
 Future learned-ranking experiments are isolated from this request path. See
 `docs/org-memory-selector-shadow.md` for the disabled-by-default,
-currently-authorised, pseudonymised export and offline shadow-evaluation
-boundary.
+currently-authorised, pseudonymised dataset-export boundary.

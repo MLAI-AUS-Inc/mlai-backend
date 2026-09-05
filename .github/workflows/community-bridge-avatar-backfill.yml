@@ -1,0 +1,209 @@
+name: Backfill production community bridge Slack avatars
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Preview candidates or enqueue the historical avatar edits
+        required: true
+        default: dry_run
+        type: choice
+        options:
+          - dry_run
+          - apply
+      before:
+        description: Exclusive UTC message-link cutover timestamp
+        required: true
+        default: "2026-08-10T10:26:32Z"
+        type: string
+      after_link_id:
+        description: Resume after this message-link ID
+        required: true
+        default: "0"
+        type: string
+      limit:
+        description: Maximum message links to inspect (1-5000)
+        required: true
+        default: "100"
+        type: string
+      slack_channel_id:
+        description: Optional single Slack channel ID
+        required: false
+        default: ""
+        type: string
+      confirm_historical_edits:
+        description: Required when mode is apply
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-community-bridge-slack-avatar-backfill
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate inputs
+        env:
+          MODE: ${{ inputs.mode }}
+          BEFORE: ${{ inputs.before }}
+          AFTER_LINK_ID: ${{ inputs.after_link_id }}
+          LIMIT: ${{ inputs.limit }}
+          SLACK_CHANNEL_ID: ${{ inputs.slack_channel_id }}
+          CONFIRM_HISTORICAL_EDITS: ${{ inputs.confirm_historical_edits }}
+        run: |
+          set -euo pipefail
+          if [[ "$MODE" != "dry_run" && "$MODE" != "apply" ]]; then
+            echo "::error::mode must be dry_run or apply"
+            exit 1
+          fi
+          if ! [[ "$BEFORE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]; then
+            echo "::error::before must be a UTC timestamp such as 2026-08-10T10:26:32Z"
+            exit 1
+          fi
+          if ! [[ "$AFTER_LINK_ID" =~ ^[0-9]+$ ]]; then
+            echo "::error::after_link_id must be zero or a positive integer"
+            exit 1
+          fi
+          if ! [[ "$LIMIT" =~ ^[0-9]+$ ]] || (( LIMIT < 1 || LIMIT > 5000 )); then
+            echo "::error::limit must be between 1 and 5000"
+            exit 1
+          fi
+          if [[ -n "$SLACK_CHANNEL_ID" ]] && ! [[ "$SLACK_CHANNEL_ID" =~ ^[A-Z0-9]+$ ]]; then
+            echo "::error::slack_channel_id must be an uppercase Slack channel ID"
+            exit 1
+          fi
+          if [[ "$MODE" == "apply" && "$CONFIRM_HISTORICAL_EDITS" != "true" ]]; then
+            echo "::error::confirm_historical_edits must be selected for apply mode"
+            exit 1
+          fi
+
+      - name: Install SSH key
+        uses: webfactory/ssh-agent@v0.10.0
+        with:
+          ssh-private-key: ${{ secrets.DO_SSH_KEY }}
+
+      - name: Add known host
+        run: ssh-keyscan -H 209.38.85.60 >> ~/.ssh/known_hosts
+
+      - name: Run avatar backfill batch
+        env:
+          MODE: ${{ inputs.mode }}
+          BEFORE: ${{ inputs.before }}
+          AFTER_LINK_ID: ${{ inputs.after_link_id }}
+          LIMIT: ${{ inputs.limit }}
+          SLACK_CHANNEL_ID: ${{ inputs.slack_channel_id }}
+        run: |
+          set -euo pipefail
+          channel_argument="${SLACK_CHANNEL_ID:-NONE}"
+          ssh root@209.38.85.60 bash -s -- \
+            "$MODE" "$BEFORE" "$AFTER_LINK_ID" "$LIMIT" "$channel_argument" <<'REMOTE'
+          set -euo pipefail
+          mode="$1"
+          before="$2"
+          after_link_id="$3"
+          limit="$4"
+          slack_channel_id="$5"
+          cd /root/mlai-backend
+          args=(
+            python manage.py backfill_community_bridge_slack_avatars
+            --before "$before"
+            --after-link-id "$after_link_id"
+            --limit "$limit"
+          )
+          if [[ "$slack_channel_id" != "NONE" ]]; then
+            args+=(--slack-channel-id "$slack_channel_id")
+          fi
+          if [[ "$mode" == "apply" ]]; then
+            args+=(--apply --confirm-historical-edits)
+          fi
+          docker compose exec -T web "${args[@]}" </dev/null
+          docker compose exec -T web python manage.py shell <<'PY'
+          import json
+          import unicodedata
+          from urllib.parse import urlparse
+
+          from django.db.models import Count, OuterRef, Subquery
+
+          from integrations.models import (
+              CommunityBridgeDelivery as Delivery,
+              CommunityBridgeDeliveryStatus,
+              CommunityBridgeMessageLink as MessageLink,
+              CommunityBridgePlatform,
+          )
+
+          all_backfill_deliveries = Delivery.objects.filter(
+              source_event_key__startswith="slack-avatar-backfill-v1:"
+          )
+          deliveries = all_backfill_deliveries.exclude(
+              source_message_id__startswith="reaction:"
+          )
+          excluded_reaction_count = all_backfill_deliveries.filter(
+              source_message_id__startswith="reaction:"
+          ).count()
+          counts = list(
+              deliveries.values("status")
+              .annotate(count=Count("id"))
+              .order_by("status")
+          )
+          target_event = MessageLink.objects.filter(
+              channel_id=OuterRef("channel_id"),
+              source_platform=CommunityBridgePlatform.SLACK,
+              source_channel_id=OuterRef("source_channel_id"),
+              source_message_id=OuterRef("source_message_id"),
+              destination_platform=CommunityBridgePlatform.BUZZ,
+          ).values("destination_message_id")[:1]
+          dead_rows = list(
+              deliveries.filter(status=CommunityBridgeDeliveryStatus.DEAD)
+              .annotate(target_event_id=Subquery(target_event))
+              .values(
+                  "id",
+                  "source_channel_id",
+                  "source_message_id",
+                  "target_channel_id",
+                  "target_event_id",
+                  "payload",
+              )
+              .order_by("id")
+          )
+          fingerprints = []
+          for row in dead_rows:
+              payload = dict(row.pop("payload") or {})
+              avatar_url = str(payload.get("source_author_avatar_url") or "")
+              display_name = str(payload.get("source_author_display_name") or "")
+              target_event_id = str(row.get("target_event_id") or "")
+              row.update(
+                  {
+                      "avatar_host": urlparse(avatar_url).hostname or "",
+                      "avatar_url_length": len(avatar_url),
+                      "display_name_has_control": any(
+                          unicodedata.category(character) == "Cc"
+                          for character in display_name
+                      ),
+                      "display_name_length": len(display_name),
+                      "source_author_id": str(payload.get("source_author_id") or ""),
+                      "target_event_id_is_hex64": len(target_event_id) == 64
+                      and all(character in "0123456789abcdef" for character in target_event_id),
+                      "text_length": len(str(payload.get("text") or "")),
+                  }
+              )
+              fingerprints.append(row)
+          print(
+              json.dumps(
+                  {
+                      "backfill_dead_delivery_fingerprints": fingerprints,
+                      "backfill_delivery_status_counts": counts,
+                      "backfill_excluded_reaction_count": excluded_reaction_count,
+                  },
+                  sort_keys=True,
+              )
+          )
+          PY
+          docker compose ps web bridge-worker
+          docker compose logs --since 10m --tail 200 bridge-worker
+          REMOTE

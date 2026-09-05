@@ -15,7 +15,7 @@ from django.http import HttpResponse, HttpResponseRedirect
 from django.shortcuts import render
 from django.urls import reverse
 from django.utils import timezone
-from django.utils.dateparse import parse_datetime
+from django.utils.dateparse import parse_date, parse_datetime
 from django.views import View
 from rest_framework import status
 from rest_framework.permissions import AllowAny
@@ -101,6 +101,23 @@ from workflow_runs.sanitization import sanitize_json_for_postgres
 logger = logging.getLogger(__name__)
 User = get_user_model()
 VALLEY_META_KEY = "_valley_meta"
+
+
+def _request_value(data, *keys, default=None):
+    """Read a wire field by any of its camelCase/snake_case spellings."""
+    if not isinstance(data, dict):
+        return default
+    for key in keys:
+        if key in data:
+            return data.get(key)
+    return default
+
+
+def _bool_from_wire(value):
+    """Coerce a query-string or JSON flag to a bool."""
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _normalize_discovery_diagnostics(value):
@@ -7261,16 +7278,29 @@ class ContentFactoryCallbackView(APIView):
 
 from content_factory.models import (
     ResearchedKeyword, KeywordVelocity, AISaturation, PAQuestion,
-    SemanticCluster, ClusterMembership, TopicMap, WrittenArticle, ResearchSession,
-    KeywordStatus, TopicFeedback
+    SemanticCluster, ClusterMembership, WrittenArticle,
+    KeywordStatus, TopicFeedback,
+    ContentIsland, ContentIslandKeyword, ContentIslandOrigin,
+    ContentIslandRefreshDispatch, ContentIslandRefreshDispatchStatus,
+    ContentIslandSnapshot, ContentIslandStatus,
+)
+from content_factory.content_islands import (
+    ISLAND_NAME_MAX_LENGTH,
+    ISLAND_PILLAR_KEYWORD_MAX_LENGTH,
+    normalize_color_key,
+    normalize_icon_key,
+    rebuild_island_edges,
+    seed_islands_from_bootstrap_pillars,
+    unique_island_slug,
 )
 from content_factory.serializers import (
     ResearchedKeywordListSerializer, ResearchedKeywordDetailSerializer,
     KeywordBulkUpsertSerializer, SemanticClusterSerializer,
-    ClusterBulkUpsertSerializer, TopicMapSerializer, WrittenArticleSerializer,
-    WrittenArticleCreateSerializer, ResearchSessionSerializer,
+    ClusterBulkUpsertSerializer, WrittenArticleSerializer,
+    WrittenArticleCreateSerializer,
     KeywordStatusUpdateSerializer, SEODashboardSerializer,
     ResearchFeedbackSerializer, TopicFeedbackRequestSerializer,
+    ContentIslandSerializer,
 )
 from content_factory.topic_feedback import (
     list_topic_feedback,
@@ -7376,6 +7406,40 @@ class SEOKeywordDetailView(APIView):
         return Response(serializer.data, status=status.HTTP_200_OK)
 
 
+def _ai_search_keyword_defaults(kw_data):
+    """
+    Build the AI-search update fields for one bulk-upsert keyword entry.
+
+    Only keys actually present in the payload are returned, so a run that did
+    not measure AI search volume leaves the stored columns untouched.
+    """
+    defaults = {}
+
+    ai_search_volume = _request_value(kw_data, 'ai_search_volume', 'aiSearchVolume')
+    if ai_search_volume is not None:
+        try:
+            defaults['ai_search_volume'] = int(ai_search_volume)
+        except (TypeError, ValueError):
+            pass
+
+    ai_monthly_searches = _request_value(kw_data, 'ai_monthly_searches', 'aiMonthlySearches')
+    if isinstance(ai_monthly_searches, list):
+        defaults['ai_monthly_searches'] = ai_monthly_searches
+
+    aeo_score = _request_value(kw_data, 'aeo_score', 'aeoScore')
+    if aeo_score is not None:
+        try:
+            defaults['aeo_score'] = float(aeo_score)
+        except (TypeError, ValueError):
+            pass
+
+    query_type = _request_value(kw_data, 'query_type', 'queryType')
+    if query_type is not None:
+        defaults['query_type'] = str(query_type).strip()[:32]
+
+    return defaults
+
+
 class SEOKeywordBulkUpsertView(APIView):
     """
     POST /api/seo/keywords/bulk/
@@ -7437,6 +7501,10 @@ class SEOKeywordBulkUpsertView(APIView):
                     'monthly_searches': monthly_searches if isinstance(monthly_searches, list) else [],
                     'cluster_fingerprint': kw_data.get('cluster_fingerprint', ''),
                 }
+                # AI-search research is only computed behind the cf GEO flags and
+                # only for the top candidates of a run, so an absent key means
+                # "not measured this time" and must never clobber a stored value.
+                defaults.update(_ai_search_keyword_defaults(kw_data))
 
                 keyword_obj, created = ResearchedKeyword.objects.update_or_create(
                     organization=org,
@@ -7843,6 +7911,430 @@ class SEOClusterBulkUpsertView(APIView):
             'created': created_count,
             'updated': updated_count,
             'total': len(clusters_data)
+        }, status=status.HTTP_200_OK)
+
+
+def _island_captured_on(value):
+    if isinstance(value, calendar_date) and not isinstance(value, datetime):
+        return value
+    parsed = parse_date(str(value or "").strip()) if value else None
+    return parsed or timezone.localdate()
+
+
+def _island_int(value, default=0):
+    try:
+        return int(round(float(value)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _island_float(value, default=0.0):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+_ISLAND_METRIC_FIELDS = (
+    ('keyword_count', ('keyword_count', 'keywordCount'), _island_int),
+    ('total_volume', ('total_volume', 'totalVolume'), _island_int),
+    ('avg_difficulty', ('avg_difficulty', 'avgDifficulty'), _island_float),
+    ('opportunity_score', ('opportunity_score', 'opportunityScore'), _island_float),
+    ('ai_search_volume', ('ai_search_volume', 'aiSearchVolume'), _island_int),
+)
+
+
+def _island_metrics_from_entry(entry, *, fallback):
+    """
+    Read one island's metrics, accepting them nested under ``metrics`` or flat.
+
+    An absent metric keeps its ``fallback`` value: an entry that only re-affirms
+    a match must never zero out what the last full refresh measured.
+    """
+    metrics = _request_value(entry, 'metrics', default=None)
+    if not isinstance(metrics, dict):
+        metrics = {}
+
+    def _pick(*keys):
+        value = _request_value(metrics, *keys, default=None)
+        if value is None:
+            value = _request_value(entry, *keys, default=None)
+        return value
+
+    resolved = {}
+    for field, keys, caster in _ISLAND_METRIC_FIELDS:
+        raw = _pick(*keys)
+        resolved[field] = fallback[field] if raw is None else caster(raw, default=fallback[field])
+    return resolved
+
+
+def _island_centroid_from_entry(entry):
+    centroid = _request_value(entry, 'centroid_embedding', 'centroidEmbedding', default=None)
+    if isinstance(centroid, list):
+        return [value for value in centroid if isinstance(value, (int, float))]
+    return []
+
+
+def _replace_island_members(island, organization, members_payload):
+    """
+    Replace the island's membership set from the payload.
+
+    Keywords the sync has not landed yet are counted and skipped - mlai_client's
+    keyword upsert is soft, so rows are never guaranteed.
+    """
+    requested = {}
+    for member in members_payload:
+        if isinstance(member, dict):
+            raw_keyword = _request_value(
+                member, 'keyword_normalized', 'keywordNormalized', 'keyword', default=''
+            )
+            similarity = _island_float(
+                _request_value(member, 'similarity_score', 'similarityScore', default=0.0)
+            )
+            is_centroid = bool(_request_value(member, 'is_centroid', 'isCentroid', default=False))
+        else:
+            raw_keyword = member
+            similarity = 0.0
+            is_centroid = False
+        keyword_normalized = str(raw_keyword or '').lower().strip()
+        if not keyword_normalized:
+            continue
+        requested[keyword_normalized] = {
+            'similarity_score': similarity,
+            'is_centroid': is_centroid,
+        }
+
+    resolved = {
+        keyword.keyword_normalized: keyword
+        for keyword in ResearchedKeyword.objects.filter(
+            organization=organization,
+            keyword_normalized__in=list(requested.keys()),
+        )
+    }
+    skipped = len(requested) - len(resolved)
+
+    ContentIslandKeyword.objects.filter(island=island).exclude(
+        keyword_id__in=[keyword.id for keyword in resolved.values()]
+    ).delete()
+    for keyword_normalized, keyword in resolved.items():
+        ContentIslandKeyword.objects.update_or_create(
+            island=island,
+            keyword=keyword,
+            defaults=requested[keyword_normalized],
+        )
+    return len(resolved), skipped
+
+
+def _island_articles_written(island):
+    return (
+        ResearchedKeyword.objects.filter(
+            island_memberships__island=island,
+            written_article__isnull=False,
+        )
+        .values('written_article_id')
+        .distinct()
+        .count()
+    )
+
+
+def _promote_eligible_islands(organization, now):
+    """Promote emerging islands by opportunity rank while visible slots remain."""
+    min_keywords = int(getattr(settings, 'CONTENT_ISLANDS_PROMOTION_MIN_KEYWORDS', 5) or 0)
+    min_volume = int(getattr(settings, 'CONTENT_ISLANDS_PROMOTION_MIN_VOLUME', 200) or 0)
+    max_visible = int(getattr(settings, 'CONTENT_ISLANDS_MAX_VISIBLE', 12) or 0)
+
+    visible_count = ContentIsland.objects.filter(
+        organization=organization, status=ContentIslandStatus.VISIBLE
+    ).count()
+    promoted = []
+    candidates = ContentIsland.objects.filter(
+        organization=organization,
+        status=ContentIslandStatus.EMERGING,
+        keyword_count__gte=min_keywords,
+        total_volume__gte=min_volume,
+    ).order_by('-opportunity_score', 'slug')
+    for island in candidates:
+        if max_visible and visible_count >= max_visible:
+            break
+        island.status = ContentIslandStatus.VISIBLE
+        island.promoted_at = now
+        island.save(update_fields=['status', 'promoted_at', 'updated_at'])
+        promoted.append(island.slug)
+        visible_count += 1
+    return promoted
+
+
+class SEOContentIslandListView(APIView):
+    """
+    GET /api/seo/islands/?domain=example.com[&seed=1]
+
+    Non-archived islands for an organization, centroids included so
+    content-factory can re-match its clusters run after run. ``seed=1`` creates
+    the org's first islands from the pillar list the dashboard already serves.
+    """
+    authentication_classes = []
+    permission_classes = [HasRooApiKey]
+
+    def get(self, request):
+        domain = str(request.query_params.get('domain') or '').strip()
+        if not domain:
+            return Response(
+                {'error': 'domain query parameter is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            org = Organization.objects.get(domain=domain)
+        except Organization.DoesNotExist:
+            return Response(
+                {'error': 'Organization not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        seeded = False
+        if _bool_from_wire(request.query_params.get('seed')):
+            with transaction.atomic():
+                if not ContentIsland.objects.filter(organization=org).exists():
+                    seeded = bool(seed_islands_from_bootstrap_pillars(org))
+
+        islands = ContentIsland.objects.filter(organization=org).exclude(
+            status=ContentIslandStatus.ARCHIVED
+        )
+        serializer = ContentIslandSerializer(islands, many=True)
+        return Response({
+            'domain': domain,
+            'count': len(serializer.data),
+            'islands': serializer.data,
+            'seeded': seeded,
+        }, status=status.HTTP_200_OK)
+
+
+class SEOContentIslandBulkSyncView(APIView):
+    """
+    POST /api/seo/islands/bulk/
+
+    Full-state island sync from one content-factory refresh run. The whole
+    lifecycle - birth, update, miss, archive, promotion, cap, articles_written,
+    edges, snapshots, dispatch completion - lives here so the state machine has
+    exactly one home. The payload carries no edges: those are recomputed
+    server-side from stored centroids.
+    """
+    authentication_classes = []
+    permission_classes = [HasRooApiKey]
+
+    def post(self, request):
+        payload = request.data if isinstance(request.data, dict) else {}
+        domain = str(_request_value(payload, 'domain', default='') or '').strip()
+        if not domain:
+            return Response(
+                {'error': 'domain is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        islands_payload = _request_value(payload, 'islands', default=None)
+        if not isinstance(islands_payload, list):
+            return Response(
+                {'error': 'islands must be a list'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            org = Organization.objects.get(domain=domain)
+        except Organization.DoesNotExist:
+            return Response(
+                {'error': f'Organization not found for domain: {domain}'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        entries = [entry for entry in islands_payload if isinstance(entry, dict)]
+        captured_on = _island_captured_on(
+            _request_value(payload, 'captured_on', 'capturedOn', default=None)
+        )
+        run_id = str(_request_value(payload, 'run_id', 'runId', default='') or '').strip()
+        expanded_slugs = {
+            str(slug or '').strip()
+            for slug in (_request_value(payload, 'expanded', 'expanded_slugs', 'expandedSlugs', default=[]) or [])
+            if str(slug or '').strip()
+        }
+
+        existing_by_slug = {
+            island.slug: island
+            for island in ContentIsland.objects.filter(organization=org)
+        }
+
+        # Every stored island must be matchable, so a birth without a centroid is
+        # rejected before anything is written.
+        for entry in entries:
+            entry_slug = str(_request_value(entry, 'slug', default='') or '').strip()
+            if entry_slug and entry_slug in existing_by_slug:
+                continue
+            if not _island_centroid_from_entry(entry):
+                return Response(
+                    {
+                        'error': 'centroid_embedding is required for a new island',
+                        'slug': entry_slug or None,
+                        'name': str(_request_value(entry, 'name', default='') or ''),
+                    },
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+        now = timezone.now()
+        created_slugs = []
+        updated_slugs = []
+        archived_slugs = []
+        skipped_keywords = 0
+        expanded_applied = []
+
+        with transaction.atomic():
+            taken_slugs = set(existing_by_slug.keys())
+            used_color_keys = [island.color_key for island in existing_by_slug.values()]
+            touched_slugs = set()
+
+            for entry in entries:
+                entry_slug = str(_request_value(entry, 'slug', default='') or '').strip()
+                island = existing_by_slug.get(entry_slug) if entry_slug else None
+                name = str(_request_value(entry, 'name', default='') or '').strip()[:ISLAND_NAME_MAX_LENGTH]
+                description = str(_request_value(entry, 'description', default='') or '').strip()
+                pillar_keyword = str(
+                    _request_value(entry, 'pillar_keyword', 'pillarKeyword', default='') or ''
+                ).strip()[:ISLAND_PILLAR_KEYWORD_MAX_LENGTH]
+                centroid = _island_centroid_from_entry(entry)
+                matched = bool(_request_value(entry, 'matched', default=bool(island)))
+
+                if island is None:
+                    origin = str(_request_value(entry, 'origin', default='') or '').strip()
+                    if origin not in ContentIslandOrigin.values:
+                        origin = ContentIslandOrigin.CLUSTER_BIRTH
+                    slug = unique_island_slug(
+                        entry_slug or name or pillar_keyword,
+                        taken_slugs,
+                        fallback='island',
+                    )
+                    color_key = normalize_color_key(
+                        _request_value(entry, 'color_key', 'colorKey'),
+                        used_color_keys=used_color_keys,
+                    )
+                    island = ContentIsland.objects.create(
+                        organization=org,
+                        slug=slug,
+                        name=name or slug,
+                        description=description,
+                        pillar_keyword=pillar_keyword or name or slug,
+                        icon_key=normalize_icon_key(_request_value(entry, 'icon_key', 'iconKey')),
+                        color_key=color_key,
+                        status=ContentIslandStatus.EMERGING,
+                        origin=origin,
+                        centroid_embedding=centroid,
+                        first_seen_at=now,
+                        last_matched_at=now,
+                        last_refreshed_at=now,
+                    )
+                    taken_slugs.add(slug)
+                    used_color_keys.append(color_key)
+                    existing_by_slug[slug] = island
+                    created_slugs.append(slug)
+                else:
+                    # Visuals are stamped at creation and never reassigned.
+                    if name:
+                        island.name = name
+                    if description:
+                        island.description = description
+                    if pillar_keyword:
+                        island.pillar_keyword = pillar_keyword
+                    if centroid:
+                        island.centroid_embedding = centroid
+                    island.consecutive_misses = 0
+                    island.last_refreshed_at = now
+                    if matched:
+                        island.last_matched_at = now
+                    updated_slugs.append(island.slug)
+
+                members_payload = _request_value(entry, 'members', default=None)
+                member_count = island.keyword_count
+                if isinstance(members_payload, list):
+                    member_count, entry_skipped = _replace_island_members(island, org, members_payload)
+                    skipped_keywords += entry_skipped
+
+                metrics_fallback = {
+                    'keyword_count': member_count,
+                    'total_volume': island.total_volume,
+                    'avg_difficulty': island.avg_difficulty,
+                    'opportunity_score': island.opportunity_score,
+                    'ai_search_volume': island.ai_search_volume,
+                }
+                for field, value in _island_metrics_from_entry(entry, fallback=metrics_fallback).items():
+                    setattr(island, field, value)
+
+                if island.slug in expanded_slugs or _bool_from_wire(
+                    _request_value(entry, 'expanded', default=False)
+                ):
+                    island.last_expanded_on = captured_on
+                    expanded_applied.append(island.slug)
+
+                island.articles_written = _island_articles_written(island)
+                island.save()
+                touched_slugs.add(island.slug)
+
+            archive_after = int(getattr(settings, 'CONTENT_ISLANDS_ARCHIVE_AFTER_MISSES', 5) or 0)
+            missed_islands = ContentIsland.objects.filter(organization=org).exclude(
+                status=ContentIslandStatus.ARCHIVED
+            ).exclude(slug__in=touched_slugs)
+            for island in missed_islands:
+                island.articles_written = _island_articles_written(island)
+                if island.last_missed_on == captured_on:
+                    island.save(update_fields=['articles_written', 'updated_at'])
+                    continue
+                island.consecutive_misses += 1
+                island.last_missed_on = captured_on
+                # A founder's published work stays on the map for good.
+                if (
+                    archive_after
+                    and island.consecutive_misses >= archive_after
+                    and island.articles_written == 0
+                ):
+                    island.status = ContentIslandStatus.ARCHIVED
+                    island.archived_at = now
+                    archived_slugs.append(island.slug)
+                island.save()
+
+            promoted_slugs = _promote_eligible_islands(org, now)
+            edge_count = rebuild_island_edges(org)
+
+            snapshot_islands = ContentIsland.objects.filter(organization=org).filter(
+                Q(slug__in=archived_slugs) | ~Q(status=ContentIslandStatus.ARCHIVED)
+            )
+            for island in snapshot_islands:
+                ContentIslandSnapshot.objects.update_or_create(
+                    island=island,
+                    captured_on=captured_on,
+                    defaults={
+                        'keyword_count': island.keyword_count,
+                        'total_volume': island.total_volume,
+                        'avg_difficulty': island.avg_difficulty,
+                        'opportunity_score': island.opportunity_score,
+                        'ai_search_volume': island.ai_search_volume,
+                        'status': island.status,
+                    },
+                )
+
+            if run_id:
+                dispatch = ContentIslandRefreshDispatch.objects.filter(
+                    organization=org, content_factory_run_id=run_id
+                ).first()
+                if dispatch and dispatch.status != ContentIslandRefreshDispatchStatus.COMPLETED:
+                    dispatch.status = ContentIslandRefreshDispatchStatus.COMPLETED
+                    dispatch.save(update_fields=['status', 'updated_at'])
+
+        return Response({
+            'domain': domain,
+            'created': len(created_slugs),
+            'updated': len(updated_slugs),
+            'created_slugs': created_slugs,
+            'promoted': promoted_slugs,
+            'archived': archived_slugs,
+            'expanded': expanded_applied,
+            'skipped_keywords': skipped_keywords,
+            'edges': edge_count,
         }, status=status.HTTP_200_OK)
 
 

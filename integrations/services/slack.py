@@ -50,6 +50,7 @@ class SlackService:
                     'email': profile.get('email'),
                     'image_url': profile.get('image_512') or profile.get('image_192'),
                     'is_bot': user.get('is_bot', False),
+                    'deleted': user.get('deleted', False),
                     'tz': user.get('tz'),
                 }
             else:
@@ -90,6 +91,7 @@ class SlackService:
                     'email': profile.get('email'),
                     'image_url': profile.get('image_512') or profile.get('image_192'),
                     'is_bot': user.get('is_bot', False),
+                    'deleted': user.get('deleted', False),
                     'tz': user.get('tz'),
                 }
             logger.error(f"Slack API error looking up user by email: {response.get('error')}")

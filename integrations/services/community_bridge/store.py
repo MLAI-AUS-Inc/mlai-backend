@@ -33,6 +33,7 @@ from integrations.services.community_bridge.contracts import (
 logger = logging.getLogger(__name__)
 
 RETRY_DELAYS_SECONDS = [10, 30, 120, 300, 900]
+PARENT_DEPENDENCY_RETRY_SECONDS = 10
 
 # Slack conversation types that may be mirrored: public channels ("channel")
 # and private channels ("group"). Direct messages ("im") and group DMs
@@ -207,7 +208,11 @@ def claim_ready_deliveries(limit: int = 10) -> list[dict]:
         queryset = (
             CommunityBridgeDelivery.objects.select_related("channel")
             .filter(
-                status__in=[CommunityBridgeDeliveryStatus.PENDING, CommunityBridgeDeliveryStatus.FAILED],
+                status__in=[
+                    CommunityBridgeDeliveryStatus.PENDING,
+                    CommunityBridgeDeliveryStatus.WAITING_FOR_PARENT,
+                    CommunityBridgeDeliveryStatus.FAILED,
+                ],
                 available_at__lte=now,
             )
             .filter(attempts__lt=F("max_attempts"))
@@ -313,6 +318,8 @@ def complete_create_delivery(
                 "destination_parent_message_id": str(destination_parent_message_id or "").strip(),
                 "source_payload": payload,
                 "destination_payload": destination_payload or {},
+                "source_deleted_at": None,
+                "destination_deleted_at": None,
             },
         )
         delivery.status = CommunityBridgeDeliveryStatus.COMPLETED
@@ -320,6 +327,7 @@ def complete_create_delivery(
         delivery.locked_at = None
         delivery.last_error = ""
         delivery.save(update_fields=["status", "completed_at", "locked_at", "last_error", "updated_at"])
+        _wake_waiting_child_deliveries(delivery)
 
 
 def complete_delivery(*, delivery_id: int) -> None:
@@ -366,6 +374,101 @@ def mark_delivery_retry(*, delivery_id: int, error_text: str, permanent: bool = 
     delivery.save(update_fields=["status", "available_at", "locked_at", "last_error", "updated_at"])
 
 
+def mark_delivery_waiting_for_parent(
+    *, delivery_id: int, parent_message_id: str
+) -> None:
+    """Park a delivery until its source parent has a destination mapping.
+
+    Dependency waits are deliberately separate from provider retries: no Slack,
+    Discord, or Buzz request has happened yet, so waiting must not consume the
+    delivery's bounded provider-attempt budget.
+    """
+
+    delivery = CommunityBridgeDelivery.objects.filter(id=delivery_id).first()
+    if not delivery:
+        return
+
+    now = timezone.now()
+    first_seen = delivery.dependency_first_seen_at or now
+    dependency_attempts = int(delivery.dependency_attempts or 0) + 1
+    max_age_seconds = max(
+        1,
+        int(
+            getattr(
+                settings,
+                "COMMUNITY_BRIDGE_PARENT_DEPENDENCY_MAX_AGE_SECONDS",
+                3600,
+            )
+            or 3600
+        ),
+    )
+    max_attempts = max(
+        1,
+        int(
+            getattr(
+                settings,
+                "COMMUNITY_BRIDGE_PARENT_DEPENDENCY_MAX_ATTEMPTS",
+                360,
+            )
+            or 360
+        ),
+    )
+    expired = (
+        dependency_attempts >= max_attempts
+        or (now - first_seen).total_seconds() >= max_age_seconds
+    )
+
+    delivery.status = (
+        CommunityBridgeDeliveryStatus.DEAD
+        if expired
+        else CommunityBridgeDeliveryStatus.WAITING_FOR_PARENT
+    )
+    delivery.attempts = max(0, int(delivery.attempts or 0) - 1)
+    delivery.dependency_attempts = dependency_attempts
+    delivery.dependency_first_seen_at = first_seen
+    delivery.available_at = (
+        now if expired else now + timedelta(seconds=PARENT_DEPENDENCY_RETRY_SECONDS)
+    )
+    delivery.locked_at = None
+    delivery.last_error = (
+        f"parent_mapping_timeout:{str(parent_message_id or '').strip()}"
+        if expired
+        else f"parent_mapping_pending:{str(parent_message_id or '').strip()}"
+    )
+    delivery.save(
+        update_fields=[
+            "status",
+            "attempts",
+            "dependency_attempts",
+            "dependency_first_seen_at",
+            "available_at",
+            "locked_at",
+            "last_error",
+            "updated_at",
+        ]
+    )
+
+
+def _wake_waiting_child_deliveries(parent: CommunityBridgeDelivery) -> int:
+    """Make children immediately eligible after their parent link is committed."""
+
+    now = timezone.now()
+    return CommunityBridgeDelivery.objects.filter(
+        channel=parent.channel,
+        source_platform=parent.source_platform,
+        source_channel_id=parent.source_channel_id,
+        source_parent_message_id=parent.source_message_id,
+        target_platform=parent.target_platform,
+        status=CommunityBridgeDeliveryStatus.WAITING_FOR_PARENT,
+    ).update(
+        status=CommunityBridgeDeliveryStatus.PENDING,
+        available_at=now,
+        locked_at=None,
+        last_error="",
+        updated_at=now,
+    )
+
+
 def reset_stale_processing_deliveries(max_age_seconds: int = 300) -> int:
     cutoff = timezone.now() - timedelta(seconds=max(1, int(max_age_seconds or 300)))
     return CommunityBridgeDelivery.objects.filter(
@@ -396,15 +499,16 @@ def _normalize_slack_event(payload: dict) -> Optional[dict]:
         return None
     bridge_bot_user_id = str(getattr(settings, "SLACK_BRIDGE_BOT_USER_ID", "") or "").strip()
 
-    if not subtype:
+    if subtype in {"", "bot_message", "thread_broadcast"}:
         source_message_id = str(event.get("ts") or "").strip()
         user_id = str(event.get("user") or "").strip()
-        if not source_message_id or not user_id or user_id == bridge_bot_user_id or event.get("bot_id"):
+        if not source_message_id or not user_id or user_id == bridge_bot_user_id:
             return None
         source_parent_message_id = _normalize_parent_message_id(
             thread_ts=str(event.get("thread_ts") or "").strip(),
             source_message_id=source_message_id,
         )
+        raw_text = str(event.get("text") or "")
         return {
             "delivery_type": CommunityBridgeDeliveryType.CREATE,
             "source_channel_id": str(event.get("channel") or "").strip(),
@@ -412,20 +516,27 @@ def _normalize_slack_event(payload: dict) -> Optional[dict]:
             "source_parent_message_id": source_parent_message_id,
             "source_author_id": user_id,
             "source_author_display_name": "",
-            "text": sanitize_slack_text(event.get("text") or ""),
+            "text": sanitize_slack_text(raw_text),
             "attachments": normalize_slack_files(event.get("files") or []),
+            "metadata": {
+                "broadcast": subtype == "thread_broadcast"
+                or bool(event.get("reply_broadcast")),
+                "slack_created_at": _slack_timestamp_seconds(source_message_id),
+                "slack_raw_text": raw_text,
+            },
         }
 
     if subtype == "message_changed":
         message = dict(event.get("message") or {})
         source_message_id = str(message.get("ts") or "").strip()
         user_id = str(message.get("user") or "").strip()
-        if not source_message_id or not user_id or user_id == bridge_bot_user_id or message.get("bot_id"):
+        if not source_message_id or not user_id or user_id == bridge_bot_user_id:
             return None
         source_parent_message_id = _normalize_parent_message_id(
             thread_ts=str(message.get("thread_ts") or "").strip(),
             source_message_id=source_message_id,
         )
+        raw_text = str(message.get("text") or "")
         return {
             "delivery_type": CommunityBridgeDeliveryType.EDIT,
             "source_channel_id": str(event.get("channel") or "").strip(),
@@ -433,19 +544,22 @@ def _normalize_slack_event(payload: dict) -> Optional[dict]:
             "source_parent_message_id": source_parent_message_id,
             "source_author_id": user_id,
             "source_author_display_name": "",
-            "text": sanitize_slack_text(message.get("text") or ""),
+            "text": sanitize_slack_text(raw_text),
             "attachments": normalize_slack_files(message.get("files") or []),
+            "metadata": {
+                "broadcast": str(message.get("subtype") or "").strip()
+                == "thread_broadcast"
+                or bool(message.get("reply_broadcast")),
+                "slack_created_at": _slack_timestamp_seconds(source_message_id),
+                "slack_raw_text": raw_text,
+            },
         }
 
     if subtype == "message_deleted":
         previous = dict(event.get("previous_message") or {})
         source_message_id = str(event.get("deleted_ts") or previous.get("ts") or "").strip()
         user_id = str(previous.get("user") or "").strip()
-        if (
-            not source_message_id
-            or previous.get("bot_id")
-            or user_id == bridge_bot_user_id
-        ):
+        if not source_message_id or not user_id or user_id == bridge_bot_user_id:
             return None
         source_parent_message_id = _normalize_parent_message_id(
             thread_ts=str(previous.get("thread_ts") or "").strip(),
@@ -588,6 +702,14 @@ def _normalize_parent_message_id(*, thread_ts: str, source_message_id: str) -> s
     if normalized_thread_ts and normalized_thread_ts != normalized_source_message_id:
         return normalized_thread_ts
     return ""
+
+
+def _slack_timestamp_seconds(value: str) -> int:
+    try:
+        seconds = int(str(value or "").split(".", 1)[0])
+    except (TypeError, ValueError):
+        return 0
+    return max(0, seconds)
 
 
 def _serialize_delivery(delivery: CommunityBridgeDelivery) -> dict:

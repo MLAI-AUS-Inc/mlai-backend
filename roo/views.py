@@ -1,6 +1,7 @@
 import hashlib
 import hmac
 import json
+import re
 import time
 
 from django.core.exceptions import ValidationError
@@ -23,7 +24,7 @@ from typing import Optional, Tuple
 from .models import (
     PointsAdmin, Minter, Task, Ledger, PointsAccount, BoostPostAdmission,
     TaskAssignment, TaskSubmission, CoworkingBooking, CoworkingDayCapacity,
-    RewardsCatalog, RewardRedemption, TaskTemplate, PointsRequest, PointsPurchase
+    RewardsCatalog, RewardRedemption, TaskTemplate, PointsRequest, PointsPurchase,
 )
 
 from .services import (
@@ -31,16 +32,23 @@ from .services import (
     BoostPostAdmissionService, BoostPostPayloadConflictError, InvalidBoostPostError,
     TaskService, RewardsService,
 )
+from .coding import roo_decimal_string
 from .permissions import (
+    can_list_committee_candidate_emails,
     can_generate_coworking_reports,
     is_points_admin,
     is_points_super_admin,
+    IdempotencyConflictError,
     InsufficientBalanceError,
     PermissionDeniedError,
 )
+from .committee_candidates import CommitteeCandidateEmailService
 from core.models import User
 from core.permissions import HasAPIKey, HasRooApiKey, HasStrictRooApiKey
+from core.slack_users import resolve_existing_user_from_profile
 from integrations.services import SlackService
+from community_chat.authentication import CommunityChatAccountAuthentication
+from hospital.authentication import CustomJWTAuthentication
 
 # Additional imports for Activity & Quests
 import logging
@@ -1141,18 +1149,29 @@ class UserBalanceViewSet(viewsets.ViewSet):
         user = PointsService.get_user_by_slack_id(slack_user_id)
         if user:
             balance_data = PointsService.get_balance(user)
-            account = PointsService.get_or_create_account(user)
+            available_microroo = PointsService.get_available_microroo(user)
+            total_microroo = balance_data['balance_microroo']
+            reserved_microroo = max(total_microroo - available_microroo, 0)
             
             data = {
                 'slack_user_id': slack_user_id,
                 'email': user.email,
-                'balance': balance_data['balance'],
+                # Legacy callers have always treated ``balance`` as spendable.
+                # Coding reservations must therefore be deducted even though
+                # the underlying account total is not debited until settlement.
+                'balance': PointsService.microroo_to_legacy_whole(available_microroo),
                 'earned_balance': balance_data['earned_balance'],
                 'purchased_topup_balance': balance_data['purchased_topup_balance'],
                 'lifetime_earned': balance_data['lifetime_earned'],
                 'lifetime_purchased_topup': balance_data['lifetime_purchased_topup'],
                 'lifetime_spent': balance_data['lifetime_spent'],
                 'expired_or_reversed_points': balance_data['expired_or_reversed_points'],
+                'balance_microroo': str(available_microroo),
+                'balance_roo': roo_decimal_string(available_microroo),
+                'reserved_microroo': str(reserved_microroo),
+                'reserved_roo': roo_decimal_string(reserved_microroo),
+                'total_balance_microroo': str(total_microroo),
+                'total_balance_roo': roo_decimal_string(total_microroo),
                 'annual_balance': balance_data['lifetime_earned'],  # For backwards compat
                 'lifetime_balance': balance_data['lifetime_earned'],  # For backwards compat
             }
@@ -1182,21 +1201,199 @@ class CurrentUserBalanceView(APIView):
     def get(self, request):
         user = request.user
         balance_data = PointsService.get_balance(user)
+        available_microroo = PointsService.get_available_microroo(user)
+        total_microroo = balance_data['balance_microroo']
+        reserved_microroo = max(total_microroo - available_microroo, 0)
         return Response(
             {
                 'user_id': user.id,
                 'email': user.email,
                 'slack_user_id': user.slack_id,
-                'balance': balance_data['balance'],
+                'balance': PointsService.microroo_to_legacy_whole(available_microroo),
                 'earned_balance': balance_data['earned_balance'],
                 'purchased_topup_balance': balance_data['purchased_topup_balance'],
                 'lifetime_earned': balance_data['lifetime_earned'],
                 'lifetime_purchased_topup': balance_data['lifetime_purchased_topup'],
                 'lifetime_spent': balance_data['lifetime_spent'],
                 'expired_or_reversed_points': balance_data['expired_or_reversed_points'],
+                'balance_microroo': str(available_microroo),
+                'balance_roo': roo_decimal_string(available_microroo),
+                'reserved_microroo': str(reserved_microroo),
+                'reserved_roo': roo_decimal_string(reserved_microroo),
+                'total_balance_microroo': str(total_microroo),
+                'total_balance_roo': roo_decimal_string(total_microroo),
             },
             status=status.HTTP_200_OK,
         )
+
+
+class KimiPromptUsageView(APIView):
+    """Atomically debit an MLAI account for one Kimi Code prompt.
+
+    Cloudflare Access supplies the developer email to the Kimi gateway. The
+    gateway calls this service endpoint with Roo's private API credential. The
+    caller controls only the identity and idempotency key; pricing remains a
+    backend setting so it cannot be reduced by a modified browser request.
+    """
+
+    permission_classes = [HasStrictRooApiKey]
+    IDEMPOTENCY_RE = re.compile(r'^[A-Za-z0-9._:-]{16,180}$')
+
+    @staticmethod
+    def _error(code: str, message: str, http_status: int) -> Response:
+        return Response(
+            {'code': code, 'message': message},
+            status=http_status,
+        )
+
+    @staticmethod
+    def _active_user(email_value):
+        email = User.objects.normalize_email(email_value)
+        if not email or len(email) > 254 or '@' not in email:
+            return email, None
+        return email, User.objects.filter(email__iexact=email, is_active=True).first()
+
+    def get(self, request):
+        email, user = self._active_user(request.query_params.get('email'))
+        if not email or user is None:
+            code = 'invalid_email' if not email or '@' not in email else 'account_not_found'
+            message = (
+                'A valid MLAI account email is required.'
+                if code == 'invalid_email'
+                else 'No active MLAI account is linked to this email.'
+            )
+            return self._error(
+                code,
+                message,
+                status.HTTP_400_BAD_REQUEST
+                if code == 'invalid_email'
+                else status.HTTP_404_NOT_FOUND,
+            )
+
+        balance = PointsService.get_balance(user)['balance']
+        return Response(
+            {
+                'balance': balance,
+                'prompt_cost_points': settings.KIMI_ROO_POINTS_PER_PROMPT,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    def post(self, request):
+        email, user = self._active_user(request.data.get('email'))
+        request_key = str(request.data.get('idempotency_key') or '').strip()
+        session_id = str(request.data.get('session_id') or '').strip()
+
+        if not email or len(email) > 254 or '@' not in email:
+            return self._error(
+                'invalid_email',
+                'A valid MLAI account email is required.',
+                status.HTTP_400_BAD_REQUEST,
+            )
+        if not self.IDEMPOTENCY_RE.fullmatch(request_key):
+            return self._error(
+                'invalid_idempotency_key',
+                'idempotency_key must contain 16-180 safe characters.',
+                status.HTTP_400_BAD_REQUEST,
+            )
+        if len(session_id) > 100:
+            return self._error(
+                'invalid_session_id',
+                'session_id must be 100 characters or fewer.',
+                status.HTTP_400_BAD_REQUEST,
+            )
+
+        if user is None:
+            return self._error(
+                'account_not_found',
+                'No active MLAI account is linked to this email.',
+                status.HTTP_404_NOT_FOUND,
+            )
+
+        points = settings.KIMI_ROO_POINTS_PER_PROMPT
+        ledger_key = f'kimi_prompt:{request_key}'
+        try:
+            ledger, created = PointsService.spend(
+                user=user,
+                delta=points,
+                source='TOOLS',
+                description='Kimi Code prompt',
+                created_by_slack_id='KIMI_CODE',
+                idempotency_key=ledger_key,
+                reference_type='KIMI_PROMPT',
+                reference_id=session_id or None,
+            )
+        except InsufficientBalanceError:
+            balance = PointsService.get_balance(user)['balance']
+            return Response(
+                {
+                    'code': 'insufficient_points',
+                    'message': f'{points} Roo Point is required for this prompt.'
+                    if points == 1
+                    else f'{points} Roo Points are required for this prompt.',
+                    'required_points': points,
+                    'balance': balance,
+                },
+                status=status.HTTP_402_PAYMENT_REQUIRED,
+            )
+        except IdempotencyConflictError:
+            return self._error(
+                'idempotency_conflict',
+                'That idempotency key was already used for a different operation.',
+                status.HTTP_409_CONFLICT,
+            )
+
+        # PointsService is globally idempotent. Reject a key collision instead
+        # of treating another user's or another operation's ledger row as this
+        # request. This also covers the IntegrityError race path in spend().
+        if (
+            ledger.user_id != user.id
+            or ledger.kind != 'SPEND'
+            or ledger.source != 'TOOLS'
+            or ledger.reference_type != 'KIMI_PROMPT'
+            or ledger.delta != -points
+        ):
+            return self._error(
+                'idempotency_conflict',
+                'That idempotency key was already used for a different operation.',
+                status.HTTP_409_CONFLICT,
+            )
+
+        balance = PointsService.get_balance(user)['balance']
+        return Response(
+            {
+                'status': 'charged' if created else 'already_charged',
+                'charged': created,
+                'charged_points': points if created else 0,
+                'prompt_cost_points': points,
+                'balance': balance,
+                'ledger_entry_id': ledger.id,
+            },
+            status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
+        )
+
+
+class CommitteeCandidateEmailsView(APIView):
+    """Return a private, copy-ready list of eligible member emails."""
+
+    permission_classes = [HasStrictRooApiKey]
+
+    def post(self, request):
+        requester_slack_id = clean_slack_id(request.data.get('requester_slack_id'))
+        if not requester_slack_id:
+            return Response(
+                {'code': 'requester_required', 'error': 'requester_slack_id is required'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not can_list_committee_candidate_emails(requester_slack_id):
+            return Response(
+                {
+                    'code': 'committee_admin_only',
+                    'error': 'Only active admin or committee Points Admins can list candidate emails',
+                },
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        return Response(CommitteeCandidateEmailService.list_emails())
 
 
 class BoostPostAdmissionView(APIView):
@@ -1245,11 +1442,25 @@ class BoostPostAdmissionView(APIView):
             request.data.get('social_post_url') or ''
         ).strip()[:2048]
         root_text = str(request.data.get('root_text') or '')[:10000]
+        recheck_insufficient_points = request.data.get(
+            'recheck_insufficient_points',
+            False,
+        )
+        if not isinstance(recheck_insufficient_points, bool):
+            return Response(
+                {
+                    'status': 'invalid_post',
+                    'code': 'invalid_post',
+                    'message': 'recheck_insufficient_points must be a boolean',
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         try:
             admission, created = BoostPostAdmissionService.admit(
                 **values,
                 root_text=root_text,
+                recheck_insufficient_points=recheck_insufficient_points,
             )
         except InvalidBoostPostError as exc:
             return Response(
@@ -1272,6 +1483,7 @@ class BoostPostAdmissionView(APIView):
 
         data = self._response(admission)
         data['idempotent_replay'] = not created
+        data['recheck_requested'] = recheck_insufficient_points
         if admission.status == 'approved':
             return Response(
                 data,
@@ -1444,10 +1656,32 @@ class CoworkingViewSet(viewsets.ViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
+        slack_user_id = clean_slack_id(slack_user_id)
+        # Points Admin awards create a Slack-scoped points owner immediately,
+        # even when the member has never run the account-link flow. Resolve
+        # that owner first so their granted balance remains directly usable.
         user = PointsService.get_user_by_slack_id(slack_user_id)
         if not user:
+            profile = SlackService.get_user_profile(slack_user_id)
+            if profile is None:
+                return Response(
+                    {
+                        'code': 'slack_identity_unavailable',
+                        'error': 'Could not verify your Slack account right now. Please try again.',
+                    },
+                    status=status.HTTP_503_SERVICE_UNAVAILABLE,
+                )
+
+            user = resolve_existing_user_from_profile(
+                slack_user_id=slack_user_id,
+                profile=profile,
+            )
+        if not user:
             return Response(
-                {'error': 'Please link your Slack account first'},
+                {
+                    'code': 'slack_account_not_linked',
+                    'error': 'Please link your Slack account first',
+                },
                 status=status.HTTP_400_BAD_REQUEST
             )
 
@@ -2217,6 +2451,12 @@ class CurrentUserPurchaseView(APIView):
     /roo/topup/{id} review + Stripe Checkout flow.
     """
     permission_classes = [IsAuthenticated]
+    # Accept the Desktop/Community Chat account session as well as the existing
+    # website JWT.  In both cases identity comes only from request.user.
+    authentication_classes = (
+        CommunityChatAccountAuthentication,
+        CustomJWTAuthentication,
+    )
 
     def post(self, request):
         pack_id = (request.data.get('pack_id') or '').strip()

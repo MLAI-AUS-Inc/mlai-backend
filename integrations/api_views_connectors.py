@@ -1,14 +1,18 @@
 import logging
 
+import requests
 from django.db import DatabaseError
 from rest_framework import permissions, status
 from rest_framework.response import Response
+from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
-from core.permissions import HasRooApiKey
+from core.permissions import HasRooApiKey, HasStrictRooApiKey
 from integrations.services.external_connectors import (
     _ACTIVE_ORG,
     ConnectorConfigurationError,
+    ConnectorOAuthError,
+    ConnectorRateLimitError,
     connect_humanitix_connection,
     connect_luma_connection,
     disconnect_external_connection,
@@ -31,16 +35,37 @@ from integrations.services.external_connectors import (
     update_slack_channel_selections,
 )
 from integrations.services.linear_meeting_actions import (
+    LinearChannelIssueAccessError,
+    LinearChannelIssueConflictError,
+    LinearChannelIssueRequestConflictError,
+    LinearChannelIssueWriteUncertainError,
+    LinearMeetingAccessError,
+    LinearMeetingActionConflictError,
     LinearMeetingConfigurationError,
     LinearMeetingGraphQLError,
     LinearMeetingIdempotencyConflictError,
     LinearMeetingRateLimitError,
     LinearMeetingSizingConflictError,
+    apply_linear_project_sizing_run,
+    cancel_linear_project_sizing_run,
+    create_linear_channel_issue,
+    create_linear_meeting_action_batch,
     create_linear_meeting_issue,
     create_linear_meeting_project_update,
+    create_linear_project_sizing_run,
+    decide_linear_meeting_action_batch,
+    get_linear_meeting_action_batch,
     get_linear_issue_receipt,
+    get_linear_channel_issue,
     get_linear_meeting_context,
+    get_linear_project_issue_page,
     get_linear_project_sizing_context,
+    get_linear_project_sizing_run,
+    get_linear_project_update_page,
+    list_linear_channel_issues,
+    list_linear_channel_issue_statuses,
+    resolve_linear_project,
+    write_linear_channel_issue,
 )
 from startup_updates.data_deletion import disconnect_gmail_for_user
 
@@ -53,6 +78,37 @@ logger = logging.getLogger(__name__)
 
 
 def _linear_meeting_error_response(exc):
+    if isinstance(exc, LinearChannelIssueAccessError):
+        return Response(
+            {
+                "detail": str(exc),
+                "code": "linear_channel_issue_access_denied",
+            },
+            status=status.HTTP_403_FORBIDDEN,
+        )
+    if isinstance(exc, LinearChannelIssueConflictError):
+        return Response(
+            {"detail": str(exc), "code": "linear_channel_issue_stale"},
+            status=status.HTTP_409_CONFLICT,
+        )
+    if isinstance(exc, LinearChannelIssueRequestConflictError):
+        return Response(
+            {"detail": str(exc), "code": "linear_channel_issue_write_conflict"},
+            status=status.HTTP_409_CONFLICT,
+        )
+    if isinstance(exc, LinearChannelIssueWriteUncertainError):
+        return Response(
+            {"detail": str(exc), "code": "linear_channel_issue_write_uncertain"},
+            status=status.HTTP_502_BAD_GATEWAY,
+        )
+    if isinstance(exc, LinearMeetingActionConflictError):
+        return Response(
+            {
+                "detail": str(exc),
+                "code": "linear_meeting_action_conflict",
+            },
+            status=status.HTTP_409_CONFLICT,
+        )
     if isinstance(exc, LinearMeetingIdempotencyConflictError):
         return Response(
             {
@@ -65,6 +121,7 @@ def _linear_meeting_error_response(exc):
         return Response(
             {
                 "detail": str(exc),
+                # Kept for older Roo deployments while the setting and UI copy migrate.
                 "code": "linear_studio_sizing_stale",
             },
             status=status.HTTP_409_CONFLICT,
@@ -74,6 +131,14 @@ def _linear_meeting_error_response(exc):
             {
                 "detail": str(exc),
                 "code": "linear_not_configured",
+            },
+            status=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+    if isinstance(exc, LinearMeetingAccessError):
+        return Response(
+            {
+                "detail": str(exc),
+                "code": "linear_team_access_incomplete",
             },
             status=status.HTTP_503_SERVICE_UNAVAILABLE,
         )
@@ -512,6 +577,19 @@ class SlackChannelListView(APIView):
             )
         except ConnectorConfigurationError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except ConnectorOAuthError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_401_UNAUTHORIZED)
+        except ConnectorRateLimitError as exc:
+            return Response(
+                {"detail": str(exc), "retryAfterSeconds": exc.retry_after_seconds},
+                status=status.HTTP_429_TOO_MANY_REQUESTS,
+            )
+        except requests.RequestException as exc:
+            logger.exception("Unable to load Slack channels")
+            return Response(
+                {"detail": str(exc) or "Slack is temporarily unavailable."},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
         except DatabaseError:
             return Response(PREVIEW_STORAGE_UNAVAILABLE_PAYLOAD, status=status.HTTP_503_SERVICE_UNAVAILABLE)
         return Response(payload, status=status.HTTP_200_OK)
@@ -544,6 +622,21 @@ class SlackChannelSelectionView(APIView):
             payload = update_slack_channel_selections(request.user, channel_ids, organization=scope)
         except ConnectorConfigurationError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except ConnectorOAuthError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_401_UNAUTHORIZED)
+        except ConnectorRateLimitError as exc:
+            return Response(
+                {"detail": str(exc), "retryAfterSeconds": exc.retry_after_seconds},
+                status=status.HTTP_429_TOO_MANY_REQUESTS,
+            )
+        except requests.RequestException as exc:
+            logger.exception("Unable to update Slack channel selections")
+            return Response(
+                {"detail": str(exc) or "Slack is temporarily unavailable."},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+        except DatabaseError:
+            return Response(PREVIEW_STORAGE_UNAVAILABLE_PAYLOAD, status=status.HTTP_503_SERVICE_UNAVAILABLE)
         return Response(payload, status=status.HTTP_200_OK)
 
 
@@ -587,6 +680,19 @@ class LinearProjectListView(APIView):
             )
         except ConnectorConfigurationError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except ConnectorOAuthError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_401_UNAUTHORIZED)
+        except ConnectorRateLimitError as exc:
+            return Response(
+                {"detail": str(exc), "retryAfterSeconds": exc.retry_after_seconds},
+                status=status.HTTP_429_TOO_MANY_REQUESTS,
+            )
+        except requests.RequestException as exc:
+            logger.exception("Unable to load automatic Linear project activity")
+            return Response(
+                {"detail": str(exc) or "Linear is temporarily unavailable."},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
         except DatabaseError:
             return Response(PREVIEW_STORAGE_UNAVAILABLE_PAYLOAD, status=status.HTTP_503_SERVICE_UNAVAILABLE)
         return Response(payload, status=status.HTTP_200_OK)
@@ -623,6 +729,19 @@ class LinearProjectSelectionView(APIView):
             payload = update_linear_project_selections(request.user, project_ids, organization=scope)
         except ConnectorConfigurationError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except ConnectorOAuthError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_401_UNAUTHORIZED)
+        except ConnectorRateLimitError as exc:
+            return Response(
+                {"detail": str(exc), "retryAfterSeconds": exc.retry_after_seconds},
+                status=status.HTTP_429_TOO_MANY_REQUESTS,
+            )
+        except requests.RequestException as exc:
+            logger.exception("Unable to refresh automatic Linear project activity")
+            return Response(
+                {"detail": str(exc) or "Linear is temporarily unavailable."},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
         return Response(payload, status=status.HTTP_200_OK)
 
 
@@ -709,10 +828,129 @@ class LinearMeetingContextView(APIView):
         try:
             payload = get_linear_meeting_context()
         except (
+            LinearMeetingAccessError,
             LinearMeetingConfigurationError,
             LinearMeetingRateLimitError,
             LinearMeetingGraphQLError,
             LinearMeetingIdempotencyConflictError,
+            ValueError,
+        ) as exc:
+            return _linear_meeting_error_response(exc)
+        return Response(payload, status=status.HTTP_200_OK)
+
+
+class LinearChannelIssueListView(APIView):
+    permission_classes = [HasRooApiKey]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "linear_channel_issue_list"
+
+    def post(self, request):
+        try:
+            payload = list_linear_channel_issues(request.data)
+        except (
+            LinearChannelIssueAccessError,
+            LinearMeetingConfigurationError,
+            LinearMeetingRateLimitError,
+            LinearMeetingGraphQLError,
+            ValueError,
+        ) as exc:
+            return _linear_meeting_error_response(exc)
+        return Response(payload, status=status.HTTP_200_OK)
+
+
+class LinearChannelIssueDetailView(APIView):
+    permission_classes = [HasRooApiKey]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "linear_channel_issue_detail"
+
+    def post(self, request):
+        try:
+            payload = get_linear_channel_issue(request.data)
+        except (
+            LinearChannelIssueAccessError,
+            LinearMeetingConfigurationError,
+            LinearMeetingRateLimitError,
+            LinearMeetingGraphQLError,
+            ValueError,
+        ) as exc:
+            return _linear_meeting_error_response(exc)
+        return Response(payload, status=status.HTTP_200_OK)
+
+
+class LinearChannelIssueStatusesView(APIView):
+    permission_classes = [HasRooApiKey]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "linear_channel_issue_statuses"
+
+    def post(self, request):
+        try:
+            payload = list_linear_channel_issue_statuses(request.data)
+        except (
+            LinearChannelIssueAccessError,
+            LinearMeetingConfigurationError,
+            LinearMeetingRateLimitError,
+            LinearMeetingGraphQLError,
+            ValueError,
+        ) as exc:
+            return _linear_meeting_error_response(exc)
+        return Response(payload, status=status.HTTP_200_OK)
+
+
+class LinearChannelIssueWriteView(APIView):
+    permission_classes = [HasStrictRooApiKey]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "linear_channel_issue_write"
+
+    def post(self, request):
+        try:
+            payload = write_linear_channel_issue(request.data)
+        except (
+            LinearChannelIssueAccessError,
+            LinearChannelIssueConflictError,
+            LinearChannelIssueRequestConflictError,
+            LinearChannelIssueWriteUncertainError,
+            LinearMeetingConfigurationError,
+            LinearMeetingRateLimitError,
+            LinearMeetingGraphQLError,
+            ValueError,
+        ) as exc:
+            return _linear_meeting_error_response(exc)
+        return Response(payload, status=status.HTTP_200_OK)
+
+
+class LinearChannelIssueCreateView(APIView):
+    permission_classes = [HasStrictRooApiKey]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "linear_channel_issue_write"
+
+    def post(self, request):
+        try:
+            payload = create_linear_channel_issue(request.data)
+        except (
+            LinearChannelIssueAccessError,
+            LinearChannelIssueConflictError,
+            LinearChannelIssueRequestConflictError,
+            LinearChannelIssueWriteUncertainError,
+            LinearMeetingConfigurationError,
+            LinearMeetingRateLimitError,
+            LinearMeetingGraphQLError,
+            ValueError,
+        ) as exc:
+            return _linear_meeting_error_response(exc)
+        return Response(payload, status=status.HTTP_201_CREATED)
+
+
+class LinearProjectResolveView(APIView):
+    permission_classes = [HasRooApiKey]
+
+    def get(self, request):
+        try:
+            payload = resolve_linear_project(request.query_params.get("query") or "")
+        except (
+            LinearMeetingAccessError,
+            LinearMeetingConfigurationError,
+            LinearMeetingRateLimitError,
+            LinearMeetingGraphQLError,
             ValueError,
         ) as exc:
             return _linear_meeting_error_response(exc)
@@ -737,6 +975,47 @@ class LinearMeetingIssueCreateView(APIView):
         return Response(payload, status=status.HTTP_201_CREATED)
 
 
+class LinearMeetingActionBatchCreateView(APIView):
+    permission_classes = [HasRooApiKey]
+
+    def post(self, request):
+        try:
+            payload = create_linear_meeting_action_batch(request.data)
+        except (LinearMeetingActionConflictError, ValueError) as exc:
+            return _linear_meeting_error_response(exc)
+        return Response(payload, status=status.HTTP_201_CREATED)
+
+
+class LinearMeetingActionBatchDetailView(APIView):
+    permission_classes = [HasRooApiKey]
+
+    def get(self, request, batch_id):
+        try:
+            payload = get_linear_meeting_action_batch(batch_id)
+        except (LinearMeetingActionConflictError, ValueError) as exc:
+            return _linear_meeting_error_response(exc)
+        return Response(payload, status=status.HTTP_200_OK)
+
+
+class LinearMeetingActionBatchDecisionView(APIView):
+    permission_classes = [HasRooApiKey]
+
+    def post(self, request, batch_id):
+        try:
+            payload = decide_linear_meeting_action_batch(batch_id, request.data)
+        except (
+            LinearMeetingActionConflictError,
+            LinearMeetingConfigurationError,
+            LinearMeetingRateLimitError,
+            LinearMeetingGraphQLError,
+            LinearMeetingIdempotencyConflictError,
+            LinearMeetingSizingConflictError,
+            ValueError,
+        ) as exc:
+            return _linear_meeting_error_response(exc)
+        return Response(payload, status=status.HTTP_200_OK)
+
+
 class LinearProjectSizingContextView(APIView):
     permission_classes = [HasRooApiKey]
 
@@ -755,6 +1034,115 @@ class LinearProjectSizingContextView(APIView):
             LinearMeetingGraphQLError,
             ValueError,
         ) as exc:
+            return _linear_meeting_error_response(exc)
+        return Response(payload, status=status.HTTP_200_OK)
+
+
+class LinearProjectIssueInventoryView(APIView):
+    permission_classes = [HasRooApiKey]
+
+    def get(self, request, project_id):
+        try:
+            payload = get_linear_project_issue_page(
+                project_id,
+                after=request.query_params.get("after"),
+                limit=request.query_params.get("limit") or 50,
+            )
+        except (
+            LinearMeetingConfigurationError,
+            LinearMeetingRateLimitError,
+            LinearMeetingGraphQLError,
+            ValueError,
+        ) as exc:
+            return _linear_meeting_error_response(exc)
+        return Response(payload, status=status.HTTP_200_OK)
+
+
+class LinearProjectUpdateInventoryView(APIView):
+    permission_classes = [HasRooApiKey]
+
+    def get(self, request, project_id):
+        try:
+            payload = get_linear_project_update_page(
+                project_id,
+                after=request.query_params.get("after"),
+                limit=request.query_params.get("limit") or 25,
+            )
+        except (
+            LinearMeetingConfigurationError,
+            LinearMeetingRateLimitError,
+            LinearMeetingGraphQLError,
+            ValueError,
+        ) as exc:
+            return _linear_meeting_error_response(exc)
+        return Response(payload, status=status.HTTP_200_OK)
+
+
+class LinearProjectSizingRunCreateView(APIView):
+    permission_classes = [HasRooApiKey]
+
+    def post(self, request, project_id):
+        try:
+            payload = create_linear_project_sizing_run(
+                {**request.data, "project_id": project_id}
+            )
+        except (
+            LinearMeetingConfigurationError,
+            LinearMeetingRateLimitError,
+            LinearMeetingGraphQLError,
+            LinearMeetingIdempotencyConflictError,
+            LinearMeetingSizingConflictError,
+            ValueError,
+        ) as exc:
+            return _linear_meeting_error_response(exc)
+        return Response(payload, status=status.HTTP_201_CREATED)
+
+
+class LinearProjectSizingRunDetailView(APIView):
+    permission_classes = [HasRooApiKey]
+
+    def get(self, request, run_id):
+        try:
+            payload = get_linear_project_sizing_run(run_id)
+        except ValueError as exc:
+            return _linear_meeting_error_response(exc)
+        return Response(payload, status=status.HTTP_200_OK)
+
+
+class LinearProjectSizingRunApplyView(APIView):
+    permission_classes = [HasRooApiKey]
+
+    def post(self, request, run_id):
+        try:
+            payload = apply_linear_project_sizing_run(
+                run_id,
+                requested_by_slack_user_id=request.data.get(
+                    "requested_by_slack_user_id"
+                ),
+                limit=request.data.get("limit") or 20,
+            )
+        except (
+            LinearMeetingConfigurationError,
+            LinearMeetingRateLimitError,
+            LinearMeetingGraphQLError,
+            ValueError,
+        ) as exc:
+            return _linear_meeting_error_response(exc)
+        return Response(payload, status=status.HTTP_200_OK)
+
+
+class LinearProjectSizingRunCancelView(APIView):
+    permission_classes = [HasRooApiKey]
+
+    def post(self, request, run_id):
+        try:
+            payload = cancel_linear_project_sizing_run(
+                run_id,
+                requested_by_slack_user_id=request.data.get(
+                    "requested_by_slack_user_id"
+                ),
+            )
+        except (LinearMeetingSizingConflictError, ValueError) as exc:
             return _linear_meeting_error_response(exc)
         return Response(payload, status=status.HTTP_200_OK)
 

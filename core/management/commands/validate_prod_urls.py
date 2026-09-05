@@ -59,6 +59,13 @@ REQUIRED_CORS_ORIGINS = {
     "https://www.victorai.win",
 }
 
+REQUIRED_COMMUNITY_CHAT_ORIGINS = {
+    "http://tauri.localhost",
+    "https://chat.mlai.au",
+    "mlaichat://callback",
+    "tauri://localhost",
+}
+
 REQUIRED_CSRF_ORIGINS = {
     "https://api.mlai.au",
     "https://chat.mlai.au",
@@ -89,6 +96,10 @@ FORBIDDEN_CREDENTIAL_ORIGINS = {
     # gain direct credentialed browser authority to api.mlai.au outside the
     # cookie-filtering gateway.
     "https://admin.mlai.au",
+    # Native webviews use bearer tokens and route-scoped, credential-free CORS.
+    # Global credentialed CORS would allow ambient browser cookies by mistake.
+    "http://tauri.localhost",
+    "tauri://localhost",
 }
 
 
@@ -191,9 +202,11 @@ def _validate_community_chat_contract(errors: list[str]) -> None:
             errors.append(f"{setting_name} must be exactly {expected} in production.")
 
     allowed_origins = set(_as_list(getattr(settings, "COMMUNITY_CHAT_ALLOWED_ORIGINS", [])))
-    if "https://chat.mlai.au" not in allowed_origins:
+    missing_origins = sorted(REQUIRED_COMMUNITY_CHAT_ORIGINS - allowed_origins)
+    if missing_origins:
         errors.append(
-            "COMMUNITY_CHAT_ALLOWED_ORIGINS is missing required origin(s): https://chat.mlai.au."
+            "COMMUNITY_CHAT_ALLOWED_ORIGINS is missing required origin(s): "
+            f"{', '.join(missing_origins)}."
         )
     development_origins = sorted(allowed_origins & DEVELOPMENT_COMMUNITY_CHAT_ORIGINS)
     if development_origins:
@@ -203,12 +216,10 @@ def _validate_community_chat_contract(errors: list[str]) -> None:
         )
     if not _as_bool(getattr(settings, "COMMUNITY_CHAT_EMAIL_CODE_AUTH_ENABLED", False)):
         errors.append("COMMUNITY_CHAT_EMAIL_CODE_AUTH_ENABLED must be true in production.")
-    for legacy_setting in (
-        "COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED",
-        "COMMUNITY_CHAT_DEVICE_AUTH_ENABLED",
-    ):
-        if _as_bool(getattr(settings, legacy_setting, False)):
-            errors.append(f"{legacy_setting} must be false in production.")
+    if _as_bool(getattr(settings, "COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED", False)):
+        errors.append("COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED must be false in production.")
+    if not _as_bool(getattr(settings, "COMMUNITY_CHAT_DEVICE_AUTH_ENABLED", False)):
+        errors.append("COMMUNITY_CHAT_DEVICE_AUTH_ENABLED must be true in production.")
     if not _as_clean_string(
         getattr(settings, "CUSTOMERIO_COMMUNITY_CHAT_CODE_MESSAGE_ID", "")
     ):

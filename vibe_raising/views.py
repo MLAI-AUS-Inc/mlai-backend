@@ -4,6 +4,7 @@ import mimetypes
 import os
 import urllib.parse
 from datetime import date, timedelta
+from functools import wraps
 from pathlib import Path
 from typing import Optional
 from uuid import uuid4
@@ -47,10 +48,12 @@ from startup_updates.metric_catalog import (
     startup_update_metric_label,
 )
 from integrations.services.external_connectors import (
+    ConnectorOAuthError,
     active_google_connection,
     active_organization_for_user,
     google_connection_for_org,
     mark_sources_sync_requested,
+    refresh_linear_activity_selections,
 )
 from integrations.services.gmail_scopes import (
     gmail_scope_status_payload,
@@ -189,53 +192,104 @@ VIBE_RAISING_INPUT_SOURCE_KEYS = {
 XERO_DRAFT_SYNC_STALE_AFTER = timedelta(minutes=15)
 
 
-def _sync_selected_financial_sources_for_draft(user, input_sources: list[str]) -> dict[str, list[str]]:
+def _connector_oauth_guarded(callback):
+    """Return the established connector-auth response for a revoked source."""
+
+    @wraps(callback)
+    def wrapped(*args, **kwargs):
+        try:
+            return callback(*args, **kwargs)
+        except ConnectorOAuthError as exc:
+            return Response(
+                {"detail": str(exc)},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+
+    return wrapped
+
+
+def _sync_selected_connector_sources_for_draft(user, input_sources: list[str]) -> dict[str, list[str]]:
     warnings: dict[str, list[str]] = {}
     selected = set(input_sources or [])
-    if ExternalServiceProvider.XERO not in selected:
-        return warnings
-
-    connection_qs = ExternalServiceConnection.objects.filter(
-        user=user,
-        provider=ExternalServiceProvider.XERO,
-    ).exclude(status=ExternalServiceConnectionStatus.DISCONNECTED)
     organization = active_organization_for_user(user)
-    if organization is not None:
-        connection_qs = connection_qs.filter(organization=organization)
-    connection = connection_qs.order_by("-updated_at", "-id").first()
-    if not connection:
-        warnings[ExternalServiceProvider.XERO] = ["Xero was selected but no active Xero connection is available."]
-        return warnings
+    provider_labels = {
+        ExternalServiceProvider.XERO: "Xero",
+        ExternalServiceProvider.LINEAR: "Linear",
+        ExternalServiceProvider.LUMA: "Luma",
+    }
+    for provider, label in provider_labels.items():
+        if provider not in selected:
+            continue
+        connection_qs = ExternalServiceConnection.objects.filter(
+            user=user,
+            provider=provider,
+        ).exclude(status=ExternalServiceConnectionStatus.DISCONNECTED)
+        if organization is not None:
+            connection_qs = connection_qs.filter(organization=organization)
+        connection = connection_qs.order_by("-updated_at", "-id").first()
+        if not connection:
+            warnings[provider] = [
+                f"{label} was selected but no active {label} connection is available."
+            ]
+            continue
 
-    last_synced_at = connection.last_synced_at
-    should_sync = (
-        connection.status != ExternalServiceConnectionStatus.CONNECTED
-        or last_synced_at is None
-        or timezone.now() - last_synced_at > XERO_DRAFT_SYNC_STALE_AFTER
-    )
-    if not should_sync:
-        return warnings
+        # Starting a draft is a browser-facing request and must return quickly.
+        # Refresh Linear's lightweight recent-activity selection here, then let
+        # Valley backfill the selected projects page-by-page. Luma drafting uses
+        # the latest cached monthly snapshot. A full inline refresh of either
+        # connector can make dozens of upstream requests and cause the browser
+        # connection to close before the run is even created.
+        if provider == ExternalServiceProvider.LINEAR:
+            try:
+                refresh_linear_activity_selections(connection)
+            except Exception as exc:
+                logger.exception(
+                    "Unable to refresh Linear activity scope before monthly update draft",
+                    extra={"user_id": user.id, "provider": provider},
+                )
+                warnings[provider] = [
+                    str(exc) or "Linear activity scope could not be refreshed before draft generation."
+                ]
+            continue
 
-    try:
-        payload = mark_sources_sync_requested(
-            user,
-            [ExternalServiceProvider.XERO],
-            financial_only=True,
+        if provider != ExternalServiceProvider.XERO:
+            continue
+
+        last_synced_at = connection.last_synced_at
+        should_sync = (
+            connection.status != ExternalServiceConnectionStatus.CONNECTED
+            or last_synced_at is None
+            or timezone.now() - last_synced_at > XERO_DRAFT_SYNC_STALE_AFTER
         )
-    except Exception as exc:
-        logger.exception("Unable to prepare Xero source before monthly update draft", extra={"user_id": user.id})
-        warnings[ExternalServiceProvider.XERO] = [str(exc) or "Xero sync failed before draft generation."]
-        return warnings
+        if not should_sync:
+            continue
 
-    sync_errors = [
-        str(item.get("error") or item.get("warning") or "").strip()
-        for item in payload.get("syncRuns", []) or payload.get("sync_runs", [])
-        if str(item.get("status") or "").lower() == "error"
-    ]
-    if payload.get("status") == "error" or sync_errors:
-        warnings[ExternalServiceProvider.XERO] = [
-            item for item in sync_errors if item
-        ] or ["Xero sync failed before draft generation."]
+        try:
+            payload = mark_sources_sync_requested(
+                user,
+                [provider],
+                financial_only=True,
+                organization=organization,
+            )
+        except Exception as exc:
+            logger.exception(
+                "Unable to prepare connected source before monthly update draft",
+                extra={"user_id": user.id, "provider": provider},
+            )
+            warnings[provider] = [
+                str(exc) or f"{label} sync failed before draft generation."
+            ]
+            continue
+
+        sync_errors = [
+            str(item.get("error") or item.get("warning") or "").strip()
+            for item in payload.get("syncRuns", []) or payload.get("sync_runs", [])
+            if str(item.get("status") or "").lower() == "error"
+        ]
+        if payload.get("status") == "error" or sync_errors:
+            warnings[provider] = [item for item in sync_errors if item] or [
+                f"{label} sync failed before draft generation."
+            ]
     return warnings
 
 
@@ -746,6 +800,16 @@ def _structured_memo_manual_documents(structured_memo):
     return documents if isinstance(documents, list) else []
 
 
+def _structured_memo_financial_snapshot(structured_memo):
+    snapshot = (structured_memo or {}).get("financial_snapshot") or (structured_memo or {}).get("financialSnapshot")
+    return snapshot if isinstance(snapshot, dict) else None
+
+
+def _structured_memo_concise_analysis(structured_memo):
+    analysis = (structured_memo or {}).get("concise_analysis") or (structured_memo or {}).get("conciseAnalysis")
+    return analysis if isinstance(analysis, dict) else None
+
+
 def _structured_memo_with_xero_metrics(draft):
     # Merges connector-backed metrics (Xero + Luma) into the draft's kpi_snapshot.
     structured_memo = draft.structured_memo or {}
@@ -793,6 +857,9 @@ def _serialize_draft_for_form(draft):
         "metrics": _extract_metrics(structured_memo),
         "metricSuggestions": _extract_metric_suggestions(structured_memo),
         "displayConfig": _extract_display_config(structured_memo),
+        "financialSnapshot": _structured_memo_financial_snapshot(structured_memo),
+        "conciseAnalysis": _structured_memo_concise_analysis(structured_memo),
+        "presentationMode": _structured_memo_text(structured_memo, "presentation_mode", "presentationMode"),
     }
 
 
@@ -906,6 +973,16 @@ def _build_manual_structured_memo(payload):
     if manual_documents:
         memo["manual_documents"] = list(manual_documents)
 
+    financial_snapshot = payload.get("financialSnapshot") or payload.get("financial_snapshot")
+    if isinstance(financial_snapshot, dict):
+        memo["financial_snapshot"] = financial_snapshot
+    concise_analysis = payload.get("conciseAnalysis") or payload.get("concise_analysis")
+    if isinstance(concise_analysis, dict):
+        memo["concise_analysis"] = concise_analysis
+    presentation_mode = _optional_text(payload.get("presentationMode") or payload.get("presentation_mode"))
+    if presentation_mode:
+        memo["presentation_mode"] = presentation_mode
+
     return memo
 
 
@@ -943,6 +1020,9 @@ def _serialize_monthly_update(draft, structured_memo=None):
         "learnings": _structured_memo_section_text(structured_memo, "learnings"),
         "next30Days": _structured_memo_section_text(structured_memo, "next_30_days"),
         "displayConfig": _extract_display_config(structured_memo),
+        "financialSnapshot": _structured_memo_financial_snapshot(structured_memo),
+        "conciseAnalysis": _structured_memo_concise_analysis(structured_memo),
+        "presentationMode": _structured_memo_text(structured_memo, "presentation_mode", "presentationMode"),
     }
 
 
@@ -2467,6 +2547,17 @@ class VibeRaisingMonthlyUpdateView(APIView):
                 display_config = normalize_vibe_raising_display_config(
                     (existing_draft.structured_memo or {}).get("display_config")
                 )
+        financial_snapshot = serializer.validated_data.get("financialSnapshot")
+        concise_analysis = serializer.validated_data.get("conciseAnalysis")
+        presentation_mode = serializer.validated_data.get("presentationMode")
+        if existing_draft:
+            existing_memo = existing_draft.structured_memo or {}
+            if financial_snapshot is None:
+                financial_snapshot = _structured_memo_financial_snapshot(existing_memo)
+            if concise_analysis is None:
+                concise_analysis = _structured_memo_concise_analysis(existing_memo)
+            if not presentation_mode:
+                presentation_mode = _structured_memo_text(existing_memo, "presentation_mode", "presentationMode")
         if "audienceVisibility" in serializer.validated_data:
             audience_visibility = serializer.validated_data["audienceVisibility"]
         elif existing_draft is not None:
@@ -2486,6 +2577,9 @@ class VibeRaisingMonthlyUpdateView(APIView):
         structured_payload = {
             **serializer.validated_data,
             "displayConfig": display_config,
+            "financialSnapshot": financial_snapshot,
+            "conciseAnalysis": concise_analysis,
+            "presentationMode": presentation_mode,
             "manualDocuments": [
                 _serialize_manual_document_for_memo(document)
                 for document in manual_documents
@@ -2628,6 +2722,7 @@ class VibeRaisingStartupUpdateBootstrapView(APIView):
 class VibeRaisingStartupUpdateRunView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
+    @_connector_oauth_guarded
     def post(self, request):
         context, error_response = _get_founder_company_context_or_response(request)
         if error_response:
@@ -2672,7 +2767,7 @@ class VibeRaisingStartupUpdateRunView(APIView):
             google_connection,
         )
         source_warnings = merge_source_warnings(
-            _sync_selected_financial_sources_for_draft(request.user, input_sources),
+            _sync_selected_connector_sources_for_draft(request.user, input_sources),
             gmail_scope_warnings,
         )
         if gmail_required_for_sources(input_sources) and (
@@ -2779,6 +2874,7 @@ class VibeRaisingStartupUpdateStatusView(APIView):
 class VibeRaisingEmailDraftStartView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
+    @_connector_oauth_guarded
     def post(self, request):
         context, error_response = _get_founder_company_context_or_response(request)
         if error_response:
@@ -2828,7 +2924,7 @@ class VibeRaisingEmailDraftStartView(APIView):
             google_connection,
         )
         source_warnings = merge_source_warnings(
-            _sync_selected_financial_sources_for_draft(request.user, input_sources),
+            _sync_selected_connector_sources_for_draft(request.user, input_sources),
             gmail_scope_warnings,
         )
         if gmail_required_for_sources(input_sources) and (

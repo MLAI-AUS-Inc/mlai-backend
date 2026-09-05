@@ -115,6 +115,57 @@ class BoostPostAdmissionAPITests(APITestCase):
         self.assertFalse(Ledger.objects.filter(reference_type='BOOST_POST').exists())
         self.assertEqual(PointsAccount.objects.get(user=self.user).balance, 7)
 
+    def test_insufficient_admission_can_be_atomically_rechecked_after_earning_points(self):
+        account = PointsAccount.objects.get(user=self.user)
+        account.balance = 7
+        account.earned_balance = 7
+        account.save(update_fields=['balance', 'earned_balance'])
+        first = self.client.post(self.url, self.payload, format='json')
+
+        account.balance = 12
+        account.earned_balance = 12
+        account.save(update_fields=['balance', 'earned_balance'])
+        recheck_payload = {**self.payload, 'recheck_insufficient_points': True}
+        second = self.client.post(self.url, recheck_payload, format='json')
+        replay = self.client.post(self.url, recheck_payload, format='json')
+
+        self.assertEqual(first.status_code, status.HTTP_402_PAYMENT_REQUIRED)
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
+        self.assertEqual(second.data['status'], 'approved')
+        self.assertTrue(second.data['recheck_requested'])
+        self.assertEqual(second.data['new_balance'], 4)
+        self.assertEqual(replay.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            Ledger.objects.filter(reference_type='BOOST_POST').count(),
+            1,
+        )
+
+    def test_insufficient_admission_stays_terminal_without_explicit_recheck(self):
+        account = PointsAccount.objects.get(user=self.user)
+        account.balance = 7
+        account.earned_balance = 7
+        account.save(update_fields=['balance', 'earned_balance'])
+        first = self.client.post(self.url, self.payload, format='json')
+
+        account.balance = 12
+        account.earned_balance = 12
+        account.save(update_fields=['balance', 'earned_balance'])
+        replay = self.client.post(self.url, self.payload, format='json')
+
+        self.assertEqual(first.status_code, status.HTTP_402_PAYMENT_REQUIRED)
+        self.assertEqual(replay.status_code, status.HTTP_402_PAYMENT_REQUIRED)
+        self.assertFalse(Ledger.objects.filter(reference_type='BOOST_POST').exists())
+
+    def test_recheck_flag_must_be_boolean(self):
+        response = self.client.post(
+            self.url,
+            {**self.payload, 'recheck_insufficient_points': 'true'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data['code'], 'invalid_post')
+
     def test_unlinked_member_is_rejected(self):
         self.payload['poster_slack_id'] = 'UUNKNOWN123'
 

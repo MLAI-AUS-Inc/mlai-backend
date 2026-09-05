@@ -3,15 +3,30 @@ from rest_framework.routers import DefaultRouter
 from .views import (
     PointsAdminViewSet, MinterViewSet, TaskViewSet, UserBalanceViewSet,
     CurrentUserBalanceView,
+    KimiPromptUsageView,
     LedgerViewSet, CoworkingViewSet, RewardsViewSet, ManualAwardView,
     RateCardView, AdminAllowanceView, PointsRequestViewSet, PointsPurchaseViewSet,
     PointsPacksView, CurrentUserPurchaseView,
     StripeWebhookView, SystemAwardView, BoostPostAdmissionView,
+    CommitteeCandidateEmailsView,
     # Activity views
     ChannelActivityView, FirstChannelPostAwardView,
     # Quest views
     QuestProgressView, UserQuestProgressView, QuestIncrementView,
     QuestCompleteView, QuestCompletionStatusView,
+)
+from .coding_views import (
+    CodingCallAdmitView,
+    CodingCallDispatchView,
+    CodingCallFailView,
+    CodingCallSettleView,
+)
+from .meeting_room_views import (
+    MeetingRoomAvailabilityView,
+    MeetingRoomBookView,
+    MeetingRoomCancelView,
+    MeetingRoomListView,
+    MyMeetingRoomBookingsView,
 )
 
 router = DefaultRouter()
@@ -23,6 +38,10 @@ router.register(r'requests', PointsRequestViewSet, basename='points-request')
 router.register(r'purchases', PointsPurchaseViewSet, basename='points-purchase')
 
 urlpatterns = [
+    path('kimi/calls/admit/', CodingCallAdmitView.as_view(), name='kimi-call-admit'),
+    path('kimi/calls/dispatch/', CodingCallDispatchView.as_view(), name='kimi-call-dispatch'),
+    path('kimi/calls/settle/', CodingCallSettleView.as_view(), name='kimi-call-settle'),
+    path('kimi/calls/fail/', CodingCallFailView.as_view(), name='kimi-call-fail'),
     path('stripe/webhook/', StripeWebhookView.as_view(), name='points-stripe-webhook'),
     path('boost-posts/admissions/', BoostPostAdmissionView.as_view(), name='boost-post-admission'),
     path('', include(router.urls)),
@@ -37,7 +56,38 @@ urlpatterns = [
     # User Balance (by Slack ID)
     # ============================================================
     path('me/balance/', CurrentUserBalanceView.as_view(), name='current-user-balance'),
+    path('kimi/usage/', KimiPromptUsageView.as_view(), name='kimi-prompt-usage'),
     path('users/<str:pk>/balance/', UserBalanceViewSet.as_view({'get': 'retrieve'}), name='user-balance'),
+
+    # ============================================================
+    # Committee candidate email export
+    # ============================================================
+    path(
+        'committee-candidates/emails/',
+        CommitteeCandidateEmailsView.as_view(),
+        name='committee-candidate-emails',
+    ),
+
+    # ============================================================
+    # Meeting room booking
+    # ============================================================
+    path('meeting-rooms/rooms/', MeetingRoomListView.as_view(), name='meeting-room-list'),
+    path(
+        'meeting-rooms/availability/',
+        MeetingRoomAvailabilityView.as_view(),
+        name='meeting-room-availability',
+    ),
+    path('meeting-rooms/book/', MeetingRoomBookView.as_view(), name='meeting-room-book'),
+    path(
+        'meeting-rooms/my-bookings/',
+        MyMeetingRoomBookingsView.as_view(),
+        name='meeting-room-my-bookings',
+    ),
+    path(
+        'meeting-rooms/cancel/',
+        MeetingRoomCancelView.as_view(),
+        name='meeting-room-cancel',
+    ),
     
     # ============================================================
     # Coworking

@@ -1,12 +1,12 @@
 import html
 import hashlib
 import re
-from typing import Iterable, Optional
+from typing import Callable, Iterable, Optional
 
 from integrations.models import CommunityBridgePlatform
 
 
-SLACK_USER_MENTION_RE = re.compile(r"<@[^>]+>")
+SLACK_USER_MENTION_RE = re.compile(r"<@([^>]+)>")
 SLACK_CHANNEL_MENTION_RE = re.compile(r"<#([^>|]+)\|?([^>]*)>")
 SLACK_SPECIAL_MENTION_RE = re.compile(r"<!([^>|]+)\|?([^>]*)>")
 SLACK_LINK_RE = re.compile(r"<((?:https?|mailto):[^>|]+)\|?([^>]*)>")
@@ -16,8 +16,8 @@ DISCORD_CHANNEL_MENTION_RE = re.compile(r"<#\d+>")
 DISCORD_ROLE_MENTION_RE = re.compile(r"<@&\d+>")
 DISCORD_EMOJI_RE = re.compile(r"<a?:([A-Za-z0-9_]+):\d+>")
 
-# Deliberately small, reversible MVP set. Unsupported/custom reactions fail
-# closed instead of silently changing meaning between Slack and MLAI Chat.
+# Preserve familiar reactions as Unicode. Other safe Slack names pass through
+# as bounded ``:name:`` shortcodes; malformed or overlong names fail closed.
 SLACK_REACTION_TO_EMOJI = {
     "+1": "👍",
     "thumbsup": "👍",
@@ -36,14 +36,29 @@ EMOJI_TO_SLACK_REACTION = {
     "🚀": "rocket",
     "✅": "white_check_mark",
 }
+# Buzz reaction content is capped at 64 Unicode scalar values. The surrounding
+# colons consume two, so Slack shortcode names are safely bounded to 62.
+SLACK_REACTION_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_+\-]{0,61}$")
 
 
 def slack_reaction_to_emoji(value: str) -> str:
-    return SLACK_REACTION_TO_EMOJI.get(str(value or "").strip().lower(), "")
+    reaction = str(value or "").strip()
+    mapped = SLACK_REACTION_TO_EMOJI.get(reaction)
+    if mapped:
+        return mapped
+    return f":{reaction}:" if SLACK_REACTION_NAME_RE.fullmatch(reaction) else ""
 
 
 def emoji_to_slack_reaction(value: str) -> str:
-    return EMOJI_TO_SLACK_REACTION.get(str(value or "").strip(), "")
+    reaction = str(value or "").strip()
+    mapped = EMOJI_TO_SLACK_REACTION.get(reaction)
+    if mapped:
+        return mapped
+    if reaction.startswith(":") and reaction.endswith(":"):
+        shortcode = reaction[1:-1]
+        if SLACK_REACTION_NAME_RE.fullmatch(shortcode):
+            return shortcode
+    return ""
 
 
 def reaction_object_id(*, message_id: str, reaction: str, author_id: str) -> str:
@@ -57,13 +72,38 @@ def reaction_object_id(*, message_id: str, reaction: str, author_id: str) -> str
     return "reaction:" + hashlib.sha256(material).hexdigest()
 
 
-def sanitize_slack_text(value: str) -> str:
+def sanitize_slack_text(
+    value: str,
+    *,
+    user_name_resolver: Optional[Callable[[str], str]] = None,
+    channel_name_resolver: Optional[Callable[[str], str]] = None,
+) -> str:
     text = html.unescape(str(value or ""))
     text = SLACK_LINK_RE.sub(_replace_slack_link, text)
-    text = SLACK_CHANNEL_MENTION_RE.sub(_replace_slack_channel, text)
+    text = SLACK_CHANNEL_MENTION_RE.sub(
+        lambda match: _replace_slack_channel(
+            match,
+            channel_name_resolver=channel_name_resolver,
+        ),
+        text,
+    )
     text = SLACK_SPECIAL_MENTION_RE.sub(_replace_slack_special_mention, text)
-    text = SLACK_USER_MENTION_RE.sub("@user", text)
+    text = SLACK_USER_MENTION_RE.sub(
+        lambda match: _replace_slack_user(
+            match,
+            user_name_resolver=user_name_resolver,
+        ),
+        text,
+    )
     return _strip_trailing_whitespace(text)
+
+
+def has_slack_entity_references(value: str) -> bool:
+    text = str(value or "")
+    return bool(
+        SLACK_USER_MENTION_RE.search(text)
+        or SLACK_CHANNEL_MENTION_RE.search(text)
+    )
 
 
 def sanitize_discord_text(value: str) -> str:
@@ -164,11 +204,43 @@ def _replace_slack_link(match: re.Match) -> str:
     return f"{label} ({url})"
 
 
-def _replace_slack_channel(match: re.Match) -> str:
+def _replace_slack_user(
+    match: re.Match,
+    *,
+    user_name_resolver: Optional[Callable[[str], str]],
+) -> str:
+    user_id = str(match.group(1) or "").strip()
+    label = _resolved_slack_label(user_id, user_name_resolver)
+    return f"@{label}" if label else "@user"
+
+
+def _replace_slack_channel(
+    match: re.Match,
+    *,
+    channel_name_resolver: Optional[Callable[[str], str]],
+) -> str:
+    channel_id = str(match.group(1) or "").strip()
     label = str(match.group(2) or "").strip()
+    if not label:
+        label = _resolved_slack_label(channel_id, channel_name_resolver)
     if label:
         return f"#{label}"
     return "#channel"
+
+
+def _resolved_slack_label(
+    entity_id: str,
+    resolver: Optional[Callable[[str], str]],
+) -> str:
+    if not entity_id or resolver is None:
+        return ""
+    try:
+        label = str(resolver(entity_id) or "").strip()
+    except Exception:
+        return ""
+    if not label or label == entity_id:
+        return ""
+    return " ".join(label.splitlines()).strip()
 
 
 def _replace_slack_special_mention(match: re.Match) -> str:

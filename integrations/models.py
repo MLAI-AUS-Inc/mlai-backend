@@ -1,6 +1,9 @@
+import uuid
+
 from django.conf import settings
 from django.core.validators import RegexValidator
 from django.db import models
+
 from .fields import EncryptedTextField
 
 
@@ -20,6 +23,7 @@ class CommunityBridgeDeliveryType(models.TextChoices):
 
 class CommunityBridgeDeliveryStatus(models.TextChoices):
     PENDING = "pending", "Pending"
+    WAITING_FOR_PARENT = "waiting_parent", "Waiting for parent"
     PROCESSING = "processing", "Processing"
     COMPLETED = "completed", "Completed"
     FAILED = "failed", "Failed"
@@ -34,9 +38,31 @@ class CommunityBridgeReceiptStatus(models.TextChoices):
     FAILED = "failed", "Failed"
 
 
+class CommunityBridgeDeletionRequestStatus(models.TextChoices):
+    PROCESSING = "processing", "Processing"
+    SUCCEEDED = "succeeded", "Succeeded"
+    ALREADY_DELETED = "already_deleted", "Already deleted"
+    FAILED = "failed", "Failed"
+
+
 class CommunityBridgeIdentityVerificationMethod(models.TextChoices):
     OPERATOR_ATTESTED = "operator_attested", "Operator attested"
     ACCOUNT_CHALLENGE = "account_challenge", "Account and key challenge"
+
+
+class SlackDmMirrorGrantStatus(models.TextChoices):
+    ACTIVE = "active", "Active"
+    PAUSED = "paused", "Paused"
+    ERROR = "error", "Error"
+    REVOKED = "revoked", "Revoked"
+
+
+class SlackDmMirrorConversationStatus(models.TextChoices):
+    AWAITING_SETUP = "awaiting_setup", "Awaiting owner setup"
+    PROVISIONING = "provisioning", "Provisioning"
+    LIVE = "live", "Live"
+    PAUSED = "paused", "Paused"
+    ERROR = "error", "Error"
 
 
 class ExternalServiceProvider(models.TextChoices):
@@ -148,6 +174,151 @@ class ExternalServiceConnection(models.Model):
     def __str__(self):
         account = self.account_label or self.external_account_id or "unknown"
         return f"{self.get_provider_display()} connection for {self.user_id} ({account})"
+
+
+class SlackDmMirrorGrant(models.Model):
+    """A member's explicit consent to mirror Slack DMs into MLAI Chat."""
+
+    CONSENT_VERSION = "slack-dm-mirror-v3-owner-direct-and-group"
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="slack_dm_mirror_grants",
+    )
+    connection = models.OneToOneField(
+        ExternalServiceConnection,
+        on_delete=models.CASCADE,
+        related_name="slack_dm_mirror_grant",
+    )
+    slack_workspace_id = models.CharField(max_length=100, db_index=True)
+    slack_user_id = models.CharField(max_length=100, db_index=True)
+    status = models.CharField(
+        max_length=24,
+        choices=SlackDmMirrorGrantStatus.choices,
+        default=SlackDmMirrorGrantStatus.ACTIVE,
+        db_index=True,
+    )
+    consent_version = models.CharField(max_length=64, default=CONSENT_VERSION)
+    history_days = models.PositiveSmallIntegerField(default=30)
+    consented_at = models.DateTimeField()
+    paused_at = models.DateTimeField(null=True, blank=True)
+    revoked_at = models.DateTimeField(null=True, blank=True)
+    last_discovery_at = models.DateTimeField(null=True, blank=True)
+    last_synced_at = models.DateTimeField(null=True, blank=True)
+    last_error = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "slack_dm_mirror_grant"
+        constraints = [
+            models.UniqueConstraint(
+                fields=("slack_workspace_id", "slack_user_id"),
+                name="slack_dm_grant_workspace_user_unique",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=("slack_workspace_id", "status"),
+                name="slack_dm_grant_ws_status_idx",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.slack_workspace_id}:{self.slack_user_id} ({self.status})"
+
+
+class SlackDmMirrorConversation(models.Model):
+    """One member-owned mirror of a Slack IM and its private MLAI conversation."""
+
+    grant = models.ForeignKey(
+        SlackDmMirrorGrant,
+        on_delete=models.CASCADE,
+        related_name="conversations",
+    )
+    slack_workspace_id = models.CharField(max_length=100, db_index=True)
+    slack_conversation_id = models.CharField(max_length=100)
+    participant_slack_ids = models.JSONField(default=list)
+    participant_buzz_pubkeys = models.JSONField(default=list)
+    participant_identity_map = models.JSONField(default=dict)
+    participant_profiles = models.JSONField(default=dict)
+    participant_hash = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    mlai_channel_id = models.UUIDField(null=True, blank=True, unique=True)
+    status = models.CharField(
+        max_length=24,
+        choices=SlackDmMirrorConversationStatus.choices,
+        default=SlackDmMirrorConversationStatus.AWAITING_SETUP,
+        db_index=True,
+    )
+    oldest_synced_ts = models.CharField(max_length=32, blank=True, default="")
+    latest_synced_ts = models.CharField(max_length=32, blank=True, default="")
+    history_backfilled_at = models.DateTimeField(null=True, blank=True)
+    last_synced_at = models.DateTimeField(null=True, blank=True)
+    last_error = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "slack_dm_mirror_conversation"
+        constraints = [
+            models.UniqueConstraint(
+                fields=("grant", "slack_conversation_id"),
+                name="slack_dm_conv_grant_chan_uniq",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=("slack_workspace_id", "status"),
+                name="slack_dm_conv_ws_status_idx",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.slack_conversation_id} -> {self.mlai_channel_id or self.status}"
+
+
+class SlackDmMirrorDelivery(models.Model):
+    """Short-lived encrypted queue item; DM bodies never enter public bridge tables."""
+
+    conversation = models.ForeignKey(
+        SlackDmMirrorConversation,
+        on_delete=models.CASCADE,
+        related_name="deliveries",
+    )
+    source_platform = models.CharField(max_length=20, choices=CommunityBridgePlatform.choices)
+    source_message_id = models.CharField(max_length=100)
+    source_author_id = models.CharField(max_length=100)
+    operation = models.CharField(max_length=20, choices=CommunityBridgeDeliveryType.choices)
+    encrypted_text = EncryptedTextField(blank=True, default="")
+    metadata = models.JSONField(default=dict, blank=True)
+    status = models.CharField(
+        max_length=20,
+        choices=CommunityBridgeDeliveryStatus.choices,
+        default=CommunityBridgeDeliveryStatus.PENDING,
+        db_index=True,
+    )
+    attempts = models.PositiveSmallIntegerField(default=0)
+    available_at = models.DateTimeField(db_index=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    last_error = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "slack_dm_mirror_delivery"
+        constraints = [
+            models.UniqueConstraint(
+                fields=("conversation", "source_platform", "source_message_id", "operation"),
+                name="slack_dm_delivery_source_operation_unique",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=("status", "available_at"),
+                name="slack_dm_delivery_ready_idx",
+            ),
+        ]
 
 
 class FinancialAccount(models.Model):
@@ -647,6 +818,8 @@ class CommunityBridgeDelivery(models.Model):
     payload = models.JSONField(default=dict, blank=True)
     attempts = models.PositiveSmallIntegerField(default=0)
     max_attempts = models.PositiveSmallIntegerField(default=5)
+    dependency_attempts = models.PositiveSmallIntegerField(default=0)
+    dependency_first_seen_at = models.DateTimeField(null=True, blank=True)
     available_at = models.DateTimeField(db_index=True)
     locked_at = models.DateTimeField(null=True, blank=True)
     completed_at = models.DateTimeField(null=True, blank=True)
@@ -669,6 +842,59 @@ class CommunityBridgeDelivery(models.Model):
             f" -> {self.target_platform} ({self.status})"
         )
 
+
+class CommunityBridgeDeletionRequest(models.Model):
+    """Audit one MLAI member request to delete their Slack-origin message."""
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="community_bridge_deletion_requests",
+    )
+    message_link = models.ForeignKey(
+        CommunityBridgeMessageLink,
+        on_delete=models.PROTECT,
+        related_name="deletion_requests",
+    )
+    idempotency_key = models.UUIDField(default=uuid.uuid4)
+    status = models.CharField(
+        max_length=24,
+        choices=CommunityBridgeDeletionRequestStatus.choices,
+        default=CommunityBridgeDeletionRequestStatus.PROCESSING,
+        db_index=True,
+    )
+    slack_workspace_id = models.CharField(max_length=100)
+    slack_channel_id = models.CharField(max_length=100)
+    slack_message_id = models.CharField(max_length=100)
+    buzz_event_id = models.CharField(max_length=100)
+    error_code = models.CharField(max_length=100, blank=True, default="")
+    provider_response = models.JSONField(default=dict, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "community_bridge_deletion_request"
+        ordering = ["-created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["user", "idempotency_key"],
+                name="bridge_delete_user_idem_unique",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=["slack_workspace_id", "slack_message_id"],
+                name="bridge_delete_slack_msg_idx",
+            ),
+            models.Index(
+                fields=["buzz_event_id", "status"],
+                name="bridge_delete_buzz_status_idx",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.user_id}:{self.slack_message_id} ({self.status})"
 
 class ReconciliationProfile(models.Model):
     """Per-organisation accounting policy for Stripe payout reconciliation.
@@ -708,6 +934,9 @@ class ReconciliationProfile(models.Model):
     event_tracking_category_name = models.CharField(max_length=255, default="Event Name")
     project_tracking_category_id = models.CharField(max_length=255, blank=True, default="")
     project_tracking_category_name = models.CharField(max_length=255, default="Project Name")
+    require_statement_tracking = models.BooleanField(default=False)
+    default_project_tracking_option_name = models.CharField(max_length=255, blank=True, default="")
+    default_project_tracking_option_id = models.CharField(max_length=255, blank=True, default="")
     standalone_fee_project_option_id = models.CharField(max_length=255, blank=True, default="")
     standalone_fee_project_option_name = models.CharField(max_length=255, blank=True, default="")
     humanitix_profitability_included = models.BooleanField(default=False)
@@ -1066,6 +1295,16 @@ class ReconciliationSuggestion(models.Model):
         (STATUS_REJECTED, "Rejected"),
         (STATUS_SUPERSEDED, "Superseded"),
     ]
+    ALLOCATION_EVENT = "event"
+    ALLOCATION_PROJECT = "project"
+    ALLOCATION_MLAI_CORE = "mlai_core"
+    ALLOCATION_UNASSIGNED = "unassigned"
+    ALLOCATION_CHOICES = [
+        (ALLOCATION_EVENT, "Event"),
+        (ALLOCATION_PROJECT, "Project"),
+        (ALLOCATION_MLAI_CORE, "MLAI core"),
+        (ALLOCATION_UNASSIGNED, "Unassigned"),
+    ]
 
     organization = models.ForeignKey(
         "organizations.Organization",
@@ -1084,8 +1323,14 @@ class ReconciliationSuggestion(models.Model):
     event_source_type = models.CharField(max_length=32, blank=True, default="")
     event_source_id = models.CharField(max_length=255, blank=True, default="")
     event_tracking_option_name = models.CharField(max_length=255, blank=True, default="")
+    allocation_mode = models.CharField(
+        max_length=16,
+        choices=ALLOCATION_CHOICES,
+        default=ALLOCATION_UNASSIGNED,
+    )
     project_source_type = models.CharField(max_length=32, blank=True, default="")
     project_source_id = models.CharField(max_length=255, blank=True, default="")
+    project_tracking_option_id = models.CharField(max_length=255, blank=True, default="")
     project_tracking_option_name = models.CharField(max_length=255, blank=True, default="")
     confidence = models.FloatField(default=0.0)
     rationale = models.TextField(blank=True, default="")
@@ -1235,6 +1480,16 @@ class ReconciliationRule(models.Model):
     ACTION_CHOICES = [
         (ACTION_CREATE_BANK_TRANSACTION, "Create bank transaction"),
     ]
+    ALLOCATION_EVENT = "event"
+    ALLOCATION_PROJECT = "project"
+    ALLOCATION_MLAI_CORE = "mlai_core"
+    ALLOCATION_UNASSIGNED = "unassigned"
+    ALLOCATION_CHOICES = [
+        (ALLOCATION_EVENT, "Event"),
+        (ALLOCATION_PROJECT, "Project"),
+        (ALLOCATION_MLAI_CORE, "MLAI core"),
+        (ALLOCATION_UNASSIGNED, "Unassigned"),
+    ]
 
     organization = models.ForeignKey(
         "organizations.Organization",
@@ -1267,7 +1522,14 @@ class ReconciliationRule(models.Model):
     event_source_type = models.CharField(max_length=32, blank=True, default="")
     event_source_id = models.CharField(max_length=255, blank=True, default="")
     event_tracking_option_name = models.CharField(max_length=255, blank=True, default="")
+    allocation_mode = models.CharField(
+        max_length=16,
+        choices=ALLOCATION_CHOICES,
+        default=ALLOCATION_UNASSIGNED,
+    )
+    project_source_type = models.CharField(max_length=32, blank=True, default="")
     project_source_id = models.CharField(max_length=255, blank=True, default="")
+    project_tracking_option_id = models.CharField(max_length=255, blank=True, default="")
     project_tracking_option_name = models.CharField(max_length=255, blank=True, default="")
     priority = models.IntegerField(default=100)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_PROPOSED, db_index=True)
@@ -1423,6 +1685,16 @@ class XeroStatementSuggestion(models.Model):
         (ACTION_MATCH_BILL, "Match Existing Bill"),
         (ACTION_NEEDS_REVIEW, "Needs Review"),
     ]
+    ALLOCATION_EVENT = "event"
+    ALLOCATION_PROJECT = "project"
+    ALLOCATION_MLAI_CORE = "mlai_core"
+    ALLOCATION_UNASSIGNED = "unassigned"
+    ALLOCATION_CHOICES = [
+        (ALLOCATION_EVENT, "Event"),
+        (ALLOCATION_PROJECT, "Project"),
+        (ALLOCATION_MLAI_CORE, "MLAI core"),
+        (ALLOCATION_UNASSIGNED, "Unassigned"),
+    ]
     STATUS_PROPOSED = "proposed"
     STATUS_APPLIED = "applied"
     STATUS_REJECTED = "rejected"
@@ -1454,7 +1726,14 @@ class XeroStatementSuggestion(models.Model):
     event_source_type = models.CharField(max_length=32, blank=True, default="")
     event_source_id = models.CharField(max_length=255, blank=True, default="")
     event_tracking_option_name = models.CharField(max_length=255, blank=True, default="")
+    allocation_mode = models.CharField(
+        max_length=16,
+        choices=ALLOCATION_CHOICES,
+        default=ALLOCATION_UNASSIGNED,
+    )
+    project_source_type = models.CharField(max_length=32, blank=True, default="")
     project_source_id = models.CharField(max_length=255, blank=True, default="")
+    project_tracking_option_id = models.CharField(max_length=255, blank=True, default="")
     project_tracking_option_name = models.CharField(max_length=255, blank=True, default="")
     matched_xero_bill_id = models.CharField(max_length=255, blank=True, default="")
     confidence = models.FloatField(default=0.0)
@@ -1683,3 +1962,189 @@ class LinearIssueCreationReceipt(models.Model):
 
     def __str__(self):
         return f"{self.idempotency_key}:{self.status}"
+
+
+class LinearMeetingActionBatch(models.Model):
+    """Requester-bound, restart-safe review batch for extracted Linear work."""
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        PROCESSING = "processing", "Processing"
+        PARTIAL = "partial", "Partially completed"
+        COMPLETED = "completed", "Completed"
+        REJECTED = "rejected", "Rejected"
+        EXPIRED = "expired", "Expired"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    requested_by_slack_user_id = models.CharField(max_length=255, db_index=True)
+    slack_channel_id = models.CharField(max_length=255, blank=True, default="")
+    slack_thread_ts = models.CharField(max_length=255, blank=True, default="")
+    source_fingerprint = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    status = models.CharField(
+        max_length=24,
+        choices=Status.choices,
+        default=Status.PENDING,
+        db_index=True,
+    )
+    expires_at = models.DateTimeField(db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "linear_meeting_action_batch"
+        ordering = ["-created_at"]
+
+
+class LinearMeetingActionItem(models.Model):
+    """One durable proposal within a meeting-action batch."""
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        PROCESSING = "processing", "Processing"
+        APPROVED = "approved", "Approved"
+        REJECTED = "rejected", "Rejected"
+        FAILED = "failed", "Failed"
+        EXPIRED = "expired", "Expired"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    batch = models.ForeignKey(
+        LinearMeetingActionBatch,
+        on_delete=models.CASCADE,
+        related_name="items",
+    )
+    position = models.PositiveSmallIntegerField()
+    issue_input = models.JSONField(default=dict)
+    display = models.JSONField(default=dict, blank=True)
+    reason = models.TextField(blank=True, default="")
+    status = models.CharField(
+        max_length=24,
+        choices=Status.choices,
+        default=Status.PENDING,
+        db_index=True,
+    )
+    linear_issue_payload = models.JSONField(default=dict, blank=True)
+    last_error = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "linear_meeting_action_item"
+        ordering = ["position", "created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["batch", "position"],
+                name="linear_meeting_batch_position_uniq",
+            ),
+        ]
+
+
+class LinearProjectSizingRun(models.Model):
+    """Durable, requester-bound preview/apply run for Linear effort labels."""
+
+    class Mode(models.TextChoices):
+        MISSING_ONLY = "missing_only", "Only issues without an effort label"
+        REPLACE_EXISTING = "replace_existing", "Replace existing effort labels"
+
+    class Status(models.TextChoices):
+        PREVIEW = "preview", "Preview"
+        APPLYING = "applying", "Applying"
+        COMPLETED = "completed", "Completed"
+        CANCELLED = "cancelled", "Cancelled"
+        EXPIRED = "expired", "Expired"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    idempotency_key = models.CharField(max_length=64, unique=True, db_index=True)
+    project_id = models.CharField(max_length=255, db_index=True)
+    project_name = models.CharField(max_length=500)
+    requested_by_slack_user_id = models.CharField(max_length=255, db_index=True)
+    requested_by_linear_user_id = models.CharField(max_length=255)
+    mode = models.CharField(
+        max_length=32,
+        choices=Mode.choices,
+        default=Mode.MISSING_ONLY,
+    )
+    status = models.CharField(
+        max_length=24,
+        choices=Status.choices,
+        default=Status.PREVIEW,
+        db_index=True,
+    )
+    model_name = models.CharField(max_length=100)
+    rubric_version = models.CharField(max_length=100)
+    project_context = models.JSONField(default=dict, blank=True)
+    source_snapshot_at = models.DateTimeField()
+    expires_at = models.DateTimeField(db_index=True)
+    last_error = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "linear_project_sizing_run"
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(
+                fields=["project_id", "status"],
+                name="linear_size_run_project_idx",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.project_name}:{self.status}"
+
+
+class LinearProjectSizingItem(models.Model):
+    """One proposed or applied effort-label change within a sizing run."""
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        PROCESSING = "processing", "Processing"
+        APPLIED = "applied", "Applied"
+        ALREADY_SIZED = "already_sized", "Already sized"
+        SKIPPED_TERMINAL = "skipped_terminal", "Skipped terminal"
+        CONFLICT = "conflict", "Conflict"
+        FAILED = "failed", "Failed"
+
+    run = models.ForeignKey(
+        LinearProjectSizingRun,
+        on_delete=models.CASCADE,
+        related_name="items",
+    )
+    issue_id = models.CharField(max_length=255)
+    identifier = models.CharField(max_length=100, blank=True, default="")
+    title = models.CharField(max_length=500)
+    team_id = models.CharField(max_length=255)
+    expected_updated_at = models.CharField(max_length=100)
+    original_labels = models.JSONField(default=list, blank=True)
+    effort_label_name = models.CharField(max_length=100)
+    effort_label_id = models.CharField(max_length=255)
+    rationale = models.CharField(max_length=280)
+    sizing_metadata = models.JSONField(default=dict, blank=True)
+    status = models.CharField(
+        max_length=32,
+        choices=Status.choices,
+        default=Status.PENDING,
+        db_index=True,
+    )
+    result_payload = models.JSONField(default=dict, blank=True)
+    last_error = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "linear_project_sizing_item"
+        ordering = ["id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["run", "issue_id"],
+                name="linear_size_run_issue_uniq",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=["run", "status"],
+                name="linear_size_item_status_idx",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.identifier or self.issue_id}:{self.status}"

@@ -1,8 +1,11 @@
-from django.contrib import admin
+from django.contrib import admin, messages
+from django.core.exceptions import ValidationError
+from django.shortcuts import redirect
 from django.utils.html import format_html
 from .models import (
     PointsAdmin, Minter, Task, Ledger, PointsAccount, PointsPurchase, BoostPostAdmission,
     TaskSubmission, CoworkingBooking, CoworkingDayCapacity,
+    MeetingRoom, MeetingRoomBlock, MeetingRoomBooking,
     RewardsCatalog, RewardRedemption, TaskTemplate, QuestProgress,
 )
 
@@ -38,7 +41,31 @@ class PointsAccountAdmin(admin.ModelAdmin):
     )
     list_filter = ('updated_at',)
     search_fields = ('user__email', 'user__slack_id')
-    readonly_fields = ('user', 'created_at', 'updated_at')
+    # Balances are projections of the append-only ledger.  Editing either the
+    # legacy whole-Roo fields or the precision microroo fields here can make
+    # the two projections disagree and bypass PointsService locking and
+    # idempotency.  Operational adjustments must go through a service-backed
+    # admin action (or a management command), never a ModelForm save.
+    readonly_fields = (
+        'user',
+        'balance',
+        'earned_balance',
+        'purchased_topup_balance',
+        'lifetime_earned',
+        'lifetime_purchased_topup',
+        'lifetime_spent',
+        'expired_or_reversed_points',
+        'balance_microroo',
+        'earned_balance_microroo',
+        'purchased_topup_balance_microroo',
+        'lifetime_earned_microroo',
+        'lifetime_purchased_topup_microroo',
+        'lifetime_spent_microroo',
+        'expired_or_reversed_microroo',
+        'microroo_initialized',
+        'created_at',
+        'updated_at',
+    )
     ordering = ('-balance',)
 
 
@@ -124,9 +151,10 @@ class LedgerAdmin(admin.ModelAdmin):
     list_display = ('id', 'user', 'delta_display', 'kind', 'source', 'description_short', 'created_at')
     list_filter = ('kind', 'source', 'created_at')
     search_fields = ('user__email', 'description', 'idempotency_key')
-    readonly_fields = ('id', 'user', 'delta', 'kind', 'source', 'reference_type', 
-                       'reference_id', 'description', 'created_by_slack_id', 
-                       'idempotency_key', 'created_at')
+    # Ledger rows are append-only financial records. Keep both the exact
+    # microroo fields and every deprecated whole-Roo/legacy projection visible
+    # for audit, but never writable through a ModelForm.
+    readonly_fields = tuple(field.name for field in Ledger._meta.fields)
     ordering = ('-created_at',)
 
     def delta_display(self, obj):
@@ -186,6 +214,66 @@ class CoworkingBookingAdmin(admin.ModelAdmin):
     search_fields = ('user__email', 'user__slack_id')
     readonly_fields = ('id', 'created_at', 'ledger_entry', 'refund_ledger_entry')
     ordering = ('-date',)
+
+
+@admin.register(MeetingRoom)
+class MeetingRoomAdmin(admin.ModelAdmin):
+    list_display = ('name', 'slug', 'is_active', 'updated_at')
+    list_editable = ('is_active',)
+    search_fields = ('name', 'slug')
+    readonly_fields = ('id', 'created_at', 'updated_at')
+    ordering = ('name',)
+
+
+@admin.register(MeetingRoomBlock)
+class MeetingRoomBlockAdmin(admin.ModelAdmin):
+    list_display = ('room', 'starts_at', 'ends_at', 'reason', 'created_at')
+    list_filter = ('room', 'starts_at')
+    search_fields = ('room__name', 'reason')
+    readonly_fields = ('id', 'created_at', 'updated_at')
+    ordering = ('starts_at',)
+
+    def changeform_view(
+        self,
+        request,
+        object_id=None,
+        form_url='',
+        extra_context=None,
+    ):
+        try:
+            return super().changeform_view(
+                request,
+                object_id=object_id,
+                form_url=form_url,
+                extra_context=extra_context,
+            )
+        except ValidationError as exc:
+            self.message_user(
+                request,
+                '; '.join(exc.messages),
+                level=messages.ERROR,
+            )
+            return redirect(request.path)
+
+
+@admin.register(MeetingRoomBooking)
+class MeetingRoomBookingAdmin(admin.ModelAdmin):
+    list_display = (
+        'id', 'room', 'user', 'starts_at', 'ends_at', 'status',
+        'points_cost', 'created_at',
+    )
+    list_filter = ('room', 'status', 'starts_at')
+    search_fields = (
+        'id', 'client_request_id', 'user__email', 'user__slack_id',
+    )
+    readonly_fields = [field.name for field in MeetingRoomBooking._meta.fields]
+    ordering = ('-starts_at',)
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
 
 
 @admin.register(TaskTemplate)

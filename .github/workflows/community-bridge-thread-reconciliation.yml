@@ -1,0 +1,123 @@
+name: Reconcile production Slack channel
+
+on:
+  workflow_dispatch:
+    inputs:
+      slack_channel_id:
+        description: Optional mapped Slack channel ID; blank scans mapped channels
+        required: false
+        type: string
+      oldest:
+        description: Optional oldest Slack timestamp (seconds.fraction)
+        required: false
+        type: string
+      latest:
+        description: Optional resume/latest Slack timestamp (seconds.fraction)
+        required: false
+        type: string
+      max_roots:
+        description: Maximum top-level messages in this controlled batch
+        required: true
+        default: "25"
+        type: string
+      mode:
+        description: Preview or apply reconciliation
+        required: true
+        default: dry_run
+        type: choice
+        options:
+          - dry_run
+          - apply
+      confirm_historical_repair:
+        description: Required when mode is apply
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-community-bridge-thread-reconciliation
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate inputs
+        env:
+          CHANNEL_ID: ${{ inputs.slack_channel_id }}
+          OLDEST: ${{ inputs.oldest }}
+          LATEST: ${{ inputs.latest }}
+          MAX_ROOTS: ${{ inputs.max_roots }}
+          MODE: ${{ inputs.mode }}
+          CONFIRM: ${{ inputs.confirm_historical_repair }}
+        run: |
+          set -euo pipefail
+          [[ -z "$CHANNEL_ID" || "$CHANNEL_ID" =~ ^C[A-Z0-9]+$ ]]
+          [[ -z "$OLDEST" || "$OLDEST" =~ ^[0-9]+\.[0-9]+$ ]]
+          [[ -z "$LATEST" || "$LATEST" =~ ^[0-9]+\.[0-9]+$ ]]
+          [[ "$MAX_ROOTS" =~ ^[0-9]+$ ]]
+          (( MAX_ROOTS >= 1 && MAX_ROOTS <= 100 ))
+          [[ "$MODE" == "dry_run" || "$MODE" == "apply" ]]
+          if [[ "$MODE" == "apply" && "$CONFIRM" != "true" ]]; then
+            echo "::error::confirm_historical_repair must be selected"
+            exit 1
+          fi
+          if [[ "$MODE" == "apply" && -z "$CHANNEL_ID" ]]; then
+            echo "::error::apply mode requires one explicit Slack channel ID"
+            exit 1
+          fi
+
+      - name: Install SSH key
+        uses: webfactory/ssh-agent@v0.10.0
+        with:
+          ssh-private-key: ${{ secrets.DO_SSH_KEY }}
+
+      - name: Add known host
+        run: ssh-keyscan -H 209.38.85.60 >> ~/.ssh/known_hosts
+
+      - name: Reconcile Slack threads
+        env:
+          CHANNEL_ID: ${{ inputs.slack_channel_id }}
+          OLDEST: ${{ inputs.oldest }}
+          LATEST: ${{ inputs.latest }}
+          MAX_ROOTS: ${{ inputs.max_roots }}
+          MODE: ${{ inputs.mode }}
+        run: |
+          set -euo pipefail
+          channel_arg="${CHANNEL_ID:-__MLAI_EMPTY__}"
+          oldest_arg="${OLDEST:-__MLAI_EMPTY__}"
+          latest_arg="${LATEST:-__MLAI_EMPTY__}"
+          ssh root@209.38.85.60 bash -s -- \
+            "$channel_arg" "$oldest_arg" "$latest_arg" "$MAX_ROOTS" "$MODE" <<'REMOTE'
+          set -euo pipefail
+          channel_id="$1"
+          oldest="$2"
+          latest="$3"
+          max_roots="$4"
+          mode="$5"
+          [[ "$channel_id" != "__MLAI_EMPTY__" ]] || channel_id=""
+          [[ "$oldest" != "__MLAI_EMPTY__" ]] || oldest=""
+          [[ "$latest" != "__MLAI_EMPTY__" ]] || latest=""
+          cd /root/mlai-backend
+          args=(
+            python manage.py reconcile_community_bridge_slack_threads
+            --max-roots "$max_roots"
+            --maximum-history-messages 10000
+            --fail-on-mismatch-rate 1
+            --include-unthreaded
+          )
+          [[ -z "$channel_id" ]] || args+=(--slack-channel-id "$channel_id")
+          [[ -z "$oldest" ]] || args+=(--oldest "$oldest")
+          [[ -z "$latest" ]] || args+=(--latest "$latest")
+          if [[ "$mode" == "apply" ]]; then
+            args+=(--apply --confirm-historical-repair --wait-seconds 120)
+          fi
+          status=0
+          docker compose exec -T web "${args[@]}" </dev/null || status=$?
+          docker compose ps web bridge-worker
+          docker compose logs --since 10m --tail 200 bridge-worker
+          exit "$status"
+          REMOTE

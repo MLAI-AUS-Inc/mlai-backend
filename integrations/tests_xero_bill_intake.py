@@ -14,6 +14,7 @@ from integrations.models import (
     ExternalServiceConnection,
     ExternalServiceProvider,
     ReconciliationProfile,
+    XeroStatementLineSnapshot,
     XeroStatementSuggestion,
 )
 from integrations.services.xero_reconciliation import (
@@ -22,13 +23,19 @@ from integrations.services.xero_reconciliation import (
 )
 from integrations.services.xero_bill_intake import (
     attach_reconciliation_document,
+    _bill_tracking_execution_suggestion,
     build_reconciliation_bill_preview,
     create_reconciliation_bill,
 )
 from integrations.services.xero_statement_reconciliation import (
     ALLOWED_STATEMENT_EVIDENCE_PROVIDERS,
+    StatementCaptureValidationError,
     _serialize_evidence,
     import_xero_statement_lines,
+)
+from integrations.services.xero_statement_posting import (
+    _ensure_bill_tracking,
+    resolve_xero_tracking_assignment,
 )
 from roo.models import PointsAdmin
 
@@ -64,6 +71,48 @@ def _bill_payload(**overrides):
     return payload
 
 
+def _bound_bill_payload(
+    organization,
+    *,
+    total="529.08",
+    statement_line_id="line-bill-1",
+    **overrides,
+):
+    line = import_xero_statement_lines(
+        organization=organization,
+        bank_account_id="bank-1",
+        expected_count=1,
+        complete_scan=True,
+        lines=[{
+            "statement_line_id": statement_line_id,
+            "date": "20 Jul 2026",
+            "narration": "TRANSFER TO LINEAR ORBIT",
+            "direction": "debit",
+            "amount": total,
+            "currency": "AUD",
+        }],
+    )[0]
+    payload_values = {
+        "total": total,
+        "status": "AUTHORISED",
+        "account_code": "412",
+        "tax_type": "INPUT",
+        "source": {
+            "gmail_message_id": "gm-123",
+            "document_id": 7,
+            "statement_line_id": line.statement_line_id,
+            "bank_account_id": line.bank_account_id,
+            "statement_source_hash": line.source_hash,
+            "run_id": "run-1",
+            "suggestion_id": 77,
+            "scheduled_automation": True,
+        },
+    }
+    payload_values.update(overrides)
+    payload = _bill_payload(**payload_values)
+    return payload, line
+
+
 class XeroBillIntakeServiceTests(TestCase):
     def setUp(self):
         self.organization = Organization.objects.create(name="MLAI", domain="mlai.au")
@@ -90,6 +139,161 @@ class XeroBillIntakeServiceTests(TestCase):
         self.assertIn("invoice_number", joined)
         self.assertIn("issue_date", joined)
 
+    def test_mandatory_tracking_is_added_to_every_bill_line(self):
+        self.profile.require_statement_tracking = True
+        self.profile.default_project_tracking_option_name = "MLAI core"
+        self.profile.default_project_tracking_option_id = "project-core"
+        self.profile.project_tracking_category_id = "project-category"
+        self.profile.save(update_fields=[
+            "require_statement_tracking",
+            "default_project_tracking_option_name",
+            "default_project_tracking_option_id",
+            "project_tracking_category_id",
+            "updated_at",
+        ])
+        payload = _bill_payload(
+            total="12.34",
+            line_amounts=[
+                {"description": "Venue", "amount": "10.00", "account_code": "429", "tax_type": "INPUT"},
+                {"description": "Catering", "amount": "2.34", "account_code": "401", "tax_type": "INPUT"},
+            ],
+            effective_tracking={
+                "allocation_mode": "mlai_core",
+                "kind": "project",
+                "option_name": "MLAI core",
+                "option_id": "project-core",
+                "default": True,
+            },
+        )
+
+        preview = build_reconciliation_bill_preview(self.organization, payload=payload)
+
+        self.assertTrue(preview["ready"])
+        for line in preview["xero_payload"]["LineItems"]:
+            self.assertEqual(len(line["Tracking"]), 1)
+            self.assertEqual(line["Tracking"][0]["Option"], "MLAI core")
+
+    @patch("integrations.services.xero_statement_posting.http_client.post")
+    def test_existing_bill_tracking_update_preserves_line_financial_fields(self, post):
+        response = Mock()
+        response.json.return_value = {"Invoices": [{"InvoiceID": "bill-1"}]}
+        response.raise_for_status.return_value = None
+        post.return_value = response
+        bill = {
+            "InvoiceID": "bill-1",
+            "Type": "ACCPAY",
+            "Status": "AUTHORISED",
+            "Date": "2026-08-01",
+            "DueDate": "2026-08-14",
+            "LineAmountTypes": "Inclusive",
+            "Contact": {"ContactID": "contact-1"},
+            "LineItems": [{
+                "LineItemID": "line-1",
+                "Description": "Venue hire",
+                "Quantity": 1,
+                "UnitAmount": 100.0,
+                "AccountCode": "429",
+                "TaxType": "INPUT",
+            }],
+        }
+        tracking = {
+            "TrackingCategoryID": "project-category",
+            "Name": "Project Name",
+            "TrackingOptionID": "project-core",
+            "Option": "MLAI core",
+        }
+
+        _ensure_bill_tracking(self.connection, bill=bill, tracking=tracking)
+
+        sent = post.call_args.kwargs["json"]["Invoices"][0]["LineItems"][0]
+        self.assertEqual(sent["LineItemID"], "line-1")
+        self.assertEqual(sent["UnitAmount"], 100.0)
+        self.assertEqual(sent["AccountCode"], "429")
+        self.assertEqual(sent["TaxType"], "INPUT")
+        self.assertEqual(sent["Tracking"], [tracking])
+
+    def test_existing_bill_conflicting_tracking_fails_without_write(self):
+        bill = {
+            "InvoiceID": "bill-1",
+            "LineItems": [{
+                "LineItemID": "line-1",
+                "Description": "Venue hire",
+                "Quantity": 1,
+                "UnitAmount": 100.0,
+                "AccountCode": "429",
+                "TaxType": "INPUT",
+                "Tracking": [{
+                    "TrackingCategoryID": "event-category",
+                    "TrackingOptionID": "event-other",
+                    "Option": "Other Event",
+                }],
+            }],
+        }
+        with self.assertRaisesMessage(XeroPostingError, "conflicts"):
+            _ensure_bill_tracking(
+                self.connection,
+                bill=bill,
+                tracking={
+                    "TrackingCategoryID": "project-category",
+                    "Name": "Project Name",
+                    "TrackingOptionID": "project-core",
+                    "Option": "MLAI core",
+                },
+            )
+
+    @patch("integrations.services.xero_statement_posting.http_client.put")
+    @patch("integrations.services.xero_statement_posting.http_client.get")
+    def test_missing_mlai_core_is_created_only_when_resolving_approved_write(self, get, put):
+        self.connection.scopes = [*self.connection.scopes, "accounting.settings"]
+        self.connection.save(update_fields=["scopes", "updated_at"])
+        self.profile.default_project_tracking_option_name = "MLAI core"
+        self.profile.project_tracking_category_id = "project-category"
+        self.profile.save(update_fields=[
+            "default_project_tracking_option_name",
+            "project_tracking_category_id",
+            "updated_at",
+        ])
+        categories = Mock()
+        categories.json.return_value = {
+            "TrackingCategories": [{
+                "TrackingCategoryID": "project-category",
+                "Name": "Project Name",
+                "Status": "ACTIVE",
+                "Options": [],
+            }]
+        }
+        categories.raise_for_status.return_value = None
+        get.return_value = categories
+        created = Mock()
+        created.json.return_value = {
+            "Options": [{
+                "TrackingOptionID": "project-core",
+                "Name": "MLAI core",
+                "Status": "ACTIVE",
+            }]
+        }
+        created.raise_for_status.return_value = None
+        put.return_value = created
+
+        resolved = resolve_xero_tracking_assignment(
+            self.connection,
+            self.profile,
+            {
+                "allocation_mode": "mlai_core",
+                "kind": "project",
+                "category_id": "project-category",
+                "category_name": "Project Name",
+                "option_id": "",
+                "option_name": "MLAI core",
+                "default": True,
+            },
+        )
+
+        self.assertEqual(resolved[0]["TrackingOptionID"], "project-core")
+        put.assert_called_once()
+        self.profile.refresh_from_db()
+        self.assertEqual(self.profile.default_project_tracking_option_id, "project-core")
+
     def test_preview_downgrades_authorised_without_account_fields(self):
         preview = build_reconciliation_bill_preview(
             self.organization, payload=_bill_payload(status="AUTHORISED")
@@ -98,6 +302,168 @@ class XeroBillIntakeServiceTests(TestCase):
         self.assertEqual(preview["status"], "DRAFT")
         self.assertTrue(any("Downgraded to DRAFT" in item for item in preview["warnings"]))
         self.assertEqual(preview["xero_payload"]["Status"], "DRAFT")
+
+    def test_authorised_preview_requires_exact_statement_binding(self):
+        preview = build_reconciliation_bill_preview(
+            self.organization,
+            payload=_bill_payload(
+                status="AUTHORISED",
+                account_code="412",
+                tax_type="INPUT",
+            ),
+        )
+
+        self.assertFalse(preview["ready"])
+        self.assertTrue(
+            any("source.statement_line_id" in error for error in preview["errors"])
+        )
+
+    @patch(
+        "integrations.services.xero_bill_intake.validate_current_statement_line_capture"
+    )
+    def test_authorised_preview_binds_exact_current_debit_row(self, validate_capture):
+        validate_capture.return_value = Mock(capture_id="capture-1")
+        payload, line = _bound_bill_payload(self.organization)
+
+        preview = build_reconciliation_bill_preview(
+            self.organization,
+            payload=payload,
+        )
+
+        self.assertTrue(preview["ready"])
+        self.assertEqual(
+            preview["statement_binding"],
+            {
+                "statement_line_id": line.statement_line_id,
+                "bank_account_id": "bank-1",
+                "statement_source_hash": line.source_hash,
+                "statement_scan_id": line.last_scan_id,
+                "capture_id": "capture-1",
+            },
+        )
+        validate_capture.assert_called_once_with(
+            line,
+            expected_bank_account_id="bank-1",
+            expected_source_hash=line.source_hash,
+        )
+
+    @patch(
+        "integrations.services.xero_bill_intake.validate_current_statement_line_capture"
+    )
+    def test_authorised_preview_rejects_green_or_wrong_amount_row(
+        self, validate_capture
+    ):
+        validate_capture.return_value = Mock(capture_id="capture-1")
+        payload, line = _bound_bill_payload(self.organization)
+        line.amount = Decimal("500.00")
+        line.ui_mode = XeroStatementLineSnapshot.UI_GREEN_MATCH
+        line.save(update_fields=["amount", "ui_mode"])
+
+        preview = build_reconciliation_bill_preview(
+            self.organization,
+            payload=payload,
+        )
+
+        self.assertFalse(preview["ready"])
+        joined = " ".join(preview["errors"])
+        self.assertIn("not the invoice total", joined)
+        self.assertIn("already has a green match", joined)
+
+    @patch(
+        "integrations.services.xero_bill_intake.validate_current_statement_line_capture"
+    )
+    def test_authorised_preview_rejects_changed_statement_source_hash(
+        self, validate_capture
+    ):
+        validate_capture.return_value = Mock(capture_id="capture-1")
+        payload, _line = _bound_bill_payload(self.organization)
+        payload["source"]["statement_source_hash"] = "b" * 64
+
+        preview = build_reconciliation_bill_preview(
+            self.organization,
+            payload=payload,
+        )
+
+        self.assertFalse(preview["ready"])
+        self.assertTrue(any("changed" in error for error in preview["errors"]))
+
+    @patch(
+        "integrations.services.xero_bill_intake.validate_current_statement_line_capture"
+    )
+    def test_authorised_preview_rejects_credit_statement_row(
+        self, validate_capture
+    ):
+        validate_capture.return_value = Mock(capture_id="capture-1")
+        payload, line = _bound_bill_payload(self.organization)
+        line.direction = XeroStatementLineSnapshot.DIRECTION_CREDIT
+        line.save(update_fields=["direction"])
+
+        preview = build_reconciliation_bill_preview(
+            self.organization,
+            payload=payload,
+        )
+
+        self.assertFalse(preview["ready"])
+        self.assertTrue(any("must bind to a debit" in error for error in preview["errors"]))
+
+    @patch(
+        "integrations.services.xero_bill_intake.validate_current_statement_line_capture"
+    )
+    def test_bound_bill_resolves_only_its_current_tracking_suggestion(
+        self, validate_capture
+    ):
+        validate_capture.return_value = Mock(capture_id="capture-1")
+        self.profile.project_tracking_category_id = "project-category"
+        self.profile.save(
+            update_fields=["project_tracking_category_id", "updated_at"]
+        )
+        payload, line = _bound_bill_payload(self.organization)
+        suggestion = XeroStatementSuggestion.objects.create(
+            organization=self.organization,
+            statement_line=line,
+            run_id="run-1",
+            proposed_action=XeroStatementSuggestion.ACTION_CREATE_BANK_TRANSACTION,
+            allocation_mode=XeroStatementSuggestion.ALLOCATION_PROJECT,
+            project_source_type="linear",
+            project_source_id="project-1",
+            project_tracking_option_name="MLAI Platform",
+            confidence=0.99,
+            execution_ready=True,
+            source_hash=line.source_hash,
+        )
+        payload["source"]["suggestion_id"] = suggestion.id
+        assignment = {
+            "allocation_mode": "project",
+            "kind": "project",
+            "category_id": "project-category",
+            "category_name": "Project Name",
+            "option_id": "",
+            "option_name": "MLAI Platform",
+            "default": False,
+        }
+        binding = build_reconciliation_bill_preview(
+            self.organization, payload=payload
+        )["statement_binding"]
+
+        resolved = _bill_tracking_execution_suggestion(
+            self.organization,
+            profile=self.profile,
+            payload=payload,
+            statement_binding=binding,
+            tracking_assignment=assignment,
+        )
+
+        self.assertEqual(resolved, suggestion)
+        payload["source"]["run_id"] = "another-run"
+        self.assertIsNone(
+            _bill_tracking_execution_suggestion(
+                self.organization,
+                profile=self.profile,
+                payload=payload,
+                statement_binding=binding,
+                tracking_assignment=assignment,
+            )
+        )
 
     def test_preview_preserves_extracted_lines_and_financial_metadata(self):
         preview = build_reconciliation_bill_preview(
@@ -262,15 +628,18 @@ class XeroBillIntakeServiceTests(TestCase):
             "DateString": "2026-07-18T00:00:00",
             "LineItems": [{"Description": "AI consulting"}],
         }
-        payload = _bill_payload(
+        payload, _line = _bound_bill_payload(
+            self.organization,
             contact_name="Aaron AI",
             invoice_number="AA-1",
             total="1137.50",
-            status="AUTHORISED",
             account_code="405",
             tax_type="INPUT",
         )
         with patch(
+            "integrations.services.xero_bill_intake.validate_current_statement_line_capture",
+            return_value=Mock(capture_id="capture-1"),
+        ), patch(
             "integrations.services.xero_bill_intake.http_client.get",
             side_effect=[
                 _response({"Invoices": []}),
@@ -308,12 +677,15 @@ class XeroBillIntakeServiceTests(TestCase):
         )
 
     def test_authorised_bill_requires_current_xero_account_and_tax(self):
-        payload = _bill_payload(
-            status="AUTHORISED",
+        payload, _line = _bound_bill_payload(
+            self.organization,
             account_code="missing",
             tax_type="INPUT",
         )
         with patch(
+            "integrations.services.xero_bill_intake.validate_current_statement_line_capture",
+            return_value=Mock(capture_id="capture-1"),
+        ), patch(
             "integrations.services.xero_bill_intake.http_client.get",
             side_effect=[
                 _response({"Invoices": []}),
@@ -328,6 +700,55 @@ class XeroBillIntakeServiceTests(TestCase):
                     payload=payload,
                     requested_by_slack_id="UADMIN",
                 )
+        put_mock.assert_not_called()
+
+    def test_create_revalidates_statement_binding_at_final_prewrite_boundary(self):
+        payload, _line = _bound_bill_payload(self.organization)
+        created_row = {
+            "InvoiceID": "inv-77",
+            "InvoiceNumber": "RVVBQKKP-0012",
+            "Status": "AUTHORISED",
+        }
+        validation = patch(
+            "integrations.services.xero_bill_intake.validate_current_statement_line_capture",
+            side_effect=[
+                Mock(capture_id="capture-1"),
+                Mock(capture_id="capture-1"),
+                StatementCaptureValidationError(
+                    "The authoritative statement capture changed before the Xero write."
+                ),
+            ],
+        )
+        with validation as validate_capture, patch(
+            "integrations.services.xero_bill_intake.http_client.get",
+            side_effect=[
+                _response({"Invoices": []}),
+                _response({"Contacts": []}),
+                _response({"Accounts": [{"Code": "412", "Status": "ACTIVE"}]}),
+                _response({
+                    "TaxRates": [{
+                        "Name": "GST on Expenses",
+                        "TaxType": "INPUT",
+                        "Status": "ACTIVE",
+                        "CanApplyToExpenses": True,
+                    }]
+                }),
+            ],
+        ), patch(
+            "integrations.services.xero_bill_intake.http_client.put",
+            return_value=_response({"Invoices": [created_row]}),
+        ) as put_mock:
+            with self.assertRaisesMessage(
+                ReconciliationValidationError,
+                "Bill statement binding is not current",
+            ):
+                create_reconciliation_bill(
+                    self.organization,
+                    payload=payload,
+                    requested_by_slack_id="UADMIN",
+                )
+
+        self.assertEqual(validate_capture.call_count, 3)
         put_mock.assert_not_called()
 
     def test_attach_document_puts_raw_content(self):

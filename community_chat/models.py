@@ -27,7 +27,7 @@ class CommunityChatDevice(models.Model):
         related_name="community_chat_devices",
     )
     public_key = models.CharField(max_length=64)
-    installation_id = models.UUIDField(default=uuid.uuid4, unique=True)
+    installation_id = models.UUIDField(default=uuid.uuid4)
     client_id = models.CharField(max_length=64, default="legacy")
     platform = models.CharField(max_length=32, blank=True)
     name = models.CharField(max_length=120, blank=True)
@@ -58,6 +58,11 @@ class CommunityChatDevice(models.Model):
                 fields=("public_key",),
                 condition=Q(status__in=(DeviceBindingStatus.PENDING, DeviceBindingStatus.VERIFIED)),
                 name="community_chat_unique_active_public_key",
+            ),
+            models.UniqueConstraint(
+                fields=("installation_id",),
+                condition=Q(status__in=(DeviceBindingStatus.PENDING, DeviceBindingStatus.VERIFIED)),
+                name="chat_unique_active_installation",
             ),
         ]
         indexes = [
@@ -299,3 +304,132 @@ class CommunityChatAccountSession(models.Model):
 
     def __str__(self):
         return f"{self.user_id}:{self.client_id}:{self.installation_id}"
+
+
+class TokenUsageAccount(models.Model):
+    """A member who has opted in to the community token leaderboard.
+
+    Opt-in is explicit: a row exists only once the member mints a reporter
+    token from MLAI Chat. Deleting the row is how a member leaves the board,
+    and the session cascade means leaving actually removes their data.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="token_usage_account",
+    )
+    token_hash = models.CharField(max_length=64, unique=True)
+    is_public = models.BooleanField(default=True)
+    last_report_at = models.DateTimeField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ("created_at",)
+
+    def __str__(self):
+        return f"{self.user_id} (token usage)"
+
+
+class TokenUsageSession(models.Model):
+    """Reported token totals for one (session, model) pair.
+
+    Re-reporting the same (account, source, session_id, model) REPLACES the
+    row rather than adding to it. The reporter re-sends whole-session totals
+    on every hook fire, so the unique constraint below is what keeps live
+    reporting and a history backfill safe to run at the same time.
+    """
+
+    account = models.ForeignKey(
+        TokenUsageAccount,
+        on_delete=models.CASCADE,
+        related_name="sessions",
+    )
+    source = models.CharField(max_length=16)
+    session_id = models.CharField(max_length=200)
+    model = models.CharField(max_length=128)
+    input_tokens = models.BigIntegerField(default=0)
+    output_tokens = models.BigIntegerField(default=0)
+    cache_read_tokens = models.BigIntegerField(default=0)
+    cache_creation_tokens = models.BigIntegerField(default=0)
+    reasoning_tokens = models.BigIntegerField(default=0)
+    started_at = models.DateTimeField()
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=("account", "source", "session_id", "model"),
+                name="token_usage_unique_session_model",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=("account", "started_at"),
+                name="token_usage_acct_time_idx",
+            ),
+            models.Index(fields=("started_at",), name="token_usage_time_idx"),
+        ]
+
+    def __str__(self):
+        return f"{self.account_id}:{self.source}:{self.session_id}:{self.model}"
+
+
+class TokenUsageDailyBucket(models.Model):
+    """Positive token deltas attributed to one Melbourne calendar day.
+
+    ``TokenUsageSession`` stores the reporter's latest cumulative snapshot so
+    the all-time board remains cheap to query. This model stores only growth
+    observed by the live ingest endpoint. Re-reporting an unchanged snapshot
+    therefore adds nothing, while a session that crosses midnight credits its
+    later growth to the new local day.
+    """
+
+    account = models.ForeignKey(
+        TokenUsageAccount,
+        on_delete=models.CASCADE,
+        related_name="daily_buckets",
+    )
+    usage_date = models.DateField()
+    source = models.CharField(max_length=16)
+    session_id = models.CharField(max_length=200)
+    model = models.CharField(max_length=128)
+    input_tokens = models.BigIntegerField(default=0)
+    output_tokens = models.BigIntegerField(default=0)
+    cache_read_tokens = models.BigIntegerField(default=0)
+    cache_creation_tokens = models.BigIntegerField(default=0)
+    reasoning_tokens = models.BigIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=(
+                    "account",
+                    "usage_date",
+                    "source",
+                    "session_id",
+                    "model",
+                ),
+                name="token_usage_unique_daily_bucket",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=("usage_date", "account"),
+                name="token_usage_day_acct_idx",
+            ),
+            models.Index(
+                fields=("account", "usage_date"),
+                name="token_usage_acct_day_idx",
+            ),
+        ]
+
+    def __str__(self):
+        return (
+            f"{self.usage_date}:{self.account_id}:{self.source}:"
+            f"{self.session_id}:{self.model}"
+        )

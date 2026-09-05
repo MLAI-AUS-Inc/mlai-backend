@@ -7,7 +7,8 @@ import json
 import re
 from datetime import date, datetime, time, timezone
 from typing import Any, Dict, Iterable, List, Optional
-from zoneinfo import ZoneInfo
+from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import requests
 from django.conf import settings
@@ -137,6 +138,81 @@ class LumaAttendeeReportService:
                 break
 
         return events[:count]
+
+    def list_all_events(self) -> List[Dict[str, Any]]:
+        """Return the complete managed calendar catalogue without guest PII.
+
+        Reconciliation needs future and in-progress events because tickets are
+        commonly sold before an event ends. Attendance metrics continue to use
+        the ended-event methods.
+        """
+
+        if not self.api_key:
+            raise LumaConfigurationError("Luma API key is not configured for this connection.")
+        return self._paginate(
+            "/v1/calendars/events/list",
+            params={
+                "pagination_limit": 100,
+                "sort_column": "start_at",
+                "sort_direction": "desc",
+            },
+        )
+
+    def list_upcoming_events(
+        self,
+        *,
+        now: Optional[datetime] = None,
+        timezone_name: str = MELBOURNE_TIMEZONE,
+        limit: int = 5,
+    ) -> List[Dict[str, Any]]:
+        """Return a bounded, public-only event-card projection.
+
+        The calendar API key can read private event settings and attendee data.
+        This method therefore fails closed unless Luma explicitly marks an
+        event public, then copies only the fields needed by MLAI Chat's Home
+        screen. The legacy endpoint is retained because it is already verified
+        by the existing integration and remains backwards compatible.
+        """
+        if not self.api_key:
+            raise LumaConfigurationError("LUMA_API_KEY is not configured on mlai-backend.")
+
+        result_limit = max(1, min(int(limit or 5), 10))
+        now_utc = _local_now_utc(now, timezone_name)
+        events: List[Dict[str, Any]] = []
+        cursor = None
+        seen_cursors = set()
+        pages_fetched = 0
+
+        while len(events) < result_limit and pages_fetched < 10:
+            pages_fetched += 1
+            params: Dict[str, Any] = {
+                "after": _isoformat_z(now_utc),
+                "pagination_limit": 100,
+                "sort_column": "start_at",
+                "sort_direction": "asc",
+                "status": "approved",
+            }
+            if cursor:
+                params["pagination_cursor"] = cursor
+
+            page = self._get("/v1/calendar/list-events", params=params)
+            for raw_event in page.get("entries", []):
+                event = _public_upcoming_event(raw_event, now_utc=now_utc)
+                if event is None:
+                    continue
+                events.append(event)
+                if len(events) >= result_limit:
+                    break
+
+            if len(events) >= result_limit or not page.get("has_more"):
+                break
+            next_cursor = str(page.get("next_cursor") or "").strip()
+            if not next_cursor or next_cursor in seen_cursors:
+                break
+            seen_cursors.add(next_cursor)
+            cursor = next_cursor
+
+        return sorted(events, key=lambda event: event["start_at"])[:result_limit]
 
     def get_ended_events_for_date(
         self,
@@ -310,6 +386,20 @@ class LumaAttendeeReportService:
         }
         return self._paginate("/v1/event/get-guests", params=params)
 
+    def get_guest(self, *, event_id: str, identifier: str) -> Dict[str, Any]:
+        """Fetch one detailed guest, including captured ticket orders."""
+
+        if not self.api_key:
+            raise LumaConfigurationError("Luma API key is not configured for this connection.")
+        event_id = str(event_id or "").strip()
+        identifier = str(identifier or "").strip()
+        if not event_id or not identifier:
+            raise LumaAPIError("Luma guest lookup requires an event and guest identifier.")
+        return self._get(
+            "/v1/events/guests/get",
+            params={"event_id": event_id, "id": identifier},
+        )
+
     def _paginate(self, path: str, *, params: Dict[str, Any]) -> List[Dict[str, Any]]:
         entries: List[Dict[str, Any]] = []
         cursor = None
@@ -457,6 +547,52 @@ def _local_now_utc(now: Optional[datetime], timezone_name: str) -> datetime:
     if now_local.tzinfo is None:
         now_local = now_local.replace(tzinfo=tz)
     return now_local.astimezone(timezone.utc)
+
+
+def _public_upcoming_event(
+    event: Any,
+    *,
+    now_utc: datetime,
+) -> Optional[Dict[str, str]]:
+    """Build the only Luma event shape that may cross the chat API boundary."""
+    if not isinstance(event, dict) or str(event.get("visibility") or "").strip() != "public":
+        return None
+
+    event_id = str(event.get("id") or "").strip()[:255]
+    name = str(event.get("name") or "").strip()[:255]
+    event_url = str(event.get("url") or "").strip()[:2048]
+    timezone_name = str(event.get("timezone") or "").strip()[:64]
+    start_at = _parse_datetime(event.get("start_at"))
+    end_at = _parse_datetime(event.get("end_at"))
+
+    try:
+        parsed_url = urlsplit(event_url)
+        ZoneInfo(timezone_name)
+    except (ValueError, ZoneInfoNotFoundError):
+        return None
+    if (
+        not event_id
+        or not name
+        or not timezone_name
+        or start_at is None
+        or end_at is None
+        or start_at < now_utc
+        or end_at < start_at
+        or parsed_url.scheme != "https"
+        or not parsed_url.hostname
+        or parsed_url.username
+        or parsed_url.password
+    ):
+        return None
+
+    return {
+        "id": event_id,
+        "name": name,
+        "url": event_url,
+        "start_at": _isoformat_z(start_at),
+        "end_at": _isoformat_z(end_at),
+        "timezone": timezone_name,
+    }
 
 
 def _guest_checked_in(guest: Dict[str, Any]) -> bool:

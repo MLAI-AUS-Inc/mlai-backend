@@ -27,11 +27,17 @@ from __future__ import annotations
 import base64
 import io
 import re
+from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 from django.conf import settings
+
+from integrations.services.luma import (
+    LumaAPIError,
+    LumaAttendeeReportService,
+)
 
 
 STRIPE_API_BASE_URL = "https://api.stripe.com"
@@ -73,6 +79,30 @@ class ReconciliationMappingSource:
     STRIPE_INVOICE = "stripe_invoice"
     STRIPE_METADATA = "stripe_metadata"
     UNATTRIBUTED = "unattributed"
+
+
+def luma_api_key_for_organization(organization: Any) -> str:
+    """Resolve the organisation-scoped Luma credential without exposing it."""
+
+    if organization is None:
+        return ""
+    from integrations.models import (
+        ExternalServiceConnection,
+        ExternalServiceConnectionStatus,
+        ExternalServiceProvider,
+    )
+
+    connection = (
+        ExternalServiceConnection.objects.filter(
+            organization=organization,
+            provider=ExternalServiceProvider.LUMA,
+            status=ExternalServiceConnectionStatus.CONNECTED,
+        )
+        .exclude(access_token="")
+        .order_by("-last_synced_at", "-updated_at", "-id")
+        .first()
+    )
+    return str(connection.access_token or "").strip() if connection else ""
 
 
 def _dollars(cents: int) -> float:
@@ -127,6 +157,8 @@ class ReconciliationReportService:
         stripe_api_version: Optional[str] = None,
         base_url: Optional[str] = None,
         session: Optional[requests.Session] = None,
+        luma_api_key: Optional[str] = None,
+        luma_service: Optional[LumaAttendeeReportService] = None,
         timeout: Any = (3, 20),
     ):
         raw_key = (
@@ -143,6 +175,19 @@ class ReconciliationReportService:
         self.stripe_api_version = resolve_stripe_api_version(configured_version)
         self.base_url = str(base_url or STRIPE_API_BASE_URL).rstrip("/")
         self.session = session or requests.Session()
+        configured_luma_key = (
+            luma_api_key
+            if luma_api_key is not None
+            else getattr(settings, "LUMA_API_KEY", None)
+        )
+        self.luma_service = luma_service or (
+            LumaAttendeeReportService(api_key=str(configured_luma_key or "").strip())
+            if str(configured_luma_key or "").strip()
+            else None
+        )
+        self._luma_events_by_name: dict[str, list[dict[str, Any]]] | None = None
+        self._luma_guest_cache: dict[tuple[str, str], dict[str, Any] | None] = {}
+        self._payment_intent_cache: dict[str, dict[str, Any]] = {}
         self.timeout = timeout
 
     # ---- public API ------------------------------------------------------
@@ -283,7 +328,12 @@ class ReconciliationReportService:
                 row = {
                     "charge_id": str(source.get("id") or txn.get("id") or ""),
                     "event_api_id": attribution["event_api_id"],
-                    "event_name": attribution["source_label"],
+                    "event_name": (
+                        attribution["source_label"]
+                        if attribution["source_type"]
+                        == ReconciliationMappingSource.LUMA_EVENT
+                        else ""
+                    ),
                     **attribution,
                     "buyer_email": str(metadata.get("email") or (source.get("billing_details") or {}).get("email") or "").strip(),
                     "gross_cents": row_gross,
@@ -313,6 +363,8 @@ class ReconciliationReportService:
                         "stripe_payment_intent_ids": set(),
                         "stripe_product_ids": set(),
                         "stripe_subscription_ids": set(),
+                        "luma_order_ids": set(),
+                        "luma_match_methods": set(),
                     },
                 )
                 bucket["ticket_count"] += 1
@@ -324,6 +376,8 @@ class ReconciliationReportService:
                     "stripe_payment_intent_ids",
                     "stripe_product_ids",
                     "stripe_subscription_ids",
+                    "luma_order_ids",
+                    "luma_match_methods",
                 ):
                     values = row.get(field) or []
                     bucket[field].update(str(value) for value in values if str(value))
@@ -383,6 +437,8 @@ class ReconciliationReportService:
                 "stripe_payment_intent_ids",
                 "stripe_product_ids",
                 "stripe_subscription_ids",
+                "luma_order_ids",
+                "luma_match_methods",
             ):
                 group[field] = sorted(group[field])
         report = {
@@ -406,11 +462,27 @@ class ReconciliationReportService:
         return report, sales_rows
 
     def _revenue_attribution(self, txn: Dict[str, Any], source: Dict[str, Any]) -> Dict[str, Any]:
-        metadata = source.get("metadata") if isinstance(source.get("metadata"), dict) else {}
+        intent = self._payment_intent_for_source(source)
+        intent_metadata = (
+            intent.get("metadata") if isinstance(intent.get("metadata"), dict) else {}
+        )
+        source_metadata = (
+            source.get("metadata") if isinstance(source.get("metadata"), dict) else {}
+        )
+        # PaymentIntent is the canonical payment object. Charge metadata wins
+        # only for keys explicitly copied or amended at capture time.
+        metadata = {**intent_metadata, **source_metadata}
         event_api_id = str(metadata.get("event_api_id") or "").strip()
         source_object_id = str(source.get("id") or txn.get("id") or "").strip()
-        description = str(source.get("description") or txn.get("description") or "").strip()
-        payment_intent_id = self._stripe_id(source.get("payment_intent"))
+        description = str(
+            source.get("description")
+            or intent.get("description")
+            or txn.get("description")
+            or ""
+        ).strip()
+        payment_intent_id = self._stripe_id(intent) or self._stripe_id(
+            source.get("payment_intent")
+        )
         if not payment_intent_id and source_object_id.startswith("pi_"):
             payment_intent_id = source_object_id
         invoice_id = self._stripe_id(source.get("invoice"))
@@ -424,6 +496,8 @@ class ReconciliationReportService:
             "stripe_payment_intent_ids": [payment_intent_id] if payment_intent_id else [],
             "stripe_product_ids": sorted(product_ids),
             "stripe_subscription_ids": sorted(subscription_ids),
+            "luma_order_ids": [],
+            "luma_match_methods": [],
         }
         if event_api_id:
             return {"source_type": ReconciliationMappingSource.LUMA_EVENT, "source_id": event_api_id, "source_label": description or event_api_id, "event_api_id": event_api_id, "project_name": "", "metadata": metadata, **lineage}
@@ -450,7 +524,155 @@ class ReconciliationReportService:
         if lineage["stripe_product_ids"]:
             product_id = lineage["stripe_product_ids"][0]
             return {"source_type": "stripe_product", "source_id": product_id, "source_label": description or product_id, "event_api_id": "", "project_name": "", "metadata": metadata, **lineage}
+        luma_match = self._luma_order_attribution(
+            txn=txn,
+            source=source,
+            intent=intent,
+            metadata=metadata,
+            description=description,
+        )
+        if luma_match:
+            lineage["luma_order_ids"] = [luma_match["luma_order_id"]]
+            lineage["luma_match_methods"] = [luma_match["match_method"]]
+            return {
+                "source_type": ReconciliationMappingSource.LUMA_EVENT,
+                "source_id": luma_match["event_api_id"],
+                "source_label": luma_match["event_name"],
+                "event_api_id": luma_match["event_api_id"],
+                "project_name": "",
+                "metadata": metadata,
+                **lineage,
+            }
         return {"source_type": ReconciliationMappingSource.UNATTRIBUTED, "source_id": source_object_id, "source_label": description or "(unattributed Stripe payment)", "event_api_id": "", "project_name": "", "metadata": metadata, **lineage}
+
+    def _payment_intent_for_source(self, source: Dict[str, Any]) -> Dict[str, Any]:
+        raw_intent = source.get("payment_intent")
+        if isinstance(raw_intent, dict):
+            return raw_intent
+        intent_id = self._stripe_id(raw_intent)
+        if not intent_id and str(source.get("id") or "").startswith("pi_"):
+            intent_id = str(source["id"])
+        if not intent_id:
+            return {}
+        if intent_id not in self._payment_intent_cache:
+            self._payment_intent_cache[intent_id] = self._get(
+                f"/v1/payment_intents/{intent_id}", {}
+            )
+        return self._payment_intent_cache[intent_id]
+
+    @staticmethod
+    def _normalized_luma_name(value: Any) -> str:
+        return " ".join(re.sub(r"[^a-z0-9]+", " ", str(value or "").casefold()).split())
+
+    def _luma_event_catalog(self) -> dict[str, list[dict[str, Any]]]:
+        if self._luma_events_by_name is not None:
+            return self._luma_events_by_name
+        by_name: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        if self.luma_service is not None:
+            try:
+                for event in self.luma_service.list_all_events():
+                    event_id = str(event.get("id") or "").strip()
+                    name = str(event.get("name") or "").strip()
+                    normalized = self._normalized_luma_name(name)
+                    if event_id and normalized:
+                        by_name[normalized].append(event)
+            except LumaAPIError:
+                # Stripe remains authoritative for payout membership and sums.
+                # A Luma outage only disables this optional attribution fallback.
+                by_name.clear()
+        self._luma_events_by_name = dict(by_name)
+        return self._luma_events_by_name
+
+    def _luma_guest(self, *, event_id: str, email: str) -> dict[str, Any] | None:
+        key = (event_id, email.casefold())
+        if key in self._luma_guest_cache:
+            return self._luma_guest_cache[key]
+        guest: dict[str, Any] | None = None
+        if self.luma_service is not None:
+            try:
+                payload = self.luma_service.get_guest(event_id=event_id, identifier=email)
+                guest = payload if isinstance(payload, dict) else None
+            except LumaAPIError:
+                guest = None
+        self._luma_guest_cache[key] = guest
+        return guest
+
+    def _luma_order_attribution(
+        self,
+        *,
+        txn: dict[str, Any],
+        source: dict[str, Any],
+        intent: dict[str, Any],
+        metadata: dict[str, Any],
+        description: str,
+    ) -> dict[str, str] | None:
+        """Resolve a metadata-poor Luma charge without guessing.
+
+        Luma does not expose a Stripe PaymentIntent ID in its public guest
+        contract.  Its detailed guest endpoint does expose captured ticket
+        orders.  We therefore require a unique exact event-name match, the
+        Stripe payer email, and exactly one captured order with the same gross
+        amount and currency.  Any ambiguity remains unattributed.
+        """
+
+        if self.luma_service is None:
+            return None
+        name_values = [
+            metadata.get(key)
+            for key in ("event_name", "luma_event_name", "event")
+        ]
+        name_values.append(description)
+        candidates: dict[str, dict[str, Any]] = {}
+        catalog = self._luma_event_catalog()
+        for value in name_values:
+            for event in catalog.get(self._normalized_luma_name(value), []):
+                event_id = str(event.get("id") or "").strip()
+                if event_id:
+                    candidates[event_id] = event
+        if len(candidates) != 1:
+            return None
+
+        billing = source.get("billing_details")
+        billing = billing if isinstance(billing, dict) else {}
+        email = str(
+            metadata.get("email")
+            or source.get("receipt_email")
+            or billing.get("email")
+            or intent.get("receipt_email")
+            or ""
+        ).strip()
+        if not email:
+            return None
+        event_id, event = next(iter(candidates.items()))
+        guest = self._luma_guest(event_id=event_id, email=email)
+        if not guest:
+            return None
+        expected_amount = int(txn.get("amount") or 0)
+        expected_currency = str(
+            txn.get("currency") or source.get("currency") or ""
+        ).casefold()
+        matching_orders = []
+        for order in guest.get("event_ticket_orders") or []:
+            if not isinstance(order, dict) or order.get("is_captured") is not True:
+                continue
+            try:
+                amount = int(order.get("amount") or 0)
+            except (TypeError, ValueError):
+                continue
+            currency = str(order.get("currency") or "").casefold()
+            if amount == expected_amount and currency == expected_currency:
+                matching_orders.append(order)
+        if len(matching_orders) != 1:
+            return None
+        order_id = str(matching_orders[0].get("id") or "").strip()
+        if not order_id:
+            return None
+        return {
+            "event_api_id": event_id,
+            "event_name": str(event.get("name") or event_id).strip(),
+            "luma_order_id": order_id,
+            "match_method": "luma_event_name_email_captured_order_amount",
+        }
 
     @staticmethod
     def _stripe_id(value: Any) -> str:
@@ -531,12 +753,7 @@ class ReconciliationReportService:
         )
 
     def _refund_attribution(self, source: Dict[str, Any]) -> Dict[str, Any]:
-        raw_intent = source.get("payment_intent")
-        if isinstance(raw_intent, dict):
-            intent = raw_intent
-        else:
-            intent_id = str(raw_intent or "").strip()
-            intent = self._get(f"/v1/payment_intents/{intent_id}", {}) if intent_id else {}
+        intent = self._payment_intent_for_source(source)
         metadata = intent.get("metadata") if isinstance(intent.get("metadata"), dict) else {}
         event_id = str(metadata.get("event_api_id") or "").strip()
         intent_id = str(intent.get("id") or "").strip()

@@ -10,15 +10,14 @@ from jobs.services.sources import PHASE_1_SOURCES
 
 
 class JobsPublicPagesParserTests(SimpleTestCase):
-    def test_new_static_sources_are_enabled(self):
+    def test_available_static_sources_are_enabled(self):
         enabled = {source.name for source in PHASE_1_SOURCES if source.enabled}
         self.assertIn("TopStartups.io", enabled)
         self.assertIn("ai-jobs.com.au", enabled)
-        self.assertIn("Matchstiq", enabled)
+        self.assertNotIn("Matchstiq", enabled)
         self.assertNotIn("CareerOne", enabled)
-        self.assertTrue(
-            all(source.enabled for source in PHASE_1_SOURCES if source.name != "CareerOne")
-        )
+        unavailable_sources = {"CareerOne", "Matchstiq"}
+        self.assertTrue(all(source.enabled for source in PHASE_1_SOURCES if source.name not in unavailable_sources))
 
     def test_parse_topstartups_jobs(self):
         soup = BeautifulSoup(

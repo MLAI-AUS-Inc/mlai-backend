@@ -6,6 +6,7 @@ import uuid
 from decimal import Decimal, InvalidOperation
 from datetime import date, datetime, time, timedelta, timezone as dt_timezone
 from typing import Any, Iterable, Optional, Union
+from zoneinfo import ZoneInfo
 
 from django.db import transaction
 from django.utils import timezone
@@ -41,6 +42,7 @@ from startup_updates.models import (
     GmailThreadArtifact,
     GoogleAnalyticsPropertySelection,
     LinearIssueArtifact,
+    LumaEventSelection,
     LinearProjectArtifact,
     LinearProjectSelection,
     LinearProjectUpdateArtifact,
@@ -54,6 +56,13 @@ from startup_updates.models import (
     GmailSyncCursor,
     StartupProfile,
     UserStartupBinding,
+)
+from startup_updates.slack_lineage import (
+    parse_slack_thread_public_id,
+    pin_slack_run_authority,
+    slack_run_authority_for_connection,
+    slack_run_authority_from_request,
+    slack_run_authority_is_present,
 )
 from integrations.services.valley_harness import ValleyHarnessResult, notify_valley_run_created
 from integrations.utils import normalize_domain
@@ -75,6 +84,8 @@ SUPERSEDED_GMAIL_CONNECTION_ERROR = "Superseded by a newer Gmail connection."
 MANUAL_DOCUMENTS_SOURCE = "manual_documents"
 MAX_MANUAL_DOCUMENT_CONTEXT_CHARS = 40000
 MAX_MANUAL_DOCUMENT_CONTEXT_CHARS_PER_DOCUMENT = 12000
+LUMA_EVENT_CONTEXT_DAYS = 14
+LUMA_EVENT_TIMEZONE = "Australia/Melbourne"
 MERGEABLE_DRAFT_LIST_SECTIONS = (
     "financial_performance",
     "highlights",
@@ -301,6 +312,7 @@ LINEAR_COMPACT_MAX_CHARS = 9000
 XERO_REPORTS_SCOPE = XERO_REPORT_SCOPE
 XERO_REPORT_METRIC_KEYS = {
     "revenue",
+    "netProfitLoss",
     "revenueGrowthRate",
     "burnRate",
     "runway",
@@ -1015,6 +1027,45 @@ def _xero_report_entry_labels(entries: list[dict[str, Any]]) -> list[str]:
     return labels[:40]
 
 
+def _xero_report_breakdown_rows(
+    entries: list[dict[str, Any]],
+    *,
+    section_terms: tuple[str, ...],
+) -> list[dict[str, str]]:
+    """Return deterministic, non-total P&L rows suitable for frozen chart data."""
+    rows: list[dict[str, str]] = []
+    for entry in entries:
+        label = str(entry.get("label") or "").strip()
+        normalized_label = str(entry.get("normalized_label") or "")
+        normalized_section = str(entry.get("normalized_section") or "")
+        amount = entry.get("amount")
+        if not label or amount is None:
+            continue
+        if normalized_label.startswith("total ") or normalized_label in {
+            "income",
+            "revenue",
+            "expenses",
+            "operating expenses",
+            "cost of sales",
+            "gross profit",
+            "net profit",
+            "net loss",
+            "net profit/(loss)",
+            "net profit / (loss)",
+        }:
+            continue
+        if not any(term in normalized_section for term in section_terms):
+            continue
+        rows.append(
+            {
+                "label": label,
+                "amount": str(abs(Decimal(str(amount)))),
+                "section": str(entry.get("section") or ""),
+            }
+        )
+    return rows
+
+
 def _find_xero_report_amount(entries: list[dict[str, Any]], labels: Iterable[str]) -> Optional[dict[str, Any]]:
     normalized_labels = {_normalize_report_label(label) for label in labels}
     for entry in entries:
@@ -1033,6 +1084,14 @@ def _positive_xero_report_entry(entry: Optional[dict[str, Any]]) -> Optional[dic
         **entry,
         "amount": abs(entry["amount"]),
     }
+
+
+def _signed_xero_net_amount(entry: dict[str, Any]) -> Decimal:
+    amount = Decimal(str(entry.get("amount") or "0"))
+    label = _normalize_report_label(entry.get("label"))
+    if amount > 0 and "loss" in label and "profit" not in label:
+        return -amount
+    return amount
 
 
 def _xero_monthly_cost_entry(
@@ -1529,66 +1588,96 @@ def publish_xero_metric_observations(
         previous_report = profit_and_loss_by_month.get(_previous_month_start(current_month)) or {}
         current_revenue = current_report.get("revenue")
         previous_revenue = previous_report.get("revenue")
-        monthly_costs = current_report.get("monthly_costs")
         operating_expenses = current_report.get("operating_expenses")
         cost_of_sales = current_report.get("cost_of_sales")
         current_report_labels = _xero_report_entry_labels(current_report.get("entries") or [])
         for report_month, report in profit_and_loss_by_month.items():
             revenue = report.get("revenue")
-            if not revenue:
-                continue
+            report_monthly_costs = report.get("monthly_costs")
+            report_net = report.get("net")
+            report_entries = report.get("entries") or []
             report_labels = _xero_report_entry_labels(report.get("entries") or [])
-            save_metric(
-                month=report_month,
-                key="revenue",
-                name="Revenue",
-                value_text=_format_money(revenue["amount"], currency),
-                value_number=revenue["amount"],
-                unit=currency,
-                records_for_metric=[],
-                summary="Revenue calculated from Xero Profit and Loss total income.",
-                metadata=_xero_report_metadata(
-                    source_metric="xero_profit_and_loss_revenue",
-                    warnings=warnings,
-                    report_name="ProfitAndLoss",
-                    start_date=report_month,
-                    end_date=_month_end(report_month),
-                    entry=revenue,
-                    extra={
-                        "connection_id": connection.id,
-                        "source_currency": currency,
-                        "parsed_row_labels": report_labels,
-                        "calculation_basis": "profit_and_loss_total_income",
-                    },
-                ),
+            income_rows = _xero_report_breakdown_rows(
+                report_entries,
+                section_terms=("income", "revenue"),
             )
-        if monthly_costs:
-            save_metric(
-                month=current_month,
-                key="monthlyCosts",
-                name="Monthly costs",
-                value_text=_format_money(monthly_costs["amount"], currency),
-                value_number=monthly_costs["amount"],
-                unit=currency,
-                records_for_metric=[],
-                summary="Monthly costs calculated from Xero Profit and Loss expense rows.",
-                metadata=_xero_report_metadata(
-                    source_metric="xero_profit_and_loss_monthly_costs",
-                    warnings=warnings,
-                    report_name="ProfitAndLoss",
-                    start_date=current_month,
-                    end_date=_month_end(current_month),
-                    entry=monthly_costs,
-                    extra={
-                        "connection_id": connection.id,
-                        "source_currency": currency,
-                        "parsed_row_labels": current_report_labels,
-                        "calculation_basis": "cost_of_sales_plus_operating_expenses_when_available_otherwise_total_expenses",
-                        "component_labels": monthly_costs.get("component_labels", []),
-                        "component_amounts": monthly_costs.get("component_amounts", []),
-                    },
-                ),
+            expense_rows = _xero_report_breakdown_rows(
+                report_entries,
+                section_terms=("expense", "cost of sales", "cost of goods", "direct cost"),
             )
+            shared_detail = {
+                "connection_id": connection.id,
+                "source_currency": currency,
+                "parsed_row_labels": report_labels,
+                "income_rows": income_rows,
+                "expense_rows": expense_rows,
+            }
+            if revenue:
+                save_metric(
+                    month=report_month,
+                    key="revenue",
+                    name="Revenue",
+                    value_text=_format_money(revenue["amount"], currency),
+                    value_number=revenue["amount"],
+                    unit=currency,
+                    records_for_metric=[],
+                    summary="Revenue calculated from Xero Profit and Loss total income.",
+                    metadata=_xero_report_metadata(
+                        source_metric="xero_profit_and_loss_revenue",
+                        warnings=warnings,
+                        report_name="ProfitAndLoss",
+                        start_date=report_month,
+                        end_date=_month_end(report_month),
+                        entry=revenue,
+                        extra={**shared_detail, "calculation_basis": "profit_and_loss_total_income"},
+                    ),
+                )
+            if report_monthly_costs:
+                save_metric(
+                    month=report_month,
+                    key="monthlyCosts",
+                    name="Monthly costs",
+                    value_text=_format_money(report_monthly_costs["amount"], currency),
+                    value_number=report_monthly_costs["amount"],
+                    unit=currency,
+                    records_for_metric=[],
+                    summary="Monthly costs calculated from Xero Profit and Loss expense rows.",
+                    metadata=_xero_report_metadata(
+                        source_metric="xero_profit_and_loss_monthly_costs",
+                        warnings=warnings,
+                        report_name="ProfitAndLoss",
+                        start_date=report_month,
+                        end_date=_month_end(report_month),
+                        entry=report_monthly_costs,
+                        extra={
+                            **shared_detail,
+                            "calculation_basis": "cost_of_sales_plus_operating_expenses_when_available_otherwise_total_expenses",
+                            "component_labels": report_monthly_costs.get("component_labels", []),
+                            "component_amounts": report_monthly_costs.get("component_amounts", []),
+                        },
+                    ),
+                )
+            if report_net:
+                net_amount = _signed_xero_net_amount(report_net)
+                save_metric(
+                    month=report_month,
+                    key="netProfitLoss",
+                    name="Net surplus / (deficit)",
+                    value_text=_format_money(net_amount, currency),
+                    value_number=net_amount,
+                    unit=currency,
+                    records_for_metric=[],
+                    summary="Net surplus or deficit calculated from Xero Profit and Loss.",
+                    metadata=_xero_report_metadata(
+                        source_metric="xero_profit_and_loss_net",
+                        warnings=warnings,
+                        report_name="ProfitAndLoss",
+                        start_date=report_month,
+                        end_date=_month_end(report_month),
+                        entry=report_net,
+                        extra={**shared_detail, "calculation_basis": "profit_and_loss_net_profit_or_loss"},
+                    ),
+                )
         if operating_expenses:
             save_metric(
                 month=current_month,
@@ -1671,11 +1760,8 @@ def publish_xero_metric_observations(
         current_net = current_report.get("net")
         current_burn: Optional[Decimal] = None
         if current_net:
-            label = _normalize_report_label(current_net.get("label"))
-            amount = current_net["amount"]
-            if "loss" in label and amount > 0:
-                current_burn = amount
-            elif amount < 0:
+            amount = _signed_xero_net_amount(current_net)
+            if amount < 0:
                 current_burn = abs(amount)
         if current_burn and current_burn > 0:
             save_metric(
@@ -1707,11 +1793,8 @@ def publish_xero_metric_observations(
             net_entry = (profit_and_loss_by_month.get(month) or {}).get("net")
             if not net_entry:
                 continue
-            amount = net_entry["amount"]
-            label = _normalize_report_label(net_entry.get("label"))
-            if "loss" in label and amount > 0:
-                trailing_burns.append(amount)
-            elif amount < 0:
+            amount = _signed_xero_net_amount(net_entry)
+            if amount < 0:
                 trailing_burns.append(abs(amount))
         balance = _parse_xero_balance_sheet_report(balance_payload)
         cash_entry = balance.get("cash")
@@ -1763,11 +1846,372 @@ def publish_xero_metric_observations(
     }
 
 
-def build_slack_run_context(*, organization: Organization, selected_channel_ids: Optional[list[str]] = None) -> dict:
+FINANCIAL_SNAPSHOT_SCHEMA_VERSION = "1"
+FINANCIAL_REVENUE_MIX_CATEGORIES = (
+    ("sponsorships_grants", "Sponsorships & Grants"),
+    ("ticket_sales", "Ticket Sales"),
+    ("programs_services", "Programs / Services"),
+    ("tech_projects", "Tech Projects"),
+    ("other", "Other / unclassified"),
+)
+
+
+def _financial_snapshot_number(value: Decimal | int | float | str | None) -> float:
+    try:
+        return float(Decimal(str(value or "0")).quantize(Decimal("0.01")))
+    except (InvalidOperation, TypeError, ValueError):
+        return 0.0
+
+
+def _xero_payload_list(payload: dict[str, Any], *keys: str) -> list[dict[str, Any]]:
+    for key in keys:
+        value = payload.get(key)
+        if isinstance(value, list):
+            return [item for item in value if isinstance(item, dict)]
+    return []
+
+
+def _xero_line_amount(line: dict[str, Any]) -> Decimal:
+    for key in ("LineAmount", "line_amount", "SubTotal", "sub_total", "Total", "total"):
+        amount = _report_decimal(line.get(key))
+        if amount is not None:
+            return abs(amount)
+    quantity = _report_decimal(line.get("Quantity") or line.get("quantity"))
+    unit_amount = _report_decimal(line.get("UnitAmount") or line.get("unit_amount"))
+    if quantity is not None and unit_amount is not None:
+        return abs(quantity * unit_amount)
+    return Decimal("0")
+
+
+def _xero_record_line_items(record: ExternalFinancialRecord) -> list[dict[str, Any]]:
+    payload = record.raw_payload if isinstance(record.raw_payload, dict) else {}
+    items = _xero_payload_list(payload, "LineItems", "line_items")
+    if items:
+        return items
+    amount = _report_decimal(
+        payload.get("SubTotal")
+        or payload.get("sub_total")
+        or payload.get("Total")
+        or payload.get("total")
+        or record.amount
+    )
+    return [{"Description": record.description, "LineAmount": str(abs(amount or Decimal("0")))}]
+
+
+def _xero_line_tracking(line: dict[str, Any]) -> list[tuple[str, str]]:
+    tracking = _xero_payload_list(line, "Tracking", "tracking")
+    values: list[tuple[str, str]] = []
+    for item in tracking:
+        name = str(item.get("Name") or item.get("name") or "").strip()
+        option = str(item.get("Option") or item.get("option") or "").strip()
+        if name and option:
+            values.append((name, option))
+    return values
+
+
+def _xero_line_search_text(record: ExternalFinancialRecord, line: dict[str, Any]) -> str:
+    item = line.get("Item") or line.get("item") or {}
+    item = item if isinstance(item, dict) else {}
+    return " ".join(
+        str(value or "")
+        for value in (
+            line.get("AccountName"),
+            line.get("account_name"),
+            line.get("AccountCode"),
+            line.get("account_code"),
+            line.get("Description"),
+            line.get("description"),
+            item.get("Name"),
+            item.get("name"),
+            record.description,
+            record.merchant_name,
+        )
+    ).lower()
+
+
+def _classify_financial_revenue(text: str) -> str:
+    if any(term in text for term in ("sponsor", "grant", "subsid", "funding contribution")):
+        return "sponsorships_grants"
+    if any(term in text for term in ("ticket", "admission", "humanitix", "eventbrite", "luma")):
+        return "ticket_sales"
+    if any(term in text for term in ("tech project", "software", "development", "implementation", "engineering", "build project")):
+        return "tech_projects"
+    if any(term in text for term in ("program", "service", "workshop", "training", "consult", "membership", "facilitat")):
+        return "programs_services"
+    return "other"
+
+
+def _xero_line_category_label(record: ExternalFinancialRecord, line: dict[str, Any]) -> str:
+    for value in (
+        line.get("AccountName"),
+        line.get("account_name"),
+        line.get("Description"),
+        line.get("description"),
+        line.get("AccountCode"),
+        line.get("account_code"),
+        record.description,
+    ):
+        label = str(value or "").strip()
+        if label:
+            return label[:100]
+    return "Other"
+
+
+def _financial_metric_lookup(
+    metrics: list[StartupMetricObservation],
+    *,
+    month: date,
+    key: str,
+    currency: str,
+) -> Optional[StartupMetricObservation]:
+    candidates = [metric for metric in metrics if metric.period_month == month and metric.metric_key == key]
+    if currency:
+        currency_candidates = [metric for metric in candidates if metric.unit == currency]
+        if currency_candidates:
+            candidates = currency_candidates
+    return candidates[0] if candidates else None
+
+
+def _financial_revenue_rows_from_metric(metric: Optional[StartupMetricObservation]) -> list[tuple[str, Decimal]]:
+    metadata = metric.source_metadata if metric and isinstance(metric.source_metadata, dict) else {}
+    rows = metadata.get("income_rows") or []
+    parsed: list[tuple[str, Decimal]] = []
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict):
+            continue
+        label = str(row.get("label") or "").strip()
+        amount = _report_decimal(row.get("amount"))
+        if label and amount is not None:
+            parsed.append((label, abs(amount)))
+    return parsed
+
+
+def build_monthly_financial_snapshot(
+    *,
+    organization: Organization,
+    target_month: date,
+    as_of_date: Optional[date] = None,
+) -> Optional[dict[str, Any]]:
+    """Build a frozen, chart-ready snapshot from cached Xero data only.
+
+    This function deliberately performs no connector requests, so adding the
+    financial brief cannot extend the browser draft-start request.
+    """
+    target_month = _month_start(target_month)
+    as_of_date = min(as_of_date or timezone.localdate(), _month_end(target_month))
+    months = iter_recent_month_starts(12, reference=target_month)
+    window_start = months[0]
+    records = list(
+        ExternalFinancialRecord.objects.filter(
+            organization=organization,
+            provider=ExternalServiceProvider.XERO,
+            record_type__in=(
+                ExternalFinancialRecord.RECORD_XERO_INVOICE,
+                ExternalFinancialRecord.RECORD_XERO_BILL,
+            ),
+            transaction_date__gte=window_start,
+            transaction_date__lte=as_of_date,
+        )
+        .exclude(connection__status=ExternalServiceConnectionStatus.DISCONNECTED)
+        .order_by("transaction_date", "id")
+    )
+    metrics = list(
+        StartupMetricObservation.objects.filter(
+            organization=organization,
+            source_provider=ExternalServiceProvider.XERO,
+            period_month__gte=window_start,
+            period_month__lte=target_month,
+            metric_key__in=("revenue", "monthlyCosts", "netProfitLoss"),
+        ).order_by("period_month", "metric_key", "-observed_at", "-updated_at", "-id")
+    )
+    if not records and not metrics:
+        return None
+
+    currencies = sorted(
+        {
+            value
+            for value in [
+                *(record.currency for record in records),
+                *(metric.unit for metric in metrics if metric.unit not in {"", "count", "ratio", "months"}),
+            ]
+            if value
+        }
+    )
+    target_revenue_metrics = [
+        metric for metric in metrics
+        if metric.period_month == target_month and metric.metric_key == "revenue" and metric.unit
+    ]
+    currency = target_revenue_metrics[0].unit if target_revenue_metrics else (currencies[0] if currencies else "AUD")
+    scoped_records = [record for record in records if not currency or not record.currency or record.currency == currency]
+    warnings: list[str] = []
+    if len(currencies) > 1:
+        warnings.append(f"Multiple Xero currencies were present; charts show {currency} only.")
+
+    records_by_month: dict[date, list[ExternalFinancialRecord]] = {month: [] for month in months}
+    for record in scoped_records:
+        if record.transaction_date:
+            records_by_month.setdefault(_month_start(record.transaction_date), []).append(record)
+
+    performance: list[dict[str, Any]] = []
+    fallback_months: list[str] = []
+    for month in months:
+        month_records = records_by_month.get(month) or []
+        invoices = [record for record in month_records if record.record_type == ExternalFinancialRecord.RECORD_XERO_INVOICE]
+        bills = [record for record in month_records if record.record_type == ExternalFinancialRecord.RECORD_XERO_BILL]
+        invoice_total = sum(
+            (_xero_line_amount(line) for record in invoices for line in _xero_record_line_items(record)),
+            Decimal("0"),
+        )
+        bill_total = sum(
+            (_xero_line_amount(line) for record in bills for line in _xero_record_line_items(record)),
+            Decimal("0"),
+        )
+        revenue_metric = _financial_metric_lookup(metrics, month=month, key="revenue", currency=currency)
+        costs_metric = _financial_metric_lookup(metrics, month=month, key="monthlyCosts", currency=currency)
+        net_metric = _financial_metric_lookup(metrics, month=month, key="netProfitLoss", currency=currency)
+        income = revenue_metric.value_number if revenue_metric and revenue_metric.value_number is not None else invoice_total
+        expenses = costs_metric.value_number if costs_metric and costs_metric.value_number is not None else bill_total
+        net = net_metric.value_number if net_metric and net_metric.value_number is not None else income - expenses
+        if not revenue_metric or not costs_metric:
+            fallback_months.append(month.isoformat())
+        performance.append(
+            {
+                "month": month.isoformat(),
+                "income": _financial_snapshot_number(income),
+                "expenses": _financial_snapshot_number(expenses),
+                "net": _financial_snapshot_number(net),
+                "is_partial": bool(month == target_month and as_of_date < _month_end(target_month)),
+                "basis": "profit_and_loss" if revenue_metric and costs_metric else "authorised_invoices_and_bills",
+            }
+        )
+    if fallback_months:
+        warnings.append(
+            "Some historical months use authorised invoice and bill lines because cached Profit and Loss totals were unavailable."
+        )
+
+    revenue_mix: list[dict[str, Any]] = []
+    category_labels = dict(FINANCIAL_REVENUE_MIX_CATEGORIES)
+    for point in performance[-6:]:
+        month = date.fromisoformat(point["month"])
+        month_records = records_by_month.get(month) or []
+        invoices = [record for record in month_records if record.record_type == ExternalFinancialRecord.RECORD_XERO_INVOICE]
+        revenue_metric = _financial_metric_lookup(metrics, month=month, key="revenue", currency=currency)
+        source_rows = _financial_revenue_rows_from_metric(revenue_metric)
+        amounts = {key: Decimal("0") for key, _label in FINANCIAL_REVENUE_MIX_CATEGORIES}
+        if source_rows:
+            for label, amount in source_rows:
+                amounts[_classify_financial_revenue(label.lower())] += amount
+        else:
+            for record in invoices:
+                for line in _xero_record_line_items(record):
+                    amounts[_classify_financial_revenue(_xero_line_search_text(record, line))] += _xero_line_amount(line)
+        total = Decimal(str(point["income"]))
+        attributed = sum(amounts.values(), Decimal("0"))
+        if total <= 0:
+            amounts = {key: Decimal("0") for key in amounts}
+        elif attributed > 0 and attributed != total:
+            scale = total / attributed
+            amounts = {key: value * scale for key, value in amounts.items()}
+        elif total > attributed:
+            amounts["other"] += total - attributed
+        segments = [
+            {
+                "key": key,
+                "label": category_labels[key],
+                "amount": _financial_snapshot_number(amounts[key]),
+            }
+            for key, _label in FINANCIAL_REVENUE_MIX_CATEGORIES
+        ]
+        rounding_delta = _financial_snapshot_number(total) - sum(segment["amount"] for segment in segments)
+        if rounding_delta:
+            other_segment = next(segment for segment in segments if segment["key"] == "other")
+            other_segment["amount"] = round(other_segment["amount"] + rounding_delta, 2)
+        revenue_mix.append({"month": month.isoformat(), "total": point["income"], "segments": segments})
+
+    target_records = records_by_month.get(target_month) or []
+    event_totals: dict[str, dict[str, Decimal]] = {}
+    overhead_totals: dict[str, Decimal] = {}
+    for record in target_records:
+        is_income = record.record_type == ExternalFinancialRecord.RECORD_XERO_INVOICE
+        for line in _xero_record_line_items(record):
+            amount = _xero_line_amount(line)
+            tracking = _xero_line_tracking(line)
+            event_names = [option for name, option in tracking if "event" in name.lower()]
+            allocated_to_event_or_project = any(
+                "event" in name.lower() or "project" in name.lower()
+                for name, _option in tracking
+            )
+            for event_name in event_names:
+                totals = event_totals.setdefault(event_name, {"income": Decimal("0"), "expenses": Decimal("0")})
+                totals["income" if is_income else "expenses"] += amount
+            if not is_income and not allocated_to_event_or_project:
+                label = _xero_line_category_label(record, line)
+                overhead_totals[label] = overhead_totals.get(label, Decimal("0")) + amount
+
+    event_contribution = [
+        {
+            "label": label,
+            "income": _financial_snapshot_number(values["income"]),
+            "expenses": _financial_snapshot_number(values["expenses"]),
+            "net": _financial_snapshot_number(values["income"] - values["expenses"]),
+        }
+        for label, values in event_totals.items()
+    ]
+    event_contribution.sort(key=lambda item: (-item["net"], item["label"].lower()))
+
+    ordered_overhead = sorted(overhead_totals.items(), key=lambda item: (-item[1], item[0].lower()))
+    top_overhead = ordered_overhead[:5]
+    remaining_overhead = sum((amount for _label, amount in ordered_overhead[5:]), Decimal("0"))
+    if remaining_overhead:
+        top_overhead.append(("Other", remaining_overhead))
+    overhead = [
+        {"label": label, "amount": _financial_snapshot_number(amount)}
+        for label, amount in top_overhead
+    ]
+
+    return {
+        "schema_version": FINANCIAL_SNAPSHOT_SCHEMA_VERSION,
+        "target_month": target_month.isoformat(),
+        "as_of_date": as_of_date.isoformat(),
+        "currency": currency,
+        "generated_at": timezone.now().isoformat(),
+        "performance": performance,
+        "revenue_mix": revenue_mix,
+        "event_contribution": event_contribution,
+        "overhead": overhead,
+        "data_quality": {
+            "warnings": warnings,
+            "performance_months_from_profit_and_loss": 12 - len(fallback_months),
+            "performance_months_from_invoice_and_bill_fallback": len(fallback_months),
+            "event_chart_available": bool(event_contribution),
+            "overhead_chart_available": bool(overhead),
+            "calculation_basis": (
+                "P&L totals where cached; authorised invoice and bill lines for source attribution and fallback months."
+            ),
+        },
+    }
+
+
+def build_slack_run_context(
+    *,
+    organization: Organization,
+    connection: Optional[ExternalServiceConnection],
+    selected_channel_ids: Optional[list[str]] = None,
+) -> dict:
+    if connection is None:
+        return {
+            "source": "slack",
+            "purpose": "selected_channel_operating_context",
+            "selected_channel_ids": [],
+            "selected_channel_count": 0,
+            "selected_channels": [],
+            "warnings": ["Slack was selected but no exact connection is available."],
+        }
     queryset = SlackChannelSelection.objects.filter(
         organization=organization,
+        connection=connection,
         selected=True,
-    ).exclude(connection__status=ExternalServiceConnectionStatus.DISCONNECTED)
+    )
     if selected_channel_ids:
         queryset = queryset.filter(channel_id__in=selected_channel_ids)
     channels = [
@@ -1779,7 +2223,7 @@ def build_slack_run_context(*, organization: Organization, selected_channel_ids:
         }
         for selection in queryset.order_by("channel_name", "channel_id")
     ]
-    return {
+    context = {
         "source": "slack",
         "purpose": "selected_channel_operating_context",
         "selected_channel_ids": [channel["channel_id"] for channel in channels],
@@ -1787,6 +2231,127 @@ def build_slack_run_context(*, organization: Organization, selected_channel_ids:
         "selected_channels": channels,
         "warnings": [] if channels else ["Slack was selected but no channels are selected."],
     }
+    context["authority"] = slack_run_authority_for_connection(connection).as_dict()
+    return context
+
+
+def _slack_connection_candidate_for_run(
+    *,
+    run: ContentFactoryRun,
+    organization: Organization,
+    binding: UserStartupBinding,
+) -> Optional[ExternalServiceConnection]:
+    """Resolve ids only; the caller must lock and revalidate the candidate."""
+
+    from integrations.services.external_connectors import ConnectorOAuthError
+
+    expected = slack_run_authority_from_request(run.run_request)
+    if expected is None and slack_run_authority_is_present(run.run_request):
+        raise ConnectorOAuthError(
+            "This startup-update run has an invalid Slack authority. Start a new run."
+        )
+    if expected is not None:
+        if (
+            expected.user_id != binding.user_id
+            or expected.organization_id != organization.pk
+        ):
+            raise ConnectorOAuthError(
+                "This startup-update run is pinned to a different Slack authority."
+            )
+        return ExternalServiceConnection.objects.filter(
+            pk=expected.connection_id,
+            user_id=expected.user_id,
+            organization_id=expected.organization_id,
+            provider=ExternalServiceProvider.SLACK,
+        ).first()
+    return (
+        ExternalServiceConnection.objects.filter(
+            user_id=binding.user_id,
+            organization=organization,
+            provider=ExternalServiceProvider.SLACK,
+        )
+        .exclude(status=ExternalServiceConnectionStatus.DISCONNECTED)
+        .order_by("-updated_at", "-id")
+        .first()
+    )
+
+
+def pin_startup_update_run_slack_authority(
+    *,
+    run: ContentFactoryRun,
+    organization: Organization,
+    binding: UserStartupBinding,
+) -> ContentFactoryRun:
+    """Pin a Slack-input run at the canonical connector lock boundary.
+
+    A run with no currently connected Slack credential remains explicitly
+    unpinned and source-unavailable. Once a credential exists, creation and
+    refresh pin it before the run can be dispatched or reused.
+    """
+
+    from integrations.services.external_connectors import (
+        ConnectorOAuthError,
+        _lock_slack_connection_authority,
+        _slack_connection_authority,
+    )
+
+    candidate = _slack_connection_candidate_for_run(
+        run=run,
+        organization=organization,
+        binding=binding,
+    )
+    if candidate is None:
+        if slack_run_authority_is_present(run.run_request):
+            raise ConnectorOAuthError(
+                "The Slack authority for this startup-update run is no longer available."
+            )
+        return run
+
+    captured = _slack_connection_authority(candidate)
+    with transaction.atomic():
+        connection = _lock_slack_connection_authority(captured)
+        authority = slack_run_authority_for_connection(connection)
+        locked_run = ContentFactoryRun.objects.select_for_update().get(pk=run.pk)
+        if locked_run.status == ContentFactoryRunStatus.CANCELLED:
+            raise ConnectorOAuthError(
+                "This startup-update run was cancelled after Slack disconnected. Start a new run."
+            )
+        request_payload = dict(locked_run.run_request or {})
+        if str(request_payload.get("binding_id") or "") != str(binding.pk):
+            raise ConnectorOAuthError(
+                "The startup-update binding changed while Slack authority was being locked."
+            )
+        locked_expected = slack_run_authority_from_request(request_payload)
+        if locked_expected is None and slack_run_authority_is_present(request_payload):
+            raise ConnectorOAuthError(
+                "This startup-update run has an invalid Slack authority. Start a new run."
+            )
+        if locked_expected is not None and locked_expected != authority:
+            raise ConnectorOAuthError(
+                "Slack authorization changed after this startup-update run began. Start a new run."
+            )
+
+        request_payload = pin_slack_run_authority(request_payload, authority)
+        channel_ids = list(
+            SlackChannelSelection.objects.filter(
+                connection=connection,
+                selected=True,
+            ).values_list("channel_id", flat=True)
+        )
+        request_payload["slack_channel_ids"] = channel_ids
+        external_context = dict(request_payload.get("external_context") or {})
+        external_context[ExternalServiceProvider.SLACK] = build_slack_run_context(
+            organization=organization,
+            connection=connection,
+            selected_channel_ids=channel_ids,
+        )
+        request_payload["external_context"] = external_context
+        locked_run.run_request = request_payload
+        locked_run.save(update_fields=("run_request", "updated_at"))
+
+    run.run_request = locked_run.run_request
+    run.updated_at = locked_run.updated_at
+    return run
 
 
 def build_linear_run_context(*, organization: Organization, selected_project_ids: Optional[list[str]] = None) -> dict:
@@ -1794,7 +2359,7 @@ def build_linear_run_context(*, organization: Organization, selected_project_ids
         organization=organization,
         selected=True,
     ).exclude(connection__status=ExternalServiceConnectionStatus.DISCONNECTED)
-    if selected_project_ids:
+    if selected_project_ids is not None:
         queryset = queryset.filter(linear_project_id__in=selected_project_ids)
     projects = [
         {
@@ -1815,15 +2380,17 @@ def build_linear_run_context(*, organization: Organization, selected_project_ids
     update_count = LinearProjectUpdateArtifact.objects.filter(organization=organization, project__in=artifacts).count()
     return {
         "source": "linear",
-        "purpose": "selected_project_management_context",
+        "purpose": "recent_project_activity_context",
         "warning": "Linear is project-management context only and is not financial truth.",
+        "project_selection_mode": "recent_activity",
+        "activity_window_days": 30,
         "selected_project_ids": project_ids,
         "selected_project_count": len(projects),
         "selected_projects": projects,
         "cached_project_count": artifacts.count(),
         "cached_issue_count": issue_count,
         "cached_update_count": update_count,
-        "warnings": [] if projects else ["Linear was selected but no projects are selected."],
+        "warnings": [],
     }
 
 
@@ -1913,6 +2480,100 @@ def build_google_analytics_run_context(*, organization: Organization) -> dict:
     }
 
 
+def build_luma_run_context(
+    *,
+    organization: Organization,
+    target_month: date,
+    warnings: Optional[list[str]] = None,
+) -> dict:
+    """Selected-month Luma events plus a two-week narrative context buffer."""
+
+    month = _month_start(target_month)
+    month_end = _month_end(month)
+    context_start = month - timedelta(days=LUMA_EVENT_CONTEXT_DAYS)
+    context_end = month_end + timedelta(days=LUMA_EVENT_CONTEXT_DAYS)
+    local_tz = ZoneInfo(LUMA_EVENT_TIMEZONE)
+    context_start_at = datetime.combine(context_start, time.min, tzinfo=local_tz).astimezone(
+        dt_timezone.utc
+    )
+    context_end_at = datetime.combine(context_end, time.max, tzinfo=local_tz).astimezone(
+        dt_timezone.utc
+    )
+
+    connection = (
+        ExternalServiceConnection.objects.filter(
+            organization=organization,
+            provider=ExternalServiceProvider.LUMA,
+        )
+        .exclude(status=ExternalServiceConnectionStatus.DISCONNECTED)
+        .order_by("-updated_at", "-id")
+        .first()
+    )
+    event_rows = LumaEventSelection.objects.none()
+    if connection is not None:
+        event_rows = LumaEventSelection.objects.filter(
+            connection=connection,
+            start_at__gte=context_start_at,
+            start_at__lte=context_end_at,
+        ).order_by("start_at", "event_name", "event_id")
+    events = []
+    for row in event_rows:
+        local_date = row.start_at.astimezone(local_tz).date() if row.start_at else None
+        in_target_month = bool(local_date and month <= local_date <= month_end)
+        context_role = "selected_month"
+        if local_date and local_date < month:
+            context_role = "before_month"
+        elif local_date and local_date > month_end:
+            context_role = "after_month"
+        events.append(
+            {
+                "event_id": row.event_id,
+                "name": row.event_name or row.event_id,
+                "url": row.event_url,
+                "start_at": row.start_at.isoformat() if row.start_at else None,
+                "local_date": local_date.isoformat() if local_date else None,
+                "context_role": context_role,
+                "counted_in_selected_month_metrics": in_target_month,
+                "registration_count": int(row.registration_count or 0),
+                "checked_in_count": int(row.checked_in_count or 0),
+            }
+        )
+
+    metrics = [
+        {
+            "metric_key": metric.metric_key,
+            "label": metric.metric_name or metric.metric_key,
+            "value": metric.value_text,
+            "unit": metric.unit,
+            "summary": metric.summary,
+            "event_ids": list(metric.source_record_ids or []),
+        }
+        for metric in StartupMetricObservation.objects.filter(
+            organization=organization,
+            source_provider=ExternalServiceProvider.LUMA,
+            period_month=month,
+            run__isnull=True,
+        ).order_by("metric_key")
+    ]
+
+    return {
+        "source": "luma",
+        "purpose": "automatic_target_month_event_context",
+        "event_selection_mode": "target_month",
+        "target_month": month.isoformat(),
+        "context_days_each_side": LUMA_EVENT_CONTEXT_DAYS,
+        "context_start": context_start.isoformat(),
+        "context_end": context_end.isoformat(),
+        "counting_rule": (
+            "Only selected_month events contribute to the target month's metrics; "
+            "before_month and after_month events are narrative context only."
+        ),
+        "events": events,
+        "metrics": metrics,
+        "warnings": list(warnings or []),
+    }
+
+
 def build_external_context_for_sources(
     *,
     organization: Organization,
@@ -1922,6 +2583,7 @@ def build_external_context_for_sources(
     source_warnings: Optional[dict[str, list[str]]] = None,
     manual_document_ids: Optional[list[str]] = None,
     manual_summary: Optional[str] = None,
+    slack_connection: Optional[ExternalServiceConnection] = None,
 ) -> dict[str, Any]:
     selected = set(input_sources or [])
     context: dict[str, Any] = {}
@@ -1945,6 +2607,7 @@ def build_external_context_for_sources(
     if ExternalServiceProvider.SLACK in selected:
         context["slack"] = build_slack_run_context(
             organization=organization,
+            connection=slack_connection,
             selected_channel_ids=None,
         )
     if ExternalServiceProvider.LINEAR in selected:
@@ -1956,6 +2619,12 @@ def build_external_context_for_sources(
         context["notion"] = build_notion_run_context(organization=organization)
     if ExternalServiceProvider.GOOGLE_ANALYTICS in selected:
         context["google_analytics"] = build_google_analytics_run_context(organization=organization)
+    if ExternalServiceProvider.LUMA in selected:
+        context["luma"] = build_luma_run_context(
+            organization=organization,
+            target_month=_month_start(end_date),
+            warnings=warnings_by_source.get(ExternalServiceProvider.LUMA),
+        )
     if MANUAL_DOCUMENTS_SOURCE in selected:
         context[MANUAL_DOCUMENTS_SOURCE] = build_manual_documents_run_context(
             organization=organization,
@@ -2065,9 +2734,48 @@ def refresh_startup_update_run_source_context(
     source_warnings: Optional[dict[str, list[str]]] = None,
     manual_document_ids: Optional[list[str]] = None,
     manual_summary: Optional[str] = None,
+    _slack_authority_locked: bool = False,
 ) -> ContentFactoryRun:
     run_request = dict(run.run_request or {})
     selected_input_sources = normalize_startup_update_input_sources(input_sources)
+    if (
+        ExternalServiceProvider.SLACK in set(selected_input_sources)
+        and not _slack_authority_locked
+    ):
+        binding = (
+            UserStartupBinding.objects.filter(
+                pk=run_request.get("binding_id"),
+                organization=organization,
+            ).first()
+        )
+        if binding is None:
+            from integrations.services.external_connectors import ConnectorOAuthError
+
+            raise ConnectorOAuthError(
+                "The startup-update binding for this Slack source is no longer available."
+            )
+        # Keep the canonical user -> all grants -> connection -> run locks
+        # until every mixed-source context/output write below commits. A
+        # nested atomic block in the pin helper is only a savepoint here,
+        # so DELETE either wins before refresh begins or waits and then
+        # erases everything this refresh published.
+        with transaction.atomic():
+            run = pin_startup_update_run_slack_authority(
+                run=run,
+                organization=organization,
+                binding=binding,
+            )
+            return refresh_startup_update_run_source_context(
+                run=run,
+                organization=organization,
+                input_sources=selected_input_sources,
+                start_date=start_date,
+                end_date=end_date,
+                source_warnings=source_warnings,
+                manual_document_ids=manual_document_ids,
+                manual_summary=manual_summary,
+                _slack_authority_locked=True,
+            )
     reconcile_startup_update_run_source_steps(run=run, input_sources=selected_input_sources)
     if selected_input_sources:
         run_request["input_sources"] = list(selected_input_sources)
@@ -2088,13 +2796,11 @@ def refresh_startup_update_run_source_context(
         run_request.pop("manual_document_ids", None)
         run_request.pop("manual_summary", None)
     if ExternalServiceProvider.SLACK in set(selected_input_sources):
-        run_request["slack_channel_ids"] = [
-            selection.channel_id
-            for selection in SlackChannelSelection.objects.filter(
-                organization=organization,
-                selected=True,
-            ).exclude(connection__status=ExternalServiceConnectionStatus.DISCONNECTED)
-        ]
+        # The exact authority was pinned above under the connector lock. Keep
+        # this field present even when no credential currently exists so the
+        # run remains explicitly source-unavailable rather than inheriting
+        # organization-wide channel state.
+        run_request.setdefault("slack_channel_ids", [])
     if ExternalServiceProvider.LINEAR in set(selected_input_sources):
         run_request["linear_project_ids"] = [
             selection.linear_project_id
@@ -2160,6 +2866,7 @@ def refresh_startup_update_run_source_context(
         source_warnings=source_warnings,
         manual_document_ids=run_request.get("manual_document_ids"),
         manual_summary=run_request.get("manual_summary"),
+        slack_connection=None,
     )
     if ExternalServiceProvider.XERO in set(selected_input_sources or []):
         xero_metrics = publish_xero_metric_observations(
@@ -2172,10 +2879,38 @@ def refresh_startup_update_run_source_context(
         external_context.setdefault("xero", {})["published_metrics"] = xero_metrics
         if xero_metrics.get("needs_review"):
             external_context.setdefault("xero", {})["needs_review"] = True
+        target_month = get_startup_update_run_target_month(run) or _month_start(end_date)
+        financial_snapshot = build_monthly_financial_snapshot(
+            organization=organization,
+            target_month=target_month,
+            as_of_date=end_date,
+        )
+        if financial_snapshot:
+            external_context["financial_snapshot"] = financial_snapshot
+            run_request["presentation_mode"] = "financial_charts_concise"
     if external_context:
         run_request["external_context"] = external_context
-    run.run_request = run_request
-    run.save(update_fields=["run_request", "updated_at"])
+    with transaction.atomic():
+        locked_run = ContentFactoryRun.objects.select_for_update().get(pk=run.pk)
+        if ExternalServiceProvider.SLACK in set(selected_input_sources):
+            # Never restore Slack metadata from the stale object passed to this
+            # refresh. DELETE may have scrubbed it while non-Slack context was
+            # being rebuilt. Merge only the current locked row's Slack fields.
+            current_request = dict(locked_run.run_request or {})
+            current_external_context = dict(
+                current_request.get("external_context") or {}
+            )
+            current_slack_context = current_external_context.get("slack")
+            run_request["slack_channel_ids"] = list(
+                current_request.get("slack_channel_ids") or []
+            )
+            if isinstance(current_slack_context, dict):
+                external_context["slack"] = current_slack_context
+            run_request["external_context"] = external_context
+        locked_run.run_request = run_request
+        locked_run.save(update_fields=["run_request", "updated_at"])
+    run.run_request = locked_run.run_request
+    run.updated_at = locked_run.updated_at
     return run
 
 
@@ -2208,25 +2943,40 @@ def _set_run_meta(run: ContentFactoryRun, meta: dict) -> None:
 
 
 def record_valley_dispatch_result(run: ContentFactoryRun, dispatch_result: ValleyHarnessResult | object) -> None:
-    meta = _get_run_meta(run)
-    meta["last_dispatch_attempt_at"] = timezone.now().isoformat()
-    raw_status_code = getattr(dispatch_result, "status_code", None)
-    status_code = raw_status_code if isinstance(raw_status_code, int) else None
-    if bool(dispatch_result):
-        payload = getattr(dispatch_result, "payload", None)
-        response_payload = payload if isinstance(payload, dict) else {}
-        meta["dispatch_status"] = "queued"
-        meta["last_dispatch_job_id"] = response_payload.get("job_id") or ""
-        meta["last_dispatch_error"] = ""
-        meta["last_dispatch_error_kind"] = ""
-        meta["last_dispatch_status_code"] = status_code
-    else:
-        meta["dispatch_status"] = "failed"
-        meta["last_dispatch_error"] = str(getattr(dispatch_result, "detail", "") or "Valley dispatch failed.")[:300]
-        meta["last_dispatch_error_kind"] = str(getattr(dispatch_result, "failure_kind", "") or "unknown")
-        meta["last_dispatch_status_code"] = status_code
-    _set_run_meta(run, meta)
-    run.save(update_fields=["result", "updated_at"])
+    # Never save the caller's stale in-memory result. Slack disconnect clears
+    # and cancels pinned runs under this same row lock; a dispatch response that
+    # resumes afterwards must not resurrect pre-disconnect source content.
+    with transaction.atomic():
+        locked_run = ContentFactoryRun.objects.select_for_update().get(pk=run.pk)
+        if locked_run.status == ContentFactoryRunStatus.CANCELLED:
+            run.status = locked_run.status
+            run.result = locked_run.result
+            return
+        meta = _get_run_meta(locked_run)
+        meta["last_dispatch_attempt_at"] = timezone.now().isoformat()
+        raw_status_code = getattr(dispatch_result, "status_code", None)
+        status_code = raw_status_code if isinstance(raw_status_code, int) else None
+        if bool(dispatch_result):
+            payload = getattr(dispatch_result, "payload", None)
+            response_payload = payload if isinstance(payload, dict) else {}
+            meta["dispatch_status"] = "queued"
+            meta["last_dispatch_job_id"] = response_payload.get("job_id") or ""
+            meta["last_dispatch_error"] = ""
+            meta["last_dispatch_error_kind"] = ""
+            meta["last_dispatch_status_code"] = status_code
+        else:
+            meta["dispatch_status"] = "failed"
+            meta["last_dispatch_error"] = str(
+                getattr(dispatch_result, "detail", "") or "Valley dispatch failed."
+            )[:300]
+            meta["last_dispatch_error_kind"] = str(
+                getattr(dispatch_result, "failure_kind", "") or "unknown"
+            )
+            meta["last_dispatch_status_code"] = status_code
+        _set_run_meta(locked_run, meta)
+        locked_run.save(update_fields=["result", "updated_at"])
+        run.result = locked_run.result
+        run.updated_at = locked_run.updated_at
 
 
 def get_startup_update_run_cancel_backups(run: ContentFactoryRun) -> dict:
@@ -2293,19 +3043,38 @@ def _serialize_metric(metric) -> dict:
     }
 
 
-def _message_haystack(artifact: GmailMessageArtifact) -> str:
+def _message_haystack(artifact: GmailMessageArtifact, *, own_domains: Optional[list[str]] = None) -> str:
+    """Searchable text for one message, excluding the founder's own addresses.
+
+    The recipient of nearly every message in a founder's mailbox is the founder
+    at the company domain, so leaving the recipient list in would make
+    `company_aliases` and `domain_aliases` match the entire inbox. Only the
+    counterparty's addresses carry information about who a message involves.
+    """
+    own_domains = [domain for domain in (own_domains or []) if domain]
+
+    def _counterparty_only(values: Iterable[str]) -> str:
+        return " ".join(value for value in (values or []) if _address_domain(value) not in own_domains)
+
     return " ".join(
         [
             getattr(artifact, "subject", "") or "",
             getattr(artifact, "snippet", "") or "",
             getattr(artifact, "cleaned_text", "") or "",
             getattr(artifact, "from_address", "") or "",
-            " ".join(getattr(artifact, "to_addresses", []) or []),
-            " ".join(getattr(artifact, "cc_addresses", []) or []),
-            " ".join(getattr(artifact, "bcc_addresses", []) or []),
-            " ".join(getattr(artifact, "reply_to_addresses", []) or []),
+            _counterparty_only(getattr(artifact, "to_addresses", [])),
+            _counterparty_only(getattr(artifact, "cc_addresses", [])),
+            _counterparty_only(getattr(artifact, "bcc_addresses", [])),
+            _counterparty_only(getattr(artifact, "reply_to_addresses", [])),
         ]
     ).lower()
+
+
+def _address_domain(value: str) -> str:
+    raw = str(value or "")
+    if "@" not in raw:
+        return ""
+    return normalize_domain(raw.split("@")[-1])
 
 
 def _participant_domains(artifact: GmailMessageArtifact) -> list[str]:
@@ -2321,6 +3090,22 @@ def _participant_domains(artifact: GmailMessageArtifact) -> list[str]:
             continue
         participant_domains.append(normalize_domain(value.split("@")[-1]))
     return participant_domains
+
+
+def _counterparty_domains(artifact: GmailMessageArtifact, *, own_domains: list[str]) -> list[str]:
+    """Participant domains with the company's own domains removed."""
+    return [domain for domain in _participant_domains(artifact) if domain and domain not in own_domains]
+
+
+def _is_internal_sender(artifact: GmailMessageArtifact, *, own_domains: list[str]) -> bool:
+    """True when the message was sent from the company's own domain.
+
+    This is the only way the company domain carries signal. Its presence among
+    the recipients just means the mailbox owner received the message, which is
+    true of everything in the mailbox.
+    """
+    sender_domain = _address_domain(getattr(artifact, "from_address", "") or "")
+    return bool(sender_domain) and sender_domain in own_domains
 
 
 def _normalize_sender_localpart(value: str) -> str:
@@ -2360,7 +3145,8 @@ def _profile_signal_lists(profile: StartupProfile) -> dict[str, list[str]]:
 def _allowlist_override_reasons(
     *,
     haystack: str,
-    participant_domains: list[str],
+    counterparty_domains: list[str],
+    internal_sender: bool,
     profile_signals: dict[str, list[str]],
 ) -> list[str]:
     reasons = []
@@ -2374,11 +3160,11 @@ def _allowlist_override_reasons(
         reasons.append("allowlist_customer_or_prospect_name")
     if _match_any(HIGH_SIGNAL_TERMS, haystack):
         reasons.append("allowlist_high_signal_term")
-    if any(domain and domain in participant_domains for domain in profile_signals["domain_aliases"]):
+    if internal_sender:
         reasons.append("allowlist_company_domain")
-    if any(domain and domain in participant_domains for domain in profile_signals["investor_domains"]):
+    if any(domain and domain in counterparty_domains for domain in profile_signals["investor_domains"]):
         reasons.append("allowlist_investor_domain")
-    if any(domain and domain in participant_domains for domain in profile_signals["customer_domains"] + profile_signals["prospect_domains"]):
+    if any(domain and domain in counterparty_domains for domain in profile_signals["customer_domains"] + profile_signals["prospect_domains"]):
         reasons.append("allowlist_customer_or_prospect_domain")
     return _uniq(reasons)
 
@@ -2877,13 +3663,8 @@ def create_startup_update_run(
             run_request["google_analytics_property_ids"] = selected_ga_property_ids
     selected_slack_channels = []
     if ExternalServiceProvider.SLACK in selected_source_set:
-        selected_slack_channels = [
-            selection.channel_id
-            for selection in SlackChannelSelection.objects.filter(
-                organization=organization,
-                selected=True,
-            ).exclude(connection__status=ExternalServiceConnectionStatus.DISCONNECTED)
-        ]
+        # Exact connector selection is populated below while the canonical
+        # Slack authority lock is held.
         run_request["slack_channel_ids"] = selected_slack_channels
     selected_linear_projects = []
     if ExternalServiceProvider.LINEAR in selected_source_set:
@@ -2903,6 +3684,7 @@ def create_startup_update_run(
         source_warnings=source_warnings,
         manual_document_ids=run_request.get("manual_document_ids"),
         manual_summary=run_request.get("manual_summary"),
+        slack_connection=None,
     )
     if external_context:
         if ExternalServiceProvider.SLACK in external_context:
@@ -2913,21 +3695,35 @@ def create_startup_update_run(
             external_context[ExternalServiceProvider.GOOGLE_ANALYTICS]["selected_property_ids"] = selected_ga_property_ids
         run_request["external_context"] = external_context
 
-    run = ContentFactoryRun.objects.create(
-        run_id=f"startup-update-{uuid.uuid4()}",
-        workflow=STARTUP_UPDATE_WORKFLOW,
-        domain=organization.domain,
-        slack_user_id=str(binding.user_id),
-        status=ContentFactoryRunStatus.QUEUED,
-        current_step=step_order[0],
-        approval_state=ContentFactoryApprovalState.NOT_REQUIRED,
-        step_order=step_order,
-        run_request=run_request,
-        result={},
-        acceptance_summary={},
-        verification_summary={},
-    )
-    reconcile_startup_update_run_source_steps(run=run, input_sources=selected_input_sources)
+    # Keep a newly inserted run invisible until any selected Slack credential
+    # has been pinned user -> all grants -> connection -> run. If DELETE wins
+    # first, authority validation rolls this transaction back instead of
+    # leaving a queued run that can silently bind a later reconnect.
+    with transaction.atomic():
+        run = ContentFactoryRun.objects.create(
+            run_id=f"startup-update-{uuid.uuid4()}",
+            workflow=STARTUP_UPDATE_WORKFLOW,
+            domain=organization.domain,
+            slack_user_id=str(binding.user_id),
+            status=ContentFactoryRunStatus.QUEUED,
+            current_step=step_order[0],
+            approval_state=ContentFactoryApprovalState.NOT_REQUIRED,
+            step_order=step_order,
+            run_request=run_request,
+            result={},
+            acceptance_summary={},
+            verification_summary={},
+        )
+        reconcile_startup_update_run_source_steps(
+            run=run,
+            input_sources=selected_input_sources,
+        )
+        if ExternalServiceProvider.SLACK in selected_source_set:
+            run = pin_startup_update_run_slack_authority(
+                run=run,
+                organization=organization,
+                binding=binding,
+            )
     if google_connection is not None and "gmail" in selected_source_set:
         GmailSyncCursor.objects.get_or_create(
             organization=organization,
@@ -3176,6 +3972,726 @@ def _restore_cancelled_run_metrics(*, organization: Organization, backups: dict)
     return restored
 
 
+def _slack_public_ids_reference_connection(
+    values: Any,
+    *,
+    connection_id: int,
+    legacy_ids: set[str],
+    allow_legacy: bool = False,
+) -> bool:
+    if not isinstance(values, (list, tuple, set)):
+        return False
+    for value in values:
+        public_id = str(value or "")
+        parsed = parse_slack_thread_public_id(public_id)
+        if parsed is not None and parsed[0] == connection_id:
+            return True
+        if allow_legacy and public_id in legacy_ids:
+            return True
+    return False
+
+
+def _run_uses_slack_connection(
+    run: Optional[ContentFactoryRun],
+    connection_id: int,
+) -> bool:
+    if run is None:
+        return False
+    authority = slack_run_authority_from_request(run.run_request)
+    return authority is not None and authority.connection_id == connection_id
+
+
+def _run_can_own_legacy_slack_lineage(
+    run: Optional[ContentFactoryRun],
+    *,
+    connection: ExternalServiceConnection,
+) -> bool:
+    if run is None:
+        return False
+    authority = slack_run_authority_from_request(run.run_request)
+    if authority is not None:
+        return authority.connection_id == connection.pk
+    if slack_run_authority_is_present(run.run_request):
+        return False
+    input_sources = (run.run_request or {}).get("input_sources") or []
+    if ExternalServiceProvider.SLACK not in input_sources:
+        return False
+    binding_id = (run.run_request or {}).get("binding_id")
+    return UserStartupBinding.objects.filter(
+        pk=binding_id,
+        organization_id=connection.organization_id,
+        user_id=connection.user_id,
+    ).exists()
+
+
+def _event_has_slack_connection_lineage(
+    event: StartupEvent,
+    *,
+    connection: ExternalServiceConnection,
+    legacy_thread_ids: set[str],
+    source_message_ids: set[str],
+) -> bool:
+    if _slack_public_ids_reference_connection(
+        event.source_thread_ids,
+        connection_id=connection.pk,
+        legacy_ids=legacy_thread_ids,
+    ):
+        return True
+    allow_unscoped = _run_can_own_legacy_slack_lineage(
+        event.run,
+        connection=connection,
+    )
+    return allow_unscoped and (
+        _slack_public_ids_reference_connection(
+            event.source_thread_ids,
+            connection_id=connection.pk,
+            legacy_ids=legacy_thread_ids,
+            allow_legacy=True,
+        )
+        or bool(source_message_ids.intersection(event.evidence_message_ids or []))
+    )
+
+
+def _metric_has_slack_connection_lineage(
+    metric: StartupMetricObservation,
+    *,
+    connection: ExternalServiceConnection,
+    legacy_thread_ids: set[str],
+    source_message_ids: set[str],
+) -> bool:
+    metadata = metric.source_metadata or {}
+    try:
+        if int(metadata.get("slack_connection_id")) == connection.pk:
+            return True
+    except (TypeError, ValueError):
+        pass
+    if _slack_public_ids_reference_connection(
+        [metadata.get("slack_thread_id")],
+        connection_id=connection.pk,
+        legacy_ids=legacy_thread_ids,
+    ):
+        return True
+    allow_unscoped = _run_can_own_legacy_slack_lineage(
+        metric.run,
+        connection=connection,
+    )
+    return allow_unscoped and (
+        _slack_public_ids_reference_connection(
+            [metadata.get("slack_thread_id")],
+            connection_id=connection.pk,
+            legacy_ids=legacy_thread_ids,
+            allow_legacy=True,
+        )
+        or bool(source_message_ids.intersection(metric.source_record_ids or []))
+        or bool(source_message_ids.intersection(metric.evidence_message_ids or []))
+    )
+
+
+def _backup_previous_run(snapshot: dict) -> Optional[ContentFactoryRun]:
+    previous_run_id = str(snapshot.get("run_id") or "")
+    if not previous_run_id:
+        return None
+    return ContentFactoryRun.objects.filter(run_id=previous_run_id).first()
+
+
+def _backup_declares_missing_run(snapshot: dict) -> bool:
+    previous_run_id = str(snapshot.get("run_id") or "")
+    return bool(previous_run_id) and _backup_previous_run(snapshot) is None
+
+
+def _normalized_identifier_set(values: Any) -> set[str]:
+    if not isinstance(values, (list, tuple, set)):
+        return set()
+    return {str(value) for value in values if value not in (None, "")}
+
+
+def _event_backup_is_safe_to_restore(
+    snapshot: dict,
+    *,
+    connection: ExternalServiceConnection,
+    legacy_thread_ids: set[str],
+    source_message_ids: set[str],
+) -> bool:
+    previous_run = _backup_previous_run(snapshot)
+    if _backup_declares_missing_run(snapshot):
+        # A deleted prior run removes the only reliable legacy authority link.
+        # Never restore opaque content whose provenance can no longer be proved.
+        return False
+    if previous_run is not None and _run_can_own_legacy_slack_lineage(
+        previous_run,
+        connection=connection,
+    ):
+        return False
+    if _slack_public_ids_reference_connection(
+        snapshot.get("source_thread_ids"),
+        connection_id=connection.pk,
+        legacy_ids=legacy_thread_ids,
+        allow_legacy=previous_run is None,
+    ):
+        return False
+    if previous_run is None and source_message_ids.intersection(
+        snapshot.get("evidence_message_ids") or []
+    ):
+        return False
+    return True
+
+
+def _metric_backup_is_safe_to_restore(
+    snapshot: dict,
+    *,
+    connection: ExternalServiceConnection,
+    legacy_thread_ids: set[str],
+    source_message_ids: set[str],
+) -> bool:
+    previous_run = _backup_previous_run(snapshot)
+    if _backup_declares_missing_run(snapshot):
+        return False
+    if previous_run is None and (
+        snapshot.get("source_provider") or "gmail"
+    ) == ExternalServiceProvider.SLACK:
+        return False
+    if previous_run is not None and _run_can_own_legacy_slack_lineage(
+        previous_run,
+        connection=connection,
+    ):
+        return False
+    metadata = snapshot.get("source_metadata") or {}
+    try:
+        if int(metadata.get("slack_connection_id")) == connection.pk:
+            return False
+    except (TypeError, ValueError):
+        pass
+    if _slack_public_ids_reference_connection(
+        [metadata.get("slack_thread_id")],
+        connection_id=connection.pk,
+        legacy_ids=legacy_thread_ids,
+        allow_legacy=previous_run is None,
+    ):
+        return False
+    if previous_run is None and (
+        source_message_ids.intersection(snapshot.get("source_record_ids") or [])
+        or source_message_ids.intersection(snapshot.get("evidence_message_ids") or [])
+    ):
+        return False
+    return True
+
+
+def _draft_backup_is_safe_to_restore(
+    snapshot: dict,
+    *,
+    connection: ExternalServiceConnection,
+    event_ids: set[int],
+    metric_ids: set[int],
+) -> bool:
+    previous_run = _backup_previous_run(snapshot)
+    if _backup_declares_missing_run(snapshot):
+        return False
+    if previous_run is not None and _run_can_own_legacy_slack_lineage(
+        previous_run,
+        connection=connection,
+    ):
+        return False
+    event_id_values = {str(item) for item in event_ids}
+    metric_id_values = {str(item) for item in metric_ids}
+    return not (
+        event_id_values.intersection(
+            _normalized_identifier_set(snapshot.get("evidence_event_ids"))
+            | _normalized_identifier_set(snapshot.get("carry_forward_event_ids"))
+        )
+        or metric_id_values.intersection(
+            _normalized_identifier_set(snapshot.get("evidence_metric_ids"))
+        )
+    )
+
+
+def _clean_slack_lineage_backups(
+    backups: dict,
+    *,
+    connection: ExternalServiceConnection,
+    legacy_thread_ids: set[str],
+    source_message_ids: set[str],
+    event_ids: set[int],
+    metric_ids: set[int],
+) -> dict:
+    return {
+        "events": {
+            key: snapshot
+            for key, snapshot in (backups.get("events") or {}).items()
+            if _event_backup_is_safe_to_restore(
+                snapshot,
+                connection=connection,
+                legacy_thread_ids=legacy_thread_ids,
+                source_message_ids=source_message_ids,
+            )
+        },
+        "metrics": {
+            key: snapshot
+            for key, snapshot in (backups.get("metrics") or {}).items()
+            if _metric_backup_is_safe_to_restore(
+                snapshot,
+                connection=connection,
+                legacy_thread_ids=legacy_thread_ids,
+                source_message_ids=source_message_ids,
+            )
+        },
+        "drafts": {
+            key: snapshot
+            for key, snapshot in (backups.get("drafts") or {}).items()
+            if _draft_backup_is_safe_to_restore(
+                snapshot,
+                connection=connection,
+                event_ids=event_ids,
+                metric_ids=metric_ids,
+            )
+        },
+    }
+
+
+def _payload_references_slack_lineage(
+    value: Any,
+    *,
+    connection_id: int,
+    legacy_thread_ids: set[str],
+    source_message_ids: set[str],
+    event_ids: set[int],
+    metric_ids: set[int],
+    field_name: str = "",
+) -> bool:
+    normalized_field = str(field_name or "").lower()
+    event_id_values = {str(item) for item in event_ids}
+    metric_id_values = {str(item) for item in metric_ids}
+    if normalized_field in {
+        "event_id",
+        "evidence_event_ids",
+        "carry_forward_event_ids",
+    } and (
+        {str(value)}.intersection(event_id_values)
+        if not isinstance(value, (list, tuple, set))
+        else _normalized_identifier_set(value).intersection(event_id_values)
+    ):
+        return True
+    if normalized_field in {"metric_id", "evidence_metric_ids"} and (
+        {str(value)}.intersection(metric_id_values)
+        if not isinstance(value, (list, tuple, set))
+        else _normalized_identifier_set(value).intersection(metric_id_values)
+    ):
+        return True
+    if normalized_field == "slack_connection_id" and str(value) == str(connection_id):
+        return True
+    if isinstance(value, dict):
+        return any(
+            _payload_references_slack_lineage(
+                nested,
+                connection_id=connection_id,
+                legacy_thread_ids=legacy_thread_ids,
+                source_message_ids=source_message_ids,
+                event_ids=event_ids,
+                metric_ids=metric_ids,
+                field_name=key,
+            )
+            for key, nested in value.items()
+        )
+    if isinstance(value, (list, tuple, set)):
+        return any(
+            _payload_references_slack_lineage(
+                nested,
+                connection_id=connection_id,
+                legacy_thread_ids=legacy_thread_ids,
+                source_message_ids=source_message_ids,
+                event_ids=event_ids,
+                metric_ids=metric_ids,
+                field_name=field_name,
+            )
+            for nested in value
+        )
+    if isinstance(value, str):
+        parsed = parse_slack_thread_public_id(value)
+        return bool(
+            (parsed is not None and parsed[0] == connection_id)
+            or value in legacy_thread_ids
+            or value in source_message_ids
+        )
+    return False
+
+
+def clear_slack_connection_startup_lineage_locked(
+    connection: ExternalServiceConnection,
+) -> None:
+    """Erase startup-update data derived from a revoked Slack authority.
+
+    The caller holds the canonical user/grant/connection locks.  This function
+    takes run and output locks only after them, matching worker lock order.  It
+    intentionally targets every generation for the connection id: disconnect
+    advances the user generation before clearing each row.
+    """
+
+    if connection.organization_id is None:
+        return
+
+    # The locked connection prevents any authorised Slack writer from changing
+    # these rows. Read raw provenance first, then freeze every organization run
+    # before output rows. Mixed-source workers use connection -> run -> output,
+    # while non-Slack-only workers take only their run -> output; neither can
+    # publish a stale snapshot after this point.
+    thread_artifacts = list(
+        SlackThreadArtifact.objects.filter(connection=connection).only(
+            "channel_id", "thread_ts", "source_message_ids"
+        )
+    )
+    legacy_thread_ids = {
+        f"slack:{thread.channel_id}:{thread.thread_ts}"
+        for thread in thread_artifacts
+    }
+    source_message_ids = {
+        str(source_id)
+        for thread in thread_artifacts
+        for source_id in (thread.source_message_ids or [])
+        if str(source_id or "")
+    }
+
+    organization = connection.organization
+    runs = list(
+        ContentFactoryRun.objects.select_for_update()
+        .filter(organization=organization)
+        .order_by("id")
+    )
+    runs_by_id = {run.pk: run for run in runs}
+    authority_run_ids: set[int] = {
+        run.pk
+        for run in runs
+        if run.workflow == STARTUP_UPDATE_WORKFLOW
+        and (
+            _run_uses_slack_connection(run, connection.pk)
+            or _run_can_own_legacy_slack_lineage(run, connection=connection)
+        )
+    }
+
+    candidate_events = list(
+        StartupEvent.objects.select_related("run").filter(organization=organization)
+    )
+    event_ids: set[int] = set()
+    for event in candidate_events:
+        if _event_has_slack_connection_lineage(
+            event,
+            connection=connection,
+            legacy_thread_ids=legacy_thread_ids,
+            source_message_ids=source_message_ids,
+        ):
+            event_ids.add(event.pk)
+
+    candidate_metrics = list(
+        StartupMetricObservation.objects.select_related("run").filter(
+            organization=organization,
+        )
+    )
+    metric_ids: set[int] = set()
+    for metric in candidate_metrics:
+        if _metric_has_slack_connection_lineage(
+            metric,
+            connection=connection,
+            legacy_thread_ids=legacy_thread_ids,
+            source_message_ids=source_message_ids,
+        ):
+            metric_ids.add(metric.pk)
+
+    cancel_run_ids = authority_run_ids | {
+        event.run_id for event in candidate_events if event.pk in event_ids and event.run_id
+    } | {
+        metric.run_id
+        for metric in candidate_metrics
+        if metric.pk in metric_ids and metric.run_id
+    }
+
+    # A later non-Slack run may have overwritten the current canonical row but
+    # retained the prior Slack value in its cancellation backup. Preserve the
+    # current non-Slack row, while still treating its stable id as tainted for
+    # transitive drafts/candidates and removing the hidden private snapshot.
+    events_by_canonical_key = {
+        event.canonical_key: event for event in candidate_events
+    }
+    metrics_by_identity = {
+        (
+            metric.source_thread_id,
+            metric.source_provider or "gmail",
+            metric.metric_key,
+            metric.period_month.isoformat(),
+            metric.value_text,
+        ): metric
+        for metric in candidate_metrics
+    }
+    for run in runs:
+        hidden_backups = get_startup_update_run_cancel_backups(run)
+        for canonical_key, snapshot in (hidden_backups.get("events") or {}).items():
+            if not _event_backup_is_safe_to_restore(
+                snapshot,
+                connection=connection,
+                legacy_thread_ids=legacy_thread_ids,
+                source_message_ids=source_message_ids,
+            ):
+                hidden_event = events_by_canonical_key.get(canonical_key)
+                if hidden_event is not None:
+                    event_ids.add(hidden_event.pk)
+        for snapshot in (hidden_backups.get("metrics") or {}).values():
+            if not _metric_backup_is_safe_to_restore(
+                snapshot,
+                connection=connection,
+                legacy_thread_ids=legacy_thread_ids,
+                source_message_ids=source_message_ids,
+            ):
+                hidden_metric = metrics_by_identity.get(
+                    (
+                        snapshot.get("source_thread_id"),
+                        snapshot.get("source_provider") or "gmail",
+                        snapshot.get("metric_key"),
+                        str(snapshot.get("period_month") or ""),
+                        snapshot.get("value_text"),
+                    )
+                )
+                if hidden_metric is not None:
+                    metric_ids.add(hidden_metric.pk)
+
+    event_id_values = {str(item) for item in event_ids}
+    metric_id_values = {str(item) for item in metric_ids}
+    candidate_drafts = list(
+        MonthlyUpdateDraft.objects.filter(organization=organization).only(
+            "id",
+            "run_id",
+            "evidence_event_ids",
+            "evidence_metric_ids",
+            "carry_forward_event_ids",
+        )
+    )
+    draft_ids = {
+        draft.pk
+        for draft in candidate_drafts
+        if draft.run_id in cancel_run_ids
+        or event_id_values.intersection(
+            _normalized_identifier_set(draft.evidence_event_ids)
+            | _normalized_identifier_set(draft.carry_forward_event_ids)
+        )
+        or metric_id_values.intersection(
+            _normalized_identifier_set(draft.evidence_metric_ids)
+        )
+    }
+
+    # Freeze every exact or transitively-derived row after all run locks are in
+    # hand. Orphaned SET_NULL outputs are included and erased below.
+    locked_drafts = list(
+        MonthlyUpdateDraft.objects.select_for_update()
+        .filter(pk__in=draft_ids)
+        .order_by("id")
+    )
+    locked_events = list(
+        StartupEvent.objects.select_for_update(of=("self",))
+        .select_related("run")
+        .filter(pk__in=event_ids)
+        .order_by("id")
+    )
+    locked_metrics = list(
+        StartupMetricObservation.objects.select_for_update(of=("self",))
+        .select_related("run")
+        .filter(pk__in=metric_ids)
+        .order_by("id")
+    )
+    locked_events = [
+        event
+        for event in locked_events
+        if _event_has_slack_connection_lineage(
+            event,
+            connection=connection,
+            legacy_thread_ids=legacy_thread_ids,
+            source_message_ids=source_message_ids,
+        )
+    ]
+    locked_metrics = [
+        metric
+        for metric in locked_metrics
+        if _metric_has_slack_connection_lineage(
+            metric,
+            connection=connection,
+            legacy_thread_ids=legacy_thread_ids,
+            source_message_ids=source_message_ids,
+        )
+    ]
+    events_by_run: dict[Optional[int], list[StartupEvent]] = {}
+    for event in locked_events:
+        events_by_run.setdefault(event.run_id, []).append(event)
+    metrics_by_run: dict[Optional[int], list[StartupMetricObservation]] = {}
+    for metric in locked_metrics:
+        metrics_by_run.setdefault(metric.run_id, []).append(metric)
+    drafts_by_run: dict[Optional[int], list[MonthlyUpdateDraft]] = {}
+    for draft in locked_drafts:
+        drafts_by_run.setdefault(draft.run_id, []).append(draft)
+
+    for run in runs:
+        original_backups = get_startup_update_run_cancel_backups(run)
+        backups = _clean_slack_lineage_backups(
+            original_backups,
+            connection=connection,
+            legacy_thread_ids=legacy_thread_ids,
+            source_message_ids=source_message_ids,
+            event_ids=event_ids,
+            metric_ids=metric_ids,
+        )
+        run_events = events_by_run.get(run.pk, [])
+        for event in run_events:
+            snapshot = (backups.get("events") or {}).get(event.canonical_key)
+            if snapshot and _event_backup_is_safe_to_restore(
+                snapshot,
+                connection=connection,
+                legacy_thread_ids=legacy_thread_ids,
+                source_message_ids=source_message_ids,
+            ):
+                _restore_cancelled_run_events(
+                    organization=organization,
+                    backups={event.canonical_key: snapshot},
+                )
+            else:
+                event.delete()
+
+        run_metrics = metrics_by_run.get(run.pk, [])
+        for metric in run_metrics:
+            backup_key = "|".join(
+                [
+                    str(metric.source_thread_id or ""),
+                    metric.metric_key,
+                    metric.period_month.isoformat(),
+                    metric.value_text,
+                ]
+            )
+            snapshot = (backups.get("metrics") or {}).get(backup_key)
+            if (
+                snapshot
+                and snapshot.get("source_thread_id") == metric.source_thread_id
+                and (snapshot.get("source_provider") or "gmail")
+                == metric.source_provider
+                and _metric_backup_is_safe_to_restore(
+                    snapshot,
+                    connection=connection,
+                    legacy_thread_ids=legacy_thread_ids,
+                    source_message_ids=source_message_ids,
+                )
+            ):
+                _restore_cancelled_run_metrics(
+                    organization=organization,
+                    backups={backup_key: snapshot},
+                )
+            else:
+                metric.delete()
+
+        for draft in drafts_by_run.get(run.pk, []):
+            draft_key = draft.month.isoformat()
+            snapshot = (backups.get("drafts") or {}).get(draft_key)
+            if snapshot and _draft_backup_is_safe_to_restore(
+                snapshot,
+                connection=connection,
+                event_ids=event_ids,
+                metric_ids=metric_ids,
+            ):
+                _restore_cancelled_run_drafts(
+                    organization=organization,
+                    backups={draft_key: snapshot},
+                )
+            else:
+                draft.delete()
+
+        if run.pk in cancel_run_ids:
+            request_payload = dict(run.run_request or {})
+            historical_authority = slack_run_authority_from_request(request_payload)
+            request_payload["slack_channel_ids"] = []
+            external_context = dict(request_payload.get("external_context") or {})
+            authority_payload = (
+                historical_authority.as_dict()
+                if historical_authority is not None
+                else slack_run_authority_for_connection(connection).as_dict()
+            )
+            external_context["slack"] = {
+                "source": "slack",
+                "source_unavailable": True,
+                "warnings": [
+                    "Slack was disconnected and cached source data was erased."
+                ],
+                # Preserve the authority the worker actually observed. The
+                # connection row has already advanced generation for DELETE.
+                "authority": authority_payload,
+            }
+            request_payload["external_context"] = external_context
+
+            result_payload = run.result if isinstance(run.result, dict) else {}
+            operational_meta = result_payload.get(VALLEY_META_KEY)
+            run.run_request = request_payload
+            run.result = (
+                {VALLEY_META_KEY: operational_meta}
+                if isinstance(operational_meta, dict)
+                else {}
+            )
+            run.acceptance_summary = {}
+            run.verification_summary = {}
+            run.status = ContentFactoryRunStatus.CANCELLED
+            run.error = (
+                "Slack source disconnected; cached Slack-derived outputs were erased."
+            )
+            run.resume_available = False
+            run.save(
+                update_fields=(
+                    "run_request",
+                    "result",
+                    "acceptance_summary",
+                    "verification_summary",
+                    "status",
+                    "error",
+                    "resume_available",
+                    "updated_at",
+                )
+            )
+            run.steps.filter(status=ContentFactoryStepStatus.RUNNING).update(
+                status=ContentFactoryStepStatus.CANCELLED,
+                message="Slack source disconnected.",
+                completed_at=timezone.now(),
+            )
+            continue
+
+        result_payload = dict(run.result or {}) if isinstance(run.result, dict) else {}
+        inspect_payload = {
+            key: value
+            for key, value in result_payload.items()
+            if key not in {VALLEY_META_KEY, RUN_CANCEL_BACKUPS_KEY}
+        }
+        result_has_lineage = _payload_references_slack_lineage(
+            inspect_payload,
+            connection_id=connection.pk,
+            legacy_thread_ids=legacy_thread_ids,
+            source_message_ids=source_message_ids,
+            event_ids=event_ids,
+            metric_ids=metric_ids,
+        )
+        if result_has_lineage:
+            operational_meta = result_payload.get(VALLEY_META_KEY)
+            run.result = (
+                {VALLEY_META_KEY: operational_meta}
+                if isinstance(operational_meta, dict)
+                else {}
+            )
+        if backups != original_backups or result_has_lineage:
+            set_startup_update_run_cancel_backups(run, backups)
+            run.save(update_fields=("result", "updated_at"))
+
+    # SET_NULL outputs have no run whose backup can be safely restored. Their
+    # exact source provenance is enough to erase them directly.
+    for run_id, orphan_events in events_by_run.items():
+        if run_id not in runs_by_id:
+            for event in orphan_events:
+                event.delete()
+    for run_id, orphan_metrics in metrics_by_run.items():
+        if run_id not in runs_by_id:
+            for metric in orphan_metrics:
+                metric.delete()
+    for run_id, orphan_drafts in drafts_by_run.items():
+        if run_id not in runs_by_id:
+            for draft in orphan_drafts:
+                draft.delete()
+
+
 def cancel_startup_update_run(
     *,
     run_id: str,
@@ -3330,12 +4846,15 @@ def maybe_start_startup_update_for_google_connection(
 
 
 def score_message_for_profile(profile: StartupProfile, artifact: GmailMessageArtifact) -> tuple[int, list[str], str]:
-    haystack = _message_haystack(artifact)
-    participant_domains = _participant_domains(artifact)
     profile_signals = _profile_signal_lists(profile)
+    own_domains = [domain for domain in profile_signals["domain_aliases"] if domain]
+    haystack = _message_haystack(artifact, own_domains=own_domains)
+    counterparty_domains = _counterparty_domains(artifact, own_domains=own_domains)
+    internal_sender = _is_internal_sender(artifact, own_domains=own_domains)
     allowlist_reasons = _allowlist_override_reasons(
         haystack=haystack,
-        participant_domains=participant_domains,
+        counterparty_domains=counterparty_domains,
+        internal_sender=internal_sender,
         profile_signals=profile_signals,
     )
     hard_irrelevant_reasons = _hard_irrelevant_reasons(artifact, haystack=haystack)
@@ -3377,22 +4896,22 @@ def score_message_for_profile(profile: StartupProfile, artifact: GmailMessageArt
         score += 15
         reasons.append("matched_high_signal_term")
 
-    if any(domain and domain in participant_domains for domain in profile_signals["domain_aliases"]):
+    if internal_sender:
         score += 25
         reasons.append("matched_company_domain")
 
-    if any(domain and domain in participant_domains for domain in profile_signals["investor_domains"]):
+    if any(domain and domain in counterparty_domains for domain in profile_signals["investor_domains"]):
         score += 20
         reasons.append("matched_investor_domain")
 
     if any(
-        domain and domain in participant_domains
+        domain and domain in counterparty_domains
         for domain in profile_signals["customer_domains"] + profile_signals["prospect_domains"]
     ):
         score += 15
         reasons.append("matched_customer_or_prospect_domain")
 
-    if any(domain and domain in participant_domains for domain in profile_signals["competitor_domains"]):
+    if any(domain and domain in counterparty_domains for domain in profile_signals["competitor_domains"]):
         score += 10
         reasons.append("matched_competitor_domain")
 
@@ -3715,7 +5234,11 @@ def compact_gmail_thread_bundle(
     }
 
 
-def compact_slack_thread_bundle(thread: SlackThreadArtifact) -> dict[str, Any]:
+def compact_slack_thread_bundle(
+    thread: SlackThreadArtifact,
+    *,
+    slack_thread_id: str,
+) -> dict[str, Any]:
     payloads = [item for item in (thread.message_payloads or []) if isinstance(item, dict)]
     hint_ids = set()
     extraction_hints = thread.extraction_hints or {}
@@ -3764,7 +5287,7 @@ def compact_slack_thread_bundle(thread: SlackThreadArtifact) -> dict[str, Any]:
     if omitted_count:
         compression_notes.append(f"omitted_{omitted_count}_low_signal_or_over_budget_messages")
     return {
-        "slack_thread_id": f"slack:{thread.channel_id}:{thread.thread_ts}",
+        "slack_thread_id": slack_thread_id,
         "channel_id": thread.channel_id,
         "channel_name": thread.channel_name,
         "thread_ts": thread.thread_ts,

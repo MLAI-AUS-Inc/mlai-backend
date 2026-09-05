@@ -6,6 +6,7 @@ import hashlib
 import json
 import uuid
 from datetime import date, datetime, time, timedelta, timezone
+from typing import Any
 
 import requests
 from django.conf import settings
@@ -66,6 +67,7 @@ from integrations.services.reconciliation import (
     ReconciliationReportService,
     StripeAPIError,
     StripeConfigurationError,
+    luma_api_key_for_organization,
 )
 from integrations.services.xero_reconciliation import (
     ReconciliationValidationError,
@@ -79,6 +81,7 @@ from integrations.services.xero_reconciliation import (
     serialize_payout,
     serialize_profile,
     xero_has_bank_transaction_scope,
+    xero_has_settings_write_scope,
 )
 from integrations.services.xero_scopes import (
     xero_has_attachments_scope,
@@ -91,14 +94,21 @@ from integrations.services.reconciliation_context import (
     save_reconciliation_suggestions,
     serialize_suggestion,
 )
+from integrations.services.xero_tracking_catalog import active_xero_project_options
 from integrations.services.xero_statement_reconciliation import (
+    StatementCaptureValidationError,
+    active_xero_bank_account_catalog,
+    canonical_bank_account_id,
     import_xero_statement_lines,
     merchant_key,
     prepare_verified_rule_suggestions,
     save_statement_suggestions,
+    select_current_statement_capture,
     serialize_statement_line,
     serialize_statement_suggestion,
+    validate_current_statement_line_capture,
 )
+from integrations.services.external_connectors import ConnectorOAuthError
 from integrations.services.xero_statement_posting import (
     build_statement_posting_preview,
     execute_statement_posting,
@@ -124,6 +134,10 @@ from integrations.services.reconciliation_knowledge import (
 )
 from integrations.services.reconciliation_catalogs import (
     build_reconciliation_catalog_status,
+)
+from integrations.services.reconciliation_bank_accounts import (
+    active_bank_account,
+    fetch_active_xero_bank_accounts,
 )
 
 
@@ -176,6 +190,90 @@ def _latest_statement_scan(organization):
     ).order_by("-started_at", "-id").first()
 
 
+def _current_statement_scan_group(organization) -> tuple[list[XeroStatementScan], list[str]]:
+    """Resolve one complete single-account scan or one exact all-account capture."""
+
+    latest = _latest_statement_scan(organization)
+    if latest is None:
+        return [], ["Import the current complete Xero bank-feed queue."]
+    metadata = latest.capture_metadata if isinstance(latest.capture_metadata, dict) else {}
+    if metadata.get("schema_version") != 2:
+        return [latest], []
+
+    capture_id = str(metadata.get("capture_id") or "").strip()
+    active_ids = [
+        str(value or "").strip()
+        for value in metadata.get("active_bank_account_ids") or []
+        if str(value or "").strip()
+    ]
+    active_keys = [canonical_bank_account_id(value) for value in active_ids]
+    try:
+        account_count = int(metadata.get("account_count") or 0)
+    except (TypeError, ValueError):
+        account_count = 0
+    if (
+        not capture_id
+        or account_count != len(active_ids)
+        or not active_ids
+        or len(set(active_keys)) != len(active_keys)
+    ):
+        return [], ["The latest all-account Xero capture metadata is incomplete."]
+
+    candidates = XeroStatementScan.objects.filter(
+        organization=organization,
+    ).order_by("-started_at", "-id")
+    by_account: dict[str, XeroStatementScan] = {}
+    for scan in candidates:
+        account_key = canonical_bank_account_id(scan.bank_account_id)
+        if account_key not in active_keys:
+            continue
+        scan_metadata = scan.capture_metadata if isinstance(scan.capture_metadata, dict) else {}
+        if str(scan_metadata.get("capture_id") or "") != capture_id:
+            continue
+        by_account.setdefault(account_key, scan)
+    scans = [by_account[account_key] for account_key in active_keys if account_key in by_account]
+    if len(scans) != account_count:
+        return [], ["The latest all-account Xero capture stopped before every account was imported."]
+
+    source_hash = str(metadata.get("source_sha256") or "")
+    group_identity = {
+        key: str(metadata.get(key) or "")
+        for key in (
+            "capture_source",
+            "report_format",
+            "tenant_id",
+            "organisation_name",
+            "period_start",
+            "period_end",
+        )
+    }
+    for expected_position, scan in enumerate(scans, start=1):
+        item = scan.capture_metadata if isinstance(scan.capture_metadata, dict) else {}
+        try:
+            position = int(item.get("account_position") or 0)
+        except (TypeError, ValueError):
+            position = 0
+        try:
+            item_account_count = int(item.get("account_count") or 0)
+        except (TypeError, ValueError):
+            item_account_count = 0
+        if (
+            item.get("schema_version") != 2
+            or item.get("full_organisation_coverage_confirmed") is not True
+            or item.get("date_range_confirmed") is not True
+            or item_account_count != account_count
+            or [
+                canonical_bank_account_id(value)
+                for value in item.get("active_bank_account_ids") or []
+            ] != active_keys
+            or str(item.get("source_sha256") or "") != source_hash
+            or position != expected_position
+            or any(str(item.get(key) or "") != value for key, value in group_identity.items())
+        ):
+            return [], ["The latest all-account Xero capture has inconsistent account evidence."]
+    return scans, []
+
+
 def _latest_monthly_context_run(organization):
     return ContentFactoryRun.objects.filter(
         organization=organization,
@@ -184,23 +282,21 @@ def _latest_monthly_context_run(organization):
     ).order_by("-updated_at", "-id").first()
 
 
-def _statement_scan_freshness(scan) -> tuple[bool, int]:
+def _statement_scan_group_freshness(scans) -> tuple[bool, int]:
     max_age_minutes = int(
         getattr(settings, "XERO_STATEMENT_SCAN_MAX_AGE_MINUTES", 30)
     )
-    fresh = bool(
-        scan
-        and scan.completed_at
-        and scan.completed_at
-        >= datetime.now(timezone.utc) - timedelta(minutes=max_age_minutes)
-    )
-    return fresh, max_age_minutes
+    threshold = datetime.now(timezone.utc) - timedelta(minutes=max_age_minutes)
+    return bool(
+        scans
+        and all(scan.completed_at and scan.completed_at >= threshold for scan in scans)
+    ), max_age_minutes
 
 
 def _reconciliation_request_fingerprint(
     *,
     organization,
-    scan,
+    capture_selection,
     monthly_run,
     instruction: str,
     requested_line_ids: list[str],
@@ -263,7 +359,9 @@ def _reconciliation_request_fingerprint(
     catalog_status = build_reconciliation_catalog_status(organization=organization)
     return _stable_reconciliation_hash({
         "organization_id": organization.id,
-        "statement_scan_id": scan.id,
+        "statement_scan_ids": list(capture_selection.scan_ids),
+        "statement_capture_id": capture_selection.capture_id,
+        "statement_capture_fingerprint": capture_selection.capture_fingerprint,
         "base_monthly_run_id": monthly_run.run_id if monthly_run else "",
         "instruction": " ".join(str(instruction or "").split()),
         "analysis_mode": analysis_mode,
@@ -298,6 +396,12 @@ def _agent_run_start_response(run, *, idempotent: bool) -> dict:
         "status": run.status,
         "current_step": run.current_step,
         "statement_scan_id": request_payload.get("statement_scan_id"),
+        "statement_scan_ids": request_payload.get("statement_scan_ids") or [],
+        "statement_capture_id": request_payload.get("statement_capture_id") or "",
+        "statement_capture_fingerprint": request_payload.get(
+            "statement_capture_fingerprint"
+        )
+        or "",
         "base_monthly_run_id": request_payload.get("base_monthly_run_id") or "",
         "request_fingerprint": request_payload.get("request_fingerprint") or "",
         "dry_run": True,
@@ -355,6 +459,47 @@ class ReconciliationKnowledgeExportView(ReconciliationAdminView):
         return Response(build_reconciliation_knowledge_export(organization=organization))
 
 
+class ReconciliationBankAccountCatalogView(ReconciliationAdminView):
+    """Return the selected tenant's authoritative live active BANK accounts."""
+
+    def get(self, request):
+        _, organization, error = self.context(request)
+        if error:
+            return error
+        profile = ReconciliationProfile.objects.filter(
+            organization=organization
+        ).select_related("xero_connection").first()
+        if profile is None:
+            profile = ReconciliationProfile(organization=organization)
+        if profile.xero_connection_id is None:
+            connection = resolve_xero_connection(organization)
+            if connection:
+                profile.xero_connection = connection
+        try:
+            accounts = fetch_active_xero_bank_accounts(profile)
+        except ReconciliationValidationError as exc:
+            return Response(
+                {"error": str(exc)},
+                status=status.HTTP_409_CONFLICT,
+            )
+        connection = profile.xero_connection
+        tenant_id = str(connection.external_account_id or "").strip()
+        organisation_name = str(
+            connection.account_label or organization.name or organization.domain
+        ).strip()
+        if not tenant_id or not organisation_name:
+            return Response(
+                {"error": "The Xero tenant ID and organisation name are required."},
+                status=status.HTTP_409_CONFLICT,
+            )
+        return Response({
+            "schema_version": 1,
+            "tenant_id": tenant_id,
+            "organisation_name": organisation_name,
+            "accounts": accounts,
+        })
+
+
 class ReconciliationReportView(APIView):
     """Roo-only endpoint: Luma->Stripe reconciliation report for Points Admins.
 
@@ -377,6 +522,10 @@ class ReconciliationReportView(APIView):
                 status=status.HTTP_403_FORBIDDEN,
             )
 
+        organization, error = _organization_or_response(request)
+        if error:
+            return error
+
         window, error_response = self._resolve_window(request.query_params)
         if error_response:
             return error_response
@@ -384,7 +533,9 @@ class ReconciliationReportView(APIView):
 
         include_workbook = self._parse_bool(request.query_params.get("include_workbook"), default=True)
 
-        service = ReconciliationReportService()
+        service = ReconciliationReportService(
+            luma_api_key=luma_api_key_for_organization(organization)
+        )
         try:
             report = service.build_report(since=since, until=until, include_workbook=include_workbook)
         except StripeConfigurationError as exc:
@@ -408,7 +559,9 @@ class ReconciliationReportView(APIView):
         if error:
             return error
         try:
-            report = ReconciliationReportService().build_report(
+            report = ReconciliationReportService(
+                luma_api_key=luma_api_key_for_organization(organization)
+            ).build_report(
                 since=window[0], until=window[1], include_workbook=False
             )
             profile = ReconciliationProfile.objects.filter(organization=organization).first()
@@ -536,6 +689,9 @@ class ReconciliationProfileView(ReconciliationAdminView):
         "event_tracking_category_name",
         "project_tracking_category_id",
         "project_tracking_category_name",
+        "require_statement_tracking",
+        "default_project_tracking_option_name",
+        "default_project_tracking_option_id",
         "standalone_fee_project_option_id",
         "standalone_fee_project_option_name",
         "humanitix_profitability_included",
@@ -597,6 +753,17 @@ class ReconciliationProfileView(ReconciliationAdminView):
                 )
             profile.profitability_policy_verified_by_slack_id = slack_user_id
             profile.profitability_policy_verified_at = datetime.now(timezone.utc)
+        if "require_statement_tracking" in request.data and not isinstance(
+            request.data.get("require_statement_tracking"), bool
+        ):
+            return Response(
+                {"error": "require_statement_tracking must be a boolean"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if profile.require_statement_tracking:
+            profile.default_project_tracking_option_name = (
+                profile.default_project_tracking_option_name.strip() or "MLAI core"
+            )
         if profile.line_amount_types not in {"Inclusive", "Exclusive", "NoTax"}:
             return Response({"error": "line_amount_types must be Inclusive, Exclusive, or NoTax"}, status=status.HTTP_400_BAD_REQUEST)
         profile.save()
@@ -646,6 +813,43 @@ class ReconciliationMappingView(ReconciliationAdminView):
             treatment = str(defaults.get("accounting_treatment") or "").strip()
             if treatment and treatment not in {choice[0] for choice in ReconciliationMapping.TREATMENT_CHOICES}:
                 return Response({"error": "accounting_treatment must be revenue or clearing"}, status=status.HTTP_400_BAD_REQUEST)
+            existing = ReconciliationMapping.objects.filter(
+                organization=organization,
+                source_type=source_type,
+                source_id=source_id,
+            ).first()
+            if existing is not None:
+                for name_field, id_field in (
+                    ("event_tracking_option_name", "event_tracking_option_id"),
+                    ("project_tracking_option_name", "project_tracking_option_id"),
+                ):
+                    if (
+                        name_field in defaults
+                        and id_field not in defaults
+                        and str(defaults[name_field] or "").strip().casefold()
+                        != str(getattr(existing, name_field) or "").strip().casefold()
+                    ):
+                        defaults[id_field] = ""
+
+            def prospective(field_name):
+                if field_name in defaults:
+                    return defaults[field_name]
+                return getattr(existing, field_name, "")
+
+            event_assigned = bool(
+                str(prospective("event_tracking_option_id") or "").strip()
+                or str(prospective("event_tracking_option_name") or "").strip()
+            )
+            project_assigned = bool(
+                str(prospective("project_tracking_option_id") or "").strip()
+                or str(prospective("project_tracking_option_name") or "").strip()
+                or str(prospective("project_source_id") or "").strip()
+            )
+            if event_assigned and project_assigned:
+                return Response(
+                    {"error": "A Stripe source mapping must use Event xor Project tracking."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
             mapping, _ = ReconciliationMapping.objects.update_or_create(
                 organization=organization,
                 source_type=source_type,
@@ -670,8 +874,43 @@ class ReconciliationEnrichmentContextView(APIView):
         run, error = _reconciliation_run_or_response(organization=organization, run_id=run_id)
         if error:
             return error
-        context = build_reconciliation_enrichment_context(organization=organization, run_id=run_id)
+        if run.workflow == RECONCILIATION_AGENT_WORKFLOW:
+            stale_run_error = _reconciliation_run_retry_error(
+                organization=organization,
+                run=run,
+            )
+            if stale_run_error:
+                return Response(
+                    {"error": stale_run_error},
+                    status=status.HTTP_409_CONFLICT,
+                )
         request_payload = run.run_request if isinstance(run.run_request, dict) else {}
+        selected_line_ids = {
+            str(item or "").strip()
+            for item in request_payload.get("statement_line_ids") or []
+            if str(item or "").strip()
+        }
+        external_agent_run = bool(
+            run.workflow == RECONCILIATION_AGENT_WORKFLOW
+            and request_payload.get("analysis_mode") == "external_agent"
+        )
+        context = build_reconciliation_enrichment_context(
+            organization=organization,
+            run_id=run_id,
+            # The desktop external agent injects bounded evidence from its two
+            # explicitly authorized local Gmail stores. Repeating the backend's
+            # Gmail/Slack scan for every statement line is both duplicative and
+            # can exceed the API worker timeout on a complete bank queue.
+            include_statement_external_evidence=not external_agent_run,
+            statement_line_ids=(
+                selected_line_ids
+                if run.workflow == RECONCILIATION_AGENT_WORKFLOW
+                else None
+            ),
+        )
+        context["statement_external_evidence_source"] = (
+            "client_local_mailboxes" if external_agent_run else "backend_artifacts"
+        )
         expected_catalog_hashes = request_payload.get("catalog_source_hashes") or {}
         context["catalog_status"] = build_reconciliation_catalog_status(
             organization=organization,
@@ -681,15 +920,6 @@ class ReconciliationEnrichmentContextView(APIView):
         if run.workflow == RECONCILIATION_AGENT_WORKFLOW:
             from startup_updates.services import build_timeline_payload
 
-            selected_line_ids = {
-                str(item or "").strip()
-                for item in (run.run_request or {}).get("statement_line_ids") or []
-                if str(item or "").strip()
-            }
-            context["statement_candidates"] = [
-                item for item in context.get("statement_candidates") or []
-                if str(item.get("statement_line_id") or "") in selected_line_ids
-            ]
             context["agent_instruction"] = str(request_payload.get("instruction") or "")
             context["base_monthly_run_id"] = str(request_payload.get("base_monthly_run_id") or "")
             context["monthly_timeline"] = build_timeline_payload(
@@ -789,12 +1019,14 @@ class ReconciliationEnrichmentContextView(APIView):
             and not bool((run.run_request or {}).get("dry_run", False))
         )
         if automatic_posting_allowed:
+            capture_selection = select_current_statement_capture(organization)
             for suggestion in saved_statements:
                 try:
                     posting = execute_statement_posting(
                         suggestion,
                         requested_by_slack_id=f"monthly-update:{run_id}"[:100],
                         automatic=True,
+                        capture_selection=capture_selection,
                     )
                     automatic_postings.append({
                         "suggestion_id": suggestion.id,
@@ -1102,19 +1334,62 @@ def _save_reconciliation_rule(*, organization, slack_user_id: str, payload, rule
                 f"event_source_id is not a known {event_source_type} event"
             )
         event_name = event.event_name
+    project_source_type = str(
+        payload.get("project_source_type", getattr(rule, "project_source_type", "linear"))
+        or "linear"
+    ).strip()
     project_source_id = str(payload.get("project_source_id", getattr(rule, "project_source_id", "")) or "").strip()
+    project_option_id = str(
+        payload.get("project_tracking_option_id", getattr(rule, "project_tracking_option_id", ""))
+        or ""
+    ).strip()
     project_name = ""
     if project_source_id:
-        project = LinearProjectArtifact.objects.filter(
-            organization=organization,
-            linear_project_id=project_source_id,
-        ).first() or LinearProjectSelection.objects.filter(
-            organization=organization,
-            linear_project_id=project_source_id,
-        ).first()
-        if project is None:
-            raise ValueError("project_source_id is not a known Linear project")
-        project_name = str(getattr(project, "name", "") or getattr(project, "project_name", ""))
+        if project_source_type == "linear":
+            project = LinearProjectArtifact.objects.filter(
+                organization=organization,
+                linear_project_id=project_source_id,
+            ).first() or LinearProjectSelection.objects.filter(
+                organization=organization,
+                linear_project_id=project_source_id,
+            ).first()
+            if project is None:
+                raise ValueError("project_source_id is not a known Linear project")
+            project_name = str(getattr(project, "name", "") or getattr(project, "project_name", ""))
+        elif project_source_type == "xero_tracking":
+            project_name = str(payload.get("project_tracking_option_name") or "").strip()
+            if not project_option_id or not project_name:
+                raise ValueError("Xero tracking projects require a stable option ID and name")
+            try:
+                xero_options = active_xero_project_options(organization=organization)
+            except Exception as exc:
+                raise ValueError("Could not refresh active Xero Project Name options") from exc
+            exact = next((
+                option for option in xero_options
+                if option["tracking_option_id"] == project_option_id
+                and option["name"].casefold() == project_name.casefold()
+            ), None)
+            if exact is None:
+                raise ValueError("The Xero Project Name option is unknown or archived")
+        else:
+            raise ValueError("project_source_type must be linear or xero_tracking")
+
+    allocation_mode = str(
+        payload.get("allocation_mode", getattr(rule, "allocation_mode", "unassigned"))
+        or "unassigned"
+    ).strip()
+    if allocation_mode not in {choice[0] for choice in ReconciliationRule.ALLOCATION_CHOICES}:
+        raise ValueError("allocation_mode must be event, project, mlai_core or unassigned")
+    if event_source_id and project_source_id:
+        raise ValueError("A reconciliation rule can select either an event or a project, not both")
+    inferred_mode = (
+        ReconciliationRule.ALLOCATION_EVENT if event_source_id
+        else ReconciliationRule.ALLOCATION_PROJECT if project_source_id
+        else allocation_mode
+    )
+    if allocation_mode not in {ReconciliationRule.ALLOCATION_UNASSIGNED, inferred_mode}:
+        raise ValueError("allocation_mode does not match the selected event or project")
+    allocation_mode = inferred_mode
 
     def value(name, default=""):
         return str(payload.get(name, getattr(rule, name, default)) or "").strip()
@@ -1174,7 +1449,10 @@ def _save_reconciliation_rule(*, organization, slack_user_id: str, payload, rule
         "event_source_type": event_source_type if event_source_id else "",
         "event_source_id": event_source_id,
         "event_tracking_option_name": event_name,
+        "allocation_mode": allocation_mode,
+        "project_source_type": project_source_type if project_source_id else "",
         "project_source_id": project_source_id,
+        "project_tracking_option_id": project_option_id if project_source_id else "",
         "project_tracking_option_name": project_name,
         "priority": priority,
         "status": requested_status,
@@ -1516,35 +1794,26 @@ class ReconciliationReadinessView(ReconciliationAdminView):
 
         blockers: list[str] = []
         warnings: list[str] = []
-        latest_scan = _latest_statement_scan(organization)
-        scan_fresh, max_age_minutes = _statement_scan_freshness(latest_scan)
+        capture_selection = select_current_statement_capture(organization)
+        blockers.extend(capture_selection.blockers)
+        current_scans = list(capture_selection.scans)
+        latest_scan = capture_selection.latest_scan
+        scan_fresh, max_age_minutes = _statement_scan_group_freshness(current_scans)
         candidate_count = 0
-        if latest_scan is None:
-            blockers.append("Import the current complete Xero bank-feed queue.")
-        else:
-            if latest_scan.status != XeroStatementScan.STATUS_COMPLETE:
-                blockers.append("The latest Xero statement scan is incomplete.")
-            if (
-                latest_scan.expected_count is not None
-                and latest_scan.expected_count != latest_scan.observed_count
-            ):
-                if "The latest Xero statement scan is incomplete." not in blockers:
-                    blockers.append("The latest Xero statement scan is incomplete.")
-            if not scan_fresh:
-                blockers.append(
-                    f"The latest Xero statement scan is older than {max_age_minutes} minutes."
-                )
+        if capture_selection.all_account_capture:
             candidate_count = sum(
                 1
                 for line in XeroStatementLineSnapshot.objects.filter(
                     organization=organization,
                     active=True,
-                    last_scan=latest_scan,
+                    last_scan_id__in=capture_selection.scan_ids,
                 )
                 if line.is_reconciliation_candidate
             )
             if candidate_count == 0:
-                blockers.append("The latest Xero statement scan has no unreconciled candidates.")
+                warnings.append(
+                    "The latest all-account capture has no unreconciled candidates; no Xero writes are needed."
+                )
 
         monthly_run = _latest_monthly_context_run(organization)
         if monthly_run is None:
@@ -1582,7 +1851,7 @@ class ReconciliationReadinessView(ReconciliationAdminView):
             and connection.provider == ExternalServiceProvider.XERO
             and connection.status != "disconnected"
         )
-        bank_account_configured = bool(profile and profile.xero_bank_account_id)
+        bank_account_configured = bool(connection_active and current_scans)
         bank_transaction_scope = bool(
             connection_active and xero_has_bank_transaction_scope(connection.scopes)
         )
@@ -1601,6 +1870,36 @@ class ReconciliationReadinessView(ReconciliationAdminView):
         project_tracking_configured = bool(
             profile and profile.project_tracking_category_id
         )
+        tracking_required = bool(profile and profile.require_statement_tracking)
+        default_project_configured = bool(
+            profile and profile.default_project_tracking_option_name
+        )
+        settings_write_scope = bool(
+            connection_active and xero_has_settings_write_scope(connection.scopes)
+        )
+        default_project_available = bool(
+            profile and profile.default_project_tracking_option_id
+        )
+        tracking_policy_ready = bool(
+            event_tracking_configured
+            and project_tracking_configured
+            and (
+                not tracking_required
+                or (
+                    default_project_configured
+                    and (default_project_available or settings_write_scope)
+                )
+            )
+        )
+        untracked_executable_count = XeroStatementSuggestion.objects.filter(
+            organization=organization,
+            statement_line__active=True,
+            status=XeroStatementSuggestion.STATUS_PROPOSED,
+            execution_ready=True,
+            allocation_mode=XeroStatementSuggestion.ALLOCATION_UNASSIGNED,
+            event_source_id="",
+            project_source_id="",
+        ).count()
         profile_enabled = bool(profile and profile.enabled)
 
         if not profile_enabled:
@@ -1608,7 +1907,9 @@ class ReconciliationReadinessView(ReconciliationAdminView):
         if not connection_active:
             warnings.append("Reconnect the organisation's Xero account.")
         if not bank_account_configured:
-            warnings.append("Configure the Xero bank account used for reconciliation.")
+            warnings.append(
+                "No legacy default Xero bank account is configured; all-account captures use each line's captured account."
+            )
         if not bank_transaction_scope:
             warnings.append(
                 "Reconnect Xero with accounting.banktransactions before creating Spend/Receive Money transactions."
@@ -1629,6 +1930,16 @@ class ReconciliationReadinessView(ReconciliationAdminView):
             warnings.append("Configure the Xero Event Name tracking category.")
         if not project_tracking_configured:
             warnings.append("Configure the Xero Project Name tracking category.")
+        if tracking_required and not default_project_configured:
+            warnings.append("Configure MLAI core as the default Project Name.")
+        if tracking_required and default_project_configured and not default_project_available and not settings_write_scope:
+            warnings.append(
+                "Reconnect Xero with accounting.settings so MLAI core can be created during an approved write."
+            )
+        if tracking_required and untracked_executable_count:
+            warnings.append(
+                f"{untracked_executable_count} execution-ready suggestion(s) have no effective tracking."
+            )
 
         active_rule_count = ReconciliationRule.objects.filter(
             organization=organization,
@@ -1638,18 +1949,24 @@ class ReconciliationReadinessView(ReconciliationAdminView):
         ready_to_execute_bank_transactions = bool(
             profile_enabled
             and connection_active
-            and bank_account_configured
+            and capture_selection.all_account_capture
             and bank_transaction_scope
+            and (not tracking_required or tracking_policy_ready)
+            and untracked_executable_count == 0
         )
         ready_to_execute_bill_payments = bool(
             profile_enabled
             and connection_active
-            and bank_account_configured
+            and capture_selection.all_account_capture
             and payment_write_scope
+            and (not tracking_required or tracking_policy_ready)
+            and untracked_executable_count == 0
         )
         ready_to_start = not blockers
         if not ready_to_start:
             recommended_next_action = blockers[0]
+        elif candidate_count == 0:
+            recommended_next_action = "No unreconciled statement candidates need action."
         elif monthly_run is None:
             recommended_next_action = "Run a monthly update, then start Xero reconciliation."
         else:
@@ -1658,11 +1975,16 @@ class ReconciliationReadinessView(ReconciliationAdminView):
         return Response({
             "domain": organization.domain,
             "ready_to_start": ready_to_start,
+            "all_account_capture": capture_selection.all_account_capture,
+            "selected_statement_scan_ids": list(capture_selection.scan_ids),
+            "statement_capture": capture_selection.readiness_payload(),
             "ready_to_execute_bank_transactions": ready_to_execute_bank_transactions,
             "ready_to_execute_bill_payments": ready_to_execute_bill_payments,
             "tracking_ready": bool(
                 event_tracking_configured and project_tracking_configured
             ),
+            "tracking_policy_ready": tracking_policy_ready,
+            "untracked_executable_count": untracked_executable_count,
             "latest_statement_scan": (
                 {
                     "id": latest_scan.id,
@@ -1677,6 +1999,17 @@ class ReconciliationReadinessView(ReconciliationAdminView):
                 if latest_scan
                 else None
             ),
+            "latest_statement_scans": [
+                {
+                    "id": scan.id,
+                    "status": scan.status,
+                    "bank_account_id": scan.bank_account_id,
+                    "completed_at": scan.completed_at,
+                    "expected_count": scan.expected_count,
+                    "observed_count": scan.observed_count,
+                }
+                for scan in current_scans
+            ],
             "monthly_context": (
                 {
                     "run_id": monthly_run.run_id,
@@ -1698,6 +2031,14 @@ class ReconciliationReadinessView(ReconciliationAdminView):
                 "attachments_scope": attachments_scope,
                 "event_tracking_configured": event_tracking_configured,
                 "project_tracking_configured": project_tracking_configured,
+                "require_statement_tracking": tracking_required,
+                "default_project_tracking_option_name": (
+                    profile.default_project_tracking_option_name if profile else ""
+                ),
+                "default_project_tracking_option_id": (
+                    profile.default_project_tracking_option_id if profile else ""
+                ),
+                "settings_write_scope": settings_write_scope,
             },
             "active_verified_rule_count": active_rule_count,
             "catalog_status": catalog_status,
@@ -1714,31 +2055,21 @@ class ReconciliationAgentRunView(ReconciliationAdminView):
         slack_user_id, organization, error = self.context(request, from_body=True)
         if error:
             return error
-        latest_scan = _latest_statement_scan(organization)
-        if latest_scan is None:
+        capture_selection = select_current_statement_capture(organization)
+        if not capture_selection.all_account_capture:
             return Response(
-                {"error": "Import a complete Xero statement scan before starting the agent."},
+                {
+                    "error": (
+                        capture_selection.blockers[0]
+                        if capture_selection.blockers
+                        else "Import a complete all-account Xero statement capture before starting the agent."
+                    ),
+                    "all_account_capture": False,
+                    "statement_capture": capture_selection.readiness_payload(),
+                },
                 status=status.HTTP_409_CONFLICT,
             )
-        if latest_scan.status != XeroStatementScan.STATUS_COMPLETE:
-            return Response(
-                {"error": "The latest Xero statement scan is incomplete."},
-                status=status.HTTP_409_CONFLICT,
-            )
-        if (
-            latest_scan.expected_count is not None
-            and latest_scan.expected_count != latest_scan.observed_count
-        ):
-            return Response(
-                {"error": "The latest Xero statement scan count is incomplete."},
-                status=status.HTTP_409_CONFLICT,
-            )
-        scan_fresh, max_scan_age_minutes = _statement_scan_freshness(latest_scan)
-        if not scan_fresh:
-            return Response(
-                {"error": f"The latest Xero statement scan is older than {max_scan_age_minutes} minutes."},
-                status=status.HTTP_409_CONFLICT,
-            )
+        latest_scan = capture_selection.latest_scan
 
         raw_line_ids = request.data.get("statement_line_ids") or []
         if not isinstance(raw_line_ids, list):
@@ -1749,8 +2080,15 @@ class ReconciliationAgentRunView(ReconciliationAdminView):
         current_scan_lines = XeroStatementLineSnapshot.objects.filter(
             organization=organization,
             active=True,
-            last_scan=latest_scan,
+            last_scan_id__in=capture_selection.scan_ids,
         )
+        current_candidate_ids = [
+            line.statement_line_id
+            for line in current_scan_lines.order_by(
+                "transaction_date", "bank_account_id", "statement_line_id"
+            )
+            if line.is_reconciliation_candidate
+        ]
         if statement_line_ids:
             valid_ids = set(current_scan_lines.filter(
                 statement_line_id__in=statement_line_ids,
@@ -1761,12 +2099,23 @@ class ReconciliationAgentRunView(ReconciliationAdminView):
                     {"error": "Some statement lines are not active for this organisation.", "statement_line_ids": unknown},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
+            requested_set = set(statement_line_ids)
+            candidate_set = set(current_candidate_ids)
+            if requested_set != candidate_set:
+                return Response(
+                    {
+                        "error": (
+                            "A reconciliation run must include every current candidate line "
+                            "from the selected all-account capture."
+                        ),
+                        "missing_statement_line_ids": sorted(candidate_set - requested_set),
+                        "unexpected_statement_line_ids": sorted(requested_set - candidate_set),
+                    },
+                    status=status.HTTP_409_CONFLICT,
+                )
+            statement_line_ids = current_candidate_ids
         else:
-            statement_line_ids = [
-                line.statement_line_id
-                for line in current_scan_lines.order_by("transaction_date", "statement_line_id")
-                if line.is_reconciliation_candidate
-            ]
+            statement_line_ids = current_candidate_ids
 
         base_monthly_run = _latest_monthly_context_run(organization)
         requested_line_ids = statement_line_ids
@@ -1783,7 +2132,7 @@ class ReconciliationAgentRunView(ReconciliationAdminView):
         )[:4000]
         request_fingerprint = _reconciliation_request_fingerprint(
             organization=organization,
-            scan=latest_scan,
+            capture_selection=capture_selection,
             monthly_run=base_monthly_run,
             instruction=instruction,
             requested_line_ids=requested_line_ids,
@@ -1794,6 +2143,22 @@ class ReconciliationAgentRunView(ReconciliationAdminView):
         catalog_status = build_reconciliation_catalog_status(
             organization=organization
         )
+        statement_source_hashes = dict(
+            current_scan_lines.filter(
+                statement_line_id__in=requested_line_ids
+            ).values_list("statement_line_id", "source_hash")
+        )
+        if len(statement_source_hashes) != len(requested_line_ids):
+            return Response(
+                {"error": "The Xero statement queue changed while the run was being prepared."},
+                status=status.HTTP_409_CONFLICT,
+            )
+        capture_response = {
+            "statement_scan_id": latest_scan.id,
+            "statement_scan_ids": list(capture_selection.scan_ids),
+            "statement_capture_id": capture_selection.capture_id,
+            "statement_capture_fingerprint": capture_selection.capture_fingerprint,
+        }
         existing_run = ContentFactoryRun.objects.filter(
             organization=organization,
             workflow=RECONCILIATION_AGENT_WORKFLOW,
@@ -1807,6 +2172,20 @@ class ReconciliationAgentRunView(ReconciliationAdminView):
 
         try:
             with transaction.atomic():
+                locked_line_hashes = dict(
+                    XeroStatementLineSnapshot.objects.select_for_update()
+                    .filter(
+                        organization=organization,
+                        active=True,
+                        last_scan_id__in=capture_selection.scan_ids,
+                        statement_line_id__in=requested_line_ids,
+                    )
+                    .values_list("statement_line_id", "source_hash")
+                )
+                if locked_line_hashes != statement_source_hashes:
+                    raise StatementCaptureValidationError(
+                        "The Xero statement queue changed while the run was being prepared."
+                    )
                 run = ContentFactoryRun.objects.create(
                     run_id=run_id,
                     workflow=RECONCILIATION_AGENT_WORKFLOW,
@@ -1848,7 +2227,8 @@ class ReconciliationAgentRunView(ReconciliationAdminView):
                     "deterministic_statement_line_ids": prepared["deterministic_line_ids"],
                     "rule_conflict_statement_line_ids": prepared["conflict_line_ids"],
                     "deferred_bill_statement_line_ids": prepared["deferred_bill_line_ids"],
-                    "statement_scan_id": latest_scan.id,
+                    **capture_response,
+                    "statement_line_source_hashes": statement_source_hashes,
                     "base_monthly_run_id": base_monthly_run.run_id if base_monthly_run else "",
                     "catalog_source_hashes": catalog_status["source_hashes"],
                     "dry_run": True,
@@ -1898,6 +2278,11 @@ class ReconciliationAgentRunView(ReconciliationAdminView):
                 _agent_run_start_response(existing_run, idempotent=True),
                 status=status.HTTP_200_OK,
             )
+        except StatementCaptureValidationError as exc:
+            return Response(
+                {"error": str(exc)},
+                status=status.HTTP_409_CONFLICT,
+            )
         except ValueError as exc:
             return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -1908,7 +2293,7 @@ class ReconciliationAgentRunView(ReconciliationAdminView):
                 "workflow": run.workflow,
                 "status": run.status,
                 "current_step": run.current_step,
-                "statement_scan_id": latest_scan.id,
+                **capture_response,
                 "base_monthly_run_id": base_monthly_run.run_id if base_monthly_run else "",
                 "dry_run": True,
                 "analysis_mode": analysis_mode,
@@ -1925,7 +2310,7 @@ class ReconciliationAgentRunView(ReconciliationAdminView):
                 "workflow": run.workflow,
                 "status": run.status,
                 "current_step": run.current_step,
-                "statement_scan_id": latest_scan.id,
+                **capture_response,
                 "base_monthly_run_id": base_monthly_run.run_id if base_monthly_run else "",
                 "dry_run": True,
                 "analysis_mode": analysis_mode,
@@ -1948,6 +2333,7 @@ class ReconciliationAgentRunView(ReconciliationAdminView):
                 {
                     "run_id": run.run_id,
                     "status": run.status,
+                    **capture_response,
                     "error": "valley_dispatch_failed",
                     "retryable": True,
                     "retry_available": True,
@@ -1964,7 +2350,7 @@ class ReconciliationAgentRunView(ReconciliationAdminView):
             "workflow": run.workflow,
             "status": run.status,
             "current_step": run.current_step,
-            "statement_scan_id": latest_scan.id,
+            **capture_response,
             "base_monthly_run_id": base_monthly_run.run_id if base_monthly_run else "",
             "dry_run": True,
             "analysis_mode": analysis_mode,
@@ -2002,6 +2388,15 @@ class ReconciliationAgentRunDetailView(ReconciliationAdminView):
             "workflow": run.workflow,
             "status": run.status,
             "current_step": run.current_step,
+            "analysis_mode": str((run.run_request or {}).get("analysis_mode") or "valley"),
+            "statement_scan_id": (run.run_request or {}).get("statement_scan_id"),
+            "statement_scan_ids": (run.run_request or {}).get("statement_scan_ids") or [],
+            "statement_capture_id": (run.run_request or {}).get("statement_capture_id") or "",
+            "statement_capture_fingerprint": (run.run_request or {}).get(
+                "statement_capture_fingerprint"
+            )
+            or "",
+            "base_monthly_run_id": str((run.run_request or {}).get("base_monthly_run_id") or ""),
             "error": run.error,
             "retry_available": bool(
                 run.resume_available
@@ -2021,39 +2416,159 @@ class ReconciliationAgentRunDetailView(ReconciliationAdminView):
         })
 
 
-def _reconciliation_run_retry_error(*, organization, run) -> str:
-    scan_id = (run.run_request or {}).get("statement_scan_id")
-    latest_scan = _latest_statement_scan(organization)
-    if latest_scan is None or latest_scan.id != scan_id:
+class ReconciliationAgentRunFailureView(ReconciliationAdminView):
+    """Let an external agent terminate a run that it could not complete."""
+
+    def post(self, request, run_id: str):
+        _, organization, error = self.context(request, from_body=True)
+        if error:
+            return error
+        if request.data.get("confirm") is not True:
+            return Response(
+                {"error": "confirm must be true to fail reconciliation analysis"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        run = ContentFactoryRun.objects.filter(
+            organization=organization,
+            workflow=RECONCILIATION_AGENT_WORKFLOW,
+            run_id=run_id,
+        ).first()
+        if run is None:
+            return Response(
+                {"error": "Reconciliation agent run was not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        request_payload = run.run_request if isinstance(run.run_request, dict) else {}
+        if request_payload.get("analysis_mode") != "external_agent":
+            return Response(
+                {"error": "Only an external reconciliation agent can report this failure."},
+                status=status.HTTP_409_CONFLICT,
+            )
+        if run.status == ContentFactoryRunStatus.COMPLETED:
+            return Response(
+                {"error": "A completed reconciliation run cannot be failed."},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        failure_kind = str(request.data.get("failure_kind") or "").strip()[:64]
+        failure_error = str(request.data.get("error") or "").strip()[:1500]
+        if not failure_kind or not failure_error:
+            return Response(
+                {"error": "failure_kind and error are required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        idempotent = run.status == ContentFactoryRunStatus.FAILED
+        if not idempotent and run.status not in {
+            ContentFactoryRunStatus.QUEUED,
+            ContentFactoryRunStatus.RUNNING,
+            ContentFactoryRunStatus.BLOCKED,
+        }:
+            return Response(
+                {"error": f"Reconciliation agent run cannot fail from {run.status}."},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        if not idempotent:
+            failed_at = datetime.now(timezone.utc)
+            with transaction.atomic():
+                run = ContentFactoryRun.objects.select_for_update().get(pk=run.pk)
+                if run.status == ContentFactoryRunStatus.COMPLETED:
+                    return Response(
+                        {"error": "A completed reconciliation run cannot be failed."},
+                        status=status.HTTP_409_CONFLICT,
+                    )
+                if run.status == ContentFactoryRunStatus.FAILED:
+                    idempotent = True
+                else:
+                    result = run.result if isinstance(run.result, dict) else {}
+                    run.result = {
+                        **result,
+                        "external_agent_failure": {
+                            "failure_kind": failure_kind,
+                            "error": failure_error,
+                            "failed_at": failed_at.isoformat(),
+                        },
+                    }
+                    run.status = ContentFactoryRunStatus.FAILED
+                    run.current_step = ""
+                    run.error = f"{failure_kind}: {failure_error}"[:4000]
+                    run.resume_available = False
+                    run.save(update_fields=[
+                        "result",
+                        "status",
+                        "current_step",
+                        "error",
+                        "resume_available",
+                        "updated_at",
+                    ])
+                    ContentFactoryRunStep.objects.filter(
+                        run=run,
+                        step_key=RECONCILIATION_AGENT_STEP_ORDER[0],
+                    ).update(
+                        status=ContentFactoryStepStatus.FAILED,
+                        completed_at=failed_at,
+                        error=failure_error,
+                        message="The external reconciliation agent failed before submitting suggestions.",
+                    )
+        return Response({
+            "run_id": run.run_id,
+            "workflow": run.workflow,
+            "status": run.status,
+            "current_step": run.current_step,
+            "analysis_mode": "external_agent",
+            "base_monthly_run_id": str(request_payload.get("base_monthly_run_id") or ""),
+            "retry_available": False,
+            "idempotent": idempotent,
+        })
+
+
+def _reconciliation_run_retry_error(
+    *,
+    organization,
+    run,
+    capture_selection=None,
+) -> str:
+    request_payload = run.run_request if isinstance(run.run_request, dict) else {}
+    selection = capture_selection or select_current_statement_capture(organization)
+    if not selection.all_account_capture:
+        return (
+            selection.blockers[0]
+            if selection.blockers
+            else "Import a fresh complete all-account Xero statement capture."
+        )
+    expected_scan_ids = request_payload.get("statement_scan_ids") or []
+    if list(selection.scan_ids) != expected_scan_ids:
         return "The Xero statement queue changed after this run started. Start a new reconciliation run."
     if (
-        latest_scan.expected_count is not None
-        and latest_scan.expected_count != latest_scan.observed_count
+        request_payload.get("statement_capture_id") != selection.capture_id
+        or request_payload.get("statement_capture_fingerprint")
+        != selection.capture_fingerprint
     ):
-        return "The run's Xero statement scan is incomplete. Import a fresh complete scan."
-    max_scan_age_minutes = int(
-        getattr(settings, "XERO_STATEMENT_SCAN_MAX_AGE_MINUTES", 30)
-    )
-    if (
-        latest_scan.completed_at is None
-        or latest_scan.completed_at
-        < datetime.now(timezone.utc) - timedelta(minutes=max_scan_age_minutes)
-    ):
-        return f"The run's statement scan is older than {max_scan_age_minutes} minutes. Import a fresh scan."
+        return "The Xero all-account capture changed after this run started. Start a new reconciliation run."
     line_ids = {
         str(item or "").strip()
-        for item in (run.run_request or {}).get("statement_line_ids") or []
+        for item in (
+            request_payload.get("requested_statement_line_ids")
+            or request_payload.get("statement_line_ids")
+            or []
+        )
         if str(item or "").strip()
     }
-    active_ids = set(
+    active_rows = dict(
         XeroStatementLineSnapshot.objects.filter(
             organization=organization,
             active=True,
-            last_scan=latest_scan,
+            last_scan_id__in=selection.scan_ids,
             statement_line_id__in=line_ids,
-        ).values_list("statement_line_id", flat=True)
+        ).values_list("statement_line_id", "source_hash")
     )
-    if active_ids != line_ids:
+    if set(active_rows) != line_ids:
+        return "One or more statement lines changed after this run started. Start a new reconciliation run."
+    expected_hashes = request_payload.get("statement_line_source_hashes") or {}
+    if not isinstance(expected_hashes, dict) or any(
+        active_rows.get(statement_line_id) != expected_hashes.get(statement_line_id)
+        for statement_line_id in line_ids
+    ):
         return "One or more statement lines changed after this run started. Start a new reconciliation run."
     return ""
 
@@ -2208,18 +2723,21 @@ def _agent_run_suggestions(*, organization, run_id: str):
     return run, suggestions
 
 
-def _fresh_statement_scan_error(suggestion: XeroStatementSuggestion) -> str:
-    scan = suggestion.statement_line.last_scan
-    if scan is None or scan.status != XeroStatementScan.STATUS_COMPLETE:
-        return "Import a complete Xero statement scan before execution."
-    if scan.expected_count is not None and scan.expected_count != scan.observed_count:
-        return "The latest Xero statement scan count is incomplete."
-    max_age_minutes = int(getattr(settings, "XERO_STATEMENT_SCAN_MAX_AGE_MINUTES", 30))
-    if (
-        scan.completed_at is None
-        or scan.completed_at < datetime.now(timezone.utc) - timedelta(minutes=max_age_minutes)
-    ):
-        return f"The statement scan is older than {max_age_minutes} minutes. Import a fresh scan."
+def _fresh_statement_scan_error(
+    suggestion: XeroStatementSuggestion,
+    *,
+    capture_selection=None,
+) -> str:
+    line = suggestion.statement_line
+    try:
+        validate_current_statement_line_capture(
+            line,
+            expected_bank_account_id=line.bank_account_id,
+            expected_source_hash=suggestion.source_hash,
+            selection=capture_selection,
+        )
+    except StatementCaptureValidationError as exc:
+        return str(exc)
     return ""
 
 
@@ -2247,10 +2765,31 @@ class ReconciliationAgentRunPreviewView(ReconciliationAdminView):
         run, suggestions = _agent_run_suggestions(organization=organization, run_id=run_id)
         if run is None:
             return Response({"error": "Reconciliation agent run was not found."}, status=status.HTTP_404_NOT_FOUND)
+        capture_selection = select_current_statement_capture(organization)
+        stale_run_error = _reconciliation_run_retry_error(
+            organization=organization,
+            run=run,
+            capture_selection=capture_selection,
+        )
+        if stale_run_error:
+            return Response(
+                {"error": stale_run_error},
+                status=status.HTTP_409_CONFLICT,
+            )
+        suggestions = list(suggestions)
+        profile = ReconciliationProfile.objects.select_related("xero_connection").filter(
+            organization=organization,
+        ).first()
+        active_bank_accounts = list(capture_selection.active_bank_accounts)
         results = []
         for suggestion in suggestions:
             try:
-                preview = build_statement_posting_preview(suggestion)
+                preview = build_statement_posting_preview(
+                    suggestion,
+                    profile=profile,
+                    active_bank_accounts=active_bank_accounts,
+                    capture_selection=capture_selection,
+                )
             except ReconciliationValidationError as exc:
                 preview = {"ready": False, "errors": exc.errors or [str(exc)]}
             serialized = serialize_statement_suggestion(suggestion)
@@ -2315,6 +2854,17 @@ class ReconciliationAgentRunDecisionView(ReconciliationAdminView):
         if run.status != ContentFactoryRunStatus.COMPLETED:
             return Response(
                 {"error": f"Reconciliation agent run is {run.status}; wait for completion before approval."},
+                status=status.HTTP_409_CONFLICT,
+            )
+        capture_selection = select_current_statement_capture(organization)
+        stale_run_error = _reconciliation_run_retry_error(
+            organization=organization,
+            run=run,
+            capture_selection=capture_selection,
+        )
+        if stale_run_error:
+            return Response(
+                {"error": stale_run_error},
                 status=status.HTTP_409_CONFLICT,
             )
         suggestion_by_id = {suggestion.id: suggestion for suggestion in suggestions}
@@ -2400,7 +2950,10 @@ class ReconciliationAgentRunDecisionView(ReconciliationAdminView):
                 })
                 continue
             try:
-                preview = build_statement_posting_preview(suggestion)
+                preview = build_statement_posting_preview(
+                    suggestion,
+                    capture_selection=capture_selection,
+                )
             except ReconciliationValidationError as exc:
                 preview = {"ready": False, "errors": exc.errors or [str(exc)]}
             if not preview.get("ready"):
@@ -2481,6 +3034,17 @@ class ReconciliationAgentRunExecuteView(ReconciliationAdminView):
                 {"error": f"Reconciliation agent run is {run.status}; wait for completion before execution."},
                 status=status.HTTP_409_CONFLICT,
             )
+        capture_selection = select_current_statement_capture(organization)
+        stale_run_error = _reconciliation_run_retry_error(
+            organization=organization,
+            run=run,
+            capture_selection=capture_selection,
+        )
+        if stale_run_error:
+            return Response(
+                {"error": stale_run_error},
+                status=status.HTTP_409_CONFLICT,
+            )
         raw_ids = request.data.get("suggestion_ids") or []
         if not isinstance(raw_ids, list):
             return Response({"error": "suggestion_ids must be a list"}, status=status.HTTP_400_BAD_REQUEST)
@@ -2505,7 +3069,10 @@ class ReconciliationAgentRunExecuteView(ReconciliationAdminView):
                 })
                 continue
             approved_candidate_count += 1
-            scan_error = _fresh_statement_scan_error(suggestion)
+            scan_error = _fresh_statement_scan_error(
+                suggestion,
+                capture_selection=capture_selection,
+            )
             if scan_error:
                 results.append({
                     "suggestion_id": suggestion.id,
@@ -2514,7 +3081,10 @@ class ReconciliationAgentRunExecuteView(ReconciliationAdminView):
                 })
                 continue
             try:
-                preview = build_statement_posting_preview(suggestion)
+                preview = build_statement_posting_preview(
+                    suggestion,
+                    capture_selection=capture_selection,
+                )
             except ReconciliationValidationError as exc:
                 preview = {"ready": False, "errors": exc.errors or [str(exc)]}
             approval_outcome = approval.outcome or {}
@@ -2550,6 +3120,7 @@ class ReconciliationAgentRunExecuteView(ReconciliationAdminView):
                     suggestion,
                     requested_by_slack_id=slack_user_id,
                     automatic=False,
+                    capture_selection=capture_selection,
                 )
                 results.append({
                     "suggestion_id": suggestion.id,
@@ -2558,6 +3129,7 @@ class ReconciliationAgentRunExecuteView(ReconciliationAdminView):
                     "status": posting.status,
                     "xero_bank_transaction_id": posting.xero_bank_transaction_id,
                     "xero_payment_id": posting.xero_payment_id,
+                    "xero_bill_id": posting.xero_bill_id,
                 })
             except ReconciliationValidationError as exc:
                 results.append({
@@ -2600,7 +3172,55 @@ class ReconciliationStatementScanView(ReconciliationAdminView):
         complete = request.data.get("complete", True)
         if not isinstance(complete, bool):
             return Response({"error": "complete must be a boolean"}, status=status.HTTP_400_BAD_REQUEST)
+        capture_metadata = request.data.get("capture_metadata")
         try:
+            if isinstance(capture_metadata, dict) and capture_metadata.get("schema_version") == 2:
+                profile = ReconciliationProfile.objects.filter(
+                    organization=organization
+                ).select_related("xero_connection").first()
+                if profile is None or profile.xero_connection is None:
+                    raise ValueError(
+                        "A Xero reconciliation profile and connection are required."
+                    )
+                active_accounts = fetch_active_xero_bank_accounts(profile)
+                selected_account = active_bank_account(
+                    profile,
+                    bank_account_id,
+                    accounts=active_accounts,
+                )
+                if selected_account is None:
+                    raise ValueError("bank_account_id is not an active Xero BANK account")
+                supplied_ids = capture_metadata.get("active_bank_account_ids")
+                if not isinstance(supplied_ids, list):
+                    raise ValueError("all-account capture requires active_bank_account_ids")
+                if {canonical_bank_account_id(value) for value in supplied_ids} != {
+                    canonical_bank_account_id(item["bank_account_id"])
+                    for item in active_accounts
+                }:
+                    raise ValueError(
+                        "all-account capture does not exactly match Xero's active BANK accounts"
+                    )
+                connection = profile.xero_connection
+                if canonical_bank_account_id(
+                    capture_metadata.get("tenant_id")
+                ) != canonical_bank_account_id(
+                    connection.external_account_id
+                ):
+                    raise ValueError("all-account capture belongs to a different Xero tenant")
+                if (
+                    capture_metadata.get("all_accounts_requested") is not True
+                    or capture_metadata.get("full_organisation_coverage_confirmed") is not True
+                    or capture_metadata.get("date_range_confirmed") is not True
+                ):
+                    raise ValueError("all-account capture coverage was not explicitly confirmed")
+                if int(capture_metadata.get("account_count") or 0) != len(active_accounts):
+                    raise ValueError("all-account capture account_count is incomplete")
+                if canonical_bank_account_id(
+                    capture_metadata.get("bank_account_label")
+                ) != canonical_bank_account_id(
+                    selected_account["name"]
+                ):
+                    raise ValueError("all-account capture bank-account label does not match Xero")
             saved = import_xero_statement_lines(
                 organization=organization,
                 bank_account_id=bank_account_id,
@@ -2608,19 +3228,41 @@ class ReconciliationStatementScanView(ReconciliationAdminView):
                 currency=str(request.data.get("currency") or "AUD"),
                 expected_count=request.data.get("expected_count"),
                 complete_scan=complete,
-                source="browser",
+                source=(
+                    "xero_csv"
+                    if isinstance(capture_metadata, dict)
+                    and capture_metadata.get("schema_version") == 2
+                    else "browser"
+                ),
                 requested_by=slack_user_id,
-                capture_metadata=request.data.get("capture_metadata"),
+                capture_metadata=capture_metadata,
             )
-        except ValueError as exc:
+        except (ValueError, ReconciliationValidationError) as exc:
             return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except ConnectorOAuthError:
+            return Response(
+                {"error": "The selected Xero connection must be reauthorised."},
+                status=status.HTTP_409_CONFLICT,
+            )
+        except requests.RequestException:
+            return Response(
+                {"error": "Unable to verify the active Xero bank-account catalogue."},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
         scan = (
             saved[0].last_scan
             if saved
-            else XeroStatementScan.objects.filter(
-                organization=organization,
-                bank_account_id=bank_account_id,
-            ).order_by("-id").first()
+            else next(
+                (
+                    item
+                    for item in XeroStatementScan.objects.filter(
+                        organization=organization,
+                    ).order_by("-id")
+                    if canonical_bank_account_id(item.bank_account_id)
+                    == canonical_bank_account_id(bank_account_id)
+                ),
+                None,
+            )
         )
         return Response({
             "scan": {
@@ -2755,9 +3397,15 @@ class ReconciliationStatementSafeBatchView(ReconciliationAdminView):
                 break
 
         results = []
+        capture_selection = (
+            select_current_statement_capture(organization) if latest else None
+        )
         for suggestion in latest:
             try:
-                preview = build_statement_posting_preview(suggestion)
+                preview = build_statement_posting_preview(
+                    suggestion,
+                    capture_selection=capture_selection,
+                )
                 result = {
                     "suggestion_id": suggestion.id,
                     "statement_line_id": suggestion.statement_line.statement_line_id,
@@ -2770,6 +3418,7 @@ class ReconciliationStatementSafeBatchView(ReconciliationAdminView):
                         suggestion,
                         requested_by_slack_id=slack_user_id,
                         automatic=request.data.get("automatic") is True,
+                        capture_selection=capture_selection,
                     )
                     result.update({
                         "posted": True,
@@ -3529,7 +4178,18 @@ class ReconciliationPayoutPreviewView(ReconciliationAdminView):
         if record is None:
             return Response({"error": "Payout was not found"}, status=status.HTTP_404_NOT_FOUND)
         try:
-            preview = build_xero_preview(record)
+            preview = build_xero_preview(
+                record,
+                statement_line_id=str(
+                    request.query_params.get("statement_line_id") or ""
+                ).strip(),
+                bank_account_id=str(
+                    request.query_params.get("bank_account_id") or ""
+                ).strip(),
+                statement_source_hash=str(
+                    request.query_params.get("statement_source_hash") or ""
+                ).strip(),
+            )
         except ReconciliationValidationError as exc:
             return Response({"error": str(exc), "errors": exc.errors}, status=status.HTTP_409_CONFLICT)
         return Response({"payout": serialize_payout(record), "preview": preview})
@@ -3559,6 +4219,15 @@ class ReconciliationPayoutPostView(ReconciliationAdminView):
                 record,
                 approved_by_slack_id=slack_user_id,
                 expected_payload_hash=payload_hash,
+                statement_line_id=str(
+                    request.data.get("statement_line_id") or ""
+                ).strip(),
+                bank_account_id=str(
+                    request.data.get("bank_account_id") or ""
+                ).strip(),
+                statement_source_hash=str(
+                    request.data.get("statement_source_hash") or ""
+                ).strip(),
             )
         except ReconciliationValidationError as exc:
             return Response({"error": str(exc), "errors": exc.errors}, status=status.HTTP_409_CONFLICT)

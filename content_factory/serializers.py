@@ -42,9 +42,15 @@ class ComponentMappingSerializer(serializers.ModelSerializer):
 # SEO Research Serializers
 # =============================================================================
 
+from datetime import timedelta
+
+from django.conf import settings
+from django.utils import timezone
+
 from .models import (
     ResearchedKeyword, KeywordVelocity, AISaturation, PAQuestion,
-    SemanticCluster, TopicMap, WrittenArticle, ResearchSession, TopicFeedback
+    SemanticCluster, WrittenArticle, TopicFeedback,
+    ContentIsland
 )
 
 
@@ -104,6 +110,7 @@ class ResearchedKeywordListSerializer(serializers.ModelSerializer):
             'times_shown', 'last_shown_at', 'times_rejected', 'last_rejected_at',
             'cooldown_until', 'times_selected', 'last_selected_at',
             'cluster_fingerprint', 'related_keywords', 'monthly_searches',
+            'ai_search_volume', 'ai_monthly_searches', 'aeo_score', 'query_type',
             'latest_velocity', 'latest_saturation', 'paa_count',
             'discovered_at', 'metrics_updated_at'
         ]
@@ -152,6 +159,7 @@ class ResearchedKeywordDetailSerializer(serializers.ModelSerializer):
             'id', 'keyword', 'keyword_normalized', 'volume', 'difficulty', 'difficulty_source',
             'intent', 'tier', 'opportunity_index', 'source', 'source_detail',
             'competitor_urls', 'related_keywords', 'monthly_searches',
+            'ai_search_volume', 'ai_monthly_searches', 'aeo_score', 'query_type',
             'status', 'times_shown', 'last_shown_at',
             'times_rejected', 'last_rejected_at', 'cooldown_until',
             'times_selected', 'last_selected_at', 'cluster_fingerprint',
@@ -209,17 +217,6 @@ class ClusterBulkUpsertSerializer(serializers.Serializer):
     clusters = serializers.ListField(child=serializers.DictField())
 
 
-class TopicMapSerializer(serializers.ModelSerializer):
-    """Serializer for topic map snapshots."""
-
-    class Meta:
-        model = TopicMap
-        fields = [
-            'id', 'clustering_threshold', 'total_keywords',
-            'unclustered_keywords', 'created_at'
-        ]
-
-
 class WrittenArticleSerializer(serializers.ModelSerializer):
     """Serializer for written article records."""
 
@@ -249,17 +246,6 @@ class WrittenArticleCreateSerializer(serializers.Serializer):
     job_id = serializers.CharField(required=False, allow_null=True)
 
 
-class ResearchSessionSerializer(serializers.ModelSerializer):
-    """Serializer for research session records."""
-
-    class Meta:
-        model = ResearchSession
-        fields = [
-            'id', 'seed_keywords_used', 'competitors_analyzed',
-            'keywords_discovered', 'keywords_updated', 'clusters_created',
-            'geo_config', 'started_at', 'completed_at'
-        ]
-        read_only_fields = ['id', 'started_at']
 
 
 class KeywordStatusUpdateSerializer(serializers.Serializer):
@@ -329,6 +315,106 @@ class TopicFeedbackSerializer(serializers.ModelSerializer):
 
     def get_active(self, obj):
         return obj.restored_at is None
+
+
+class ContentIslandSerializer(serializers.ModelSerializer):
+    """
+    Snake-case island row for content-factory.
+
+    This is the shape ``GET /api/seo/islands/`` returns; the centroid rides
+    along because cf needs it to re-match clusters to existing islands.
+    """
+
+    class Meta:
+        model = ContentIsland
+        fields = [
+            'slug', 'name', 'description', 'pillar_keyword',
+            'icon_key', 'color_key', 'status', 'origin',
+            'centroid_embedding', 'keyword_count', 'total_volume',
+            'avg_difficulty', 'opportunity_score', 'ai_search_volume',
+            'articles_written', 'consecutive_misses', 'last_matched_at',
+            'last_expanded_on', 'first_seen_at', 'promoted_at',
+            'last_refreshed_at',
+        ]
+        read_only_fields = fields
+
+
+class ContentIslandGraphNodeSerializer(serializers.ModelSerializer):
+    """camelCase graph node for the founder-facing bootstrap payload."""
+    id = serializers.SerializerMethodField()
+    pillarKeyword = serializers.CharField(source='pillar_keyword', read_only=True)
+    iconKey = serializers.CharField(source='icon_key', read_only=True)
+    colorKey = serializers.CharField(source='color_key', read_only=True)
+    isNew = serializers.SerializerMethodField()
+    keywordCount = serializers.IntegerField(source='keyword_count', read_only=True)
+    totalVolume = serializers.IntegerField(source='total_volume', read_only=True)
+    avgDifficulty = serializers.FloatField(source='avg_difficulty', read_only=True)
+    opportunityScore = serializers.FloatField(source='opportunity_score', read_only=True)
+    aiSearchVolume = serializers.IntegerField(source='ai_search_volume', read_only=True)
+    articlesWritten = serializers.IntegerField(source='articles_written', read_only=True)
+    ideaCount = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ContentIsland
+        fields = [
+            'id', 'slug', 'name', 'description', 'pillarKeyword',
+            'iconKey', 'colorKey', 'status', 'isNew',
+            'keywordCount', 'totalVolume', 'avgDifficulty',
+            'opportunityScore', 'aiSearchVolume', 'ideaCount', 'articlesWritten',
+        ]
+        read_only_fields = fields
+
+    def get_id(self, obj):
+        return f"island:{obj.slug}"
+
+    def get_isNew(self, obj):
+        if not obj.promoted_at:
+            return False
+        badge_days = int(getattr(settings, 'CONTENT_ISLANDS_NEW_BADGE_DAYS', 7) or 0)
+        if badge_days <= 0:
+            return False
+        return obj.promoted_at >= timezone.now() - timedelta(days=badge_days)
+
+    def get_ideaCount(self, obj):
+        idea_counts = (self.context or {}).get('idea_counts') or {}
+        return int(idea_counts.get(obj.slug, 0))
+
+
+class ContentIslandGraphSerializer(serializers.Serializer):
+    """
+    Nodes + edges + counts for one organization's island graph.
+
+    Edge ``source``/``target`` are bare slugs: the frontend layout joins on
+    ``node.slug``, never on the ``island:<slug>`` node id.
+    """
+    updatedAt = serializers.SerializerMethodField()
+    emergingCount = serializers.SerializerMethodField()
+    nodes = serializers.SerializerMethodField()
+    edges = serializers.SerializerMethodField()
+
+    def get_updatedAt(self, obj):
+        updated_at = obj.get('updated_at')
+        return updated_at.isoformat() if updated_at else None
+
+    def get_emergingCount(self, obj):
+        return int(obj.get('emerging_count') or 0)
+
+    def get_nodes(self, obj):
+        return ContentIslandGraphNodeSerializer(
+            obj.get('islands') or [],
+            many=True,
+            context=self.context,
+        ).data
+
+    def get_edges(self, obj):
+        return [
+            {
+                'source': edge.island_a.slug,
+                'target': edge.island_b.slug,
+                'similarity': edge.similarity,
+            }
+            for edge in obj.get('edges') or []
+        ]
 
 
 class SEODashboardSerializer(serializers.Serializer):
