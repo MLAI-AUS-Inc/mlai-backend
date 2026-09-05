@@ -794,6 +794,18 @@ LOGGING = {
     },
 }
 
+# --- Error reporting -------------------------------------------------------
+# Container logs die with the container, so a deploy erases all history and an
+# intermittent 500 cannot be investigated after the fact. Sentry retains the
+# traceback and request context independently of the container lifecycle.
+#
+# Entirely opt-in: with no SENTRY_DSN set this is a no-op and behaviour is
+# unchanged. init_sentry() never raises -- a broken error tracker must not stop
+# the app from booting. Credential scrubbing lives in core.observability.
+from core.observability import init_sentry  # noqa: E402  (needs APP_ENV/APP_RELEASE above)
+
+SENTRY_ENABLED = init_sentry(environment=APP_ENV, release=APP_RELEASE)
+
 # HSTS (HTTP Strict Transport Security)
 SECURE_HSTS_SECONDS = 31536000
 SECURE_HSTS_INCLUDE_SUBDOMAINS = True

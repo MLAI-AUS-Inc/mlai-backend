@@ -51,3 +51,4 @@ anthropic>=0.18.0  # Optional: for Claude support
 google-api-python-client
 playwright>=1.52.0
 redis>=4.2,<6  # Django builtin RedisCache (shared cross-worker cache; DO Valkey-compatible)
+sentry-sdk[django]>=2.0,<3  # Error reporting; inert unless SENTRY_DSN is set (see core/observability.py)
