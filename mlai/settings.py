@@ -483,6 +483,9 @@ REST_FRAMEWORK = {
         'token_usage_token': os.getenv('TOKEN_USAGE_TOKEN_RATE', '10/minute'),
         'token_usage_leaderboard': os.getenv('TOKEN_USAGE_LEADERBOARD_RATE', '60/minute'),
         'community_chat_home': os.getenv('COMMUNITY_CHAT_HOME_RATE', '60/minute'),
+        'community_chat_slack_delete': os.getenv(
+            'COMMUNITY_CHAT_SLACK_DELETE_RATE', '20/minute'
+        ),
     }
 }
 
@@ -790,6 +793,18 @@ LOGGING = {
         },
     },
 }
+
+# --- Error reporting -------------------------------------------------------
+# Container logs die with the container, so a deploy erases all history and an
+# intermittent 500 cannot be investigated after the fact. Sentry retains the
+# traceback and request context independently of the container lifecycle.
+#
+# Entirely opt-in: with no SENTRY_DSN set this is a no-op and behaviour is
+# unchanged. init_sentry() never raises -- a broken error tracker must not stop
+# the app from booting. Credential scrubbing lives in core.observability.
+from core.observability import init_sentry  # noqa: E402  (needs APP_ENV/APP_RELEASE above)
+
+SENTRY_ENABLED = init_sentry(environment=APP_ENV, release=APP_RELEASE)
 
 # HSTS (HTTP Strict Transport Security)
 SECURE_HSTS_SECONDS = 31536000
@@ -1113,6 +1128,12 @@ BUZZ_BRIDGE_CALLBACK_MAX_AGE_SECONDS = int(
 )
 COMMUNITY_BRIDGE_WORKER_POLL_SECONDS = float(
     os.getenv('COMMUNITY_BRIDGE_WORKER_POLL_SECONDS', '1')
+)
+COMMUNITY_BRIDGE_PARENT_DEPENDENCY_MAX_AGE_SECONDS = int(
+    os.getenv('COMMUNITY_BRIDGE_PARENT_DEPENDENCY_MAX_AGE_SECONDS', '3600')
+)
+COMMUNITY_BRIDGE_PARENT_DEPENDENCY_MAX_ATTEMPTS = int(
+    os.getenv('COMMUNITY_BRIDGE_PARENT_DEPENDENCY_MAX_ATTEMPTS', '360')
 )
 DISCORD_BRIDGE_BOT_TOKEN = os.getenv('DISCORD_BRIDGE_BOT_TOKEN', '')
 DISCORD_BRIDGE_APPLICATION_ID = os.getenv('DISCORD_BRIDGE_APPLICATION_ID', '')
@@ -1476,6 +1497,10 @@ SLACK_API_CONNECT_TIMEOUT_SECONDS = float(os.environ.get("SLACK_API_CONNECT_TIME
 SLACK_API_READ_TIMEOUT_SECONDS = float(os.environ.get("SLACK_API_READ_TIMEOUT_SECONDS", "8") or 8)
 
 LINEAR_API_KEY = os.environ.get("LINEAR_API_KEY", "")
+LINEAR_MEETING_REQUIRED_TEAM_KEYS = _env_list(
+    "LINEAR_MEETING_REQUIRED_TEAM_KEYS",
+    [],
+)
 LINEAR_CLIENT_ID = os.environ.get("LINEAR_CLIENT_ID", "")
 LINEAR_CLIENT_SECRET = os.environ.get("LINEAR_CLIENT_SECRET", "")
 LINEAR_OAUTH_REDIRECT_URI = os.environ.get(

@@ -26,6 +26,8 @@ from integrations.models import (
     ExternalFinancialRecord,
     ExternalServiceProvider,
     ReconciliationProfile,
+    XeroStatementLineSnapshot,
+    XeroStatementSuggestion,
 )
 from integrations.services.xero_reconciliation import (
     XERO_API_URL,
@@ -38,11 +40,18 @@ from integrations.services.xero_scopes import (
     xero_has_invoice_write_scope,
 )
 from integrations.services.xero_statement_posting import (
+    _resolve_xero_tracking_assignment,
     _ensure_bill_tracking,
     _first_xero_row,
-    resolve_xero_tracking_assignment,
 )
-from integrations.services.reconciliation_tracking import xero_tracking_entry
+from integrations.services.xero_statement_reconciliation import (
+    StatementCaptureValidationError,
+    validate_current_statement_line_capture,
+)
+from integrations.services.reconciliation_tracking import (
+    effective_tracking as suggestion_effective_tracking,
+    xero_tracking_entry,
+)
 
 BILL_STATUS_DRAFT = "DRAFT"
 BILL_STATUS_AUTHORISED = "AUTHORISED"
@@ -95,6 +104,181 @@ def _profile_and_connection(organization):
     if profile.xero_connection is None:
         raise ReconciliationValidationError("A Xero connection must be selected.")
     return profile, profile.xero_connection
+
+
+def _bill_statement_binding(
+    organization,
+    *,
+    payload: dict[str, Any],
+    invoice_total: Decimal,
+    currency: str,
+    required: bool,
+    errors: list[str],
+) -> dict[str, Any] | None:
+    """Resolve the exact current bank row that authorises this bill."""
+
+    source = payload.get("source") if isinstance(payload.get("source"), dict) else {}
+    statement_line_id = _clean_text(source.get("statement_line_id"))
+    bank_account_id = _clean_text(source.get("bank_account_id"))
+    expected_source_hash = _clean_text(
+        source.get("statement_source_hash"), limit=64
+    )
+    supplied = bool(statement_line_id or bank_account_id or expected_source_hash)
+    if not required and not supplied:
+        return None
+
+    missing = [
+        field_name
+        for field_name, value in (
+            ("source.statement_line_id", statement_line_id),
+            ("source.bank_account_id", bank_account_id),
+            ("source.statement_source_hash", expected_source_hash),
+        )
+        if not value
+    ]
+    if missing:
+        errors.append(
+            "The bill's exact statement binding is incomplete: "
+            + ", ".join(missing)
+            + "."
+        )
+        return None
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_source_hash):
+        errors.append("source.statement_source_hash must be a lowercase SHA-256 value.")
+        return None
+
+    statement_line = XeroStatementLineSnapshot.objects.filter(
+        organization=organization,
+        bank_account_id=bank_account_id,
+        statement_line_id=statement_line_id,
+    ).first()
+    if statement_line is None:
+        errors.append(
+            "The bound Xero statement line does not exist for this organisation and bank account."
+        )
+        return None
+
+    if statement_line.source_hash != expected_source_hash:
+        errors.append("The bound Xero statement line changed after the bill was prepared.")
+    if statement_line.direction != XeroStatementLineSnapshot.DIRECTION_DEBIT:
+        errors.append("A supplier bill must bind to a debit Xero statement line.")
+    if statement_line.amount != invoice_total:
+        errors.append(
+            f"The bound Xero statement line amount is {statement_line.amount}, "
+            f"not the invoice total {invoice_total}."
+        )
+    if currency and statement_line.currency.casefold() != currency.casefold():
+        errors.append(
+            f"The bound Xero statement line currency is {statement_line.currency}, "
+            f"not the invoice currency {currency}."
+        )
+    if not statement_line.active or (
+        statement_line.queue_state != XeroStatementLineSnapshot.QUEUE_ACTIVE
+    ):
+        errors.append("The bound Xero statement line is no longer active and unreconciled.")
+    if statement_line.is_green_match:
+        errors.append("The bound Xero statement line already has a green match.")
+    if statement_line.matched_xero_transaction_id:
+        errors.append("The bound Xero statement line already identifies a matched Xero transaction.")
+    try:
+        selection = validate_current_statement_line_capture(
+            statement_line,
+            expected_bank_account_id=bank_account_id,
+            expected_source_hash=expected_source_hash,
+        )
+    except StatementCaptureValidationError as exc:
+        errors.append(str(exc))
+        selection = None
+
+    if errors:
+        return None
+    return {
+        "statement_line_id": statement_line.statement_line_id,
+        "bank_account_id": statement_line.bank_account_id,
+        "statement_source_hash": statement_line.source_hash,
+        "statement_scan_id": statement_line.last_scan_id,
+        "capture_id": str(getattr(selection, "capture_id", "") or ""),
+    }
+
+
+def _require_bill_statement_binding(
+    organization,
+    *,
+    payload: dict[str, Any],
+    invoice_total: Decimal,
+    currency: str,
+    required: bool,
+) -> dict[str, Any] | None:
+    errors: list[str] = []
+    binding = _bill_statement_binding(
+        organization,
+        payload=payload,
+        invoice_total=invoice_total,
+        currency=currency,
+        required=required,
+        errors=errors,
+    )
+    if errors:
+        raise ReconciliationValidationError(
+            "Bill statement binding is not current.", errors=errors
+        )
+    return binding
+
+
+def _bill_tracking_execution_suggestion(
+    organization,
+    *,
+    profile: ReconciliationProfile,
+    payload: dict[str, Any],
+    statement_binding: dict[str, Any] | None,
+    tracking_assignment: dict[str, Any] | None,
+) -> XeroStatementSuggestion | None:
+    """Return the exact current suggestion allowed to create canonical tracking."""
+
+    if not statement_binding or not tracking_assignment or tracking_assignment.get("default"):
+        return None
+    source = payload.get("source") if isinstance(payload.get("source"), dict) else {}
+    run_id = _clean_text(source.get("run_id"))
+    try:
+        suggestion_id = int(source.get("suggestion_id"))
+    except (TypeError, ValueError):
+        return None
+    if not run_id or suggestion_id <= 0:
+        return None
+    suggestion = (
+        XeroStatementSuggestion.objects.select_related("statement_line")
+        .filter(
+            pk=suggestion_id,
+            organization=organization,
+            run_id=run_id,
+            status=XeroStatementSuggestion.STATUS_PROPOSED,
+            execution_ready=True,
+            statement_line__statement_line_id=statement_binding["statement_line_id"],
+            statement_line__bank_account_id=statement_binding["bank_account_id"],
+        )
+        .first()
+    )
+    if suggestion is None or suggestion.source_hash != statement_binding["statement_source_hash"]:
+        return None
+    canonical_assignment = suggestion_effective_tracking(profile, suggestion)
+    if canonical_assignment is None:
+        return None
+    for key in (
+        "allocation_mode",
+        "kind",
+        "category_id",
+        "category_name",
+        "option_name",
+        "default",
+    ):
+        expected = canonical_assignment.get(key)
+        actual = tracking_assignment.get(key)
+        if isinstance(expected, str):
+            if str(actual or "").strip().casefold() != expected.strip().casefold():
+                return None
+        elif actual != expected:
+            return None
+    return suggestion
 
 
 def _bill_effective_tracking(
@@ -271,6 +455,23 @@ def build_reconciliation_bill_preview(organization, *, payload: dict[str, Any]) 
         errors.append("Reconnect Xero with accounting.transactions before creating bills.")
 
     source = payload.get("source") if isinstance(payload.get("source"), dict) else {}
+    scheduled_marker = source.get("scheduled_automation", False)
+    if not isinstance(scheduled_marker, bool):
+        errors.append("source.scheduled_automation must be a boolean when provided.")
+    scheduled_automation = scheduled_marker is True
+    statement_binding_required = bool(
+        resolved_status == BILL_STATUS_AUTHORISED
+        or scheduled_automation
+        or (scheduled_marker not in (False, None))
+    )
+    statement_binding = _bill_statement_binding(
+        organization,
+        payload=payload,
+        invoice_total=line_total,
+        currency=currency,
+        required=statement_binding_required,
+        errors=errors,
+    )
     gmail_message_id = _clean_text(source.get("gmail_message_id"))
     reference = _clean_text(payload.get("reference")) or (
         f"treasurer-inbox:{gmail_message_id}" if gmail_message_id else ""
@@ -332,6 +533,8 @@ def build_reconciliation_bill_preview(organization, *, payload: dict[str, Any]) 
         "invoice_number": invoice_number,
         "total": str(line_total),
         "document_metadata": document_metadata,
+        "statement_binding_required": statement_binding_required,
+        "statement_binding": statement_binding,
         "effective_tracking": tracking_assignment,
         "tracking_policy_ready": not (
             profile and profile.require_statement_tracking and not tracking_assignment
@@ -517,6 +720,29 @@ def create_reconciliation_bill(
     profile, connection = _profile_and_connection(organization)
     invoice_number = preview["invoice_number"]
     contact_name = preview["contact_name"]
+    invoice_total = _money(preview["total"])
+    if invoice_total is None:
+        raise ReconciliationValidationError("Bill request has no valid invoice total.")
+    invoice_currency = str(
+        preview.get("xero_payload", {}).get("CurrencyCode") or ""
+    )
+    statement_binding_required = preview.get("statement_binding_required") is True
+    tracking_suggestion = _bill_tracking_execution_suggestion(
+        organization,
+        profile=profile,
+        payload=payload,
+        statement_binding=preview.get("statement_binding"),
+        tracking_assignment=preview.get("effective_tracking"),
+    )
+
+    def revalidate_statement_binding() -> dict[str, Any] | None:
+        return _require_bill_statement_binding(
+            organization,
+            payload=payload,
+            invoice_total=invoice_total,
+            currency=invoice_currency,
+            required=statement_binding_required,
+        )
 
     existing = _existing_bill_for_contact(
         connection, invoice_number=invoice_number, contact_name=contact_name
@@ -529,10 +755,7 @@ def create_reconciliation_bill(
                 f"Xero already has bill {invoice_number} for {contact_name} with total "
                 f"{existing_total}, not {requested_total}. Review it before creating another."
             )
-        tracking = resolve_xero_tracking_assignment(
-            connection, profile, preview.get("effective_tracking")
-        )
-        if tracking:
+        if preview.get("effective_tracking"):
             full_response = http_client.get(
                 f"{XERO_API_URL}/Invoices/{existing['InvoiceID']}",
                 headers=_xero_headers(connection),
@@ -540,6 +763,14 @@ def create_reconciliation_bill(
             )
             full_response.raise_for_status()
             full_bill = _first_xero_row(full_response.json(), "Invoices")
+            revalidate_statement_binding()
+            tracking = _resolve_xero_tracking_assignment(
+                connection,
+                profile,
+                preview.get("effective_tracking"),
+                execution_suggestion=tracking_suggestion,
+            )
+            revalidate_statement_binding()
             _ensure_bill_tracking(connection, bill=full_bill, tracking=tracking[0])
         _mirror_authorised_bill(
             connection,
@@ -555,12 +786,6 @@ def create_reconciliation_bill(
         }
 
     xero_payload = dict(preview["xero_payload"])
-    tracking = resolve_xero_tracking_assignment(
-        connection, profile, preview.get("effective_tracking")
-    )
-    if tracking:
-        for line_item in xero_payload.get("LineItems") or []:
-            line_item["Tracking"] = tracking
     xero_payload["Contact"] = _contact_payload(connection, contact_name)
     if xero_payload["Status"] == BILL_STATUS_AUTHORISED:
         _validate_authorised_lines(connection, xero_payload)
@@ -569,6 +794,17 @@ def create_reconciliation_bill(
     headers["Idempotency-Key"] = (
         f"mlai-bill-{hashlib.sha256(idempotency_seed.encode('utf-8')).hexdigest()[:32]}"
     )
+    revalidate_statement_binding()
+    tracking = _resolve_xero_tracking_assignment(
+        connection,
+        profile,
+        preview.get("effective_tracking"),
+        execution_suggestion=tracking_suggestion,
+    )
+    if tracking:
+        for line_item in xero_payload.get("LineItems") or []:
+            line_item["Tracking"] = tracking
+    revalidate_statement_binding()
     response = http_client.put(
         f"{XERO_API_URL}/Invoices",
         headers=headers,

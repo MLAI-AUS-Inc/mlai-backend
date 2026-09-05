@@ -43,6 +43,10 @@ class LinearMeetingConfigurationError(Exception):
     pass
 
 
+class LinearMeetingAccessError(Exception):
+    """Raised when Roo's Linear credential cannot see its required teams."""
+
+
 class LinearMeetingGraphQLError(Exception):
     def __init__(self, message: str, *, operation: str | None = None):
         self.operation = operation
@@ -1242,6 +1246,7 @@ def _normalize_linear_channel_issue_detail(
 
 def get_linear_meeting_context() -> dict[str, Any]:
     teams = list_teams()
+    _assert_required_linear_team_access(teams)
     users = list_users()
     projects = list_active_projects(teams=teams)
     labels = list_issue_labels()
@@ -1864,7 +1869,9 @@ def resolve_linear_project(query: str, *, limit: int = 100) -> dict[str, Any]:
     if len(normalized_query) < 3:
         raise ValueError("A specific Linear project query is required.")
 
-    projects = _list_projects(limit=limit, teams=[], include_inactive=True)
+    teams = list_teams()
+    _assert_required_linear_team_access(teams)
+    projects = _list_projects(limit=limit, teams=teams, include_inactive=True)
     ranked: list[tuple[float, dict[str, Any], str]] = []
     for project in projects:
         best_score = 0.0
@@ -1888,6 +1895,14 @@ def resolve_linear_project(query: str, *, limit: int = 100) -> dict[str, Any]:
             ):
                 score = 0.94
                 reason = f"Matched project by {field} containment"
+            elif field == "name" and _is_ordered_project_token_alias(query, value):
+                # People often omit the client/brand token from a Studio title,
+                # for example "[Studio] Master App" for
+                # "[Studio] Sansoni Master App". Rank an ordered token alias
+                # below containment and let the existing runner-up guard reject
+                # it when more than one project fits.
+                score = 0.92
+                reason = "Matched project by ordered name tokens"
             else:
                 similarity = SequenceMatcher(
                     None,
@@ -1946,7 +1961,12 @@ def _list_projects(
 ) -> list[dict[str, Any]]:
     page_size = _bounded_limit(limit, default=100, maximum=100)
     query = """
-    query LinearProjects($first: Int!, $after: String, $includeArchived: Boolean!) {
+    query LinearProjects(
+      $first: Int!,
+      $after: String,
+      $includeArchived: Boolean!,
+      $memberFirst: Int!
+    ) {
       projects(first: $first, after: $after, includeArchived: $includeArchived) {
         nodes {
           id
@@ -1989,7 +2009,7 @@ def _list_projects(
               name
             }
           }
-          members(first: 50) {
+          members(first: $memberFirst) {
             nodes {
               id
               name
@@ -2012,6 +2032,12 @@ def _list_projects(
             "after": cursor,
             "includeArchived": include_inactive,
         }
+        if not use_basic_query:
+            # Project members are useful assignment evidence, but multiplying
+            # 100 projects by 50 nested members exceeds Linear's query budget in
+            # the MLAI workspace. Ten preserves a bounded tie-breaker while team
+            # membership remains the complete fallback.
+            variables["memberFirst"] = 10
         try:
             data = _graphql(
                 _basic_projects_query() if use_basic_query else query,
@@ -3388,6 +3414,42 @@ def _team_members_query_unsupported(exc: LinearMeetingGraphQLError) -> bool:
     )
 
 
+def _assert_required_linear_team_access(teams: list[dict[str, Any]]) -> None:
+    required_keys = {
+        str(value or "").strip().upper()
+        for value in getattr(settings, "LINEAR_MEETING_REQUIRED_TEAM_KEYS", []) or []
+        if str(value or "").strip()
+    }
+    if not required_keys:
+        return
+
+    accessible_keys = {
+        str(team.get("key") or "").strip().upper()
+        for team in teams
+        if isinstance(team, dict) and str(team.get("key") or "").strip()
+    }
+    missing_keys = sorted(required_keys - accessible_keys)
+    if not missing_keys:
+        return
+
+    accessible_names = sorted(
+        {
+            str(team.get("name") or team.get("key") or "").strip()
+            for team in teams
+            if isinstance(team, dict)
+            and str(team.get("name") or team.get("key") or "").strip()
+        }
+    )
+    visible = ", ".join(accessible_names) if accessible_names else "no teams"
+    missing = ", ".join(missing_keys)
+    raise LinearMeetingAccessError(
+        "Roo's Linear credential has incomplete workspace access. "
+        f"Missing required team keys: {missing}; currently visible: {visible}. "
+        "Replace or re-authorize LINEAR_API_KEY with read/write access and "
+        "'All teams you have access to'. Nothing was changed."
+    )
+
+
 def _project_context_query_unsupported(exc: LinearMeetingGraphQLError) -> bool:
     message = str(exc).lower()
     contextual_fields = {"content", "description", "members", "slackchannelid"}
@@ -3433,6 +3495,23 @@ def _project_is_inactive(project: dict[str, Any], inactive_states: set[str]) -> 
 
 def _normalize_project_lookup_value(value: Any) -> str:
     return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
+
+
+def _is_ordered_project_token_alias(query: Any, candidate: Any) -> bool:
+    """Return true when a specific multi-token query is a candidate subsequence."""
+
+    query_tokens = re.findall(r"[a-z0-9]+", str(query or "").lower())
+    candidate_tokens = re.findall(r"[a-z0-9]+", str(candidate or "").lower())
+    if len(query_tokens) < 3 or len(query_tokens) >= len(candidate_tokens):
+        return False
+
+    candidate_index = 0
+    for query_token in query_tokens:
+        try:
+            candidate_index = candidate_tokens.index(query_token, candidate_index) + 1
+        except ValueError:
+            return False
+    return True
 
 
 def _project_lookup_summary(

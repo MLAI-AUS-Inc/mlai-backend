@@ -92,6 +92,7 @@ ALLOWED_CONNECTOR_NEXT_PREFIXES = (
     "/vibe-raising/connect-data",
     "/vibe-raising/create-update",
     "/home",
+    "/?slack_connected=",
 )
 
 
@@ -283,9 +284,9 @@ def normalize_connector_next(next_url: Optional[str]) -> str:
     if parsed.scheme or parsed.netloc:
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
             return default_next
-        if _origin_from_url(raw_next) not in _known_frontend_origins():
-            return default_next
         target_origin = _origin_from_url(raw_next)
+        if target_origin not in _known_frontend_origins():
+            return default_next
         candidate = urllib.parse.urlunparse(("", "", parsed.path, "", parsed.query, ""))
     else:
         candidate = raw_next if raw_next.startswith("/") else f"/{raw_next}"
@@ -812,6 +813,25 @@ def _consume_state(request, provider: str, state: str) -> dict[str, Any]:
     return signed_payload
 
 
+def connector_oauth_state_user_id(*, provider: str, state: str) -> Optional[int]:
+    """Resolve a user only from a valid, unexpired server-signed OAuth state."""
+
+    try:
+        payload = signing.loads(
+            str(state or ""),
+            salt=CONNECTOR_OAUTH_STATE_SIGNING_SALT,
+            max_age=CONNECTOR_OAUTH_STATE_MAX_AGE_SECONDS,
+        )
+    except (signing.BadSignature, signing.SignatureExpired):
+        return None
+    if not isinstance(payload, dict) or payload.get("provider") != provider:
+        return None
+    try:
+        return int(payload.get("user_id"))
+    except (TypeError, ValueError):
+        return None
+
+
 def _expires_at(token_data: dict[str, Any]) -> Optional[Any]:
     raw = token_data.get("expires_in")
     try:
@@ -930,6 +950,57 @@ def build_authorization_url(request, provider: str) -> str:
         return "https://linear.app/oauth/authorize?" + urllib.parse.urlencode(params)
 
     raise ConnectorConfigurationError("Unsupported connector provider.")
+
+
+def build_community_chat_slack_authorization_url(user) -> str:
+    """Build a Slack user-token OAuth URL for an authenticated Chat account."""
+
+    configuration_error = _provider_configuration_error(ExternalServiceProvider.SLACK)
+    if configuration_error:
+        raise ConnectorConfigurationError(configuration_error)
+    frontend_url = str(
+        getattr(settings, "COMMUNITY_CHAT_FRONTEND_URL", "") or ""
+    ).rstrip("/")
+    parsed_frontend = urllib.parse.urlparse(frontend_url)
+    allowed_origins = {
+        str(origin).strip().rstrip("/")
+        for origin in getattr(settings, "COMMUNITY_CHAT_ALLOWED_ORIGINS", [])
+    }
+    if (
+        parsed_frontend.scheme not in {"http", "https"}
+        or not parsed_frontend.netloc
+        or frontend_url not in allowed_origins
+    ):
+        raise ConnectorConfigurationError(
+            "COMMUNITY_CHAT_FRONTEND_URL must be a trusted absolute Chat origin."
+        )
+    next_url = f"{frontend_url}/?slack_connected=true"
+    organization = active_organization_for_user(user)
+    state = signing.dumps(
+        {
+            "provider": ExternalServiceProvider.SLACK,
+            "user_id": user.id,
+            "nonce": secrets.token_urlsafe(24),
+            "next": next_url,
+            "organization_id": organization.id if organization else None,
+            "flow": "community_chat_delete",
+            SLACK_OAUTH_STATE_GENERATION_KEY: current_slack_oauth_generation(user.pk),
+        },
+        salt=CONNECTOR_OAUTH_STATE_SIGNING_SALT,
+        compress=True,
+    )
+    params = {
+        "client_id": settings.SLACK_CLIENT_ID,
+        "redirect_uri": settings.SLACK_OAUTH_REDIRECT_URI,
+        "state": state,
+    }
+    bot_scopes = _slack_oauth_bot_scope_list()
+    user_scopes = _slack_oauth_user_scope_list()
+    if bot_scopes:
+        params["scope"] = ",".join(bot_scopes)
+    if user_scopes:
+        params["user_scope"] = ",".join(user_scopes)
+    return "https://slack.com/oauth/v2/authorize?" + urllib.parse.urlencode(params)
 
 
 def _basiq_headers(extra: Optional[dict[str, str]] = None) -> dict[str, str]:

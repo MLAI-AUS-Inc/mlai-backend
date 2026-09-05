@@ -278,6 +278,7 @@ install_remote_env_value() {
 }
 
 echo "🔧 Updating Linear channel issue reader configuration..."
+install_remote_env_value LINEAR_MEETING_REQUIRED_TEAM_KEYS "$LINEAR_MEETING_REQUIRED_TEAM_KEYS"
 install_remote_env_value LINEAR_CHANNEL_ISSUE_BINDINGS_JSON "$LINEAR_CHANNEL_ISSUE_BINDINGS_JSON"
 install_remote_env_value LINEAR_CHANNEL_ISSUE_MAX_COMMENTS "$LINEAR_CHANNEL_ISSUE_MAX_COMMENTS"
 install_remote_env_value LINEAR_CHANNEL_ISSUE_WRITES_ENABLED "$linear_channel_writes_enabled_normalized"
