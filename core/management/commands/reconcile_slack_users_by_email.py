@@ -4,11 +4,13 @@ from django.contrib.auth import get_user_model
 from django.core.management.base import BaseCommand
 from django.core.management.base import CommandError
 from django.db import transaction
+from django.db.models import Q
 
 from content_factory.models import OrganizationContentConfig
 from integrations.models import UserIntegration
 from integrations.services.slack import SlackService
 from core.management.commands.cleanup_users import Command as CleanupUsersCommand
+from core.models import SlackFounderLinkRequest
 
 from core.slack_founder_links import (
     invalidate_unused_slack_founder_link_requests,
@@ -88,10 +90,78 @@ class Command(BaseCommand):
                 merger = CleanupUsersCommand()
                 merger.stdout = self.stdout
                 merger.stderr = self.stderr
+
+                def before_merge(locked_slack_user, locked_email_user):
+                    if user_participates_in_slack_founder_link(
+                        locked_email_user
+                    ) or user_participates_in_slack_founder_link(
+                        locked_slack_user
+                    ):
+                        self.stdout.write(
+                            self.style.WARNING(
+                                f"{slack_id}: explicit Roo-Founder Tools link appeared; "
+                                "manual support required"
+                            )
+                        )
+                        return False
+
+                    current_target_slack_id = str(
+                        locked_email_user.slack_id or ""
+                    ).strip()
+                    if current_target_slack_id:
+                        if current_target_slack_id == slack_id:
+                            self.stdout.write(
+                                f"{slack_id}: already linked while reconciliation was running"
+                            )
+                        else:
+                            self.stdout.write(
+                                self.style.WARNING(
+                                    f"{slack_id}: target gained another Slack identity; "
+                                    "manual support required"
+                                )
+                            )
+                        return False
+
+                    if str(locked_slack_user.slack_id or "").strip() != slack_id:
+                        self.stdout.write(
+                            self.style.WARNING(
+                                f"{slack_id}: source Slack identity changed while "
+                                "reconciliation was running; manual support required"
+                            )
+                        )
+                        return False
+
+                    # Link-request rows are security audit history and must not
+                    # cascade away with a duplicate principal. Preserve the
+                    # source row in this rare case, invalidate any unused
+                    # capabilities, and transfer only the Slack identity.
+                    has_link_request_history = SlackFounderLinkRequest.objects.filter(
+                        Q(slack_user__in=[locked_slack_user, locked_email_user])
+                        | Q(
+                            consumed_by_user__in=[
+                                locked_slack_user,
+                                locked_email_user,
+                            ]
+                        )
+                    ).exists()
+                    if has_link_request_history:
+                        invalidate_unused_slack_founder_link_requests(
+                            locked_slack_user,
+                            locked_email_user,
+                        )
+                        locked_slack_user.slack_id = None
+                        locked_slack_user.save(update_fields=["slack_id"])
+                        locked_email_user.slack_id = slack_id
+                        locked_email_user.save(update_fields=["slack_id"])
+                        return False
+
+                    return True
+
                 try:
                     merger.merge_users_with_retry(
                         source_id=slack_user.pk,
                         target_id=email_user.pk,
+                        before_merge=before_merge,
                     )
                 except (ValueError, CommandError) as exc:
                     raise CommandError(

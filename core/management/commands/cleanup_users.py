@@ -198,8 +198,21 @@ class Command(BaseCommand):
         )
         self.stdout.write(self.style.SUCCESS('Merge complete'))
 
-    def merge_users_with_retry(self, *, source_id, target_id):
-        """Retry only whole merge transactions aborted by PostgreSQL."""
+    def merge_users_with_retry(
+        self,
+        *,
+        source_id,
+        target_id,
+        before_merge=None,
+    ):
+        """Retry only whole merge transactions aborted by PostgreSQL.
+
+        ``before_merge`` runs after both principals are locked. Callers with
+        identity-specific safety rules can revalidate those rules without
+        opening a race between validation and the durable ownership transfer.
+        Returning ``False`` commits any deliberate preparatory changes while
+        leaving both principals in place.
+        """
         for attempt in range(MERGE_TRANSACTION_RETRY_ATTEMPTS):
             try:
                 with transaction.atomic():
@@ -211,11 +224,15 @@ class Command(BaseCommand):
                     }
                     if len(principals) != 2:
                         raise CommandError('Both merge principals must still exist')
-                    self.merge_users(
-                        source=principals[source_id],
-                        target=principals[target_id],
-                    )
-                return
+                    source = principals[source_id]
+                    target = principals[target_id]
+                    if before_merge is not None and not before_merge(
+                        source,
+                        target,
+                    ):
+                        return False
+                    self.merge_users(source=source, target=target)
+                return True
             except OperationalError as exc:
                 if (
                     not _retryable_transaction_error(exc)

@@ -1827,7 +1827,9 @@ class CoworkingViewSet(viewsets.ViewSet):
                 # the single source of truth in get_standard_coworking_cost().
                 standard_cost = CoworkingService.get_standard_coworking_cost()
                 response_data["standard_points_cost"] = standard_cost
-                response_data["monthly_update_discount_applied"] = booking.points_cost < standard_cost
+                response_data["monthly_update_discount_applied"] = (
+                    CoworkingService.monthly_update_discount_applied(booking)
+                )
                 connection_type = founder_tools_connection_type(booking.user)
                 response_data["founder_tools_connection_type"] = connection_type
                 response_data["founder_tools_account_linked"] = (
@@ -2028,7 +2030,9 @@ class CoworkingViewSet(viewsets.ViewSet):
                         'booking': dict(CoworkingBookingSerializer(booking).data),
                         'points_cost': booking.points_cost,
                         'standard_points_cost': standard_cost,
-                        'monthly_update_discount_applied': booking.points_cost < standard_cost,
+                        'monthly_update_discount_applied': (
+                            CoworkingService.monthly_update_discount_applied(booking)
+                        ),
                         'founder_tools_connection_type': connection_type,
                         'founder_tools_account_linked': connection_type is not None,
                         'founder_tools_explicitly_linked': connection_type == 'explicit',
