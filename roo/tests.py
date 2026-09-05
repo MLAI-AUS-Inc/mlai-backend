@@ -16,7 +16,7 @@ from .models import (
     CoworkingBooking, CoworkingDayCapacity, RewardsCatalog, RewardRedemption,
     PointsPurchase,
 )
-from .admin import LedgerAdmin, PointsAccountAdmin
+from .admin import CoworkingBookingAdmin, LedgerAdmin, PointsAccountAdmin
 from .services import PointsService, PointsPurchaseService, CoworkingService, TaskService, RewardsService, StartupUpdateRewardService
 from .permissions import (
     can_generate_coworking_reports,
@@ -531,6 +531,18 @@ class LedgerAdminSafetyTests(TestCase):
         self.assertFalse(model_admin.has_delete_permission(request=None))
 
 
+class CoworkingBookingAdminSafetyTests(TestCase):
+    def test_every_transaction_field_is_read_only(self):
+        model_admin = CoworkingBookingAdmin(CoworkingBooking, AdminSite())
+        readonly = set(model_admin.get_readonly_fields(request=None))
+        self.assertEqual(
+            readonly,
+            {field.name for field in CoworkingBooking._meta.fields},
+        )
+        self.assertFalse(model_admin.has_add_permission(request=None))
+        self.assertFalse(model_admin.has_delete_permission(request=None))
+
+
 class PointsPurchaseModelTests(TestCase):
     """Tests for the Top-up Roo Points purchase record."""
 
@@ -816,6 +828,49 @@ class CoworkingServiceTests(TestCase):
         )
         account = PointsAccount.objects.get(user=self.user)
         self.assertEqual(account.balance, 2)  # charged once at the standard 8
+
+    def test_cancel_rebook_cycle_charges_each_booking_before_refund(self):
+        """A replacement booking is a new charged lifecycle, not a spend replay."""
+        booking_date = date.today() + timedelta(days=7)
+
+        first, first_created = CoworkingService.book(
+            user=self.user,
+            booking_date=booking_date,
+            created_by_slack_id=self.user.slack_id,
+        )
+        _, first_refunded = CoworkingService.cancel(
+            booking_id=str(first.id),
+            requester_slack_id=self.user.slack_id,
+        )
+        second, second_created = CoworkingService.book(
+            user=self.user,
+            booking_date=booking_date,
+            created_by_slack_id=self.user.slack_id,
+        )
+        _, second_refunded = CoworkingService.cancel(
+            booking_id=str(second.id),
+            requester_slack_id=self.user.slack_id,
+        )
+
+        self.assertTrue(first_created)
+        self.assertTrue(first_refunded)
+        self.assertTrue(second_created)
+        self.assertTrue(second_refunded)
+        self.assertNotEqual(first.id, second.id)
+        account = PointsAccount.objects.get(user=self.user)
+        self.assertEqual(account.balance, 10)
+        lifecycle_ledgers = Ledger.objects.filter(
+            user=self.user,
+            source='COWORKING',
+        )
+        self.assertEqual(lifecycle_ledgers.filter(kind='SPEND').count(), 2)
+        self.assertEqual(lifecycle_ledgers.filter(kind='REFUND').count(), 2)
+        self.assertEqual(
+            set(lifecycle_ledgers.filter(kind='SPEND').values_list(
+                'reference_id', flat=True
+            )),
+            {str(first.id), str(second.id)},
+        )
 
     @patch('roo.services.connection')
     def test_booking_date_lock_uses_postgres_transaction_advisory_lock(self, mock_connection):

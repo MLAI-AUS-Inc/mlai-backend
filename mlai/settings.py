@@ -511,6 +511,9 @@ REST_FRAMEWORK = {
         'token_usage_token': os.getenv('TOKEN_USAGE_TOKEN_RATE', '10/minute'),
         'token_usage_leaderboard': os.getenv('TOKEN_USAGE_LEADERBOARD_RATE', '60/minute'),
         'community_chat_home': os.getenv('COMMUNITY_CHAT_HOME_RATE', '60/minute'),
+        'community_chat_slack_delete': os.getenv(
+            'COMMUNITY_CHAT_SLACK_DELETE_RATE', '20/minute'
+        ),
     }
 }
 
@@ -819,6 +822,18 @@ LOGGING = {
     },
 }
 
+# --- Error reporting -------------------------------------------------------
+# Container logs die with the container, so a deploy erases all history and an
+# intermittent 500 cannot be investigated after the fact. Sentry retains the
+# traceback and request context independently of the container lifecycle.
+#
+# Entirely opt-in: with no SENTRY_DSN set this is a no-op and behaviour is
+# unchanged. init_sentry() never raises -- a broken error tracker must not stop
+# the app from booting. Credential scrubbing lives in core.observability.
+from core.observability import init_sentry  # noqa: E402  (needs APP_ENV/APP_RELEASE above)
+
+SENTRY_ENABLED = init_sentry(environment=APP_ENV, release=APP_RELEASE)
+
 # HSTS (HTTP Strict Transport Security)
 SECURE_HSTS_SECONDS = 31536000
 SECURE_HSTS_INCLUDE_SUBDOMAINS = True
@@ -896,6 +911,48 @@ ESAFETY_URL = os.getenv('ESAFETY_URL') or DEFAULT_FRONTEND_URL
 WATT_THE_HACK_URL = os.getenv('WATT_THE_HACK_URL') or DEFAULT_FRONTEND_URL
 VIBE_RAISING_URL = os.getenv('VIBE_RAISING_URL') or DEFAULT_FRONTEND_URL
 FOUNDER_TOOLS_URL = os.getenv('FOUNDER_TOOLS_URL') or VIBE_RAISING_URL
+CORE_ACTOR_MIGRATION_HISTORY_ATTESTATION = os.getenv(
+    'CORE_ACTOR_MIGRATION_HISTORY_ATTESTATION',
+    '',
+).strip().lower()
+try:
+    ROO_FOUNDER_LINK_TTL_SECONDS = int(
+        os.getenv('ROO_FOUNDER_LINK_TTL_SECONDS', '1800') or 1800
+    )
+except ValueError as exc:
+    raise ImproperlyConfigured(
+        'ROO_FOUNDER_LINK_TTL_SECONDS must be an integer between 300 and 1800 seconds'
+    ) from exc
+if not 300 <= ROO_FOUNDER_LINK_TTL_SECONDS <= 1800:
+    raise ImproperlyConfigured(
+        'ROO_FOUNDER_LINK_TTL_SECONDS must be between 300 and 1800 seconds'
+    )
+try:
+    ROO_FOUNDER_LINK_ISSUE_LIMIT = int(
+        os.getenv('ROO_FOUNDER_LINK_ISSUE_LIMIT', '5') or 5
+    )
+    ROO_FOUNDER_LINK_ISSUE_WINDOW_SECONDS = int(
+        os.getenv('ROO_FOUNDER_LINK_ISSUE_WINDOW_SECONDS', '600') or 600
+    )
+    ROO_FOUNDER_LINK_REQUEST_RETENTION_DAYS = int(
+        os.getenv('ROO_FOUNDER_LINK_REQUEST_RETENTION_DAYS', '7') or 7
+    )
+except ValueError as exc:
+    raise ImproperlyConfigured(
+        'Roo Founder link issuance and retention settings must be integers'
+    ) from exc
+if not 1 <= ROO_FOUNDER_LINK_ISSUE_LIMIT <= 100:
+    raise ImproperlyConfigured(
+        'ROO_FOUNDER_LINK_ISSUE_LIMIT must be between 1 and 100'
+    )
+if not 60 <= ROO_FOUNDER_LINK_ISSUE_WINDOW_SECONDS <= 86400:
+    raise ImproperlyConfigured(
+        'ROO_FOUNDER_LINK_ISSUE_WINDOW_SECONDS must be between 60 and 86400'
+    )
+if not 1 <= ROO_FOUNDER_LINK_REQUEST_RETENTION_DAYS <= 365:
+    raise ImproperlyConfigured(
+        'ROO_FOUNDER_LINK_REQUEST_RETENTION_DAYS must be between 1 and 365'
+    )
 CONTENT_FACTORY_FRONTEND_URL = os.getenv('CONTENT_FACTORY_FRONTEND_URL') or DEFAULT_FRONTEND_URL
 CONTENT_FACTORY_URL = os.getenv('CONTENT_FACTORY_URL') or (
     'http://localhost:8001' if IS_LOCAL_ENV else ''
@@ -1106,6 +1163,12 @@ BUZZ_BRIDGE_CALLBACK_MAX_AGE_SECONDS = int(
 )
 COMMUNITY_BRIDGE_WORKER_POLL_SECONDS = float(
     os.getenv('COMMUNITY_BRIDGE_WORKER_POLL_SECONDS', '1')
+)
+COMMUNITY_BRIDGE_PARENT_DEPENDENCY_MAX_AGE_SECONDS = int(
+    os.getenv('COMMUNITY_BRIDGE_PARENT_DEPENDENCY_MAX_AGE_SECONDS', '3600')
+)
+COMMUNITY_BRIDGE_PARENT_DEPENDENCY_MAX_ATTEMPTS = int(
+    os.getenv('COMMUNITY_BRIDGE_PARENT_DEPENDENCY_MAX_ATTEMPTS', '360')
 )
 DISCORD_BRIDGE_BOT_TOKEN = os.getenv('DISCORD_BRIDGE_BOT_TOKEN', '')
 DISCORD_BRIDGE_APPLICATION_ID = os.getenv('DISCORD_BRIDGE_APPLICATION_ID', '')
@@ -1469,6 +1532,10 @@ SLACK_API_CONNECT_TIMEOUT_SECONDS = float(os.environ.get("SLACK_API_CONNECT_TIME
 SLACK_API_READ_TIMEOUT_SECONDS = float(os.environ.get("SLACK_API_READ_TIMEOUT_SECONDS", "8") or 8)
 
 LINEAR_API_KEY = os.environ.get("LINEAR_API_KEY", "")
+LINEAR_MEETING_REQUIRED_TEAM_KEYS = _env_list(
+    "LINEAR_MEETING_REQUIRED_TEAM_KEYS",
+    [],
+)
 LINEAR_CLIENT_ID = os.environ.get("LINEAR_CLIENT_ID", "")
 LINEAR_CLIENT_SECRET = os.environ.get("LINEAR_CLIENT_SECRET", "")
 LINEAR_OAUTH_REDIRECT_URI = os.environ.get(

@@ -3,12 +3,17 @@ from __future__ import annotations
 from django.contrib.auth import get_user_model
 from django.core.management.base import BaseCommand
 from django.core.management.base import CommandError
-from django.db.models import Q
+from django.db import transaction
 
 from content_factory.models import OrganizationContentConfig
 from integrations.models import UserIntegration
 from integrations.services.slack import SlackService
 from core.management.commands.cleanup_users import Command as CleanupUsersCommand
+
+from core.slack_founder_links import (
+    invalidate_unused_slack_founder_link_requests,
+    user_participates_in_slack_founder_link,
+)
 
 
 class Command(BaseCommand):
@@ -66,6 +71,16 @@ class Command(BaseCommand):
                 if commit:
                     failures.append(f"{slack_id}: target already owns another Slack id")
                 continue
+            if user_participates_in_slack_founder_link(email_user) or (
+                slack_user is not None
+                and user_participates_in_slack_founder_link(slack_user)
+            ):
+                self.stdout.write(
+                    self.style.WARNING(
+                        f"{slack_id}: explicit Roo-Founder Tools link exists; manual support required"
+                    )
+                )
+                continue
             self.stdout.write(f"{slack_id}: link to {email}")
             if not commit:
                 continue
@@ -84,15 +99,41 @@ class Command(BaseCommand):
                     ) from exc
             else:
                 # No duplicate principal exists, so there is no durable ownership
-                # to transfer. Re-read before linking to avoid a stale profile row.
-                updated = User.objects.filter(
-                    Q(slack_id__isnull=True) | Q(slack_id=""),
-                    pk=email_user.pk,
-                ).update(slack_id=slack_id)
-                if updated != 1:
-                    raise CommandError(
-                        f"{slack_id}: target identity changed during reconciliation"
+                # to transfer. Lock and re-check the target before assigning the
+                # Slack identity, including links created during this sweep.
+                with transaction.atomic():
+                    locked_email_user = User.objects.select_for_update().get(
+                        pk=email_user.pk
                     )
+                    if user_participates_in_slack_founder_link(locked_email_user):
+                        self.stdout.write(
+                            self.style.WARNING(
+                                f"{slack_id}: explicit Roo-Founder Tools link appeared; "
+                                "manual support required"
+                            )
+                        )
+                        continue
+                    current_target_slack_id = str(
+                        locked_email_user.slack_id or ""
+                    ).strip()
+                    if current_target_slack_id:
+                        if current_target_slack_id == slack_id:
+                            self.stdout.write(
+                                f"{slack_id}: already linked while reconciliation was running"
+                            )
+                        else:
+                            self.stdout.write(
+                                self.style.WARNING(
+                                    f"{slack_id}: target gained another Slack identity; "
+                                    "manual support required"
+                                )
+                            )
+                        continue
+                    invalidate_unused_slack_founder_link_requests(
+                        locked_email_user
+                    )
+                    locked_email_user.slack_id = slack_id
+                    locked_email_user.save(update_fields=["slack_id"])
         if failures:
             raise CommandError(
                 "Slack/email reconciliation left unresolved identities: "

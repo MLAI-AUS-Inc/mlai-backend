@@ -13,6 +13,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from core.actor_ids import actor_ids_for_user, synthetic_actor_id_for_user_id
 from core.article_system import (
     article_system_ready,
     best_registry_driven_publish_target,
@@ -64,14 +65,7 @@ ACTIVE_RUN_STATUSES = {
 
 
 def _ensure_actor_id(user) -> str:
-    existing = str(getattr(user, "slack_id", "") or "").strip()
-    if existing:
-        return existing
-
-    actor_id = f"web_{user.pk}"
-    user.slack_id = actor_id
-    user.save(update_fields=["slack_id"])
-    return actor_id
+    return synthetic_actor_id_for_user_id(user.pk)
 
 
 def _serialize_user(user, actor_id: str) -> dict:
@@ -181,14 +175,19 @@ def _get_config_for_domain(domain: str | None) -> OrganizationContentConfig | No
     return getattr(org, "content_config", None) if org else None
 
 
-def _assert_domain_access(actor_id: str, domain: str | None, *, allow_unowned: bool = False):
+def _assert_domain_access(
+    actor_ids: list[str],
+    domain: str | None,
+    *,
+    allow_unowned: bool = False,
+):
     normalized = normalize_domain(domain or "")
     if not normalized:
         return None, normalized
 
     config = _get_config_for_domain(normalized)
     owner = str(getattr(config, "connected_slack_user_id", "") or "").strip() if config else ""
-    if owner and owner != actor_id:
+    if owner and owner not in actor_ids:
         return Response(
             {"error": "You do not have access to this Content Factory domain."},
             status=status.HTTP_403_FORBIDDEN,
@@ -318,17 +317,18 @@ class ContentFactoryAppBootstrapView(APIView):
 
     def get(self, request):
         actor_id = _ensure_actor_id(request.user)
+        actor_ids = actor_ids_for_user(request.user)
         requested_domain = normalize_domain(request.query_params.get("domain") or "")
 
         access_error, normalized_domain = _assert_domain_access(
-            actor_id,
+            actor_ids,
             requested_domain,
             allow_unowned=False,
         )
         if access_error and requested_domain:
             return access_error
 
-        owned_configs = list(get_owned_org_configs(actor_id))
+        owned_configs = list(get_owned_org_configs(actor_ids))
         active_config = _get_config_for_domain(normalized_domain) if normalized_domain else (
             owned_configs[0] if len(owned_configs) == 1 else None
         )
@@ -337,7 +337,7 @@ class ContentFactoryAppBootstrapView(APIView):
 
         owned_domains = [_serialize_config(config) for config in owned_configs if getattr(config, "organization", None)]
         run_domain_filter = [config.organization.domain for config in owned_configs if getattr(config, "organization", None)]
-        run_filter = Q(slack_user_id=actor_id)
+        run_filter = Q(slack_user_id__in=actor_ids)
         if run_domain_filter:
             run_filter |= Q(domain__in=run_domain_filter)
         recent_runs = [
@@ -365,12 +365,17 @@ class ContentFactoryAppSettingsView(APIView):
 
     def put(self, request):
         actor_id = _ensure_actor_id(request.user)
+        actor_ids = actor_ids_for_user(request.user)
         data = request.data or {}
         domain = normalize_domain(data.get("domain") or "")
         if not domain:
             return Response({"error": "domain is required"}, status=status.HTTP_400_BAD_REQUEST)
 
-        access_error, normalized_domain = _assert_domain_access(actor_id, domain, allow_unowned=True)
+        access_error, normalized_domain = _assert_domain_access(
+            actor_ids,
+            domain,
+            allow_unowned=True,
+        )
         if access_error:
             return access_error
 
@@ -441,11 +446,16 @@ class ContentFactoryAppGitHubConnectView(APIView):
 
     def post(self, request):
         actor_id = _ensure_actor_id(request.user)
+        actor_ids = actor_ids_for_user(request.user)
         domain = normalize_domain((request.data or {}).get("domain") or "")
         if not domain:
             return Response({"error": "domain is required"}, status=status.HTTP_400_BAD_REQUEST)
 
-        access_error, normalized_domain = _assert_domain_access(actor_id, domain, allow_unowned=True)
+        access_error, normalized_domain = _assert_domain_access(
+            actor_ids,
+            domain,
+            allow_unowned=True,
+        )
         if access_error:
             return access_error
 
@@ -478,12 +488,17 @@ class ContentFactoryAppScanView(APIView):
 
     def post(self, request):
         actor_id = _ensure_actor_id(request.user)
+        actor_ids = actor_ids_for_user(request.user)
         data = request.data or {}
         domain = normalize_domain(data.get("domain") or "")
         if not domain:
             return Response({"error": "domain is required"}, status=status.HTTP_400_BAD_REQUEST)
 
-        access_error, normalized_domain = _assert_domain_access(actor_id, domain, allow_unowned=False)
+        access_error, normalized_domain = _assert_domain_access(
+            actor_ids,
+            domain,
+            allow_unowned=False,
+        )
         if access_error:
             return access_error
 
@@ -578,9 +593,14 @@ class ContentFactoryAppDiscoveryView(APIView):
 
     def post(self, request):
         actor_id = _ensure_actor_id(request.user)
+        actor_ids = actor_ids_for_user(request.user)
         data = request.data or {}
         domain = normalize_domain(data.get("domain") or "")
-        access_error, normalized_domain = _assert_domain_access(actor_id, domain, allow_unowned=False)
+        access_error, normalized_domain = _assert_domain_access(
+            actor_ids,
+            domain,
+            allow_unowned=False,
+        )
         if access_error:
             return access_error
 
@@ -596,7 +616,11 @@ class ContentFactoryAppDiscoveryView(APIView):
             "user_avatar_url": request.user.avatar_url,
         }
         try:
-            result = trigger_article_generation(actor_id, article_request)
+            result = trigger_article_generation(
+                actor_id,
+                article_request,
+                billing_user=request.user,
+            )
             return Response(result, status=status.HTTP_202_ACCEPTED)
         except ContentFactoryBackendUnavailableError as exc:
             return Response(exc.payload, status=status.HTTP_503_SERVICE_UNAVAILABLE)
@@ -614,9 +638,14 @@ class ContentFactoryAppArticleView(APIView):
 
     def post(self, request):
         actor_id = _ensure_actor_id(request.user)
+        actor_ids = actor_ids_for_user(request.user)
         data = request.data or {}
         domain = normalize_domain(data.get("domain") or "")
-        access_error, normalized_domain = _assert_domain_access(actor_id, domain, allow_unowned=False)
+        access_error, normalized_domain = _assert_domain_access(
+            actor_ids,
+            domain,
+            allow_unowned=False,
+        )
         if access_error:
             return access_error
 
@@ -640,6 +669,7 @@ class ContentFactoryAppArticleView(APIView):
                     delivery_mode=delivery_mode,
                     delivery_mode_confirmed=True,
                     request_source=CONTENT_FACTORY_REQUEST_SOURCE,
+                    billing_user=request.user,
                 )
             else:
                 article_request = {
@@ -659,7 +689,11 @@ class ContentFactoryAppArticleView(APIView):
                     "user_last_name": request.user.last_name,
                     "user_avatar_url": request.user.avatar_url,
                 }
-                result = trigger_article_generation(actor_id, article_request)
+                result = trigger_article_generation(
+                    actor_id,
+                    article_request,
+                    billing_user=request.user,
+                )
             return Response(result, status=status.HTTP_202_ACCEPTED)
         except ContentFactoryBackendUnavailableError as exc:
             return Response(exc.payload, status=status.HTTP_503_SERVICE_UNAVAILABLE)
@@ -676,11 +710,11 @@ class ContentFactoryAppRunView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, run_id: str):
-        actor_id = _ensure_actor_id(request.user)
+        actor_ids = actor_ids_for_user(request.user)
         refresh = str(request.query_params.get("refresh") or "").lower() in {"1", "true", "yes"}
         run = ContentFactoryRun.objects.filter(run_id=run_id).first()
 
-        if run and not _run_belongs_to_actor(run, actor_id):
+        if run and not _run_belongs_to_actor(run, actor_ids):
             return Response({"error": "Run not found"}, status=status.HTTP_404_NOT_FOUND)
 
         should_fetch_remote = refresh or run is None or (run.status in ACTIVE_RUN_STATUSES)
@@ -690,7 +724,7 @@ class ContentFactoryAppRunView(APIView):
                 if response.status_code == 200:
                     remote_payload = _response_json(response)
                     remote_run = _sync_remote_run_payload(run_id, remote_payload)
-                    if remote_run and _run_belongs_to_actor(remote_run, actor_id):
+                    if remote_run and _run_belongs_to_actor(remote_run, actor_ids):
                         run = remote_run
                 elif response.status_code != 404 or run is None:
                     return _proxy_error(response)
@@ -706,20 +740,20 @@ class ContentFactoryAppRunView(APIView):
         return Response(_serialize_content_factory_run(run), status=status.HTTP_200_OK)
 
 
-def _run_belongs_to_actor(run: ContentFactoryRun, actor_id: str) -> bool:
-    if run.slack_user_id == actor_id:
+def _run_belongs_to_actor(run: ContentFactoryRun, actor_ids: list[str]) -> bool:
+    if run.slack_user_id in actor_ids:
         return True
     config = _get_config_for_domain(run.domain)
-    return bool(config and config.connected_slack_user_id == actor_id)
+    return bool(config and config.connected_slack_user_id in actor_ids)
 
 
 class ContentFactoryAppRunArtifactsView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, run_id: str):
-        actor_id = _ensure_actor_id(request.user)
+        actor_ids = actor_ids_for_user(request.user)
         run = ContentFactoryRun.objects.filter(run_id=run_id).first()
-        if run and not _run_belongs_to_actor(run, actor_id):
+        if run and not _run_belongs_to_actor(run, actor_ids):
             return Response({"error": "Run not found"}, status=status.HTTP_404_NOT_FOUND)
 
         try:
@@ -750,8 +784,9 @@ class ContentFactoryAppRunControlView(APIView):
 
     def post(self, request, run_id: str, action: str):
         actor_id = _ensure_actor_id(request.user)
+        actor_ids = actor_ids_for_user(request.user)
         run = ContentFactoryRun.objects.filter(run_id=run_id).first()
-        if run and not _run_belongs_to_actor(run, actor_id):
+        if run and not _run_belongs_to_actor(run, actor_ids):
             return Response({"error": "Run not found"}, status=status.HTTP_404_NOT_FOUND)
 
         if action == "delivery-mode":
@@ -805,9 +840,14 @@ class ContentFactoryAppDailyReplayView(APIView):
 
     def post(self, request):
         actor_id = _ensure_actor_id(request.user)
+        actor_ids = actor_ids_for_user(request.user)
         data = request.data or {}
         domain = normalize_domain(data.get("domain") or "")
-        access_error, normalized_domain = _assert_domain_access(actor_id, domain, allow_unowned=False)
+        access_error, normalized_domain = _assert_domain_access(
+            actor_ids,
+            domain,
+            allow_unowned=False,
+        )
         if access_error:
             return access_error
 

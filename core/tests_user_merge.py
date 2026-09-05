@@ -293,6 +293,55 @@ class MergePairTests(TestCase):
         self.assertTrue(User.objects.filter(pk=self.source.pk).exists())
         connection.refresh_from_db()
         self.assertEqual(connection.user_id, self.source.pk)
+    def test_commit_refuses_source_github_installation(self):
+        from integrations.models import GitHubInstallation
+
+        installation = GitHubInstallation.objects.create(
+            user=self.source,
+            installation_id="12345",
+            account_login="source-owner",
+        )
+
+        with self.assertRaisesMessage(CommandError, "external identity state"):
+            self.run_merge("--commit")
+
+        self.assertTrue(User.objects.filter(pk=self.source.pk).exists())
+        self.assertTrue(GitHubInstallation.objects.filter(pk=installation.pk).exists())
+
+    def test_commit_refuses_source_content_factory_actor_references(self):
+        from content_factory.models import ContentFactoryJob, OrganizationContentConfig
+        from organizations.models import Organization
+
+        actor_id = f"mlai_user:{self.source.pk}"
+        organization = Organization.objects.create(
+            name="Source Identity Co",
+            domain="source-identity.example",
+        )
+        config = OrganizationContentConfig.objects.create(
+            organization=organization,
+            connected_slack_user_id=f"\t{actor_id}\n",
+        )
+        job = ContentFactoryJob.objects.create(
+            job_id="source-identity-job",
+            slack_user_id="unrelated",
+            domain=organization.domain,
+            request_meta={"nested": {"requested_by_slack_user_id": actor_id}},
+        )
+
+        with self.assertRaisesMessage(CommandError, "external identity state"):
+            self.run_merge("--commit")
+
+        self.assertTrue(User.objects.filter(pk=self.source.pk).exists())
+        self.assertEqual(
+            OrganizationContentConfig.objects.get(pk=config.pk).connected_slack_user_id,
+            f"\t{actor_id}\n",
+        )
+        self.assertEqual(
+            ContentFactoryJob.objects.get(pk=job.pk).request_meta["nested"][
+                "requested_by_slack_user_id"
+            ],
+            actor_id,
+        )
 
     def test_requires_both_ids(self):
         with self.assertRaises(CommandError):

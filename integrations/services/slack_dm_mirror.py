@@ -119,8 +119,11 @@ GROUP_DM_SCOPES = {"mpim:read", "mpim:history", "mpim:write"}
 REQUIRED_SCOPES = DIRECT_DM_SCOPES | GROUP_DM_SCOPES
 _last_grant_discovery_scan = 0.0
 _history_scan_available_at = 0.0
+_history_expiration_cursor = 0
+_history_expiration_scan_available_at = 0.0
 GRANT_DISCOVERY_INTERVAL_SECONDS = 300
 HISTORY_RECONCILIATION_INTERVAL_SECONDS = 3600
+HISTORY_EXPIRATION_SCAN_INTERVAL_SECONDS = 60
 MAX_HISTORY_DAYS = 30
 HISTORY_PAGE_LIMIT = 1000
 HISTORY_REQUESTS_PER_MINUTE = 50
@@ -2057,7 +2060,14 @@ def _staged_slack_channel_ids(
 
 
 def _slack_conversation_activity_seconds(raw: dict[str, Any]) -> int | None:
-    """Return Slack's best conversation-activity marker, if one is present."""
+    """Return Slack's explicit latest-message marker, if one is present.
+
+    Slack's conversation ``updated`` field describes channel metadata rather
+    than reliably proving the time of the latest message. Treating it as
+    message activity can incorrectly skip an active DM forever. Missing
+    ``latest`` therefore fails open to the bounded ``conversations.history``
+    request, whose ``oldest`` parameter remains the privacy boundary.
+    """
 
     latest = raw.get("latest")
     if isinstance(latest, dict):
@@ -2068,15 +2078,7 @@ def _slack_conversation_activity_seconds(raw: dict[str, Any]) -> int | None:
             return _slack_ts_sort_key(latest_text)[0]
         except SlackDmMirrorError:
             pass
-    try:
-        updated = int(float(str(raw.get("updated") or "").strip()))
-    except (TypeError, ValueError):
-        return None
-    # Slack conversation `updated` values are normally milliseconds while a
-    # few fixtures and older API responses use seconds.
-    if updated > 10_000_000_000:
-        updated //= 1000
-    return updated if updated > 0 else None
+    return None
 
 
 def _slack_conversation_is_recent(
@@ -2195,29 +2197,17 @@ def _complete_inactive_conversation_history(
             .order_by("id")
         )
         now = timezone.now()
-        for row in rows:
-            metadata = dict(row.metadata or {})
-            metadata["history_outside_window"] = True
-            row.metadata = metadata
-            row.status = CommunityBridgeDeliveryStatus.COMPLETED
-            row.encrypted_text = ""
-            row.completed_at = now
-            row.available_at = now
-            row.last_error = ""
-            row.updated_at = now
-        if rows:
-            SlackDmMirrorDelivery.objects.bulk_update(
-                rows,
-                (
-                    "metadata",
-                    "status",
-                    "encrypted_text",
-                    "completed_at",
-                    "available_at",
-                    "last_error",
-                    "updated_at",
-                ),
+        expired_rows = [
+            row
+            for row in rows
+            if _backfill_delivery_is_outside_history_window(
+                row,
+                now=now,
+                history_days=grant.history_days,
             )
+        ]
+        for row in expired_rows:
+            _complete_outside_history_window_delivery_locked(row, now=now)
         _clear_history_scan_states([conversation.pk])
         conversation.history_backfilled_at = now
         conversation.oldest_synced_ts = ""
@@ -3478,6 +3468,97 @@ def ingest_mlai_dm_event(payload: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
+def _backfill_delivery_is_outside_history_window(
+    delivery: SlackDmMirrorDelivery,
+    *,
+    now=None,
+    history_days: Any = None,
+) -> bool:
+    if (
+        delivery.source_platform != CommunityBridgePlatform.SLACK
+        or not bool((delivery.metadata or {}).get("backfill"))
+    ):
+        return False
+    now = now or timezone.now()
+    if history_days is None:
+        history_days = delivery.conversation.grant.history_days
+    cutoff = int(now.timestamp()) - _bounded_history_days(history_days) * 86_400
+    return _delivery_created_at(delivery) < cutoff
+
+
+def _complete_outside_history_window_delivery_locked(
+    delivery: SlackDmMirrorDelivery,
+    *,
+    now=None,
+) -> None:
+    now = now or timezone.now()
+    metadata = dict(delivery.metadata or {})
+    metadata["history_outside_window"] = True
+    metadata.pop("history_recovery_scheduled", None)
+    metadata.pop("history_recovery_superseded", None)
+    delivery.metadata = metadata
+    delivery.status = CommunityBridgeDeliveryStatus.COMPLETED
+    delivery.encrypted_text = ""
+    delivery.completed_at = now
+    delivery.available_at = now
+    delivery.last_error = ""
+    delivery.updated_at = now
+    delivery.save(
+        update_fields=(
+            "metadata",
+            "status",
+            "encrypted_text",
+            "completed_at",
+            "available_at",
+            "last_error",
+            "updated_at",
+        )
+    )
+
+
+def _expire_outside_history_window_deliveries(*, limit: int = 500) -> int:
+    """Incrementally erase queued history after it leaves the consent window."""
+
+    global _history_expiration_cursor, _history_expiration_scan_available_at
+    monotonic_now = time.monotonic()
+    if monotonic_now < _history_expiration_scan_available_at:
+        return 0
+    _history_expiration_scan_available_at = (
+        monotonic_now + HISTORY_EXPIRATION_SCAN_INTERVAL_SECONDS
+    )
+    with transaction.atomic():
+        rows = list(
+            SlackDmMirrorDelivery.objects.select_for_update(
+                skip_locked=True,
+                of=("self",),
+            )
+            .select_related("conversation__grant")
+            .filter(
+                id__gt=_history_expiration_cursor,
+                source_platform=CommunityBridgePlatform.SLACK,
+                metadata__backfill=True,
+                status__in=(
+                    CommunityBridgeDeliveryStatus.PENDING,
+                    CommunityBridgeDeliveryStatus.FAILED,
+                    CommunityBridgeDeliveryStatus.DEAD,
+                ),
+            )
+            .order_by("id")[: max(1, min(int(limit), 1000))]
+        )
+        if not rows:
+            _history_expiration_cursor = 0
+            return 0
+        next_cursor = rows[-1].pk
+        now = timezone.now()
+        expired = 0
+        for delivery in rows:
+            if _backfill_delivery_is_outside_history_window(delivery, now=now):
+                _complete_outside_history_window_delivery_locked(delivery, now=now)
+                expired += 1
+        _history_expiration_cursor = next_cursor
+        return expired
+
+
 def process_ready_deliveries(limit: int = 20, *, batch_size: int = 1) -> int:
     now = timezone.now()
     SlackDmMirrorDelivery.objects.filter(
@@ -3491,6 +3572,7 @@ def process_ready_deliveries(limit: int = 20, *, batch_size: int = 1) -> int:
         last_error="Recovered an interrupted private delivery",
         updated_at=now,
     )
+    _expire_outside_history_window_deliveries()
     processed = 0
     attempted = 0
     delivery_limit = max(1, min(int(limit), 100))
@@ -3526,11 +3608,12 @@ def _claim_ready_private_delivery_batch(*, limit: int) -> list[SlackDmMirrorDeli
     """Claim one conversation's next ordered work, batching simple creates."""
 
     with transaction.atomic():
+        claim_now = timezone.now()
         candidate_conversation_id = (
             SlackDmMirrorDelivery.objects
             .filter(
                 status=CommunityBridgeDeliveryStatus.PENDING,
-                available_at__lte=timezone.now(),
+                available_at__lte=claim_now,
                 conversation__status=SlackDmMirrorConversationStatus.LIVE,
                 conversation__grant__status=SlackDmMirrorGrantStatus.ACTIVE,
                 conversation__grant__revoked_at__isnull=True,
@@ -3560,21 +3643,35 @@ def _claim_ready_private_delivery_batch(*, limit: int) -> list[SlackDmMirrorDeli
             status=CommunityBridgeDeliveryStatus.PROCESSING,
         ).exists():
             return []
-        seed = (
-            SlackDmMirrorDelivery.objects.select_for_update(
-                skip_locked=True,
-                of=("self",),
+        seed = None
+        for _ in range(100):
+            seed = (
+                SlackDmMirrorDelivery.objects.select_for_update(
+                    skip_locked=True,
+                    of=("self",),
+                )
+                .filter(
+                    conversation=conversation,
+                    status=CommunityBridgeDeliveryStatus.PENDING,
+                    available_at__lte=claim_now,
+                )
+                .exclude(source_message_id__startswith=REGISTRATION_STATE_PREFIX)
+                .order_by("available_at", "id")
+                .first()
             )
-            .filter(
-                conversation=conversation,
-                status=CommunityBridgeDeliveryStatus.PENDING,
-                available_at__lte=timezone.now(),
+            if seed is None:
+                return []
+            seed.conversation = conversation
+            if not _backfill_delivery_is_outside_history_window(
+                seed,
+                now=claim_now,
+            ):
+                break
+            _complete_outside_history_window_delivery_locked(
+                seed,
+                now=claim_now,
             )
-            .exclude(source_message_id__startswith=REGISTRATION_STATE_PREFIX)
-            .order_by("available_at", "id")
-            .first()
-        )
-        if seed is None:
+        else:
             return []
         seed.conversation = conversation
         candidates = [seed]
@@ -3587,7 +3684,7 @@ def _claim_ready_private_delivery_batch(*, limit: int) -> list[SlackDmMirrorDeli
                 .filter(
                     conversation=conversation,
                     status=CommunityBridgeDeliveryStatus.PENDING,
-                    available_at__lte=timezone.now(),
+                    available_at__lte=claim_now,
                 )
                 .exclude(source_message_id__startswith=REGISTRATION_STATE_PREFIX)
                 .order_by("available_at", "id")[:limit]
@@ -3596,6 +3693,15 @@ def _claim_ready_private_delivery_batch(*, limit: int) -> list[SlackDmMirrorDeli
             text_bytes = 0
             for candidate in candidates:
                 candidate.conversation = conversation
+                if _backfill_delivery_is_outside_history_window(
+                    candidate,
+                    now=claim_now,
+                ):
+                    _complete_outside_history_window_delivery_locked(
+                        candidate,
+                        now=claim_now,
+                    )
+                    continue
                 if not _private_delivery_batch_eligible(candidate):
                     break
                 next_text_bytes = text_bytes + len(
@@ -5549,6 +5655,9 @@ def _upsert_history_delivery(
     if delivery.status in (
         CommunityBridgeDeliveryStatus.FAILED,
         CommunityBridgeDeliveryStatus.DEAD,
+    ) or (
+        delivery.status == CommunityBridgeDeliveryStatus.COMPLETED
+        and bool((delivery.metadata or {}).get("history_outside_window"))
     ):
         delivery.source_author_id = author_id
         delivery.encrypted_text = text

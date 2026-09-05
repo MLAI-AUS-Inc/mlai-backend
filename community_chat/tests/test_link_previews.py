@@ -14,7 +14,15 @@ from rest_framework.test import APIClient
 from community_chat.account_sessions import issue_account_session
 from community_chat.link_previews import LinkPreviewError, _validated_public_url
 from community_chat.models import CommunityChatEmailCodeChallenge
-from integrations.models import CommunityBridgeChannel, CommunityBridgePlatform
+from integrations.models import (
+    CommunityBridgeChannel,
+    CommunityBridgePlatform,
+    ExternalServiceConnection,
+    ExternalServiceProvider,
+    SlackDmMirrorConversation,
+    SlackDmMirrorConversationStatus,
+    SlackDmMirrorGrant,
+)
 
 
 class _FakeResponse:
@@ -215,3 +223,71 @@ class CommunityChatLinkPreviewTests(TestCase):
 
         self.assertEqual(response.status_code, status.HTTP_422_UNPROCESSABLE_ENTITY)
         self.assertEqual(response.data["error"], "preview_unavailable")
+
+    @patch("community_chat.slack_file_previews.requests.Session.get")
+    @patch("community_chat.slack_file_previews.WebClient")
+    @patch("community_chat.slack_file_previews.SlackBridgeClient.get_client")
+    def test_slack_dm_owner_can_render_an_image_from_their_private_mirror(
+        self,
+        get_client,
+        web_client,
+        session_get,
+    ):
+        connection = ExternalServiceConnection.objects.create(
+            user=self.user,
+            provider=ExternalServiceProvider.SLACK,
+            access_token="xoxp-owner",
+            scopes=["files:read"],
+            external_account_id="TMLAI",
+            account_label="MLAI",
+        )
+        grant = SlackDmMirrorGrant.objects.create(
+            user=self.user,
+            connection=connection,
+            slack_workspace_id="TMLAI",
+            slack_user_id="UOWNER",
+            consented_at=timezone.now(),
+        )
+        SlackDmMirrorConversation.objects.create(
+            grant=grant,
+            slack_workspace_id="TMLAI",
+            slack_conversation_id="DPRIVATE",
+            status=SlackDmMirrorConversationStatus.LIVE,
+        )
+        private_file = {
+            "id": "F0PRIVATE01",
+            "title": "private-image.png",
+            "mimetype": "image/png",
+            "team_id": "TMLAI",
+            "ims": ["DPRIVATE"],
+            "shares": {"private": {"DPRIVATE": [{}]}},
+            "permalink": "https://mlai-aus.slack.com/files/UOWNER/F0PRIVATE01/private-image.png",
+            "url_private_download": "https://files.slack.com/files-pri/T-F/private-image.png",
+        }
+        slack_response = {"ok": True, "file": private_file}
+        get_client.return_value.files_info.return_value = slack_response
+        web_client.return_value.files_info.return_value = slack_response
+        session_get.return_value = _FakeResponse(
+            body=b"\x89PNG\r\n\x1a\nprivate-preview",
+            content_type="image/png",
+        )
+
+        preview = self.client.get(
+            reverse("community_chat_link_preview"),
+            {
+                "url": "https://mlai-aus.slack.com/files/UOWNER/F0PRIVATE01/private-image.png"
+            },
+        )
+        image = self.client.get(
+            reverse("community_chat_link_preview_image"),
+            {"slack_file": "F0PRIVATE01"},
+        )
+
+        self.assertEqual(preview.status_code, status.HTTP_200_OK)
+        self.assertIn("slack_file=F0PRIVATE01", preview.data["image_url"])
+        self.assertEqual(image.status_code, status.HTTP_200_OK)
+        self.assertEqual(image.content, b"\x89PNG\r\n\x1a\nprivate-preview")
+        self.assertEqual(
+            session_get.call_args.kwargs["headers"]["Authorization"],
+            "Bearer xoxp-owner",
+        )

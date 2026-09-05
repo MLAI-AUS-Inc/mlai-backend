@@ -1,4 +1,5 @@
 from pathlib import Path
+import subprocess
 
 from django.test import SimpleTestCase
 
@@ -10,7 +11,7 @@ class RuntimeHardeningConfigTests(SimpleTestCase):
     def _web_command(self, compose_filename):
         lines = (ROOT / compose_filename).read_text().splitlines()
         web_index = lines.index("  web:")
-        for line in lines[web_index + 1:]:
+        for line in lines[web_index + 1 :]:
             if line.startswith("  ") and not line.startswith("    "):
                 break
             stripped = line.strip()
@@ -22,7 +23,7 @@ class RuntimeHardeningConfigTests(SimpleTestCase):
         lines = (ROOT / compose_filename).read_text().splitlines()
         web_index = lines.index("  web:")
         healthcheck_index = None
-        for index, line in enumerate(lines[web_index + 1:], start=web_index + 1):
+        for index, line in enumerate(lines[web_index + 1 :], start=web_index + 1):
             if line.startswith("  ") and not line.startswith("    "):
                 break
             if line == "    healthcheck:":
@@ -32,7 +33,7 @@ class RuntimeHardeningConfigTests(SimpleTestCase):
         if healthcheck_index is None:
             self.fail(f"Missing web healthcheck in {compose_filename}")
 
-        for line in lines[healthcheck_index + 1:]:
+        for line in lines[healthcheck_index + 1 :]:
             if line.startswith("    ") and not line.startswith("      "):
                 break
             stripped = line.strip()
@@ -63,11 +64,16 @@ class RuntimeHardeningConfigTests(SimpleTestCase):
         local_compose = (ROOT / "docker-compose.local.yml").read_text()
         start_script = (ROOT / "scripts" / "start-web.sh").read_text()
 
-        self.assertEqual(self._web_command("docker-compose.yml"), "sh /app/scripts/start-web.sh")
-        self.assertEqual(self._web_command("docker-compose.local.yml"), "sh /app/scripts/start-web.sh")
+        self.assertEqual(
+            self._web_command("docker-compose.yml"), "sh /app/scripts/start-web.sh"
+        )
+        self.assertEqual(
+            self._web_command("docker-compose.local.yml"),
+            "sh /app/scripts/start-web.sh",
+        )
         self.assertIn('RUN_MIGRATIONS_ON_START: "0"', production_compose)
         self.assertIn('RUN_MIGRATIONS_ON_START: "1"', local_compose)
-        self.assertIn('${RUN_MIGRATIONS_ON_START:-0}', start_script)
+        self.assertIn("${RUN_MIGRATIONS_ON_START:-0}", start_script)
         self.assertNotIn("collectstatic", start_script)
 
     def test_image_build_collects_production_static_manifest(self):
@@ -137,17 +143,26 @@ class RuntimeHardeningConfigTests(SimpleTestCase):
         ).read_text()
 
         self.assertIn("HAVING COUNT(*) > 1", migration)
-        self.assertIn("CREATE UNIQUE INDEX IF NOT EXISTS unique_active_booking_per_user_date", migration)
+        self.assertIn(
+            "CREATE UNIQUE INDEX IF NOT EXISTS unique_active_booking_per_user_date",
+            migration,
+        )
         self.assertIn("WHERE status = 'booked'", migration)
 
     def test_deploy_pauses_web_until_constraint_is_verified(self):
         deploy = (ROOT / "deploy.sh").read_text()
 
         self.assertIn(
-            'paused_runtime_services=(web scheduler memory-worker memory-scheduler community-email-worker)',
+            "all_runtime_writer_services=(web scheduler memory-worker memory-scheduler community-email-worker bridge-worker bridge-reconciler bridge-retention analytics-sync)",
             deploy,
         )
-        self.assertIn('docker compose stop "\\${paused_runtime_services[@]}"', deploy)
+        self.assertIn(
+            'for service in "\\${all_runtime_writer_services[@]}"; do', deploy
+        )
+        self.assertIn('running_writer_services+=("\\$service")', deploy)
+        self.assertIn(
+            'docker compose stop "\\${all_runtime_writer_services[@]}"', deploy
+        )
 
         # The coworking booking guard is still verified on every deploy, but it
         # now lives in deploy_postmigrate alongside the other post-migration
@@ -159,21 +174,25 @@ class RuntimeHardeningConfigTests(SimpleTestCase):
         self.assertIn("unique_active_booking_per_user_date", postmigrate)
         self.assertIn("to_regclass", postmigrate)
         self.assertLess(
-            deploy.index('docker compose stop "\\${paused_runtime_services[@]}"'),
+            deploy.index('docker compose stop "\\${all_runtime_writer_services[@]}"'),
             deploy.index("compose_run_web python manage.py deploy_postmigrate"),
         )
         self.assertIn(
-            'runtime_services=(web scheduler memory-worker memory-scheduler community-email-worker)',
+            "runtime_services=(web scheduler memory-worker memory-scheduler community-email-worker)",
             deploy,
         )
         self.assertIn(
             'if [ "\\$internal_status" != "401" ] || [ "\\$missing_status" != "401" ]; then',
             deploy,
         )
-        self.assertIn("community-email-worker:", (ROOT / "docker-compose.yml").read_text())
-        self.assertIn("run_email_code_worker", (ROOT / "docker-compose.yml").read_text())
         self.assertIn(
-            'runtime_services+=(bridge-worker bridge-reconciler bridge-retention)',
+            "community-email-worker:", (ROOT / "docker-compose.yml").read_text()
+        )
+        self.assertIn(
+            "run_email_code_worker", (ROOT / "docker-compose.yml").read_text()
+        )
+        self.assertIn(
+            "runtime_services+=(bridge-worker bridge-reconciler bridge-retention)",
             deploy,
         )
         self.assertIn(
@@ -188,13 +207,13 @@ class RuntimeHardeningConfigTests(SimpleTestCase):
             'upsert_env_value COMMUNITY_BRIDGE_PRODUCTION_ENABLED "\\$community_bridge_production_enabled"',
             deploy,
         )
-        self.assertIn('&& env_has_value SLACK_BRIDGE_BOT_TOKEN \\', deploy)
-        self.assertIn('env_has_value DISCORD_BRIDGE_BOT_TOKEN \\', deploy)
-        self.assertIn('env_has_value BUZZ_BRIDGE_ADAPTER_URL \\', deploy)
-        self.assertIn('env_has_value BUZZ_BRIDGE_ADAPTER_TOKEN \\', deploy)
-        self.assertIn('env_has_value BUZZ_BRIDGE_CALLBACK_SECRET;', deploy)
+        self.assertIn("&& env_has_value SLACK_BRIDGE_BOT_TOKEN \\", deploy)
+        self.assertIn("env_has_value DISCORD_BRIDGE_BOT_TOKEN \\", deploy)
+        self.assertIn("env_has_value BUZZ_BRIDGE_ADAPTER_URL \\", deploy)
+        self.assertIn("env_has_value BUZZ_BRIDGE_ADAPTER_TOKEN \\", deploy)
+        self.assertIn("env_has_value BUZZ_BRIDGE_CALLBACK_SECRET;", deploy)
         self.assertIn(
-            'python3 scripts/validate_community_bridge_adapter_url.py '
+            "python3 scripts/validate_community_bridge_adapter_url.py "
             '"$BUZZ_BRIDGE_ADAPTER_URL"',
             deploy,
         )
@@ -204,28 +223,108 @@ class RuntimeHardeningConfigTests(SimpleTestCase):
         )
         self.assertIn('--slack-workspace-id "$SLACK_BRIDGE_WORKSPACE_ID"', deploy)
         self.assertIn('--slack-channel-id "$SLACK_BRIDGE_CHANNEL_ID"', deploy)
-        self.assertIn('--destination-platform buzz', deploy)
+        self.assertIn("--destination-platform buzz", deploy)
         self.assertIn(
             '--destination-channel-id "$BUZZ_BRIDGE_DESTINATION_CHANNEL_ID"',
             deploy,
         )
         self.assertIn(
-            'docker compose stop bridge-worker bridge-reconciler || true', deploy
+            "docker compose stop bridge-worker bridge-reconciler bridge-retention || true",
+            deploy,
         )
         self.assertIn(
-            'docker compose rm -f bridge-worker bridge-reconciler || true', deploy
+            "docker compose rm -f bridge-worker bridge-reconciler bridge-retention || true",
+            deploy,
         )
         # deploy_postmigrate verifies migration readiness as its first step, so
         # the bridge mapping still cannot be written against a half-migrated
         # database.
         self.assertLess(
             deploy.index("compose_run_web python manage.py deploy_postmigrate"),
-            deploy.index("compose_run_web python manage.py upsert_community_bridge_channel"),
+            deploy.index(
+                "compose_run_web python manage.py upsert_community_bridge_channel"
+            ),
         )
         self.assertLess(
-            deploy.index('docker compose stop "\\${paused_runtime_services[@]}"'),
-            deploy.index('docker compose up -d --force-recreate "\\${runtime_services[@]}"'),
+            deploy.index('docker compose stop "\\${all_runtime_writer_services[@]}"'),
+            deploy.index(
+                'docker compose up -d --force-recreate "\\${runtime_services[@]}"'
+            ),
         )
+
+    def test_deploy_restores_only_before_forward_only_schema_advancement(self):
+        deploy = (ROOT / "deploy.sh").read_text()
+
+        self.assertIn("rollback_manifest=\\$(mktemp)", deploy)
+        self.assertIn("docker inspect --format '{{.Image}}'", deploy)
+        self.assertIn('docker image tag "\\$image_id" "\\$rollback_tag"', deploy)
+        self.assertIn("migration_started=0", deploy)
+        self.assertIn("migration_started=1", deploy)
+        self.assertIn("restoring the last known-good runtime images", deploy)
+        self.assertIn(
+            "keeping all runtime writers safely disabled",
+            deploy,
+        )
+        self.assertIn(
+            'docker compose stop "\\${all_runtime_writer_services[@]}"', deploy
+        )
+        self.assertIn('docker image tag "\\$image_id" "\\$image_ref"', deploy)
+        self.assertIn(
+            'docker compose up -d --force-recreate "\\${restored_services[@]}"',
+            deploy,
+        )
+        self.assertLess(
+            deploy.index("trap restore_runtime_on_error ERR"),
+            deploy.index("Verifying external Vibe Raising video upload CORS preflight"),
+        )
+        self.assertGreater(
+            deploy.rindex("trap - ERR"),
+            deploy.index("Verifying external Vibe Raising video upload CORS preflight"),
+        )
+        trapped_deploy = deploy[
+            deploy.index("trap restore_runtime_on_error ERR") : deploy.rindex(
+                "trap - ERR"
+            )
+        ]
+        self.assertNotIn(
+            "exit 1",
+            trapped_deploy,
+            "explicit exit bypasses Bash ERR traps and therefore recovery",
+        )
+
+    def test_post_migration_failure_executes_safe_disabled_recovery(self):
+        deploy = (ROOT / "deploy.sh").read_text()
+        function_start = deploy.index("    restore_runtime_on_error() {")
+        function_end = deploy.index(
+            '\n    }\n\n    echo "⏸️ Pausing',
+            function_start,
+        ) + len("\n    }")
+        recovery_function = deploy[function_start:function_end].replace("\\$", "$")
+        probe = (
+            recovery_function
+            + r"""
+migration_started=1
+all_runtime_writer_services=(web scheduler memory-worker memory-scheduler community-email-worker bridge-worker bridge-reconciler bridge-retention analytics-sync)
+rollback_manifest="$(mktemp)"
+docker_log="$(mktemp)"
+docker() {
+    printf '%s\n' "$*" >> "$docker_log"
+}
+trap restore_runtime_on_error ERR
+false
+grep -Fx 'compose stop web scheduler memory-worker memory-scheduler community-email-worker bridge-worker bridge-reconciler bridge-retention analytics-sync' "$docker_log"
+"""
+        )
+
+        completed = subprocess.run(
+            ["bash", "-c", probe],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("keeping all runtime writers safely disabled", completed.stdout)
 
     def test_bridge_deploy_validation_requires_explicit_production_activation(self):
         workflow = (ROOT / ".github" / "workflows" / "deploy.yml").read_text()
@@ -281,7 +380,7 @@ class RuntimeHardeningConfigTests(SimpleTestCase):
             deploy,
         )
         self.assertIn(
-            'upsert_env_value MEETING_ROOM_BOOKING_ENABLED '
+            "upsert_env_value MEETING_ROOM_BOOKING_ENABLED "
             '"\\$meeting_room_booking_enabled"',
             deploy,
         )
@@ -301,7 +400,9 @@ class RuntimeHardeningConfigTests(SimpleTestCase):
         self.assertNotIn("docker compose run --rm", deploy)
         self.assertNotIn("docker compose run --no-TTY", deploy)
         self.assertEqual(deploy.count("docker compose run -T --rm --no-deps web"), 1)
-        self.assertIn('docker compose run -T --rm --no-deps web "\\$@" </dev/null', deploy)
+        self.assertIn(
+            'docker compose run -T --rm --no-deps web "\\$@" </dev/null', deploy
+        )
         self.assertIn("compose_run_web python manage.py migrate --noinput", deploy)
 
     def test_office_manager_deploy_probes_exact_authenticated_contract(self):

@@ -4,6 +4,7 @@ import json
 import time
 from datetime import date, timedelta
 import threading
+from uuid import uuid4
 
 import requests
 
@@ -16,6 +17,7 @@ from rest_framework.test import APIClient, APITestCase
 from .models import (
     ChannelFirstPost,
     CoworkingBooking,
+    CoworkingBookingOperation,
     CoworkingDayCapacity,
     Ledger,
     PointsAccount,
@@ -30,7 +32,7 @@ from .models import (
 )
 from django.contrib.auth import get_user_model
 from unittest.mock import Mock, patch
-from .services import PointsService
+from .services import CoworkingService, PointsService
 
 User = get_user_model()
 
@@ -2091,6 +2093,92 @@ class CoworkingViewSetTests(APITestCase):
         self.assertEqual(response.data['standard_points_cost'], 8)
         self.assertFalse(response.data['monthly_update_discount_applied'])
 
+    @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
+    def test_book_operation_replays_committed_snapshot_after_cancel_and_deactivation(
+        self,
+        mock_permission,
+    ):
+        booking_date = date.today() + timedelta(days=1)
+        operation_id = str(uuid4())
+        request_data = {
+            'slack_user_id': self.user.slack_id,
+            'date': booking_date.isoformat(),
+            'operation_id': operation_id,
+        }
+
+        first = self.client.post(self.url, request_data, format='json')
+        self.assertEqual(first.status_code, status.HTTP_201_CREATED)
+        booking = CoworkingBooking.objects.get(pk=first.data['id'])
+        CoworkingService.cancel(str(booking.id), self.user.slack_id)
+        current = self.client.get(
+            reverse('coworking-my-bookings'),
+            {
+                'slack_user_id': self.user.slack_id,
+                'booking_id': str(booking.id),
+            },
+        )
+        self.assertEqual(current.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(current.data), 1)
+        self.assertEqual(current.data[0]['status'], 'cancelled')
+        self.user.is_active = False
+        self.user.save(update_fields=['is_active'])
+        current_inactive = self.client.get(
+            reverse('coworking-my-bookings'),
+            {
+                'slack_user_id': request_data['slack_user_id'],
+                'booking_id': str(booking.id),
+            },
+        )
+        self.assertEqual(current_inactive.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(current_inactive.data), 1)
+        self.assertEqual(current_inactive.data[0]['status'], 'cancelled')
+
+        replay = self.client.post(self.url, request_data, format='json')
+
+        self.assertEqual(replay.status_code, status.HTTP_200_OK)
+        self.assertEqual(replay.data['id'], first.data['id'])
+        self.assertEqual(replay.data['status'], 'booked')
+        self.assertEqual(
+            replay.data['operation_booking_current_status'], 'cancelled'
+        )
+        self.assertTrue(replay.data['operation_replayed'])
+        self.assertEqual(CoworkingBooking.objects.count(), 1)
+        self.assertEqual(PointsAccount.objects.get(user=self.user).balance, 10)
+        receipt = CoworkingBookingOperation.objects.get(pk=operation_id)
+        self.assertNotIn('user', receipt.response_payload)
+        self.assertNotIn('user_email', receipt.response_payload)
+        self.assertEqual(list(receipt.subjects.all()), [self.user])
+
+        conflict = self.client.post(
+            self.url,
+            {
+                **request_data,
+                'date': (booking_date + timedelta(days=1)).isoformat(),
+            },
+            format='json',
+        )
+        self.assertEqual(conflict.status_code, status.HTTP_409_CONFLICT)
+
+        self.user.delete()
+        self.assertTrue(
+            CoworkingBookingOperation.objects.filter(pk=operation_id).exists()
+        )
+        current_deleted = self.client.get(
+            reverse('coworking-my-bookings'),
+            {
+                'slack_user_id': request_data['slack_user_id'],
+                'booking_id': str(booking.id),
+            },
+        )
+        self.assertEqual(current_deleted.status_code, status.HTTP_200_OK)
+        self.assertEqual(current_deleted.data, [])
+        erased_replay = self.client.post(self.url, request_data, format='json')
+        self.assertEqual(erased_replay.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            erased_replay.data['operation_booking_current_status'], 'deleted'
+        )
+        self.assertFalse(CoworkingBooking.objects.exists())
+
     @patch('core.permissions.HasRooApiKey.has_permission', return_value=True)
     @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
     @patch('roo.views.SlackService.get_user_profile', return_value=None)
@@ -2606,6 +2694,110 @@ class CoworkingViewSetTests(APITestCase):
             CoworkingBooking.objects.filter(date=booking_date, status='booked').count(),
             2,
         )
+
+    @patch('core.permissions.HasStrictRooApiKey.has_permission', return_value=True)
+    def test_batch_operation_replays_after_cancellation_and_admin_revocation(
+        self,
+        mock_permission,
+    ):
+        target = self._create_member_with_points('UCOBATCHREPLAY', balance=10)
+        booking_date = date.today() + timedelta(days=1)
+        request_data = {
+            'admin_slack_user_id': self.admin_slack_id,
+            'target_slack_user_ids': [target.slack_id],
+            'date': booking_date.isoformat(),
+            'operation_id': str(uuid4()),
+        }
+        first = self.client.post(self.batch_url, request_data, format='json')
+        self.assertEqual(first.status_code, status.HTTP_201_CREATED)
+        booking = CoworkingBooking.objects.get(user=target, date=booking_date)
+        CoworkingService.cancel(str(booking.id), self.admin_slack_id)
+        PointsAdmin.objects.filter(slack_user_id=self.admin_slack_id).update(
+            is_active=False
+        )
+        target.is_active = False
+        target.save(update_fields=['is_active'])
+
+        replay = self.client.post(self.batch_url, request_data, format='json')
+
+        self.assertEqual(replay.status_code, status.HTTP_200_OK)
+        self.assertTrue(replay.data['operation_replayed'])
+        self.assertEqual(replay.data['results'][0]['booking']['id'], str(booking.id))
+        self.assertEqual(
+            replay.data['results'][0]['booking'][
+                'operation_booking_current_status'
+            ],
+            'cancelled',
+        )
+        self.assertEqual(CoworkingBooking.objects.count(), 1)
+        self.assertEqual(PointsAccount.objects.get(user=target).balance, 10)
+        receipt = CoworkingBookingOperation.objects.get(pk=request_data['operation_id'])
+        stored_booking = receipt.response_payload['results'][0]['booking']
+        self.assertNotIn('user', stored_booking)
+        self.assertNotIn('user_email', stored_booking)
+        self.assertNotIn('slack_user_id', receipt.response_payload['results'][0])
+        self.assertNotIn('admin_slack_user_id', receipt.response_payload)
+        self.assertEqual(
+            set(receipt.subjects.all()), {target, self.admin_user}
+        )
+
+        target.delete()
+        deleted_target_replay = self.client.post(
+            self.batch_url, request_data, format='json'
+        )
+        self.assertEqual(deleted_target_replay.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            deleted_target_replay.data['results'][0]['slack_user_id'],
+            request_data['target_slack_user_ids'][0],
+        )
+        self.assertEqual(
+            deleted_target_replay.data['results'][0]['booking'][
+                'operation_booking_current_status'
+            ],
+            'deleted',
+        )
+        self.assertTrue(
+            CoworkingBookingOperation.objects.filter(
+                pk=request_data['operation_id']
+            ).exists()
+        )
+
+    def test_receipt_data_migration_scrubs_earlier_writer_payloads(self):
+        import importlib
+        from django.apps import apps
+
+        target = self._create_member_with_points('UCOLEGACYRECEIPT', balance=0)
+        operation = CoworkingBookingOperation.objects.create(
+            id=uuid4(),
+            kind='batch',
+            request_fingerprint='a' * 64,
+            response_payload={
+                'admin_slack_user_id': self.admin_slack_id,
+                'results': [
+                    {
+                        'slack_user_id': target.slack_id,
+                        'booking': {
+                            'id': str(uuid4()),
+                            'user': str(target.pk),
+                            'user_email': target.email,
+                        },
+                    }
+                ],
+            },
+        )
+        migration = importlib.import_module(
+            'roo.migrations.0036_sanitize_coworking_operation_receipts'
+        )
+
+        migration.sanitize_receipts(apps, None)
+
+        operation.refresh_from_db()
+        stored_row = operation.response_payload['results'][0]
+        self.assertNotIn('admin_slack_user_id', operation.response_payload)
+        self.assertNotIn('slack_user_id', stored_row)
+        self.assertNotIn('user', stored_row['booking'])
+        self.assertNotIn('user_email', stored_row['booking'])
+        self.assertEqual(set(operation.subjects.all()), {target})
 
     @patch('core.permissions.HasStrictRooApiKey.has_permission', return_value=True)
     def test_batch_book_treats_existing_booking_as_idempotent(self, mock_permission):

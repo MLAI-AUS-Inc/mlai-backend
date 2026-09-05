@@ -1,8 +1,20 @@
 
+# Bound the on-disk log size per container so a noisy service cannot fill the
+# droplet's disk. NOTE: this caps size only -- Docker still deletes a
+# container's logs when the container is REPLACED, which is what a deploy does.
+# Surviving a deploy requires shipping logs off-box; Sentry (see
+# core/observability.py) covers the error case, which is the part that matters
+# for post-hoc debugging.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "5"
 
 services:
   web:
     build: .
+    logging: *default-logging
     command: sh /app/scripts/start-web.sh
     environment:
       APP_ENV: ${APP_ENV:-production}
@@ -29,6 +41,7 @@ services:
 
   scheduler:
     build: .
+    logging: *default-logging
     command: >-
       sh -ec '
         health_file=/tmp/mlai-scheduled-discovery.ok;
@@ -113,6 +126,7 @@ services:
 
   analytics-sync:
     build: .
+    logging: *default-logging
     command: >-
       sh -ec '
         until python manage.py migrate --check --noinput; do
@@ -152,6 +166,7 @@ services:
 
   memory-worker:
     build: .
+    logging: *default-logging
     command: >-
       sh -ec '
         until python manage.py migrate --check --noinput; do
@@ -180,6 +195,7 @@ services:
 
   memory-scheduler:
     build: .
+    logging: *default-logging
     command: >-
       sh -ec '
         until python manage.py migrate --check --noinput; do
@@ -210,6 +226,7 @@ services:
 
   password-email-worker:
     build: .
+    logging: *default-logging
     command: >-
       sh -ec '
         until python manage.py migrate --check --noinput; do
@@ -231,6 +248,7 @@ services:
 
   community-email-worker:
     build: .
+    logging: *default-logging
     command: >-
       sh -ec '
         until python manage.py migrate --check --noinput; do
@@ -254,6 +272,7 @@ services:
 
   bridge-worker:
     build: .
+    logging: *default-logging
     command: sh -c "until python manage.py migrate --check --noinput; do echo 'Waiting for migrations to complete...'; sleep 5; done; python manage.py run_community_bridge"
     environment:
       APP_ENV: ${APP_ENV:-production}
@@ -312,6 +331,7 @@ services:
 
   bridge-retention:
     build: .
+    logging: *default-logging
     command: >-
       sh -ec '
         until python manage.py migrate --check --noinput; do
@@ -342,6 +362,7 @@ services:
 
   db:
     image: pgvector/pgvector:0.8.2-pg15-bookworm
+    logging: *default-logging
     volumes:
       - postgres_data:/var/lib/postgresql/data
     env_file:

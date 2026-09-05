@@ -22,6 +22,8 @@ from content_factory.models import (
     ResearchAutomation,
     ResearchAutomationStatus,
 )
+from core.models import SlackFounderAccountLink
+from core.slack_founder_links import ConflictingSlackFounderLinkError
 from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
 from integrations.services.notification_channels import (
     ChannelActionError,
@@ -64,7 +66,9 @@ class WhatsAppOtpTests(TestCase):
         self.user = User.objects.create_user(email="founder@example.com")
 
     def _channel(self):
-        return initiate_whatsapp_channel(organization=self.org, user=self.user, phone="+61 400 000 000")
+        return initiate_whatsapp_channel(
+            organization=self.org, user=self.user, phone="+61 400 000 000"
+        )
 
     def test_normalize_e164(self):
         self.assertEqual(normalize_e164("+61 400-000-000"), "+61400000000")
@@ -75,7 +79,10 @@ class WhatsAppOtpTests(TestCase):
             normalize_e164("+12")
 
     @override_settings(**WHATSAPP_SETTINGS)
-    @patch("integrations.services.notification_channels._generate_otp", return_value="123456")
+    @patch(
+        "integrations.services.notification_channels._generate_otp",
+        return_value="123456",
+    )
     @patch("integrations.services.notification_adapters.http_client.post")
     def test_send_otp_stores_hash_and_sends_auth_template(self, mock_post, _mock_otp):
         mock_post.return_value = _Response(201, {"sid": "SM-1"})
@@ -91,7 +98,9 @@ class WhatsAppOtpTests(TestCase):
         url = mock_post.call_args.args[0]
         self.assertIn("api.twilio.com", url)
         self.assertIn("AC-test", url)
-        self.assertEqual(mock_post.call_args.kwargs["auth"], ("AC-test", "twilio-auth-token"))
+        self.assertEqual(
+            mock_post.call_args.kwargs["auth"], ("AC-test", "twilio-auth-token")
+        )
         payload = mock_post.call_args.kwargs["data"]
         self.assertEqual(payload["From"], "whatsapp:+61480000000")
         self.assertEqual(payload["To"], "whatsapp:+61400000000")
@@ -99,7 +108,10 @@ class WhatsAppOtpTests(TestCase):
         self.assertEqual(json.loads(payload["ContentVariables"]), {"1": "123456"})
 
     @override_settings(**WHATSAPP_SETTINGS)
-    @patch("integrations.services.notification_channels._generate_otp", return_value="123456")
+    @patch(
+        "integrations.services.notification_channels._generate_otp",
+        return_value="123456",
+    )
     @patch("integrations.services.notification_adapters.http_client.post")
     def test_verify_happy_path_activates_channel(self, mock_post, _mock_otp):
         mock_post.return_value = _Response(201, {"sid": "SM-1"})
@@ -114,7 +126,10 @@ class WhatsAppOtpTests(TestCase):
         self.assertEqual(channel.verification_code_hash, "")
 
     @override_settings(**WHATSAPP_SETTINGS)
-    @patch("integrations.services.notification_channels._generate_otp", return_value="123456")
+    @patch(
+        "integrations.services.notification_channels._generate_otp",
+        return_value="123456",
+    )
     @patch("integrations.services.notification_adapters.http_client.post")
     def test_wrong_code_attempts_then_lockout(self, mock_post, _mock_otp):
         mock_post.return_value = _Response(201, {"sid": "SM-1"})
@@ -138,7 +153,10 @@ class WhatsAppOtpTests(TestCase):
         self.assertEqual(ctx.exception.code, "no_pending_code")
 
     @override_settings(**WHATSAPP_SETTINGS)
-    @patch("integrations.services.notification_channels._generate_otp", return_value="123456")
+    @patch(
+        "integrations.services.notification_channels._generate_otp",
+        return_value="123456",
+    )
     @patch("integrations.services.notification_adapters.http_client.post")
     def test_expired_code_rejected(self, mock_post, _mock_otp):
         mock_post.return_value = _Response(201, {"sid": "SM-1"})
@@ -159,7 +177,8 @@ class WhatsAppOtpTests(TestCase):
         mock_post.return_value = _Response(201, {"sid": "SM-1"})
         channel = self._channel()
         with patch(
-            "integrations.services.notification_channels._generate_otp", return_value="111111"
+            "integrations.services.notification_channels._generate_otp",
+            return_value="111111",
         ):
             send_whatsapp_otp(channel)
 
@@ -173,7 +192,8 @@ class WhatsAppOtpTests(TestCase):
         )
         channel.refresh_from_db()
         with patch(
-            "integrations.services.notification_channels._generate_otp", return_value="222222"
+            "integrations.services.notification_channels._generate_otp",
+            return_value="222222",
         ):
             send_whatsapp_otp(channel)
 
@@ -185,7 +205,10 @@ class WhatsAppOtpTests(TestCase):
         self.assertEqual(channel.consent_state, NotificationConsentState.ACTIVE)
 
     @override_settings(**WHATSAPP_SETTINGS)
-    @patch("integrations.services.notification_channels._generate_otp", return_value="123456")
+    @patch(
+        "integrations.services.notification_channels._generate_otp",
+        return_value="123456",
+    )
     @patch("integrations.services.notification_adapters.http_client.post")
     def test_send_cap_per_rolling_day(self, mock_post, _mock_otp):
         mock_post.return_value = _Response(201, {"sid": "SM-1"})
@@ -224,7 +247,9 @@ class WhatsAppOtpTests(TestCase):
 class EmailVerificationTests(TestCase):
     def setUp(self):
         self.client = APIClient()
-        self.org = Organization.objects.create(name="Email Co", domain="email.example.com")
+        self.org = Organization.objects.create(
+            name="Email Co", domain="email.example.com"
+        )
         self.user = User.objects.create_user(email="founder@example.com")
 
     def _legacy_pending_channel(self):
@@ -239,7 +264,9 @@ class EmailVerificationTests(TestCase):
 
     @patch("integrations.services.notification_adapters.http_client.post")
     def test_initiate_activates_account_email_without_sending(self, mock_post):
-        channel = initiate_email_channel(organization=self.org, user=self.user, route_id="Founder@Example.com")
+        channel = initiate_email_channel(
+            organization=self.org, user=self.user, route_id="Founder@Example.com"
+        )
         self.assertEqual(channel.route_id, "founder@example.com")
         self.assertEqual(channel.consent_state, NotificationConsentState.ACTIVE)
         self.assertTrue(channel.delivery_enabled)
@@ -254,7 +281,9 @@ class EmailVerificationTests(TestCase):
                 route_id="someone-else@example.com",
             )
         self.assertEqual(ctx.exception.code, "email_must_match_account")
-        self.assertFalse(NotificationChannel.objects.filter(organization=self.org).exists())
+        self.assertFalse(
+            NotificationChannel.objects.filter(organization=self.org).exists()
+        )
 
     def test_verify_link_activates_and_redirects(self):
         channel = self._legacy_pending_channel()
@@ -277,7 +306,9 @@ class EmailVerificationTests(TestCase):
     @override_settings(NOTIFICATION_CHANNEL_VERIFY_MAX_AGE_SECONDS=-1)
     def test_expired_link_redirects_expired(self):
         channel = self._legacy_pending_channel()
-        token = parse_qs(urlparse(build_email_verification_url(channel)).query)["token"][0]
+        token = parse_qs(urlparse(build_email_verification_url(channel)).query)[
+            "token"
+        ][0]
 
         response = self.client.get(
             reverse("content_factory_notification_channel_verify"), {"token": token}
@@ -289,7 +320,9 @@ class EmailVerificationTests(TestCase):
 
     def test_route_mismatch_or_garbage_token_redirects_invalid(self):
         channel = self._legacy_pending_channel()
-        token = parse_qs(urlparse(build_email_verification_url(channel)).query)["token"][0]
+        token = parse_qs(urlparse(build_email_verification_url(channel)).query)[
+            "token"
+        ][0]
         channel.route_id = "changed@example.com"
         channel.save(update_fields=["route_id"])
 
@@ -309,7 +342,9 @@ class AccountEmailChannelMigrationTests(TestCase):
         from django.apps import apps as django_apps
         from importlib import import_module
 
-        org = Organization.objects.create(name="Migration Co", domain="migration.example.com")
+        org = Organization.objects.create(
+            name="Migration Co", domain="migration.example.com"
+        )
         matching_user = User.objects.create_user(email="matching@example.com")
         alternate_user = User.objects.create_user(email="account@example.com")
         matching = NotificationChannel.objects.create(
@@ -349,17 +384,28 @@ class AccountEmailChannelMigrationTests(TestCase):
 
 class SlackLinkTests(TestCase):
     def setUp(self):
-        self.org = Organization.objects.create(name="Slack Co", domain="slack.example.com")
+        self.org = Organization.objects.create(
+            name="Slack Co", domain="slack.example.com"
+        )
         self.user = User.objects.create_user(email="founder@example.com")
-        self.config, _ = OrganizationContentConfig.objects.get_or_create(organization=self.org)
+        self.config, _ = OrganizationContentConfig.objects.get_or_create(
+            organization=self.org
+        )
 
-    @patch("integrations.services.notification_channels.SlackService.send_dm", return_value=(True, "1.0"))
-    @patch("integrations.services.notification_channels.SlackService.lookup_user_by_email")
+    @patch(
+        "integrations.services.notification_channels.SlackService.send_dm",
+        return_value=(True, "1.0"),
+    )
+    @patch(
+        "integrations.services.notification_channels.SlackService.lookup_user_by_email"
+    )
     def test_link_via_user_slack_id(self, mock_lookup, mock_dm):
         self.user.slack_id = "U111"
         self.user.save(update_fields=["slack_id"])
 
-        channel = link_slack_channel(organization=self.org, user=self.user, config=self.config)
+        channel = link_slack_channel(
+            organization=self.org, user=self.user, config=self.config
+        )
 
         self.assertEqual(channel.route_id, "U111")
         self.assertEqual(channel.consent_state, NotificationConsentState.ACTIVE)
@@ -368,29 +414,259 @@ class SlackLinkTests(TestCase):
         self.config.refresh_from_db()
         self.assertEqual(self.config.connected_slack_user_id, "U111")
 
-    @patch("integrations.services.notification_channels.SlackService.send_dm", return_value=(True, "1.0"))
-    @patch("integrations.services.notification_channels.SlackService.lookup_user_by_email")
+    @patch(
+        "integrations.services.notification_channels.SlackService.send_dm",
+        return_value=(True, "1.0"),
+    )
+    @patch(
+        "integrations.services.notification_channels.SlackService.lookup_user_by_email"
+    )
     def test_link_via_config_connected_slack_user(self, mock_lookup, mock_dm):
         self.config.connected_slack_user_id = "U222"
         self.config.save(update_fields=["connected_slack_user_id"])
 
-        channel = link_slack_channel(organization=self.org, user=self.user, config=self.config)
+        channel = link_slack_channel(
+            organization=self.org, user=self.user, config=self.config
+        )
 
         self.assertEqual(channel.route_id, "U222")
         mock_lookup.assert_not_called()
 
-    @patch("integrations.services.notification_channels.SlackService.send_dm", return_value=(True, "1.0"))
+    @patch(
+        "integrations.services.notification_channels.SlackService.send_dm",
+        return_value=(True, "1.0"),
+    )
+    @patch(
+        "integrations.services.notification_channels.SlackService.lookup_user_by_email"
+    )
+    def test_explicit_founder_link_routes_to_linked_slack_account_without_reassigning_identity(
+        self,
+        mock_lookup,
+        mock_dm,
+    ):
+        slack_user = User.objects.create_user(
+            email="roo-account@example.com",
+            slack_id="UROOACCOUNT",
+        )
+        SlackFounderAccountLink.objects.create(
+            slack_user=slack_user,
+            founder_user=self.user,
+        )
+        self.config.connected_slack_user_id = "UNOTIFY123"
+        self.config.save(update_fields=["connected_slack_user_id"])
+
+        channel = link_slack_channel(
+            organization=self.org,
+            user=self.user,
+            config=self.config,
+        )
+
+        self.assertEqual(channel.route_id, "UROOACCOUNT")
+        self.user.refresh_from_db()
+        self.config.refresh_from_db()
+        self.assertIsNone(self.user.slack_id)
+        self.assertEqual(self.config.connected_slack_user_id, "UNOTIFY123")
+        mock_lookup.assert_not_called()
+        mock_dm.assert_called_once_with(
+            "UROOACCOUNT",
+            "You're set up to receive daily article topic suggestions here. "
+            "You can manage notification channels from your marketing dashboard.",
+        )
+
+    @patch(
+        "integrations.services.notification_channels.SlackService.send_dm",
+        return_value=(True, "1.0"),
+    )
+    @patch("integrations.services.notification_channels.assign_direct_slack_identity")
+    @patch(
+        "integrations.services.notification_channels.SlackService.lookup_user_by_email"
+    )
+    def test_explicit_link_supplies_route_without_rewriting_canonical_owner(
+        self,
+        mock_lookup,
+        mock_assign,
+        mock_dm,
+    ):
+        slack_user = User.objects.create_user(
+            email="roo-account@example.com",
+            slack_id="UROOACCOUNT",
+            first_name="Roo",
+            last_name="Founder",
+        )
+        SlackFounderAccountLink.objects.create(
+            slack_user=slack_user,
+            founder_user=self.user,
+        )
+        canonical_owner = f"mlai_user:{self.user.pk}"
+        self.config.connected_slack_user_id = canonical_owner
+        self.config.save(update_fields=["connected_slack_user_id"])
+
+        channel = link_slack_channel(
+            organization=self.org,
+            user=self.user,
+            config=self.config,
+        )
+
+        self.user.refresh_from_db()
+        self.config.refresh_from_db()
+        self.assertEqual(channel.route_id, "UROOACCOUNT")
+        self.assertEqual(channel.display_name, "Roo Founder")
+        self.assertIsNone(self.user.slack_id)
+        self.assertEqual(self.config.connected_slack_user_id, canonical_owner)
+        mock_lookup.assert_not_called()
+        mock_assign.assert_not_called()
+        mock_dm.assert_called_once_with(
+            "UROOACCOUNT",
+            "You're set up to receive daily article topic suggestions here. "
+            "You can manage notification channels from your marketing dashboard.",
+        )
+
+    @patch(
+        "integrations.services.notification_channels.SlackService.send_dm",
+        return_value=(True, "1.0"),
+    )
     @patch(
         "integrations.services.notification_channels.SlackService.lookup_user_by_email",
         return_value={"slack_id": "U333", "real_name": "Founder"},
     )
     def test_link_via_email_lookup_persists_slack_id(self, mock_lookup, mock_dm):
-        channel = link_slack_channel(organization=self.org, user=self.user, config=self.config)
+        channel = link_slack_channel(
+            organization=self.org, user=self.user, config=self.config
+        )
 
         self.assertEqual(channel.route_id, "U333")
         self.assertEqual(channel.display_name, "Founder")
         self.user.refresh_from_db()
         self.assertEqual(self.user.slack_id, "U333")
+
+    @patch(
+        "integrations.services.notification_channels.SlackService.send_dm",
+        return_value=(True, "1.0"),
+    )
+    @patch(
+        "integrations.services.notification_channels.SlackService.lookup_user_by_email",
+        return_value={"slack_id": "UVERIFIED", "real_name": "Founder"},
+    )
+    def test_internal_actor_id_is_not_used_as_a_slack_route(self, mock_lookup, mock_dm):
+        self.config.connected_slack_user_id = f"mlai_user:{self.user.pk}"
+        self.config.save(update_fields=["connected_slack_user_id"])
+
+        channel = link_slack_channel(
+            organization=self.org,
+            user=self.user,
+            config=self.config,
+        )
+
+        self.assertEqual(channel.route_id, "UVERIFIED")
+        self.user.refresh_from_db()
+        self.config.refresh_from_db()
+        self.assertEqual(self.user.slack_id, "UVERIFIED")
+        self.assertEqual(
+            self.config.connected_slack_user_id,
+            f"mlai_user:{self.user.pk}",
+        )
+        mock_lookup.assert_called_once_with(self.user.email)
+        mock_dm.assert_called_once()
+
+    @patch(
+        "integrations.services.notification_channels.SlackService.send_dm",
+        return_value=(True, "1.0"),
+    )
+    @patch(
+        "integrations.services.notification_channels.SlackService.lookup_user_by_email"
+    )
+    def test_real_slack_route_preserves_migration_attested_owner(
+        self,
+        mock_lookup,
+        mock_dm,
+    ):
+        preserved_owner = f"web_{self.user.pk}"
+        self.user.slack_id = "UVERIFIED"
+        self.user.save(update_fields=["slack_id"])
+        self.config.connected_slack_user_id = preserved_owner
+        self.config.save(update_fields=["connected_slack_user_id"])
+
+        channel = link_slack_channel(
+            organization=self.org,
+            user=self.user,
+            config=self.config,
+        )
+
+        self.config.refresh_from_db()
+        self.assertEqual(channel.route_id, "UVERIFIED")
+        self.assertEqual(self.config.connected_slack_user_id, preserved_owner)
+        mock_lookup.assert_not_called()
+        mock_dm.assert_called_once()
+
+    @patch("integrations.services.notification_channels.SlackService.send_dm")
+    @patch(
+        "integrations.services.notification_channels.SlackService.lookup_user_by_email",
+        return_value=None,
+    )
+    def test_internal_actor_id_requires_verified_slack_lookup(
+        self, mock_lookup, mock_dm
+    ):
+        self.config.connected_slack_user_id = f"web_{self.user.pk}"
+        self.config.save(update_fields=["connected_slack_user_id"])
+
+        with self.assertRaisesRegex(
+            ChannelActionError, "couldn't find your Slack account"
+        ):
+            link_slack_channel(
+                organization=self.org,
+                user=self.user,
+                config=self.config,
+            )
+
+        self.user.refresh_from_db()
+        self.config.refresh_from_db()
+        self.assertIsNone(self.user.slack_id)
+        self.assertEqual(self.config.connected_slack_user_id, f"web_{self.user.pk}")
+        mock_lookup.assert_called_once_with(self.user.email)
+        mock_dm.assert_not_called()
+
+    @patch("integrations.services.notification_channels.SlackService.send_dm")
+    @patch(
+        "integrations.services.notification_channels.assign_direct_slack_identity",
+        side_effect=ConflictingSlackFounderLinkError(),
+    )
+    @patch(
+        "integrations.services.notification_channels.SlackService.lookup_user_by_email",
+        return_value={"slack_id": "UOTHER", "real_name": "Other Founder"},
+    )
+    def test_lookup_identity_conflict_preserves_migration_attested_owner(
+        self,
+        mock_lookup,
+        mock_assign,
+        mock_dm,
+    ):
+        preserved_owner = f"web_{self.user.pk}"
+        self.config.connected_slack_user_id = preserved_owner
+        self.config.save(update_fields=["connected_slack_user_id"])
+
+        with self.assertRaises(ChannelActionError) as ctx:
+            link_slack_channel(
+                organization=self.org,
+                user=self.user,
+                config=self.config,
+            )
+
+        self.assertEqual(ctx.exception.code, "slack_identity_conflict")
+        self.assertEqual(ctx.exception.http_status, 409)
+        self.config.refresh_from_db()
+        self.user.refresh_from_db()
+        self.assertEqual(self.config.connected_slack_user_id, preserved_owner)
+        self.assertIsNone(self.user.slack_id)
+        self.assertFalse(
+            NotificationChannel.objects.filter(
+                organization=self.org,
+                channel_type=NotificationChannelType.SLACK,
+                route_id="UOTHER",
+            ).exists()
+        )
+        mock_lookup.assert_called_once_with(self.user.email)
+        mock_assign.assert_called_once()
+        mock_dm.assert_not_called()
 
     @patch("integrations.services.notification_channels.SlackService.send_dm")
     @patch(
@@ -399,18 +675,56 @@ class SlackLinkTests(TestCase):
     )
     def test_unresolvable_slack_raises(self, mock_lookup, mock_dm):
         with self.assertRaises(ChannelActionError) as ctx:
-            link_slack_channel(organization=self.org, user=self.user, config=self.config)
+            link_slack_channel(
+                organization=self.org, user=self.user, config=self.config
+            )
         self.assertEqual(ctx.exception.code, "slack_user_not_found")
         mock_dm.assert_not_called()
+
+    @patch(
+        "integrations.services.notification_channels.SlackService.send_dm",
+        return_value=(False, None),
+    )
+    @patch(
+        "integrations.services.notification_channels.SlackService.lookup_user_by_email",
+        return_value={"slack_id": "UVERIFIED"},
+    )
+    def test_failed_verification_dm_does_not_activate_channel(
+        self, mock_lookup, mock_dm
+    ):
+        with self.assertRaises(ChannelActionError) as ctx:
+            link_slack_channel(
+                organization=self.org,
+                user=self.user,
+                config=self.config,
+            )
+
+        self.assertEqual(ctx.exception.code, "send_failed")
+        self.assertEqual(ctx.exception.http_status, 502)
+        channel = NotificationChannel.objects.get(
+            organization=self.org,
+            channel_type=NotificationChannelType.SLACK,
+            route_id="UVERIFIED",
+        )
+        self.assertEqual(channel.consent_state, NotificationConsentState.PENDING)
+        mock_lookup.assert_called_once_with(self.user.email)
+        mock_dm.assert_called_once()
 
 
 class EnsureAutomationTests(TestCase):
     def setUp(self):
-        self.org = Organization.objects.create(name="Ensure Co", domain="ensure.example.com")
+        self.org = Organization.objects.create(
+            name="Ensure Co", domain="ensure.example.com"
+        )
         self.user = User.objects.create_user(email="founder@example.com")
-        self.config, _ = OrganizationContentConfig.objects.get_or_create(organization=self.org)
+        self.config, _ = OrganizationContentConfig.objects.get_or_create(
+            organization=self.org
+        )
 
-    @patch("integrations.services.notification_channels.SlackService.send_dm", return_value=(True, "1.0"))
+    @patch(
+        "integrations.services.notification_channels.SlackService.send_dm",
+        return_value=(True, "1.0"),
+    )
     def test_creates_slack_channel_and_automation_when_none_exist(self, _mock_dm):
         self.user.slack_id = "U900"
         self.user.save(update_fields=["slack_id"])
@@ -504,7 +818,10 @@ class CustomerioEmailVerificationTests(TestCase):
         self.assertEqual(request_body["to"], "founder@example.com")
         self.assertEqual(request_body["identifiers"], {"id": str(self.user.id)})
         self.assertEqual(request_body["from"], "Roo <roo@mlai.au>")
-        self.assertIn("/api/content-factory/notification-channels/verify-email", request_body["body_plain"])
+        self.assertIn(
+            "/api/content-factory/notification-channels/verify-email",
+            request_body["body_plain"],
+        )
         self.assertIn("token=", request_body["body_plain"])
         self.assertIn("Confirm this email", request_body["body"])
 
@@ -535,7 +852,11 @@ class CustomerioEmailVerificationTests(TestCase):
         self.assertEqual(ctx.exception.http_status, 503)
 
 
-@override_settings(RESEND_API_KEY="resend-key", CUSTOMERIO_API_KEY="", DEFAULT_BACKEND_URL="https://api.test")
+@override_settings(
+    RESEND_API_KEY="resend-key",
+    CUSTOMERIO_API_KEY="",
+    DEFAULT_BACKEND_URL="https://api.test",
+)
 class NotificationChannelEndpointTests(TestCase):
     def setUp(self):
         self.client = APIClient()
@@ -546,7 +867,9 @@ class NotificationChannelEndpointTests(TestCase):
             last_name="One",
             role="participant",
         )
-        self.profile = VibeRaisingProfile.objects.create(user=self.user, role=VibeRaisingProfile.ROLE_FOUNDER)
+        self.profile = VibeRaisingProfile.objects.create(
+            user=self.user, role=VibeRaisingProfile.ROLE_FOUNDER
+        )
         self.company = VibeRaisingCompany.objects.create(
             profile=self.profile,
             name="Acme",
@@ -565,7 +888,9 @@ class NotificationChannelEndpointTests(TestCase):
         self.assertIsNone(response.data["automation"])
 
     @patch("integrations.services.notification_adapters.http_client.post")
-    def test_create_email_channel_activates_account_email_without_sending(self, mock_post):
+    def test_create_email_channel_activates_account_email_without_sending(
+        self, mock_post
+    ):
         response = self.client.post(
             reverse("vibe-marketing-notification-channels"),
             {"channelType": "email"},
@@ -589,7 +914,10 @@ class NotificationChannelEndpointTests(TestCase):
         self.assertEqual(response.data["code"], "whatsapp_not_configured")
 
     @override_settings(**WHATSAPP_SETTINGS)
-    @patch("integrations.services.notification_channels._generate_otp", return_value="654321")
+    @patch(
+        "integrations.services.notification_channels._generate_otp",
+        return_value="654321",
+    )
     @patch("integrations.services.notification_adapters.http_client.post")
     def test_whatsapp_create_then_verify_endpoint(self, mock_post, _mock_otp):
         mock_post.return_value = _Response(201, {"sid": "SM-1"})
@@ -603,7 +931,10 @@ class NotificationChannelEndpointTests(TestCase):
         channel_id = create.data["channel"]["id"]
 
         bad = self.client.post(
-            reverse("vibe-marketing-notification-channel-verify", kwargs={"channel_id": channel_id}),
+            reverse(
+                "vibe-marketing-notification-channel-verify",
+                kwargs={"channel_id": channel_id},
+            ),
             {"code": "000000"},
             format="json",
         )
@@ -611,7 +942,10 @@ class NotificationChannelEndpointTests(TestCase):
         self.assertEqual(bad.data["code"], "invalid_code")
 
         good = self.client.post(
-            reverse("vibe-marketing-notification-channel-verify", kwargs={"channel_id": channel_id}),
+            reverse(
+                "vibe-marketing-notification-channel-verify",
+                kwargs={"channel_id": channel_id},
+            ),
             {"code": "654321"},
             format="json",
         )
@@ -619,7 +953,9 @@ class NotificationChannelEndpointTests(TestCase):
         self.assertEqual(good.data["channel"]["consentState"], "active")
 
     def test_channel_scoped_to_org(self):
-        other_org = Organization.objects.create(name="Other", domain="other.example.com")
+        other_org = Organization.objects.create(
+            name="Other", domain="other.example.com"
+        )
         foreign = NotificationChannel.objects.create(
             organization=other_org,
             channel_type=NotificationChannelType.EMAIL,
@@ -627,7 +963,10 @@ class NotificationChannelEndpointTests(TestCase):
             consent_state=NotificationConsentState.ACTIVE,
         )
         response = self.client.delete(
-            reverse("vibe-marketing-notification-channel-detail", kwargs={"channel_id": foreign.id})
+            reverse(
+                "vibe-marketing-notification-channel-detail",
+                kwargs={"channel_id": foreign.id},
+            )
         )
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
 
@@ -643,12 +982,17 @@ class NotificationChannelEndpointTests(TestCase):
             notification_channel=channel,
             status=ResearchAutomationStatus.ACTIVE,
         )
-        config, _ = OrganizationContentConfig.objects.get_or_create(organization=self.org)
+        config, _ = OrganizationContentConfig.objects.get_or_create(
+            organization=self.org
+        )
         config.daily_discovery_enabled = True
         config.save(update_fields=["daily_discovery_enabled"])
 
         response = self.client.delete(
-            reverse("vibe-marketing-notification-channel-detail", kwargs={"channel_id": channel.id})
+            reverse(
+                "vibe-marketing-notification-channel-detail",
+                kwargs={"channel_id": channel.id},
+            )
         )
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
@@ -696,7 +1040,9 @@ class NotificationChannelEndpointTests(TestCase):
         config.refresh_from_db()
         self.assertFalse(config.daily_discovery_enabled)
 
-    def _active_channel(self, channel_type=NotificationChannelType.EMAIL, route_id="founder@example.com"):
+    def _active_channel(
+        self, channel_type=NotificationChannelType.EMAIL, route_id="founder@example.com"
+    ):
         return NotificationChannel.objects.create(
             organization=self.org,
             channel_type=channel_type,
@@ -705,7 +1051,10 @@ class NotificationChannelEndpointTests(TestCase):
         )
 
     def _detail_url(self, channel):
-        return reverse("vibe-marketing-notification-channel-detail", kwargs={"channel_id": channel.id})
+        return reverse(
+            "vibe-marketing-notification-channel-detail",
+            kwargs={"channel_id": channel.id},
+        )
 
     def test_channels_serialize_delivery_enabled_default_true(self):
         self._active_channel()
@@ -716,7 +1065,9 @@ class NotificationChannelEndpointTests(TestCase):
     def test_toggle_delivery_off_then_on_preserves_consent(self):
         # Two active channels so the guard permits turning one off.
         self._active_channel()
-        whatsapp = self._active_channel(NotificationChannelType.WHATSAPP, "+61400000000")
+        whatsapp = self._active_channel(
+            NotificationChannelType.WHATSAPP, "+61400000000"
+        )
         url = self._detail_url(whatsapp)
 
         off = self.client.patch(url, {"deliveryEnabled": False}, format="json")
@@ -740,13 +1091,17 @@ class NotificationChannelEndpointTests(TestCase):
             route_id="+61400000000",
             consent_state=NotificationConsentState.PENDING,
         )
-        response = self.client.patch(self._detail_url(pending), {"deliveryEnabled": False}, format="json")
+        response = self.client.patch(
+            self._detail_url(pending), {"deliveryEnabled": False}, format="json"
+        )
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(response.data["code"], "channel_not_active")
 
     def test_toggle_last_delivery_channel_blocked(self):
         email = self._active_channel()
-        response = self.client.patch(self._detail_url(email), {"deliveryEnabled": False}, format="json")
+        response = self.client.patch(
+            self._detail_url(email), {"deliveryEnabled": False}, format="json"
+        )
         self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
         self.assertEqual(response.data["code"], "last_delivery_channel")
         email.refresh_from_db()
@@ -759,14 +1114,18 @@ class NotificationChannelEndpointTests(TestCase):
         self.assertEqual(response.data["code"], "missing_delivery_enabled")
 
     def test_toggle_scoped_to_org(self):
-        other_org = Organization.objects.create(name="Other", domain="other.example.com")
+        other_org = Organization.objects.create(
+            name="Other", domain="other.example.com"
+        )
         foreign = NotificationChannel.objects.create(
             organization=other_org,
             channel_type=NotificationChannelType.EMAIL,
             route_id="other@example.com",
             consent_state=NotificationConsentState.ACTIVE,
         )
-        response = self.client.patch(self._detail_url(foreign), {"deliveryEnabled": False}, format="json")
+        response = self.client.patch(
+            self._detail_url(foreign), {"deliveryEnabled": False}, format="json"
+        )
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
 
     # --- type-based delivery endpoint (connect-on-enable) -------------------
@@ -774,27 +1133,38 @@ class NotificationChannelEndpointTests(TestCase):
     def _delivery_url(self):
         return reverse("vibe-marketing-notification-channel-delivery")
 
-    @patch("integrations.services.notification_channels.SlackService.send_dm", return_value=(True, "1.0"))
+    @patch(
+        "integrations.services.notification_channels.SlackService.send_dm",
+        return_value=(True, "1.0"),
+    )
     def test_delivery_enable_slack_connects_and_enables(self, _mock_dm):
         self.user.slack_id = "U1"
         self.user.save(update_fields=["slack_id"])
         response = self.client.post(
-            self._delivery_url(), {"channelType": "slack", "enabled": True}, format="json"
+            self._delivery_url(),
+            {"channelType": "slack", "enabled": True},
+            format="json",
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["status"], "active")
-        slack = NotificationChannel.objects.get(organization=self.org, channel_type=NotificationChannelType.SLACK)
+        slack = NotificationChannel.objects.get(
+            organization=self.org, channel_type=NotificationChannelType.SLACK
+        )
         self.assertEqual(slack.consent_state, NotificationConsentState.ACTIVE)
         self.assertTrue(slack.delivery_enabled)
 
     @patch("integrations.services.notification_adapters.http_client.post")
     def test_delivery_enable_email_activates_without_sending(self, mock_post):
         response = self.client.post(
-            self._delivery_url(), {"channelType": "email", "enabled": True}, format="json"
+            self._delivery_url(),
+            {"channelType": "email", "enabled": True},
+            format="json",
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["status"], "active")
-        email = NotificationChannel.objects.get(organization=self.org, channel_type=NotificationChannelType.EMAIL)
+        email = NotificationChannel.objects.get(
+            organization=self.org, channel_type=NotificationChannelType.EMAIL
+        )
         self.assertEqual(email.consent_state, NotificationConsentState.ACTIVE)
         self.assertTrue(email.delivery_enabled)
         mock_post.assert_not_called()
@@ -808,7 +1178,9 @@ class NotificationChannelEndpointTests(TestCase):
             delivery_enabled=False,
         )
         response = self.client.post(
-            self._delivery_url(), {"channelType": "email", "enabled": True}, format="json"
+            self._delivery_url(),
+            {"channelType": "email", "enabled": True},
+            format="json",
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["status"], "active")
@@ -817,9 +1189,13 @@ class NotificationChannelEndpointTests(TestCase):
 
     def test_delivery_disable_keeps_connection_and_needs_another_channel(self):
         slack = self._active_channel(NotificationChannelType.SLACK, "U1")
-        self._active_channel(NotificationChannelType.EMAIL, "founder@example.com")  # keeps guard satisfied
+        self._active_channel(
+            NotificationChannelType.EMAIL, "founder@example.com"
+        )  # keeps guard satisfied
         response = self.client.post(
-            self._delivery_url(), {"channelType": "slack", "enabled": False}, format="json"
+            self._delivery_url(),
+            {"channelType": "slack", "enabled": False},
+            format="json",
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["status"], "disabled")
@@ -831,7 +1207,9 @@ class NotificationChannelEndpointTests(TestCase):
     def test_delivery_disable_last_channel_blocked(self):
         slack = self._active_channel(NotificationChannelType.SLACK, "U1")
         response = self.client.post(
-            self._delivery_url(), {"channelType": "slack", "enabled": False}, format="json"
+            self._delivery_url(),
+            {"channelType": "slack", "enabled": False},
+            format="json",
         )
         self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
         self.assertEqual(response.data["code"], "last_delivery_channel")
@@ -840,18 +1218,24 @@ class NotificationChannelEndpointTests(TestCase):
 
     def test_delivery_enable_whatsapp_without_channel_requires_setup(self):
         response = self.client.post(
-            self._delivery_url(), {"channelType": "whatsapp", "enabled": True}, format="json"
+            self._delivery_url(),
+            {"channelType": "whatsapp", "enabled": True},
+            format="json",
         )
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(response.data["code"], "whatsapp_setup_required")
 
     def test_delivery_invalid_type_and_missing_enabled(self):
         bad_type = self.client.post(
-            self._delivery_url(), {"channelType": "carrier-pigeon", "enabled": True}, format="json"
+            self._delivery_url(),
+            {"channelType": "carrier-pigeon", "enabled": True},
+            format="json",
         )
         self.assertEqual(bad_type.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(bad_type.data["code"], "invalid_channel_type")
-        missing = self.client.post(self._delivery_url(), {"channelType": "slack"}, format="json")
+        missing = self.client.post(
+            self._delivery_url(), {"channelType": "slack"}, format="json"
+        )
         self.assertEqual(missing.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(missing.data["code"], "missing_enabled")
 
@@ -870,7 +1254,11 @@ class NotificationChannelEndpointTests(TestCase):
 
     @patch("content_factory.notification_channel_views.start_manual_automation_run")
     def test_run_now_reused_flag(self, mock_start):
-        mock_start.return_value = {"status": "reused", "automation_run_id": "run-1", "run_status": "queued"}
+        mock_start.return_value = {
+            "status": "reused",
+            "automation_run_id": "run-1",
+            "run_status": "queued",
+        }
         response = self.client.post(self._run_now_url(), {}, format="json")
         self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
         self.assertTrue(response.data["reused"])
@@ -947,14 +1335,18 @@ class NotificationChannelEndpointTests(TestCase):
         self.assertEqual(response.data["deliveries"][0]["status"], "sent")
 
     def test_run_status_researching_when_queued(self):
-        run, _ = self._manual_run(organization=self.org, run_status=AutomationRunStatus.QUEUED)
+        run, _ = self._manual_run(
+            organization=self.org, run_status=AutomationRunStatus.QUEUED
+        )
         response = self.client.get(self._run_status_url(run))
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["phase"], "researching")
 
     def test_run_status_org_scoped_404(self):
         other = Organization.objects.create(name="Other", domain="other2.example.com")
-        run, _ = self._manual_run(organization=other, run_status=AutomationRunStatus.QUEUED)
+        run, _ = self._manual_run(
+            organization=other, run_status=AutomationRunStatus.QUEUED
+        )
         response = self.client.get(self._run_status_url(run))
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
 
@@ -963,7 +1355,9 @@ class ActiveChannelsForRunTests(TestCase):
     """Fan-out targeting honours delivery_enabled (the single delivery seam)."""
 
     def setUp(self):
-        self.org = Organization.objects.create(name="Fanout Co", domain="fanout.example.com")
+        self.org = Organization.objects.create(
+            name="Fanout Co", domain="fanout.example.com"
+        )
         self.primary = NotificationChannel.objects.create(
             organization=self.org,
             channel_type=NotificationChannelType.EMAIL,

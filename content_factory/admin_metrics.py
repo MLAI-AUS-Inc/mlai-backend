@@ -16,6 +16,7 @@ from django.contrib.auth import get_user_model
 from django.db.models import Q, QuerySet
 from django.utils import timezone
 
+from core.actor_ids import internal_actor_user_id
 from roo.models import Ledger, PointsPurchase
 from startup_updates.models import UserStartupBinding
 from workflow_runs.models import ContentFactoryRun, ContentFactoryRunStatus
@@ -69,12 +70,12 @@ def _direct_user_id(actor: str, user_ids: set[int], slack_to_user: dict[str, int
     actor = str(actor or "").strip()
     if not actor:
         return None
-    if actor.startswith("mlai_user:"):
-        actor = actor.partition(":")[2]
-    try:
-        candidate = int(actor)
-    except (TypeError, ValueError):
-        candidate = None
+    candidate = internal_actor_user_id(actor)
+    if candidate is None:
+        try:
+            candidate = int(actor)
+        except (TypeError, ValueError):
+            candidate = None
     if candidate in user_ids:
         return candidate
     return slack_to_user.get(actor)
@@ -92,11 +93,16 @@ def _run_user_map(run_rows: Iterable[dict[str, Any]]) -> dict[str, set[int]]:
     possible_ids: set[int] = set()
     slack_values: set[str] = set()
     for actor in actor_values:
-        raw_id = actor.partition(":")[2] if actor.startswith("mlai_user:") else actor
-        try:
-            possible_ids.add(int(raw_id))
-        except (TypeError, ValueError):
+        candidate = internal_actor_user_id(actor)
+        if candidate is None:
+            try:
+                candidate = int(actor)
+            except (TypeError, ValueError):
+                candidate = None
+        if candidate is None:
             slack_values.add(actor)
+        else:
+            possible_ids.add(candidate)
 
     User = get_user_model()
     existing_user_ids = set(

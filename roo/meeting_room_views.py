@@ -5,11 +5,11 @@ from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from core.models import User
 from core.permissions import HasStrictRooApiKey
 
 from .meeting_rooms import MeetingRoomError, MeetingRoomService
 from .permissions import InsufficientBalanceError, is_points_admin
-from .services import PointsService
 from .views import clean_slack_id
 
 
@@ -57,7 +57,11 @@ def _active_user_for_slack_id(slack_user_id: str, *, target: bool = False):
             ),
             status.HTTP_404_NOT_FOUND,
         )
-    user = PointsService.get_user_by_slack_id(slack_user_id)
+    # Resolve the identity before applying the active-account policy so callers
+    # receive the contractually distinct inactive_user response instead of an
+    # indistinguishable unlinked_user response. PointsService deliberately
+    # filters inactive users for general points operations.
+    user = User.objects.filter(slack_id=slack_user_id).first()
     if user is None:
         raise MeetingRoomError(
             'unlinked_user',

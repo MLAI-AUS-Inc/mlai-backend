@@ -103,6 +103,7 @@ from .serializers import (
     CommunityChatEmailCodeVerifySerializer,
     CommunityChatPasswordLoginSerializer,
     CommunityChatPublicProfileBatchSerializer,
+    CommunityChatSlackDeleteSerializer,
     own_chat_profile,
     public_chat_profile,
 )
@@ -1143,7 +1144,7 @@ class LinkPreviewView(APIView):
     def get(self, request):
         raw_url = str(request.query_params.get("url") or "").strip()
         try:
-            slack_preview = fetch_slack_file_preview(raw_url)
+            slack_preview = fetch_slack_file_preview(raw_url, user=request.user)
             preview = slack_preview or fetch_link_preview(raw_url)
         except (LinkPreviewError, SlackFilePreviewError) as exc:
             return Response(
@@ -1178,7 +1179,10 @@ class LinkPreviewImageView(APIView):
         try:
             slack_file_id = str(request.query_params.get("slack_file") or "").strip()
             if slack_file_id:
-                content_type, body = fetch_slack_file_image(slack_file_id)
+                content_type, body = fetch_slack_file_image(
+                    slack_file_id,
+                    user=request.user,
+                )
             else:
                 content_type, body = fetch_preview_image(
                     str(request.query_params.get("url") or "").strip()
@@ -1192,6 +1196,59 @@ class LinkPreviewImageView(APIView):
         response["Cache-Control"] = "private, max-age=21600"
         response["Cross-Origin-Resource-Policy"] = "same-site"
         return response
+
+
+class SlackOriginMessageDeleteView(APIView):
+    """Request deletion of the caller's Slack-authored mirrored message."""
+
+    authentication_classes = (CommunityChatAccountAuthentication,)
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [CommunityChatScopedThrottle]
+    community_chat_throttle_scope = "community_chat_slack_delete"
+
+    def post(self, request):
+        from integrations.services.community_bridge.deletion import (
+            SlackDeletionError,
+            delete_slack_origin_message,
+        )
+        from integrations.services.external_connectors import (
+            ConnectorConfigurationError,
+            build_community_chat_slack_authorization_url,
+        )
+
+        serializer = CommunityChatSlackDeleteSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            result = delete_slack_origin_message(
+                user=request.user,
+                device_public_key=request.community_chat_public_key,
+                buzz_event_id=serializer.validated_data["buzz_event_id"],
+                idempotency_key=serializer.validated_data["idempotency_key"],
+            )
+        except SlackDeletionError as exc:
+            body = {"error": exc.code, "detail": exc.detail}
+            if exc.code == "slack_reauthorization_required":
+                try:
+                    body["connect_url"] = build_community_chat_slack_authorization_url(
+                        request.user
+                    )
+                except ConnectorConfigurationError:
+                    body["error"] = "slack_oauth_unavailable"
+                    body["detail"] = "Slack reconnection is temporarily unavailable."
+            return Response(body, status=exc.http_status)
+
+        response_status = (
+            status.HTTP_202_ACCEPTED
+            if result.status in {"processing", "succeeded"}
+            else status.HTTP_200_OK
+        )
+        return Response(
+            {
+                "request_id": result.request_id,
+                "status": result.status,
+            },
+            status=response_status,
+        )
 
 
 class DeviceAuthStartView(APIView):

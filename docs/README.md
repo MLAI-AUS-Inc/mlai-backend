@@ -32,6 +32,8 @@ rollout sequence.
 
 - [`stripe-xero-reconciliation.md`](stripe-xero-reconciliation.md)
 - [`humanitix-xero-reconciliation.md`](humanitix-xero-reconciliation.md)
+- [`reconciliation-bill-binding.md`](reconciliation-bill-binding.md)
+- [`reconciliation-stripe-statement-binding.md`](reconciliation-stripe-statement-binding.md)
 - [`reconciliation-knowledge-export.md`](reconciliation-knowledge-export.md)
 - [`xero-statement-reconciliation.md`](xero-statement-reconciliation.md)
 - [`monthly-update-reminders.md`](monthly-update-reminders.md)
@@ -48,6 +50,7 @@ rollout sequence.
   scheduler health chain, rollback/drain procedure, and the mandatory
   read-only audit for historical Roo migration identities `0029`–`0036`.
 - [`roo-linear-channel-issues.md`](roo-linear-channel-issues.md)
+- [`slack-founder-actor-migration-recovery.md`](slack-founder-actor-migration-recovery.md)
 
 Linear meeting-action reviews are stored by the internal, Roo-authenticated
 `/api/v1/integrations/linear/action-batches` endpoints. Batches contain 1–20

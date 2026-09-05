@@ -19,11 +19,13 @@ MLAI Chat is another client surface, not a one-time data migration.
   messages, and Slack Connect channels fail closed unless separately approved.
 - Attachments remain represented as safe provider-hosted links in the durable
   bridge event. For Slack image links, the authenticated MLAI Chat preview API
-  may fetch the image on demand with the bridge bot and return a bounded,
-  private-cache response. The proxy permits only supported image types shared
-  in enabled, public Slack channels mapped to MLAI Chat; it does not expose the
-  Slack token, store image bytes in bridge records/the database, or fetch
-  private/unmapped-channel files.
+  may fetch the image on demand and return a bounded, private-cache response.
+  Public-channel images use the bridge bot and must be shared in an enabled
+  Slack channel mapped to MLAI Chat. Private-DM images use the requesting
+  owner's current Slack grant and must belong to that owner's live or paused
+  private mirror. The proxy never exposes either Slack token or stores image
+  bytes in bridge records/the database; unsupported or out-of-scope files fail
+  closed.
 - Mirrored messages are visibly attributed to the source author and platform,
   but are signed/sent by a dedicated MLAI bridge identity.
 
@@ -62,6 +64,10 @@ deliberately retain no message content.
   reaction rather than the parent message.
 - Delivery is at least once; adapters must be idempotent for a claimed outbox
   row. Ordering is best effort within one mapped channel.
+- Replies whose parent mapping is not ready are parked without consuming the
+  provider retry budget. Completing the parent wakes its parked children; a
+  bounded age and dependency-attempt limit dead-letters unresolved children
+  instead of flattening them into top-level messages.
 - Exhausted deliveries enter a dead state for operator inspection and replay.
 
 The backend reaches the Rust sidecar with `BUZZ_BRIDGE_ADAPTER_TOKEN`. When the
@@ -149,14 +155,15 @@ token is stored.
 
 Each linked member receives an independent, owner-controlled mirror of direct
 and supported multi-person Slack DMs with activity in the configured history
-window. Discovery sorts Slack activity metadata newest-first and skips a
-conversation only when Slack explicitly reports that its latest activity is
-older than the cutoff. Missing or ambiguous activity metadata, and any channel
-with a staged live callback, fail open to the bounded history scan. The other
-participants are represented by deterministic shadow keys, so linking never
-gives an unconsenting participant access to imported history. Participant
-profiles are bulk-preloaded with `users.list` and fall back to `users.info` for
-any IDs Slack omitted.
+window. Discovery sorts explicit Slack latest-message metadata newest-first and
+skips a conversation only when that marker proves its latest activity is older
+than the cutoff. The channel-metadata `updated` field is not treated as message
+activity. Missing or ambiguous activity metadata, and any channel with a staged
+live callback, fail open to the bounded history scan. The other participants
+are represented by deterministic shadow keys, so linking never gives an
+unconsenting participant access to imported history. Participant profiles are
+bulk-preloaded with `users.list` and fall back to `users.info` for any IDs Slack
+omitted.
 
 History requests fetch up to 1,000 messages, run at the 50-requests/minute
 baseline, persist the oldest timestamp boundary, and honor Slack's
@@ -178,7 +185,11 @@ rejected adapter delivery stays fenced until explicit backfill or renewed
 consent. History is always limited to the most recent 30 days. The legacy
 `backfill_all` action is accepted as a compatibility alias for the same bounded
 rescan, and every Slack history request includes an `oldest` parameter. The
-idempotency key prevents duplicate deliveries.
+idempotency key prevents duplicate deliveries. A queued or failed backfill row
+that ages past the rolling cutoff is completed as a content-free tombstone
+instead of being sent or retried. Periodic source reconciliation rehydrates any
+current row that an older importer incorrectly classified as outside the
+window.
 
 The backend also starts an hourly bounded reconciliation and immediately starts
 one after Slack reports `app_rate_limited`. A message that disappeared from an
@@ -248,6 +259,13 @@ Community Chat exposes these owner-authenticated endpoints:
   content-free durable cleanup ledger; any remaining registrations or adapter
   failures are retried by periodic reconciliation without restoring Slack
   access or retaining message bodies.
+- `POST /api/v1/community-chat/messages/delete-slack-origin/` accepts the
+  mirrored Buzz event ID and a caller-generated idempotency UUID. It verifies
+  the active MLAI device and linked Slack author, then uses that member's
+  connected Slack user token to delete the Slack source message. The signed
+  Slack deletion callback remains authoritative for removing the mirrored
+  event; requests and provider outcomes are retained as content-free audit
+  records.
 
 Private delivery retries are direction-specific: Slack-origin rows retry only
 through MLAI Chat, while MLAI-origin rows retry only through Slack with a stable

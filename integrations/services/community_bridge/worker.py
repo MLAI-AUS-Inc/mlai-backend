@@ -27,6 +27,7 @@ from integrations.services.community_bridge.store import (
     complete_create_delivery,
     complete_delivery,
     ingest_discord_event,
+    mark_delivery_waiting_for_parent,
     mark_delivery_retry,
     mark_link_deleted,
     reset_stale_processing_deliveries,
@@ -43,8 +44,12 @@ from integrations.services.slack_dm_mirror import (
 logger = logging.getLogger(__name__)
 
 
-class CommunityBridgeParentNotReady(RuntimeError):
-    """Raised when a reply reaches the worker before its parent mapping exists."""
+class ParentMappingPending(Exception):
+    """A reply arrived before its parent had a destination message mapping."""
+
+    def __init__(self, parent_message_id: str):
+        self.parent_message_id = str(parent_message_id or "").strip()
+        super().__init__(f"parent mapping is not ready: {self.parent_message_id}")
 
 
 class CommunityBridgeDiscordClient(discord.Client):
@@ -187,6 +192,17 @@ class CommunityBridgeDiscordClient(discord.Client):
         for delivery in deliveries:
             try:
                 await self._process_delivery(delivery)
+            except ParentMappingPending as exc:
+                logger.info(
+                    "community_bridge_waiting_for_parent delivery_id=%s parent_message_id=%s",
+                    delivery["id"],
+                    exc.parent_message_id,
+                )
+                await asyncio.to_thread(
+                    mark_delivery_waiting_for_parent,
+                    delivery_id=delivery["id"],
+                    parent_message_id=exc.parent_message_id,
+                )
             except Exception as exc:
                 logger.exception(
                     "community_bridge_delivery_failed delivery_id=%s target_platform=%s",
@@ -503,6 +519,9 @@ class CommunityBridgeDiscordClient(discord.Client):
             "source_author_display_name": author_display_name,
             "source_author_avatar_url": author_avatar_url,
             "linked_pubkey": str((identity or {}).get("buzz_pubkey") or ""),
+            "linked_profile_id": str(
+                (identity or {}).get("user_profile_id") or ""
+            ),
             "source_created_at": int(payload_metadata.get("slack_created_at") or 0),
         }
         text = ""
@@ -637,18 +656,10 @@ class CommunityBridgeDiscordClient(discord.Client):
             destination_platform=delivery["target_platform"],
         )
         if not link:
-            raise CommunityBridgeParentNotReady(
-                "Parent mapping is not ready for "
-                f"{delivery['source_platform']}:{delivery['source_channel_id']}:"
-                f"{source_parent_message_id} -> {delivery['target_platform']}"
-            )
+            raise ParentMappingPending(source_parent_message_id)
         destination_message_id = str(link.get("destination_message_id") or "").strip()
         if not destination_message_id:
-            raise CommunityBridgeParentNotReady(
-                "Parent mapping has no destination message for "
-                f"{delivery['source_platform']}:{delivery['source_channel_id']}:"
-                f"{source_parent_message_id} -> {delivery['target_platform']}"
-            )
+            raise ParentMappingPending(source_parent_message_id)
         return destination_message_id
 
     async def _get_channel_or_fetch(self, channel_id: str) -> Optional[discord.abc.Messageable]:

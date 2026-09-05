@@ -270,6 +270,22 @@ class SlackBridgeClient:
     def delete_message(cls, *, channel_id: str, message_id: str) -> None:
         cls.get_client().chat_delete(channel=channel_id, ts=message_id)
 
+    @staticmethod
+    def delete_message_as_user(
+        *, access_token: str, channel_id: str, message_id: str
+    ) -> dict:
+        """Delete through the requesting member's narrowly scoped user token."""
+
+        response = WebClient(token=access_token).chat_delete(
+            channel=channel_id,
+            ts=message_id,
+        )
+        return {
+            "ok": bool(response.get("ok")),
+            "channel": str(response.get("channel") or channel_id),
+            "message_id": str(response.get("ts") or message_id),
+        }
+
     @classmethod
     def add_reaction(cls, *, channel_id: str, message_id: str, reaction: str) -> None:
         cls.get_client().reactions_add(

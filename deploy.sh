@@ -318,6 +318,7 @@ install_remote_env_value() {
 }
 
 echo "🔧 Updating Linear channel issue reader configuration..."
+install_remote_env_value LINEAR_MEETING_REQUIRED_TEAM_KEYS "$LINEAR_MEETING_REQUIRED_TEAM_KEYS"
 install_remote_env_value LINEAR_CHANNEL_ISSUE_BINDINGS_JSON "$LINEAR_CHANNEL_ISSUE_BINDINGS_JSON"
 install_remote_env_value LINEAR_CHANNEL_ISSUE_MAX_COMMENTS "$LINEAR_CHANNEL_ISSUE_MAX_COMMENTS"
 if [ -n "${OFFICE_MANAGER_SLACK_CHANNEL_ID:-}" ]; then
@@ -748,6 +749,7 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
         fi
         unset office_manager_timezone
 
+    all_runtime_writer_services=(web scheduler memory-worker memory-scheduler community-email-worker bridge-worker bridge-reconciler bridge-retention analytics-sync)
     runtime_services=(web scheduler memory-worker memory-scheduler community-email-worker)
     if [ "\$community_bridge_production_enabled" = "true" ] \
         && env_has_value SLACK_BRIDGE_BOT_TOKEN \
@@ -777,6 +779,25 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     fi
 
     docker network inspect mlai-shared >/dev/null 2>&1 || docker network create mlai-shared
+
+    # Preserve the exact currently running image IDs before Compose retags the
+    # service images during the build. This lets the ERR trap restore the last
+    # known-good runtime even after new containers have been created.
+    rollback_manifest=\$(mktemp)
+    rollback_tags=()
+    running_writer_services=()
+    for service in "\${all_runtime_writer_services[@]}"; do
+        container_id=\$(docker compose ps -q "\$service" || true)
+        if [ -n "\$container_id" ]; then
+            running_writer_services+=("\$service")
+            image_id=\$(docker inspect --format '{{.Image}}' "\$container_id")
+            image_ref=\$(docker inspect --format '{{.Config.Image}}' "\$container_id")
+            rollback_tag="mlai-backend-rollback-\${service}:$APP_RELEASE_SHORT"
+            docker image tag "\$image_id" "\$rollback_tag"
+            printf '%s|%s|%s|%s\n' "\$service" "\$image_id" "\$image_ref" "\$rollback_tag" >> "\$rollback_manifest"
+            rollback_tags+=("\$rollback_tag")
+        fi
+    done
 
     echo "🐘 Starting database..."
     docker compose up -d db
@@ -983,12 +1004,11 @@ if parsed.username or parsed.password or parsed.query or parsed.fragment:
         unset roo_service_url roo_health_body
     fi
 
-    paused_runtime_services=(web scheduler memory-worker memory-scheduler community-email-worker)
     previous_runtime_container_ids=()
     previous_scheduler_container_id=""
     previous_scheduler_image_id=""
     previous_scheduler_tick_mtime=0
-    for service in "\${paused_runtime_services[@]}"; do
+    for service in "\${all_runtime_writer_services[@]}"; do
         service_container_id=\$(docker compose ps -q "\$service" || true)
         if [ -n "\$service_container_id" ]; then
             previous_runtime_container_ids+=("\$service_container_id")
@@ -1065,6 +1085,7 @@ if parsed.username or parsed.password or parsed.query or parsed.fragment:
 
     runtime_restore_attempted=0
     new_runtime_replacement_started=0
+    migration_started=0
     schema_transition_started=0
     schema_transition_completed=0
     restore_runtime_on_error() {
@@ -1072,20 +1093,48 @@ if parsed.username or parsed.password or parsed.query or parsed.fragment:
             return
         fi
         runtime_restore_attempted=1
+        trap - ERR
+        set +e
+
+        if [ "\$migration_started" = "1" ]; then
+            if [ "\$schema_transition_completed" != "1" ]; then
+                # Django commits migrations individually. A failing migrate can
+                # therefore leave a prefix applied while the new binary still
+                # requires later columns. Neither the previous nor the new runtime
+                # is proven compatible with that intermediate schema. Keep every
+                # writer stopped and make the failed deployment the operator alert.
+                echo "❌ CRITICAL: migration transition is incomplete; runtime services remain stopped for audited schema repair."
+                echo "⚠️ Deployment failed after schema advancement began; keeping all runtime writers safely disabled."
+                docker compose stop "\${all_runtime_writer_services[@]}" || true
+                return
+            fi
+        fi
+
         echo "⚠️ Deployment failed after runtime services were paused; staging Office Manager disabled and selecting fail-closed recovery."
         upsert_env_value OFFICE_MANAGER_ENABLED "false" || true
         if [ "\$new_runtime_replacement_started" != "1" ] \
-            && [ "\$schema_transition_started" != "1" ]; then
+            && [ "\$migration_started" != "1" ]; then
             # These stopped containers still reference the last known-good images
             # and carry the environment that was validated with that release. Do
             # not replace them with the just-built image: a pre/post-migration
             # failure can leave that image waiting forever on migrate --check.
-            if [ "\${#previous_runtime_container_ids[@]}" -gt 0 ]; then
+            echo "⚠️ Deployment failed before schema advancement; restoring the last known-good runtime images."
+            restored_services=()
+            while IFS='|' read -r service image_id image_ref rollback_tag; do
+                [ -n "\$service" ] || continue
+                docker image tag "\$image_id" "\$image_ref"
+                restored_services+=("\$service")
+            done < "\$rollback_manifest"
+            if [ "\${#restored_services[@]}" -gt 0 ]; then
+                docker compose up -d --force-recreate "\${restored_services[@]}"
+            elif [ "\${#previous_runtime_container_ids[@]}" -gt 0 ]; then
                 docker start "\${previous_runtime_container_ids[@]}" >/dev/null || true
+            else
+                echo "⚠️ No prior runtime containers were recorded; leaving services stopped for operator recovery."
             fi
             if [ -n "\$previous_scheduler_container_id" ]; then
                 verify_scheduler_recovery_tick \
-                    "\$previous_scheduler_container_id" \
+                    "" \
                     "\$previous_scheduler_image_id" \
                     "\$previous_scheduler_tick_mtime" || true
             else
@@ -1094,32 +1143,23 @@ if parsed.username or parsed.password or parsed.query or parsed.fragment:
             return
         fi
 
-        if [ "\$schema_transition_completed" != "1" ]; then
-            # Django commits migrations individually. A failing migrate can
-            # therefore leave a prefix applied while the new binary still
-            # requires later columns. Neither the previous nor the new runtime
-            # is proven compatible with that intermediate schema. Keep every
-            # writer stopped and make the failed deployment the operator alert.
-            echo "❌ CRITICAL: migration transition is incomplete; runtime services remain stopped for audited schema repair." >&2
-            return
-        fi
-
         # Once the full migration graph has been checked (or replacement has
         # begun), the new image is safe to recreate with the staged-off feature
         # flag. Still require a fresh scheduler tick after recovery.
-        docker compose up -d --force-recreate "\${paused_runtime_services[@]}" || true
+        docker compose up -d --force-recreate "\${runtime_services[@]}" || true
         verify_scheduler_recovery_tick "" "" 0 || true
     }
 
-    echo "⏸️ Pausing web, schedulers, and workers before DB migrations..."
+    echo "⏸️ Pausing all runtime writers before DB migrations..."
+    docker compose stop "\${all_runtime_writer_services[@]}" || true
     trap restore_runtime_on_error ERR
     trap 'deployment_status=\$?; if [ "\$deployment_status" != "0" ]; then restore_runtime_on_error; fi' EXIT
-    docker compose stop "\${paused_runtime_services[@]}"
 
     echo "🗄️ Running migrations..."
     # From this point a failed migrate may still have committed earlier
     # append-only migrations. Never restore either binary until the complete
     # migration graph is proven; an intermediate schema is operator-repair-only.
+    migration_started=1
     schema_transition_started=1
     compose_run_web python manage.py migrate --noinput
     compose_run_web python manage.py migrate --check --noinput
@@ -1132,10 +1172,10 @@ if parsed.username or parsed.password or parsed.query or parsed.fragment:
         # feature off and start that image so an older binary cannot reverse an
         # allocation whose provenance 0037 marked unknown.
         upsert_env_value OFFICE_MANAGER_ENABLED "false"
-        docker compose up -d --force-recreate "\${paused_runtime_services[@]}"
+        docker compose up -d --force-recreate "\${runtime_services[@]}"
         verify_scheduler_recovery_tick "" "" 0
         runtime_restore_attempted=1
-        exit 1
+        false
     fi
 
     # Migration readiness, vector installation, memory index rebuild, startup
@@ -1330,8 +1370,8 @@ PY
 
     if [ "\$bridge_worker_enabled" != "1" ]; then
         echo "🧹 Stopping disabled community bridge services..."
-        docker compose stop bridge-worker bridge-reconciler || true
-        docker compose rm -f bridge-worker bridge-reconciler || true
+        docker compose stop bridge-worker bridge-reconciler bridge-retention || true
+        docker compose rm -f bridge-worker bridge-reconciler bridge-retention || true
     fi
 
     if [ "\$analytics_sync_enabled" != "1" ]; then
@@ -1344,7 +1384,9 @@ PY
     running_release=\$(docker compose exec -T web sh -lc 'printf "%s" "\$APP_RELEASE"' </dev/null)
     if [ "\$running_release" != "$APP_RELEASE" ]; then
         echo "Expected running web container APP_RELEASE=$APP_RELEASE but found \$running_release"
-        exit 1
+        # Fail through a command so the ERR trap keeps forward-only schemas
+        # paired with no writers until an operator completes recovery.
+        false
     fi
 
     echo "🩺 Verifying external health release..."
@@ -1360,7 +1402,7 @@ PY
     if [ "\$release_ok" != "1" ]; then
         echo "Expected /healthz/ready to report release $APP_RELEASE_SHORT for $APP_RELEASE"
         echo "\$health_body"
-        exit 1
+        false
     fi
 
     echo "🩺 Verifying the required scheduler reached a healthy successful tick..."
@@ -1384,7 +1426,7 @@ PY
         echo "Required scheduler did not report a recent successful tick."
         docker compose ps scheduler || true
         docker compose logs --tail 80 scheduler || true
-        exit 1
+        false
     fi
 
     echo "🔐 Verifying the live Office Manager endpoint enforces the strict Roo credential..."
@@ -1401,7 +1443,7 @@ PY
             "\$office_manager_preflight_url")
         if [ "\$internal_status" != "401" ] || [ "\$missing_status" != "401" ]; then
             echo "Office Manager auth smoke failed (internal=\$internal_status missing=\$missing_status)."
-            exit 1
+            false
         fi
         printf '%s' "\$office_manager_preflight_body" | python3 -c '
 import json
@@ -1464,7 +1506,7 @@ if slugs != expected:
     done
     if [ "\$admin_login_ok" != "1" ]; then
         echo "Expected Django admin login page to return HTTP 200"
-        exit 1
+        false
     fi
 
     admin_css_path=\$(
@@ -1478,7 +1520,7 @@ if slugs != expected:
     esac
     if ! curl -fsS -o /dev/null "https://api.mlai.au\$admin_css_path"; then
         echo "Expected Django admin stylesheet to be reachable at \$admin_css_path"
-        exit 1
+        false
     fi
 
     echo "🌐 Verifying external Vibe Raising video upload CORS preflight..."
@@ -1503,10 +1545,16 @@ if slugs != expected:
         echo "Expected video upload session preflight to return CORS headers"
         cat "\$preflight_headers"
         rm -f "\$preflight_headers"
-        exit 1
+        false
     fi
     rm -f "\$preflight_headers"
+    # All release and functional checks passed; rollback images are no longer
+    # needed. Keep the ERR trap active until this exact point.
     trap - ERR EXIT
+    rm -f "\$rollback_manifest"
+    for rollback_tag in "\${rollback_tags[@]}"; do
+        docker image rm "\$rollback_tag" >/dev/null 2>&1 || true
+    done
 EOF
 
 echo "✅ Deployment complete! Check http://$DROPLET_IP or https://api.mlai.au"

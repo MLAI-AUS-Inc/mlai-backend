@@ -22,6 +22,9 @@ class BuzzBridgePermanentError(BuzzBridgeError):
 
 
 class BuzzBridgeClient:
+    _private_batch_disabled_until = 0.0
+    _private_batch_fallback_seconds = 300
+
     @classmethod
     def is_configured(cls) -> bool:
         return bool(cls._adapter_url() and cls._api_token() and cls._callback_secret())
@@ -64,6 +67,7 @@ class BuzzBridgeClient:
         source_author_display_name: str = "",
         source_author_avatar_url: str = "",
         linked_pubkey: str = "",
+        linked_profile_id: str = "",
         source_created_at: int = 0,
         broadcast: bool = False,
     ) -> dict:
@@ -86,6 +90,7 @@ class BuzzBridgeClient:
             "source_author_display_name": str(source_author_display_name or "") or None,
             "source_author_avatar_url": str(source_author_avatar_url or "") or None,
             "linked_pubkey": str(linked_pubkey or "") or None,
+            "linked_profile_id": str(linked_profile_id or "") or None,
             "source_created_at": int(source_created_at or 0) or None,
             "broadcast": bool(broadcast),
         }
@@ -278,6 +283,8 @@ class BuzzBridgeClient:
             raise BuzzBridgePermanentError(
                 "Private delivery batches must target one channel"
             )
+        if time.monotonic() < cls._private_batch_disabled_until:
+            return cls._deliver_private_one_at_a_time(deliveries)
         try:
             result = cls._post_adapter(
                 "v1/private-deliveries/batch",
@@ -289,13 +296,20 @@ class BuzzBridgeClient:
             # Rolling deploy compatibility: an older adapter can safely accept
             # the same deterministic deliveries one at a time until its batch
             # route is available.
-            return [
-                cls._validated_private_delivery_result(
-                    cls._post_adapter("v1/private-deliveries", delivery),
-                    channel_id=str(delivery.get("channel_id") or ""),
-                )
-                for delivery in deliveries
-            ]
+            cls._private_batch_disabled_until = (
+                time.monotonic() + cls._private_batch_fallback_seconds
+            )
+            return cls._deliver_private_one_at_a_time(deliveries)
+        except BuzzBridgeError:
+            # A relay batch can cross an upstream timeout after storing only a
+            # prefix of its events. Every event is deterministic, and the
+            # adapter treats an already-stored event as a successful retry, so
+            # degrading to individual requests is both safe and substantially
+            # faster than retrying the same failing batch forever.
+            cls._private_batch_disabled_until = (
+                time.monotonic() + cls._private_batch_fallback_seconds
+            )
+            return cls._deliver_private_one_at_a_time(deliveries)
         raw_results = result.get("deliveries")
         if not isinstance(raw_results, list) or len(raw_results) != len(deliveries):
             raise BuzzBridgeError("MLAI Chat adapter returned an invalid private batch")
@@ -329,6 +343,16 @@ class BuzzBridgeClient:
                 }
             )
         return validated
+
+    @classmethod
+    def _deliver_private_one_at_a_time(cls, deliveries: list[dict]) -> list[dict]:
+        return [
+            cls._validated_private_delivery_result(
+                cls._post_adapter("v1/private-deliveries", delivery),
+                channel_id=str(delivery.get("channel_id") or ""),
+            )
+            for delivery in deliveries
+        ]
 
     @classmethod
     def _post_adapter(cls, path: str, payload: dict) -> dict:

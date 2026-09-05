@@ -182,6 +182,171 @@ class ReconciliationServiceTests(SimpleTestCase):
         self.assertTrue(any("refunds/adjustments" in w for w in p["warnings"]))
         self.assertNotIn("workbook", report)
 
+    def test_payment_intent_metadata_is_followed_for_luma_event_attribution(self):
+        def handler(path, params):
+            if path == "/v1/payouts":
+                return {
+                    "data": [{
+                        "id": "po_intent",
+                        "amount": 9700,
+                        "currency": "aud",
+                        "arrival_date": 1_780_600_000,
+                        "status": "paid",
+                    }],
+                    "has_more": False,
+                }
+            if path == "/v1/balance_transactions":
+                return {
+                    "data": [{
+                        "id": "bt_intent",
+                        "type": "charge",
+                        "amount": 10000,
+                        "fee": 300,
+                        "net": 9700,
+                        "currency": "aud",
+                        "source": {
+                            "id": "ch_intent",
+                            "payment_intent": "pi_intent",
+                            "metadata": {},
+                        },
+                    }],
+                    "has_more": False,
+                }
+            if path == "/v1/payment_intents/pi_intent":
+                return {
+                    "id": "pi_intent",
+                    "description": "Intent Event",
+                    "metadata": {"event_api_id": "evt_intent"},
+                }
+            raise AssertionError(path)
+
+        since, until = self._window()
+        report = self._service(handler).build_report(
+            since=since,
+            until=until,
+            include_workbook=False,
+        )
+
+        group = report["payouts"][0]["revenue_groups"][0]
+        self.assertEqual(group["source_type"], "luma_event")
+        self.assertEqual(group["source_id"], "evt_intent")
+        self.assertEqual(group["stripe_payment_intent_ids"], ["pi_intent"])
+
+    def test_metadata_poor_charge_uses_unique_luma_captured_order(self):
+        class FakeLuma:
+            def list_all_events(self):
+                return [{"id": "evt_fallback", "name": "Fallback Night"}]
+
+            def get_guest(self, *, event_id, identifier):
+                assert event_id == "evt_fallback"
+                assert identifier == "guest@example.com"
+                return {
+                    "event_ticket_orders": [{
+                        "id": "order_fallback",
+                        "amount": 10000,
+                        "currency": "aud",
+                        "is_captured": True,
+                        "amount_refunded": 0,
+                    }]
+                }
+
+        def handler(path, params):
+            if path == "/v1/payouts":
+                return {
+                    "data": [{
+                        "id": "po_fallback",
+                        "amount": 9700,
+                        "currency": "aud",
+                        "arrival_date": 1_780_600_000,
+                        "status": "paid",
+                    }],
+                    "has_more": False,
+                }
+            if path == "/v1/balance_transactions":
+                return {
+                    "data": [_charge(
+                        "bt_fallback",
+                        10000,
+                        300,
+                        "",
+                        "guest@example.com",
+                        "Fallback Night",
+                    )],
+                    "has_more": False,
+                }
+            raise AssertionError(path)
+
+        since, until = self._window()
+        report = ReconciliationReportService(
+            stripe_api_key="rk_test",
+            base_url="https://stripe.test",
+            session=FakeSession(handler),
+            luma_service=FakeLuma(),
+        ).build_report(since=since, until=until, include_workbook=False)
+
+        group = report["payouts"][0]["revenue_groups"][0]
+        self.assertEqual(group["source_type"], "luma_event")
+        self.assertEqual(group["source_id"], "evt_fallback")
+        self.assertEqual(group["luma_order_ids"], ["order_fallback"])
+        self.assertEqual(
+            group["luma_match_methods"],
+            ["luma_event_name_email_captured_order_amount"],
+        )
+        self.assertEqual(report["unmatched_charge_count"], 0)
+
+    def test_ambiguous_luma_orders_remain_unattributed(self):
+        class AmbiguousLuma:
+            def list_all_events(self):
+                return [{"id": "evt_ambiguous", "name": "Ambiguous Night"}]
+
+            def get_guest(self, *, event_id, identifier):
+                return {
+                    "event_ticket_orders": [
+                        {"id": "order_1", "amount": 10000, "currency": "aud", "is_captured": True},
+                        {"id": "order_2", "amount": 10000, "currency": "aud", "is_captured": True},
+                    ]
+                }
+
+        def handler(path, params):
+            if path == "/v1/payouts":
+                return {
+                    "data": [{
+                        "id": "po_ambiguous_luma",
+                        "amount": 9700,
+                        "currency": "aud",
+                        "arrival_date": 1_780_600_000,
+                        "status": "paid",
+                    }],
+                    "has_more": False,
+                }
+            if path == "/v1/balance_transactions":
+                return {
+                    "data": [_charge(
+                        "bt_ambiguous_luma",
+                        10000,
+                        300,
+                        "",
+                        "guest@example.com",
+                        "Ambiguous Night",
+                    )],
+                    "has_more": False,
+                }
+            raise AssertionError(path)
+
+        since, until = self._window()
+        report = ReconciliationReportService(
+            stripe_api_key="rk_test",
+            base_url="https://stripe.test",
+            session=FakeSession(handler),
+            luma_service=AmbiguousLuma(),
+        ).build_report(since=since, until=until, include_workbook=False)
+
+        self.assertEqual(report["unmatched_charge_count"], 1)
+        self.assertEqual(
+            report["payouts"][0]["revenue_groups"][0]["source_type"],
+            "unattributed",
+        )
+
     def test_tie_out_mismatch_warns(self):
         def handler(path, params):
             if path == "/v1/payouts":

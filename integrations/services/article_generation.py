@@ -544,10 +544,20 @@ def _is_delegated_content_request(
 
 
 def _ensure_content_factory_user(slack_user_id: str, article_request: dict):
+    from core.actor_ids import is_internal_actor_id
     from core.slack_users import ensure_slack_user
+    from integrations.services.github_installations import resolve_user_for_actor_id
     from roo.services import PointsService
 
     requested_by_slack_user_id = _resolve_requested_by_slack_user_id(slack_user_id, article_request)
+    if is_internal_actor_id(requested_by_slack_user_id):
+        user = resolve_user_for_actor_id(requested_by_slack_user_id)
+        if user is None or not user.is_active:
+            raise ArticleGenerationError(
+                "The internal Content Factory actor does not resolve to an active user."
+            )
+        PointsService.get_or_create_account(user)
+        return user
     existing_user = PointsService.get_user_by_slack_id(requested_by_slack_user_id)
     if existing_user:
         PointsService.get_or_create_account(existing_user)
@@ -624,12 +634,28 @@ def _require_content_factory_ai_agent_points(
     article_request: dict,
     resolved_domain: str,
     action: str,
+    billing_user=None,
 ):
+    requested_by_slack_user_id = _resolve_requested_by_slack_user_id(
+        slack_user_id,
+        article_request,
+    )
+    if billing_user is not None:
+        _validate_authenticated_content_factory_actor(
+            user=billing_user,
+            actor_id=requested_by_slack_user_id,
+        )
     required_points = get_content_factory_ai_agent_required_points(resolved_domain)
     if required_points <= 0:
         return None, None
 
-    user = _ensure_content_factory_user(slack_user_id, article_request)
+    if billing_user is None:
+        user = _ensure_content_factory_user(slack_user_id, article_request)
+    else:
+        from roo.services import PointsService
+
+        PointsService.get_or_create_account(billing_user)
+        user = billing_user
     current_balance = _content_factory_balance_for_user(user)
     if current_balance < required_points:
         raise InsufficientRooPointsError(
@@ -729,9 +755,22 @@ def _charge_content_factory_user(
     return user, ledger, cost_points
 
 
-def _charge_content_factory_request(slack_user_id: str, article_request: dict, resolved_domain: str):
+def _charge_content_factory_request(
+    slack_user_id: str,
+    article_request: dict,
+    resolved_domain: str,
+    *,
+    billing_user=None,
+):
     requested_by_slack_user_id = _resolve_requested_by_slack_user_id(slack_user_id, article_request)
-    user = _ensure_content_factory_user(slack_user_id, article_request)
+    if billing_user is None:
+        user = _ensure_content_factory_user(slack_user_id, article_request)
+    else:
+        _validate_authenticated_content_factory_actor(
+            user=billing_user,
+            actor_id=requested_by_slack_user_id,
+        )
+        user = billing_user
     return _charge_content_factory_user(
         user=user,
         created_by_slack_id=requested_by_slack_user_id,
@@ -747,12 +786,23 @@ def charge_content_factory_request_for_user(
     article_request: dict,
     resolved_domain: str,
 ):
+    _validate_authenticated_content_factory_actor(user=user, actor_id=actor_id)
     return _charge_content_factory_user(
         user=user,
         created_by_slack_id=actor_id,
         article_request=article_request,
         resolved_domain=resolved_domain,
     )
+
+
+def _validate_authenticated_content_factory_actor(*, user, actor_id: str) -> None:
+    from core.actor_ids import actor_ids_for_user
+
+    normalized_actor_id = str(actor_id or "").strip()
+    if normalized_actor_id not in actor_ids_for_user(user):
+        raise ArticleGenerationError(
+            "The Content Factory actor does not belong to the authenticated user."
+        )
 
 
 def charge_content_factory_topic_generation_for_user(
@@ -762,6 +812,7 @@ def charge_content_factory_topic_generation_for_user(
     article_request: dict,
     resolved_domain: str,
 ):
+    _validate_authenticated_content_factory_actor(user=user, actor_id=actor_id)
     from roo.models import Ledger
     from roo.permissions import InsufficientBalanceError
     from roo.services import PointsService
@@ -882,16 +933,16 @@ def refund_content_factory_topic_generation_for_user(
 
 def _get_content_factory_user_for_job(job):
     from django.contrib.auth import get_user_model
+    from integrations.services.github_installations import resolve_user_for_actor_id
 
     UserModel = get_user_model()
     request_meta = getattr(job, "request_meta", {}) or {}
-    slack_user_id = str(
-        request_meta.get("requested_by_slack_user_id")
-        or getattr(job, "slack_user_id", "")
-        or ""
-    ).strip()
-    if slack_user_id:
-        user = UserModel.objects.filter(slack_id=slack_user_id).first()
+    actor_ids = (
+        request_meta.get("requested_by_slack_user_id"),
+        getattr(job, "slack_user_id", ""),
+    )
+    for actor_id in actor_ids:
+        user = resolve_user_for_actor_id(actor_id)
         if user:
             return user
 
@@ -1178,6 +1229,7 @@ def _charge_deferred_discovery_job_if_needed(
     domain: str,
     confirmed_keyword: str,
     custom_title: Optional[str] = None,
+    billing_user=None,
 ):
     if not _job_uses_deferred_billing(source_job):
         return source_job
@@ -1196,6 +1248,7 @@ def _charge_deferred_discovery_job_if_needed(
         slack_user_id,
         request_meta,
         normalize_domain(domain),
+        billing_user=billing_user,
     )
     source_job.billing_source_job_id = source_job.job_id
     source_job.billing_amount = charge_amount
@@ -1889,7 +1942,12 @@ def resolve_content_factory_connection_for_domain(
     }
 
 
-def trigger_article_generation(slack_user_id: str, article_request: dict) -> dict:
+def trigger_article_generation(
+    slack_user_id: str,
+    article_request: dict,
+    *,
+    billing_user=None,
+) -> dict:
     """
     Trigger article generation via Content Factory.
 
@@ -1975,6 +2033,7 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
             article_request=article_request,
             resolved_domain=resolved_domain,
             action="topic_discovery",
+            billing_user=billing_user,
         )
         charge_amount = 0
         billing_status = CONTENT_FACTORY_BILLING_STATUS_DEFERRED
@@ -2147,6 +2206,7 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
         slack_user_id,
         article_request,
         resolved_domain,
+        billing_user=billing_user,
     )
     payload.update(
         _content_factory_authorization_payload(
@@ -2695,6 +2755,7 @@ def confirm_topic(
     delivery_mode_confirmed: Optional[bool] = None,
     request_source: str = CONTENT_FACTORY_REQUEST_SOURCE,
     notification_context: Optional[dict] = None,
+    billing_user=None,
 ) -> dict:
     """
     Confirm topic selection and trigger Phase 2 generation.
@@ -2732,6 +2793,7 @@ def confirm_topic(
             domain=normalized_domain,
             confirmed_keyword=confirmed_keyword,
             custom_title=custom_title,
+            billing_user=billing_user,
         )
         progress_message_ts = source_job.progress_message_ts or progress_message_ts
 

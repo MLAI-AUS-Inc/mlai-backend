@@ -725,7 +725,7 @@ class PointsService:
             User instance or None if not found
         """
         try:
-            return User.objects.get(slack_id=slack_id)
+            return User.objects.get(slack_id=slack_id, is_active=True)
         except User.DoesNotExist:
             return None
     
@@ -1348,8 +1348,11 @@ class CoworkingService:
         ``ready_at`` is stamped once, the first time a draft becomes ready, so
         re-approving an old draft cannot renew the window.
         """
-        # Imported lazily to avoid a hard import dependency between the roo and
-        # startup_updates / founder_tools apps at module load time.
+        # Imported lazily to avoid hard app dependencies at module load time.
+        # A verified explicit link selects the Founder Tools identity whose
+        # bindings are checked. Without one, the Slack-side user remains the
+        # legacy fallback. Points and bookings always continue to use ``user``.
+        from core.slack_founder_links import coworking_eligibility_user_ids
         from founder_tools.models import VibeRaisingCompany
         from startup_updates.models import (
             MonthlyUpdateDraft,
@@ -1357,9 +1360,10 @@ class CoworkingService:
             UserStartupBinding,
         )
 
+        eligibility_user_ids = coworking_eligibility_user_ids(user)
         org_ids = list(
             UserStartupBinding.objects.filter(
-                user=user,
+                user_id__in=eligibility_user_ids,
                 coworking_discount_eligible=True,
             ).values_list('organization_id', flat=True)
         )
@@ -1611,6 +1615,15 @@ class CoworkingService:
             ValueError: If date is invalid or no availability
             InsufficientBalanceError: If user doesn't have enough points
         """
+        locked_user = (
+            User.objects.select_for_update()
+            .filter(pk=user.pk, is_active=True)
+            .first()
+        )
+        if locked_user is None:
+            raise ValueError("An active Slack account is required to book coworking")
+        user = locked_user
+
         # Validate date range
         today = timezone.now().date()
         max_advance_days = getattr(settings, 'COWORKING_BOOKING_ADVANCE_DAYS', 30)
@@ -1652,10 +1665,20 @@ class CoworkingService:
             PointsService.roo_to_microroo(cost),
         )
         
-        # A new booking after cancellation is a new charge. The active-booking
-        # check above still makes retries idempotent while the booking is live.
-        booking_id = uuid.uuid4()
-        idempotency_key = f"coworking_book:{booking_id}"
+        # A booking UUID identifies one booking lifecycle. Repeated requests
+        # while that lifecycle is active return ``existing`` above, but a new
+        # lifecycle after cancellation must create a fresh debit. A user/date
+        # key would incorrectly reuse the first debit while each later booking
+        # could still receive its own refund.
+        booking = CoworkingBooking(
+            user=user,
+            date=booking_date,
+            status='booked',
+            points_cost=cost,
+            purchased_points_cost_microroo=purchased_points_cost_microroo,
+            slack_channel_id=slack_channel_id,
+        )
+        idempotency_key = f"coworking_book:{booking.id}"
         
         # Spend points (this also validates balance)
         ledger, _ = PointsService.spend(
@@ -1666,22 +1689,13 @@ class CoworkingService:
             created_by_slack_id=created_by_slack_id,
             idempotency_key=idempotency_key,
             reference_type='COWORKING_BOOKING',
-            reference_id=str(booking_date),
+            reference_id=str(booking.id),
         )
         
-        # Create booking
-        booking = CoworkingBooking.objects.create(
-            id=booking_id,
-            user=user,
-            date=booking_date,
-            status='booked',
-            points_cost=cost,
-            purchased_points_cost_microroo=(
-                purchased_points_cost_microroo
-            ),
-            ledger_entry=ledger,
-            slack_channel_id=slack_channel_id,
-        )
+        # Commit the lifecycle only after its debit is durable. The surrounding
+        # transaction rolls both records back together on any failure.
+        booking.ledger_entry = ledger
+        booking.save(force_insert=True)
         
         return booking, True
 
@@ -1706,6 +1720,17 @@ class CoworkingService:
         if not unique_users:
             raise CoworkingBatchBookingError("At least one target user is required")
         unique_users.sort(key=lambda user: str(user.pk))
+
+        active_users = list(
+            User.objects.select_for_update()
+            .filter(pk__in=[user.pk for user in unique_users], is_active=True)
+            .order_by("pk")
+        )
+        if len(active_users) != len(unique_users):
+            raise CoworkingBatchBookingError(
+                "All coworking attendees must have active Slack accounts"
+            )
+        unique_users = active_users
 
         today = timezone.now().date()
         max_advance_days = getattr(settings, 'COWORKING_BOOKING_ADVANCE_DAYS', 30)

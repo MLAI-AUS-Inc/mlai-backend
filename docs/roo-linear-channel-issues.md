@@ -18,6 +18,7 @@ channel binding below:
 
 ```dotenv
 LINEAR_API_KEY=lin_api_replace_locally
+LINEAR_MEETING_REQUIRED_TEAM_KEYS=TECH,STU,MLA
 LINEAR_CHANNEL_ISSUE_BINDINGS_JSON={"T05N9C1QSJC:C0BRM181EDV":{"display_name":"MLAI_TECH · Todo","team_name":"MLAI_TECH","state_name":"Todo","linear_team_id":"def24f5e-2990-4e28-9e06-e89db4a09f9f","linear_state_id":"f3591a1e-f7a2-4514-9280-000d43ea60e5"}}
 LINEAR_CHANNEL_ISSUE_MAX_COMMENTS=250
 LINEAR_CHANNEL_ISSUE_LIST_RATE=60/minute
@@ -45,10 +46,15 @@ control. No database migration is required for this feature.
 
 The backend deployment reads `LINEAR_API_KEY` from a GitHub Actions repository
 secret for both read and write requests. It reads
-`LINEAR_CHANNEL_ISSUE_BINDINGS_JSON`, `LINEAR_CHANNEL_ISSUE_WRITES_ENABLED`, and
-`LINEAR_CHANNEL_ISSUE_MAX_COMMENTS` from repository variables. The deployment
-validates all three values before connecting to the production host, then
-installs them into the host `.env` over SSH stdin before recreating services.
+`LINEAR_MEETING_REQUIRED_TEAM_KEYS`, `LINEAR_CHANNEL_ISSUE_BINDINGS_JSON`,
+`LINEAR_CHANNEL_ISSUE_WRITES_ENABLED`, and
+`LINEAR_CHANNEL_ISSUE_MAX_COMMENTS` from repository variables. The normal MLAI
+team default is `TECH,STU,MLA`. The deployment validates the managed values and
+queries Linear before connecting to the production host. It fails if the key
+cannot see every required team, then installs the validated values into the
+host `.env` over SSH stdin before recreating services. Create the key with
+read/write permission and **All teams you have access to**; a team-scoped key
+cannot resolve or create meeting-action tasks outside that team.
 
 Adding the GitHub settings does not deploy the feature by itself. The normal
 reviewed deployment workflow consumes them only after this deployment wiring

@@ -3,6 +3,11 @@ import time
 from django.core.management.base import BaseCommand, CommandError
 from django.db import OperationalError, transaction
 from core.models import User
+from core.actor_ids import actor_ids_for_user
+from core.slack_founder_links import (
+    invalidate_unused_slack_founder_link_requests,
+    user_participates_in_slack_founder_link,
+)
 from roo.models import (
     PointsAccount, Ledger, Task, TaskSubmission, 
     CoworkingBooking, RewardRedemption, PointsAdmin, BoostPostAdmission
@@ -27,6 +32,16 @@ def _retryable_transaction_error(exc):
 
 class Command(BaseCommand):
     help = 'Clean up duplicate users by merging Slack users into Email users'
+
+    @staticmethod
+    def _scalar_model_references_actor(model, field, actor_ids):
+        """Match runtime actor resolution, whose Python strip handles all whitespace."""
+        return any(
+            str(value or '').strip() in actor_ids
+            for value in model.objects.values_list(field, flat=True).iterator(
+                chunk_size=500
+            )
+        )
 
     def add_arguments(self, parser):
         parser.add_argument(
@@ -65,6 +80,15 @@ class Command(BaseCommand):
         for slack_user in slack_users:
             slack_id = slack_user.slack_id
             current_email = slack_user.email
+
+            if user_participates_in_slack_founder_link(slack_user):
+                self.stdout.write(
+                    self.style.WARNING(
+                        f"Skipping linked account {slack_user.pk}; manual support required."
+                    )
+                )
+                skipped_count += 1
+                continue
             
             try:
                 # Fetch profile from Slack
@@ -96,8 +120,22 @@ class Command(BaseCommand):
                     old_email = slack_user.email
                     self.stdout.write(f"UPDATE EMAIL: SlackUser({slack_id}) {old_email} -> {real_email}")
                     if commit:
-                        slack_user.email = real_email
-                        slack_user.save()
+                        with transaction.atomic():
+                            locked_slack_user = User.objects.select_for_update().get(
+                                pk=slack_user.pk
+                            )
+                            if user_participates_in_slack_founder_link(
+                                locked_slack_user
+                            ):
+                                self.stdout.write(
+                                    self.style.WARNING(
+                                        f"Skipping linked account {slack_user.pk}; manual support required."
+                                    )
+                                )
+                                skipped_count += 1
+                                continue
+                            locked_slack_user.email = real_email
+                            locked_slack_user.save(update_fields=["email"])
                     updated_count += 1
                     continue
                 
@@ -234,6 +272,98 @@ class Command(BaseCommand):
             f"remain unhandled: {details}"
         )
 
+    @staticmethod
+    def _payload_references_actor(value, actor_ids, *, actor_field=False):
+        """Return whether identity-bearing JSON refers to a source actor."""
+        identity_keys = {
+            "actor_id",
+            "connected_slack_user_id",
+            "requested_by_slack_user_id",
+            "slack_user_id",
+        }
+        if actor_field and isinstance(value, str):
+            return value.strip() in actor_ids
+        if isinstance(value, list):
+            return any(
+                Command._payload_references_actor(item, actor_ids)
+                for item in value
+            )
+        if isinstance(value, dict):
+            return any(
+                Command._payload_references_actor(
+                    item,
+                    actor_ids,
+                    actor_field=key in identity_keys,
+                )
+                for key, item in value.items()
+            )
+        return False
+
+    def _assert_no_external_identity_state(self, source):
+        """Fail closed instead of deleting or orphaning external authority.
+
+        Content Factory ownership is partly relational and partly stored as
+        actor-id strings. Safely combining credential bundles and historical
+        ownership requires a dedicated, operator-reviewed reconciliation; a
+        generic duplicate-user cleanup must not guess which grant wins.
+        """
+        from content_factory.models import (
+            ContentFactoryJob,
+            OrganizationContentConfig,
+            ScheduledDiscoveryDispatch,
+        )
+        from integrations.models import GitHubInstallation, UserIntegration
+        from workflow_runs.models import ContentFactoryRun
+
+        actor_ids = set(actor_ids_for_user(source))
+        references = []
+        if GitHubInstallation.objects.filter(user=source).exists():
+            references.append("GitHub installations")
+        if self._scalar_model_references_actor(
+            UserIntegration, 'slack_user_id', actor_ids
+        ):
+            references.append("integration credentials")
+        if self._scalar_model_references_actor(
+            OrganizationContentConfig, 'connected_slack_user_id', actor_ids
+        ):
+            references.append("Content Factory organization ownership")
+        if self._scalar_model_references_actor(
+            ScheduledDiscoveryDispatch, 'slack_user_id', actor_ids
+        ):
+            references.append("scheduled discovery dispatches")
+
+        job_reference = self._scalar_model_references_actor(
+            ContentFactoryJob, 'slack_user_id', actor_ids
+        )
+        if not job_reference:
+            job_reference = any(
+                self._payload_references_actor(payload, actor_ids)
+                for payload in ContentFactoryJob.objects.values_list(
+                    "request_meta", flat=True
+                ).iterator(chunk_size=500)
+            )
+        if job_reference:
+            references.append("Content Factory jobs")
+
+        run_reference = self._scalar_model_references_actor(
+            ContentFactoryRun, 'slack_user_id', actor_ids
+        )
+        if not run_reference:
+            run_reference = any(
+                self._payload_references_actor(payload, actor_ids)
+                for payload in ContentFactoryRun.objects.values_list(
+                    "run_request", flat=True
+                ).iterator(chunk_size=500)
+            )
+        if run_reference:
+            references.append("Content Factory runs")
+
+        if references:
+            raise CommandError(
+                "Cannot merge an account with external identity state "
+                f"({', '.join(references)}); manual support is required."
+            )
+
     @transaction.atomic
     def merge_users(self, source, target):
         """
@@ -244,6 +374,24 @@ class Command(BaseCommand):
         source is deleted.
         """
         
+        locked_users = {
+            user.pk: user
+            for user in User.objects.select_for_update()
+            .filter(pk__in=sorted({source.pk, target.pk}))
+            .order_by("pk")
+        }
+        source = locked_users[source.pk]
+        target = locked_users[target.pk]
+        if user_participates_in_slack_founder_link(
+            source
+        ) or user_participates_in_slack_founder_link(target):
+            raise CommandError(
+                "Cannot merge an account with an explicit Roo-Founder Tools link; "
+                "manual support is required."
+            )
+        self._assert_no_external_identity_state(source)
+        invalidate_unused_slack_founder_link_requests(source, target)
+
         # Validate and move durable booking/Office Manager ownership before
         # touching balances or identity fields. Any ambiguity aborts this
         # entire account merge instead of cascading away an active owner.

@@ -256,6 +256,13 @@ def apply_verified_rule(
         prior_confidence = float(result.get("confidence") or 0.0)
     except (TypeError, ValueError):
         prior_confidence = 0.0
+    allocation_mode = (
+        ReconciliationRule.ALLOCATION_EVENT
+        if rule.event_source_id
+        else ReconciliationRule.ALLOCATION_PROJECT
+        if rule.project_source_id
+        else rule.allocation_mode
+    )
     result.update({
         "proposed_action": rule.proposed_action,
         "contact_name": rule.contact_name,
@@ -267,7 +274,7 @@ def apply_verified_rule(
             "source_type": rule.event_source_type or "luma",
             "source_id": rule.event_source_id,
         } if rule.event_source_id else None,
-        "allocation_mode": rule.allocation_mode,
+        "allocation_mode": allocation_mode,
         "project": {
             "source_type": rule.project_source_type or "linear",
             "source_id": rule.project_source_id,
@@ -276,7 +283,7 @@ def apply_verified_rule(
         "identity_confidence": 1.0,
         "accounting_confidence": 1.0,
         "allocation_confidence": 1.0 if (
-            rule.allocation_mode != ReconciliationRule.ALLOCATION_UNASSIGNED
+            allocation_mode != ReconciliationRule.ALLOCATION_UNASSIGNED
             or rule.event_source_id
             or rule.project_source_id
         ) else 0.0,

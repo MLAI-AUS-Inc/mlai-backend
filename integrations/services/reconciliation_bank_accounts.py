@@ -20,7 +20,6 @@ def _normalized_id(value: Any) -> str:
 def _normalise_accounts(rows: list[dict[str, Any]]) -> list[dict[str, str]]:
     accounts: list[dict[str, str]] = []
     seen_ids: set[str] = set()
-    seen_names: set[str] = set()
     for row in rows:
         if str(row.get("Type") or "").strip().upper() != "BANK":
             continue
@@ -34,12 +33,11 @@ def _normalise_accounts(rows: list[dict[str, Any]]) -> list[dict[str, str]]:
             raise ReconciliationValidationError(
                 "Xero returned an active bank account without a stable ID and name."
             )
-        if normalized_id in seen_ids or normalized_name in seen_names:
+        if normalized_id in seen_ids:
             raise ReconciliationValidationError(
-                "Xero returned duplicate active bank-account IDs or names."
+                "Xero returned duplicate active bank-account IDs."
             )
         seen_ids.add(normalized_id)
-        seen_names.add(normalized_name)
         accounts.append({"bank_account_id": account_id, "name": name})
     accounts.sort(key=lambda item: (item["name"].casefold(), item["bank_account_id"].casefold()))
     if not accounts:
