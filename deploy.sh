@@ -687,6 +687,7 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     fi
     unset health_hack_key roo_sim_key roo_api_key victor_ai_roo_secret
 
+    all_runtime_writer_services=(web scheduler memory-worker memory-scheduler community-email-worker bridge-worker bridge-reconciler bridge-retention analytics-sync)
     runtime_services=(web scheduler memory-worker memory-scheduler community-email-worker)
     if [ "\$community_bridge_production_enabled" = "true" ] \
         && env_has_value SLACK_BRIDGE_BOT_TOKEN \
@@ -717,6 +718,25 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
 
     docker network inspect mlai-shared >/dev/null 2>&1 || docker network create mlai-shared
 
+    # Preserve the exact currently running image IDs before Compose retags the
+    # service images during the build. This lets the ERR trap restore the last
+    # known-good runtime even after new containers have been created.
+    rollback_manifest=\$(mktemp)
+    rollback_tags=()
+    running_writer_services=()
+    for service in "\${all_runtime_writer_services[@]}"; do
+        container_id=\$(docker compose ps -q "\$service" || true)
+        if [ -n "\$container_id" ]; then
+            running_writer_services+=("\$service")
+            image_id=\$(docker inspect --format '{{.Image}}' "\$container_id")
+            image_ref=\$(docker inspect --format '{{.Config.Image}}' "\$container_id")
+            rollback_tag="mlai-backend-rollback-\${service}:$APP_RELEASE_SHORT"
+            docker image tag "\$image_id" "\$rollback_tag"
+            printf '%s|%s|%s|%s\n' "\$service" "\$image_id" "\$image_ref" "\$rollback_tag" >> "\$rollback_manifest"
+            rollback_tags+=("\$rollback_tag")
+        fi
+    done
+
     echo "🐘 Starting database..."
     docker compose up -d db
 
@@ -733,17 +753,41 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     echo "🧪 Running deployment preflight..."
     compose_run_web python manage.py deploy_preflight
 
-    paused_runtime_services=(web memory-worker memory-scheduler community-email-worker)
+    migration_started=0
     restore_runtime_on_error() {
-        echo "⚠️ Deployment failed after runtime services were paused; restoring them with the reviewed image."
-        docker compose up -d --force-recreate "\${paused_runtime_services[@]}" || true
+        trap - ERR
+        set +e
+        if [ "\$migration_started" = "1" ]; then
+            # The actor migrations are forward-only. A failed migrate command
+            # may still have committed earlier migration files, so starting an
+            # old image could create legacy actor IDs against the new schema.
+            echo "⚠️ Deployment failed after schema advancement began; keeping all runtime writers safely disabled."
+            docker compose stop "\${all_runtime_writer_services[@]}" || true
+            echo "⚠️ Complete the documented forward recovery before restarting services."
+            rm -f "\$rollback_manifest"
+            return
+        fi
+        echo "⚠️ Deployment failed before schema advancement; restoring the last known-good runtime images."
+        restored_services=()
+        while IFS='|' read -r service image_id image_ref rollback_tag; do
+            [ -n "\$service" ] || continue
+            docker image tag "\$image_id" "\$image_ref"
+            restored_services+=("\$service")
+        done < "\$rollback_manifest"
+        if [ "\${#restored_services[@]}" -gt 0 ]; then
+            docker compose up -d --force-recreate "\${restored_services[@]}"
+        else
+            echo "⚠️ No prior runtime containers were recorded; leaving services stopped for operator recovery."
+        fi
+        rm -f "\$rollback_manifest"
     }
 
-    echo "⏸️ Pausing web and organisational-memory workers before DB migrations..."
-    docker compose stop "\${paused_runtime_services[@]}" || true
+    echo "⏸️ Pausing all runtime writers before DB migrations..."
+    docker compose stop "\${all_runtime_writer_services[@]}" || true
     trap restore_runtime_on_error ERR
 
     echo "🗄️ Running migrations..."
+    migration_started=1
     compose_run_web python manage.py migrate --noinput
 
     # Migration readiness, vector installation, memory index rebuild, startup
@@ -929,15 +973,13 @@ PY
         echo "ℹ️ Skipping Admin Brain production staging and activation; query API remains disabled."
     fi
 
-    trap - ERR
-
     echo "🌐 Starting runtime services: \${runtime_services[*]}..."
     docker compose up -d --force-recreate "\${runtime_services[@]}"
 
     if [ "\$bridge_worker_enabled" != "1" ]; then
         echo "🧹 Stopping disabled community bridge services..."
-        docker compose stop bridge-worker bridge-reconciler || true
-        docker compose rm -f bridge-worker bridge-reconciler || true
+        docker compose stop bridge-worker bridge-reconciler bridge-retention || true
+        docker compose rm -f bridge-worker bridge-reconciler bridge-retention || true
     fi
 
     if [ "\$analytics_sync_enabled" != "1" ]; then
@@ -950,7 +992,9 @@ PY
     running_release=\$(docker compose exec -T web sh -lc 'printf "%s" "\$APP_RELEASE"' </dev/null)
     if [ "\$running_release" != "$APP_RELEASE" ]; then
         echo "Expected running web container APP_RELEASE=$APP_RELEASE but found \$running_release"
-        exit 1
+        # Fail through a command so the ERR trap keeps forward-only schemas
+        # paired with no writers until an operator completes recovery.
+        false
     fi
 
     echo "🩺 Verifying external health release..."
@@ -966,7 +1010,7 @@ PY
     if [ "\$release_ok" != "1" ]; then
         echo "Expected /healthz/ready to report release $APP_RELEASE_SHORT for $APP_RELEASE"
         echo "\$health_body"
-        exit 1
+        false
     fi
 
     if [ "\$meeting_room_booking_enabled" = "true" ]; then
@@ -1005,7 +1049,7 @@ if slugs != expected:
     done
     if [ "\$admin_login_ok" != "1" ]; then
         echo "Expected Django admin login page to return HTTP 200"
-        exit 1
+        false
     fi
 
     admin_css_path=\$(
@@ -1019,7 +1063,7 @@ if slugs != expected:
     esac
     if ! curl -fsS -o /dev/null "https://api.mlai.au\$admin_css_path"; then
         echo "Expected Django admin stylesheet to be reachable at \$admin_css_path"
-        exit 1
+        false
     fi
 
     echo "🌐 Verifying external Vibe Raising video upload CORS preflight..."
@@ -1044,9 +1088,17 @@ if slugs != expected:
         echo "Expected video upload session preflight to return CORS headers"
         cat "\$preflight_headers"
         rm -f "\$preflight_headers"
-        exit 1
+        false
     fi
     rm -f "\$preflight_headers"
+
+    # All release and functional checks passed; rollback images are no longer
+    # needed. Keep the ERR trap active until this exact point.
+    trap - ERR
+    rm -f "\$rollback_manifest"
+    for rollback_tag in "\${rollback_tags[@]}"; do
+        docker image rm "\$rollback_tag" >/dev/null 2>&1 || true
+    done
 EOF
 
 echo "✅ Deployment complete! Check http://$DROPLET_IP or https://api.mlai.au"

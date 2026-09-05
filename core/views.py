@@ -48,9 +48,25 @@ from .permissions import (
     HasStrictRooApiKey,
     IsOwnerOrTeammateOrSuperuser,
 )
+from .slack_founder_links import (
+    ConflictingSlackFounderLinkError,
+    SlackFounderLinkError,
+    SlackFounderLinkRateLimitedError,
+    SlackFounderLinkUserNotFoundError,
+    UsedSlackFounderLinkError,
+    complete_slack_founder_link,
+    consumed_link_matches_founder_user,
+    founder_account_connection_status,
+    preview_slack_founder_link,
+    start_slack_founder_link,
+)
 from .throttles import AuthEndpointRateThrottle, MagicLinkSendRateThrottle
 from .user_compat import DEFAULT_USER_ROLE, get_compat_user_role, user_has_team
-from .slack_users import resolve_existing_user_from_profile
+from .slack_users import (
+    SlackProfileUnavailableError,
+    register_slack_side_user_for_founder_link,
+    resolve_existing_user_from_profile,
+)
 
 User = get_user_model()
 logger = logging.getLogger(__name__)
@@ -1021,17 +1037,21 @@ class LinkSlackView(APIView):
 
         # An existing Slack link is authoritative and idempotent. Never move
         # that Slack identity to a different account based on a later email.
-        user = User.objects.filter(slack_id=slack_id).first()
+        user = User.objects.filter(slack_id=slack_id, is_active=True).first()
         if user:
             return Response(
                 {"user_id": user.id, "linked": True, "already_linked": True},
                 status=status.HTTP_200_OK,
             )
 
-        user = resolve_existing_user_from_profile(
-            slack_user_id=slack_id,
-            profile={"slack_id": slack_id, "email": email},
-        )
+        try:
+            user = resolve_existing_user_from_profile(
+                slack_user_id=slack_id,
+                profile={"slack_id": slack_id, "email": email},
+                raise_link_conflict=True,
+            )
+        except ConflictingSlackFounderLinkError as exc:
+            return _slack_founder_link_error_response(exc)
         if user:
             return Response(
                 {"user_id": user.id, "linked": True},
@@ -1053,6 +1073,193 @@ class LinkSlackView(APIView):
                 "error": "That MLAI account is already linked to another Slack identity",
             },
             status=status.HTTP_409_CONFLICT,
+        )
+
+
+def _slack_founder_link_error_response(exc, **details):
+    logger.info("slack_founder_link_rejected code=%s", exc.code)
+    retry_after_seconds = getattr(exc, "retry_after_seconds", None)
+    if retry_after_seconds is not None:
+        details["retry_after_seconds"] = retry_after_seconds
+    response = Response(
+        {"code": exc.code, "error": str(exc), **details},
+        status=exc.status_code,
+    )
+    if retry_after_seconds is not None:
+        response["Retry-After"] = str(retry_after_seconds)
+    return response
+
+
+class SlackFounderLinkNoStoreMixin:
+    def finalize_response(self, request, response, *args, **kwargs):
+        response = super().finalize_response(request, response, *args, **kwargs)
+        response["Cache-Control"] = "no-store"
+        response["Pragma"] = "no-cache"
+        return response
+
+
+class SlackFounderLinkStartView(SlackFounderLinkNoStoreMixin, APIView):
+    authentication_classes = []
+    permission_classes = [HasStrictRooApiKey]
+
+    def post(self, request):
+        slack_user_id = str(request.data.get("slack_user_id") or "").strip()
+        if not slack_user_id:
+            return Response(
+                {
+                    "code": "invalid_request",
+                    "error": "slack_user_id is required",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        slack_user = User.objects.filter(
+            slack_id=slack_user_id,
+            is_active=True,
+        ).first()
+        if slack_user is None:
+            try:
+                slack_user = register_slack_side_user_for_founder_link(
+                    slack_user_id
+                )
+            except SlackProfileUnavailableError:
+                return Response(
+                    {
+                        "code": "slack_identity_unavailable",
+                        "error": (
+                            "Roo could not verify this Slack account right now. "
+                            "Please try again."
+                        ),
+                    },
+                    status=status.HTTP_503_SERVICE_UNAVAILABLE,
+                )
+        if slack_user is None:
+            return _slack_founder_link_error_response(
+                SlackFounderLinkUserNotFoundError()
+            )
+
+        try:
+            link_start = start_slack_founder_link(slack_user)
+        except SlackFounderLinkRateLimitedError as exc:
+            return _slack_founder_link_error_response(exc)
+        except SlackFounderLinkError as exc:
+            return _slack_founder_link_error_response(exc)
+        if link_start.status == "already_linked":
+            return Response(
+                {"status": "already_linked"},
+                status=status.HTTP_200_OK,
+            )
+
+        link_request = link_start.request
+        raw_token = link_start.raw_token
+        if link_request is None or raw_token is None:
+            raise RuntimeError("Link request creation returned no request token")
+        base_url = _frontend_base_url("founder-tools").rstrip("/")
+        link_url = (
+            f"{base_url}/founder-tools/link-roo?"
+            f"{urlencode({'token': raw_token})}"
+        )
+        return Response(
+            {
+                "status": "link_required",
+                "link_url": link_url,
+                "expires_at": link_request.expires_at.isoformat(),
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class SlackFounderLinkHealthView(SlackFounderLinkNoStoreMixin, APIView):
+    """Non-mutating service-key probe for coordinated companion rollout."""
+
+    authentication_classes = []
+    permission_classes = [HasStrictRooApiKey]
+
+    def get(self, request):
+        return Response(
+            {
+                "status": "ok",
+                "contract": "slack-founder-link-v1",
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class SlackFounderLinkStatusView(SlackFounderLinkNoStoreMixin, APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        return Response(
+            founder_account_connection_status(request.user),
+            status=status.HTTP_200_OK,
+        )
+
+
+class SlackFounderLinkPreviewView(SlackFounderLinkNoStoreMixin, APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        try:
+            preview = preview_slack_founder_link(
+                request.data.get("token"),
+                founder_user=request.user,
+            )
+        except UsedSlackFounderLinkError as exc:
+            return _slack_founder_link_error_response(
+                exc,
+                connection_matches_requesting_user=(
+                    consumed_link_matches_founder_user(
+                        request.data.get("token"),
+                        request.user,
+                    )
+                ),
+            )
+        except SlackFounderLinkError as exc:
+            return _slack_founder_link_error_response(exc)
+
+        slack_display_name = (
+            preview.request.slack_user.full_name
+            or "Your Roo Slack account"
+        )
+        return Response(
+            {
+                "status": preview.status,
+                "slack_display_name": slack_display_name,
+                "expires_at": preview.request.expires_at.isoformat(),
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class SlackFounderLinkCompleteView(SlackFounderLinkNoStoreMixin, APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        try:
+            completion = complete_slack_founder_link(
+                request.data.get("token"),
+                founder_user=request.user,
+            )
+        except UsedSlackFounderLinkError as exc:
+            return _slack_founder_link_error_response(
+                exc,
+                connection_matches_requesting_user=(
+                    consumed_link_matches_founder_user(
+                        request.data.get("token"),
+                        request.user,
+                    )
+                ),
+            )
+        except SlackFounderLinkError as exc:
+            return _slack_founder_link_error_response(exc)
+
+        return Response(
+            {"status": completion.status},
+            status=(
+                status.HTTP_201_CREATED
+                if completion.created
+                else status.HTTP_200_OK
+            ),
         )
 
 
@@ -1111,9 +1318,15 @@ class GetOrCreateSlackUserView(APIView):
             user = result.user
 
             if result.linked:
-                logger.info(f"Linked Slack ID {slack_id} to existing user {email}")
+                logger.info(
+                    "slack_identity_linked_to_existing_user user_pk=%s",
+                    result.user.pk,
+                )
             elif result.created:
-                logger.info(f"Auto-created user from Slack: {email} (Slack ID: {slack_id})")
+                logger.info(
+                    "slack_backed_user_created user_pk=%s",
+                    result.user.pk,
+                )
 
             return Response({
                 "user_id": user.id,
@@ -1125,8 +1338,13 @@ class GetOrCreateSlackUserView(APIView):
                 "linked": result.linked,
             }, status=status.HTTP_201_CREATED if result.created else status.HTTP_200_OK)
 
-        except Exception as e:
-            logger.exception(f"Error creating user from Slack data: {str(e)}")
+        except ConflictingSlackFounderLinkError as exc:
+            return _slack_founder_link_error_response(exc)
+        except Exception as exc:
+            logger.error(
+                "slack_user_creation_failed reason=%s",
+                type(exc).__name__,
+            )
             return Response(
                 {"error": "Failed to create user"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR

@@ -27,6 +27,7 @@ from django.db import transaction
 from django.db.models import F, Q
 from django.utils import timezone
 
+from core.actor_ids import internal_actor_user_id
 from integrations.models import GitHubInstallation
 from integrations.services.github_app import (
     GitHubAppTokenError,
@@ -45,8 +46,8 @@ logger = logging.getLogger(__name__)
 def resolve_user_for_actor_id(actor_id):
     """Map a connected_slack_user_id / slack_user_id back to a core.User.
 
-    Actor ids are either a real Slack id or the synthetic ``mlai_user:{id}``
-    (founder_tools.services.actor_ids_for_user). Returns None when unresolvable.
+    Actor ids are either a real Slack id, the canonical ``mlai_user:{id}``, or
+    the temporary legacy alias ``web_{id}``. Returns None when unresolvable.
     """
     from django.contrib.auth import get_user_model
 
@@ -54,12 +55,9 @@ def resolve_user_for_actor_id(actor_id):
     if not value:
         return None
     User = get_user_model()
-    if value.startswith("mlai_user:"):
-        try:
-            uid = int(value.split(":", 1)[1])
-        except (ValueError, IndexError):
-            return None
-        return User.objects.filter(id=uid).first()
+    internal_user_id = internal_actor_user_id(value)
+    if internal_user_id is not None:
+        return User.objects.filter(id=internal_user_id).first()
     return User.objects.filter(slack_id=value).first()
 
 

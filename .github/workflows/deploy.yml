@@ -141,10 +141,15 @@ jobs:
       run: |
         python manage.py test \
           roo.tests_api.TaskViewSetTests \
+          roo.tests_api.CoworkingViewSetTests \
+          roo.tests.CoworkingBookingAdminSafetyTests \
           roo.tests_kimi_usage \
           roo.tests_meeting_rooms \
           core.tests.test_auth_contract \
           core.tests.test_auth_session \
+          core.test_slack_user_creation \
+          core.tests_slack_founder_links \
+          core.tests_user_merge \
           core.tests.test_ops_domain_transition \
           core.tests.test_request_logging \
           org_memory.tests \
@@ -285,6 +290,7 @@ jobs:
         python manage.py migrate --noinput
         python manage.py check_org_memory_search --require-vector --require-installed
         python manage.py test \
+          core.tests_slack_founder_links.SlackFounderLinkConcurrencyTests \
           org_memory.tests.test_search_postgres \
           org_memory.tests.test_public_knowledge_embeddings \
           org_memory.tests.test_runtime_postgres \
@@ -363,6 +369,12 @@ jobs:
     - name: Run migration tests
       run: |
         python manage.py test \
+          core.tests_slack_founder_links.SlackFounderSyntheticIdentityMigrationTests \
+          core.tests_slack_founder_links.SlackFounderActorReferenceMigrationTests \
+          core.tests_slack_founder_links.SlackFounderActorMigrationHistoryGuardTests \
+          core.tests_slack_founder_links.SlackFounderActorMigrationAlreadyAppliedGuardTests \
+          core.tests_slack_founder_links.SlackFounderActorOrphanedPrincipalGuardTests \
+          core.tests_slack_founder_links.SlackFounderActorDeletedBeforeHistoryGuardTests \
           org_memory.tests.test_migrations \
           --verbosity 2
 

@@ -108,13 +108,11 @@ class OrgMemoryProductionDeployTests(SimpleTestCase):
             self.assertNotIn(flag, deploy)
 
         self.assertIn(
-            "paused_runtime_services=(web memory-worker memory-scheduler community-email-worker)",
+            "all_runtime_writer_services=(web scheduler memory-worker memory-scheduler community-email-worker bridge-worker bridge-reconciler bridge-retention analytics-sync)",
             deploy,
         )
-        self.assertIn('docker compose stop "\\${paused_runtime_services[@]}"', deploy)
         self.assertIn(
-            'docker compose up -d --force-recreate "\\${paused_runtime_services[@]}"',
-            deploy,
+            'docker compose stop "\\${all_runtime_writer_services[@]}"', deploy
         )
         self.assertIn("schedule_org_memory_reextraction", deploy)
         self.assertIn("reconcile_org_memory_auto_activation", deploy)
@@ -126,9 +124,14 @@ class OrgMemoryProductionDeployTests(SimpleTestCase):
         self.assertIn("--require-active", deploy)
         self.assertIn("check_org_memory_pilot_access_matrix", deploy)
         self.assertIn("compose_run_web_with_approval", deploy)
-        self.assertIn('ORG_MEMORY_PRODUCTION_DEPLOY_ENABLED="${ORG_MEMORY_PRODUCTION_DEPLOY_ENABLED:-false}"', deploy)
+        self.assertIn(
+            'ORG_MEMORY_PRODUCTION_DEPLOY_ENABLED="${ORG_MEMORY_PRODUCTION_DEPLOY_ENABLED:-false}"',
+            deploy,
+        )
         self.assertIn('upsert_env_value ORG_MEMORY_QUERY_API_ENABLED "false"', deploy)
-        self.assertIn('if [ "\\$org_memory_production_deploy_enabled" = "true" ]; then', deploy)
+        self.assertIn(
+            'if [ "\\$org_memory_production_deploy_enabled" = "true" ]; then', deploy
+        )
         self.assertNotIn("--environment staging", deploy)
         # Admin Brain activation still runs after the generic post-migration
         # setup, which now includes the Firebase Storage CORS step that used to
@@ -151,7 +154,7 @@ class OrgMemoryProductionDeployTests(SimpleTestCase):
             deploy.index("schedule_org_memory_reextraction"),
         )
         self.assertLess(
-            deploy.index('docker compose stop "\\${paused_runtime_services[@]}"'),
+            deploy.index('docker compose stop "\\${all_runtime_writer_services[@]}"'),
             deploy.index("recover_org_memory_stopped_worker_work"),
         )
         self.assertLess(
@@ -183,7 +186,9 @@ class OrgMemoryProductionDeployTests(SimpleTestCase):
         # Activation and every post-binding verification run only after a
         # successful staging apply.
         skip_probe_index = deploy.index("scripts/org_memory_staging_skip.py")
-        self.assertGreater(deploy.index(staging_guard), deploy.index("stage_org_memory_pilot"))
+        self.assertGreater(
+            deploy.index(staging_guard), deploy.index("stage_org_memory_pilot")
+        )
         for verified_only_after_staging in (
             "activate_org_memory_pilot",
             "check_org_memory_pilot_release_gate",
@@ -273,9 +278,7 @@ class AdminBrainStagingSkipDecisionTests(SimpleTestCase):
             "DEBUG: ESAFETY VIEWS MODULE LOADED\nnot-json {",
         ):
             with self.subTest(stdout_text=stdout_text):
-                self.assertFalse(
-                    self.skip_module.staging_skip_allowed(stdout_text)
-                )
+                self.assertFalse(self.skip_module.staging_skip_allowed(stdout_text))
 
     def test_fails_on_successful_apply_output_shape(self):
         # A post-readiness apply failure prints the deployment result shape
@@ -316,16 +319,10 @@ class AdminBrainStagingSkipDecisionTests(SimpleTestCase):
                 _blocked_staging_stdout(["provider_governance_invalid"]),
                 encoding="utf-8",
             )
+            self.assertEqual(self.skip_module.main(["prog", str(tolerated_path)]), 0)
+            self.assertEqual(self.skip_module.main(["prog", str(blocked_path)]), 1)
             self.assertEqual(
-                self.skip_module.main(["prog", str(tolerated_path)]), 0
-            )
-            self.assertEqual(
-                self.skip_module.main(["prog", str(blocked_path)]), 1
-            )
-            self.assertEqual(
-                self.skip_module.main(
-                    ["prog", str(Path(tmp) / "missing.txt")]
-                ),
+                self.skip_module.main(["prog", str(Path(tmp) / "missing.txt")]),
                 2,
             )
             self.assertEqual(self.skip_module.main(["prog"]), 2)

@@ -7,6 +7,29 @@ from django.conf import settings
 
 logger = logging.getLogger(__name__)
 
+_SLACK_USER_NOT_FOUND_ERRORS = frozenset({"user_not_found", "users_not_found"})
+
+
+def _response_value(response: Any, key: str) -> Any:
+    """Read an untrusted Slack response without allowing shape errors to escape."""
+    try:
+        return response.get(key)
+    except (AttributeError, TypeError):
+        return None
+
+
+class SlackUserLookupError(RuntimeError):
+    """Base error for strict Slack user-profile lookup."""
+
+
+class SlackUserNotFoundError(SlackUserLookupError):
+    """Raised when Slack confirms that the requested user does not exist."""
+
+
+class SlackUserLookupUnavailableError(SlackUserLookupError):
+    """Raised when Slack cannot authoritatively answer a user lookup."""
+
+
 class SlackService:
     """Service for interacting with Slack API."""
     
@@ -28,6 +51,76 @@ class SlackService:
         return cls._client
 
     @classmethod
+    def get_user_profile_strict(cls, slack_user_id: str) -> Dict[str, Any]:
+        """Fetch a Slack profile while preserving not-found versus outage."""
+        try:
+            client = cls.get_client()
+            response = client.users_info(user=slack_user_id)
+        except SlackApiError as exc:
+            error_code = str(_response_value(exc.response, 'error') or '')
+            if error_code in _SLACK_USER_NOT_FOUND_ERRORS:
+                logger.info(
+                    "slack_user_lookup_not_found reason_code=user_not_found"
+                )
+                raise SlackUserNotFoundError("Slack user was not found") from exc
+            logger.warning(
+                "slack_user_lookup_unavailable reason_code=slack_api_error"
+            )
+            raise SlackUserLookupUnavailableError(
+                "Slack user lookup is temporarily unavailable"
+            ) from exc
+        except Exception as exc:
+            logger.warning(
+                "slack_user_lookup_unavailable reason_code=%s",
+                type(exc).__name__,
+            )
+            raise SlackUserLookupUnavailableError(
+                "Slack user lookup is temporarily unavailable"
+            ) from exc
+
+        if _response_value(response, 'ok') is not True:
+            error_code = str(_response_value(response, 'error') or '')
+            if error_code in _SLACK_USER_NOT_FOUND_ERRORS:
+                logger.info(
+                    "slack_user_lookup_not_found reason_code=user_not_found"
+                )
+                raise SlackUserNotFoundError("Slack user was not found")
+            logger.warning(
+                "slack_user_lookup_unavailable reason_code=slack_api_error"
+            )
+            raise SlackUserLookupUnavailableError(
+                "Slack user lookup is temporarily unavailable"
+            )
+
+        user = _response_value(response, 'user')
+        if not isinstance(user, dict) or not user.get('id'):
+            logger.warning(
+                "slack_user_lookup_unavailable reason_code=malformed_success"
+            )
+            raise SlackUserLookupUnavailableError(
+                "Slack user lookup returned an invalid response"
+            )
+        profile = user.get('profile')
+        if not isinstance(profile, dict):
+            logger.warning(
+                "slack_user_lookup_unavailable reason_code=malformed_success"
+            )
+            raise SlackUserLookupUnavailableError(
+                "Slack user lookup returned an invalid response"
+            )
+        return {
+            'slack_id': user['id'],
+            'real_name': user.get('real_name') or profile.get('real_name'),
+            'display_name': profile.get('display_name') or user.get('name'),
+            'name': user.get('name'),
+            'email': profile.get('email'),
+            'image_url': profile.get('image_512') or profile.get('image_192'),
+            'is_bot': user.get('is_bot', False),
+            'deleted': user.get('deleted', False),
+            'tz': user.get('tz'),
+        }
+
+    @classmethod
     def get_user_profile(cls, slack_user_id: str) -> Optional[Dict[str, Any]]:
         """
         Fetch user profile from Slack.
@@ -36,31 +129,9 @@ class SlackService:
             Dict containing 'real_name', 'email', 'image_512' etc.
             Returns None if user not found or API error.
         """
-        client = cls.get_client()
         try:
-            response = client.users_info(user=slack_user_id)
-            if response['ok']:
-                user = response['user']
-                profile = user.get('profile', {})
-                return {
-                    'slack_id': user['id'],
-                    'real_name': user.get('real_name') or profile.get('real_name'),
-                    'display_name': profile.get('display_name') or user.get('name'),
-                    'name': user.get('name'),
-                    'email': profile.get('email'),
-                    'image_url': profile.get('image_512') or profile.get('image_192'),
-                    'is_bot': user.get('is_bot', False),
-                    'deleted': user.get('deleted', False),
-                    'tz': user.get('tz'),
-                }
-            else:
-                logger.error(f"Slack API error fetching user {slack_user_id}: {response.get('error')}")
-                return None
-        except SlackApiError as e:
-            logger.error(f"Slack API exception fetching user {slack_user_id}: {e.response['error']}")
-            return None
-        except Exception as e:
-            logger.error(f"Exception fetching Slack user {slack_user_id}: {str(e)}")
+            return cls.get_user_profile_strict(slack_user_id)
+        except SlackUserLookupError:
             return None
 
     @classmethod

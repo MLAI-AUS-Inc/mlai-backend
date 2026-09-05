@@ -1,5 +1,6 @@
 import uuid
 
+from django.conf import settings
 from django.db import models
 from django.contrib.auth.models import AbstractBaseUser, PermissionsMixin, BaseUserManager
 from django.db.models.functions import Lower
@@ -156,6 +157,96 @@ class PasswordResetEmailDelivery(models.Model):
 
     def __str__(self):
         return f"{self.challenge_id}:{self.status}"
+
+
+class SlackFounderAccountLink(models.Model):
+    """Verified association between Roo's Slack user and a Founder Tools user."""
+
+    slack_user = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="slack_founder_account_link",
+    )
+    founder_user = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="founder_slack_account_link",
+    )
+    verified_at = models.DateTimeField(default=timezone.now)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "core_slackfounderaccountlink"
+        constraints = [
+            models.CheckConstraint(
+                check=~models.Q(slack_user=models.F("founder_user")),
+                name="core_sfal_distinct_users",
+            ),
+        ]
+
+    def __str__(self):
+        return f"Slack user {self.slack_user_id} -> Founder user {self.founder_user_id}"
+
+
+class SlackFounderLinkRequest(models.Model):
+    """Single-use request proving possession of a Roo Slack identity."""
+
+    slack_user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="slack_founder_link_requests",
+    )
+    token_digest = models.CharField(max_length=64, unique=True)
+    expires_at = models.DateTimeField(db_index=True)
+    consumed_at = models.DateTimeField(null=True, blank=True)
+    consumed_by_user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="consumed_slack_founder_link_requests",
+    )
+    invalidated_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "core_slackfounderlinkrequest"
+        indexes = [
+            models.Index(
+                fields=["slack_user", "expires_at"],
+                name="core_sflr_user_exp_idx",
+            ),
+            models.Index(
+                fields=["slack_user", "created_at"],
+                name="core_sflr_user_created_idx",
+            ),
+            models.Index(
+                fields=["created_at"],
+                name="core_sflr_created_idx",
+            ),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                check=(
+                    models.Q(
+                        consumed_at__isnull=True,
+                        consumed_by_user__isnull=True,
+                    )
+                    | models.Q(
+                        consumed_at__isnull=False,
+                        consumed_by_user__isnull=False,
+                    )
+                ),
+                name="core_sflr_consumed_actor",
+            ),
+        ]
+
+    def __str__(self):
+        return f"Slack founder link request {self.pk} for user {self.slack_user_id}"
+
+
 class Hackathon(models.Model):
     name = models.CharField(max_length=255)
     slug = models.SlugField(unique=True)
