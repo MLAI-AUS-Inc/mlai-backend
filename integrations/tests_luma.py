@@ -232,6 +232,7 @@ class LumaAttendeeReportServiceTests(SimpleTestCase):
                     "start_at": "2026-05-06T08:00:00Z",
                     "end_at": "2026-05-06T09:00:00Z",
                     "timezone": "Australia/Melbourne",
+                    "description": "",
                 },
                 {
                     "id": "evt-later",
@@ -240,6 +241,7 @@ class LumaAttendeeReportServiceTests(SimpleTestCase):
                     "start_at": "2026-05-08T08:00:00Z",
                     "end_at": "2026-05-08T10:00:00Z",
                     "timezone": "Australia/Melbourne",
+                    "description": "",
                 },
             ],
         )

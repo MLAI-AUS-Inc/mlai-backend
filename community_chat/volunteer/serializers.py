@@ -3,7 +3,8 @@
 from django.db.models import Q
 from rest_framework import serializers
 
-from .access import capabilities, community_id, public_source
+from .access import capabilities, channels, community_id, public_source
+from .events import public_event
 from .evidence import source_is_invalidated
 from .models import VolunteerMilestone, VolunteerSourceReceipt
 from .policy import microroo, roo
@@ -58,21 +59,32 @@ def guide_contact(guide, reviewer=None):
 def opportunity_dto(record, viewer):
     """Serialize a curated opportunity after server-side visibility validation."""
     action = active_policy()[record.action_key]
+    event = public_event(record.event_id) if record.kind == "event" else None
+    event = event or {}
+    volunteer_channel = channels().get("volunteer")
     return dict(
         id=str(record.pk),
         kind=record.kind,
         action_key=record.action_key,
-        title=record.title,
-        purpose=record.purpose,
-        description=record.description,
+        title=event.get("name") or record.title,
+        purpose="" if record.kind == "event" else record.purpose,
+        description=(
+            event.get("description", "")
+            if record.kind == "event"
+            else record.description
+        ),
+        event_url=event.get("url"),
+        volunteer_channel_id=volunteer_channel,
         learning=record.learning,
         **guide_contact(record.guide, record.reviewer),
         reviewer=member_dto(record.reviewer),
         source=public_source(record.source, thread_required=True),
         event_id=record.event_id or None,
         project_id=str(record.project_id) if record.project_id else None,
-        starts_at=record.starts_at.isoformat() if record.starts_at else None,
-        ends_at=record.ends_at.isoformat() if record.ends_at else None,
+        starts_at=event.get("start_at")
+        or (record.starts_at.isoformat() if record.starts_at else None),
+        ends_at=event.get("end_at")
+        or (record.ends_at.isoformat() if record.ends_at else None),
         reward_roo=roo(record.reward_microroo),
         reward_max_roo=roo(record.reward_max_microroo),
         recommended_level=record.recommended_level,

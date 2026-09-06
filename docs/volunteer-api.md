@@ -1,3 +1,13 @@
+# Current Volunteer member experience
+
+The member app has Explore, event opportunity details and My journey. Member recognition-request forms, My contributions, receipts and review queues are no longer exposed. Existing accounting, audit records and administrator awards remain intact; no schema migration or data deletion accompanies this UI change.
+
+Event opportunity DTOs resolve the canonical `event_id` against the existing public Luma calendar. They return Luma’s name, description, event URL and schedule rather than generic volunteering copy. The calendar is bounded to the next ten public events and cached for sixty seconds. If the event is absent or Luma is unavailable, description is empty and clients show an honest unavailable state. Only plain text/Markdown descriptions cross the API boundary; structured internal fields and attendee data do not.
+
+Set `COMMUNITY_CHAT_VOLUNTEER_CHANNELS["volunteer"]` to the verified volunteer channel ID in the target community. The DTO exposes it as `volunteer_channel_id`. Join opens that channel (no thread/message target), with an editable, unsent `I'd like to volunteer for {event title}` draft. Clients preserve an existing draft. Missing configuration disables the button.
+
+`event_url` and `volunteer_channel_id` are additive optional opportunity fields. Historical request/receipt API contracts below remain available for compatibility and accounting; clients no longer link to their member screens.
+
 # Volunteer account API
 
 Volunteer lives under `/api/v1/community-chat/volunteer/`. It reuses account
@@ -31,7 +41,8 @@ is never fetched by the backend. Existing app thread navigation stays canonical.
 approved source-backed records. Pending work never appears as a completed tick.
 
 `Opportunity`: `id`, `kind` (`event`/`project`), `action_key`, `title`, `purpose`,
-`description` (definition of done), `learning`, `guide`, `reviewer`, `source`,
+`description` (public Luma event copy for events; curated copy for projects),
+`event_url`, `volunteer_channel_id`, `learning`, `guide`, `reviewer`, `source`,
 nullable `event_id`, `project_id`, `starts_at`, `ends_at`, `reward_roo`,
 `reward_max_roo`, `recommended_level`, `requires_attendance`, `status`, `version`,
 `can_request`, `guide_available`, `guide_is_fallback`. Closing an event leaves its

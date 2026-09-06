@@ -585,6 +585,10 @@ def _public_upcoming_event(
     ):
         return None
 
+    description = event.get("description_md") or event.get("description")
+    if not isinstance(description, str):
+        description = ""
+
     return {
         "id": event_id,
         "name": name,
@@ -592,6 +596,7 @@ def _public_upcoming_event(
         "start_at": _isoformat_z(start_at),
         "end_at": _isoformat_z(end_at),
         "timezone": timezone_name,
+        "description": description[:20000],
     }
 
 
