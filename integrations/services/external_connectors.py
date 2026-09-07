@@ -366,6 +366,8 @@ def _slack_oauth_user_scope_list() -> list[str]:
             "mpim:read",
             "mpim:history",
             "mpim:write",
+            "groups:read",
+            "groups:history",
             "chat:write",
             "users:read",
             "reactions:read",
@@ -1710,6 +1712,13 @@ def _store_slack_connection(
                 connection.external_account_id = team_id
                 connection.account_label = team_name or team_id or "Slack workspace"
                 connection.status = ExternalServiceConnectionStatus.CONNECTED
+                # Retain source channel types across renewed OAuth for the same
+                # owner/workspace; the identity-conflict fence above prevents
+                # carrying this private catalog onto another Slack account.
+                from integrations.services.slack_chat_catalog import CATALOG_KEY
+                catalog = (connection.provider_metadata or {}).get(CATALOG_KEY)
+                if catalog is not None:
+                    provider_metadata[CATALOG_KEY] = catalog
                 connection.provider_metadata = provider_metadata
                 connection.last_error = ""
                 connection.save()
@@ -1894,7 +1903,14 @@ def complete_oauth_callback(request, provider: str) -> str:
         )
 
         try:
-            activate_connection(connection)
+            from urllib.parse import parse_qs, urlsplit
+
+            options = parse_qs(urlsplit(next_url).query)
+            history_days = 30 if options.get("slack_history_days") == ["30"] else 7
+            activate_connection(
+                connection, history_days=history_days,
+                include_private_channels=options.get("slack_private_channels") == ["1"],
+            )
         except Exception as exc:
             logger.warning(
                 "Slack connected but DM mirroring could not activate",

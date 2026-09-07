@@ -65,6 +65,15 @@ def conversation_owner_device_pubkeys(
 def conversation_name(conversation: SlackDmMirrorConversation) -> str:
     """Build the existing user-facing mirror name from stored Slack profiles."""
 
+    from integrations.services.slack_chat_catalog import (
+        conversation_kind,
+        conversation_metadata,
+    )
+
+    if conversation_kind(conversation) == "private_channel":
+        return str(
+            conversation_metadata(conversation).get("name") or "Private Slack channel"
+        )[:255]
     profiles = conversation.participant_profiles or {}
     counterpart_ids = [
         value
@@ -589,9 +598,9 @@ def _registration_cleanup_disposition_locked(
         now = timezone.now()
         colliding_attempts = [
             other
-            for other in registration_rows_for_grant(
-                grant.pk, for_update=True
-            ).filter(conversation_id=conversation.pk)
+            for other in registration_rows_for_grant(grant.pk, for_update=True).filter(
+                conversation_id=conversation.pk
+            )
             if other.pk != row.pk
             and registration_participant_hash(other) == participant_hash
             and registration_state(other) == REGISTRATION_STATE_PROVISIONING

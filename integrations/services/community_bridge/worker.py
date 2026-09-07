@@ -165,7 +165,7 @@ class CommunityBridgeDiscordClient(discord.Client):
     async def delivery_loop(self) -> None:
         await self.process_pending_deliveries_once(limit=20)
 
-    @tasks.loop(seconds=60.0)
+    @tasks.loop(seconds=5.0)
     async def slack_dm_discovery_loop(self) -> None:
         await asyncio.to_thread(discover_grants_if_due)
 
@@ -753,19 +753,22 @@ async def _run_headless_delivery_worker(client: CommunityBridgeDiscordClient) ->
         min(float(getattr(settings, "COMMUNITY_BRIDGE_WORKER_POLL_SECONDS", 1.0)), 60.0),
     )
     logger.info("community_bridge_headless_worker_ready target=mlai_chat")
-    next_discovery_at = 0.0
-    next_history_at = 0.0
-    while True:
-        now = asyncio.get_running_loop().time()
-        if now >= next_discovery_at:
+    async def discovery_loop():
+        while True:
             await asyncio.to_thread(discover_grants_if_due)
-            next_discovery_at = now + 60.0
-        if now >= next_history_at:
+            await asyncio.sleep(5.0)
+
+    async def history_loop():
+        while True:
             await asyncio.to_thread(process_due_history_backfills, 1)
-            next_history_at = now + HISTORY_REQUEST_INTERVAL_SECONDS
-        await client.process_pending_deliveries_once(limit=20)
-        history_delay = max(
-            0.05,
-            next_history_at - asyncio.get_running_loop().time(),
-        )
-        await asyncio.sleep(min(poll_seconds, history_delay))
+            await asyncio.sleep(HISTORY_REQUEST_INTERVAL_SECONDS)
+
+    async def delivery_loop():
+        while True:
+            await client.process_pending_deliveries_once(limit=20)
+            await asyncio.sleep(poll_seconds)
+
+    async with asyncio.TaskGroup() as group:
+        group.create_task(discovery_loop())
+        group.create_task(history_loop())
+        group.create_task(delivery_loop())
