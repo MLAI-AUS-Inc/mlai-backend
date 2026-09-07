@@ -16,7 +16,7 @@ from .views import CoworkingViewSet
     MLAI_API_KEY="distinct-mlai-test-key",
     OFFICE_MANAGER_ENABLED=True,
     OFFICE_MANAGER_SLACK_CHANNEL_ID=CHANNEL,
-    OFFICE_MANAGER_SLACK_BOT_TOKEN="xoxb-synthetic-test-token",
+    OFFICE_MANAGER_SLACK_BOT_TOKEN="office-manager-public-roo-test-token",
 )
 class OfficeManagerChannelTests(SimpleTestCase):
     def request(self, channel):
