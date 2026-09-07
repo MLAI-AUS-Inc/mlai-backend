@@ -803,6 +803,19 @@ class VolunteerTests(TestCase):
     def test_conversations_paginate_distinct_threads_without_hiding_older_replies(self):
         first, second = self.event("older"), self.event("newer")
         now = timezone.now()
+        for flag in ("invalidated", "service_account"):
+            hidden = self.event(flag)
+            VolunteerSourceReceipt.objects.create(
+                community=community_id(),
+                actor=self.member,
+                origin="relay",
+                kind="reply",
+                source_key=f"reply:{hidden.pk}",
+                source=hidden.source,
+                metadata={flag: True},
+                occurred_at=now,
+                status="recorded",
+            )
         for opportunity, count in ((first, 1), (second, 202)):
             VolunteerSourceReceipt.objects.bulk_create(
                 [

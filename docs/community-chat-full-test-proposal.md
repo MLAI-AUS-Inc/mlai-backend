@@ -1,34 +1,78 @@
-# Disposable Slack import and account profile regression tests
+# Complete disposable backend test setup
 
-No new schema or migration is proposed for Slack imports. Types and names use
-the existing connector metadata field. Integration tests need the existing
-model schemas below to build a fresh PostgreSQL database.
+The original approved 301-migration closure passed all 10 account-profile tests.
+The broader Slack/Volunteer run exposed prerequisites missing from that proposal:
+Django sessions, current startup-binding columns, and tables used by Django's
+sequence reset. This proposal adds 33 existing migrations, for 334 total.
 
-Approved in the task conversation on 7 September 2026. All 10 account-profile
-tests passed with this exact closure. The broader regression run found that
-this list omitted some test prerequisites; the additional existing migrations
-are recorded separately in `community-chat-full-test-proposal.md` and require
-their own approval. The approved list below remains unchanged.
+Approval requested: apply the exact full closure below in fresh, synthetic
+disposable test databases only, locally and in pull-request CI. This includes
+CI's existing migration round-trip regressions. No new migration file, ordinary
+local database, production data, service startup or deployment is included.
+All locally created test databases will be removed after their run.
 
-Approval requested: execute the exact existing migration targets and dependency
-closure listed below only in a newly created loopback test database, with
-synthetic credentials and fixtures, then remove that database. This also permits
-rerunning the pending Volunteer tests and the canonical account profile tests
-(`community_chat.tests.test_account_profiles`, including its PostgreSQL
-concurrent-write regression) in the same disposable test setup. The account
-profile update uses existing columns and adds no migrations. No
-ordinary local/production database, service startup, deployment, Slack import
-or production repair is included. No migration file is changed.
+Additional existing migrations beyond the earlier approval:
+
+- `esafety.0001_initial`
+- `esafety.0002_submission`
+- `esafety.0003_announcement`
+- `esafety.0004_team_avatar_url`
+- `esafety.0005_alter_announcement_body`
+- `esafety.0006_submission_coarse_score_submission_fine_score_and_more`
+- `esafety.0007_submission_logs`
+- `esafety.0008_alter_submission_logs`
+- `generic_hackathons.0001_initial`
+- `generic_hackathons.0002_wattthehacksettings`
+- `generic_hackathons.0003_generichackathonteam_leader`
+- `generic_hackathons.0004_generichackathonjoinrequest_and_more`
+- `generic_hackathons.0005_watt_session_cache_table`
+- `generic_hackathons.0005_generichackathonteam_eval_token`
+- `generic_hackathons.0006_merge_20260604_0238`
+- `generic_hackathons.0007_alter_generichackathonteam_eval_team_uuid_and_more`
+- `jobs.0001_initial`
+- `jobs.0002_jobrun_execution_config`
+- `mlai_studio.0001_initial`
+- `sessions.0001_initial`
+- `startup_updates.0014_monthlyupdatedraft_ready_at`
+- `startup_updates.0015_backfill_monthly_update_ready_at`
+- `startup_updates.0016_userstartupbinding_monthly_updates_enabled`
+- `startup_updates.0017_userstartupbinding_coworking_discount_eligible`
+- `startup_updates.0018_monthlyupdatereminderdelivery`
+- `startup_updates.0017_monthly_update_visibility_publish_state`
+- `startup_updates.0019_merge_20260723_0335`
+- `startup_updates.0020_luma_event_attendance_counts`
+- `startup_updates.0021_linear_project_member_artifact`
+- `victor_ai.0001_initial`
+- `victor_ai.0002_victorapplication_revenue_last_3_months_and_more`
+- `victor_ai.0003_victorapplication_linkedin`
+- `victor_ai.0004_victor_roo_access`
 
 Targets:
 
+- `admin.0003_logentry_add_action_flag_choices`
+- `auth.0012_alter_user_first_name_max_length`
 - `community_chat.0009_volunteer`
+- `content_analytics.0003_articleperformancereport_and_more`
+- `content_factory.0038_delete_seo_topicmap_researchsession`
+- `contenttypes.0002_remove_content_type_name`
 - `core.0068_merge_0059_purge_stale_content_types_0067_merge_0058_drop_orphan_tables_from_removed_apps_0066_guard_orphaned_actor_migration_history`
+- `esafety.0008_alter_submission_logs`
 - `founder_tools.0010_company_default_audience_visibility`
+- `generic_hackathons.0007_alter_generichackathonteam_eval_team_uuid_and_more`
+- `hospital.0017_delete_medhack_game_and_prediction`
 - `integrations.0046_communitybridgedeletionrequest`
+- `jobs.0002_jobrun_execution_config`
+- `mlai_studio.0001_initial`
+- `org_memory.0025_delete_selector_shadow`
 - `organizations.0002_organization_company_linkedin_url`
+- `roo.0036_sanitize_coworking_operation_receipts`
+- `sessions.0001_initial`
+- `startup_updates.0021_linear_project_member_artifact`
+- `vibe_raising.0002_move_founder_tools_models`
+- `victor_ai.0004_victor_roo_access`
+- `workflow_runs.0005_contentfactoryrun_reconciled_at`
 
-Full existing dependency closure (301 migrations):
+Full existing dependency closure (334 migrations):
 
 - `contenttypes.0001_initial`
 - `contenttypes.0002_remove_content_type_name`
@@ -45,6 +89,9 @@ Full existing dependency closure (301 migrations):
 - `auth.0011_update_proxy_permissions`
 - `auth.0012_alter_user_first_name_max_length`
 - `core.0001_initial`
+- `admin.0001_initial`
+- `admin.0002_logentry_remove_auto_add`
+- `admin.0003_logentry_add_action_flag_choices`
 - `roo.0001_initial`
 - `core.0002_hackathon`
 - `core.0003_user_avatar_url`
@@ -99,6 +146,7 @@ Full existing dependency closure (301 migrations):
 - `roo.0036_sanitize_coworking_operation_receipts`
 - `community_chat.0008_token_usage`
 - `community_chat.0009_volunteer`
+- `organizations.0001_split_content_factory_apps`
 - `core.0011_organization_organizationcontentconfig`
 - `core.0012_organizationcontentconfig_scan_summary_and_more`
 - `core.0013_organizationcontentconfig_resource_prompt`
@@ -120,9 +168,6 @@ Full existing dependency closure (301 migrations):
 - `core.0029_add_research_memory_fields`
 - `core.0030_add_content_factory_runs`
 - `workflow_runs.0001_split_content_factory_apps`
-- `workflow_runs.0002_contentfactoryrun_cf_run_domain_wf_updated_idx`
-- `workflow_runs.0003_contentfactoryrun_last_event_emitted_at`
-- `organizations.0001_split_content_factory_apps`
 - `integrations.0001_initial`
 - `integrations.0002_userintegration`
 - `integrations.0003_add_github_repo_field`
@@ -157,17 +202,62 @@ Full existing dependency closure (301 migrations):
 - `integrations.0011_split_content_factory_apps`
 - `core.0051_split_content_factory_apps`
 - `organizations.0002_organization_company_linkedin_url`
-- `workflow_runs.0004_contentfactoryrun_organization_and_more`
-- `workflow_runs.0005_contentfactoryrun_reconciled_at`
 - `integrations.0012_financial_account_external_record`
 - `integrations.0013_xero_financial_record_types`
 - `integrations.0014_startup_metric_source_provenance`
 - `integrations.0015_slack_artifacts`
 - `startup_updates.0001_split_startup_updates_app`
 - `integrations.0016_split_startup_updates_app`
-- `admin.0001_initial`
-- `admin.0002_logentry_remove_auto_add`
-- `admin.0003_logentry_add_action_flag_choices`
+- `integrations.0017_alter_external_service_provider_choices`
+- `integrations.0018_google_analytics_provider_choice`
+- `integrations.0019_luma_provider_choice`
+- `workflow_runs.0002_contentfactoryrun_cf_run_domain_wf_updated_idx`
+- `workflow_runs.0003_contentfactoryrun_last_event_emitted_at`
+- `content_factory.0001_split_content_factory_apps`
+- `content_factory.0002_move_legacy_contenttypes`
+- `content_factory.0003_website_baseline_snapshot`
+- `content_factory.0004_vibe_marketing_component_comment`
+- `content_factory.0005_vibe_marketing_component_comment_anchor`
+- `content_factory.0006_topic_feedback`
+- `content_factory.0007_backfill_topic_coverage_memory`
+- `content_factory.0008_researchedkeyword_difficulty_source`
+- `content_factory.0009_researchedkeyword_topic_picker_metrics`
+- `content_factory.0010_backfill_review_draft_delivery_mode`
+- `content_factory.0011_vibe_marketing_component_comment_context`
+- `content_factory.0012_research_automations`
+- `content_factory.0013_writtenarticle_wa_org_created_idx`
+- `content_factory.0014_writtenarticle_publish_status`
+- `content_factory.0014_contentfactorycallbackevent`
+- `content_factory.0015_merge_20260610_0823`
+- `content_factory.0016_writtenarticle_source_run_id`
+- `content_factory.0017_backfill_writtenarticle_source_run_id`
+- `content_factory.0018_notification_channel_verification`
+- `content_factory.0019_notification_delivery_per_channel_keys`
+- `content_factory.0020_organizationcontentconfig_article_system_setup_cache_and_more`
+- `content_factory.0021_organizationcontentconfig_auto_publish_requires_review`
+- `content_factory.0022_writtenarticle_content_path_and_more`
+- `content_factory.0023_design_snapshot`
+- `content_factory.0024_generatedcomponent_import_statement_metadata`
+- `content_factory.0025_orgconfig_use_component_library`
+- `content_factory.0026_organizationcontentconfig_authors_and_more`
+- `content_factory.0027_healing_record_archived_state`
+- `content_factory.0028_organizationcontentconfig_scan_artifact_cache`
+- `content_factory.0029_notificationchannel_delivery_enabled`
+- `content_factory.0030_learning_entries_and_healing_framework`
+- `content_factory.0030_callback_event_lease`
+- `content_factory.0031_merge_callback_lease_learning_entries`
+- `content_factory.0032_writtenarticle_analytics_identity`
+- `content_analytics.0001_initial`
+- `content_analytics.0002_article_analytics_location_history`
+- `content_analytics.0003_articleperformancereport_and_more`
+- `content_factory.0033_activate_account_email_notification_channels`
+- `content_factory.0034_keywordvelocity_trend_provenance`
+- `content_factory.0035_notificationdelivery_performance_report_and_more`
+- `content_factory.0036_researched_keyword_ai_search_metrics`
+- `content_factory.0037_content_islands`
+- `content_factory.0038_delete_seo_topicmap_researchsession`
+- `workflow_runs.0004_contentfactoryrun_organization_and_more`
+- `workflow_runs.0005_contentfactoryrun_reconciled_at`
 - `startup_updates.0002_move_legacy_contenttypes`
 - `startup_updates.0003_slackthreadartifact_relevance_fields`
 - `startup_updates.0004_linear_artifacts`
@@ -186,40 +276,11 @@ Full existing dependency closure (301 migrations):
 - `founder_tools.0005_viberaisingcompany_location`
 - `founder_tools.0006_repair_company_organization_column`
 - `startup_updates.0010_startup_manual_document`
-- `integrations.0017_alter_external_service_provider_choices`
-- `content_factory.0001_split_content_factory_apps`
-- `content_factory.0002_move_legacy_contenttypes`
-- `content_factory.0003_website_baseline_snapshot`
-- `content_factory.0004_vibe_marketing_component_comment`
-- `content_factory.0005_vibe_marketing_component_comment_anchor`
-- `content_factory.0006_topic_feedback`
-- `content_factory.0007_backfill_topic_coverage_memory`
-- `content_factory.0008_researchedkeyword_difficulty_source`
-- `content_factory.0009_researchedkeyword_topic_picker_metrics`
-- `content_factory.0010_backfill_review_draft_delivery_mode`
-- `content_factory.0011_vibe_marketing_component_comment_context`
-- `content_factory.0012_research_automations`
 - `startup_updates.0011_startupprofile_company_detail_fields`
-- `integrations.0018_google_analytics_provider_choice`
 - `startup_updates.0012_googleanalyticspropertyselection_and_more`
-- `integrations.0019_luma_provider_choice`
 - `startup_updates.0013_luma_event_selection`
 - `integrations.0020_externalserviceconnection_uniq_user_org_provider_account`
 - `integrations.0021_googleconnection_organization_and_more`
-- `content_factory.0013_writtenarticle_wa_org_created_idx`
-- `content_factory.0014_writtenarticle_publish_status`
-- `content_factory.0014_contentfactorycallbackevent`
-- `content_factory.0015_merge_20260610_0823`
-- `content_factory.0016_writtenarticle_source_run_id`
-- `content_factory.0017_backfill_writtenarticle_source_run_id`
-- `content_factory.0018_notification_channel_verification`
-- `content_factory.0019_notification_delivery_per_channel_keys`
-- `content_factory.0020_organizationcontentconfig_article_system_setup_cache_and_more`
-- `content_factory.0021_organizationcontentconfig_auto_publish_requires_review`
-- `content_factory.0022_writtenarticle_content_path_and_more`
-- `content_factory.0023_design_snapshot`
-- `content_factory.0024_generatedcomponent_import_statement_metadata`
-- `content_factory.0025_orgconfig_use_component_library`
 - `integrations.0022_githubinstallation`
 - `integrations.0023_githubinstallation_liveness_checked_at`
 - `integrations.0024_stripe_xero_reconciliation`
@@ -254,22 +315,6 @@ Full existing dependency closure (301 migrations):
 - `core.0060_slackfounderlinkrequest_consumed_by_user`
 - `core.0061_clear_synthetic_web_slack_ids`
 - `core.0062_slackfounderlinkrequest_created_index`
-- `content_factory.0026_organizationcontentconfig_authors_and_more`
-- `content_factory.0027_healing_record_archived_state`
-- `content_factory.0028_organizationcontentconfig_scan_artifact_cache`
-- `content_factory.0029_notificationchannel_delivery_enabled`
-- `content_factory.0030_learning_entries_and_healing_framework`
-- `content_factory.0030_callback_event_lease`
-- `content_factory.0031_merge_callback_lease_learning_entries`
-- `content_factory.0032_writtenarticle_analytics_identity`
-- `content_factory.0033_activate_account_email_notification_channels`
-- `content_factory.0034_keywordvelocity_trend_provenance`
-- `content_analytics.0001_initial`
-- `content_analytics.0002_article_analytics_location_history`
-- `content_analytics.0003_articleperformancereport_and_more`
-- `content_factory.0035_notificationdelivery_performance_report_and_more`
-- `content_factory.0036_researched_keyword_ai_search_metrics`
-- `content_factory.0037_content_islands`
 - `core.0063_canonicalize_legacy_content_factory_actor_ids`
 - `core.0064_guard_legacy_actor_migration_history`
 - `core.0065_recheck_legacy_actor_migration_attestation`
@@ -318,16 +363,48 @@ Full existing dependency closure (301 migrations):
 - `hospital.0015_hospital_competition_round`
 - `hospital.0016_announcement_round_and_activate_healthhack`
 - `hospital.0017_delete_medhack_game_and_prediction`
-- `content_factory.0038_delete_seo_topicmap_researchsession`
 - `core.0059_purge_stale_content_types`
 - `core.0068_merge_0059_purge_stale_content_types_0067_merge_0058_drop_orphan_tables_from_removed_apps_0066_guard_orphaned_actor_migration_history`
+- `esafety.0001_initial`
+- `esafety.0002_submission`
+- `esafety.0003_announcement`
+- `esafety.0004_team_avatar_url`
+- `esafety.0005_alter_announcement_body`
+- `esafety.0006_submission_coarse_score_submission_fine_score_and_more`
+- `esafety.0007_submission_logs`
+- `esafety.0008_alter_submission_logs`
 - `founder_tools.0007_viberaisingcompany_avatar_url`
 - `founder_tools.0008_viberaisingcompany_uniq_profile_domain`
 - `founder_tools.0008_viberaisingcompany_abr_verified_at_and_more`
 - `founder_tools.0009_merge_20260701_0348`
 - `founder_tools.0010_company_default_audience_visibility`
+- `generic_hackathons.0001_initial`
+- `generic_hackathons.0002_wattthehacksettings`
+- `generic_hackathons.0003_generichackathonteam_leader`
+- `generic_hackathons.0004_generichackathonjoinrequest_and_more`
+- `generic_hackathons.0005_watt_session_cache_table`
+- `generic_hackathons.0005_generichackathonteam_eval_token`
+- `generic_hackathons.0006_merge_20260604_0238`
+- `generic_hackathons.0007_alter_generichackathonteam_eval_team_uuid_and_more`
 - `integrations.0042_linear_meeting_action_batches`
 - `integrations.0043_slack_dm_mirroring`
 - `integrations.0044_slack_dm_group_history_backfill`
 - `integrations.0045_communitybridgedelivery_parent_dependency`
 - `integrations.0046_communitybridgedeletionrequest`
+- `jobs.0001_initial`
+- `jobs.0002_jobrun_execution_config`
+- `mlai_studio.0001_initial`
+- `sessions.0001_initial`
+- `startup_updates.0014_monthlyupdatedraft_ready_at`
+- `startup_updates.0015_backfill_monthly_update_ready_at`
+- `startup_updates.0016_userstartupbinding_monthly_updates_enabled`
+- `startup_updates.0017_userstartupbinding_coworking_discount_eligible`
+- `startup_updates.0018_monthlyupdatereminderdelivery`
+- `startup_updates.0017_monthly_update_visibility_publish_state`
+- `startup_updates.0019_merge_20260723_0335`
+- `startup_updates.0020_luma_event_attendance_counts`
+- `startup_updates.0021_linear_project_member_artifact`
+- `victor_ai.0001_initial`
+- `victor_ai.0002_victorapplication_revenue_last_3_months_and_more`
+- `victor_ai.0003_victorapplication_linkedin`
+- `victor_ai.0004_victor_roo_access`

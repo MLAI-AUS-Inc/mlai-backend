@@ -284,8 +284,10 @@ class ContributionsView(VolunteerView):
                     actor=request.user,
                     kind="reply",
                 )
-                .exclude(metadata__invalidated=True)
-                .exclude(metadata__service_account=True)
+                .exclude(metadata__has_key="invalidated", metadata__invalidated=True)
+                .exclude(
+                    metadata__has_key="service_account", metadata__service_account=True
+                )
             )
             invalidations = (
                 VolunteerSourceReceipt.objects.filter(

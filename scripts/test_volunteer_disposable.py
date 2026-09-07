@@ -11,6 +11,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 import sys
 
 
@@ -26,13 +27,27 @@ def main():
         default=[],
         choices=[
             "core.0056_user_community_chat_profile_id",
+            "core.0068_merge_0059_purge_stale_content_types_0067_merge_0058_drop_orphan_tables_from_removed_apps_0066_guard_orphaned_actor_migration_history",
             "founder_tools.0010_company_default_audience_visibility",
+            "integrations.0046_communitybridgedeletionrequest",
             "organizations.0002_organization_company_linkedin_url",
         ],
         help="Explicitly approved existing test prerequisite; repeat for each approved target.",
     )
+    parser.add_argument(
+        "--approved-plan",
+        type=Path,
+        help="Approved proposal whose full migration closure must exactly match this run.",
+    )
+    parser.add_argument(
+        "--use-approved-plan-targets",
+        action="store_true",
+        help="Use the exact targets listed in --approved-plan instead of prerequisite flags.",
+    )
     parser.add_argument("tests", nargs="*")
     args = parser.parse_args()
+    if args.use_approved_plan_targets and not args.approved_plan:
+        parser.error("--use-approved-plan-targets requires --approved-plan")
     config = json.loads(Path(args.connection_json).read_text())
     if config["host"] not in ("127.0.0.1", "::1") or not config[
         "test_database"
@@ -94,10 +109,42 @@ def main():
                 tuple(value.split(".", 1))
                 for value in args.approved_existing_prerequisite
             )
+            if args.use_approved_plan_targets:
+                target_section = (
+                    args.approved_plan.read_text()
+                    .split("\nTargets:\n", 1)[1]
+                    .split("\nFull existing dependency closure (", 1)[0]
+                )
+                targets = [
+                    tuple(value.split(".", 1))
+                    for value in re.findall(
+                        r"^- `([^`]+)`$", target_section, re.MULTILINE
+                    )
+                ]
+                if ("community_chat", "0009_volunteer") not in targets:
+                    raise RuntimeError(
+                        "Approved plan must include the Volunteer target."
+                    )
             plan = executor.migration_plan(targets)
             if any(backwards for _, backwards in plan):
                 raise RuntimeError(
                     "Unexpected backwards migration in empty test database"
+                )
+            if args.approved_plan:
+                proposal = args.approved_plan.read_text()
+                closure = proposal.split("Full existing dependency closure (", 1)[1]
+                approved = re.findall(r"^- `([^`]+)`$", closure, re.MULTILINE)
+                actual = [
+                    f"{migration.app_label}.{migration.name}" for migration, _ in plan
+                ]
+                if len(approved) != len(set(approved)) or set(actual) != set(approved):
+                    raise RuntimeError(
+                        "Migration plan differs from the approved dependency closure: "
+                        f"unapproved={sorted(set(actual) - set(approved))}; "
+                        f"missing={sorted(set(approved) - set(actual))}"
+                    )
+                print(
+                    f"Verified exact approved closure: {len(actual)} existing migrations."
                 )
             print(
                 f"Applying approved migration and {len(plan) - 1} dependency migrations."

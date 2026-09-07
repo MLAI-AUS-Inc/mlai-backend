@@ -1034,6 +1034,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
         deliver_private,
         provision,
     ):
+        first_ts = int(timezone.now().timestamp()) - 3600
         first_client = MagicMock()
         first_client.users_conversations.return_value = {
             "channels": [{"id": "DONE", "user": "UTWO"}],
@@ -1053,8 +1054,8 @@ class SlackDmMirrorOwnerTests(APITestCase):
         }
         first_client.conversations_history.return_value = {
             "messages": [
-                {"ts": "1787900001.000200", "user": "UTWO", "text": "private second"},
-                {"ts": "1787900000.000100", "user": "UONE", "text": "private first"},
+                {"ts": f"{first_ts + 1}.000200", "user": "UTWO", "text": "private second"},
+                {"ts": f"{first_ts}.000100", "user": "UONE", "text": "private first"},
             ],
             "response_metadata": {"next_cursor": ""},
         }
@@ -1098,7 +1099,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
         delivered_times = [
             call.kwargs["created_at"] for call in deliver_private.call_args_list
         ]
-        self.assertEqual(delivered_times, [1787900000, 1787900001])
+        self.assertEqual(delivered_times, [first_ts, first_ts + 1])
         self.assertEqual(
             [
                 call.kwargs["source_author_display_name"]
@@ -2218,7 +2219,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
             {
                 "channel": "DONE",
                 "ts": root_ts,
-                "limit": 1000,
+                "limit": 200,
                 "oldest": web_client.return_value.conversations_history.call_args.kwargs[
                     "oldest"
                 ],
@@ -2234,7 +2235,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
             {
                 "channel": "DONE",
                 "ts": root_ts,
-                "limit": 1000,
+                "limit": 200,
                 "cursor": "reply-page-2",
                 "oldest": web_client.return_value.conversations_history.call_args.kwargs[
                     "oldest"
@@ -2245,7 +2246,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
         web_client.return_value.conversations_replies.assert_called_with(
             channel="DONE",
             ts=root_ts,
-            limit=1000,
+            limit=200,
             cursor="reply-page-2",
             oldest=web_client.return_value.conversations_history.call_args.kwargs[
                 "oldest"

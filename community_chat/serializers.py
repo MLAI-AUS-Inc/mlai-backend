@@ -1,3 +1,6 @@
+from collections.abc import Mapping
+from urllib.parse import urlsplit
+
 from rest_framework import serializers
 
 from .nostr import InvalidDeviceProof, normalize_public_key
@@ -12,6 +15,41 @@ COMMUNITY_CHAT_CLIENT_IDS = (
 COMMUNITY_CHAT_DESKTOP_CLIENT_IDS = ('mlai-chat-desktop',)
 
 COMMUNITY_CHAT_PUBLIC_PROFILE_BATCH_SIZE = 200
+
+
+class CommunityChatProfileUpdateSerializer(serializers.Serializer):
+    """The only account fields writable by a Chat-scoped session."""
+
+    profile_version = serializers.CharField(max_length=64, allow_null=True)
+    display_name = serializers.CharField(max_length=80, required=False)
+    about = serializers.CharField(max_length=500, required=False, allow_blank=True)
+    # Match the existing core.User URL column; inline images must be uploaded.
+    avatar_url = serializers.URLField(max_length=200, required=False, allow_null=True)
+
+    def to_internal_value(self, data):
+        if isinstance(data, Mapping):
+            unknown = set(data) - set(self.fields)
+            if unknown:
+                raise serializers.ValidationError(
+                    {
+                        field: "This account field cannot be changed here."
+                        for field in sorted(unknown)
+                    }
+                )
+        return super().to_internal_value(data)
+
+    def validate_avatar_url(self, value):
+        if value is None:
+            return None
+        parsed = urlsplit(value)
+        if parsed.scheme not in {"http", "https"} or parsed.username or parsed.password:
+            raise serializers.ValidationError("Use a public HTTP(S) image URL.")
+        return value
+
+    def validate(self, attrs):
+        if not {"display_name", "about", "avatar_url"}.intersection(attrs):
+            raise serializers.ValidationError("Choose a profile field to update.")
+        return attrs
 
 
 class CommunityChatPublicProfileBatchSerializer(serializers.Serializer):

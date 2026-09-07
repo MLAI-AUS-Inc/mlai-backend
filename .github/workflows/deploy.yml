@@ -169,6 +169,7 @@ jobs:
           content_factory.tests_admin_metrics \
           tests.test_community_bridge_adapter_url \
           community_chat.tests.test_account_sessions \
+          community_chat.tests.test_account_profiles.AccountProfileTests \
           community_chat.tests.test_adapter \
           community_chat.tests.test_api \
           community_chat.tests.test_device_auth \
@@ -183,6 +184,16 @@ jobs:
           community_chat.tests.test_slack_dm_mirror \
           community_chat.tests.test_slack_dm_registration_ledger \
           community_chat.tests.test_slack_endpoint_errors \
+          community_chat.tests.test_slack_chat_catalog \
+          community_chat.tests.test_slack_chat_import \
+          community_chat.tests.test_slack_deletion \
+          community_chat.tests.test_volunteer_policy \
+          community_chat.tests.test_volunteer \
+          community_chat.tests.test_volunteer_backfill \
+          community_chat.tests.test_volunteer_presentation \
+          community_chat.tests.test_volunteer_events \
+          roo.tests.StartupUpdateRewardServiceTests \
+          roo.tests_api.FirstChannelPostAwardViewTests \
           integrations.tests_community_bridge \
           integrations.tests_community_bridge_avatar_backfill \
           integrations.tests_community_bridge_mention_backfill \
@@ -317,6 +328,9 @@ jobs:
       run: |
         python manage.py test \
           community_chat.tests.test_api.CommunityChatDeviceAuthorityTransactionTests \
+          community_chat.tests.test_account_profiles.AccountProfileConcurrencyTests \
+          community_chat.tests.test_volunteer_concurrency \
+          roo.tests_api.FirstChannelPostAwardConcurrencyTests \
           community_chat.tests.test_slack_dm_io_authority.SlackDmIoAuthorityTransactionTests \
           community_chat.tests.test_slack_dm_registration_ledger.SlackDmDeliveryLeaseTransactionTests \
           integrations.tests_slack_connector_authority.SlackConnectorAuthorityPostgresTests \

@@ -291,9 +291,13 @@ class StrictSerializer(serializers.Serializer):
 
     def to_internal_value(self, data):
         if not isinstance(data, dict):
-            raise serializers.ValidationError("Expected an object.")
+            raise serializers.ValidationError(
+                {"non_field_errors": ["Expected an object."]}
+            )
         if set(data) - set(self.fields):
-            raise serializers.ValidationError("Unexpected input fields.")
+            raise serializers.ValidationError(
+                {"non_field_errors": ["Unexpected input fields."]}
+            )
         return super().to_internal_value(data)
 
 

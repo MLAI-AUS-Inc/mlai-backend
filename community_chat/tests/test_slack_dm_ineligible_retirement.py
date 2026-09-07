@@ -213,7 +213,7 @@ class SlackDmIneligibleRetirementTests(TestCase):
         unregister_private_conversation,
     ):
         conversation, channel_id = self._create_live_conversation("DCONNECT")
-        web_client.return_value.conversations_list.return_value = {
+        web_client.return_value.users_conversations.return_value = {
             "channels": [
                 {
                     "id": "DCONNECT",
@@ -297,7 +297,7 @@ class SlackDmIneligibleRetirementTests(TestCase):
             "GOVERSIZED",
             participant_slack_ids=["UOWNER", "UONE"],
         )
-        web_client.return_value.conversations_list.return_value = {
+        web_client.return_value.users_conversations.return_value = {
             "channels": [
                 {
                     "id": "GREMOVED",
@@ -346,7 +346,7 @@ class SlackDmIneligibleRetirementTests(TestCase):
     ):
         archived, archived_channel_id = self._create_live_conversation("DARCHIVED")
         absent, absent_channel_id = self._create_live_conversation("DABSENT")
-        web_client.return_value.conversations_list.return_value = {
+        web_client.return_value.users_conversations.return_value = {
             "channels": [
                 {
                     "id": "DARCHIVED",
@@ -382,7 +382,7 @@ class SlackDmIneligibleRetirementTests(TestCase):
         conversation.status = SlackDmMirrorConversationStatus.ERROR
         conversation.last_error = "provisioning timed out"
         conversation.save(update_fields=("status", "last_error", "updated_at"))
-        web_client.return_value.conversations_list.return_value = {
+        web_client.return_value.users_conversations.return_value = {
             "channels": [],
             "response_metadata": {"next_cursor": ""},
         }
