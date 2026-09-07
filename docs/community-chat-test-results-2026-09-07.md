@@ -51,3 +51,28 @@ step.
 Client commit `346c43d70fe6444a074280a323576bddf56065e8` has successful hosted
 [CI](https://github.com/MLAI-AUS-Inc/mlai-chat/actions/runs/34120233229) and
 [Docker builds](https://github.com/MLAI-AUS-Inc/mlai-chat/actions/runs/34120233385).
+
+## CI follow-up, 2026-09-08
+
+Hosted run [34127964599](https://github.com/MLAI-AUS-Inc/mlai-backend/actions/runs/34127964599)
+passed the migration round-trip job and all 106 tests across its PostgreSQL
+search, meeting-room and privacy steps. Its 1,889-test SQLite job found four
+errors in two test areas; no migration or production-code change is needed.
+
+Two historical-bonus history tests exercise PostgreSQL JSON containment, which
+SQLite does not support. They now declare that database feature requirement,
+and the entire historical-bonus test class is included in the PostgreSQL CI
+job so their permission, reviewer and pagination assertions still execute.
+
+Two legacy Slack webhook fixtures omitted event-recipient authorization and
+expected the shared bridge to receive private events. They now include the
+recipient/workspace envelope and verify that private channels, group DMs and
+1:1 DMs go through owner import discovery without creating shared deliveries,
+even when a legacy shared-channel mapping exists. The production privacy
+boundary is unchanged.
+
+The corrected selection passed **351 tests on PostgreSQL** with the exact
+approved 334-migration closure. A separate isolated, in-memory SQLite run of
+the affected classes passed 24 tests and skipped the two unsupported JSON
+containment cases (26 total). Both databases were removed/closed, and the
+PostgreSQL cluster was stopped. Hosted CI is rerun for this correction.

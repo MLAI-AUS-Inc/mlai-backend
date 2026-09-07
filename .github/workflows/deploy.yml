@@ -329,6 +329,7 @@ jobs:
         python manage.py test \
           community_chat.tests.test_api.CommunityChatDeviceAuthorityTransactionTests \
           community_chat.tests.test_account_profiles.AccountProfileConcurrencyTests \
+          community_chat.tests.test_volunteer_backfill.HistoricalBonusBackfillTests \
           community_chat.tests.test_volunteer_concurrency \
           roo.tests_api.FirstChannelPostAwardConcurrencyTests \
           community_chat.tests.test_slack_dm_io_authority.SlackDmIoAuthorityTransactionTests \

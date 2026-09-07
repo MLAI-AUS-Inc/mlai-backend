@@ -5,7 +5,7 @@ import json
 
 from django.contrib.auth import get_user_model
 from django.core.management import call_command
-from django.test import TestCase, override_settings
+from django.test import TestCase, override_settings, skipUnlessDBFeature
 from django.utils import timezone
 from rest_framework.test import APIClient
 
@@ -159,6 +159,7 @@ class HistoricalBonusBackfillTests(TestCase):
             historical_bonus_preview(self.user, self.reviewer)
         self.assertFalse(Ledger.objects.exists())
 
+    @skipUnlessDBFeature("supports_json_field_contains")
     def test_paid_historical_bonus_has_private_read_only_history_and_reviewer(self):
         result = award_historical_bonuses(
             self.user, self.reviewer, **self.approval(["level_1"])
@@ -222,6 +223,7 @@ class HistoricalBonusBackfillTests(TestCase):
         self.assertEqual(response.data["results"][0]["record_type"], "contribution")
         self.assertEqual(response.data["results"][0]["bonus_roo"], "2")
 
+    @skipUnlessDBFeature("supports_json_field_contains")
     def test_merged_bonus_history_pagination_reaches_every_record_once(self):
         award_historical_bonuses(
             self.user, self.reviewer, **self.approval(["level_1", "level_2"])
