@@ -49,6 +49,7 @@ concurrent-write regression and session revocation/rotation checks. The runner
 removed its test database after completion. This proves the backend source
 behavior; it does not establish deployment or a physical-device save.
 
-The broader Slack/Volunteer regressions exposed missing test prerequisites in
-that original proposal. The complete setup is separately listed in
-[community-chat-full-test-proposal.md](community-chat-full-test-proposal.md).
+The user subsequently approved the expanded
+[334-migration setup](community-chat-full-test-proposal.md). The complete
+334-test selection, including these 10 profile tests and the Slack/Volunteer
+regressions, passed. See [the regression evidence](community-chat-test-results-2026-09-07.md).

@@ -5,8 +5,8 @@ The broader Slack/Volunteer run exposed prerequisites missing from that proposal
 Django sessions, current startup-binding columns, and tables used by Django's
 sequence reset. This proposal adds 33 existing migrations, for 334 total.
 
-Approval requested: apply the exact full closure below in fresh, synthetic
-disposable test databases only, locally and in pull-request CI. This includes
+Approved by the user on 2026-09-07: apply the exact full closure below in fresh,
+synthetic disposable test databases only, locally and in pull-request CI. This includes
 CI's existing migration round-trip regressions. No new migration file, ordinary
 local database, production data, service startup or deployment is included.
 All locally created test databases will be removed after their run.

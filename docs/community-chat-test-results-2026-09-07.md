@@ -6,7 +6,9 @@ cluster runs PostgreSQL 18.6 and pgvector 0.8.2. Each run creates a fresh databa
 and removes it in `finally`; settings never load the ordinary `.env` file.
 
 The user approved the exact 301 existing migrations in
-[slack-chat-test-proposal.md](slack-chat-test-proposal.md). The runner compares
+[slack-chat-test-proposal.md](slack-chat-test-proposal.md), then explicitly
+approved the expanded [334-migration setup](community-chat-full-test-proposal.md)
+on 2026-09-07 for disposable local tests and pull-request CI. The runner compares
 its computed dependency closure with the proposal before applying migrations.
 No migration source files changed.
 
@@ -18,9 +20,12 @@ No migration source files changed.
   prerequisites. The remaining failures/errors were investigated below.
 - After the fixes, all 167 tests in the affected suites passed, including real
   PostgreSQL consent/disconnect races. Each test database was removed.
-- The full 320-test selection has not yet passed. The additional prerequisites
-  are listed in [the complete test proposal](community-chat-full-test-proposal.md)
-  for a 334-migration setup, including pull-request CI.
+- The complete selection passed: **334 tests**, including all account-profile,
+  Slack import/catalogue/deletion, consent and device races, connector authority,
+  account sessions, device auth, Volunteer and Roo reward regressions. The runner
+  verified all **334 approved migrations** before applying them.
+- The final run removed its disposable database, and the dedicated PostgreSQL
+  cluster was stopped. No ordinary local or production database was touched.
 
 ## Corrections
 
@@ -40,7 +45,8 @@ now expects the existing canonical lowercase placeholder email.
 
 The workflow registers the new Slack/Volunteer tests and PostgreSQL concurrency
 cases so these regressions are exercised by future PR checks. The expanded
-migration setup is still awaiting approval before that CI can be triggered.
+migration setup is approved for those checks; hosted CI is the next verification
+step.
 
 Client commit `346c43d70fe6444a074280a323576bddf56065e8` has successful hosted
 [CI](https://github.com/MLAI-AUS-Inc/mlai-chat/actions/runs/34120233229) and
