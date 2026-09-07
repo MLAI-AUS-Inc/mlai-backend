@@ -75,7 +75,7 @@ def office_manager_day(day, *, status_value="open"):
     return OfficeManagerDay.objects.create(
         date=day,
         status=status_value,
-        slack_channel_id="CCOWORK",
+        slack_channel_id="C0BRM181EDV",
         claim_cutoff_at=melbourne_at(day.year, day.month, day.day, 10),
         announcement_status="sent",
         slack_message_ts="123.456",
@@ -96,7 +96,7 @@ def active_slack_profile(slack_user_id, **_kwargs):
 
 @override_settings(
     OFFICE_MANAGER_ENABLED=True,
-    OFFICE_MANAGER_SLACK_CHANNEL_ID="CCOWORK",
+    OFFICE_MANAGER_SLACK_CHANNEL_ID="C0BRM181EDV",
     OFFICE_MANAGER_SLACK_BOT_TOKEN="office-manager-public-roo-test-token",
     OFFICE_MANAGER_TIMEZONE="Australia/Melbourne",
     OFFICE_MANAGER_WEEKDAYS="0,1,2,3,4",
@@ -1195,7 +1195,7 @@ class OfficeManagerServiceTests(TestCase):
         self.assertTrue(retracted)
         fake_client.chat_update.assert_called_once()
         update_payload = fake_client.chat_update.call_args.kwargs
-        self.assertEqual(update_payload["channel"], "CCOWORK")
+        self.assertEqual(update_payload["channel"], "C0BRM181EDV")
         self.assertEqual(update_payload["ts"], "789.012")
         self.assertIn("is no longer *Office Manager for 2026-08-03*", update_payload["text"])
         self.assertIn("current assignment", update_payload["text"])
@@ -2535,7 +2535,7 @@ class OfficeManagerServiceTests(TestCase):
 
 @override_settings(
     OFFICE_MANAGER_ENABLED=True,
-    OFFICE_MANAGER_SLACK_CHANNEL_ID="CCOWORK",
+    OFFICE_MANAGER_SLACK_CHANNEL_ID="C0BRM181EDV",
     OFFICE_MANAGER_SLACK_BOT_TOKEN="office-manager-public-roo-test-token",
     OFFICE_MANAGER_TIMEZONE="Australia/Melbourne",
 )
@@ -3066,7 +3066,7 @@ class OfficeManagerSchedulerTests(TestCase):
         day = OfficeManagerDay.objects.create(
             date=now.date(),
             status="open",
-            slack_channel_id="CCOWORK",
+            slack_channel_id="C0BRM181EDV",
             claim_cutoff_at=melbourne_at(2026, 8, 3, 10),
             announcement_status="sending",
             announcement_last_error=lease_token,
@@ -3220,7 +3220,7 @@ class OfficeManagerSchedulerTests(TestCase):
         day = OfficeManagerDay.objects.create(
             date=prior_date,
             status="claimed",
-            slack_channel_id="CCOWORK",
+            slack_channel_id="C0BRM181EDV",
             claim_cutoff_at=melbourne_at(2026, 8, 2, 10),
             announcement_status="unknown",
         )
@@ -3819,7 +3819,7 @@ class OfficeManagerSchedulerTests(TestCase):
         fake_client.chat_update.assert_called_once()
         self.assertEqual(
             fake_client.chat_update.call_args.kwargs["channel"],
-            "CCOWORK",
+            "C0BRM181EDV",
         )
         self.assertEqual(
             fake_client.chat_update.call_args.kwargs["ts"],
@@ -3924,7 +3924,7 @@ class OfficeManagerSchedulerTests(TestCase):
         )
 
     @override_settings(OFFICE_MANAGER_SLACK_CHANNEL_ID="CNEWCHANNEL")
-    def test_existing_day_keeps_original_channel_after_configuration_change(self):
+    def test_configuration_change_cannot_move_pilot_outside_testing_channel(self):
         now = melbourne_at(2026, 8, 3, 9)
         day = office_manager_day(now.date())
         OfficeManagerDay.objects.filter(pk=day.pk).update(
@@ -3938,11 +3938,11 @@ class OfficeManagerSchedulerTests(TestCase):
         ) as update_message:
             result = run_office_manager_scheduler(now=now)
 
-        self.assertTrue(result["message_updated"])
+        self.assertEqual(result, {"status": "failed", "reason": "channel_not_allowed"})
         day.refresh_from_db()
         self.assertEqual(day.slack_channel_id, "CORIGINAL")
-        update_message.assert_called_once()
-        self.assertEqual(update_message.call_args.args[:2], ("CORIGINAL", "123.456"))
+        self.assertTrue(day.message_update_pending)
+        update_message.assert_not_called()
 
     def test_fatal_office_manager_result_fails_scheduled_command(self):
         runner_names = (
@@ -3996,6 +3996,7 @@ def json_text(value):
     INTERNAL_API_KEY="office-manager-internal-test-key",
     MLAI_API_KEY="office-manager-mlai-test-key",
     OFFICE_MANAGER_ENABLED=True,
+    OFFICE_MANAGER_SLACK_CHANNEL_ID="C0BRM181EDV",
     OFFICE_MANAGER_SLACK_BOT_TOKEN="office-manager-public-roo-test-token",
     OFFICE_MANAGER_TIMEZONE="Australia/Melbourne",
 )
@@ -4015,6 +4016,7 @@ class OfficeManagerClaimApiTests(APITestCase):
             self.url,
             {
                 "slack_user_id": self.user.slack_id,
+                "slack_channel_id": "C0BRM181EDV",
                 "date": self.now.date(),
                 "attempt_id": self.attempt_id,
             },
@@ -4066,6 +4068,7 @@ class OfficeManagerClaimApiTests(APITestCase):
                     self.url,
                     {
                         "slack_user_id": self.user.slack_id,
+                        "slack_channel_id": "C0BRM181EDV",
                         "date": self.now.date(),
                         "attempt_id": self.attempt_id,
                         "generation": 1,
@@ -4089,6 +4092,7 @@ class OfficeManagerClaimApiTests(APITestCase):
         url = reverse("coworking-cancel")
         payload = {
             "slack_user_id": self.user.slack_id,
+            "slack_channel_id": "C0BRM181EDV",
             "booking_id": str(booking.id),
         }
 
@@ -4125,6 +4129,7 @@ class OfficeManagerClaimApiTests(APITestCase):
             reverse("coworking-cancel"),
             {
                 "slack_user_id": self.user.slack_id,
+                "slack_channel_id": "C0BRM181EDV",
                 "booking_id": str(booking.id),
             },
             format="json",
@@ -4144,6 +4149,7 @@ class OfficeManagerClaimApiTests(APITestCase):
             self.url,
             {
                 "slack_user_id": self.user.slack_id,
+                "slack_channel_id": "C0BRM181EDV",
                 "date": self.now.date(),
                 "attempt_id": self.attempt_id,
             },
@@ -4177,6 +4183,7 @@ class OfficeManagerClaimApiTests(APITestCase):
                     self.url,
                     {
                         "slack_user_id": self.user.slack_id,
+                        "slack_channel_id": "C0BRM181EDV",
                         "date": self.now.date(),
                         "attempt_id": self.attempt_id,
                         "generation": 1,
@@ -4207,6 +4214,7 @@ class OfficeManagerClaimApiTests(APITestCase):
                     self.url,
                     {
                         "slack_user_id": self.user.slack_id,
+                        "slack_channel_id": "C0BRM181EDV",
                         "date": self.now.date(),
                         "attempt_id": self.attempt_id,
                         "generation": generation,
@@ -4227,6 +4235,7 @@ class OfficeManagerClaimApiTests(APITestCase):
                     self.url,
                     {
                         "slack_user_id": self.user.slack_id,
+                        "slack_channel_id": "C0BRM181EDV",
                         "date": booking_date,
                         "attempt_id": self.attempt_id,
                         "generation": 1,
@@ -4242,6 +4251,7 @@ class OfficeManagerClaimApiTests(APITestCase):
             self.url,
             {
                 "slack_user_id": self.user.slack_id,
+                "slack_channel_id": "C0BRM181EDV",
                 "date": self.now.date(),
                 "attempt_id": self.attempt_id,
             },
@@ -4278,6 +4288,7 @@ class OfficeManagerClaimApiTests(APITestCase):
             reverse("coworking-cancel"),
             {
                 "slack_user_id": self.user.slack_id,
+                "slack_channel_id": "C0BRM181EDV",
                 "booking_id": str(booking.id),
             },
             format="json",
@@ -4319,6 +4330,7 @@ class OfficeManagerClaimApiTests(APITestCase):
             reverse("coworking-cancel"),
             {
                 "slack_user_id": self.user.slack_id,
+                "slack_channel_id": "C0BRM181EDV",
                 "booking_id": str(booking.id),
             },
             format="json",
@@ -4348,6 +4360,7 @@ class OfficeManagerClaimApiTests(APITestCase):
         )
         request_data = {
             "slack_user_id": self.user.slack_id,
+            "slack_channel_id": "C0BRM181EDV",
             "booking_id": str(booking.id),
         }
 
@@ -4394,6 +4407,7 @@ class OfficeManagerClaimApiTests(APITestCase):
             reverse("coworking-cancel"),
             {
                 "slack_user_id": self.user.slack_id,
+                "slack_channel_id": "C0BRM181EDV",
                 "date": self.now.date().isoformat(),
             },
             format="json",
@@ -4410,6 +4424,7 @@ class OfficeManagerClaimApiTests(APITestCase):
             reverse("coworking-cancel"),
             {
                 "slack_user_id": self.user.slack_id,
+                "slack_channel_id": "C0BRM181EDV",
                 "booking_id": "not-a-uuid",
             },
             format="json",
@@ -4458,6 +4473,7 @@ class OfficeManagerClaimApiTests(APITestCase):
             self.url,
             {
                 "slack_user_id": self.user.slack_id,
+                "slack_channel_id": "C0BRM181EDV",
                 "date": self.now.date(),
                 "attempt_id": self.attempt_id,
                 "generation": 1,
@@ -4520,6 +4536,7 @@ class OfficeManagerClaimApiTests(APITestCase):
             self.url,
             {
                 "slack_user_id": self.user.slack_id,
+                "slack_channel_id": "C0BRM181EDV",
                 "date": self.now.date(),
                 "attempt_id": self.attempt_id,
                 "generation": 1,
@@ -4562,7 +4579,7 @@ class OfficeManagerMigrationAuditInvariantTests(TestCase):
             date=booking_date,
             status="open",
             generation=2,
-            slack_channel_id="CCOWORK",
+            slack_channel_id="C0BRM181EDV",
             claim_cutoff_at=melbourne_at(2026, 9, 7, 10),
             announcement_status="sent",
             slack_message_ts="audit-reopened.123",
@@ -4602,7 +4619,7 @@ class OfficeManagerMigrationAuditInvariantTests(TestCase):
         ):
             call_command(
                 "audit_office_manager_migrations",
-                configured_office_manager_channel="CCOWORK",
+                configured_office_manager_channel="C0BRM181EDV",
                 stdout=pre_0039_stdout,
             )
         pre_0039_report = json.loads(pre_0039_stdout.getvalue().splitlines()[0])
@@ -4616,7 +4633,7 @@ class OfficeManagerMigrationAuditInvariantTests(TestCase):
         with self.assertRaises(CommandError):
             call_command(
                 "audit_office_manager_migrations",
-                configured_office_manager_channel="CCOWORK",
+                configured_office_manager_channel="C0BRM181EDV",
                 stdout=stdout,
             )
 
@@ -4650,7 +4667,7 @@ class OfficeManagerMigrationAuditInvariantTests(TestCase):
                 date=booking_date,
                 status=day_status,
                 generation=2,
-                slack_channel_id="CCOWORK",
+                slack_channel_id="C0BRM181EDV",
                 claim_cutoff_at=melbourne_at(2026, 9, 8 + offset, 10),
                 announcement_status="sent",
                 slack_message_ts=f"audit-reopened.{offset}",
@@ -4727,7 +4744,7 @@ class OfficeManagerMigrationAuditInvariantTests(TestCase):
         day = OfficeManagerDay.objects.create(
             date=booking_date,
             status="claimed",
-            slack_channel_id="CCOWORK",
+            slack_channel_id="C0BRM181EDV",
             claim_cutoff_at=timezone.now() + timedelta(days=5),
         )
         refund, _ = PointsService.refund(
@@ -4816,7 +4833,7 @@ class OfficeManagerMigrationAuditInvariantTests(TestCase):
         day = OfficeManagerDay.objects.create(
             date=booking_date,
             status="claimed",
-            slack_channel_id="CCOWORK",
+            slack_channel_id="C0BRM181EDV",
             claim_cutoff_at=timezone.now() + timedelta(days=5),
         )
         # This reproduces the pre-provenance behavior: a purchased debit was
@@ -4907,7 +4924,7 @@ class OfficeManagerMigrationAuditInvariantTests(TestCase):
         day = OfficeManagerDay.objects.create(
             date=booking_date,
             status="closed",
-            slack_channel_id="CCOWORK",
+            slack_channel_id="C0BRM181EDV",
             claim_cutoff_at=timezone.now() + timedelta(days=5),
         )
         refund, _ = PointsService.refund(
@@ -4986,7 +5003,7 @@ class OfficeManagerMigrationAuditInvariantTests(TestCase):
         )
         call_command(
             "audit_office_manager_migrations",
-            configured_office_manager_channel="CCOWORK",
+            configured_office_manager_channel="C0BRM181EDV",
             stdout=io.StringIO(),
         )
 
@@ -4999,7 +5016,7 @@ class OfficeManagerMigrationAuditInvariantTests(TestCase):
         day = OfficeManagerDay.objects.create(
             date=booking_date,
             status="claimed",
-            slack_channel_id="CCOWORK",
+            slack_channel_id="C0BRM181EDV",
             claim_cutoff_at=melbourne_at(2026, 9, 4, 10),
         )
         booking = CoworkingBooking.objects.create(
@@ -5099,7 +5116,7 @@ class OfficeManagerMigrationAuditInvariantTests(TestCase):
         day = OfficeManagerDay.objects.create(
             date=booking_date,
             status="claimed",
-            slack_channel_id="CCOWORK",
+            slack_channel_id="C0BRM181EDV",
             claim_cutoff_at=melbourne_at(2026, 9, 5, 10),
         )
         booking = CoworkingBooking.objects.create(
@@ -5235,6 +5252,7 @@ class OfficeManagerMigrationAuditInvariantTests(TestCase):
 )
 @override_settings(
     OFFICE_MANAGER_ENABLED=True,
+    OFFICE_MANAGER_SLACK_CHANNEL_ID="C0BRM181EDV",
     OFFICE_MANAGER_SLACK_BOT_TOKEN="office-manager-public-roo-test-token",
     OFFICE_MANAGER_TIMEZONE="Australia/Melbourne",
 )

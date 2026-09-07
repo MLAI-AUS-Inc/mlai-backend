@@ -7,6 +7,7 @@ import logging
 import uuid
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
+from functools import wraps
 from zoneinfo import ZoneInfo
 
 from django.conf import settings
@@ -24,6 +25,7 @@ from .models import (
     OfficeManagerClaimAttempt,
     OfficeManagerDay,
 )
+from .office_manager_policy import is_office_manager_channel_allowed
 from .permissions import InsufficientBalanceError
 from .services import CoworkingService, PointsService
 
@@ -122,8 +124,46 @@ def _office_manager_slack_token() -> str:
     return token
 
 
-def _office_manager_slack_client():
+def _office_manager_slack_client(*, channel_id: str | None = None):
+    # A supplied channel is the persisted day destination, including for DMs.
+    if channel_id is None:
+        channel_id = getattr(settings, "OFFICE_MANAGER_SLACK_CHANNEL_ID", "")
+    if not is_office_manager_channel_allowed(channel_id):
+        raise OfficeManagerConfigurationError("office_manager_channel_not_allowed")
     return SlackService.get_client(bot_token=_office_manager_slack_token())
+
+
+def _restricted_office_manager_delivery(*, assignment: bool = False):
+    """Pause legacy work outside the pilot without rewriting its destination."""
+    def decorate(method):
+        @wraps(method)
+        def guarded(*args, **kwargs):
+            record_id = args[0] if args else kwargs.get(
+                "assignment_id" if assignment else "day_id"
+            )
+            model = OfficeManagerAssignment if assignment else OfficeManagerDay
+            field = "day__slack_channel_id" if assignment else "slack_channel_id"
+            channel = (
+                model.objects.filter(pk=record_id)
+                .values_list(field, flat=True)
+                .first()
+            )
+            if not is_office_manager_channel_allowed(channel):
+                logger.error(
+                    "Office Manager delivery blocked outside roo-testing: %s",
+                    method.__name__,
+                )
+                return False
+            return method(*args, **kwargs)
+        return guarded
+    return decorate
+
+
+def _assert_office_manager_day_channel(channel_id: str) -> None:
+    if not is_office_manager_channel_allowed(channel_id):
+        raise OfficeManagerClaimError(
+            "channel_not_allowed", "Office Manager is only available in #roo-testing"
+        )
 
 
 def _timezone() -> ZoneInfo:
@@ -1234,6 +1274,14 @@ class OfficeManagerService:
         supplies an attempt id and therefore never conflates a later lifecycle
         with a retry of an earlier one.
         """
+        _assert_office_manager_day_channel(
+            getattr(settings, "OFFICE_MANAGER_SLACK_CHANNEL_ID", "")
+        )
+        existing_channel = OfficeManagerDay.objects.filter(date=booking_date).values_list(
+            "slack_channel_id", flat=True
+        ).first()
+        if existing_channel is not None:
+            _assert_office_manager_day_channel(existing_channel)
         legacy_natural_key = attempt_id is None
         if isinstance(generation, bool):
             raise OfficeManagerClaimError(
@@ -1374,6 +1422,7 @@ class OfficeManagerService:
             CoworkingService._lock_booking_date(booking_date)
             try:
                 day = OfficeManagerDay.objects.select_for_update().get(date=booking_date)
+                _assert_office_manager_day_channel(day.slack_channel_id)
             except OfficeManagerDay.DoesNotExist as exc:
                 raise OfficeManagerClaimError(
                     "office_manager_day_not_found",
@@ -1762,6 +1811,7 @@ class OfficeManagerService:
         return reopened, day.id, assignment.id
 
     @staticmethod
+    @_restricted_office_manager_delivery()
     def recover_announcement_coordinates(day_id: int) -> bool | None:
         """Return True when a response-loss daily post is found, None if absent."""
         lease_token = _delivery_lease_token()
@@ -1793,7 +1843,7 @@ class OfficeManagerService:
                 "updated_at",
             ])
         try:
-            slack_client = _office_manager_slack_client()
+            slack_client = _office_manager_slack_client(channel_id=day.slack_channel_id)
             message_ts = _find_message_ts_by_client_msg_id(
                 slack_client,
                 channel_id=day.slack_channel_id,
@@ -1857,6 +1907,7 @@ class OfficeManagerService:
         ).exists()
 
     @staticmethod
+    @_restricted_office_manager_delivery(assignment=True)
     def recover_winner_channel_coordinates(
         assignment_id: int,
         *,
@@ -1924,7 +1975,9 @@ class OfficeManagerService:
                 "updated_at",
             ])
         try:
-            slack_client = _office_manager_slack_client()
+            slack_client = _office_manager_slack_client(
+                channel_id=assignment.day.slack_channel_id
+            )
             message_ts = _find_message_ts_by_client_msg_id(
                 slack_client,
                 channel_id=assignment.day.slack_channel_id,
@@ -1985,6 +2038,7 @@ class OfficeManagerService:
         ).exists()
 
     @staticmethod
+    @_restricted_office_manager_delivery()
     def post_announcement(day_id: int, *, now: datetime | None = None) -> bool:
         existing = OfficeManagerDay.objects.get(pk=day_id)
         if (
@@ -2063,7 +2117,8 @@ class OfficeManagerService:
                 return False
             rendered_text = _announcement_text(day)
             rendered_blocks = _announcement_blocks(day)
-            response = _office_manager_slack_client().chat_postMessage(
+            slack_client = _office_manager_slack_client(channel_id=day.slack_channel_id)
+            response = slack_client.chat_postMessage(
                 channel=day.slack_channel_id,
                 text=rendered_text,
                 blocks=rendered_blocks,
@@ -2169,6 +2224,7 @@ class OfficeManagerService:
         return True
 
     @staticmethod
+    @_restricted_office_manager_delivery()
     def reconcile_message(
         day_id: int,
         *,
@@ -2200,7 +2256,7 @@ class OfficeManagerService:
             channel_id = day.slack_channel_id
             message_ts = day.slack_message_ts
         try:
-            slack_client = _office_manager_slack_client()
+            slack_client = _office_manager_slack_client(channel_id=day.slack_channel_id)
             success = SlackService.update_message(
                 channel_id,
                 message_ts,
@@ -2377,6 +2433,7 @@ class OfficeManagerService:
         ]
 
     @staticmethod
+    @_restricted_office_manager_delivery(assignment=True)
     def deliver_winner_channel_announcement(
         assignment_id: int,
         *,
@@ -2481,7 +2538,10 @@ class OfficeManagerService:
                     error=EXPIRED_DELIVERY_ERROR,
                 )
                 return False
-            response = _office_manager_slack_client().chat_postMessage(
+            slack_client = _office_manager_slack_client(
+                channel_id=assignment.day.slack_channel_id
+            )
+            response = slack_client.chat_postMessage(
                 channel=assignment.day.slack_channel_id,
                 text=_winner_channel_announcement_text(assignment),
                 client_msg_id=_winner_channel_client_msg_id(assignment),
@@ -2614,6 +2674,7 @@ class OfficeManagerService:
         return True
 
     @staticmethod
+    @_restricted_office_manager_delivery(assignment=True)
     def retract_winner_channel_announcement(assignment_id: int) -> bool:
         lease_token = _retraction_lease_token()
         now = timezone.now()
@@ -2683,7 +2744,9 @@ class OfficeManagerService:
             # Never create or re-create a winner announcement merely to retract
             # it. Recover an accepted response-loss post by its deterministic
             # client_msg_id before deciding that an operator must intervene.
-            slack_client = _office_manager_slack_client()
+            slack_client = _office_manager_slack_client(
+                channel_id=assignment.day.slack_channel_id
+            )
             if not message_ts:
                 recovered = (
                     OfficeManagerService.recover_winner_channel_coordinates(
@@ -3419,6 +3482,7 @@ class OfficeManagerService:
         return recovered
 
     @staticmethod
+    @_restricted_office_manager_delivery(assignment=True)
     def deliver_winner_dm(
         assignment_id: int,
         *,
@@ -3458,7 +3522,9 @@ class OfficeManagerService:
             )
 
         try:
-            slack_client = _office_manager_slack_client()
+            slack_client = _office_manager_slack_client(
+                channel_id=assignment.day.slack_channel_id
+            )
             dm_channel = _open_dm_channel(
                 slack_client,
                 assignment.user.slack_id,
@@ -3631,6 +3697,7 @@ class OfficeManagerService:
         return True
 
     @staticmethod
+    @_restricted_office_manager_delivery(assignment=True)
     def deliver_end_of_day_reminder(
         assignment_id: int,
         *,
@@ -3670,7 +3737,9 @@ class OfficeManagerService:
             )
 
         try:
-            slack_client = _office_manager_slack_client()
+            slack_client = _office_manager_slack_client(
+                channel_id=assignment.day.slack_channel_id
+            )
             dm_channel = _open_dm_channel(
                 slack_client,
                 assignment.user.slack_id,
@@ -3863,6 +3932,7 @@ class OfficeManagerService:
         )
 
     @staticmethod
+    @_restricted_office_manager_delivery(assignment=True)
     def deliver_private_correction(assignment_id: int) -> bool:
         """Replace any stale private winner/reminder content after cancellation."""
         lease_token = _delivery_lease_token()
@@ -3910,7 +3980,9 @@ class OfficeManagerService:
             )
 
         try:
-            slack_client = _office_manager_slack_client()
+            slack_client = _office_manager_slack_client(
+                channel_id=assignment.day.slack_channel_id
+            )
             dm_channel = _open_dm_channel(slack_client, assignment.user.slack_id)
             assignment.refresh_from_db()
             oldest = assignment.claimed_at - timedelta(minutes=10)
@@ -3977,6 +4049,14 @@ def run_office_manager_scheduler(
     now: datetime | None = None,
     dry_run: bool = False,
 ) -> dict:
+    configured_channel = getattr(settings, "OFFICE_MANAGER_SLACK_CHANNEL_ID", "")
+    if _office_manager_enabled() and not is_office_manager_channel_allowed(
+        configured_channel
+    ):
+        return {
+            "status": "failed",
+            "reason": "channel_not_allowed" if configured_channel else "channel_not_configured",
+        }
     recovered_deliveries: dict[str, dict[int, bool]] = {
         "announcement": {},
         "message_update": {},

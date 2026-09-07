@@ -88,8 +88,8 @@ if [[ ! "${OFFICE_MANAGER_SLACK_BOT_TOKEN:-}" =~ ^xoxb-[A-Za-z0-9-]+$ ]]; then
     echo "❌ OFFICE_MANAGER_SLACK_BOT_TOKEN must be retained for durable Office Manager recovery."
     exit 1
 fi
-if [[ ! "${OFFICE_MANAGER_SLACK_CHANNEL_ID:-}" =~ ^C[A-Z0-9]+$ ]]; then
-    echo "❌ OFFICE_MANAGER_SLACK_CHANNEL_ID must be retained for durable Office Manager recovery."
+if [ "${OFFICE_MANAGER_SLACK_CHANNEL_ID:-}" != "C0BRM181EDV" ]; then
+    echo "❌ OFFICE_MANAGER_SLACK_CHANNEL_ID must be C0BRM181EDV (#roo-testing) during the pilot."
     exit 1
 fi
 if [ "$OFFICE_MANAGER_TIMEZONE" != "Australia/Melbourne" ]; then

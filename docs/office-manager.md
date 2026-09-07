@@ -1,5 +1,35 @@
 # Roo Office Manager contract and runbook
 
+## Channel-restricted pilot
+
+This release is locked in code to **#roo-testing (`C0BRM181EDV`)**. Keep
+`OFFICE_MANAGER_ENABLED=false` on the backend and
+`OFFICE_MANAGER_ACTIONS_ENABLED=false` on Roo until both services are deployed,
+configured for that channel, and their preflight checks pass. Deploy the backend
+first. Use the same existing Public Roo Slack app on both sides and invite it to
+#roo-testing; Roo's other features keep their existing channel behavior.
+
+Roo derives `slack_channel_id` from the signed Slack envelope, persists it in its
+existing outbox, and sends it with every claim and retry. The backend requires
+that field and independently checks the stored Office Manager day's channel
+before new claims or replay. Preflight advertises `claim_channel_required: true`
+and `allowed_channel_id: C0BRM181EDV`; Roo refuses an older backend contract.
+
+Every Office Manager channel delivery, update, reminder, cancellation correction,
+and recovery path checks the original stored day channel. Private confirmations
+and responsibility DMs remain permitted for a test-channel workflow. Historical
+work bound to any other channel stays blocked in place and visible as pending
+or failed delivery; it is never moved into #roo-testing or silently completed.
+Inspect queued work before activation. This intentionally suspends off-channel
+repair during the pilot; any cleanup elsewhere requires a separately reviewed
+rollout. Disabling the feature flags stops new work while allowed test-channel
+retries can still finish. Expanding to Cowork and Chill requires a reviewed code
+change in both services, not merely a new channel environment value.
+
+No new database migrations are introduced by the pilot restriction. A live
+backend still creates real bookings and points effects: use designated testers.
+
+
 The backend owns the Office Manager of the Day state machine, first-volunteer
 selection, coworking booking, Roo Points accounting, and durable Slack repair
 state. Public Roo only verifies the Slack interaction, persists it in Roo's
@@ -18,6 +48,7 @@ The request body is:
 ```json
 {
   "slack_user_id": "U0123456789",
+  "slack_channel_id": "C0BRM181EDV",
   "date": "2026-09-01",
   "generation": 1,
   "attempt_id": "4482112f-79e1-4ca0-940b-06b24903f796"
@@ -121,7 +152,7 @@ Required backend settings are listed in `.env.example`:
   read the configured public channel's message history. The backend uses
   `conversations.history` plus deterministic `client_msg_id` values to recover
   accepted Slack posts whose HTTP response was lost.
-- `OFFICE_MANAGER_SLACK_CHANNEL_ID`: coworking channel to announce in.
+- `OFFICE_MANAGER_SLACK_CHANNEL_ID`: must be `C0BRM181EDV` (#roo-testing) for this pilot.
 - `SLACK_HTTP_TIMEOUT_SECONDS`: per-request Slack API timeout (default 10
   seconds), preventing a stalled provider call from blocking scheduler health.
 - `OFFICE_MANAGER_TIMEZONE`, weekday, announcement, cutoff, and reminder

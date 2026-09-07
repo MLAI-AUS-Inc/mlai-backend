@@ -145,6 +145,7 @@ jobs:
     - name: Run targeted Django tests
       run: |
         python manage.py test \
+          roo.tests_office_manager_channel \
           roo.tests_api.TaskViewSetTests \
           roo.tests_api.CoworkingViewSetTests \
           roo.tests.CoworkingBookingAdminSafetyTests \
@@ -297,6 +298,7 @@ jobs:
         python manage.py check_org_memory_search --require-vector --require-installed
         python manage.py test \
           roo.tests_office_manager \
+          roo.tests_office_manager_channel \
           roo.tests_office_manager_migration \
           core.tests_user_merge \
           core.tests_slack_founder_links.SlackFounderLinkConcurrencyTests \

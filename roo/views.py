@@ -37,6 +37,10 @@ from .services import (
     TaskService, RewardsService,
 )
 from .coding import roo_decimal_string
+from .office_manager_policy import (
+    OFFICE_MANAGER_TEST_CHANNEL_ID,
+    is_office_manager_channel_allowed,
+)
 from .office_manager import (
     MAX_OFFICE_MANAGER_GENERATION,
     OfficeManagerClaimError,
@@ -2108,6 +2112,8 @@ class CoworkingViewSet(viewsets.ViewSet):
                 'credential_scope': 'strict_roo',
                 'claim_generation_supported': True,
                 'claim_generation_required': True,
+                'claim_channel_required': True,
+                'allowed_channel_id': OFFICE_MANAGER_TEST_CHANNEL_ID,
                 'timezone': str(
                     getattr(
                         settings,
@@ -2125,6 +2131,15 @@ class CoworkingViewSet(viewsets.ViewSet):
     @action(detail=False, methods=['post'], url_path='office-manager/claim')
     def office_manager_claim(self, request):
         """Atomically select and book today's first Office Manager volunteer."""
+        # This field comes from Roo's verified Slack envelope, never button values.
+        if not is_office_manager_channel_allowed(request.data.get("slack_channel_id")):
+            return Response(
+                {
+                    "code": "channel_not_allowed",
+                    "error": "Office Manager is only available in #roo-testing",
+                },
+                status=status.HTTP_403_FORBIDDEN,
+            )
         slack_user_id = clean_slack_id(request.data.get('slack_user_id'))
         booking_date_raw = str(request.data.get('date') or '').strip()
         attempt_id_raw = str(request.data.get('attempt_id') or '').strip()
@@ -2209,6 +2224,7 @@ class CoworkingViewSet(viewsets.ViewSet):
             status_by_code = {
                 'feature_disabled': status.HTTP_503_SERVICE_UNAVAILABLE,
                 'member_not_eligible': status.HTTP_403_FORBIDDEN,
+                'channel_not_allowed': status.HTTP_403_FORBIDDEN,
                 'slack_profile_unavailable': status.HTTP_503_SERVICE_UNAVAILABLE,
                 'office_manager_day_not_found': status.HTTP_404_NOT_FOUND,
                 'already_claimed': status.HTTP_409_CONFLICT,
