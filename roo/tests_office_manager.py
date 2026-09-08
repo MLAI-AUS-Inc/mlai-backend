@@ -1857,7 +1857,7 @@ class OfficeManagerServiceTests(TestCase):
             result.assignment.winner_channel_announcement_next_attempt_at
         )
 
-    def test_claimed_announcement_includes_booking_reminder_without_action(self):
+    def test_claimed_announcement_names_winner_without_repeating_details(self):
         result = OfficeManagerService.claim(
             slack_user_id=self.user.slack_id,
             booking_date=self.now.date(),
@@ -1875,9 +1875,19 @@ class OfficeManagerServiceTests(TestCase):
         self.assertTrue(updated)
         update_message.assert_called_once()
         fallback_text = update_message.call_args.args[2]
-        blocks_text = json_text(update_message.call_args.kwargs["blocks"])
+        blocks = update_message.call_args.kwargs["blocks"]
+        blocks_text = json_text(blocks)
         self.assertIn(self.now.date().isoformat(), fallback_text)
         self.assertIn(self.now.date().isoformat(), blocks_text)
+        self.assertIn(f"Claimed by <@{self.user.slack_id}>.", fallback_text)
+        self.assertEqual(len(blocks), 2)
+        self.assertEqual(
+            blocks[1]["text"]["text"],
+            f"Claimed by <@{self.user.slack_id}>.",
+        )
+        self.assertNotIn("without deducting", blocks_text)
+        self.assertNotIn("book yourself", blocks_text)
+        self.assertNotIn(NO_FOOD_REMINDER, blocks_text)
         self.assertNotIn(OFFICE_MANAGER_ACTION_ID, blocks_text)
 
     def test_stale_winner_dm_delivery_lease_is_retried(self):
@@ -3535,7 +3545,7 @@ class OfficeManagerSchedulerTests(TestCase):
         text = _announcement_text(day)
 
         self.assertIn(
-            f"Office Manager for {day.date.isoformat()}: A member",
+            f"Office Manager — {day.date.isoformat()}\nClaimed by a member.",
             text,
         )
         self.assertNotIn("Who’s up for being Office Manager today?", text)

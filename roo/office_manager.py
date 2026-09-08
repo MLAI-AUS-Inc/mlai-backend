@@ -255,13 +255,9 @@ def _announcement_text(day: OfficeManagerDay) -> str:
         mention = (
             f"<@{assignment.user.slack_id}>"
             if assignment and assignment.user.slack_id
-            else "A member"
+            else "a member"
         )
-        return (
-            f"Office Manager for {day_label}: {mention}. "
-            "Roo booked them in without deducting Roo points. "
-            f"{_coworking_self_book_reminder(day.date)}"
-        )
+        return f"Office Manager — {day_label}\nClaimed by {mention}."
     if day.status == "closed":
         return (
             f"The Office Manager volunteer window for {day_label} is closed. "
@@ -286,7 +282,7 @@ def _announcement_blocks(day: OfficeManagerDay) -> list[dict]:
         mention = (
             f"<@{assignment.user.slack_id}>"
             if assignment and assignment.user.slack_id
-            else "A member"
+            else "a member"
         )
         return [
             heading,
@@ -294,16 +290,8 @@ def _announcement_blocks(day: OfficeManagerDay) -> list[dict]:
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": (
-                        f"{mention} is Office Manager for {day.date.isoformat()}.\n"
-                        "They have been booked in without deducting Roo points."
-                        f"\n\n{_coworking_self_book_reminder(day.date)}"
-                    ),
+                    "text": f"Claimed by {mention}.",
                 },
-            },
-            {
-                "type": "context",
-                "elements": [{"type": "mrkdwn", "text": NO_FOOD_REMINDER}],
             },
         ]
     if day.status == "closed":
