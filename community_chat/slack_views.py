@@ -32,11 +32,21 @@ from integrations.services.slack_dm_mirror import (
 )
 from integrations.views import mint_connector_connect_ticket
 
+from integrations.services.slack_chat_catalog import PRIVATE_CHANNEL_CONSENT
+
+
 from .authentication import (
     CommunityChatAccountAuthentication,
     CommunityChatBootstrapAuthentication,
 )
 from .throttles import CommunityChatScopedThrottle
+
+
+def _import_history_days(data, *, default=7):
+    days = data.get("history_days", default)
+    if type(days) is not int or days not in (7, 30):
+        raise ValidationError({"history_days": "Choose 7 or 30 days."})
+    return days
 
 
 SLACK_AUTH_ERROR_CODES = frozenset(
@@ -149,12 +159,15 @@ class SlackDmMirrorView(SlackDmMirrorApiView):
         )
 
     def post(self, request):
+        history_days = _import_history_days(request.data)
         connection = slack_connection_for_user(request.user)
         if connection is not None and REQUIRED_SCOPES.issubset(
             set(connection.scopes or [])
         ):
             try:
-                activate_connection(connection)
+                activate_connection(
+                    connection, history_days=history_days, include_private_channels=True
+                )
             except SlackDmMirrorError as exc:
                 raise ValidationError({"slack": str(exc)}) from exc
             return Response(
@@ -167,7 +180,7 @@ class SlackDmMirrorView(SlackDmMirrorApiView):
                 status=status.HTTP_200_OK,
             )
 
-        connect_url = self._authorization_url(request)
+        connect_url = self._authorization_url(request, history_days=history_days)
         payload = status_payload(
             request.user,
             authenticated_public_key=getattr(
@@ -176,22 +189,22 @@ class SlackDmMirrorView(SlackDmMirrorApiView):
         )
         payload["authorization_url"] = connect_url
         payload["consent"] = {
-            "version": SlackDmMirrorGrant.CONSENT_VERSION,
+            "version": PRIVATE_CHANNEL_CONSENT,
             "summary": (
-                "Mirror all direct and group Slack DMs visible to your Slack account into "
+                "Import private channels, group chats and DMs visible to your Slack account into "
                 "private, owner-controlled conversations in MLAI Chat. The other person "
                 "or group members do not need to link Slack and cannot see your imported "
-                "copy unless they link independently. Up to 30 days of history is imported; DMs are "
+                f"copy unless they link independently. The last {history_days} days are imported. Private messages are "
                 "excluded from Roo, organization memory, public search, and analytics."
             ),
         }
         return Response(payload, status=status.HTTP_200_OK)
 
     @staticmethod
-    def _authorization_url(request):
+    def _authorization_url(request, *, history_days=7):
         ticket = mint_connector_connect_ticket(request.user, "slack")
         frontend = str(settings.COMMUNITY_CHAT_FRONTEND_URL).strip().rstrip("/")
-        next_url = f"{frontend}/home?slack=connected"
+        next_url = f"{frontend}/home?slack=connected&slack_history_days={history_days}&slack_private_channels=1"
         path = reverse("connector_connect", kwargs={"provider": "slack"})
         return request.build_absolute_uri(
             f"{path}?{urlencode({'ticket': ticket, 'next': next_url})}"
@@ -219,7 +232,12 @@ class SlackDmMirrorView(SlackDmMirrorApiView):
                 raise ValidationError({"slack": str(exc)}) from exc
         elif action == "backfill":
             try:
-                backfill_grant(grant)
+                backfill_grant(
+                    grant,
+                    history_days=_import_history_days(
+                        request.data, default=grant.history_days
+                    ),
+                )
             except SlackDmMirrorError as exc:
                 raise ValidationError({"slack": str(exc)}) from exc
         elif action == "backfill_all":
@@ -227,7 +245,12 @@ class SlackDmMirrorView(SlackDmMirrorApiView):
             # import contract. The service deliberately treats this as the
             # same rolling-window rescan as `backfill`.
             try:
-                backfill_grant(grant)
+                backfill_grant(
+                    grant,
+                    history_days=_import_history_days(
+                        request.data, default=grant.history_days
+                    ),
+                )
             except SlackDmMirrorError as exc:
                 raise ValidationError({"slack": str(exc)}) from exc
         else:

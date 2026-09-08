@@ -125,14 +125,14 @@ class SlackDmMirrorApiTests(APITestCase):
             "/integrations/connect/slack?", response.data["authorization_url"]
         )
         self.assertIn(
-            "slack-dm-mirror-v3-owner-direct-and-group",
+            "slack-chat-v4-private-channels",
             response.data["consent"]["version"],
         )
         self.assertIn(
-            "direct and group Slack DMs", response.data["consent"]["summary"]
+            "private channels, group chats and DMs", response.data["consent"]["summary"]
         )
         self.assertIn(
-            "Up to 30 days of history", response.data["consent"]["summary"]
+            "The last 7 days are imported", response.data["consent"]["summary"]
         )
         self.assertFalse(response.data["privacy"]["requires_both_participants"])
         self.assertTrue(response.data["privacy"]["owner_controlled"])
@@ -174,7 +174,7 @@ class SlackDmMirrorApiTests(APITestCase):
         response = self.client.patch(self.url, {"action": "backfill"}, format="json")
 
         self.assertEqual(response.status_code, 200)
-        backfill.assert_called_once_with(grant)
+        backfill.assert_called_once_with(grant, history_days=30)
 
     @override_settings(COMMUNITY_CHAT_FRONTEND_URL="https://chat.mlai.au")
     def test_existing_slack_connection_without_dm_scopes_is_reauthorized(self):
@@ -939,7 +939,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
         grant, conversation = self._conversation_ready_for_provision()
         late_channel_id = uuid.uuid4()
         client = web_client.return_value
-        client.conversations_list.return_value = {
+        client.users_conversations.return_value = {
             "channels": [{"id": "DRACE", "user": "UTWO"}],
             "response_metadata": {"next_cursor": ""},
         }
@@ -1019,8 +1019,8 @@ class SlackDmMirrorOwnerTests(APITestCase):
 
         grant.refresh_from_db()
         payload = status_payload(self.first)
-        self.assertEqual(grant.history_days, 30)
-        self.assertEqual(payload["history_days"], 30)
+        self.assertEqual(grant.history_days, 7)
+        self.assertEqual(payload["history_days"], 7)
         self.assertTrue(payload["privacy"]["history_is_bounded"])
 
     @patch(
@@ -1034,8 +1034,9 @@ class SlackDmMirrorOwnerTests(APITestCase):
         deliver_private,
         provision,
     ):
+        first_ts = int(timezone.now().timestamp()) - 3600
         first_client = MagicMock()
-        first_client.conversations_list.return_value = {
+        first_client.users_conversations.return_value = {
             "channels": [{"id": "DONE", "user": "UTWO"}],
             "response_metadata": {"next_cursor": ""},
         }
@@ -1053,8 +1054,8 @@ class SlackDmMirrorOwnerTests(APITestCase):
         }
         first_client.conversations_history.return_value = {
             "messages": [
-                {"ts": "1787900001.000200", "user": "UTWO", "text": "private second"},
-                {"ts": "1787900000.000100", "user": "UONE", "text": "private first"},
+                {"ts": f"{first_ts + 1}.000200", "user": "UTWO", "text": "private second"},
+                {"ts": f"{first_ts}.000100", "user": "UONE", "text": "private first"},
             ],
             "response_metadata": {"next_cursor": ""},
         }
@@ -1098,7 +1099,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
         delivered_times = [
             call.kwargs["created_at"] for call in deliver_private.call_args_list
         ]
-        self.assertEqual(delivered_times, [1787900000, 1787900001])
+        self.assertEqual(delivered_times, [first_ts, first_ts + 1])
         self.assertEqual(
             [
                 call.kwargs["source_author_display_name"]
@@ -1128,7 +1129,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
     ):
         now = int(timezone.now().timestamp())
         client = web_client.return_value
-        client.conversations_list.return_value = {
+        client.users_conversations.return_value = {
             "channels": [
                 {"id": "DOLD", "user": "UOLD", "latest": f"{now - 31 * 86_400}.1"},
                 {"id": "DRECENT2", "user": "URECENT2", "latest": f"{now - 20}.1"},
@@ -1151,6 +1152,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
                 for user_id in (
                     "UONE",
                     "UAMBIGUOUS",
+                    "UOLD",
                     "URECENT1",
                     "URECENT2",
                     "URECENT3",
@@ -1165,18 +1167,21 @@ class SlackDmMirrorOwnerTests(APITestCase):
 
         grant = activate_connection(self.first_connection)
 
-        self.assertEqual(discover_conversations(grant), 4)
+        self.assertEqual(discover_conversations(grant), 5)
         self.assertEqual(
             list(
                 SlackDmMirrorConversation.objects.filter(grant=grant)
                 .order_by("id")
                 .values_list("slack_conversation_id", flat=True)
             ),
-            ["DRECENT1", "DRECENT2", "DRECENT3", "DAMBIGUOUS"],
+            ["DRECENT1", "DRECENT2", "DRECENT3", "DOLD", "DAMBIGUOUS"],
         )
         client.users_list.assert_called_once_with(limit=200, cursor="")
         client.users_info.assert_not_called()
         client.conversations_history.assert_not_called()
+        old = SlackDmMirrorConversation.objects.get(grant=grant, slack_conversation_id="DOLD")
+        self.assertIsNotNone(old.mlai_channel_id)
+        self.assertIsNotNone(old.history_backfilled_at)
 
     @patch(
         "integrations.services.slack_dm_mirror.BuzzBridgeClient.deliver_private_batch"
@@ -1345,7 +1350,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
         provision,
     ):
         client = web_client.return_value
-        client.conversations_list.side_effect = [
+        client.users_conversations.side_effect = [
             {
                 "channels": [{"id": "DONE", "user": "UTWO"}],
                 "response_metadata": {"next_cursor": "page-2"},
@@ -1401,7 +1406,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
         self.assertEqual(
             [
                 call.kwargs["cursor"]
-                for call in client.conversations_list.call_args_list
+                for call in client.users_conversations.call_args_list
             ],
             ["", "page-2", "page-2"],
         )
@@ -1483,7 +1488,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
                 "response_metadata": {"next_cursor": ""},
             }
 
-        web_client.return_value.conversations_list.side_effect = finish_page
+        web_client.return_value.users_conversations.side_effect = finish_page
 
         self.assertEqual(discover_conversations(grant), 0)
 
@@ -1512,7 +1517,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
         provision,
     ):
         client = MagicMock()
-        client.conversations_list.return_value = {
+        client.users_conversations.return_value = {
             "channels": [
                 {
                     "id": "GMPIM",
@@ -1570,15 +1575,15 @@ class SlackDmMirrorOwnerTests(APITestCase):
             conversation.participant_slack_ids,
             ["UONE", "UTHREE", "UTWO"],
         )
-        self.assertEqual(len(conversation.participant_buzz_pubkeys), 3)
+        self.assertEqual(len(conversation.participant_buzz_pubkeys), 2)
         self.assertEqual(conversation.participant_identity_map["UONE"], "1" * 64)
         self.assertNotEqual(conversation.participant_identity_map["UTWO"], "2" * 64)
         self.assertIsNotNone(conversation.history_backfilled_at)
         self.assertEqual(self._message_deliveries(conversation).count(), 1)
-        client.conversations_list.assert_called_once_with(
+        client.users_conversations.assert_called_once_with(
             types="im,mpim",
             exclude_archived=True,
-            limit=200,
+            limit=20,
             cursor="",
         )
         self.assertEqual(
@@ -1608,7 +1613,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
         provision,
     ):
         client = MagicMock()
-        client.conversations_list.return_value = {
+        client.users_conversations.return_value = {
             "channels": [{"id": "DONE", "user": "UTWO"}],
             "response_metadata": {"next_cursor": ""},
         }
@@ -1663,7 +1668,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
         self.first_connection.scopes = DIRECT_SCOPES
         self.first_connection.save(update_fields=("scopes", "updated_at"))
         client = MagicMock()
-        client.conversations_list.return_value = {
+        client.users_conversations.return_value = {
             "channels": [{"id": "DONE", "user": "UTWO"}],
             "response_metadata": {"next_cursor": ""},
         }
@@ -1690,10 +1695,10 @@ class SlackDmMirrorOwnerTests(APITestCase):
         )
         self.assertIsNotNone(conversation.history_backfilled_at)
         self.assertEqual(client.conversations_history.call_count, 1)
-        client.conversations_list.assert_called_with(
+        client.users_conversations.assert_called_with(
             types="im",
             exclude_archived=True,
-            limit=200,
+            limit=20,
             cursor="",
         )
         payload = status_payload(self.first)
@@ -1719,7 +1724,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
             }
         )
 
-        self.assertIsNone(result)
+        self.assertEqual(result, {"status": "discovery_queued", "staged": 0})
 
     def test_live_slack_event_routes_only_to_explicitly_authorized_owner_mirror(
         self,
@@ -2214,7 +2219,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
             {
                 "channel": "DONE",
                 "ts": root_ts,
-                "limit": 1000,
+                "limit": 200,
                 "oldest": web_client.return_value.conversations_history.call_args.kwargs[
                     "oldest"
                 ],
@@ -2230,7 +2235,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
             {
                 "channel": "DONE",
                 "ts": root_ts,
-                "limit": 1000,
+                "limit": 200,
                 "cursor": "reply-page-2",
                 "oldest": web_client.return_value.conversations_history.call_args.kwargs[
                     "oldest"
@@ -2241,7 +2246,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
         web_client.return_value.conversations_replies.assert_called_with(
             channel="DONE",
             ts=root_ts,
-            limit=1000,
+            limit=200,
             cursor="reply-page-2",
             oldest=web_client.return_value.conversations_history.call_args.kwargs[
                 "oldest"
@@ -3823,7 +3828,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
         provision,
     ):
         client = web_client.return_value
-        client.conversations_list.return_value = {
+        client.users_conversations.return_value = {
             "channels": [
                 {"id": "DFIRST", "user": "UTWO"},
                 {"id": "DSECOND", "user": "UTHREE"},
@@ -3992,7 +3997,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
             verified_at=timezone.now(),
         )
         client = web_client.return_value
-        client.conversations_list.return_value = {
+        client.users_conversations.return_value = {
             "channels": [{"id": "DONE", "user": "UTWO"}],
             "response_metadata": {"next_cursor": ""},
         }
@@ -4040,7 +4045,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
         "integrations.services.slack_dm_mirror.BuzzBridgeClient.provision_private_conversation"
     )
     @patch("integrations.services.slack_dm_mirror.WebClient")
-    def test_maximum_mpim_reports_when_only_authenticated_device_fits(
+    def test_maximum_mpim_preserves_all_verified_owner_devices(
         self,
         web_client,
         provision,
@@ -4089,13 +4094,13 @@ class SlackDmMirrorOwnerTests(APITestCase):
         )
 
         self.assertEqual(payload["device_capacity"]["active"], 2)
-        self.assertEqual(payload["device_capacity"]["included"], 1)
-        self.assertTrue(payload["device_capacity"]["limited"])
+        self.assertEqual(payload["device_capacity"]["included"], 2)
+        self.assertFalse(payload["device_capacity"]["limited"])
         self.assertTrue(payload["device_capacity"]["authenticated_device_included"])
-        self.assertEqual(payload["owner_device_pubkeys"], [authenticated_key])
+        self.assertEqual(set(payload["owner_device_pubkeys"]), {"1" * 64, authenticated_key})
         self.assertEqual(
-            provision.call_args.kwargs["callback_author_pubkeys"],
-            [authenticated_key],
+            set(provision.call_args.kwargs["callback_author_pubkeys"]),
+            {"1" * 64, authenticated_key},
         )
 
     @patch("integrations.services.slack_dm_mirror.BuzzBridgeClient.deliver_private")

@@ -3245,7 +3245,7 @@ class FirstChannelPostAwardViewTests(APITestCase):
         self.assertEqual(response.data['points_awarded'], 4)
 
         user = User.objects.get(slack_id='UNOPROFILEINTRO')
-        self.assertEqual(user.email, 'UNOPROFILEINTRO@slack.placeholder.com')
+        self.assertEqual(user.email, 'unoprofileintro@slack.placeholder.com')
         self.assertEqual(user.first_name, 'Unknown Slack User')
 
     @patch('core.permissions.HasAPIKey.has_permission', return_value=True)

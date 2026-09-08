@@ -156,7 +156,7 @@ class SlackDmIoAuthorityTests(SlackDmIoAuthorityFixture, TransactionTestCase):
         )
 
         def slack_call(_authority, method, **_kwargs):
-            if method == "conversations_list":
+            if method == "users_conversations":
                 return {
                     "channels": [{"id": "DIOAUTH", "user": "UOTHER"}],
                     "response_metadata": {"next_cursor": ""},

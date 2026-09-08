@@ -1048,6 +1048,10 @@ class SlackDmRegistrationLedgerTests(APITestCase):
     def test_activation_final_lock_fences_new_ambiguous_prior_attempt(self):
         request = self._prepare_attempt()
         original_generation = self.grant.consented_at
+        # A paused grant renews consent. An active connection upgrade deliberately
+        # retains its existing generation and registrations.
+        self.grant.status = SlackDmMirrorGrantStatus.PAUSED
+        self.grant.save(update_fields=("status", "updated_at"))
 
         def become_ambiguous_after_preflight(*_args, **_kwargs):
             registration_ledger.record_ambiguous_registration_attempt(

@@ -720,11 +720,13 @@ class SlackCommunityBridgeEventViewTests(TestCase):
         self.assertEqual(shared_message.data["status"], "ignored")
         self.assertEqual(CommunityBridgeDelivery.objects.count(), 0)
 
-    def test_mapped_private_channel_message_is_mirrored(self):
+    def test_mapped_private_channel_uses_owner_import_not_shared_bridge(self):
         response = self._post(
             {
                 "type": "event_callback",
                 "event_id": "EvPrivateChannel",
+                "team_id": "TMLAI",
+                "authorizations": [{"user_id": "U12345"}],
                 "event": {
                     "type": "message",
                     "channel_type": "group",
@@ -736,28 +738,34 @@ class SlackCommunityBridgeEventViewTests(TestCase):
             }
         )
 
-        self.assertEqual(response.data["status"], "enqueued")
-        delivery = CommunityBridgeDelivery.objects.get()
-        self.assertEqual(delivery.source_message_id, "1710000000.7000")
-        self.assertEqual(delivery.payload["text"], "private channel message")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["status"], "discovery_queued")
+        self.assertEqual(CommunityBridgeDelivery.objects.count(), 0)
 
-    def test_direct_messages_are_never_mirrored(self):
+    def test_direct_messages_never_fall_back_to_shared_bridge(self):
         for index, channel_type in enumerate(("im", "mpim")):
             response = self._post(
                 {
                     "type": "event_callback",
                     "event_id": f"EvDirectMessage{index}",
+                    "team_id": "TMLAI",
+                    "authorizations": [{"user_id": "U12345"}],
                     "event": {
                         "type": "message",
                         "channel_type": channel_type,
-                        "channel": self.channel.slack_channel_id,
+                        "channel": (
+                            "D-SLACK-1"
+                            if channel_type == "im"
+                            else self.channel.slack_channel_id
+                        ),
                         "user": "U12345",
                         "ts": f"1710000000.80{index}0",
                         "text": "direct message",
                     },
                 }
             )
-            self.assertEqual(response.data["status"], "ignored", channel_type)
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.data["status"], "discovery_queued", channel_type)
 
         self.assertEqual(CommunityBridgeDelivery.objects.count(), 0)
 

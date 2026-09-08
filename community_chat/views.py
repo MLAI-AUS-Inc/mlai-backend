@@ -53,6 +53,7 @@ from .account_sessions import (
     revoke_account_session,
     rotate_account_session,
 )
+from .account_profiles import ProfileVersionConflict, update_account_profile
 from .models import (
     CommunityChatAccountSession,
     CommunityChatBootstrapToken,
@@ -96,6 +97,7 @@ from .slack_file_previews import (
     fetch_slack_file_preview,
 )
 from .serializers import (
+    CommunityChatProfileUpdateSerializer,
     CommunityChatDeviceAuthAuthorizeSerializer,
     CommunityChatDeviceAuthExchangeSerializer,
     CommunityChatDeviceAuthStartSerializer,
@@ -895,24 +897,48 @@ class AccountSessionLogoutView(APIView):
 
 
 class AccountView(APIView):
+    """Read the member's account and update its versioned public profile."""
+
     authentication_classes = (CommunityChatAccountAuthentication,)
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
+        return self._response(request, request.user)
+
+    def patch(self, request):
+        serializer = CommunityChatProfileUpdateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            user = update_account_profile(
+                authenticated_session=request.community_chat_account_session,
+                values=serializer.validated_data,
+            )
+        except ProfileVersionConflict:
+            return Response(
+                {
+                    "code": "profile_version_conflict",
+                    "detail": "Your profile changed on another device. Reload it and review your edits.",
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+        return self._response(request, user)
+
+    def _response(self, request, user):
         account_session = request.community_chat_account_session
         devices = CommunityChatDevice.objects.filter(
-            user=request.user,
+            user=user,
             status__in=(DeviceBindingStatus.PENDING, DeviceBindingStatus.VERIFIED),
         )
         return Response(
             {
                 "authenticated": True,
-                "profile": own_chat_profile(request.user),
-                "public_profile": public_chat_profile(request.user),
+                "profile": own_chat_profile(user),
+                "public_profile": public_chat_profile(user),
                 "session": {
                     "id": str(account_session.id),
                     "installation_id": str(account_session.installation_id),
                     "client_id": account_session.client_id,
+                    "public_key": account_session.public_key,
                     "platform": account_session.platform,
                     "name": account_session.name,
                     "access_expires_at": account_session.access_expires_at,

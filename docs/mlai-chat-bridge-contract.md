@@ -145,7 +145,7 @@ SLACK_DM_MIRROR_DELIVERY_BATCH_SIZE=20
 SLACK_DM_MIRROR_SHADOW_SECRET=replace-with-a-long-random-secret
 ```
 
-For one-click DM linking, add `message.im`, `message.mpim`, `reaction_added`,
+For one-click chat linking, add `message.im`, `message.mpim`, `message.groups`, `reaction_added`,
 and `reaction_removed` under **Subscribe to events on behalf of users** in the
 Slack app and keep the same signed request URL used by the bridge. Reauthorize
 existing users to add `mpim:write`, `reactions:read`, `reactions:write`, and
@@ -154,10 +154,13 @@ existing users to add `mpim:write`, `reactions:read`, `reactions:write`, and
 token is stored.
 
 Each linked member receives an independent, owner-controlled mirror of direct
-and supported multi-person Slack DMs with activity in the configured history
-window. Discovery sorts explicit Slack latest-message metadata newest-first and
-skips a conversation only when that marker proves its latest activity is older
-than the cutoff. The channel-metadata `updated` field is not treated as message
+and multi-person Slack DMs, plus private channels after explicit consent.
+The authenticated user token lists all active internal memberships with
+`users.conversations`, using `im,mpim,private_channel` and pages of 20.
+Discovery, paced history and delivery run independently; new mirrors appear
+before history completes. Discovery sorts explicit Slack latest-message metadata newest-first and
+skips the history request when that marker proves its latest activity is older
+than the cutoff, while still creating the conversation in the directory. The channel-metadata `updated` field is not treated as message
 activity. Missing or ambiguous activity metadata, and any channel with a staged
 live callback, fail open to the bounded history scan. The other participants
 are represented by deterministic shadow keys, so linking never gives an
@@ -165,7 +168,7 @@ unconsenting participant access to imported history. Participant profiles are
 bulk-preloaded with `users.list` and fall back to `users.info` for any IDs Slack
 omitted.
 
-History requests fetch up to 1,000 messages, run at the 50-requests/minute
+History requests fetch up to 200 messages, run at the 50-requests/minute
 baseline, persist the oldest timestamp boundary, and honor Slack's
 `Retry-After` response without blocking OAuth or Community Home. Each persisted
 page is released to delivery immediately, so a large scan becomes visible while
@@ -182,7 +185,8 @@ updated.
 Backfill status is complete only after every queued history delivery completes;
 transient dead rows are safely repopulated from Slack, while a permanently
 rejected adapter delivery stays fenced until explicit backfill or renewed
-consent. History is always limited to the most recent 30 days. The legacy
+consent. New imports default to seven days; members can explicitly choose 30 days.
+The configured maximum remains 30 days. The legacy
 `backfill_all` action is accepted as a compatibility alias for the same bounded
 rescan, and every Slack history request includes an `oldest` parameter. The
 idempotency key prevents duplicate deliveries. A queued or failed backfill row
@@ -211,9 +215,11 @@ for every owner (bounded reconciliation remains the recovery path).
 
 All active verified MLAI Chat device keys are included in a one-to-one mirror,
 alongside the counterpart shadow key. Revoked keys are removed on the next
-discovery. MPIMs retain the relay's nine-participant cap: the authenticated or
-preferred owner key is included first and status/start responses report when
-additional active devices could not fit. An active preferred identity is never
+discovery. MPIMs and private channels use one conversation-specific synthetic import
+identity, leaving room for up to eight verified owner devices within the relay's
+nine-key transport limit. Signed Slack provenance preserves each message author.
+Private-channel size therefore does not grant other Slack members relay access.
+Status/start responses report if an owner has more devices than fit. An active preferred identity is never
 silently rebound; a revoked or otherwise inactive preferred device is repaired
 atomically to the authenticated verified device (or the newest active device in
 worker discovery), marks every destination participant set due for
@@ -309,6 +315,40 @@ python manage.py requeue_community_bridge_delivery 1234 \
 
 Never use timestamp refresh for an ambiguous timeout or after a destination
 link exists; normal retries retain the original timestamp and signed event ID.
+
+## Chat import API and rollout
+
+The existing authenticated `GET /api/v1/community-chat/slack/` response adds
+`discovery_pending`, `private_channels_enabled`, and `channel_catalog` entries
+of `{channel_id, kind}` (`im`, `mpim`, or `private_channel`). Only mirrors
+provisioned for the caller's verified device appear in that catalog. Clients
+use source type rather than relay participant count to classify chats.
+
+`POST` accepts `{"history_days": 7}` (default) or `{"history_days": 30}`. Other
+values return 400. It either activates the existing sufficiently scoped user
+connection or returns the user OAuth authorization URL. The signed OAuth
+return state preserves the chosen window and private-channel consent. Old
+connections must explicitly reconnect for `groups:read` / `groups:history` and
+`slack-chat-v4-private-channels` consent. Generic connector callbacks do not
+silently broaden consent. Updating the same active account keeps existing
+registrations and queues discovery instead of synchronously deleting them.
+
+`PATCH {"action": "backfill", "history_days": 30}` expands the import. Omitting
+the window preserves the existing grant's window, including for the legacy
+`backfill_all` action. Pause, resume and disconnect remain supported. Disconnect
+erases credentials, queued private bodies and source names, retaining only
+content-free conversation-type fences to prevent late private events from
+falling into a less restrictive route.
+
+No new migration is required: connector metadata stores the owner-scoped
+catalog. Release the bridge adapter (private Slack IDs may begin with `C` or
+`G`), backend worker/API, and updated clients together. Add `message.groups`
+subscriptions and reconnect a controlled test account before a live pilot.
+No deployment or pilot is implied by this implementation. The one-minute
+objective is first useful results, not a guarantee that every conversation's
+history has finished. Slack plan retention, missing scopes and API rate limits
+still apply. Archived and external Slack Connect conversations, bot messages,
+and unsupported Slack system events retain their existing exclusions.
 
 ## Slack thread reconciliation
 
