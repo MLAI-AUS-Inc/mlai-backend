@@ -23,6 +23,9 @@ from .services import PointsService
 
 ROOM_LOCK_SCOPE = 'meeting-room'
 USER_LOCK_SCOPE = 'meeting-room-user'
+CONFERENCE_ROOM_SLUG = 'conference-room'
+CONFERENCE_ROOM_UNAVAILABLE = 'The Conference Room is unavailable.'
+DEFAULT_ROOM_SLUGS = ('small-meeting-room', 'big-meeting-room')
 
 
 class MeetingRoomError(Exception):
@@ -43,6 +46,29 @@ def serialize_room(room: MeetingRoom) -> dict:
 
 class MeetingRoomService:
     """Transactional source of truth for Roo meeting-room reservations."""
+
+    @staticmethod
+    def _assert_conference_access(account: Optional[PointsAccount]) -> None:
+        # Purchased points and spending do not change lifetime contribution.
+        # Honour fractional Roo and legacy accounts without rounding the threshold.
+        earned = 0
+        if account is not None:
+            earned = (
+                account.lifetime_earned_microroo
+                if account.microroo_initialized
+                else PointsService.roo_to_microroo(account.lifetime_earned)
+            )
+        if earned <= PointsService.roo_to_microroo(100):
+            raise MeetingRoomError(
+                'room_unavailable', CONFERENCE_ROOM_UNAVAILABLE, 409,
+            )
+
+    @classmethod
+    def _check_room_access(cls, *, user: User, room_slug: str) -> None:
+        if room_slug == CONFERENCE_ROOM_SLUG:
+            cls._assert_conference_access(
+                PointsAccount.objects.filter(user=user).first()
+            )
 
     @staticmethod
     def _timezone() -> ZoneInfo:
@@ -337,8 +363,16 @@ class MeetingRoomService:
         try:
             room = MeetingRoom.objects.get(slug=room_slug)
         except MeetingRoom.DoesNotExist:
+            if room_slug == CONFERENCE_ROOM_SLUG:
+                raise MeetingRoomError(
+                    'room_unavailable', CONFERENCE_ROOM_UNAVAILABLE, 409,
+                )
             raise MeetingRoomError('room_not_found', 'Meeting room not found', 404)
         if active_required and not room.is_active:
+            if room_slug == CONFERENCE_ROOM_SLUG:
+                raise MeetingRoomError(
+                    'room_unavailable', CONFERENCE_ROOM_UNAVAILABLE, 409,
+                )
             raise MeetingRoomError(
                 'inactive_room',
                 'This meeting room is not accepting bookings',
@@ -349,7 +383,12 @@ class MeetingRoomService:
     @classmethod
     def list_rooms(cls) -> list[dict]:
         cls._ensure_enabled()
-        return [serialize_room(room) for room in MeetingRoom.objects.filter(is_active=True)]
+        return [
+            serialize_room(room)
+            for room in MeetingRoom.objects.filter(
+                is_active=True, slug__in=DEFAULT_ROOM_SLUGS,
+            )
+        ]
 
     @classmethod
     def _booked_hours_for_date(cls, user: User, local_date: date) -> float:
@@ -499,6 +538,7 @@ class MeetingRoomService:
         ends_at: Optional[datetime] = None,
     ) -> dict:
         cls._ensure_enabled()
+        cls._check_room_access(user=user, room_slug=room_slug)
         room = cls._get_room(room_slug)
         requested_interval = None
         available = None
@@ -639,6 +679,7 @@ class MeetingRoomService:
             cls._assert_active_replay(existing)
             return existing, False
 
+        cls._check_room_access(user=user, room_slug=room_slug)
         room = cls._get_room(room_slug)
         starts_at, ends_at, points_cost = cls.validate_interval(starts_at, ends_at)
         if expected_points_cost is not None and expected_points_cost != points_cost:
@@ -658,6 +699,10 @@ class MeetingRoomService:
 
         room = MeetingRoom.objects.select_for_update().get(pk=room.pk)
         if not room.is_active:
+            if room.slug == CONFERENCE_ROOM_SLUG:
+                raise MeetingRoomError(
+                    'room_unavailable', CONFERENCE_ROOM_UNAVAILABLE, 409,
+                )
             raise MeetingRoomError(
                 'inactive_room',
                 'This meeting room is not accepting bookings',
@@ -707,6 +752,9 @@ class MeetingRoomService:
                 account = PointsAccount.objects.select_for_update().filter(
                     user=user
                 ).first()
+                if room.slug == CONFERENCE_ROOM_SLUG:
+                    # Recheck under the same account lock used for the debit.
+                    cls._assert_conference_access(account)
                 if account is not None:
                     PointsService._ensure_microroo_account(account)
                 purchased_points_cost_microroo = min(

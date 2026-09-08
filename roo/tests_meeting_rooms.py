@@ -1414,3 +1414,181 @@ class MeetingRoomConcurrencyTests(TransactionTestCase):
             MeetingRoomBooking.objects.filter(status='booked').exists()
             and MeetingRoomBlock.objects.exists()
         )
+
+
+@override_settings(**TEST_SETTINGS)
+class ConferenceRoomApiTests(APITestCase):
+    create_member = MeetingRoomApiTests.create_member
+    book_payload = MeetingRoomApiTests.book_payload
+    book = MeetingRoomApiTests.book
+
+    def setUp(self):
+        self.client.credentials(HTTP_X_API_KEY=TEST_SETTINGS['ROO_API_KEY'])
+        self.room = MeetingRoom.objects.create(
+            slug='conference-room', name='Conference Room',
+        )
+        self.user = self.create_member('UCONFERENCE', balance=10)
+        self.set_earned(101)
+
+    def set_earned(self, earned, *, microroo=None):
+        from .services import PointsService
+        account = PointsAccount.objects.get(user=self.user)
+        PointsService._ensure_microroo_account(account)
+        account.lifetime_earned = earned
+        account.lifetime_earned_microroo = (
+            earned * 1_000_000 if microroo is None else microroo
+        )
+        account.save()
+
+    def availability(self, **overrides):
+        payload = {
+            'slack_user_id': self.user.slack_id,
+            'room_slug': self.room.slug,
+            'date': future_local().date().isoformat(),
+        }
+        payload.update(overrides)
+        return self.client.post(reverse('meeting-room-availability'), payload, format='json')
+
+    def assert_unavailable(self, response):
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.data, {
+            'code': 'room_unavailable',
+            'error': 'The Conference Room is unavailable.',
+        })
+
+    def test_default_list_contains_only_big_and_small(self):
+        response = self.client.get(reverse('meeting-room-list'))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            {room['slug'] for room in response.data['rooms']},
+            {'small-meeting-room', 'big-meeting-room'},
+        )
+
+    def test_at_or_below_threshold_denies_availability_and_booking_without_charge(self):
+        for earned in (0, 99, 100):
+            with self.subTest(earned=earned):
+                self.set_earned(earned)
+                self.assert_unavailable(self.availability())
+                self.assert_unavailable(self.book(future_local()))
+        self.assertFalse(MeetingRoomBooking.objects.filter(user=self.user).exists())
+        self.assertFalse(Ledger.objects.filter(user=self.user).exists())
+        self.assertEqual(PointsAccount.objects.get(user=self.user).balance, 10)
+
+    def test_missing_points_account_is_unavailable(self):
+        PointsAccount.objects.filter(user=self.user).delete()
+        self.assert_unavailable(self.availability())
+        self.assert_unavailable(self.book(future_local()))
+        self.assertFalse(PointsAccount.objects.filter(user=self.user).exists())
+
+    def test_purchased_points_do_not_unlock_conference_room(self):
+        self.set_earned(100)
+        account = PointsAccount.objects.get(user=self.user)
+        account.purchased_topup_balance = 500
+        account.lifetime_purchased_topup = 500
+        account.balance = 510
+        account.save(update_fields=[
+            'balance', 'purchased_topup_balance', 'lifetime_purchased_topup',
+        ])
+        self.assert_unavailable(self.availability())
+        self.assert_unavailable(self.book(future_local()))
+
+    def test_spending_does_not_remove_access_and_booking_charges_normal_price(self):
+        self.assertEqual(self.availability().status_code, 200)
+        response = self.book(future_local(), duration=1.5)
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data['points_cost'], 2)
+        account = PointsAccount.objects.get(user=self.user)
+        self.assertEqual(account.balance, 8)
+        self.assertEqual(account.lifetime_earned, 101)
+        self.assertEqual(self.availability().status_code, 200)
+
+    def test_fractional_lifetime_earned_is_not_rounded_down(self):
+        self.set_earned(100, microroo=100_000_001)
+        self.assertEqual(self.availability().status_code, 200)
+        self.assertEqual(self.book(future_local()).status_code, 201)
+
+    def test_initialized_precision_value_overrides_legacy_projection(self):
+        self.set_earned(101, microroo=100_000_000)
+        self.assert_unavailable(self.availability())
+        self.assert_unavailable(self.book(future_local()))
+
+    def test_legacy_account_above_threshold_can_book(self):
+        PointsAccount.objects.filter(user=self.user).update(
+            lifetime_earned=101, lifetime_earned_microroo=0,
+            microroo_initialized=False,
+        )
+        self.assertEqual(self.book(future_local()).status_code, 201)
+
+    def test_confirmation_rechecks_access_after_preview(self):
+        self.assertEqual(self.availability().status_code, 200)
+        self.set_earned(100)
+        self.assert_unavailable(self.book(future_local()))
+        self.assertFalse(MeetingRoomBooking.objects.filter(user=self.user).exists())
+
+    def test_final_account_lock_rechecks_access_even_if_early_check_passed(self):
+        from unittest.mock import patch
+        self.set_earned(100)
+        with patch.object(MeetingRoomService, '_check_room_access'):
+            self.assert_unavailable(self.book(future_local()))
+        self.assertFalse(Ledger.objects.filter(user=self.user).exists())
+        self.assertEqual(PointsAccount.objects.get(user=self.user).balance, 10)
+
+    def test_eligible_admin_cannot_bypass_target_members_eligibility(self):
+        admin = self.create_member('UCONFERENCEADMIN', balance=200)
+        PointsAdmin.objects.create(slack_user_id=admin.slack_id, role='admin')
+        self.set_earned(100)
+        target = {'slack_user_id': admin.slack_id, 'target_slack_user_id': self.user.slack_id}
+        self.assert_unavailable(self.availability(**target))
+        self.assert_unavailable(self.book(future_local(), **target))
+        self.assertFalse(MeetingRoomBooking.objects.filter(user=self.user).exists())
+
+    def test_admin_books_eligible_target_using_targets_earned_points_and_balance(self):
+        admin = self.create_member('UCONFERENCEADMIN', balance=1)
+        PointsAdmin.objects.create(slack_user_id=admin.slack_id, role='admin')
+        response = self.book(
+            future_local(), slack_user_id=admin.slack_id,
+            target_slack_user_id=self.user.slack_id,
+        )
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(PointsAccount.objects.get(user=admin).balance, 1)
+        self.assertEqual(PointsAccount.objects.get(user=self.user).balance, 9)
+
+    def test_hidden_room_missing_or_inactive_has_same_unavailable_message(self):
+        self.room.is_active = False
+        self.room.save(update_fields=['is_active'])
+        self.assert_unavailable(self.availability())
+        self.assert_unavailable(self.book(future_local()))
+        self.room.delete()
+        self.assert_unavailable(self.availability())
+        self.assert_unavailable(self.book(future_local()))
+
+    def test_low_earned_member_can_still_book_small_and_big_rooms(self):
+        self.set_earned(0)
+        for offset, slug in enumerate(('small-meeting-room', 'big-meeting-room'), 1):
+            with self.subTest(slug=slug):
+                self.assertEqual(self.book(future_local(offset), room_slug=slug).status_code, 201)
+
+    def test_replay_is_idempotent_and_cancellation_remains_available_after_access_changes(self):
+        payload = self.book_payload(future_local())
+        url = reverse('meeting-room-book')
+        first = self.client.post(url, payload, format='json')
+        self.assertEqual(first.status_code, 201)
+        self.set_earned(100)
+        replay = self.client.post(url, payload, format='json')
+        self.assertEqual(replay.status_code, 200)
+        self.assertTrue(replay.data['already_booked'])
+        cancelled = self.client.post(reverse('meeting-room-cancel'), {
+            'slack_user_id': self.user.slack_id,
+            'booking_id': first.data['booking']['id'],
+        }, format='json')
+        self.assertEqual(cancelled.status_code, 200)
+        self.assertEqual(PointsAccount.objects.get(user=self.user).balance, 10)
+
+    def test_room_deactivated_while_confirming_keeps_generic_message(self):
+        from unittest.mock import patch
+        with patch.object(MeetingRoomService, '_lock_booking_scope', side_effect=lambda **kwargs:
+            MeetingRoom.objects.filter(pk=self.room.pk).update(is_active=False)
+        ):
+            self.assert_unavailable(self.book(future_local()))
+        self.assertFalse(MeetingRoomBooking.objects.filter(user=self.user).exists())
+        self.assertFalse(Ledger.objects.filter(user=self.user).exists())

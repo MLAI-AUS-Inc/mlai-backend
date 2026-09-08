@@ -50,6 +50,7 @@ rollout sequence.
 
 ## Roo
 
+- [`meeting-room-booking.md`](meeting-room-booking.md)
 - [`coworking-booking.md`](coworking-booking.md)
 - [`roo-linear-channel-issues.md`](roo-linear-channel-issues.md)
 - [`slack-founder-actor-migration-recovery.md`](slack-founder-actor-migration-recovery.md)
