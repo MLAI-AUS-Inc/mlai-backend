@@ -186,7 +186,7 @@ class CommunityChatHomeFacadeTests(TestCase):
         )
         self.assertEqual(
             response.data["feature_flags"],
-            {"link_love": False, "meeting_rooms": True},
+            {"link_love": False, "meeting_rooms": True, "coworking_booking": False},
         )
         self.assertNotIn("email", response.data["points"])
         self.assertEqual(response["Cache-Control"], "private, no-store")

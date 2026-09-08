@@ -55,7 +55,8 @@ reviewer or assignee ids, internal tasks, redemption history, or task metadata.
 - `rewards`: active rewards with non-zero or unlimited stock and an affordability
   hint for the caller;
 - `feature_flags`: currently `link_love` (false until a verified runtime exists)
-  and `meeting_rooms` (from `MEETING_ROOM_BOOKING_ENABLED`).
+  `meeting_rooms` (from `MEETING_ROOM_BOOKING_ENABLED`), and member-scoped
+  `coworking_booking` (see [the handoff contract](community-chat-coworking.md)).
 
 Task actions include the command `@Roo task claim <task_code>`. The endpoint
 does not use `TaskTemplate`, so closed or unpublished templates cannot appear
@@ -123,5 +124,6 @@ The catalog remains filtered to mirrors provisioned for the requesting verified
 device and its account. It exposes no message bodies and grants no additional
 relay access. Clients must use the source people for group avatar stacks rather
 than treating transport keys or multiple owner devices as group members.
-Older clients can ignore the additive field; newer clients fall back to native
-relay profiles if it is absent. No schema change or historical backfill is needed.
+Older clients can ignore the additive field. Newer clients show a neutral group
+icon when an imported conversation has no source profiles; relay/device keys
+must never be used as fallback people for a known Slack mirror. No schema change or historical backfill is needed.

@@ -946,6 +946,7 @@ CONTENT_FACTORY_URL = os.getenv('CONTENT_FACTORY_URL') or (
 # calls this Django service over HTTPS; Django reaches Roo over the private
 # DigitalOcean VPC so Roo itself does not need a public hostname.
 ROO_SERVICE_URL = os.getenv('ROO_SERVICE_URL', '').rstrip('/')
+ROO_INTERNAL_MENTION_API_KEY = os.getenv('ROO_INTERNAL_MENTION_API_KEY', '').strip()
 ROO_SIM_PATIENT_KEY = os.getenv('ROO_SIM_PATIENT_KEY', '').strip()
 HEALTH_HACK_API_KEY = os.getenv('HEALTH_HACK_API_KEY', '').strip()
 ROO_API_KEY = os.getenv('ROO_API_KEY', '').strip()

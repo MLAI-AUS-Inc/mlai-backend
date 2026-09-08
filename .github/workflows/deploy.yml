@@ -195,6 +195,7 @@ jobs:
           roo.tests.StartupUpdateRewardServiceTests \
           roo.tests_api.FirstChannelPostAwardViewTests \
           integrations.tests_community_bridge \
+          integrations.tests_coworking_handoff \
           integrations.tests_community_bridge_avatar_backfill \
           integrations.tests_community_bridge_mention_backfill \
           integrations.tests_community_bridge_contracts \

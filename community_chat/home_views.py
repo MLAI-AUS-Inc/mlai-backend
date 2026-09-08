@@ -11,6 +11,7 @@ from rest_framework.views import APIView
 from hospital.authentication import CustomJWTAuthentication
 from roo.models import RewardsCatalog, Task, TaskAssignment
 from roo.services import PointsService
+from integrations.services.community_bridge.coworking import coworking_booking_available
 
 from .authentication import (
     CommunityChatAccountAuthentication,
@@ -132,6 +133,7 @@ class CommunityHomeView(APIView):
                     for reward in rewards
                 ],
                 "feature_flags": {
+                    "coworking_booking": coworking_booking_available(request.user),
                     "link_love": False,
                     "meeting_rooms": bool(
                         getattr(settings, "MEETING_ROOM_BOOKING_ENABLED", False)

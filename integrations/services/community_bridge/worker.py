@@ -10,6 +10,7 @@ from slack_sdk.errors import SlackApiError
 
 from integrations.models import CommunityBridgeDeliveryType, CommunityBridgePlatform
 from integrations.services.community_bridge.buzz import BuzzBridgeClient
+from integrations.services.community_bridge.coworking import is_coworking_request, deliver_coworking_request
 from integrations.services.community_bridge.formatting import (
     build_mirrored_text,
     emoji_to_slack_reaction,
@@ -334,6 +335,9 @@ class CommunityBridgeDiscordClient(discord.Client):
 
         if delivery["delivery_type"] == CommunityBridgeDeliveryType.CREATE:
             thread_ts = await self._resolve_parent_destination_message(delivery)
+            if is_coworking_request(delivery):
+                await deliver_coworking_request(delivery, text, thread_ts)
+                return
             response = await asyncio.to_thread(
                 SlackBridgeClient.post_message,
                 channel_id=delivery["target_channel_id"],

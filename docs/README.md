@@ -9,6 +9,7 @@ subsystem-specific contracts and runbooks.
 - [`community-chat-account-profile.md`](community-chat-account-profile.md)
 - [`community-chat-test-results-2026-09-07.md`](community-chat-test-results-2026-09-07.md) — disposable backend regression evidence
 - [`community-chat-home.md`](community-chat-home.md)
+- [`community-chat-coworking.md`](community-chat-coworking.md) — signed booking handoff to Public Roo
 - [`volunteer-api.md`](volunteer-api.md) — gated member journey, recognition and Roo contracts
 
 ## Inactive Buzz / MLAI Chat experiment
