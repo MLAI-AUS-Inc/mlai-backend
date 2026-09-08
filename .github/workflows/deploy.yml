@@ -195,6 +195,7 @@ jobs:
           community_chat.tests.test_volunteer_events \
           roo.tests.StartupUpdateRewardServiceTests \
           roo.tests_api.FirstChannelPostAwardViewTests \
+          integrations.tests_slack_emoji \
           integrations.tests_community_bridge \
           integrations.tests_coworking_handoff \
           integrations.tests_community_bridge_avatar_backfill \
