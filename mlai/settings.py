@@ -2060,3 +2060,6 @@ HUMANITIX_API_BASE_URL = os.environ.get(
     'HUMANITIX_API_BASE_URL',
     'https://api.humanitix.com/v1',
 )
+
+# Public identity of the deployed MLAI Chat Roo assistant (not a signing key).
+COMMUNITY_CHAT_ROO_PUBLIC_KEY = os.getenv("COMMUNITY_CHAT_ROO_PUBLIC_KEY", "")

@@ -1,5 +1,7 @@
 """Member-scoped data for the MLAI Chat Community Home dashboard."""
 
+import re
+
 from django.conf import settings
 from django.db.models import Q
 from rest_framework.permissions import IsAuthenticated
@@ -40,6 +42,8 @@ class CommunityHomeView(APIView):
     community_chat_throttle_scope = "community_chat_home"
 
     def get(self, request):
+        configured_roo = str(getattr(settings, "COMMUNITY_CHAT_ROO_PUBLIC_KEY", "") or "").strip().lower()
+        roo_public_key = configured_roo if re.fullmatch(r"[0-9a-f]{64}", configured_roo) else None
         balance = PointsService.get_balance(request.user)
         available_microroo = PointsService.get_available_microroo(request.user)
 
@@ -98,6 +102,7 @@ class CommunityHomeView(APIView):
 
         return Response(
             {
+                "roo_public_key": roo_public_key,
                 "points": {
                     "balance": PointsService.microroo_to_legacy_whole(
                         available_microroo
@@ -132,5 +137,6 @@ class CommunityHomeView(APIView):
                         getattr(settings, "MEETING_ROOM_BOOKING_ENABLED", False)
                     ),
                 },
-            }
+            },
+            headers={"Cache-Control": "private, no-store"},
         )

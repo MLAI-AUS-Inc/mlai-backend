@@ -56,6 +56,17 @@ class CommunityHomeTests(APITestCase):
             microroo_initialized=True,
         )
 
+    @override_settings(COMMUNITY_CHAT_ROO_PUBLIC_KEY="AB" * 32)
+    def test_home_returns_only_configured_roo_public_identity(self):
+        response = self.client.get(self.url)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["roo_public_key"], "ab" * 32)
+
+    @override_settings(COMMUNITY_CHAT_ROO_PUBLIC_KEY="not-a-public-key")
+    def test_invalid_roo_configuration_does_not_create_a_chat_target(self):
+        response = self.client.get(self.url)
+        self.assertIsNone(response.data["roo_public_key"])
+
     def task(self, title, **overrides):
         values = {
             "title": title,
@@ -121,7 +132,7 @@ class CommunityHomeTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(
             set(response.data),
-            {"points", "earn_actions", "rewards", "feature_flags"},
+            {"points", "earn_actions", "rewards", "feature_flags", "roo_public_key"},
         )
         self.assertEqual(
             response.data["points"],

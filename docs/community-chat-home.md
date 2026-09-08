@@ -40,7 +40,13 @@ reviewer or assignee ids, internal tasks, redemption history, or task metadata.
 
 ## Community Home
 
-`GET home/` returns four top-level keys:
+`GET home/` returns five top-level keys:
+
+- `roo_public_key`: the configured public identity of the deployed MLAI Chat Roo
+  assistant, or null when unavailable. `COMMUNITY_CHAT_ROO_PUBLIC_KEY` must be
+  a 64-character hexadecimal public key. This does not create or deploy an
+  assistant; its DM and tagged-message handler must be operational before
+  configuration. Home responses use `Cache-Control: private, no-store`.
 
 - `points`: the caller's spendable balance and their own earned, purchased,
   lifetime-earned, and lifetime-spent totals;

@@ -145,7 +145,7 @@ class CommunityChatHomeFacadeTests(TestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(
             set(response.data),
-            {"points", "earn_actions", "rewards", "feature_flags"},
+            {"points", "earn_actions", "rewards", "feature_flags", "roo_public_key"},
         )
         self.assertEqual(
             response.data["points"],
