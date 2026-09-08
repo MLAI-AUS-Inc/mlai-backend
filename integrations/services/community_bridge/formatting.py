@@ -4,6 +4,7 @@ import re
 from typing import Callable, Iterable, Optional
 
 from integrations.models import CommunityBridgePlatform
+from ..slack_emoji import emoji_to_slack_reaction, slack_reaction_to_emoji  # noqa: F401
 
 
 SLACK_USER_MENTION_RE = re.compile(r"<@([^>]+)>")
@@ -15,50 +16,6 @@ DISCORD_USER_MENTION_RE = re.compile(r"<@!?\d+>")
 DISCORD_CHANNEL_MENTION_RE = re.compile(r"<#\d+>")
 DISCORD_ROLE_MENTION_RE = re.compile(r"<@&\d+>")
 DISCORD_EMOJI_RE = re.compile(r"<a?:([A-Za-z0-9_]+):\d+>")
-
-# Preserve familiar reactions as Unicode. Other safe Slack names pass through
-# as bounded ``:name:`` shortcodes; malformed or overlong names fail closed.
-SLACK_REACTION_TO_EMOJI = {
-    "+1": "👍",
-    "thumbsup": "👍",
-    "heart": "❤️",
-    "tada": "🎉",
-    "eyes": "👀",
-    "rocket": "🚀",
-    "white_check_mark": "✅",
-}
-EMOJI_TO_SLACK_REACTION = {
-    "👍": "thumbsup",
-    "❤️": "heart",
-    "❤": "heart",
-    "🎉": "tada",
-    "👀": "eyes",
-    "🚀": "rocket",
-    "✅": "white_check_mark",
-}
-# Buzz reaction content is capped at 64 Unicode scalar values. The surrounding
-# colons consume two, so Slack shortcode names are safely bounded to 62.
-SLACK_REACTION_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_+\-]{0,61}$")
-
-
-def slack_reaction_to_emoji(value: str) -> str:
-    reaction = str(value or "").strip()
-    mapped = SLACK_REACTION_TO_EMOJI.get(reaction)
-    if mapped:
-        return mapped
-    return f":{reaction}:" if SLACK_REACTION_NAME_RE.fullmatch(reaction) else ""
-
-
-def emoji_to_slack_reaction(value: str) -> str:
-    reaction = str(value or "").strip()
-    mapped = EMOJI_TO_SLACK_REACTION.get(reaction)
-    if mapped:
-        return mapped
-    if reaction.startswith(":") and reaction.endswith(":"):
-        shortcode = reaction[1:-1]
-        if SLACK_REACTION_NAME_RE.fullmatch(shortcode):
-            return shortcode
-    return ""
 
 
 def reaction_object_id(*, message_id: str, reaction: str, author_id: str) -> str:
@@ -101,8 +58,7 @@ def sanitize_slack_text(
 def has_slack_entity_references(value: str) -> bool:
     text = str(value or "")
     return bool(
-        SLACK_USER_MENTION_RE.search(text)
-        or SLACK_CHANNEL_MENTION_RE.search(text)
+        SLACK_USER_MENTION_RE.search(text) or SLACK_CHANNEL_MENTION_RE.search(text)
     )
 
 
@@ -140,7 +96,9 @@ def normalize_discord_attachments(attachments: Iterable[object]) -> list[dict]:
             url = str(item.get("url") or item.get("proxy_url") or "").strip()
             title = str(item.get("filename") or item.get("title") or url).strip()
         else:
-            url = str(getattr(item, "url", "") or getattr(item, "proxy_url", "") or "").strip()
+            url = str(
+                getattr(item, "url", "") or getattr(item, "proxy_url", "") or ""
+            ).strip()
             title = str(getattr(item, "filename", "") or url).strip()
         if not url:
             continue
@@ -172,13 +130,17 @@ def build_mirrored_text(
     return "\n\n".join(section for section in sections if section).strip()
 
 
-def _format_author_line(destination_platform: str, author_name: str, source_label: str) -> str:
+def _format_author_line(
+    destination_platform: str, author_name: str, source_label: str
+) -> str:
     if destination_platform == CommunityBridgePlatform.SLACK:
         return f"*{author_name} ({source_label})*"
     return f"**{author_name} ({source_label})**"
 
 
-def _format_attachment_lines(destination_platform: str, attachments: Iterable[dict]) -> str:
+def _format_attachment_lines(
+    destination_platform: str, attachments: Iterable[dict]
+) -> str:
     items = []
     for attachment in attachments:
         if not isinstance(attachment, dict):

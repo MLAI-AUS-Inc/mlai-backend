@@ -7,8 +7,8 @@ MLAI Chat is another client surface, not a one-time data migration.
 ## MVP scope
 
 - Operators explicitly map a public Slack channel to one MLAI Chat channel.
-- New messages, replies, edits, deletes, common Unicode reactions (`👍`, `❤️`,
-  `🎉`, `👀`, `🚀`, `✅`), and safe Slack shortcode reactions are mirrored after
+- New messages, replies, edits, deletes, the full emoji-mart Unicode 15 reaction catalog
+  (including Slack aliases, flags, ZWJ sequences and skin tones), and safe Slack shortcode reactions are mirrored after
   the mapping is enabled. Shortcodes use canonical `:name:` content with an
   inner `[a-z0-9][a-z0-9_+-]{0,61}` name so the full value stays within MLAI
   Chat's 64-scalar reaction limit; longer Slack custom-emoji names fail closed.
@@ -435,3 +435,14 @@ python manage.py revoke_community_bridge_identity \
   --slack-user-id U0123456789 \
   --reason "account disconnected"
 ```
+
+## Standard emoji data
+
+`integrations/services/community_bridge/slack_emoji.json` pins the same
+`@emoji-mart/data` 1.2.1 / Unicode 15 native catalog used by MLAI Chat. The codec
+in `integrations/services/slack_emoji.py` translates both directions, including
+skin-tone suffixes, while preserving bounded workspace custom shortcodes.
+Workspace-specific image assets still use the existing custom-emoji transport;
+this catalog contains Unicode glyphs, not workspace images.
+Regenerate using `python scripts/generate_slack_emoji.py /path/to/@emoji-mart/data/sets/15/native.json`.
+Verify without a database using `python -m unittest integrations.tests_slack_emoji`.
