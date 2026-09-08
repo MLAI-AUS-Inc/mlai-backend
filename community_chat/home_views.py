@@ -12,6 +12,7 @@ from hospital.authentication import CustomJWTAuthentication
 from roo.models import RewardsCatalog, Task, TaskAssignment
 from roo.services import PointsService
 from integrations.services.community_bridge.coworking import coworking_booking_available
+from integrations.services.slack_roo import public_roo_target
 
 from .authentication import (
     CommunityChatAccountAuthentication,
@@ -45,6 +46,7 @@ class CommunityHomeView(APIView):
     def get(self, request):
         configured_roo = str(getattr(settings, "COMMUNITY_CHAT_ROO_PUBLIC_KEY", "") or "").strip().lower()
         roo_public_key = configured_roo if re.fullmatch(r"[0-9a-f]{64}", configured_roo) else None
+        slack_roo = public_roo_target()
         balance = PointsService.get_balance(request.user)
         available_microroo = PointsService.get_available_microroo(request.user)
 
@@ -104,6 +106,7 @@ class CommunityHomeView(APIView):
         return Response(
             {
                 "roo_public_key": roo_public_key,
+                "roo_slack_user_id": slack_roo[1] if slack_roo else None,
                 "points": {
                     "balance": PointsService.microroo_to_legacy_whole(
                         available_microroo

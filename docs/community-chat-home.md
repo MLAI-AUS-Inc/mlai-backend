@@ -40,13 +40,20 @@ reviewer or assignee ids, internal tasks, redemption history, or task metadata.
 
 ## Community Home
 
-`GET home/` returns five top-level keys:
+`GET home/` returns six top-level keys:
 
 - `roo_public_key`: the configured public identity of the deployed MLAI Chat Roo
   assistant, or null when unavailable. `COMMUNITY_CHAT_ROO_PUBLIC_KEY` must be
   a 64-character hexadecimal public key. This does not create or deploy an
   assistant; its DM and tagged-message handler must be operational before
   configuration. Home responses use `Cache-Control: private, no-store`.
+
+- `roo_slack_user_id`: Public Roo's configured Slack bot user ID, or null when
+  disabled or outside the MLAI relay. The native assistant public key takes
+  precedence. Without that key, Talk to Roo opens the member's existing private
+  Slack Roo DM through `POST slack/dms/` with this single recipient. Opening a
+  chat sends no message. Disconnected members first complete the existing Slack
+  consent/OAuth flow. See [Roo chat](community-chat-roo-dm.md).
 
 - `points`: the caller's spendable balance and their own earned, purchased,
   lifetime-earned, and lifetime-spent totals;

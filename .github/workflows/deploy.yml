@@ -178,6 +178,7 @@ jobs:
           community_chat.tests.test_token_usage \
           community_chat.tests.test_tokenmaxer_federation \
           community_chat.tests.test_home \
+          community_chat.tests.test_roo_slack_dm \
           community_chat.tests.test_password_auth \
           community_chat.tests.test_slack_dm_ineligible_retirement \
           community_chat.tests.test_slack_dm_io_authority \

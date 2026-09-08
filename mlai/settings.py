@@ -493,7 +493,7 @@ REST_FRAMEWORK = {
 # only the public relay/client URLs are returned to browsers.
 COMMUNITY_CHAT_RELAY_URL = os.getenv('COMMUNITY_CHAT_RELAY_URL', 'wss://chat.mlai.au')
 # Volunteer is a separate, read-first rollout. No UI preference enables awards.
-COMMUNITY_CHAT_VOLUNTEER_ENABLED = _env_is_true('COMMUNITY_CHAT_VOLUNTEER_ENABLED', False)
+COMMUNITY_CHAT_VOLUNTEER_ENABLED = _env_is_true('COMMUNITY_CHAT_VOLUNTEER_ENABLED', True)
 COMMUNITY_CHAT_VOLUNTEER_RECOGNITION_ENABLED = _env_is_true('COMMUNITY_CHAT_VOLUNTEER_RECOGNITION_ENABLED', False)
 COMMUNITY_CHAT_VOLUNTEER_AWARDS_ENABLED = _env_is_true('COMMUNITY_CHAT_VOLUNTEER_AWARDS_ENABLED', False)
 COMMUNITY_CHAT_VOLUNTEER_BONUSES_ENABLED = _env_is_true('COMMUNITY_CHAT_VOLUNTEER_BONUSES_ENABLED', False)
@@ -2064,3 +2064,7 @@ HUMANITIX_API_BASE_URL = os.environ.get(
 
 # Public identity of the deployed MLAI Chat Roo assistant (not a signing key).
 COMMUNITY_CHAT_ROO_PUBLIC_KEY = os.getenv("COMMUNITY_CHAT_ROO_PUBLIC_KEY", "")
+# Public Roo's identity verified in the MLAI Slack workspace. Empty values pause
+# the first-party DM connection; no other bot is enabled by this setting.
+COMMUNITY_CHAT_ROO_SLACK_WORKSPACE_ID = os.getenv("COMMUNITY_CHAT_ROO_SLACK_WORKSPACE_ID", "T05N9C1QSJC")
+COMMUNITY_CHAT_ROO_SLACK_USER_ID = os.getenv("COMMUNITY_CHAT_ROO_SLACK_USER_ID", "U090FV0GTT4")

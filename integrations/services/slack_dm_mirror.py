@@ -881,13 +881,20 @@ def open_slack_dm(
         raw_user = (
             response.get("user") if isinstance(response.get("user"), dict) else {}
         )
-        if not _is_eligible_slack_user(
+        from integrations.services.slack_roo import is_public_roo_user
+
+        is_roo_dm = (
+            len(requested_ids) == 1
+            and slack_user_id == raw_user.get("id")
+            and is_public_roo_user(raw_user, workspace_id=grant.slack_workspace_id)
+        )
+        if not is_roo_dm and not _is_eligible_slack_user(
             raw_user,
             workspace_id=grant.slack_workspace_id,
             owner_slack_user_id=grant.slack_user_id,
         ):
             raise SlackDmMirrorError(
-                "Slack DMs can only be started with internal human users."
+                "Slack DMs can only be started with internal members or Public Roo."
             )
         profile_cache[slack_user_id] = _profile_from_slack_user(raw_user)
     open_response = _call_slack_with_grant_authority(
@@ -2714,6 +2721,15 @@ def _normalize_private_slack_event(
     payload: dict[str, Any],
     event: dict[str, Any],
 ) -> dict[str, Any] | None:
+    from integrations.services.slack_roo import is_public_roo_reply
+
+    def roo_reply(message):
+        return is_public_roo_reply(
+            message,
+            workspace_id=str(payload.get("team_id") or ""),
+            conversation_id=str(event.get("channel") or ""),
+        )
+
     event_type = str(event.get("type") or "message").strip()
     if event_type in {"reaction_added", "reaction_removed"}:
         item = event.get("item") if isinstance(event.get("item"), dict) else {}
@@ -2767,11 +2783,13 @@ def _normalize_private_slack_event(
             "slack_reaction": reaction,
             "slack_text": "",
         }
-    if event_type != "message" or event.get("bot_id"):
+    if event_type != "message" or (event.get("bot_id") and not roo_reply(event)):
         return None
 
     subtype = str(event.get("subtype") or "").strip()
-    if subtype in {"", "thread_broadcast", "file_share", "me_message"}:
+    if subtype == "bot_message" and not roo_reply(event):
+        return None
+    if subtype in {"", "thread_broadcast", "file_share", "me_message", "bot_message"}:
         source_message_id = str(event.get("ts") or "").strip()
         author_id = str(event.get("user") or "").strip()
         if not source_message_id or not author_id:
@@ -2797,7 +2815,9 @@ def _normalize_private_slack_event(
         }
     if subtype == "message_changed":
         message = event.get("message") if isinstance(event.get("message"), dict) else {}
-        if message.get("bot_id"):
+        if (
+            message.get("bot_id") or message.get("subtype") == "bot_message"
+        ) and not roo_reply(message):
             return None
         target_message_id = str(message.get("ts") or "").strip()
         author_id = str(message.get("user") or "").strip()
@@ -2844,7 +2864,9 @@ def _normalize_private_slack_event(
             if isinstance(event.get("previous_message"), dict)
             else {}
         )
-        if previous.get("bot_id"):
+        if (
+            previous.get("bot_id") or previous.get("subtype") == "bot_message"
+        ) and not roo_reply(previous):
             return None
         target_message_id = str(
             event.get("deleted_ts") or previous.get("ts") or ""
@@ -5301,7 +5323,7 @@ def _persist_history_page_locked(
     history = []
     participant_ids = set(conversation.participant_slack_ids or [])
     for message in raw_messages:
-        if message.get("bot_id"):
+        if not _history_message_author_allowed(conversation, message):
             continue
         message_id = str(message.get("ts") or "").strip()
         author_id = str(message.get("user") or "").strip()
@@ -5472,6 +5494,22 @@ def _persist_reply_page(
         )
 
 
+def _history_message_author_allowed(conversation, message):
+    """Preserve Roo replies only in the owner's actual one-to-one Roo mirror."""
+    from integrations.services.slack_roo import is_public_roo_reply
+
+    if not message.get("bot_id") and message.get("subtype") != "bot_message":
+        return True
+    return is_public_roo_reply(
+        message,
+        workspace_id=conversation.slack_workspace_id,
+        conversation_id=conversation.slack_conversation_id,
+    ) and set(conversation.participant_slack_ids or []) == {
+        conversation.grant.slack_user_id,
+        str(message.get("user") or ""),
+    }
+
+
 def _persist_reply_page_locked(
     conversation: SlackDmMirrorConversation,
     state: SlackDmMirrorDelivery,
@@ -5483,7 +5521,9 @@ def _persist_reply_page_locked(
     participant_ids = set(conversation.participant_slack_ids or [])
     messages = []
     for message in response.get("messages") or []:
-        if not isinstance(message, dict) or message.get("bot_id"):
+        if not isinstance(message, dict) or not _history_message_author_allowed(
+            conversation, message
+        ):
             continue
         message_id = str(message.get("ts") or "").strip()
         author_id = str(message.get("user") or "").strip()

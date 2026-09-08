@@ -13,7 +13,19 @@ Set `COMMUNITY_CHAT_VOLUNTEER_CHANNELS["volunteer"]` to the verified volunteer c
 Volunteer lives under `/api/v1/community-chat/volunteer/`. It reuses account
 sessions and the existing user JWT. Bootstrap and reporter credentials cannot
 award or review. Community scope derives from deployment configuration and
-cannot be supplied in a request. Reads and writes are disabled by default.
+cannot be supplied in a request. The member page is enabled by default, matching
+its default-visible client tab. Recognition, awards, attendance and bonus flags
+remain independently disabled by default. An explicit
+`COMMUNITY_CHAT_VOLUNTEER_ENABLED=false` still pauses the feature with
+`404 volunteer_disabled`; remove that override or set it to true during an
+authorized rollout. Existing Volunteer migration `community_chat.0009_volunteer`
+and its dependencies must already be applied. This default change introduces no
+migration, historical backfill or wallet credits.
+
+The default journey is tested using an authenticated account with an existing
+wallet: its balance stays intact and unreconciled contribution history stays
+null. Runtime availability still depends on the deployed schema and configuration;
+client tab visibility alone does not prove backend readiness.
 
 ## Wire types
 
