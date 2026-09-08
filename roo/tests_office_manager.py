@@ -2438,7 +2438,7 @@ class OfficeManagerServiceTests(TestCase):
         self.assertEqual(result.assignment.day.announcement_last_error, "")
         self.assertEqual(update_message.call_count, 2)
         self.assertIn(
-            f"Volunteer to be Office Manager for {self.now.date().isoformat()}",
+            "Who’s up for being Office Manager today?",
             update_message.call_args.args[2],
         )
 
@@ -2548,7 +2548,7 @@ class OfficeManagerSchedulerTests(TestCase):
         self.profile_patcher.start()
         self.addCleanup(self.profile_patcher.stop)
 
-    def test_scheduler_posts_once_with_button_and_no_reply_copy(self):
+    def test_scheduler_posts_once_with_button_and_volunteer_benefit(self):
         now = melbourne_at(2026, 8, 3, 8, 30)
         fake_client = Mock()
         fake_client.conversations_history.return_value = {
@@ -2578,11 +2578,14 @@ class OfficeManagerSchedulerTests(TestCase):
             _slack_client_msg_id("daily", day.id),
         )
         blocks_text = json_text(payload["blocks"])
-        self.assertIn(f"Volunteer for {now.date().isoformat()}", blocks_text)
-        self.assertIn("No channel or thread reply is needed", blocks_text)
-        self.assertIn(now.date().isoformat(), payload["text"])
+        self.assertIn("Volunteer for today", blocks_text)
+        self.assertIn("enjoy free coworking for the day", blocks_text)
+        self.assertIn("no Roo points needed", payload["text"])
+        self.assertIn("friendly reminder to book in through Roo", blocks_text)
+        self.assertIn("clean up after themselves", blocks_text)
+        self.assertNotIn("No channel or thread reply is needed", blocks_text)
         self.assertIn(now.date().isoformat(), blocks_text)
-        self.assertIn(NO_FOOD_REMINDER, blocks_text)
+        self.assertNotIn(NO_FOOD_REMINDER, blocks_text)
         get_client.assert_called_once_with(
             bot_token="office-manager-public-roo-test-token"
         )
@@ -3503,7 +3506,7 @@ class OfficeManagerSchedulerTests(TestCase):
         OFFICE_MANAGER_CLAIM_CUTOFF_HOUR=9,
         OFFICE_MANAGER_CLAIM_CUTOFF_MINUTE=15,
     )
-    def test_announcement_uses_configured_claim_cutoff(self):
+    def test_announcement_keeps_configured_cutoff_without_displaying_it(self):
         now = melbourne_at(2026, 8, 3, 8, 30)
         fake_client = Mock()
         fake_client.chat_postMessage.return_value = {
@@ -3520,7 +3523,9 @@ class OfficeManagerSchedulerTests(TestCase):
         blocks_text = json_text(
             fake_client.chat_postMessage.call_args.kwargs["blocks"]
         )
-        self.assertIn("Volunteer before 9:15 AM", blocks_text)
+        day = OfficeManagerDay.objects.get(date=now.date())
+        self.assertEqual(day.claim_cutoff_at, melbourne_at(2026, 8, 3, 9, 15))
+        self.assertNotIn("Volunteer before", blocks_text)
         self.assertNotIn("10:00 AM", blocks_text)
 
     def test_claimed_fallback_text_never_invites_another_volunteer(self):
@@ -3533,7 +3538,7 @@ class OfficeManagerSchedulerTests(TestCase):
             f"Office Manager for {day.date.isoformat()}: A member",
             text,
         )
-        self.assertNotIn("Volunteer to be", text)
+        self.assertNotIn("Who’s up for being Office Manager today?", text)
 
     def test_scheduler_skips_weekends_and_before_announcement(self):
         weekend = run_office_manager_scheduler(

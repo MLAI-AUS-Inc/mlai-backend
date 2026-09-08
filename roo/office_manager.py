@@ -32,6 +32,14 @@ from .services import CoworkingService, PointsService
 logger = logging.getLogger(__name__)
 
 OFFICE_MANAGER_ACTION_ID = "office_manager_volunteer_today"
+OFFICE_MANAGER_VOLUNTEER_HEADING = "Who’s up for being Office Manager today? 🦘"
+OFFICE_MANAGER_VOLUNTEER_BODY = (
+    "Volunteer and *enjoy free coworking for the day—no Roo points needed!*\n\n"
+    "In return, help keep the space welcoming:\n\n"
+    "• Give everyone a friendly reminder to book in through Roo.\n"
+    "• Encourage people to clean up after themselves and leave shared spaces tidy.\n"
+    "• Help new arrivals get settled."
+)
 MAX_OFFICE_MANAGER_GENERATION = (2**31) - 1
 NO_FOOD_REMINDER = "Reminder: no food is permitted in the coworking space."
 COWORKING_SELF_BOOK_REMINDER = (
@@ -260,9 +268,8 @@ def _announcement_text(day: OfficeManagerDay) -> str:
             f"{_coworking_self_book_reminder(day.date)}"
         )
     return (
-        f"Volunteer to be Office Manager for {day_label}. "
-        "Roo will book the selected member in without deducting Roo points. "
-        f"{_coworking_self_book_reminder(day.date)}"
+        f"{OFFICE_MANAGER_VOLUNTEER_HEADING}\n\n"
+        f"{OFFICE_MANAGER_VOLUNTEER_BODY}"
     )
 
 
@@ -318,31 +325,19 @@ def _announcement_blocks(day: OfficeManagerDay) -> list[dict]:
             },
         ]
     return [
-        heading,
         {
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": (
-                    "Volunteer to help welcome members, help people get settled, "
-                    "and reset the space before leaving.\n\n"
-                    f"Roo will book the selected member in for {day.date.isoformat()} without "
-                    "deducting Roo points. No channel or thread reply is needed."
-                    f"\n\n{_coworking_self_book_reminder(day.date)}"
-                ),
+                "text": f"*{OFFICE_MANAGER_VOLUNTEER_HEADING}*",
             },
         },
         {
-            "type": "context",
-            "elements": [
-                {
-                    "type": "mrkdwn",
-                    "text": (
-                        f"Volunteer before {_format_local_time(day.claim_cutoff_at)}. "
-                        f"{NO_FOOD_REMINDER}"
-                    ),
-                }
-            ],
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": OFFICE_MANAGER_VOLUNTEER_BODY,
+            },
         },
         {
             "type": "actions",
@@ -352,7 +347,7 @@ def _announcement_blocks(day: OfficeManagerDay) -> list[dict]:
                     "action_id": OFFICE_MANAGER_ACTION_ID,
                     "text": {
                         "type": "plain_text",
-                        "text": f"Volunteer for {day.date.isoformat()}",
+                        "text": "Volunteer for today",
                     },
                     "style": "primary",
                     "value": json.dumps(
