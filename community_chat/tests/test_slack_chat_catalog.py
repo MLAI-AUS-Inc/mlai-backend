@@ -131,3 +131,30 @@ class SlackChatCatalogTests(SimpleTestCase):
             ),
             [],
         )
+
+    def test_group_catalog_uses_slack_people_not_transport_or_owner_device_keys(self):
+        conversation = self.conversation("GGROUP", "mpim")
+        conversation.grant.slack_user_id = "OWNER"
+        conversation.participant_slack_ids = ["OWNER", "ALICE", "BOB", "BOB"]
+        conversation.participant_profiles = {
+            "OWNER": {
+                "display_name": "Sam",
+                "avatar_url": "https://avatars.slack-edge.com/sam.png",
+            },
+            "ALICE": {
+                "display_name": "Alice",
+                "avatar_url": "https://avatars.slack-edge.com/alice.png",
+            },
+            "REMOVED": {"display_name": "Removed member"},
+        }
+        people = catalog_payload([conversation], "owner-device")[0]["participants"]
+        self.assertEqual(
+            [person["slack_user_id"] for person in people], ["OWNER", "ALICE", "BOB"]
+        )
+        self.assertEqual(
+            people[1]["avatar_url"], "https://avatars.slack-edge.com/alice.png"
+        )
+        self.assertEqual(people[2]["display_name"], "BOB")
+        self.assertTrue(people[0]["is_owner"])
+        self.assertFalse(people[1]["is_owner"])
+        self.assertEqual(catalog_payload([conversation], "another-account"), [])

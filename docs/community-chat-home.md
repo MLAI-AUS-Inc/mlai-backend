@@ -109,3 +109,19 @@ MLAI reporter account remains visible in every MLAI window. Rows include
 `has_reported`: false means the member connected but the backend has not
 accepted a session yet; true with zero window totals means the member has
 history but no session that began in that period.
+
+
+### Slack catalog member presentation
+
+The authenticated Slack status response's `channel_catalog` now includes a
+`participants` array for `im` and `mpim` entries. Each member has `slack_user_id`,
+`display_name`, `avatar_url` (empty when unavailable), and `is_owner`. These are
+existing source Slack profiles, restricted to the conversation's current
+participant IDs. Private-channel entries keep their existing shape.
+
+The catalog remains filtered to mirrors provisioned for the requesting verified
+device and its account. It exposes no message bodies and grants no additional
+relay access. Clients must use the source people for group avatar stacks rather
+than treating transport keys or multiple owner devices as group members.
+Older clients can ignore the additive field; newer clients fall back to native
+relay profiles if it is absent. No schema change or historical backfill is needed.

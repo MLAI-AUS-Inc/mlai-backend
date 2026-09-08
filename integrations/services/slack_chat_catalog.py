@@ -1,7 +1,7 @@
 """Account-scoped Slack conversation metadata stored in connector state.
 
-This contains names and types only, never message bodies. The existing owner
-mirror remains the authority for membership and relay access.
+This contains names, member profiles and types, never message bodies. The
+existing owner mirror remains the authority for membership and relay access.
 """
 
 CATALOG_KEY = "mlai_chat_conversations_v1"
@@ -57,9 +57,32 @@ def catalog_payload(conversations, public_key):
         {
             "channel_id": str(conversation.mlai_channel_id),
             "kind": conversation_kind(conversation),
+            **(
+                {"participants": catalog_participants(conversation)}
+                if conversation_kind(conversation) in {"im", "mpim"}
+                else {}
+            ),
         }
         for conversation in conversations
         if key
         and conversation.mlai_channel_id
         and key in (conversation.participant_buzz_pubkeys or [])
+    ]
+
+
+def catalog_participants(conversation):
+    """Present Slack people independently of the mirror's transport/device keys."""
+    profiles = conversation.participant_profiles or {}
+    return [
+        {
+            "slack_user_id": slack_id,
+            "display_name": str(
+                (profiles.get(slack_id) or {}).get("display_name") or slack_id
+            )[:255],
+            "avatar_url": str(
+                (profiles.get(slack_id) or {}).get("avatar_url") or ""
+            )[:2000],
+            "is_owner": slack_id == conversation.grant.slack_user_id,
+        }
+        for slack_id in dict.fromkeys(conversation.participant_slack_ids or [])
     ]
