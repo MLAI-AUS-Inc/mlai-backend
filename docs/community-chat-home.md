@@ -40,7 +40,20 @@ reviewer or assignee ids, internal tasks, redemption history, or task metadata.
 
 ## Community Home
 
-`GET home/` returns four top-level keys:
+`GET home/` returns six top-level keys:
+
+- `roo_public_key`: the configured public identity of the deployed MLAI Chat Roo
+  assistant, or null when unavailable. `COMMUNITY_CHAT_ROO_PUBLIC_KEY` must be
+  a 64-character hexadecimal public key. This does not create or deploy an
+  assistant; its DM and tagged-message handler must be operational before
+  configuration. Home responses use `Cache-Control: private, no-store`.
+
+- `roo_slack_user_id`: Public Roo's configured Slack bot user ID, or null when
+  disabled or outside the MLAI relay. The native assistant public key takes
+  precedence. Without that key, Talk to Roo opens the member's existing private
+  Slack Roo DM through `POST slack/dms/` with this single recipient. Opening a
+  chat sends no message. Disconnected members first complete the existing Slack
+  consent/OAuth flow. See [Roo chat](community-chat-roo-dm.md).
 
 - `points`: the caller's spendable balance and their own earned, purchased,
   lifetime-earned, and lifetime-spent totals;
@@ -49,7 +62,8 @@ reviewer or assignee ids, internal tasks, redemption history, or task metadata.
 - `rewards`: active rewards with non-zero or unlimited stock and an affordability
   hint for the caller;
 - `feature_flags`: currently `link_love` (false until a verified runtime exists)
-  and `meeting_rooms` (from `MEETING_ROOM_BOOKING_ENABLED`).
+  `meeting_rooms` (from `MEETING_ROOM_BOOKING_ENABLED`), and member-scoped
+  `coworking_booking` (see [the handoff contract](community-chat-coworking.md)).
 
 Task actions include the command `@Roo task claim <task_code>`. The endpoint
 does not use `TaskTemplate`, so closed or unpublished templates cannot appear
@@ -103,3 +117,20 @@ MLAI reporter account remains visible in every MLAI window. Rows include
 `has_reported`: false means the member connected but the backend has not
 accepted a session yet; true with zero window totals means the member has
 history but no session that began in that period.
+
+
+### Slack catalog member presentation
+
+The authenticated Slack status response's `channel_catalog` now includes a
+`participants` array for `im` and `mpim` entries. Each member has `slack_user_id`,
+`display_name`, `avatar_url` (empty when unavailable), and `is_owner`. These are
+existing source Slack profiles, restricted to the conversation's current
+participant IDs. Private-channel entries keep their existing shape.
+
+The catalog remains filtered to mirrors provisioned for the requesting verified
+device and its account. It exposes no message bodies and grants no additional
+relay access. Clients must use the source people for group avatar stacks rather
+than treating transport keys or multiple owner devices as group members.
+Older clients can ignore the additive field. Newer clients show a neutral group
+icon when an imported conversation has no source profiles; relay/device keys
+must never be used as fallback people for a known Slack mirror. No schema change or historical backfill is needed.

@@ -810,6 +810,94 @@ class SlackDmMirrorOwnerTests(APITestCase):
         )
         return grant, conversation
 
+    @override_settings(
+        COMMUNITY_CHAT_RELAY_URL="wss://chat.mlai.au",
+        COMMUNITY_CHAT_ROO_SLACK_WORKSPACE_ID="TMLAI",
+        COMMUNITY_CHAT_ROO_SLACK_USER_ID="UROO",
+    )
+    @patch(
+        "integrations.services.slack_dm_mirror.BuzzBridgeClient.provision_private_conversation"
+    )
+    @patch("integrations.services.slack_dm_mirror.WebClient")
+    def test_open_public_roo_dm_reuses_private_mirror_without_sending(
+        self, web_client, provision
+    ):
+        grant = SlackDmMirrorGrant.objects.create(
+            user=self.first,
+            connection=self.first_connection,
+            slack_workspace_id="TMLAI",
+            slack_user_id="UONE",
+            consented_at=timezone.now(),
+        )
+        client = web_client.return_value
+        client.users_info.side_effect = lambda *, user: {
+            "user": {
+                "id": user,
+                "team_id": "TMLAI",
+                "name": user.lower(),
+                "is_bot": user != "UONE",
+            }
+        }
+        client.conversations_open.return_value = {"channel": {"id": "DROO", "user": "UROO"}}
+        provision.side_effect = lambda pubkeys, **_: {
+            "channel_id": str(uuid.uuid4()),
+            "participant_pubkeys": pubkeys,
+        }
+        opened = open_slack_dm(
+            grant, slack_user_ids=["UROO"], authenticated_public_key="1" * 64
+        )
+        reopened = open_slack_dm(
+            grant, slack_user_ids=["UROO"], authenticated_public_key="1" * 64
+        )
+        self.assertEqual(opened["mlai_channel_id"], reopened["mlai_channel_id"])
+        self.assertEqual(grant.conversations.count(), 1)
+        self.assertEqual(
+            set(grant.conversations.get().participant_slack_ids), {"UONE", "UROO"}
+        )
+        client.chat_postMessage.assert_not_called()
+        for users in [["UOTHER"], ["UROO", "UOTHER"]]:
+            with self.subTest(users=users), self.assertRaises(slack_dm_mirror.SlackDmMirrorError):
+                open_slack_dm(
+                    grant, slack_user_ids=users, authenticated_public_key="1" * 64
+                )
+
+    @override_settings(
+        COMMUNITY_CHAT_RELAY_URL="wss://chat.mlai.au",
+        COMMUNITY_CHAT_ROO_SLACK_WORKSPACE_ID="TMLAI",
+        COMMUNITY_CHAT_ROO_SLACK_USER_ID="UROO",
+    )
+    def test_roo_reply_enqueues_only_in_its_owners_private_conversation(self):
+        _, conversation = self._live_conversation(
+            participant_slack_ids=["UONE", "UROO"],
+            participant_identity_map={"UONE": "1" * 64, "UROO": "3" * 64},
+        )
+        payload = {
+            "team_id": "TMLAI",
+            "event_id": "EvROO",
+            "event": {
+                "type": "message",
+                "channel": "DONE",
+                "user": "UROO",
+                "bot_id": "BROO",
+                "subtype": "bot_message",
+                "ts": "1788800000.000001",
+                "text": "How can I help?",
+            },
+        }
+        result = ingest_slack_dm_event(payload)
+        self.assertEqual(result["status"], "enqueued")
+        delivery = self._message_deliveries(conversation).get()
+        self.assertEqual(delivery.source_author_id, "UROO")
+        self.assertEqual(delivery.encrypted_text, "How can I help?")
+        # Same signed source event cannot duplicate a reply.
+        ingest_slack_dm_event(payload)
+        self.assertEqual(self._message_deliveries(conversation).count(), 1)
+        conversation.participant_slack_ids = ["UONE", "UTWO"]
+        conversation.save(update_fields=("participant_slack_ids",))
+        payload["event"]["ts"] = "1788800001.000001"
+        ingest_slack_dm_event(payload)
+        self.assertEqual(self._message_deliveries(conversation).count(), 1)
+
     def test_singular_status_never_hides_an_older_active_grant(self):
         active = SlackDmMirrorGrant.objects.create(
             user=self.first,

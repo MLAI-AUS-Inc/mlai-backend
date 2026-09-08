@@ -1,5 +1,7 @@
 """Member-scoped data for the MLAI Chat Community Home dashboard."""
 
+import re
+
 from django.conf import settings
 from django.db.models import Q
 from rest_framework.permissions import IsAuthenticated
@@ -9,6 +11,8 @@ from rest_framework.views import APIView
 from hospital.authentication import CustomJWTAuthentication
 from roo.models import RewardsCatalog, Task, TaskAssignment
 from roo.services import PointsService
+from integrations.services.community_bridge.coworking import coworking_booking_available
+from integrations.services.slack_roo import public_roo_target
 
 from .authentication import (
     CommunityChatAccountAuthentication,
@@ -40,6 +44,9 @@ class CommunityHomeView(APIView):
     community_chat_throttle_scope = "community_chat_home"
 
     def get(self, request):
+        configured_roo = str(getattr(settings, "COMMUNITY_CHAT_ROO_PUBLIC_KEY", "") or "").strip().lower()
+        roo_public_key = configured_roo if re.fullmatch(r"[0-9a-f]{64}", configured_roo) else None
+        slack_roo = public_roo_target()
         balance = PointsService.get_balance(request.user)
         available_microroo = PointsService.get_available_microroo(request.user)
 
@@ -98,6 +105,8 @@ class CommunityHomeView(APIView):
 
         return Response(
             {
+                "roo_public_key": roo_public_key,
+                "roo_slack_user_id": slack_roo[1] if slack_roo else None,
                 "points": {
                     "balance": PointsService.microroo_to_legacy_whole(
                         available_microroo
@@ -127,10 +136,12 @@ class CommunityHomeView(APIView):
                     for reward in rewards
                 ],
                 "feature_flags": {
+                    "coworking_booking": coworking_booking_available(request.user),
                     "link_love": False,
                     "meeting_rooms": bool(
                         getattr(settings, "MEETING_ROOM_BOOKING_ENABLED", False)
                     ),
                 },
-            }
+            },
+            headers={"Cache-Control": "private, no-store"},
         )

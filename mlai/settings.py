@@ -493,7 +493,7 @@ REST_FRAMEWORK = {
 # only the public relay/client URLs are returned to browsers.
 COMMUNITY_CHAT_RELAY_URL = os.getenv('COMMUNITY_CHAT_RELAY_URL', 'wss://chat.mlai.au')
 # Volunteer is a separate, read-first rollout. No UI preference enables awards.
-COMMUNITY_CHAT_VOLUNTEER_ENABLED = _env_is_true('COMMUNITY_CHAT_VOLUNTEER_ENABLED', False)
+COMMUNITY_CHAT_VOLUNTEER_ENABLED = _env_is_true('COMMUNITY_CHAT_VOLUNTEER_ENABLED', True)
 COMMUNITY_CHAT_VOLUNTEER_RECOGNITION_ENABLED = _env_is_true('COMMUNITY_CHAT_VOLUNTEER_RECOGNITION_ENABLED', False)
 COMMUNITY_CHAT_VOLUNTEER_AWARDS_ENABLED = _env_is_true('COMMUNITY_CHAT_VOLUNTEER_AWARDS_ENABLED', False)
 COMMUNITY_CHAT_VOLUNTEER_BONUSES_ENABLED = _env_is_true('COMMUNITY_CHAT_VOLUNTEER_BONUSES_ENABLED', False)
@@ -946,6 +946,7 @@ CONTENT_FACTORY_URL = os.getenv('CONTENT_FACTORY_URL') or (
 # calls this Django service over HTTPS; Django reaches Roo over the private
 # DigitalOcean VPC so Roo itself does not need a public hostname.
 ROO_SERVICE_URL = os.getenv('ROO_SERVICE_URL', '').rstrip('/')
+ROO_INTERNAL_MENTION_API_KEY = os.getenv('ROO_INTERNAL_MENTION_API_KEY', '').strip()
 ROO_SIM_PATIENT_KEY = os.getenv('ROO_SIM_PATIENT_KEY', '').strip()
 HEALTH_HACK_API_KEY = os.getenv('HEALTH_HACK_API_KEY', '').strip()
 ROO_API_KEY = os.getenv('ROO_API_KEY', '').strip()
@@ -2060,3 +2061,10 @@ HUMANITIX_API_BASE_URL = os.environ.get(
     'HUMANITIX_API_BASE_URL',
     'https://api.humanitix.com/v1',
 )
+
+# Public identity of the deployed MLAI Chat Roo assistant (not a signing key).
+COMMUNITY_CHAT_ROO_PUBLIC_KEY = os.getenv("COMMUNITY_CHAT_ROO_PUBLIC_KEY", "")
+# Public Roo's identity verified in the MLAI Slack workspace. Empty values pause
+# the first-party DM connection; no other bot is enabled by this setting.
+COMMUNITY_CHAT_ROO_SLACK_WORKSPACE_ID = os.getenv("COMMUNITY_CHAT_ROO_SLACK_WORKSPACE_ID", "T05N9C1QSJC")
+COMMUNITY_CHAT_ROO_SLACK_USER_ID = os.getenv("COMMUNITY_CHAT_ROO_SLACK_USER_ID", "U090FV0GTT4")

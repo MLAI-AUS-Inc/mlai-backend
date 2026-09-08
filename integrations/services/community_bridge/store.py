@@ -300,7 +300,9 @@ def complete_create_delivery(
     destination_channel_id: str,
     destination_parent_message_id: str = "",
     destination_payload: Optional[dict] = None,
+    mark_completed: bool = True,
 ) -> None:
+    """Record the destination before any dependent work, then optionally finish."""
     with transaction.atomic():
         delivery = CommunityBridgeDelivery.objects.select_related("channel").get(id=delivery_id)
         payload = dict(delivery.payload or {})
@@ -322,6 +324,8 @@ def complete_create_delivery(
                 "destination_deleted_at": None,
             },
         )
+        if not mark_completed:
+            return
         delivery.status = CommunityBridgeDeliveryStatus.COMPLETED
         delivery.completed_at = timezone.now()
         delivery.locked_at = None
@@ -330,14 +334,18 @@ def complete_create_delivery(
         _wake_waiting_child_deliveries(delivery)
 
 
-def complete_delivery(*, delivery_id: int) -> None:
-    CommunityBridgeDelivery.objects.filter(id=delivery_id).update(
-        status=CommunityBridgeDeliveryStatus.COMPLETED,
-        completed_at=timezone.now(),
-        locked_at=None,
-        last_error="",
-        updated_at=timezone.now(),
-    )
+def complete_delivery(*, delivery_id: int, wake_waiting_children: bool = False) -> None:
+    """Finish delivery without rewriting a previously checkpointed message link."""
+    with transaction.atomic():
+        CommunityBridgeDelivery.objects.filter(id=delivery_id).update(
+            status=CommunityBridgeDeliveryStatus.COMPLETED,
+            completed_at=timezone.now(),
+            locked_at=None,
+            last_error="",
+            updated_at=timezone.now(),
+        )
+        if wake_waiting_children:
+            _wake_waiting_child_deliveries(CommunityBridgeDelivery.objects.get(id=delivery_id))
 
 
 def mark_link_deleted(

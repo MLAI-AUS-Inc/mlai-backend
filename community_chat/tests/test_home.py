@@ -56,6 +56,43 @@ class CommunityHomeTests(APITestCase):
             microroo_initialized=True,
         )
 
+    @override_settings(COMMUNITY_CHAT_ROO_PUBLIC_KEY="AB" * 32)
+    def test_home_returns_only_configured_roo_public_identity(self):
+        response = self.client.get(self.url)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["roo_public_key"], "ab" * 32)
+
+    @override_settings(COMMUNITY_CHAT_ROO_PUBLIC_KEY="not-a-public-key")
+    def test_invalid_roo_configuration_does_not_create_a_chat_target(self):
+        response = self.client.get(self.url)
+        self.assertIsNone(response.data["roo_public_key"])
+
+    def test_default_volunteer_journey_loads_without_enabling_awards(self):
+        response = self.client.get("/api/v1/community-chat/volunteer/journey/")
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data["feature_flags"]["enabled"])
+        self.assertFalse(response.data["feature_flags"]["awards_enabled"])
+        self.assertFalse(response.data["feature_flags"]["bonuses_enabled"])
+        self.assertEqual(response.data["wallet_balance"], "17")
+        self.assertIsNone(response.data["contribution_roo"])
+        self.assertFalse(response.data["history_reconciled"])
+
+    @override_settings(COMMUNITY_CHAT_VOLUNTEER_ENABLED=False)
+    def test_operator_can_still_pause_volunteer(self):
+        response = self.client.get("/api/v1/community-chat/volunteer/journey/")
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.data["error"], "volunteer_disabled")
+
+    @override_settings(
+        COMMUNITY_CHAT_ROO_SLACK_WORKSPACE_ID="TMLAI",
+        COMMUNITY_CHAT_ROO_SLACK_USER_ID="UROO",
+    )
+    def test_home_exposes_the_configured_public_roo_slack_target(self):
+        response = self.client.get(self.url)
+        self.assertEqual(response.data["roo_slack_user_id"], "UROO")
+        with override_settings(COMMUNITY_CHAT_RELAY_URL="wss://other.example.test"):
+            self.assertIsNone(self.client.get(self.url).data["roo_slack_user_id"])
+
     def task(self, title, **overrides):
         values = {
             "title": title,
@@ -121,7 +158,7 @@ class CommunityHomeTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(
             set(response.data),
-            {"points", "earn_actions", "rewards", "feature_flags"},
+            {"points", "earn_actions", "rewards", "feature_flags", "roo_public_key", "roo_slack_user_id"},
         )
         self.assertEqual(
             response.data["points"],
@@ -158,7 +195,7 @@ class CommunityHomeTests(APITestCase):
         self.assertFalse(rewards["UNLIMITED"]["can_afford"])
         self.assertEqual(
             response.data["feature_flags"],
-            {"link_love": False, "meeting_rooms": True},
+            {"link_love": False, "meeting_rooms": True, "coworking_booking": False},
         )
 
     def test_response_does_not_expose_other_members_or_private_roo_fields(self):
