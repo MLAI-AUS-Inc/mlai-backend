@@ -160,9 +160,9 @@ class CommunityChatHomeFacadeTests(TestCase):
         action_ids = [action["id"] for action in response.data["earn_actions"]]
         self.assertEqual(
             action_ids,
-            ["intro", "monthly_update", f"task:{visible_task.task_code}"],
+            ["intro", "monthly_update", "boost_startup", "helpful_answer", f"task:{visible_task.task_code}"],
         )
-        task_action = response.data["earn_actions"][2]
+        task_action = response.data["earn_actions"][4]
         self.assertEqual(task_action["points"], 4)
         self.assertEqual(
             task_action["command"],
@@ -207,7 +207,7 @@ class CommunityChatHomeFacadeTests(TestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(
             [action["id"] for action in response.data["earn_actions"]],
-            ["intro"],
+            ["intro", "boost_startup", "helpful_answer"],
         )
 
     def test_upcoming_events_are_cached_and_defensively_allowlisted(self):
@@ -215,6 +215,7 @@ class CommunityChatHomeFacadeTests(TestCase):
         service.list_upcoming_events.return_value = [
             {
                 "id": "evt-1",
+                "cover_url": "https://images.lumacdn.com/event-covers/coffee.jpg",
                 "name": "Founder Coffee",
                 "url": "https://lu.ma/founder-coffee",
                 "start_at": "2026-09-01T23:00:00Z",
@@ -251,7 +252,7 @@ class CommunityChatHomeFacadeTests(TestCase):
         self.assertEqual(len(second.data["events"]), 2)
         self.assertEqual(
             set(second.data["events"][0]),
-            {"id", "name", "url", "start_at", "end_at", "timezone"},
+            {"id", "name", "url", "start_at", "end_at", "timezone", "cover_url"},
         )
         self.assertEqual(second["Cache-Control"], "private, max-age=60")
         service_class.assert_called_once_with(timeout=2)

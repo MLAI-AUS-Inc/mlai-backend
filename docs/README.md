@@ -52,7 +52,11 @@ rollout sequence.
 
 ## Roo
 
+- [`meeting-room-booking.md`](meeting-room-booking.md)
 - [`coworking-booking.md`](coworking-booking.md)
+- [`office-manager.md`](office-manager.md) includes the backend-first rollout,
+  scheduler health chain, rollback/drain procedure, and the mandatory
+  read-only audit for historical Roo migration identities `0029`–`0036`.
 - [`roo-linear-channel-issues.md`](roo-linear-channel-issues.md)
 - [`slack-founder-actor-migration-recovery.md`](slack-founder-actor-migration-recovery.md)
 

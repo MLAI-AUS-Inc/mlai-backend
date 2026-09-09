@@ -1,6 +1,7 @@
 import logging
+import time
 from django.core.management.base import BaseCommand, CommandError
-from django.db import transaction, IntegrityError
+from django.db import OperationalError, transaction
 from core.models import User
 from core.actor_ids import actor_ids_for_user
 from core.slack_founder_links import (
@@ -11,10 +12,23 @@ from roo.models import (
     PointsAccount, Ledger, Task, TaskSubmission, 
     CoworkingBooking, RewardRedemption, PointsAdmin, BoostPostAdmission
 )
-from roo.services import PointsService
+from roo.services import CoworkingService, PointsService
 from integrations.services import SlackService
 
 logger = logging.getLogger(__name__)
+
+MERGE_TRANSACTION_RETRY_ATTEMPTS = 3
+
+
+def _retryable_transaction_error(exc):
+    cause = getattr(exc, '__cause__', None)
+    code = (
+        getattr(exc, 'pgcode', None)
+        or getattr(exc, 'sqlstate', None)
+        or getattr(cause, 'pgcode', None)
+        or getattr(cause, 'sqlstate', None)
+    )
+    return code in {'40P01', '40001'}
 
 class Command(BaseCommand):
     help = 'Clean up duplicate users by merging Slack users into Email users'
@@ -61,6 +75,7 @@ class Command(BaseCommand):
         merged_count = 0
         updated_count = 0
         skipped_count = 0
+        commit_failures = []
         
         for slack_user in slack_users:
             slack_id = slack_user.slack_id
@@ -133,17 +148,28 @@ class Command(BaseCommand):
                 ))
                 
                 if commit:
-                    self.merge_users(source=slack_user, target=target_user)
+                    self.merge_users_with_retry(
+                        source_id=slack_user.pk,
+                        target_id=target_user.pk,
+                    )
                 
                 merged_count += 1
                 
             except Exception as e:
                 self.stdout.write(self.style.ERROR(f"Error processing {slack_user.email}: {e}"))
                 skipped_count += 1
+                if commit:
+                    commit_failures.append(
+                        f"{slack_id}: {e.__class__.__name__}"
+                    )
 
         self.stdout.write(self.style.SUCCESS(f"Done. Updated Emails: {updated_count}, Merged Users: {merged_count}, Skipped/Error: {skipped_count}"))
+        if commit_failures:
+            raise CommandError(
+                "User cleanup left unresolved committed merges: "
+                + "; ".join(commit_failures[:10])
+            )
 
-    @transaction.atomic
     def merge_pair(self, source_slack_id, target_slack_id, commit):
         """Merge one known duplicate pair, without consulting the Slack API."""
         if not source_slack_id or not target_slack_id:
@@ -166,16 +192,102 @@ class Command(BaseCommand):
             self.report_related(source)
             return
 
-        with transaction.atomic():
-            self.merge_users(source=source, target=target)
+        self.merge_users_with_retry(
+            source_id=source.pk,
+            target_id=target.pk,
+        )
         self.stdout.write(self.style.SUCCESS('Merge complete'))
+
+    def merge_users_with_retry(
+        self,
+        *,
+        source_id,
+        target_id,
+        before_merge=None,
+    ):
+        """Retry only whole merge transactions aborted by PostgreSQL.
+
+        ``before_merge`` runs after both principals are locked. Callers with
+        identity-specific safety rules can revalidate those rules without
+        opening a race between validation and the durable ownership transfer.
+        Returning ``False`` commits any deliberate preparatory changes while
+        leaving both principals in place.
+        """
+        for attempt in range(MERGE_TRANSACTION_RETRY_ATTEMPTS):
+            try:
+                with transaction.atomic():
+                    principals = {
+                        user.pk: user
+                        for user in User.objects.select_for_update()
+                        .filter(pk__in=sorted([source_id, target_id]))
+                        .order_by('pk')
+                    }
+                    if len(principals) != 2:
+                        raise CommandError('Both merge principals must still exist')
+                    source = principals[source_id]
+                    target = principals[target_id]
+                    if before_merge is not None and not before_merge(
+                        source,
+                        target,
+                    ):
+                        return False
+                    self.merge_users(source=source, target=target)
+                return True
+            except OperationalError as exc:
+                if (
+                    not _retryable_transaction_error(exc)
+                    or attempt + 1 >= MERGE_TRANSACTION_RETRY_ATTEMPTS
+                ):
+                    raise
+                time.sleep(0.05 * (2 ** attempt))
 
     def report_related(self, user):
         """List every row still pointing at this user, so nothing is merged blind."""
+        for label, _field_name, count in self.remaining_related(user):
+            self.stdout.write(f"  {label}: {count}")
+
+    def remaining_related(self, user):
+        """Return every durable relation that would be changed by deleting user.
+
+        The merge intentionally handles only relations whose conflict and
+        accounting semantics are known.  This repository has many additional
+        CASCADE, SET_NULL and PROTECT user relations; silently relying on their
+        ``on_delete`` behavior would either destroy history, orphan ownership,
+        or make the merge fail late.  Introspection makes new user relations
+        fail closed until their merge semantics are explicitly implemented.
+        """
+        remaining = []
         for rel in User._meta.related_objects:
-            count = rel.related_model.objects.filter(**{rel.field.name: user}).count()
+            field_name = rel.field.name
+            count = rel.related_model._base_manager.filter(
+                **{field_name: user}
+            ).count()
             if count:
-                self.stdout.write(f"  {rel.related_model._meta.label}: {count}")
+                remaining.append(
+                    (rel.related_model._meta.label, field_name, count)
+                )
+        for field in User._meta.many_to_many:
+            through_model = field.remote_field.through
+            source_field_name = field.m2m_field_name()
+            count = through_model._base_manager.filter(
+                **{source_field_name: user}
+            ).count()
+            if count:
+                remaining.append((User._meta.label, field.name, count))
+        return remaining
+
+    def assert_no_unhandled_relations(self, user):
+        remaining = self.remaining_related(user)
+        if not remaining:
+            return
+        details = ", ".join(
+            f"{label}.{field_name}={count}"
+            for label, field_name, count in remaining
+        )
+        raise CommandError(
+            "Refusing to delete merge source because durable user relations "
+            f"remain unhandled: {details}"
+        )
 
     @staticmethod
     def _payload_references_actor(value, actor_ids, *, actor_field=False):
@@ -269,6 +381,7 @@ class Command(BaseCommand):
                 f"({', '.join(references)}); manual support is required."
             )
 
+    @transaction.atomic
     def merge_users(self, source, target):
         """
         Merges source (the duplicates/slack-only user) INTO target (the email user).
@@ -296,10 +409,27 @@ class Command(BaseCommand):
         self._assert_no_external_identity_state(source)
         invalidate_unused_slack_founder_link_requests(source, target)
 
+        # Validate and move durable booking/Office Manager ownership before
+        # touching balances or identity fields. Any ambiguity aborts this
+        # entire account merge instead of cascading away an active owner.
+        moved_bookings, moved_assignments = (
+            CoworkingService.transfer_user_ownership_for_merge(
+                source=source,
+                target=target,
+            )
+        )
+
         # 1. Update Basic Info on Target
         if not target.slack_id:
-            target.slack_id = source.slack_id
-            self.stdout.write(f"  Transferred slack_id {source.slack_id} to target")
+            transferred_slack_id = source.slack_id
+            if transferred_slack_id:
+                # ``slack_id`` is unique. Release it from the source before
+                # assigning it to the target; the outer atomic merge restores
+                # both rows if any later ownership transfer fails.
+                source.slack_id = None
+                source.save(update_fields=['slack_id'])
+            target.slack_id = transferred_slack_id
+            self.stdout.write(f"  Transferred slack_id {transferred_slack_id} to target")
         elif target.slack_id != source.slack_id:
              self.stdout.write(self.style.WARNING(f"  Target already has slack_id {target.slack_id} (Source has {source.slack_id}). Keeping Target's. Source's slack_id will be lost/unlinked."))
 
@@ -313,10 +443,22 @@ class Command(BaseCommand):
         target.save()
 
         # 2. Merge Points Data
-        # PointsAccount
+        # PointsAccount. Follow the global user -> booking -> account lock order
+        # and lock both accounts deterministically before changing balances.
+        accounts = {
+            account.user_id: account
+            for account in PointsAccount.objects.select_for_update()
+            .filter(user_id__in=sorted([source.pk, target.pk]))
+            .order_by('user_id')
+        }
         try:
-            source_account = PointsAccount.objects.get(user=source)
-            target_account, created = PointsAccount.objects.get_or_create(user=target)
+            source_account = accounts[source.pk]
+            target_account = accounts.get(target.pk)
+            if target_account is None:
+                PointsAccount.objects.create(user=target)
+                target_account = PointsAccount.objects.select_for_update().get(
+                    user=target
+                )
             
             # Add exact balances; legacy whole-Roo projections are derived.
             PointsService._ensure_microroo_account(source_account)
@@ -333,7 +475,7 @@ class Command(BaseCommand):
             
             self.stdout.write(f"  Merged PointsAccount: +{source_account.balance} pts to target. New balance: {target_account.balance}")
             source_account.delete() 
-        except PointsAccount.DoesNotExist:
+        except KeyError:
             self.stdout.write("  No source PointsAccount to merge.")
             
         # Ledger
@@ -347,27 +489,11 @@ class Command(BaseCommand):
         count = TaskSubmission.objects.filter(user=source).update(user=target)
         self.stdout.write(f"  moved {count} TaskSubmissions")
         
-        # 4. Coworking
-        # Handle conflicts for unique constraint (user, date)
-        source_bookings = CoworkingBooking.objects.filter(user=source)
-        moved_bookings = 0
-        for booking in source_bookings:
-            # Check if target already has a booking for this date
-            if CoworkingBooking.objects.filter(user=target, date=booking.date, status='booked').exists():
-                 self.stdout.write(self.style.WARNING(f"  Skipping duplicate booking for date {booking.date}"))
-                 # Maybe delete the duplicate if it's redundant?
-                 # If we don't move it, and we delete source, it gets deleted (cascade).
-                 # That's probably fine if target already has one.
-                 pass
-            else:
-                booking.user = target
-                try:
-                    booking.save()
-                    moved_bookings += 1
-                except IntegrityError:
-                     self.stdout.write(self.style.WARNING(f"  IntegrityError moving booking {booking.date}"))
-
+        # 4. Coworking and Office Manager ownership moved together above.
         self.stdout.write(f"  moved {moved_bookings} CoworkingBookings")
+        self.stdout.write(
+            f"  moved {moved_assignments} OfficeManagerAssignments"
+        )
         
         # 5. Rewards
         count = RewardRedemption.objects.filter(user=source).update(user=target)
@@ -386,9 +512,10 @@ class Command(BaseCommand):
         count = BoostPostAdmission.objects.filter(user=source).update(user=target)
         self.stdout.write(f"  moved {count} BoostPostAdmissions")
 
-        # 8. Delete Source
-        # Anything still pointing at source is about to be cascaded away or
-        # orphaned by SET_NULL, so name it rather than lose it quietly.
-        self.report_related(source)
+        # 8. Delete Source. Fail closed if any relation was not deliberately
+        # transferred or reconciled above. The surrounding atomic transaction
+        # rolls back all earlier mutations, including Slack identity and
+        # balance changes, when this guard fires.
+        self.assert_no_unhandled_relations(source)
         self.stdout.write(f"  Deleting source user {source.id}")
         source.delete()

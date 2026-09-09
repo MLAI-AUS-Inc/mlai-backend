@@ -549,6 +549,26 @@ def _local_now_utc(now: Optional[datetime], timezone_name: str) -> datetime:
     return now_local.astimezone(timezone.utc)
 
 
+def _public_event_cover_url(value: Any) -> str:
+    """Expose only public Luma CDN artwork, never credentials or arbitrary hosts."""
+    if not isinstance(value, str) or len(value) > 4096:
+        return ""
+    value = value.strip()
+    try:
+        url = urlsplit(value)
+        if (
+            url.scheme == "https"
+            and url.hostname == "images.lumacdn.com"
+            and not url.username
+            and not url.password
+            and url.port in (None, 443)
+        ):
+            return value
+    except ValueError:
+        pass
+    return ""
+
+
 def _public_upcoming_event(
     event: Any,
     *,
@@ -591,6 +611,7 @@ def _public_upcoming_event(
 
     return {
         "id": event_id,
+        "cover_url": _public_event_cover_url(event.get("cover_url")),
         "name": name,
         "url": event_url,
         "start_at": _isoformat_z(start_at),

@@ -1,14 +1,26 @@
-from datetime import date
+from datetime import date, timedelta
 from io import StringIO
+from unittest.mock import patch
+from uuid import uuid4
 
 from django.contrib.auth import get_user_model
+from django.contrib.auth.models import Group
 from django.core.management import CommandError, call_command
+from django.db import OperationalError
 from django.test import TestCase
+from django.utils import timezone
+
+from integrations.models import GoogleConnection, UserIntegration
 
 from roo.models import (
     BoostPostAdmission,
     CoworkingBooking,
     Ledger,
+    MeetingRoom,
+    MeetingRoomBooking,
+    OfficeManagerAssignment,
+    OfficeManagerClaimAttempt,
+    OfficeManagerDay,
     PointsAccount,
     PointsAdmin,
 )
@@ -100,14 +112,37 @@ class MergePairTests(TestCase):
         self.assertEqual(booking.user_id, self.target.id)
 
     def test_points_accounts_are_summed(self):
-        PointsAccount.objects.create(user=self.source, balance=140, lifetime_earned=188)
-        PointsAccount.objects.create(user=self.target, balance=142, lifetime_earned=178)
+        PointsAccount.objects.create(
+            user=self.source,
+            balance=140,
+            lifetime_earned=188,
+            balance_microroo=140_000_000,
+            earned_balance_microroo=130_000_000,
+            purchased_topup_balance_microroo=10_000_000,
+            lifetime_earned_microroo=188_000_000,
+            lifetime_purchased_topup_microroo=10_000_000,
+            lifetime_spent_microroo=58_000_000,
+            microroo_initialized=True,
+        )
+        PointsAccount.objects.create(
+            user=self.target,
+            balance=142,
+            lifetime_earned=178,
+            balance_microroo=142_000_000,
+            earned_balance_microroo=122_000_000,
+            purchased_topup_balance_microroo=20_000_000,
+            lifetime_earned_microroo=178_000_000,
+            lifetime_purchased_topup_microroo=20_000_000,
+            lifetime_spent_microroo=56_000_000,
+            microroo_initialized=True,
+        )
 
         self.run_merge("--commit")
 
         account = PointsAccount.objects.get(user=self.target)
         self.assertEqual(account.balance, 282)
         self.assertEqual(account.lifetime_earned, 366)
+        self.assertEqual(account.purchased_topup_balance_microroo, 30_000_000)
         self.assertEqual(PointsAccount.objects.count(), 1)
 
     def test_duplicate_points_admin_row_is_removed(self):
@@ -125,6 +160,139 @@ class MergePairTests(TestCase):
         self.target.refresh_from_db()
         self.assertEqual(self.target.slack_id, "UTARGET")
 
+    def test_different_slack_identity_merge_refuses_office_manager_history(self):
+        booking_date = date(2026, 9, 3)
+        booking = CoworkingBooking.objects.create(
+            user=self.source,
+            date=booking_date,
+            points_cost=0,
+            booking_source="office_manager",
+        )
+        day = OfficeManagerDay.objects.create(
+            date=booking_date,
+            status="claimed",
+            slack_channel_id="CCOWORK",
+            claim_cutoff_at=timezone.now() + timedelta(hours=1),
+        )
+        assignment = OfficeManagerAssignment.objects.create(
+            day=day,
+            user=self.source,
+            booking=booking,
+        )
+        attempt = OfficeManagerClaimAttempt.objects.create(
+            attempt_id=uuid4(),
+            slack_user_id="USOURCE",
+            booking_date=booking_date,
+            outcome="claimed",
+            assignment=assignment,
+        )
+
+        with self.assertRaisesMessage(
+            ValueError,
+            "Cannot merge different Slack identities",
+        ):
+            self.run_merge("--commit")
+
+        self.source.refresh_from_db()
+        booking.refresh_from_db()
+        assignment.refresh_from_db()
+        attempt.refresh_from_db()
+        self.assertEqual(self.source.slack_id, "USOURCE")
+        self.assertEqual(booking.user_id, self.source.pk)
+        self.assertEqual(assignment.user_id, self.source.pk)
+        self.assertEqual(attempt.slack_user_id, "USOURCE")
+
+    def test_commit_refuses_unhandled_cascade_relation_without_partial_merge(self):
+        room = MeetingRoom.objects.create(slug="merge-guard", name="Merge Guard")
+        starts_at = timezone.now() + timedelta(days=1)
+        booking = MeetingRoomBooking.objects.create(
+            room=room,
+            user=self.source,
+            starts_at=starts_at,
+            ends_at=starts_at + timedelta(hours=1),
+            points_cost=1,
+            client_request_id=uuid4(),
+            requested_by_slack_id="USOURCE",
+        )
+        self.make_ledger(self.source, "merge-guard-ledger")
+
+        with self.assertRaisesMessage(
+            CommandError,
+            "roo.MeetingRoomBooking.user=1",
+        ):
+            self.run_merge("--commit")
+
+        self.source.refresh_from_db()
+        booking.refresh_from_db()
+        self.assertEqual(self.source.slack_id, "USOURCE")
+        self.assertEqual(booking.user_id, self.source.pk)
+        self.assertEqual(Ledger.objects.filter(user=self.source).count(), 1)
+        self.assertEqual(Ledger.objects.filter(user=self.target).count(), 0)
+
+    def test_commit_refuses_unhandled_integration_relation(self):
+        connection = GoogleConnection.objects.create(
+            user=self.source,
+            google_email="source@example.com",
+            refresh_token="encrypted-test-token",
+            scope="openid email",
+        )
+
+        with self.assertRaisesMessage(
+            CommandError,
+            "integrations.GoogleConnection.user=1",
+        ):
+            self.run_merge("--commit")
+
+        self.assertTrue(User.objects.filter(pk=self.source.pk).exists())
+        connection.refresh_from_db()
+        self.assertEqual(connection.user_id, self.source.pk)
+
+    def test_commit_refuses_forward_permission_membership(self):
+        group = Group.objects.create(name="merge-source-privilege")
+        self.source.groups.add(group)
+        self.make_ledger(self.source, "merge-group-ledger")
+
+        with self.assertRaisesMessage(
+            CommandError,
+            "core.User.groups=1",
+        ):
+            self.run_merge("--commit")
+
+        self.source.refresh_from_db()
+        self.target.refresh_from_db()
+        self.assertTrue(self.source.groups.filter(pk=group.pk).exists())
+        self.assertFalse(self.target.groups.filter(pk=group.pk).exists())
+        self.assertEqual(Ledger.objects.filter(user=self.source).count(), 1)
+        self.assertEqual(Ledger.objects.filter(user=self.target).count(), 0)
+
+    def test_bulk_commit_exits_nonzero_when_a_merge_is_refused(self):
+        connection = GoogleConnection.objects.create(
+            user=self.source,
+            google_email="bulk-source@example.com",
+            refresh_token="encrypted-test-token",
+            scope="openid email",
+        )
+
+        with (
+            patch(
+                "core.management.commands.cleanup_users."
+                "SlackService.get_user_profile",
+                side_effect=lambda slack_id: {
+                    "email": self.target.email
+                    if slack_id == "USOURCE"
+                    else self.target.email
+                },
+            ),
+            self.assertRaisesMessage(
+                CommandError,
+                "User cleanup left unresolved committed merges",
+            ),
+        ):
+            call_command("cleanup_users", "--commit", stdout=StringIO())
+
+        self.assertTrue(User.objects.filter(pk=self.source.pk).exists())
+        connection.refresh_from_db()
+        self.assertEqual(connection.user_id, self.source.pk)
     def test_commit_refuses_source_github_installation(self):
         from integrations.models import GitHubInstallation
 
@@ -194,5 +362,167 @@ class MergePairTests(TestCase):
                 "cleanup_users",
                 "--source-slack-id=UNOPE",
                 "--target-slack-id=UTARGET",
+                stdout=StringIO(),
+            )
+
+    def test_merge_retries_whole_transaction_after_deadlock(self):
+        from core.management.commands.cleanup_users import Command
+
+        error = OperationalError("deadlock detected")
+        error.pgcode = "40P01"
+        command = Command()
+        with (
+            patch.object(
+                command,
+                "merge_users",
+                side_effect=[error, None],
+            ) as merge_users,
+            patch("core.management.commands.cleanup_users.time.sleep") as sleep,
+        ):
+            command.merge_users_with_retry(
+                source_id=self.source.pk,
+                target_id=self.target.pk,
+            )
+
+        self.assertEqual(merge_users.call_count, 2)
+        sleep.assert_called_once_with(0.05)
+
+
+class SlackEmailReconciliationTests(TestCase):
+    def test_commit_links_matching_email_user_without_duplicate_principal(self):
+        target = User.objects.create_user(email="member@example.com")
+        UserIntegration.objects.create(slack_user_id="UDIRECT")
+
+        with patch(
+            "core.management.commands.reconcile_slack_users_by_email."
+            "SlackService.get_user_profile",
+            return_value={"email": target.email},
+        ):
+            call_command(
+                "reconcile_slack_users_by_email",
+                "--commit",
+                stdout=StringIO(),
+            )
+
+        target.refresh_from_db()
+        self.assertEqual(target.slack_id, "UDIRECT")
+
+    def test_commit_merges_slack_principal_into_matching_email_principal(self):
+        source = User.objects.create_user(
+            email="USOURCE@slack.placeholder.com",
+            slack_id="USOURCE",
+        )
+        target = User.objects.create_user(email="member@example.com")
+        booking = CoworkingBooking.objects.create(
+            user=source,
+            date=date(2026, 9, 2),
+            points_cost=8,
+        )
+
+        with patch(
+            "core.management.commands.reconcile_slack_users_by_email."
+            "SlackService.get_user_profile",
+            return_value={"email": target.email},
+        ):
+            call_command(
+                "reconcile_slack_users_by_email",
+                "--commit",
+                stdout=StringIO(),
+            )
+
+        self.assertFalse(User.objects.filter(pk=source.pk).exists())
+        target.refresh_from_db()
+        booking.refresh_from_db()
+        self.assertEqual(target.slack_id, "USOURCE")
+        self.assertEqual(booking.user_id, target.pk)
+
+    def test_commit_exits_nonzero_when_durable_merge_fails(self):
+        User.objects.create_user(
+            email="USOURCE@slack.placeholder.com",
+            slack_id="USOURCE",
+        )
+        target = User.objects.create_user(email="member@example.com")
+
+        with (
+            patch(
+                "core.management.commands.reconcile_slack_users_by_email."
+                "SlackService.get_user_profile",
+                return_value={"email": target.email},
+            ),
+            patch(
+                "core.management.commands.reconcile_slack_users_by_email."
+                "CleanupUsersCommand.merge_users_with_retry",
+                side_effect=ValueError("ambiguous ownership"),
+            ),
+            self.assertRaises(CommandError),
+        ):
+            call_command(
+                "reconcile_slack_users_by_email",
+                "--commit",
+                stdout=StringIO(),
+            )
+
+    def test_commit_refuses_duplicate_with_unhandled_history(self):
+        source = User.objects.create_user(
+            email="USOURCE@slack.placeholder.com",
+            slack_id="USOURCE",
+        )
+        target = User.objects.create_user(email="member@example.com")
+        connection = GoogleConnection.objects.create(
+            user=source,
+            google_email="source@example.com",
+            refresh_token="encrypted-test-token",
+            scope="openid email",
+        )
+
+        with (
+            patch(
+                "core.management.commands.reconcile_slack_users_by_email."
+                "SlackService.get_user_profile",
+                return_value={"email": target.email},
+            ),
+            self.assertRaisesMessage(
+                CommandError,
+                "integrations.GoogleConnection.user=1",
+            ),
+        ):
+            call_command(
+                "reconcile_slack_users_by_email",
+                "--commit",
+                stdout=StringIO(),
+            )
+
+        source.refresh_from_db()
+        target.refresh_from_db()
+        connection.refresh_from_db()
+        self.assertEqual(source.slack_id, "USOURCE")
+        self.assertIsNone(target.slack_id)
+        self.assertEqual(connection.user_id, source.pk)
+
+    def test_commit_exits_nonzero_on_conflicting_target_slack_identity(self):
+        User.objects.create_user(
+            email="USOURCE@slack.placeholder.com",
+            slack_id="USOURCE",
+        )
+        target = User.objects.create_user(
+            email="member@example.com",
+            slack_id="UOTHER",
+        )
+
+        with (
+            patch(
+                "core.management.commands.reconcile_slack_users_by_email."
+                "SlackService.get_user_profile",
+                side_effect=lambda slack_id: {
+                    "email": target.email
+                    if slack_id == "USOURCE"
+                    else "other@example.com"
+                },
+            ),
+            self.assertRaises(CommandError),
+        ):
+            call_command(
+                "reconcile_slack_users_by_email",
+                "--commit",
                 stdout=StringIO(),
             )

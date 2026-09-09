@@ -70,6 +70,19 @@ class VolunteerPolicyTests(unittest.TestCase):
         self.assertEqual(start.month, 1)
         self.assertEqual(end.month, 2)
 
+    def test_startup_engagement_is_two_points_for_each_distinct_post(self):
+        boost = catalogue()["boost_startup"]
+        self.assertEqual(boost["reward_roo"], "2")
+        self.assertEqual(boost["reward_max_roo"], "2")
+        self.assertEqual(boost["period"], "post")
+        self.assertEqual(boost["cap"], 1)
+        self.assertEqual(boost["repeat_label"], "Once per post")
+        self.assertIn("#boost-my-startup", boost["description"])
+
+    def test_retired_learning_update_is_not_suggested(self):
+        action = dict(catalogue()["monthly_learning_update"], eligible=True, completed=False)
+        self.assertEqual(next_actions([action]), [])
+
     def test_catalogue_and_verified_checklist(self):
         actions = catalogue(20)
         self.assertEqual(len(actions), 17)
