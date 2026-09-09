@@ -492,6 +492,7 @@ REST_FRAMEWORK = {
 # MLAI Chat device bootstrap. The adapter URL is private service-to-service;
 # only the public relay/client URLs are returned to browsers.
 COMMUNITY_CHAT_RELAY_URL = os.getenv('COMMUNITY_CHAT_RELAY_URL', 'wss://chat.mlai.au')
+COMMUNITY_CHAT_ROLE_SERVICE_TOKEN = os.getenv('COMMUNITY_CHAT_ROLE_SERVICE_TOKEN', '')
 # Volunteer is a separate, read-first rollout. No UI preference enables awards.
 COMMUNITY_CHAT_VOLUNTEER_ENABLED = _env_is_true('COMMUNITY_CHAT_VOLUNTEER_ENABLED', True)
 COMMUNITY_CHAT_VOLUNTEER_RECOGNITION_ENABLED = _env_is_true('COMMUNITY_CHAT_VOLUNTEER_RECOGNITION_ENABLED', False)

@@ -15,6 +15,27 @@ from .volunteer.models import (  # noqa: F401 -- Django model discovery
 )
 
 
+class Moderator(models.Model):
+    """Chat-only appointment: channel creation and channel-wide announcements.
+
+    This is deliberately independent of PointsAdmin, Django staff status and
+    committee membership. Removing or disabling it immediately removes its
+    authority from subsequent relay permission checks.
+    """
+
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="chat_moderator",
+    )
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"{self.user} (Moderator)"
+
+
 class DeviceBindingStatus(models.TextChoices):
     PENDING = "pending", "Pending"
     VERIFIED = "verified", "Verified"
