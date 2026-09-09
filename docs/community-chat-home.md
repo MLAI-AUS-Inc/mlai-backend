@@ -134,3 +134,23 @@ than treating transport keys or multiple owner devices as group members.
 Older clients can ignore the additive field. Newer clients show a neutral group
 icon when an imported conversation has no source profiles; relay/device keys
 must never be used as fallback people for a known Slack mirror. No schema change or historical backfill is needed.
+
+## Roo Points member guide refresh (September 2026)
+
+Home includes `boost_startup` (2 points, once for each distinct verified startup
+post) and `helpful_answer` (3 points, existing approval and weekly cap). The
+canonical volunteer policy supplies the amounts. Startup engagement retains
+source verification, activation flags and per-member/per-post idempotency;
+the former four-post monthly cap is removed prospectively. Existing awards
+and balances are unchanged. Channel destinations are `#boost-my-startup` and
+`#i-need-advice-or-help`.
+
+Member journey responses and suggestions omit `monthly_learning_update`;
+the policy key remains available to interpret historical receipts. Home now
+returns up to 100 available rewards so the Roo Points page can display the
+full catalogue; the clients select three popular rewards plus the 72-point
+newsletter feature, which is requested through Roo.
+
+Clients display whole points and retain exact ledger strings. Reconciliation
+checks and audit timestamps are still returned but update timestamps are not
+shown on the simplified member pages. This change requires no migration.

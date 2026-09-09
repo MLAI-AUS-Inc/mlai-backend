@@ -2,6 +2,8 @@
 
 import re
 
+from .volunteer.policy import catalogue
+
 from django.conf import settings
 from django.db.models import Q
 from rest_framework.permissions import IsAuthenticated
@@ -65,7 +67,7 @@ class CommunityHomeView(APIView):
         rewards = (
             RewardsCatalog.objects.filter(is_active=True)
             .filter(Q(stock_remaining__isnull=True) | Q(stock_remaining__gt=0))
-            .order_by("cost_points", "name")[:HOME_ITEM_LIMIT]
+            .order_by("cost_points", "name")[:100]
         )
 
         earn_actions = [
@@ -91,6 +93,15 @@ class CommunityHomeView(APIView):
                     "points": monthly_update_points,
                 }
             )
+        contribution_actions = catalogue(monthly_update_points)
+        for key in ("boost_startup", "helpful_answer"):
+            action = contribution_actions[key]
+            earn_actions.append({
+                "id": key,
+                "name": action["title"],
+                "description": action["description"],
+                "points": int(action["reward_roo"]),
+            })
         earn_actions.extend(
             {
                 "id": f"task:{task.task_code}",

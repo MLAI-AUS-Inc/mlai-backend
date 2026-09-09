@@ -201,6 +201,8 @@ def action_catalogue(user):
     now = timezone.now()
     attendance = attendance_verified(user)
     for action in active_policy().values():
+        if action["key"] == "monthly_learning_update":
+            continue
         item = dict(action)
         done = (
             VolunteerRecognition.objects.filter(
