@@ -701,10 +701,11 @@ def scan_github_project(
         elif 'company_context' in cf_config:
             config.company_context = cf_config['company_context']
 
+        from content_factory.editorial_catalog import merge_strategy
         if 'pillar_strategy' in cf_data:
-            config.pillar_strategy = cf_data['pillar_strategy']
+            config.pillar_strategy = merge_strategy(config.pillar_strategy, cf_data['pillar_strategy'])
         elif 'pillar_strategy' in cf_config:
-            config.pillar_strategy = cf_config['pillar_strategy']
+            config.pillar_strategy = merge_strategy(config.pillar_strategy, cf_config['pillar_strategy'])
 
         if 'article_system' in cf_data or 'article_system' in cf_config:
             raw_article_system = config.article_system if isinstance(config.article_system, dict) else {}
@@ -722,7 +723,15 @@ def scan_github_project(
         if 'registry_path' in cf_data:
             config.registry_path = cf_data.get('registry_path')
 
-        config.save()
+        # The service config endpoint uses the same organization lock for
+        # editorial catalog writes. Refresh that reserved policy immediately
+        # before this scan save so a stale scan cannot undo a newer approval.
+        from django.db import transaction
+        with transaction.atomic():
+            Organization.objects.select_for_update().get(pk=org.pk)
+            latest_strategy = OrganizationContentConfig.objects.filter(pk=config.pk).values_list("pillar_strategy", flat=True).get()
+            config.pillar_strategy = merge_strategy(latest_strategy, config.pillar_strategy)
+            config.save()
         logger.info(f"Updated OrganizationContentConfig for {org_domain}")
 
         # Save generated components and component mapping from scan response
