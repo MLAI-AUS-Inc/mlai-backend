@@ -342,13 +342,17 @@ class CoworkingBookingSerializer(serializers.ModelSerializer):
         model = CoworkingBooking
         fields = [
             'id', 'user', 'user_email', 'date', 'status', 'points_cost',
+            'booking_source', 'original_points_cost',
             'is_refundable', 'created_at', 'cancelled_at'
         ]
-        read_only_fields = ['id', 'status', 'points_cost', 'created_at', 'cancelled_at']
+        read_only_fields = [
+            'id', 'status', 'points_cost', 'booking_source',
+            'original_points_cost', 'created_at', 'cancelled_at',
+        ]
     
     def get_is_refundable(self, obj):
         from .services import CoworkingService
-        if obj.status != 'booked':
+        if obj.status != 'booked' or obj.points_cost <= 0:
             return False
         return CoworkingService.is_refundable(obj.date)
 

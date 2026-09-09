@@ -624,6 +624,11 @@ class MeetingRoomService:
         cls._ensure_enabled()
         request_id = cls.validate_client_request_id(client_request_id)
 
+        # Every points-bearing mutation begins with the principal row. This
+        # keeps Meeting Room booking on the same User -> owned rows -> account
+        # order as points updates and identity merges.
+        user = User.objects.select_for_update().get(pk=user.pk)
+
         existing = MeetingRoomBooking.objects.select_for_update().filter(
             client_request_id=request_id
         ).first()
@@ -785,6 +790,7 @@ class MeetingRoomService:
         booking_id: str,
         requested_by_slack_id: str,
     ) -> tuple[MeetingRoomBooking, bool, bool]:
+        user = User.objects.select_for_update().get(pk=user.pk)
         try:
             booking = MeetingRoomBooking.objects.select_for_update().select_related(
                 'room'

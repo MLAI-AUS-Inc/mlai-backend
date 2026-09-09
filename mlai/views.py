@@ -125,6 +125,40 @@ def health_ready(request):
     if migration_response is not None:
         return migration_response
 
+    if getattr(settings, "IS_PRODUCTION_ENV", False):
+        try:
+            from roo.models import ScheduledDiscoveryHeartbeat
+
+            heartbeat = ScheduledDiscoveryHeartbeat.objects.filter(
+                name="scheduled_discovery"
+            ).first()
+            max_age = timedelta(
+                seconds=int(
+                    settings.SCHEDULED_DISCOVERY_HEALTH_MAX_AGE_SECONDS
+                )
+            )
+            now = timezone.now()
+            scheduler_ready = bool(
+                heartbeat
+                and heartbeat.last_succeeded_at
+                and now - heartbeat.last_succeeded_at <= max_age
+                and (
+                    heartbeat.last_failed_at is None
+                    or heartbeat.last_failed_at <= heartbeat.last_succeeded_at
+                )
+            )
+        except Exception as exc:
+            logger.warning("Scheduler readiness check failed: %s", exc)
+            scheduler_ready = False
+        if not scheduler_ready:
+            return JsonResponse(
+                _health_payload(
+                    status="not_ready",
+                    message="Required scheduler has no recent successful tick",
+                ),
+                status=503,
+            )
+
     return JsonResponse(
         _health_payload(
             status="ok",
