@@ -26,7 +26,7 @@ from django.conf import settings
 from django.core.cache import cache
 from django.contrib.auth import get_user_model
 from django.db import transaction
-from django.db.models import Min, Q
+from django.db.models import Case, IntegerField, Min, Q, Value, When
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from slack_sdk import WebClient
@@ -689,7 +689,10 @@ def _store_conversation_membership_intent(
         if channel_metadata is not None:
             metadata = dict(connection.provider_metadata or {})
             catalog = dict(metadata.get(CATALOG_KEY) or {})
-            catalog[slack_conversation_id] = channel_metadata
+            catalog[slack_conversation_id] = {
+                **(catalog.get(slack_conversation_id) or {}),
+                **channel_metadata,
+            }
             metadata[CATALOG_KEY] = catalog
             connection.provider_metadata = metadata
             connection.save(update_fields=("provider_metadata", "updated_at"))
@@ -786,12 +789,13 @@ def _store_conversation_profiles(
     required_scopes: set[str] | frozenset[str],
     participant_slack_ids: list[str],
     participant_profiles: dict[str, dict[str, str]],
+    activity_seconds: int | None = None,
 ) -> SlackDmMirrorConversation:
     """Persist profiles only if the locked membership intent is still current."""
 
     expected_ids = sorted(participant_slack_ids)
     with transaction.atomic():
-        grant, _ = _lock_slack_grant_api_authority(
+        grant, connection = _lock_slack_grant_api_authority(
             authority,
             required_scopes=required_scopes,
         )
@@ -807,6 +811,16 @@ def _store_conversation_profiles(
             raise SlackDmMirrorAuthorizationError(
                 "Slack private conversation membership changed during profile lookup."
             )
+        if activity_seconds is not None:
+            metadata = dict(connection.provider_metadata or {})
+            catalog = dict(metadata.get(CATALOG_KEY) or {})
+            catalog[conversation.slack_conversation_id] = {
+                **(catalog.get(conversation.slack_conversation_id) or {}),
+                "latest_message_ts": str(activity_seconds),
+            }
+            metadata[CATALOG_KEY] = catalog
+            connection.provider_metadata = metadata
+            connection.save(update_fields=("provider_metadata", "updated_at"))
         conversation.grant = grant
         conversation.participant_profiles = participant_profiles
         conversation.save(update_fields=("participant_profiles", "updated_at"))
@@ -2207,6 +2221,42 @@ def _slack_conversation_is_recent(
     return activity_seconds is None or activity_seconds >= activity_cutoff
 
 
+def _discover_conversation_activity(authority, raw, *, required_scopes):
+    """Read only the latest message timestamp when the directory omits it.
+
+    Slack's users.conversations response usually omits latest. Its info endpoint
+    supplies that marker for DMs, including those older than the history window.
+    The message body returned alongside it is never persisted or imported here.
+    """
+    activity = _slack_conversation_activity_seconds(raw)
+    if activity is not None:
+        return activity
+    try:
+        response = _call_slack_with_grant_authority(
+            authority,
+            "conversations_info",
+            required_scopes=required_scopes,
+            channel=raw["id"],
+        )
+    except Exception as exc:
+        if (
+            isinstance(exc, (SlackDmMirrorAuthorizationError, SlackDmMirrorRateLimited))
+            or _is_slack_auth_error(exc)
+            or _slack_retry_after_seconds(exc)
+        ):
+            raise
+        # An unavailable metadata hint must not prevent the bounded history scan.
+        return None
+    details = response.get("channel")
+    if (
+        not isinstance(details, dict)
+        or details.get("id") != raw.get("id")
+        or _is_external_shared_conversation(details)
+    ):
+        return None
+    return _slack_conversation_activity_seconds(details)
+
+
 def _embedded_conversation_participant_ids(
     raw_channels: list[dict[str, Any]],
     *,
@@ -2684,7 +2734,10 @@ def _discover_conversation(
         required_scopes=required_scopes,
         slack_conversation_id=channel_id,
         participant_slack_ids=participant_ids,
-        channel_metadata={"kind": kind, "name": str(raw.get("name") or "")[:255]},
+        channel_metadata={
+            "kind": kind,
+            "name": str(raw.get("name") or "")[:255],
+        },
     )
     _preload_slack_profiles(authority, set(participant_ids), profile_cache)
     participant_profiles = {
@@ -2696,6 +2749,10 @@ def _discover_conversation(
         )
         for slack_user_id in participant_ids
     }
+    # Fence changed membership before any optional metadata network lookup.
+    activity = _discover_conversation_activity(
+        authority, raw, required_scopes=required_scopes
+    )
     conversation = _store_conversation_profiles(
         grant.pk,
         conversation.pk,
@@ -2703,6 +2760,7 @@ def _discover_conversation(
         required_scopes=required_scopes,
         participant_slack_ids=participant_ids,
         participant_profiles=participant_profiles,
+        activity_seconds=activity,
     )
     periodic_reconciliation_due = bool(
         conversation.history_backfilled_at is not None
@@ -4846,7 +4904,14 @@ def process_due_history_backfills(limit: int = 1) -> int:
                     last_error__startswith="history_scan_processing:",
                     updated_at__gte=now - timedelta(minutes=5),
                 )
-                .order_by("updated_at", "id")
+                .annotate(
+                    history_page_priority=Case(
+                        When(oldest_synced_ts="", then=Value(0)),
+                        default=Value(1),
+                        output_field=IntegerField(),
+                    )
+                )
+                .order_by("history_page_priority", "updated_at", "id")
                 .values("id", "grant_id")
                 .first()
             )

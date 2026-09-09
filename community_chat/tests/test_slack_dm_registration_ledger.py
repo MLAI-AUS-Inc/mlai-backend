@@ -412,9 +412,7 @@ class SlackDmRegistrationLedgerTests(APITestCase):
         now = timezone.now()
         channel_ids = [str(uuid.uuid4()) for _ in range(101)]
         with transaction.atomic():
-            grant = SlackDmMirrorGrant.objects.select_for_update().get(
-                pk=self.grant.pk
-            )
+            grant = SlackDmMirrorGrant.objects.select_for_update().get(pk=self.grant.pk)
             conversation = SlackDmMirrorConversation.objects.select_for_update().get(
                 pk=self.conversation.pk
             )
@@ -423,9 +421,7 @@ class SlackDmRegistrationLedgerTests(APITestCase):
             grant.save(update_fields=("status", "revoked_at", "updated_at"))
             conversation.status = SlackDmMirrorConversationStatus.PAUSED
             conversation.mlai_channel_id = None
-            conversation.save(
-                update_fields=("status", "mlai_channel_id", "updated_at")
-            )
+            conversation.save(update_fields=("status", "mlai_channel_id", "updated_at"))
             for channel_id in channel_ids:
                 row = registration_ledger.create_registration_row_locked(
                     conversation,
@@ -450,9 +446,7 @@ class SlackDmRegistrationLedgerTests(APITestCase):
         self.assertEqual(unregister.call_count, 1)
         with transaction.atomic():
             self.assertTrue(
-                registration_ledger.registration_cleanup_pending_locked(
-                    self.grant.pk
-                )
+                registration_ledger.registration_cleanup_pending_locked(self.grant.pk)
             )
         self.grant.refresh_from_db()
         self.assertEqual(
@@ -469,9 +463,7 @@ class SlackDmRegistrationLedgerTests(APITestCase):
         self.assertEqual(unregister.call_count, 101)
         with transaction.atomic():
             self.assertFalse(
-                registration_ledger.registration_cleanup_pending_locked(
-                    self.grant.pk
-                )
+                registration_ledger.registration_cleanup_pending_locked(self.grant.pk)
             )
         self.grant.refresh_from_db()
         self.assertEqual(self.grant.last_error, "")
@@ -825,6 +817,82 @@ class SlackDmRegistrationLedgerTests(APITestCase):
             registration_ledger.REGISTRATION_STATE_ACTIVE,
         )
 
+    def test_discovery_fences_old_membership_before_activity_network_io(self):
+        old_attempt = self._prepare_attempt()
+        old_channel = uuid.uuid4()
+        self.conversation.status = SlackDmMirrorConversationStatus.LIVE
+        self.conversation.mlai_channel_id = old_channel
+        self.conversation.save(
+            update_fields=("status", "mlai_channel_id", "updated_at")
+        )
+        callback_results = []
+
+        def profile_lookup_fails_after_callback(*_args, **_kwargs):
+            callback_results.append(
+                slack_dm_mirror.ingest_slack_dm_event(
+                    {
+                        "team_id": "TLEDGER",
+                        "authorizations": [{"user_id": "UOWNER"}],
+                        "event": {
+                            "channel": "DLEDGER",
+                            "ts": "1787900003.000100",
+                            "user": "UNEW",
+                            "text": "must not enter the old private channel",
+                        },
+                    }
+                )
+            )
+            raise RuntimeError("activity lookup failed")
+
+        client = MagicMock()
+        with (
+            patch("integrations.services.slack_dm_mirror._preload_slack_profiles"),
+            patch(
+                "integrations.services.slack_dm_mirror._slack_profile", return_value={}
+            ),
+            patch(
+                "integrations.services.slack_dm_mirror._discover_conversation_activity",
+                side_effect=profile_lookup_fails_after_callback,
+            ),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "activity lookup failed"):
+                slack_dm_mirror._discover_conversation(
+                    self.grant,
+                    client,
+                    {"id": "DLEDGER", "user": "UNEW"},
+                    profile_cache={},
+                    force_backfill=False,
+                    reset_history=False,
+                )
+
+        self.assertEqual(
+            callback_results,
+            [{"status": "discovery_queued", "staged": 1}],
+        )
+        self.assertFalse(self._message_rows().exists())
+        self.conversation.refresh_from_db()
+        self.assertEqual(
+            self.conversation.participant_slack_ids,
+            ["UNEW", "UOWNER"],
+        )
+        self.assertNotEqual(
+            self.conversation.status,
+            SlackDmMirrorConversationStatus.LIVE,
+        )
+        self.assertIsNone(self.conversation.mlai_channel_id)
+        returned_channel = uuid.uuid4()
+        self.assertFalse(
+            registration_ledger.finalize_registration_attempt(
+                old_attempt["attempt_id"],
+                channel_id=str(returned_channel),
+            )
+        )
+        old_row = SlackDmMirrorDelivery.objects.get(pk=old_attempt["attempt_id"])
+        self.assertNotEqual(
+            old_row.metadata["registration_state"],
+            registration_ledger.REGISTRATION_STATE_ACTIVE,
+        )
+
     @patch(
         "integrations.services.slack_dm_registration_ledger.BuzzBridgeClient.unregister_private_conversation"
     )
@@ -916,9 +984,7 @@ class SlackDmRegistrationLedgerTests(APITestCase):
         self.conversation.status = SlackDmMirrorConversationStatus.PAUSED
         self.conversation.save(update_fields=("status", "updated_at"))
         with transaction.atomic():
-            grant = SlackDmMirrorGrant.objects.select_for_update().get(
-                pk=self.grant.pk
-            )
+            grant = SlackDmMirrorGrant.objects.select_for_update().get(pk=self.grant.pk)
             conversation = SlackDmMirrorConversation.objects.select_for_update().get(
                 pk=self.conversation.pk
             )
@@ -1403,9 +1469,7 @@ class SlackDmRegistrationLedgerTests(APITestCase):
 
         self.assertEqual(slack_dm_mirror.process_due_history_backfills(), 0)
         self.assertFalse(
-            self._message_rows()
-            .filter(source_message_id="1787900000.000100")
-            .exists()
+            self._message_rows().filter(source_message_id="1787900000.000100").exists()
         )
         self.assertTrue(
             all(row.encrypted_text == "" for row in SlackDmMirrorDelivery.objects.all())
