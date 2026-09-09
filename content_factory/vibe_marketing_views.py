@@ -14682,7 +14682,7 @@ class VibeMarketingScanView(APIView):
             "request_source": CONTENT_FACTORY_REQUEST_SOURCE,
             "scaffold_if_missing": scaffold_if_missing,
             "auto_setup_preview": auto_setup_preview,
-            "generate_components": True,
+            "generate_components": False,
             "article_surface_mode": article_surface_mode,
             "scan_purpose": scan_purpose,
             "force_refresh": force_refresh,
@@ -15051,9 +15051,7 @@ class VibeMarketingDiscoveryView(APIView):
         if error_response:
             return error_response
         config = _get_config(context.organization)
-        blocked_response = _setup_blocked_response_for_generation(context, config)
-        if blocked_response:
-            return blocked_response
+        # Topic research has no dependency on a merged repository scaffold.
         payload = {
             "domain": context.organization.domain,
             "slack_user_id": founder_actor_id_for_user(request.user),
@@ -15320,8 +15318,6 @@ class VibeMarketingArticleView(APIView):
             return error_response
         config = _get_config(context.organization)
         blocked_response = _setup_blocked_response_for_generation(context, config)
-        if blocked_response:
-            return blocked_response
         selected_title = str(
             _request_value(request.data, "selected_title", "selectedTitle", "candidate_title", "candidateTitle", default="")
             or ""
@@ -15454,6 +15450,11 @@ class VibeMarketingArticleView(APIView):
                 default=False,
             )
         )
+        if blocked_response:
+            if delivery_mode_explicit and requested_delivery_mode == "publish_code":
+                return blocked_response
+            requested_delivery_mode = "content_only"
+            delivery_mode_explicit = True
         # "Operable" repo = the platform can actually reach the repo: a live user OAuth
         # token OR a stamped GitHub App installation (the credential every scan/scaffold/
         # publish/live-preview operation authenticates with). The prior check only honored
@@ -15534,6 +15535,18 @@ class VibeMarketingArticleView(APIView):
             "request_source": CONTENT_FACTORY_REQUEST_SOURCE,
             "analytics_article_id": str(uuid.uuid4()),
         }
+        # Resolve approved catalog versions before charging or dispatching.
+        from content_factory.editorial_catalog import catalog_payload
+        from content_factory.editorial_contract import ArticleEditorialBrief, AudienceOption, normalize_cta_options, resolve_editorial_brief
+        catalog = catalog_payload(config.pillar_strategy)
+        editorial_brief = _request_value(request.data, "editorial_brief", "editorialBrief", default=None)
+        if catalog["audience_options"] or catalog["cta_options"] or editorial_brief:
+            try:
+                brief = ArticleEditorialBrief.model_validate(editorial_brief)
+                resolve_editorial_brief(brief, [AudienceOption.model_validate(a) for a in catalog["audience_options"]], normalize_cta_options(catalog["cta_options"]))
+            except ValueError as exc:
+                return Response({"detail": str(exc), "field": "editorialBrief"}, status=status.HTTP_400_BAD_REQUEST)
+            payload["editorial_brief"] = brief.model_dump(mode="json")
         payload["analytics_config"] = analytics_config_for_content_factory(
             context.organization,
             analytics_article_id=payload["analytics_article_id"],

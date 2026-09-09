@@ -37,6 +37,7 @@ from content_factory.article_setup_reset import (
     clear_cancelled_article_setup_config,
 )
 from content_factory.authors import normalize_authors, org_config_author_payload
+from content_factory.editorial_catalog import catalog_payload, merge_strategy, update_catalog
 from content_factory.auth import content_factory_github_connection_state
 from content_factory.delivery import (
     build_content_factory_preview_url,
@@ -488,6 +489,7 @@ class ContentFactoryOrgConfigView(APIView):
         # authors + default_author_name/default_author_profile: content-factory re-fetches this
         # per run and the renderer seeds its inline author byline from the default profile.
         response_data.update(org_config_author_payload(config))
+        response_data.update(catalog_payload(config.pillar_strategy if config else {}))
 
         # Opt-in heavy payload for the scan hydration path ONLY: the full stored component
         # rows (including source code), so a re-scan at an unchanged repo SHA can replay the
@@ -759,11 +761,23 @@ class ContentFactoryOrgConfigView(APIView):
                 defaults['publish_targets'] = persisted_targets
                 defaults['default_publish_target_id'] = persisted_default_id
 
-        # Upsert config
-        config, config_created = OrganizationContentConfig.objects.update_or_create(
-            organization=org,
-            defaults=defaults
-        )
+        # Serialize policy edits and scan refreshes on the owning organization.
+        # The catalog lives with content strategy but generated pillars cannot
+        # replace it, including when a scan returns a stale snapshot.
+        with transaction.atomic():
+            Organization.objects.select_for_update().get(pk=org.pk)
+            current_config = OrganizationContentConfig.objects.filter(organization=org).first()
+            current_strategy = current_config.pillar_strategy if current_config else {}
+            if 'pillar_strategy' in defaults:
+                defaults['pillar_strategy'] = merge_strategy(current_strategy, defaults['pillar_strategy'])
+            if 'audience_options' in data or 'cta_options' in data:
+                try:
+                    defaults['pillar_strategy'] = update_catalog(defaults.get('pillar_strategy', current_strategy), data)
+                except ValueError as exc:
+                    return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+            config, config_created = OrganizationContentConfig.objects.update_or_create(
+                organization=org, defaults=defaults,
+            )
         
         # Handle generated_components array
         generated_components_data = data.get('generated_components', [])
