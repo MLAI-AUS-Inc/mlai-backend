@@ -268,3 +268,23 @@ through Level 6 per eligible member, less any already credited milestones.
 
 Rollback disables new issuance and keeps history/ledger entries. Source receipts
 stay retryable; a failed client refresh cannot repeat a wallet transaction.
+
+## Roo Points member guide refresh (September 2026)
+
+Home includes `boost_startup` (2 points, once for each distinct verified startup
+post) and `helpful_answer` (3 points, existing approval and weekly cap). The
+canonical volunteer policy supplies the amounts. Startup engagement retains
+source verification, activation flags and per-member/per-post idempotency;
+the former four-post monthly cap is removed prospectively. Existing awards
+and balances are unchanged. Channel destinations are `#boost-my-startup` and
+`#i-need-advice-or-help`.
+
+Member journey responses and suggestions omit `monthly_learning_update`;
+the policy key remains available to interpret historical receipts. Home now
+returns up to 100 available rewards so the Roo Points page can display the
+full catalogue; the clients select three popular rewards plus the 72-point
+newsletter feature, which is requested through Roo.
+
+Clients display whole points and retain exact ledger strings. Reconciliation
+checks and audit timestamps are still returned but update timestamps are not
+shown on the simplified member pages. This change requires no migration.

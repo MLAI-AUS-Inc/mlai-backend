@@ -172,7 +172,7 @@ class CommunityHomeTests(APITestCase):
         )
         self.assertEqual(
             [action["id"] for action in response.data["earn_actions"]],
-            ["intro", "monthly_update", f"task:{visible.task_code}"],
+            ["intro", "monthly_update", "boost_startup", "helpful_answer", f"task:{visible.task_code}"],
         )
         self.assertEqual(response.data["earn_actions"][0]["points"], 4)
         self.assertEqual(response.data["earn_actions"][1]["points"], 10)
@@ -181,7 +181,7 @@ class CommunityHomeTests(APITestCase):
             "Complete and save a ready monthly update for your verified company.",
         )
         self.assertEqual(
-            response.data["earn_actions"][2]["command"],
+            response.data["earn_actions"][4]["command"],
             f"@Roo task claim {visible.task_code}",
         )
         rewards = {
@@ -233,7 +233,7 @@ class CommunityHomeTests(APITestCase):
 
         self.assertEqual(
             [action["id"] for action in response.data["earn_actions"]],
-            ["intro"],
+            ["intro", "boost_startup", "helpful_answer"],
         )
 
     @override_settings(

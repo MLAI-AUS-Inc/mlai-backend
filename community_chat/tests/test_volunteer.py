@@ -312,7 +312,7 @@ class VolunteerTests(TestCase):
             VolunteerRecognition.objects.filter(
                 user=self.member, action_key="boost_startup", status="approved"
             ).count(),
-            4,
+            5,
         )
         duplicate = self.receipt(
             key="toggle",
@@ -322,7 +322,7 @@ class VolunteerTests(TestCase):
             metadata={"reaction": "+", "target_public_key": "b" * 64},
         )
         self.assertEqual(duplicate.status, "processed")
-        self.assertEqual(contribution_total(self.member), microroo("4"))
+        self.assertEqual(contribution_total(self.member), microroo("10"))
 
     def test_verified_source_required_and_repeated_request_keeps_same_record(self):
         with self.assertRaisesMessage(VolunteerError, "source_unavailable"):

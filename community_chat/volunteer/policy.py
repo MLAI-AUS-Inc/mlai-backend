@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal, DecimalException
 from zoneinfo import ZoneInfo
 
-VERSION = "mlai-volunteer-v1"
+VERSION = "mlai-volunteer-v2"
 MICROROO = 1_000_000
 MELBOURNE = ZoneInfo("Australia/Melbourne")
 LEVELS = (
@@ -168,13 +168,13 @@ def catalogue(monthly_reward=20):
         ),
         (
             "boost_startup",
-            "Like a startup post",
-            "Like another member's post inside MLAI Chat.",
-            1,
-            1,
+            "Engage with a startup post",
+            "React to another member's post in #boost-my-startup. Earn once for each post you engage with.",
+            2,
+            2,
             False,
-            "month",
-            4,
+            "post",
+            1,
             "boost",
             "reaction",
             "boost_startup",
@@ -272,8 +272,8 @@ def catalogue(monthly_reward=20):
         ),
         (
             "helpful_answer",
-            "Answer somebody helpfully",
-            "Help another member with a useful answer.",
+            "Answer a question",
+            "Help another member with a useful answer in #i-need-advice-or-help.",
             3,
             3,
             False,
@@ -389,7 +389,7 @@ def catalogue(monthly_reward=20):
             verification=verification,
             channel_key=channel,
             repeat_label=(
-                "Once per member" if period == "once" else f"Up to {cap} per {period}"
+                "Once per member" if period == "once" else "Once per post" if period == "post" else f"Up to {cap} per {period}"
             ),
         )
         for key, title, description, reward, maximum, attendance, period, cap, group, verification, channel in rows
@@ -399,7 +399,7 @@ def catalogue(monthly_reward=20):
 def next_actions(actions, limit=3):
     """Select a small deterministic next-level checklist, never infer completion."""
     actionable = [
-        item for item in actions if item.get("eligible") and not item.get("completed")
+        item for item in actions if item.get("eligible") and not item.get("completed") and item["key"] != "monthly_learning_update"
     ]
     priority = {
         "introduce_yourself": 0,
