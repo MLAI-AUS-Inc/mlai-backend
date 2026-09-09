@@ -33,7 +33,10 @@ from .admin_views import (
 )
 
 
+from .views import VibeRaisingBusinessHealthView
+
 urlpatterns = [
+    path("business-health/", VibeRaisingBusinessHealthView.as_view(), name="vibe-business-health"),
     path("admin/overview/", VibeRaisingAdminOverviewView.as_view(), name="vibe-raising-admin-overview"),
     path(
         "admin/monthly-update-usage/",

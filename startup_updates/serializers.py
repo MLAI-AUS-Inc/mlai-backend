@@ -312,6 +312,11 @@ class CurationResultsSerializer(serializers.Serializer):
 
 
 class DraftResultSerializer(serializers.Serializer):
+    snapshot_id = serializers.IntegerField(required=True)
+    expected_revision = serializers.IntegerField(required=False, allow_null=True)
+    revision_id = serializers.IntegerField(required=False)
+    revision_hash = serializers.CharField(required=False)
+    audience = serializers.ChoiceField(choices=["private", "community", "investor"], default="private")
     month = serializers.DateField()
     status = serializers.ChoiceField(
         choices=MonthlyUpdateDraftStatus.choices,

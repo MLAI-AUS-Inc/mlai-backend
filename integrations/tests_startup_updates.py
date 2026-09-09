@@ -845,6 +845,31 @@ class StartupUpdateSlackBackfillViewTest(StartupUpdateApiTestCase):
             input_sources=["gmail", "slack"],
         )
 
+    @patch("integrations.services.slack_dm_mirror._revoke_remote_token")
+    def test_disconnect_erases_historical_evidence_revisions(self, _mock_remote_revoke):
+        from startup_updates.models import MonthlyEvidenceSnapshot
+        from startup_updates.revisions import save_revision
+        from startup_updates.evidence_contract import content_hash
+        authority = slack_run_authority_for_connection(self.connection)
+        event = StartupEvent.objects.create(organization=self.organization, run=self.run,
+            canonical_key="frozen-private-slack", event_type="product_milestone", title="Private Slack evidence",
+            month_bucket=date(2026, 3, 1), source_thread_ids=[authority.thread_public_id("C123", "1770000050.000100")])
+        payload = {"metrics": [], "events": [{"id": event.pk, "title": event.title}]}
+        snapshot = MonthlyEvidenceSnapshot.objects.create(organization=self.organization, month=event.month_bucket,
+            payload=payload, content_hash=content_hash(payload))
+        draft = MonthlyUpdateDraft.objects.create(organization=self.organization, month=event.month_bucket)
+        first = save_revision(draft, {"highlights": [event.title]}, snapshot=snapshot)
+        clean_payload = {"metrics": [], "events": []}
+        clean = MonthlyEvidenceSnapshot.objects.create(organization=self.organization, month=event.month_bucket,
+            payload=clean_payload, content_hash=content_hash(clean_payload))
+        save_revision(draft, {"highlights": ["Founder supplied replacement"]}, snapshot=clean, expected_revision=first.pk)
+        draft.refresh_from_db()
+        self.assertEqual(draft.evidence_event_ids, [])
+        revoke_user_grant(self.user)
+        self.assertFalse(MonthlyUpdateDraft.objects.filter(pk=draft.pk).exists())
+        self.assertFalse(MonthlyEvidenceSnapshot.objects.filter(pk=snapshot.pk).exists())
+        self.assertTrue(MonthlyEvidenceSnapshot.objects.filter(pk=clean.pk).exists())
+
     def _slack_message(self, ts: str, text: str, *, reply_count: int = 0, thread_ts: Optional[str] = None):
         payload = {
             "type": "message",
@@ -2467,7 +2492,7 @@ class StartupUpdateWorkflowViewsTest(StartupUpdateApiTestCase):
         )
         return other_user, other_connection
 
-    def test_draft_results_merge_regenerated_bullets_without_duplicates(self):
+    def test_regeneration_creates_exact_revision_without_merging_old_bullets(self):
         month_bucket = date(2026, 3, 1)
         MonthlyUpdateDraft.objects.create(
             organization=self.organization,
@@ -2495,6 +2520,13 @@ class StartupUpdateWorkflowViewsTest(StartupUpdateApiTestCase):
             groundedness_notes="Existing review notes.",
         )
 
+        self.run.run_request["draft_months"] = [month_bucket.isoformat()]
+        self.run.save(update_fields=["run_request"])
+        with self._with_key():
+            pinned = self.client.post(reverse("startup_updates_evidence_snapshot", args=[self.run.run_id]), {}, format="json", **self.headers)
+        self.assertEqual(pinned.status_code, 200, pinned.data)
+        pin = pinned.data["snapshots"][month_bucket.isoformat()]
+
         with self._with_key():
             response = self.client.post(
                 reverse("startup_updates_draft_results", args=[self.run.run_id]),
@@ -2502,6 +2534,8 @@ class StartupUpdateWorkflowViewsTest(StartupUpdateApiTestCase):
                     "drafts": [
                         {
                             "month": month_bucket.isoformat(),
+                            "snapshot_id": pin["snapshot_id"],
+                            "expected_revision": pin["expected_revision"],
                             "status": "ready",
                             "model_name": "gpt-5.4",
                             "groundedness_status": "passed",
@@ -2544,12 +2578,11 @@ class StartupUpdateWorkflowViewsTest(StartupUpdateApiTestCase):
         draft = MonthlyUpdateDraft.objects.get(organization=self.organization, month=month_bucket)
         memo = draft.structured_memo
         self.assertEqual(memo["title"], "Acme March Update Refined")
-        self.assertEqual(memo["topline"], "Existing topline.")
+        self.assertEqual(memo["topline"], "")
         self.assertEqual(
             memo["highlights"],
             [
                 "Converted the pilot into a paid annual contract",
-                "Hired first support lead",
                 "Launched onboarding refresh",
             ],
         )
@@ -2557,7 +2590,7 @@ class StartupUpdateWorkflowViewsTest(StartupUpdateApiTestCase):
         self.assertEqual(memo["asks"], [{"label": "Intro", "text": "Customer introductions to seed investors"}])
         self.assertEqual(
             {item["metric_key"]: item["value"] for item in memo["kpi_snapshot"]},
-            {"mrr": "$26,000", "cashCollected": "$20,000"},
+            {},
         )
         self.assertEqual(
             memo["metric_suggestions"],
@@ -2569,13 +2602,14 @@ class StartupUpdateWorkflowViewsTest(StartupUpdateApiTestCase):
                 }
             ],
         )
-        self.assertEqual(set(draft.evidence_event_ids), {11, 12})
-        self.assertEqual(set(draft.evidence_metric_ids), {21, 22})
-        self.assertEqual(set(draft.carry_forward_event_ids), {31, 32})
-        self.assertIn("3 bullets refreshed", draft.groundedness_notes)
-        self.assertIn("1 added", draft.groundedness_notes)
+        self.assertEqual(draft.evidence_event_ids, [])
+        self.assertEqual(draft.evidence_metric_ids, [])
+        self.assertEqual(draft.carry_forward_event_ids, [])
+        self.assertEqual(draft.current_revision.validation["groundedness_status"], "pending")
 
-    def test_draft_results_merge_xero_metrics_into_kpi_snapshot(self):
+    def test_draft_results_use_only_pinned_verified_metrics(self):
+        self.profile.default_currency = "AUD"
+        self.profile.save(update_fields=["default_currency"])
         month_bucket = date(2026, 3, 1)
         revenue_metric = StartupMetricObservation.objects.create(
             organization=self.organization,
@@ -2591,6 +2625,7 @@ class StartupUpdateWorkflowViewsTest(StartupUpdateApiTestCase):
             source_metadata={
                 "report_name": "ProfitAndLoss",
                 "report_start_date": "2026-03-01",
+                "source_metric": "xero_profit_and_loss_revenue",
                 "report_end_date": "2026-03-31",
                 "calculation_basis": "profit_and_loss_total_income",
             },
@@ -2625,6 +2660,13 @@ class StartupUpdateWorkflowViewsTest(StartupUpdateApiTestCase):
             },
         )
 
+        self.run.run_request["draft_months"] = [month_bucket.isoformat()]
+        self.run.save(update_fields=["run_request"])
+        with self._with_key():
+            pinned = self.client.post(reverse("startup_updates_evidence_snapshot", args=[self.run.run_id]), {}, format="json", **self.headers)
+        self.assertEqual(pinned.status_code, 200, pinned.data)
+        pin = pinned.data["snapshots"][month_bucket.isoformat()]
+
         with self._with_key():
             response = self.client.post(
                 reverse("startup_updates_draft_results", args=[self.run.run_id]),
@@ -2632,6 +2674,8 @@ class StartupUpdateWorkflowViewsTest(StartupUpdateApiTestCase):
                     "drafts": [
                         {
                             "month": month_bucket.isoformat(),
+                            "snapshot_id": pin["snapshot_id"],
+                            "expected_revision": pin["expected_revision"],
                             "status": "ready",
                             "model_name": "gpt-5.4",
                             "structured_memo": {
@@ -2656,17 +2700,17 @@ class StartupUpdateWorkflowViewsTest(StartupUpdateApiTestCase):
         snapshot = {item["metric_key"]: item for item in draft.structured_memo["kpi_snapshot"]}
         self.assertEqual(snapshot["revenue"]["value"], "AUD 4000.00")
         self.assertEqual(snapshot["revenue"]["source_provider"], ExternalServiceProvider.XERO)
-        self.assertEqual(snapshot["revenue"]["source_metadata"]["report_name"], "ProfitAndLoss")
-        self.assertEqual(snapshot["burnRate"]["value"], "AUD 1500.00")
+        self.assertEqual(snapshot["revenue"]["basis"], "xero_profit_and_loss_revenue")
+        self.assertNotIn("burnRate", snapshot)
         self.assertEqual(snapshot["monthlyCosts"]["value"], "AUD 2500.00")
         self.assertEqual(snapshot["monthlyCosts"]["source_provider"], ExternalServiceProvider.XERO)
-        self.assertEqual(snapshot["activeUsers"]["value"], "240")
+        self.assertNotIn("activeUsers", snapshot)
         self.assertEqual(
             set(draft.evidence_metric_ids),
-            {revenue_metric.id, burn_metric.id, monthly_costs_metric.id},
+            {revenue_metric.id, monthly_costs_metric.id},
         )
 
-    def test_draft_results_get_hydrates_xero_metrics_without_saving_draft(self):
+    def test_draft_results_get_preserves_saved_content_without_live_hydration(self):
         current_month = date(2026, 4, 1)
         previous_month = date(2026, 3, 1)
         MonthlyUpdateDraft.objects.create(
@@ -2725,10 +2769,10 @@ class StartupUpdateWorkflowViewsTest(StartupUpdateApiTestCase):
             )
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data["draft"]["metrics"]["revenue"], "AUD 3800.00")
-        self.assertEqual(response.data["draft"]["pastMonths"][0]["metrics"]["revenue"], "AUD 2735.75")
-        self.assertEqual(response.data["current_month"]["metrics"]["revenue"], "AUD 3800.00")
-        self.assertEqual(response.data["past_months"][0]["metrics"]["revenue"], "AUD 2735.75")
+        self.assertNotIn("revenue", response.data["draft"]["metrics"])
+        self.assertNotIn("revenue", response.data["draft"]["pastMonths"][0]["metrics"])
+        self.assertNotIn("revenue", response.data["current_month"]["metrics"])
+        self.assertNotIn("revenue", response.data["past_months"][0]["metrics"])
         stored_draft = MonthlyUpdateDraft.objects.get(organization=self.organization, month=current_month)
         self.assertNotIn(
             "revenue",
@@ -3667,6 +3711,13 @@ class StartupUpdateWorkflowViewsTest(StartupUpdateApiTestCase):
         self.assertEqual(timeline_response.status_code, status.HTTP_200_OK)
         self.assertIn(month_bucket.isoformat(), timeline_response.data["timeline"]["months"])
 
+        self.run.run_request["draft_months"] = [month_bucket.isoformat()]
+        self.run.save(update_fields=["run_request"])
+        with self._with_key():
+            pinned = self.client.post(reverse("startup_updates_evidence_snapshot", args=[self.run.run_id]), {}, format="json", **self.headers)
+        self.assertEqual(pinned.status_code, 200, pinned.data)
+        pin = pinned.data["snapshots"][month_bucket.isoformat()]
+
         with self._with_key():
             draft_response = self.client.post(
                 reverse("startup_updates_draft_results", args=[self.run.run_id]),
@@ -3674,6 +3725,8 @@ class StartupUpdateWorkflowViewsTest(StartupUpdateApiTestCase):
                     "drafts": [
                         {
                             "month": month_bucket.isoformat(),
+                            "snapshot_id": pin["snapshot_id"],
+                            "expected_revision": pin["expected_revision"],
                             "status": "ready",
                             "model_name": "gpt-5.4",
                             "groundedness_status": "passed",
@@ -3701,7 +3754,7 @@ class StartupUpdateWorkflowViewsTest(StartupUpdateApiTestCase):
 
         self.assertEqual(draft_response.status_code, status.HTTP_200_OK)
         draft = MonthlyUpdateDraft.objects.get(organization=self.organization, month=month_bucket)
-        self.assertEqual(draft.status, "ready")
+        self.assertEqual(draft.status, "draft")
         self.assertIn("# Acme Investor Update", draft.rendered_markdown)
 
         with self._with_key():
@@ -3722,8 +3775,8 @@ class StartupUpdateWorkflowViewsTest(StartupUpdateApiTestCase):
         self.assertEqual(draft_list.status_code, status.HTTP_200_OK)
         self.assertEqual(len(draft_list.data["drafts"]), 1)
         self.assertEqual(draft_detail.status_code, status.HTTP_200_OK)
-        self.assertEqual(draft_detail.data["events"][0]["canonical_key"], event.canonical_key)
-        self.assertEqual(draft_detail.data["metrics"][0]["metric_key"], metric.metric_key)
+        self.assertEqual(draft_detail.data["events"], [])
+        self.assertEqual(draft_detail.data["metrics"], [])
         self.assertEqual(draft_results.status_code, status.HTTP_200_OK)
         self.assertEqual(
             draft_results.data["draft"]["highlights"],

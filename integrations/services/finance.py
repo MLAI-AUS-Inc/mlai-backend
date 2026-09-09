@@ -204,58 +204,60 @@ def calculate_and_publish_monthly_revenue(*, run: ContentFactoryRun) -> dict[str
 
 
 def publish_financial_metric_observations(*, organization: Organization, run: Optional[ContentFactoryRun] = None) -> list[StartupMetricObservation]:
-    records = list(
-        ExternalFinancialRecord.objects.filter(organization=organization)
-        .exclude(connection__status=ExternalServiceConnectionStatus.DISCONNECTED)
-        .select_related("connection")
-    )
-    buckets: dict[tuple[date, str], dict[str, Any]] = defaultdict(
-        lambda: {"invoice": Decimal("0"), "cash": Decimal("0"), "record_ids": []}
-    )
-    for record in records:
-        month = _record_month(record)
-        if month is None:
-            continue
-        currency = (record.currency or "").upper() or "AUD"
-        key = (month, currency)
-        amount = record.amount or Decimal("0")
-        record_type = str(record.record_type or "")
-        if record_type in {ExternalFinancialRecord.RECORD_XERO_PAYMENT}:
-            buckets[key]["cash"] += abs(amount)
-        elif record_type in {ExternalFinancialRecord.RECORD_XERO_INVOICE, STRIPE_RECORD_INVOICE}:
-            buckets[key]["invoice"] += amount
-            buckets[key]["cash"] += max(amount, Decimal("0"))
-        buckets[key]["record_ids"].append(_record_source_id(record))
+    """One Revenue metric: Xero books win; never add invoices or bill payments."""
+    if ExternalServiceConnection.objects.filter(organization=organization, provider=ExternalServiceProvider.XERO).exclude(status=ExternalServiceConnectionStatus.DISCONNECTED).exists():
+        from startup_updates.services import publish_xero_metric_observations
+        from startup_updates.models import StartupProfile
+        from zoneinfo import ZoneInfo
+        profile, _ = StartupProfile.objects.get_or_create(organization=organization)
+        today = timezone.now().astimezone(ZoneInfo(profile.reporting_timezone)).date()
+        publish_xero_metric_observations(organization=organization, run=run,
+            start_date=date(today.year, today.month, 1), end_date=today)
+        return list(StartupMetricObservation.objects.filter(
+            organization=organization, source_provider=ExternalServiceProvider.XERO, metric_key="revenue",
+            source_metadata__source_metric="xero_profit_and_loss_revenue",
+        ).order_by("period_month", "unit", "-observed_at"))
 
-    metrics: list[StartupMetricObservation] = []
-    observed_at = timezone.now()
+    from zoneinfo import ZoneInfo
+    from startup_updates.models import StartupProfile
+    profile, _ = StartupProfile.objects.get_or_create(organization=organization)
+    zone = ZoneInfo(profile.reporting_timezone)
+    records = ExternalFinancialRecord.objects.filter(
+        organization=organization, provider=ExternalServiceProvider.STRIPE,
+        record_type=STRIPE_RECORD_INVOICE, status="paid",
+    ).exclude(connection__status=ExternalServiceConnectionStatus.DISCONNECTED)
+    buckets = {}
+    for record in records:
+        paid_at = _timestamp((record.raw_payload or {}).get("status_transitions", {}).get("paid_at"))
+        month = paid_at.astimezone(zone).date().replace(day=1) if paid_at else None
+        currency = (record.currency or "").upper()
+        if not month or not currency:
+            continue
+        payload = record.raw_payload or {}
+        from startup_updates.evidence_contract import stripe_paid_invoice_sales_minor
+        minor_amount = stripe_paid_invoice_sales_minor(payload)
+        bucket = buckets.setdefault((month, currency), {"amount": Decimal("0"), "ids": [], "unknown": False})
+        if minor_amount is None:
+            bucket["unknown"] = True
+        else:
+            bucket["amount"] += _minor_units(minor_amount, currency)
+        bucket["ids"].append(_record_source_id(record))
+    metrics = []
     for (month, currency), values in sorted(buckets.items()):
-        for metric_key, metric_name, amount in (
-            ("invoiceRevenue", "Invoice Revenue", values["invoice"]),
-            ("cashCollected", "Cash Collected", values["cash"]),
-        ):
-            metric, _created = StartupMetricObservation.objects.update_or_create(
-                organization=organization,
-                run=run,
-                metric_key=metric_key,
-                period_month=month,
-                source_provider=FINANCIAL_METRIC_SOURCE,
-                defaults={
-                    "metric_name": metric_name,
-                    "value_text": _format_money(amount, currency),
-                    "value_number": amount,
-                    "unit": currency,
-                    "observed_at": observed_at,
-                    "confidence": 0.8,
-                    "source_record_ids": list(dict.fromkeys(values["record_ids"])),
-                    "source_metadata": {
-                        "calculation_basis": "external_financial_records",
-                        "currency": currency,
-                    },
-                    "summary": f"{metric_name} calculated from connected financial records.",
-                },
-            )
-            metrics.append(metric)
+        # The semantic key is independent of a workflow retry/run.
+        metric = StartupMetricObservation.objects.filter(organization=organization, metric_key="revenue", period_month=month, source_provider=FINANCIAL_METRIC_SOURCE, unit=currency).order_by("-id").first()
+        if metric is None:
+            metric = StartupMetricObservation(organization=organization, metric_key="revenue", period_month=month, source_provider=FINANCIAL_METRIC_SOURCE, unit=currency)
+        metric.run = run
+        metric.metric_name = "Revenue"
+        metric.value_number = None if values["unknown"] else values["amount"]
+        metric.value_text = "" if values["unknown"] else _format_money(values["amount"], currency)
+        metric.observed_at = timezone.now()
+        metric.source_record_ids = values["ids"]
+        metric.source_metadata = {"definition_version": 2, "basis": "paid_stripe_invoice_sales_excluding_tax", "currency": currency, "coverage": "paid_invoices_only", "needs_confirmation": values["unknown"], "limitations": ["Excludes non-invoice payments and refunds issued without credit notes; not whole-business accounting revenue."]}
+        metric.summary = "Revenue from paid Stripe invoices excluding tax. Credit adjustments or incomplete totals require confirmation; processor coverage is not reconciled company accounts."
+        metric.save()
+        metrics.append(metric)
     return metrics
 
 
@@ -348,12 +350,12 @@ def _financial_connections(
 def _stripe_collection(connection: ExternalServiceConnection, path: str, params: Optional[dict[str, Any]] = None) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
     request_params = dict(params or {})
-    for _page in range(5):
+    while True:
         response = requests.get(
             f"{STRIPE_API_BASE_URL}{path}",
             headers={
                 "Authorization": f"Bearer {connection.access_token}",
-                "Stripe-Version": str(getattr(settings, "STRIPE_API_VERSION", "2026-02-25.clover")),
+                "Stripe-Version": str(getattr(settings, "STRIPE_API_VERSION", "2026-07-29.dahlia")),
             },
             params=request_params,
             timeout=(3, 20),
@@ -362,9 +364,12 @@ def _stripe_collection(connection: ExternalServiceConnection, path: str, params:
         payload = response.json()
         page_items = payload.get("data") if isinstance(payload.get("data"), list) else []
         results.extend(item for item in page_items if isinstance(item, dict))
-        if not payload.get("has_more") or not page_items:
+        if not payload.get("has_more"):
             break
-        request_params["starting_after"] = page_items[-1].get("id")
+        next_cursor = page_items[-1].get("id") if page_items else None
+        if not next_cursor or next_cursor == request_params.get("starting_after"):
+            raise ValueError("Stripe returned an incomplete page without an advancing cursor.")
+        request_params["starting_after"] = next_cursor
     return results
 
 
@@ -374,7 +379,7 @@ def _upsert_stripe_invoices(connection: ExternalServiceConnection, invoices: lis
         invoice_id = str(invoice.get("id") or "").strip()
         if not invoice_id:
             continue
-        amount = _minor_units(invoice.get("amount_paid") or invoice.get("amount_due") or invoice.get("total"))
+        amount = _minor_units(invoice.get("amount_paid"), str(invoice.get("currency") or "USD"))
         occurred_at = _timestamp(invoice.get("status_transitions", {}).get("paid_at") or invoice.get("created"))
         transaction_date = occurred_at.date() if occurred_at else None
         ExternalFinancialRecord.objects.update_or_create(
@@ -451,9 +456,10 @@ def _format_money(value: Decimal, currency: str) -> str:
     return f"{currency} {value.quantize(Decimal('0.01'))}"
 
 
-def _minor_units(value: Any) -> Decimal:
+def _minor_units(value: Any, currency: str = "USD") -> Decimal:
     try:
-        return Decimal(str(value or 0)) / Decimal("100")
+        exponent = 0 if currency.upper() in {"BIF", "CLP", "DJF", "GNF", "JPY", "KMF", "KRW", "MGA", "PYG", "RWF", "UGX", "VND", "VUV", "XAF", "XOF", "XPF"} else (3 if currency.upper() in {"BHD", "JOD", "KWD", "OMR", "TND"} else 2)
+        return Decimal(str(value or 0)) / (Decimal(10) ** exponent)
     except (InvalidOperation, TypeError, ValueError):
         return Decimal("0")
 

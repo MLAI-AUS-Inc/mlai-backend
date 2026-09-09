@@ -101,6 +101,8 @@ class StartupProfile(models.Model):
     negative_keywords = models.JSONField(default=list, blank=True)
     kpi_definitions = models.JSONField(default=list, blank=True)
     default_currency = models.CharField(max_length=12, default="USD")
+    reporting_timezone = models.CharField(max_length=64, default="UTC")
+    reporting_config_version = models.PositiveIntegerField(default=1)
     stage = models.CharField(max_length=64, blank=True, default="")
     organization_kind = models.CharField(max_length=32, blank=True, default="")
     short_description = models.TextField(blank=True, default="")
@@ -1079,6 +1081,8 @@ class MonthlyUpdateDraft(models.Model):
     ready_at = models.DateTimeField(null=True, blank=True, db_index=True)
     audience_visibility = models.JSONField(default=default_audience_visibility, blank=True)
     published_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    current_revision = models.ForeignKey("MonthlyUpdateRevision", null=True, blank=True, on_delete=models.SET_NULL, related_name="+")
+    published_revision = models.ForeignKey("MonthlyUpdateRevision", null=True, blank=True, on_delete=models.SET_NULL, related_name="+")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -1103,6 +1107,51 @@ class MonthlyUpdateDraft(models.Model):
 
     def __str__(self):
         return f"{self.organization.domain}:{self.month}"
+
+
+class MonthlyEvidenceSnapshot(models.Model):
+    """A fixed evidence base. New input creates a new snapshot, never an edit."""
+    organization = models.ForeignKey("organizations.Organization", on_delete=models.CASCADE)
+    month = models.DateField()
+    content_hash = models.CharField(max_length=64)
+    payload = models.JSONField(default=dict)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["organization", "content_hash"], name="monthly_snapshot_org_hash")]
+
+    def save(self, *args, **kwargs):
+        if not self._state.adding:
+            raise ValueError("Evidence snapshots are immutable; create a new snapshot.")
+        return super().save(*args, **kwargs)
+
+
+class MonthlyUpdateRevision(models.Model):
+    draft = models.ForeignKey(MonthlyUpdateDraft, on_delete=models.CASCADE, related_name="revisions")
+    snapshot = models.ForeignKey(MonthlyEvidenceSnapshot, on_delete=models.PROTECT)
+    number = models.PositiveIntegerField()
+    audience = models.CharField(max_length=16, default="private")
+    content_hash = models.CharField(max_length=64)
+    structured_memo = models.JSONField(default=dict)
+    rendered_markdown = models.TextField(blank=True, default="")
+    validation = models.JSONField(default=dict)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["draft", "number"], name="monthly_revision_draft_number")]
+
+    def save(self, *args, **kwargs):
+        if not self._state.adding:
+            raise ValueError("Update revisions are immutable; create a new revision.")
+        return super().save(*args, **kwargs)
+
+
+class MonthlyUpdateApproval(models.Model):
+    revision = models.OneToOneField(MonthlyUpdateRevision, on_delete=models.CASCADE, related_name="approval")
+    actor = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, on_delete=models.SET_NULL)
+    content_hash = models.CharField(max_length=64)
+    audience_visibility = models.JSONField(default=list)
+    approved_at = models.DateTimeField(auto_now_add=True)
 
 
 class MonthlyUpdateReminderDelivery(models.Model):

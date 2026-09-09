@@ -2108,6 +2108,8 @@ class ConnectorEndpointTests(TestCase):
             status="AUTHORISED",
             transaction_date=date(2026, 4, 20),
             description="April payment",
+            direction="credit",
+            raw_payload={"PaymentType": "ACCRECPAYMENT", "Invoice": {"Type": "ACCREC"}},
             merchant_name="Acme Customer",
         )
         StartupMetricObservation.objects.create(
@@ -2329,8 +2331,10 @@ class ConnectorEndpointTests(TestCase):
         self.assertIn("invoiceRevenue", keys)
         self.assertNotIn("revenue", keys)
 
-    def test_monthly_financial_snapshot_uses_cached_totals_and_line_attribution(self):
+    def test_monthly_financial_snapshot_rejects_invoice_fallback_and_invented_attribution(self):
         organization = Organization.objects.create(name="Acme", domain="financial-brief.example")
+        from startup_updates.models import StartupProfile
+        StartupProfile.objects.create(organization=organization, default_currency="AUD")
         connection = ExternalServiceConnection.objects.create(
             user=self.user,
             organization=organization,
@@ -2410,18 +2414,12 @@ class ConnectorEndpointTests(TestCase):
 
         self.assertIsNotNone(snapshot)
         self.assertEqual(len(snapshot["performance"]), 12)
-        self.assertEqual(snapshot["performance"][-1]["income"], 10000.0)
+        self.assertIsNone(snapshot["performance"][-1]["income"])
         self.assertEqual(snapshot["performance"][-1]["expenses"], 7000.0)
         self.assertEqual(snapshot["performance"][-1]["net"], 3000.0)
-        april_mix = snapshot["revenue_mix"][-1]
-        self.assertEqual(sum(item["amount"] for item in april_mix["segments"]), 10000.0)
-        self.assertEqual(april_mix["segments"][0]["amount"], 4000.0)
-        self.assertEqual(snapshot["event_contribution"], [
-            {"label": "HealthHack", "income": 3000.0, "expenses": 500.0, "net": 2500.0},
-        ])
-        self.assertEqual(snapshot["overhead"], [
-            {"label": "Software subscriptions", "amount": 1200.0},
-        ])
+        self.assertEqual(snapshot["revenue_mix"], [])
+        self.assertEqual(snapshot["event_contribution"], [])
+        self.assertEqual(snapshot["overhead"], [])
 
 
 class LinearRecentActivitySelectionTests(TestCase):

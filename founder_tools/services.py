@@ -226,6 +226,9 @@ def apply_company_domain_change(company: VibeRaisingCompany, new_domain, *, user
             normalized_new,
             summary,
         )
+    # Only this guarded, explicit domain-edit path may request a new tenant.
+    # Ordinary reporting reads retain the company's existing organization.
+    company.organization = None
     return "repoint"
 
 
@@ -454,9 +457,14 @@ def _normalize_organization_kind(value) -> str:
 
 @transaction.atomic
 def ensure_company_organization(company: VibeRaisingCompany) -> Organization | None:
+    if company.organization_id:
+        return company.organization
     normalized_domain = normalize_company_domain(company.domain)
     if not normalized_domain:
-        return None
+        organization, _ = Organization.objects.get_or_create(domain=f"startup-{company.pk}.invalid", defaults={"name": company.name})
+        company.organization = organization
+        company.save(update_fields=["organization", "updated_at"])
+        return organization
 
     company_update_fields = []
     if company.domain != normalized_domain:

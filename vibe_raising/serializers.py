@@ -18,7 +18,7 @@ def _normalize_display_config_keys(values):
     keys = []
     for item in values if isinstance(values, (list, tuple)) else []:
         metric_key = startup_update_metric_key(item)
-        if metric_key in VIBE_RAISING_UPDATE_METRIC_KEYS and metric_key not in keys:
+        if metric_key and metric_key not in keys:
             keys.append(metric_key)
     return keys
 
@@ -222,6 +222,7 @@ class VibeRaisingActiveCompanySerializer(AliasInputSerializer):
 
 
 class VibeRaisingMonthlyUpdateUpsertSerializer(AliasInputSerializer):
+    expectedRevision = serializers.IntegerField(required=False, allow_null=True)
     input_aliases = {
         "audienceVisibility": (
             "audience_visibility",
@@ -323,8 +324,8 @@ class VibeRaisingMonthlyUpdateUpsertSerializer(AliasInputSerializer):
         normalized_metrics = {}
         for key, value in (attrs.get("metrics") or {}).items():
             metric_key = startup_update_metric_key(key)
-            if metric_key not in VIBE_RAISING_UPDATE_METRIC_KEYS:
-                continue
+            if not metric_key:
+                raise serializers.ValidationError({"metrics": "Metric keys must be short identifiers."})
             normalized_value = _blank_to_none(value)
             if normalized_value is not None:
                 normalized_metrics[metric_key] = normalized_value
