@@ -134,3 +134,16 @@ than treating transport keys or multiple owner devices as group members.
 Older clients can ignore the additive field. Newer clients show a neutral group
 icon when an imported conversation has no source profiles; relay/device keys
 must never be used as fallback people for a known Slack mirror. No schema change or historical backfill is needed.
+
+## Upcoming event artwork
+
+`GET upcoming-events/?limit=5` includes `cover_url` on each public event.
+It is Luma's public cover image hosted at `https://images.lumacdn.com/`, or
+an empty string when absent or invalid. Only HTTPS URLs without embedded
+credentials or nonstandard ports are accepted. Clients show the botanical
+date square first, followed by a separate square cover image, with a neutral
+fallback for missing or failed artwork. This additive field does not expose
+private event settings or attendee data. The cache key is versioned to avoid
+serving the older projection after deployment; no migration is required.
+
+Source: [Luma cover image field](https://docs.luma.com/reference/post_v1-events-create).

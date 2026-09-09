@@ -128,9 +128,10 @@ DESKTOP_AUTHORIZATION_CODE_SALT = "community-chat.desktop-authorization.v1"
 DESKTOP_AUTHORIZATION_CODE_INVALID_DETAIL = "Desktop authorization code is invalid."
 PKCE_CHALLENGE_RE = re.compile(r"^[A-Za-z0-9_-]{43}$")
 HOME_ITEM_LIMIT = 12
-UPCOMING_EVENTS_CACHE_KEY = "community-chat:upcoming-events:v1"
+UPCOMING_EVENTS_CACHE_KEY = "community-chat:upcoming-events:v2"
 UPCOMING_EVENT_FIELDS = (
     "id",
+    "cover_url",
     "name",
     "url",
     "start_at",
