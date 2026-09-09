@@ -227,6 +227,7 @@ class LumaAttendeeReportServiceTests(SimpleTestCase):
             [
                 {
                     "id": "evt-sooner",
+                    "cover_url": "",
                     "name": "Sooner event",
                     "url": "https://lu.ma/sooner",
                     "start_at": "2026-05-06T08:00:00Z",
@@ -236,6 +237,7 @@ class LumaAttendeeReportServiceTests(SimpleTestCase):
                 },
                 {
                     "id": "evt-later",
+                    "cover_url": "",
                     "name": "Later event",
                     "url": "https://lu.ma/later",
                     "start_at": "2026-05-08T08:00:00Z",
