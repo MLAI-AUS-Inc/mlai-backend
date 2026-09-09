@@ -180,15 +180,20 @@ letters instead of being retried forever.
 
 Production also requires `ROO_API_KEY` and `INTERNAL_API_KEY` to be present,
 at least 32 characters, and different. The deploy installs both from separate
-secret-store entries. The Slack token, channel, and timezone must remain
-configured even while new Office Manager claims are disabled, because durable
-updates and retractions still need recovery. Every deploy performs live,
+secret-store entries. The channel and timezone remain configured on every deploy. The Slack token
+and live companion are required whenever new claims are enabled or any Office
+Manager table contains records, because durable updates and retractions still
+need recovery. A first deployment may precede the companion only when claims
+are disabled, the migration identity audit passes, and a read-only database
+check proves all Office Manager tables absent or empty. Query errors fail the
+deployment; an omitted deployment secret never erases a stored bot token.
+Deployments that require the integration perform live,
 read-only checks of the Public Roo Slack token (`auth.test`), its declared
 `channels:history`, `channels:read`, `chat:write`, `im:history`, `im:write`,
 `users:read`, and `users:read.email` scopes, the configured public channel
 (`conversations.info`, including that the bot is already a member, and
 `conversations.history`), and Public Roo's non-secret readiness contract even
-when new claims are disabled. The companion must report the same Melbourne timezone and the exact
+when new claims are disabled but stored Office Manager state exists. The companion must report the same Melbourne timezone and the exact
 backend claim path. It must also report the same non-secret Slack `team_id` and
 `bot_id` returned by the backend token's `auth.test`; this proves the app that
 posts the buttons is the app whose interactions are routed to Roo. After startup,
