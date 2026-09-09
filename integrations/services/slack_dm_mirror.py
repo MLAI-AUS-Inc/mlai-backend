@@ -789,12 +789,13 @@ def _store_conversation_profiles(
     required_scopes: set[str] | frozenset[str],
     participant_slack_ids: list[str],
     participant_profiles: dict[str, dict[str, str]],
+    activity_seconds: int | None = None,
 ) -> SlackDmMirrorConversation:
     """Persist profiles only if the locked membership intent is still current."""
 
     expected_ids = sorted(participant_slack_ids)
     with transaction.atomic():
-        grant, _ = _lock_slack_grant_api_authority(
+        grant, connection = _lock_slack_grant_api_authority(
             authority,
             required_scopes=required_scopes,
         )
@@ -810,6 +811,16 @@ def _store_conversation_profiles(
             raise SlackDmMirrorAuthorizationError(
                 "Slack private conversation membership changed during profile lookup."
             )
+        if activity_seconds is not None:
+            metadata = dict(connection.provider_metadata or {})
+            catalog = dict(metadata.get(CATALOG_KEY) or {})
+            catalog[conversation.slack_conversation_id] = {
+                **(catalog.get(conversation.slack_conversation_id) or {}),
+                "latest_message_ts": str(activity_seconds),
+            }
+            metadata[CATALOG_KEY] = catalog
+            connection.provider_metadata = metadata
+            connection.save(update_fields=("provider_metadata", "updated_at"))
         conversation.grant = grant
         conversation.participant_profiles = participant_profiles
         conversation.save(update_fields=("participant_profiles", "updated_at"))
@@ -2717,9 +2728,6 @@ def _discover_conversation(
             required_scopes=required_scopes,
         )
         return None
-    activity = _discover_conversation_activity(
-        authority, raw, required_scopes=required_scopes
-    )
     conversation, _ = _store_conversation_membership_intent(
         grant.pk,
         authority=authority,
@@ -2729,7 +2737,6 @@ def _discover_conversation(
         channel_metadata={
             "kind": kind,
             "name": str(raw.get("name") or "")[:255],
-            **({"latest_message_ts": str(activity)} if activity is not None else {}),
         },
     )
     _preload_slack_profiles(authority, set(participant_ids), profile_cache)
@@ -2742,6 +2749,10 @@ def _discover_conversation(
         )
         for slack_user_id in participant_ids
     }
+    # Fence changed membership before any optional metadata network lookup.
+    activity = _discover_conversation_activity(
+        authority, raw, required_scopes=required_scopes
+    )
     conversation = _store_conversation_profiles(
         grant.pk,
         conversation.pk,
@@ -2749,6 +2760,7 @@ def _discover_conversation(
         required_scopes=required_scopes,
         participant_slack_ids=participant_ids,
         participant_profiles=participant_profiles,
+        activity_seconds=activity,
     )
     periodic_reconciliation_due = bool(
         conversation.history_backfilled_at is not None

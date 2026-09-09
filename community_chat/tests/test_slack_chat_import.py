@@ -108,6 +108,7 @@ class SlackChatImportTests(APITestCase):
                 {
                     "channel_id": str(conversation.mlai_channel_id),
                     "kind": "private_channel",
+                    "last_message_at": None,
                 }
             ],
         )
