@@ -221,7 +221,8 @@ class AccountProfileConcurrencyTests(TransactionTestCase):
                 except ProfileVersionConflict:
                     return "conflict"
             finally:
-                close_old_connections()
+                # Thread-local connections must close even while still healthy.
+                connection.close()
 
         with ThreadPoolExecutor(max_workers=2) as workers:
             results = list(

@@ -8,7 +8,7 @@ from uuid import uuid4
 
 import requests
 
-from django.db import close_old_connections
+from django.db import close_old_connections, connections
 from django.test import TransactionTestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
@@ -3298,7 +3298,7 @@ class FirstChannelPostAwardConcurrencyTests(TransactionTestCase):
             except Exception as exc:
                 errors.append(exc)
             finally:
-                close_old_connections()
+                connections.close_all()
 
         threads = [threading.Thread(target=worker) for _ in range(2)]
         for thread in threads:
