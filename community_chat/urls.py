@@ -1,4 +1,5 @@
 from django.urls import include, path
+from .permission_views import ChatPermissionsView, RelayChatRoleView, ChatModeratorView, ChatMemberRolesView
 
 from .views import (
     AccountSessionLogoutView,
@@ -40,6 +41,10 @@ from .usage_views import (
 
 
 urlpatterns = [
+    path("permissions/", ChatPermissionsView.as_view(), name="community_chat_permissions"),
+    path("member-roles/", ChatMemberRolesView.as_view(), name="community_chat_member_roles"),
+    path("moderators/<str:public_key>/", ChatModeratorView.as_view(), name="community_chat_moderator"),
+    path("relay-roles/<str:public_key>/", RelayChatRoleView.as_view(), name="community_chat_relay_role"),
     path("volunteer/", include("community_chat.volunteer.urls")),
     path("home/", CommunityHomeView.as_view(), name="community_chat_home"),
     path("slack/", SlackDmMirrorView.as_view(), name="community_chat_slack"),
