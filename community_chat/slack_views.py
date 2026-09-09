@@ -149,6 +149,18 @@ class SlackDmMirrorView(SlackDmMirrorApiView):
     """Inspect, connect, pause, resume, or disconnect Slack DM mirroring."""
 
     def get(self, request):
+        if "channel_id" in request.query_params:
+            from integrations.services.slack_chat_refresh import (
+                conversation_refresh_status,
+            )
+
+            return Response(
+                conversation_refresh_status(
+                    request.user,
+                    request.query_params["channel_id"],
+                    public_key=getattr(request, "community_chat_public_key", None),
+                )
+            )
         return Response(
             status_payload(
                 request.user,
@@ -211,6 +223,18 @@ class SlackDmMirrorView(SlackDmMirrorApiView):
         )
 
     def patch(self, request):
+        if request.data.get("action") == "refresh_channel":
+            from integrations.services.slack_chat_refresh import (
+                request_conversation_refresh,
+            )
+
+            return Response(
+                request_conversation_refresh(
+                    request.user,
+                    request.data.get("channel_id"),
+                    public_key=getattr(request, "community_chat_public_key", None),
+                )
+            )
         grants = SlackDmMirrorGrant.objects.filter(user=request.user)
         grant = (
             grants.filter(status="active", revoked_at__isnull=True)

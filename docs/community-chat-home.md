@@ -147,6 +147,7 @@ private event settings or attendee data. The cache key is versioned to avoid
 serving the older projection after deployment; no migration is required.
 
 Source: [Luma cover image field](https://docs.luma.com/reference/post_v1-events-create).
+
 ## Roo Points member guide refresh (September 2026)
 
 Home includes `boost_startup` (2 points, once for each distinct verified startup
@@ -166,3 +167,28 @@ newsletter feature, which is requested through Roo.
 Clients display whole points and retain exact ledger strings. Reconciliation
 checks and audit timestamps are still returned but update timestamps are not
 shown on the simplified member pages. This change requires no migration.
+
+## Refresh an opened private Slack conversation
+
+Clients request a refresh with `PATCH /community-chat/slack/` and
+`{"action":"refresh_channel","channel_id":"<relay UUID>"}`. Progress is read with
+`GET /community-chat/slack/?channel_id=<relay UUID>`. Both require the active
+owner account and a provisioned device key. Other accounts' mirrors and unknown
+or unprovisioned devices return 404; revoked or paused connections cannot refresh.
+
+Responses contain `channel_id`, `history_days`, and `status` (`syncing`,
+`complete`, or `error`). Completion includes the private delivery queue, not
+just Slack history pagination. No private message body is returned by this API.
+
+Opening a mirror queues a bounded rescan or promotes its existing partial scan.
+History and delivery workers prioritise it for five minutes, retaining normal
+Slack rate limits, source deduplication, authority checks and the owner's 7/30-day
+window. Reopening within thirty seconds coalesces; a pending scan is never reset
+by repeated clicks. The priority is a completed, content-free history-state row
+in the existing delivery table. No schema migration is needed. The completion
+cleanup retains that marker until its priority expires so queued messages can
+reach the relay promptly; revocation and other scan resets clear it normally.
+
+Desktop/web and mobile show progress and retry controls, poll only for the open
+conversation, and refresh the relay timeline as delivery progresses. Deploy the
+backend API/history/delivery workers together with the clients for this path.
