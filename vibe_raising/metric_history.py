@@ -139,6 +139,8 @@ def build_metric_history(
             if not value_text:
                 continue
 
+            if item.get("snapshot_id") and item.get("value_number") is None:
+                continue
             value = parse_metric_number(item.get("value_number"), value_text)
             if value is None:
                 continue
@@ -159,6 +161,10 @@ def build_metric_history(
                     "points": [],
                 },
             )
+            if series["unit"] != point["unit"]:
+                # A changed unit/currency starts a new comparable series.
+                series["points"] = []
+                series["unit"] = point["unit"]
             if not series["unit"] and point["unit"]:
                 series["unit"] = point["unit"]
             series["points"].append(

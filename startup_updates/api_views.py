@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone as dt_timezone
+from datetime import date, datetime, timedelta, timezone as dt_timezone
 from functools import wraps
 from typing import Any, Optional, Tuple
 
@@ -319,10 +319,12 @@ def _serialize_attachment(attachment) -> dict:
 
 
 def _serialize_draft(draft) -> dict:
+    from startup_updates.revisions import revision_payload
     audience_visibility = monthly_update_visibility(draft)
     published_at = draft.published_at.isoformat() if draft.published_at else None
     return {
         "id": draft.id,
+        **(revision_payload(draft.current_revision) if draft.current_revision_id else {}),
         "organization_id": draft.organization_id,
         "month": draft.month.isoformat(),
         "status": draft.status,
@@ -702,26 +704,10 @@ def _structured_memo_concise_analysis(structured_memo) -> Optional[dict]:
     return value if isinstance(value, dict) else None
 
 
-def _structured_memo_with_xero_metrics(draft) -> dict:
-    # Merges connector-backed metrics (Xero + Luma) into the draft's kpi_snapshot.
-    structured_memo = draft.structured_memo or {}
-    if not getattr(draft, "organization_id", None):
-        return structured_memo
-
-    evidence_metric_ids = getattr(draft, "evidence_metric_ids", []) or []
-    merged_memo, evidence_metric_ids = merge_xero_metrics_into_structured_memo(
-        organization=draft.organization,
-        month=draft.month,
-        structured_memo=structured_memo,
-        evidence_metric_ids=evidence_metric_ids,
-    )
-    merged_memo, _evidence_metric_ids = merge_luma_metrics_into_structured_memo(
-        organization=draft.organization,
-        month=draft.month,
-        structured_memo=merged_memo,
-        evidence_metric_ids=evidence_metric_ids,
-    )
-    return merged_memo
+def _structured_memo_with_xero_metrics(draft):
+    # Historical values must never be replaced during a read.
+    from startup_updates.revisions import frozen_memo
+    return frozen_memo(draft)
 
 
 def _serialize_draft_for_editor(draft) -> dict:
@@ -876,7 +862,8 @@ def _get_prioritized_run_thread_ids(
 
 
 def _get_org_and_binding_for_run(run: ContentFactoryRun):
-    organization = get_object_or_404(Organization, domain=normalize_domain(run.domain))
+    organization_id = (run.run_request or {}).get("organization_id")
+    organization = get_object_or_404(Organization, pk=organization_id) if organization_id else get_object_or_404(Organization, domain=normalize_domain(run.domain))
     binding_id = (run.run_request or {}).get("binding_id")
     binding = get_object_or_404(
         organization.user_startup_bindings.select_related("user", "google_connection"),
@@ -4108,9 +4095,6 @@ class StartupUpdateDraftResultsView(APIView):
 
     @transaction.atomic
     def post(self, request, run_id: str):
-        serializer = DraftResultsSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-
         try:
             run, organization, binding, google_connection, profile = (
                 _locked_pipeline_run_context(run_id)
@@ -4120,6 +4104,8 @@ class StartupUpdateDraftResultsView(APIView):
         cancelled_response = _reject_if_run_cancelled(run)
         if cancelled_response is not None:
             return cancelled_response
+        serializer = DraftResultsSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
         _update_run_step(run, step_key="draft_generation")
 
         replace_existing = bool((run.run_request or {}).get("force_regenerate"))
@@ -4134,33 +4120,51 @@ class StartupUpdateDraftResultsView(APIView):
                 ).first()
                 if existing_draft is not None:
                     backups_changed = _backup_draft_if_needed(run, existing_draft, backups) or backups_changed
-                structured_memo, evidence_metric_ids = merge_xero_metrics_into_structured_memo(
-                    organization=organization,
-                    month=item["month"],
-                    structured_memo=item["structured_memo"],
-                    evidence_metric_ids=item.get("evidence_metric_ids", []),
-                )
-                structured_memo, evidence_metric_ids = merge_luma_metrics_into_structured_memo(
-                    organization=organization,
-                    month=item["month"],
-                    structured_memo=structured_memo,
-                    evidence_metric_ids=evidence_metric_ids,
-                )
-                draft = upsert_monthly_update_draft(
-                    organization=organization,
-                    month=item["month"],
-                    run=run,
-                    structured_memo=structured_memo,
-                    model_name=item.get("model_name", ""),
-                    status=item.get("status"),
-                    groundedness_status=item.get("groundedness_status"),
-                    evidence_event_ids=item.get("evidence_event_ids", []),
-                    evidence_metric_ids=evidence_metric_ids,
-                    carry_forward_event_ids=item.get("carry_forward_event_ids", []),
-                    groundedness_notes=item.get("groundedness_notes", ""),
-                    audience_visibility=item.get("audience_visibility"),
-                    replace=replace_existing,
-                )
+                from startup_updates.revisions import save_revision, RevisionConflict
+                from startup_updates.models import MonthlyEvidenceSnapshot, MonthlyUpdateRevision
+                pin = (run.run_request or {}).get("evidence_snapshots", {}).get(item["month"].isoformat())
+                if not pin or pin["snapshot_id"] != item["snapshot_id"]:
+                    raise RevisionConflict("Capture this run's evidence before generation.")
+                snapshot = get_object_or_404(MonthlyEvidenceSnapshot, pk=item["snapshot_id"], organization=organization)
+                Organization.objects.select_for_update().get(pk=organization.pk)
+                draft, _ = MonthlyUpdateDraft.objects.get_or_create(organization=organization, month=item["month"])
+                draft = MonthlyUpdateDraft.objects.select_for_update().get(pk=draft.pk)
+                if item.get("revision_id"):
+                    revision = draft.current_revision
+                    if not revision or revision.pk != item["revision_id"] or revision.content_hash != item.get("revision_hash") or revision.snapshot_id != snapshot.pk:
+                        raise RevisionConflict()
+                    validation = {"groundedness_status": item["groundedness_status"], "notes": item.get("groundedness_notes", ""), "run_id": run.run_id}
+                    # Validation metadata can be attached; the reviewed content stays immutable.
+                    MonthlyUpdateRevision.objects.filter(pk=revision.pk).update(validation=validation)
+                    draft.groundedness_status = item["groundedness_status"]
+                    draft.save(update_fields=["groundedness_status", "updated_at"])
+                else:
+                    if item.get("expected_revision") != pin["expected_revision"]:
+                        raise RevisionConflict("Generation base revision does not match this run.")
+                    memo = dict(item["structured_memo"])
+                    from startup_updates.evidence_contract import content_hash, validate_generated_metric_claims
+                    try:
+                        validate_generated_metric_claims(memo)
+                    except ValueError as exc:
+                        from rest_framework.exceptions import ValidationError
+                        raise ValidationError(str(exc))
+                    # A generation retry may only acknowledge the exact same output.
+                    prior = (run.run_request or {}).get("saved_revisions", {}).get(item["month"].isoformat())
+                    if prior:
+                        if draft.current_revision_id != prior["revision_id"] or prior["input_hash"] != content_hash(memo):
+                            raise RevisionConflict()
+                    else:
+                        revision = save_revision(draft, memo, snapshot=snapshot, audience="private", expected_revision=item.get("expected_revision"))
+                        MonthlyUpdateRevision.objects.filter(pk=revision.pk).update(validation={"groundedness_status": "pending", "run_id": run.run_id})
+                        run_request = dict(run.run_request or {})
+                        from startup_updates.evidence_contract import content_hash
+                        run_request.setdefault("saved_revisions", {})[item["month"].isoformat()] = {"revision_id": revision.pk, "input_hash": content_hash(memo)}
+                        run.run_request = run_request
+                        run.save(update_fields=["run_request", "updated_at"])
+                    draft.run = run
+                    draft.model_name = item.get("model_name", "")
+                    draft.save(update_fields=["run", "model_name", "updated_at"])
+                draft.refresh_from_db()
                 saved.append(_serialize_draft(draft))
 
             if backups_changed:
@@ -4303,3 +4307,35 @@ class MonthlyDispatchTargetsView(APIView):
             for binding in bindings
         ]
         return Response({"count": len(targets), "targets": targets}, status=status.HTTP_200_OK)
+
+
+class StartupUpdateEvidenceSnapshotView(APIView):
+    """Pin generation inputs once per run. Retries receive identical evidence."""
+    authentication_classes = []
+    permission_classes = [HasRooApiKey]
+
+    @transaction.atomic
+    def post(self, request, run_id):
+        from startup_updates.revisions import capture_snapshot
+        from startup_updates.models import MonthlyEvidenceSnapshot
+        run, organization, binding, connection, profile = _locked_pipeline_run_context(run_id)
+        cancelled = _reject_if_run_cancelled(run)
+        if cancelled is not None:
+            return cancelled
+        run_request = dict(run.run_request or {})
+        pinned = run_request.get("evidence_snapshots")
+        if pinned is None:
+            pinned = {}
+            for raw_month in run_request.get("draft_months", []):
+                month = date.fromisoformat(raw_month)
+                snapshot = capture_snapshot(organization, month, run=run)
+                draft = MonthlyUpdateDraft.objects.filter(organization=organization, month=month).first()
+                pinned[raw_month] = {"snapshot_id": snapshot.pk, "expected_revision": draft.current_revision_id if draft else None}
+            run_request["evidence_snapshots"] = pinned
+            run.run_request = run_request
+            run.save(update_fields=["run_request", "updated_at"])
+        snapshots = {}
+        for month, item in pinned.items():
+            snapshot = get_object_or_404(MonthlyEvidenceSnapshot, pk=item["snapshot_id"], organization=organization)
+            snapshots[month] = {**item, "payload": snapshot.payload}
+        return Response({"snapshots": snapshots})

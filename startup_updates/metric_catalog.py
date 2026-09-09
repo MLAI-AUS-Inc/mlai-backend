@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Optional
+import re
 
 
 STARTUP_UPDATE_METRIC_LABELS: dict[str, str] = {
@@ -123,7 +124,7 @@ def startup_update_metric_key(value: object) -> Optional[str]:
     if text in STARTUP_UPDATE_METRIC_KEY_SET:
         return text
     normalized = text.replace("_", " ").replace("-", " ").strip().lower()
-    return _METRIC_ALIASES.get(normalized)
+    return _METRIC_ALIASES.get(normalized) or (text if re.fullmatch(r"[A-Za-z][A-Za-z0-9_.]{0,63}", text) else None)
 
 
 def startup_update_metric_label(metric_key: str) -> str:

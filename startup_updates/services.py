@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from startup_updates.evidence_contract import customer_receipt
+
 import logging
 import re
 import uuid
@@ -744,14 +746,18 @@ def build_startup_update_target_windows(
     target_month: Optional[Union[str, date, datetime]] = None,
     *,
     reference: Optional[datetime] = None,
+    timezone_name: str = "UTC",
 ) -> dict[str, Any]:
+    from zoneinfo import ZoneInfo
+    zone = ZoneInfo(timezone_name)
     now = reference or timezone.now()
     if timezone.is_naive(now):
         now = timezone.make_aware(now, timezone=dt_timezone.utc)
+    now = now.astimezone(zone)
     month = parse_startup_update_target_month(target_month, reference=now)
     month_end = _month_end(month)
-    narrative_start = _aware_utc_datetime(month, time.min)
-    narrative_month_end = _aware_utc_datetime(month_end, time.max)
+    narrative_start = datetime.combine(month, time.min, tzinfo=zone)
+    narrative_month_end = datetime.combine(month_end, time.max, tzinfo=zone)
     narrative_end = min(now, narrative_month_end)
     financial_start = _previous_month_start(month)
     return {
@@ -794,7 +800,7 @@ def set_startup_update_run_target_month(
     reference: Optional[datetime] = None,
     window_months: Optional[int] = None,
 ) -> ContentFactoryRun:
-    windows = build_startup_update_target_windows(target_month, reference=reference)
+    windows = build_startup_update_target_windows(target_month, reference=reference, timezone_name=(run.run_request or {}).get("reporting_timezone", "UTC"))
     month = windows["target_month"]
     run_request = dict(run.run_request or {})
     if window_months is not None:
@@ -1245,7 +1251,8 @@ def build_xero_run_context(*, organization: Organization, start_date: date, end_
         (value for value in (_monthly_normalized_xero_amount(record) for record in recurring_records) if value is not None),
         Decimal("0"),
     )
-    cash_collected = sum((abs(record.amount or Decimal("0")) for record in payment_records), Decimal("0"))
+    from startup_updates.evidence_contract import customer_receipt
+    cash_collected = sum((record.amount or Decimal("0") for record in payment_records if customer_receipt(record)), Decimal("0"))
     currencies = sorted({record.currency for record in recurring_records + invoice_records + payment_records if record.currency})
     warnings = [
         "Use Xero as accounting validation and non-Stripe recurring revenue context; Stripe subscription data wins where both sources overlap."
@@ -1351,6 +1358,7 @@ def publish_xero_metric_observations(
         if record.record_type == ExternalFinancialRecord.RECORD_XERO_PAYMENT
         and record.transaction_date
         and start_date <= record.transaction_date <= end_date
+        and customer_receipt(record)
     ]
     connections = list(
         ExternalServiceConnection.objects.filter(
@@ -1469,7 +1477,7 @@ def publish_xero_metric_observations(
             monthly_invoices = records_for_month(invoice_records, month, currency)
             monthly_payments = records_for_month(payment_records, month, currency)
             invoice_revenue = _decimal_sum(monthly_invoices)
-            cash_collected = sum((abs(record.amount or Decimal("0")) for record in monthly_payments), Decimal("0"))
+            cash_collected = sum((record.amount or Decimal("0") for record in monthly_payments if customer_receipt(record)), Decimal("0"))
 
             if monthly_invoices:
                 save_metric(
@@ -1545,8 +1553,6 @@ def publish_xero_metric_observations(
         _previous_month_start(_previous_month_start(current_month)),
     ]
     report_metrics_available = False
-    for month in report_months:
-        delete_report_metrics(month)
     for connection in connections:
         if not xero_has_report_scope(connection.scopes):
             warnings.append(
@@ -1561,13 +1567,13 @@ def publish_xero_metric_observations(
                 month_payload = fetch_xero_accounting_report(
                     connection,
                     "ProfitAndLoss",
-                    params={"fromDate": month.isoformat(), "toDate": _month_end(month).isoformat()},
+                    params={"fromDate": month.isoformat(), "toDate": min(end_date, _month_end(month)).isoformat()},
                 )
                 profit_and_loss_by_month[month] = _parse_xero_profit_and_loss_report(month_payload)
             balance_payload = fetch_xero_accounting_report(
                 connection,
                 "BalanceSheet",
-                params={"date": _month_end(current_month).isoformat()},
+                params={"date": min(end_date, _month_end(current_month)).isoformat()},
             )
         except http_client.HTTPError as exc:
             status_code = getattr(getattr(exc, "response", None), "status_code", None)
@@ -1595,6 +1601,14 @@ def publish_xero_metric_observations(
             revenue = report.get("revenue")
             report_monthly_costs = report.get("monthly_costs")
             report_net = report.get("net")
+            if report_net and _signed_xero_net_amount(report_net) >= 0:
+                # A successful profitable report supersedes obsolete loss
+                # estimates. Failed refreshes never reach this cleanup.
+                StartupMetricObservation.objects.filter(
+                    organization=organization, source_provider=ExternalServiceProvider.XERO,
+                    period_month=report_month, unit=currency,
+                    metric_key__in=["burnRate", "runway"],
+                ).delete()
             report_entries = report.get("entries") or []
             report_labels = _xero_report_entry_labels(report.get("entries") or [])
             income_rows = _xero_report_breakdown_rows(
@@ -1767,7 +1781,7 @@ def publish_xero_metric_observations(
             save_metric(
                 month=current_month,
                 key="burnRate",
-                name="Burn rate",
+                name="Accounting loss",
                 value_text=_format_money(current_burn, currency),
                 value_number=current_burn,
                 unit=currency,
@@ -1807,7 +1821,7 @@ def publish_xero_metric_observations(
                 save_metric(
                     month=current_month,
                     key="runway",
-                    name="Runway",
+                    name="Accounting runway estimate",
                     value_text=runway_text,
                     value_number=runway_value_number,
                     unit="months",
@@ -1967,8 +1981,7 @@ def _financial_metric_lookup(
     candidates = [metric for metric in metrics if metric.period_month == month and metric.metric_key == key]
     if currency:
         currency_candidates = [metric for metric in candidates if metric.unit == currency]
-        if currency_candidates:
-            candidates = currency_candidates
+        candidates = currency_candidates
     return candidates[0] if candidates else None
 
 
@@ -1998,197 +2011,36 @@ def build_monthly_financial_snapshot(
     financial brief cannot extend the browser draft-start request.
     """
     target_month = _month_start(target_month)
-    as_of_date = min(as_of_date or timezone.localdate(), _month_end(target_month))
+    profile, _ = StartupProfile.objects.get_or_create(organization=organization)
+    currency = profile.default_currency
     months = iter_recent_month_starts(12, reference=target_month)
-    window_start = months[0]
-    records = list(
-        ExternalFinancialRecord.objects.filter(
-            organization=organization,
-            provider=ExternalServiceProvider.XERO,
-            record_type__in=(
-                ExternalFinancialRecord.RECORD_XERO_INVOICE,
-                ExternalFinancialRecord.RECORD_XERO_BILL,
-            ),
-            transaction_date__gte=window_start,
-            transaction_date__lte=as_of_date,
-        )
-        .exclude(connection__status=ExternalServiceConnectionStatus.DISCONNECTED)
-        .order_by("transaction_date", "id")
-    )
-    metrics = list(
-        StartupMetricObservation.objects.filter(
-            organization=organization,
-            source_provider=ExternalServiceProvider.XERO,
-            period_month__gte=window_start,
-            period_month__lte=target_month,
-            metric_key__in=("revenue", "monthlyCosts", "netProfitLoss"),
-        ).order_by("period_month", "metric_key", "-observed_at", "-updated_at", "-id")
-    )
-    if not records and not metrics:
-        return None
-
-    currencies = sorted(
-        {
-            value
-            for value in [
-                *(record.currency for record in records),
-                *(metric.unit for metric in metrics if metric.unit not in {"", "count", "ratio", "months"}),
-            ]
-            if value
-        }
-    )
-    target_revenue_metrics = [
-        metric for metric in metrics
-        if metric.period_month == target_month and metric.metric_key == "revenue" and metric.unit
-    ]
-    currency = target_revenue_metrics[0].unit if target_revenue_metrics else (currencies[0] if currencies else "AUD")
-    scoped_records = [record for record in records if not currency or not record.currency or record.currency == currency]
-    warnings: list[str] = []
-    if len(currencies) > 1:
-        warnings.append(f"Multiple Xero currencies were present; charts show {currency} only.")
-
-    records_by_month: dict[date, list[ExternalFinancialRecord]] = {month: [] for month in months}
-    for record in scoped_records:
-        if record.transaction_date:
-            records_by_month.setdefault(_month_start(record.transaction_date), []).append(record)
-
-    performance: list[dict[str, Any]] = []
-    fallback_months: list[str] = []
+    observations = list(StartupMetricObservation.objects.filter(
+        organization=organization, period_month__in=months, unit=currency,
+        source_provider__in=("xero", "financial"),
+        metric_key__in=("revenue", "monthlyCosts", "netProfitLoss"),
+    ).order_by("-observed_at", "-id"))
+    performance = []
     for month in months:
-        month_records = records_by_month.get(month) or []
-        invoices = [record for record in month_records if record.record_type == ExternalFinancialRecord.RECORD_XERO_INVOICE]
-        bills = [record for record in month_records if record.record_type == ExternalFinancialRecord.RECORD_XERO_BILL]
-        invoice_total = sum(
-            (_xero_line_amount(line) for record in invoices for line in _xero_record_line_items(record)),
-            Decimal("0"),
-        )
-        bill_total = sum(
-            (_xero_line_amount(line) for record in bills for line in _xero_record_line_items(record)),
-            Decimal("0"),
-        )
-        revenue_metric = _financial_metric_lookup(metrics, month=month, key="revenue", currency=currency)
-        costs_metric = _financial_metric_lookup(metrics, month=month, key="monthlyCosts", currency=currency)
-        net_metric = _financial_metric_lookup(metrics, month=month, key="netProfitLoss", currency=currency)
-        income = revenue_metric.value_number if revenue_metric and revenue_metric.value_number is not None else invoice_total
-        expenses = costs_metric.value_number if costs_metric and costs_metric.value_number is not None else bill_total
-        net = net_metric.value_number if net_metric and net_metric.value_number is not None else income - expenses
-        if not revenue_metric or not costs_metric:
-            fallback_months.append(month.isoformat())
-        performance.append(
-            {
-                "month": month.isoformat(),
-                "income": _financial_snapshot_number(income),
-                "expenses": _financial_snapshot_number(expenses),
-                "net": _financial_snapshot_number(net),
-                "is_partial": bool(month == target_month and as_of_date < _month_end(target_month)),
-                "basis": "profit_and_loss" if revenue_metric and costs_metric else "authorised_invoices_and_bills",
-            }
-        )
-    if fallback_months:
-        warnings.append(
-            "Some historical months use authorised invoice and bill lines because cached Profit and Loss totals were unavailable."
-        )
-
-    revenue_mix: list[dict[str, Any]] = []
-    category_labels = dict(FINANCIAL_REVENUE_MIX_CATEGORIES)
-    for point in performance[-6:]:
-        month = date.fromisoformat(point["month"])
-        month_records = records_by_month.get(month) or []
-        invoices = [record for record in month_records if record.record_type == ExternalFinancialRecord.RECORD_XERO_INVOICE]
-        revenue_metric = _financial_metric_lookup(metrics, month=month, key="revenue", currency=currency)
-        source_rows = _financial_revenue_rows_from_metric(revenue_metric)
-        amounts = {key: Decimal("0") for key, _label in FINANCIAL_REVENUE_MIX_CATEGORIES}
-        if source_rows:
-            for label, amount in source_rows:
-                amounts[_classify_financial_revenue(label.lower())] += amount
-        else:
-            for record in invoices:
-                for line in _xero_record_line_items(record):
-                    amounts[_classify_financial_revenue(_xero_line_search_text(record, line))] += _xero_line_amount(line)
-        total = Decimal(str(point["income"]))
-        attributed = sum(amounts.values(), Decimal("0"))
-        if total <= 0:
-            amounts = {key: Decimal("0") for key in amounts}
-        elif attributed > 0 and attributed != total:
-            scale = total / attributed
-            amounts = {key: value * scale for key, value in amounts.items()}
-        elif total > attributed:
-            amounts["other"] += total - attributed
-        segments = [
-            {
-                "key": key,
-                "label": category_labels[key],
-                "amount": _financial_snapshot_number(amounts[key]),
-            }
-            for key, _label in FINANCIAL_REVENUE_MIX_CATEGORIES
-        ]
-        rounding_delta = _financial_snapshot_number(total) - sum(segment["amount"] for segment in segments)
-        if rounding_delta:
-            other_segment = next(segment for segment in segments if segment["key"] == "other")
-            other_segment["amount"] = round(other_segment["amount"] + rounding_delta, 2)
-        revenue_mix.append({"month": month.isoformat(), "total": point["income"], "segments": segments})
-
-    target_records = records_by_month.get(target_month) or []
-    event_totals: dict[str, dict[str, Decimal]] = {}
-    overhead_totals: dict[str, Decimal] = {}
-    for record in target_records:
-        is_income = record.record_type == ExternalFinancialRecord.RECORD_XERO_INVOICE
-        for line in _xero_record_line_items(record):
-            amount = _xero_line_amount(line)
-            tracking = _xero_line_tracking(line)
-            event_names = [option for name, option in tracking if "event" in name.lower()]
-            allocated_to_event_or_project = any(
-                "event" in name.lower() or "project" in name.lower()
-                for name, _option in tracking
-            )
-            for event_name in event_names:
-                totals = event_totals.setdefault(event_name, {"income": Decimal("0"), "expenses": Decimal("0")})
-                totals["income" if is_income else "expenses"] += amount
-            if not is_income and not allocated_to_event_or_project:
-                label = _xero_line_category_label(record, line)
-                overhead_totals[label] = overhead_totals.get(label, Decimal("0")) + amount
-
-    event_contribution = [
-        {
-            "label": label,
-            "income": _financial_snapshot_number(values["income"]),
-            "expenses": _financial_snapshot_number(values["expenses"]),
-            "net": _financial_snapshot_number(values["income"] - values["expenses"]),
-        }
-        for label, values in event_totals.items()
-    ]
-    event_contribution.sort(key=lambda item: (-item["net"], item["label"].lower()))
-
-    ordered_overhead = sorted(overhead_totals.items(), key=lambda item: (-item[1], item[0].lower()))
-    top_overhead = ordered_overhead[:5]
-    remaining_overhead = sum((amount for _label, amount in ordered_overhead[5:]), Decimal("0"))
-    if remaining_overhead:
-        top_overhead.append(("Other", remaining_overhead))
-    overhead = [
-        {"label": label, "amount": _financial_snapshot_number(amount)}
-        for label, amount in top_overhead
-    ]
-
+        values = {}
+        for key, output in (("revenue", "income"), ("monthlyCosts", "expenses"), ("netProfitLoss", "net")):
+            candidates = [m for m in observations if m.period_month == month and m.metric_key == key]
+            if key == "revenue":
+                candidates = [m for m in candidates if (
+                    m.source_provider == "xero" and (m.source_metadata or {}).get("source_metric") == "xero_profit_and_loss_revenue"
+                ) or (m.source_provider == "financial" and (m.source_metadata or {}).get("basis") == "paid_stripe_invoice_sales_excluding_tax")]
+            accounting = [m for m in candidates if m.source_provider == "xero"]
+            chosen = next(iter(accounting or candidates), None)
+            values[output] = float(chosen.value_number) if chosen and chosen.value_number is not None else None
+        performance.append({"month": month.isoformat(), **values,
+            "is_partial": month == target_month and (as_of_date or timezone.localdate()) < _month_end(month),
+            "basis": "recorded_metrics"})
     return {
-        "schema_version": FINANCIAL_SNAPSHOT_SCHEMA_VERSION,
-        "target_month": target_month.isoformat(),
-        "as_of_date": as_of_date.isoformat(),
-        "currency": currency,
-        "generated_at": timezone.now().isoformat(),
-        "performance": performance,
-        "revenue_mix": revenue_mix,
-        "event_contribution": event_contribution,
-        "overhead": overhead,
-        "data_quality": {
-            "warnings": warnings,
-            "performance_months_from_profit_and_loss": 12 - len(fallback_months),
-            "performance_months_from_invoice_and_bill_fallback": len(fallback_months),
-            "event_chart_available": bool(event_contribution),
-            "overhead_chart_available": bool(overhead),
-            "calculation_basis": (
-                "P&L totals where cached; authorised invoice and bill lines for source attribution and fallback months."
-            ),
-        },
+        "schema_version": 2, "target_month": target_month.isoformat(),
+        "as_of_date": (as_of_date or timezone.localdate()).isoformat(), "currency": currency,
+        "generated_at": timezone.now().isoformat(), "performance": performance,
+        "revenue_mix": [], "event_contribution": [], "overhead": [],
+        "data_quality": {"warnings": ["Missing periods remain unknown. Category allocations are not inferred."],
+            "calculation_basis": "Accounting revenue from Xero, otherwise paid Stripe sales. Sources are never summed."},
     }
 
 
@@ -3541,7 +3393,9 @@ def create_startup_update_run(
     force_regenerate: bool = False,
 ) -> ContentFactoryRun:
     now = timezone.now()
-    windows = build_startup_update_target_windows(target_month, reference=now)
+    profile = getattr(organization, "startup_profile", None)
+    reporting_timezone = profile.reporting_timezone if profile else "UTC"
+    windows = build_startup_update_target_windows(target_month, reference=now, timezone_name=reporting_timezone)
     selected_target_month = windows["target_month"]
     selected_input_sources = normalize_startup_update_input_sources(input_sources)
     from integrations.services.external_connectors import google_connection_for_org
@@ -3611,6 +3465,8 @@ def create_startup_update_run(
     )
     run_request = {
         "organization_id": organization.id,
+        "reporting_timezone": reporting_timezone,
+        "reporting_contract_version": 1,
         "startup_profile_id": profile.id if profile else None,
         "binding_id": binding.id,
         "google_connection_id": google_connection.id if google_connection else None,
@@ -3765,6 +3621,8 @@ def _iso_datetime(value) -> str | None:
 
 def build_cancel_backup_for_draft(draft: MonthlyUpdateDraft) -> dict:
     return {
+        "current_revision_id": draft.current_revision_id,
+        "published_revision_id": draft.published_revision_id,
         "run_id": getattr(draft.run, "run_id", None),
         "month": draft.month.isoformat(),
         "status": draft.status,
@@ -3831,6 +3689,11 @@ def _restore_cancelled_run_drafts(*, organization: Organization, backups: dict) 
     restored = 0
     for snapshot in (backups or {}).values():
         month_value = date.fromisoformat(str(snapshot["month"]))
+        current = MonthlyUpdateDraft.objects.filter(organization=organization, month=month_value).first()
+        if current and current.current_revision_id:
+            validation = current.current_revision.validation or {}
+            if not current.run_id or validation.get("run_id") != current.run.run_id:
+                continue  # Never undo a founder edit or publication when a worker is cancelled.
         previous_run = ContentFactoryRun.objects.filter(run_id=snapshot.get("run_id") or "").first()
         # Preserve the original first-ready stamp across cancel/restore so the
         # restore doesn't re-stamp (and thereby extend) time-based perks.
@@ -3840,6 +3703,8 @@ def _restore_cancelled_run_drafts(*, organization: Organization, backups: dict) 
             organization=organization,
             month=month_value,
             defaults={
+                "current_revision_id": snapshot.get("current_revision_id"),
+                "published_revision_id": snapshot.get("published_revision_id"),
                 "run": previous_run,
                 "status": snapshot.get("status", MonthlyUpdateDraftStatus.DRAFT),
                 "title": snapshot.get("title", ""),
@@ -4452,6 +4317,17 @@ def clear_slack_connection_startup_lineage_locked(
 
     event_id_values = {str(item) for item in event_ids}
     metric_id_values = {str(item) for item in metric_ids}
+    from startup_updates.models import MonthlyEvidenceSnapshot
+    revoked_snapshot_ids = {
+        pin["snapshot_id"] for run in runs if run.pk in cancel_run_ids
+        for pin in (run.run_request or {}).get("evidence_snapshots", {}).values()
+        if isinstance(pin, dict) and pin.get("snapshot_id")
+    }
+    for frozen in MonthlyEvidenceSnapshot.objects.filter(organization=organization):
+        payload = frozen.payload or {}
+        if (event_id_values.intersection(str(item.get("id")) for item in payload.get("events", []))
+            or metric_id_values.intersection(str(item.get("observation_id")) for item in payload.get("metrics", []))):
+            revoked_snapshot_ids.add(frozen.pk)
     candidate_drafts = list(
         MonthlyUpdateDraft.objects.filter(organization=organization).only(
             "id",
@@ -4690,6 +4566,11 @@ def clear_slack_connection_startup_lineage_locked(
         if run_id not in runs_by_id:
             for draft in orphan_drafts:
                 draft.delete()
+
+    # Historical revisions retain copied source text even if the current memo
+    # no longer cites it. Erase that lineage across all revisions as well.
+    MonthlyUpdateDraft.objects.filter(revisions__snapshot_id__in=revoked_snapshot_ids).delete()
+    MonthlyEvidenceSnapshot.objects.filter(organization=organization, pk__in=revoked_snapshot_ids).delete()
 
 
 def cancel_startup_update_run(

@@ -219,3 +219,5 @@ cython_debug/
 # PyPI configuration file
 .pypirc
 medhack_backend/hospital/Eval_Labels.csv
+
+!/docs/monthly-update-evidence-contract.md

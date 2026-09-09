@@ -8,7 +8,7 @@ the OAuth connect start, with ownership enforced.
 """
 
 from django.contrib.auth import get_user_model
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
 
 from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
@@ -70,6 +70,7 @@ class ConnectorCompanyScopingTests(TestCase):
                 return source
         raise AssertionError("notion source missing from status payload")
 
+    @override_settings(NOTION_CLIENT_ID="test-client", NOTION_CLIENT_SECRET="test-secret")
     def test_status_scopes_to_requested_company(self):
         self._connect_notion(self.org_b, "token-b")
 

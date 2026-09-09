@@ -117,6 +117,7 @@ class VibeRaisingApiTests(TestCase):
             organization=organization,
             provider=ExternalServiceProvider.SLACK,
             account_label="Acme Slack",
+            access_token="xoxp-test-authority",
         )
         SlackChannelSelection.objects.create(
             connection=slack_connection,
@@ -401,7 +402,7 @@ class VibeRaisingApiTests(TestCase):
 
         self.assertEqual(response.status_code, 201)
         draft = MonthlyUpdateDraft.objects.get(organization__domain="acme.com", month=date(2026, 3, 1))
-        self.assertEqual(draft.status, MonthlyUpdateDraftStatus.READY)
+        self.assertEqual(draft.status, MonthlyUpdateDraftStatus.DRAFT)
         self.assertIsNone(draft.published_at)
         self.assertEqual(draft.audience_visibility, ["just_me"])
         self.assertEqual(draft.structured_memo["highlights"], ["Closed two pilots", "Hired first AE"])
@@ -435,7 +436,7 @@ class VibeRaisingApiTests(TestCase):
             response.data["update"]["metricSuggestions"],
             [{"metricKey": "customerInterviews", "label": "Customer Interviews", "reason": "Track discovery."}],
         )
-        self.assertNotIn("ignored", response.data["update"]["metrics"])
+        self.assertEqual(response.data["update"]["metrics"]["ignored"], "noop")
         self.assertEqual(response.data["update"]["id"], draft.id)
         self.assertIsInstance(response.data["update"]["id"], int)
 
@@ -452,18 +453,18 @@ class VibeRaisingApiTests(TestCase):
         )
         self.assertEqual(first.status_code, 201)
         march = MonthlyUpdateDraft.objects.get(organization__domain="acme.com", month=date(2026, 3, 1))
-        self.assertEqual(march.audience_visibility, ["community"])
+        self.assertEqual(march.current_revision.structured_memo["_audience_visibility"], ["community"])
 
         company.default_audience_visibility = ["investors"]
         company.save(update_fields=["default_audience_visibility", "updated_at"])
         edit_existing = self.client.post(
             "/api/v1/vibe-raising/updates/",
-            {"month": "March", "year": 2026, "highlights": "Edited March"},
+            {"month": "March", "year": 2026, "highlights": "Edited March", "expectedRevision": march.current_revision_id},
             format="json",
         )
         self.assertEqual(edit_existing.status_code, 200)
         march.refresh_from_db()
-        self.assertEqual(march.audience_visibility, ["community"])
+        self.assertEqual(march.current_revision.structured_memo["_audience_visibility"], ["community"])
 
         future = self.client.post(
             "/api/v1/vibe-raising/updates/",
@@ -472,7 +473,7 @@ class VibeRaisingApiTests(TestCase):
         )
         self.assertEqual(future.status_code, 201)
         april = MonthlyUpdateDraft.objects.get(organization__domain="acme.com", month=date(2026, 4, 1))
-        self.assertEqual(april.audience_visibility, ["investors"])
+        self.assertEqual(april.current_revision.structured_memo["_audience_visibility"], ["just_me"])
 
     def test_monthly_update_accepts_allowed_audience_visibility_combinations(self):
         self.client.force_authenticate(user=self.user)
@@ -500,13 +501,13 @@ class VibeRaisingApiTests(TestCase):
                 self.assertEqual(response.status_code, 201)
                 self.assertEqual(
                     response.data["update"]["audienceVisibility"],
-                    ["community", "investors"] if len(audience_visibility) == 2 else audience_visibility,
+                    ["community"] if "community" in audience_visibility else ["just_me"],
                 )
                 draft = MonthlyUpdateDraft.objects.get(
                     organization__domain="acme.com",
                     month=date(2026, month_number, 1),
                 )
-                self.assertEqual(draft.audience_visibility, response.data["update"]["audienceVisibility"])
+                self.assertEqual(draft.current_revision.structured_memo["_audience_visibility"], response.data["update"]["audienceVisibility"])
 
     def test_monthly_update_rejects_invalid_audience_visibility_combo(self):
         self.client.force_authenticate(user=self.user)
@@ -554,26 +555,26 @@ class VibeRaisingApiTests(TestCase):
         draft = MonthlyUpdateDraft.objects.get(organization__domain="acme.com", month=date(2026, 6, 1))
         self.assertEqual(draft.status, MonthlyUpdateDraftStatus.DRAFT)
         self.assertIsNone(draft.published_at)
-        self.assertEqual(draft.audience_visibility, ["community", "investors"])
+        self.assertEqual(draft.current_revision.structured_memo["_audience_visibility"], ["community"])
         self.assertEqual(response.data["update"]["visibility"], "private")
 
         updates_response = self.client.get("/api/v1/vibe-raising/updates/")
         self.assertEqual(updates_response.status_code, 200)
-        self.assertEqual(updates_response.data["updates"][0]["audienceVisibility"], ["community", "investors"])
+        self.assertEqual(updates_response.data["updates"][0]["audienceVisibility"], ["community"])
         drafts_response = self.client.get("/api/v1/vibe-raising/drafts/")
         self.assertEqual(drafts_response.status_code, 200)
         self.assertEqual(len(drafts_response.data["drafts"]), 1)
 
-        publish_response = self.client.post(f"/api/v1/vibe-raising/updates/{draft.id}/publish/")
+        publish_response = self.client.post(f"/api/v1/vibe-raising/updates/{draft.id}/publish/", {"companyId": company.pk, "revisionId": response.data["update"]["revisionId"], "revisionHash": response.data["update"]["revisionHash"], "audienceVisibility": ["community"]}, format="json")
 
         self.assertEqual(publish_response.status_code, 200)
         self.assertEqual(publish_response.data["update"]["visibility"], "published")
-        self.assertEqual(publish_response.data["update"]["audienceVisibility"], ["community", "investors"])
+        self.assertEqual(publish_response.data["update"]["audienceVisibility"], ["community"])
         self.assertIsNotNone(publish_response.data["update"]["publishedAt"])
         draft.refresh_from_db()
         self.assertEqual(draft.status, MonthlyUpdateDraftStatus.READY)
         self.assertIsNotNone(draft.published_at)
-        self.assertEqual(draft.audience_visibility, ["community", "investors"])
+        self.assertEqual(draft.audience_visibility, ["community"])
         self.assertEqual(self.client.get("/api/v1/vibe-raising/drafts/").data["drafts"], [])
         mock_award.assert_called_once_with(
             user=self.user,
@@ -638,18 +639,21 @@ class VibeRaisingApiTests(TestCase):
         )
         url = f"/api/v1/vibe-raising/updates/{draft.id}/publish/"
 
-        first_response = self.client.post(url)
+        saved = self.client.post("/api/v1/vibe-raising/updates/", {"companyId": company.pk, "month": "June", "year": 2026, "saveMode": "draft", "highlights": "Reviewed update", "audienceVisibility": ["just_me"]}, format="json")
+        self.assertEqual(saved.status_code, 200, saved.data)
+        receipt = {"companyId": company.pk, "revisionId": saved.data["update"]["revisionId"], "revisionHash": saved.data["update"]["revisionHash"], "audienceVisibility": ["just_me"]}
+        first_response = self.client.post(url, receipt, format="json")
         draft.refresh_from_db()
         first_published_at = draft.published_at
-        second_response = self.client.post(url)
+        second_response = self.client.post(url, receipt, format="json")
         draft.refresh_from_db()
 
         self.assertEqual(first_response.status_code, 200)
         self.assertEqual(second_response.status_code, 200)
         self.assertIsNotNone(first_published_at)
         self.assertEqual(draft.published_at, first_published_at)
-        self.assertEqual(draft.audience_visibility, ["investors"])
-        self.assertEqual(second_response.data["update"]["audienceVisibility"], ["investors"])
+        self.assertEqual(draft.audience_visibility, ["just_me"])
+        self.assertEqual(second_response.data["update"]["audienceVisibility"], ["just_me"])
         mock_award.assert_called_once()
 
     def test_editing_published_update_preserves_publish_state_and_visibility_when_omitted(self):
@@ -681,12 +685,17 @@ class VibeRaisingApiTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         draft.refresh_from_db()
-        self.assertEqual(draft.status, MonthlyUpdateDraftStatus.READY)
+        self.assertEqual(draft.status, MonthlyUpdateDraftStatus.DRAFT)
         self.assertEqual(draft.published_at, published_at)
         self.assertEqual(draft.audience_visibility, ["community"])
         self.assertEqual(draft.structured_memo["highlights"], ["Edited highlight"])
-        self.assertEqual(response.data["update"]["visibility"], "published")
+        self.assertEqual(response.data["update"]["visibility"], "private")
         self.assertEqual(response.data["update"]["audienceVisibility"], ["community"])
+
+        self.assertEqual(draft.published_revision.structured_memo["highlights"], ["Initial highlight"])
+        public_copy = self.client.get("/api/v1/vibe-raising/updates/").data["updates"][0]
+        self.assertEqual(public_copy["highlights"], "Initial highlight")
+        self.assertEqual(public_copy["evidenceStatus"], "legacy_unverified")
 
     def test_drafts_endpoint_returns_only_unpublished_owner_rows(self):
         self.client.force_authenticate(user=self.user)
@@ -879,6 +888,7 @@ class VibeRaisingApiTests(TestCase):
                 "drafts": [
                     {
                         "month": "2026-08-01",
+                        "snapshot_id": 1,
                         "structured_memo": {"highlights": ["Generated highlight"]},
                         "audienceVisibility": ["investor"],
                     }
@@ -1442,19 +1452,19 @@ class VibeRaisingApiTests(TestCase):
         self.assertEqual(
             draft.structured_memo["display_config"],
             {
-                "snippet_metric_keys": ["revenue"],
-                "full_metric_keys": ["activeUsers", "revenue"],
+                "snippet_metric_keys": ["revenue", "bogusKey"],
+                "full_metric_keys": ["activeUsers", "revenue", "bogusKey"],
             },
         )
         self.assertEqual(
             response.data["update"]["displayConfig"],
             {
-                "snippetMetricKeys": ["revenue"],
-                "fullMetricKeys": ["activeUsers", "revenue"],
+                "snippetMetricKeys": ["revenue", "bogusKey"],
+                "fullMetricKeys": ["activeUsers", "revenue", "bogusKey"],
             },
         )
 
-    def test_monthly_update_save_round_trips_financial_brief(self):
+    def test_monthly_update_ignores_client_chart_totals(self):
         self.client.force_authenticate(user=self.user)
         self._create_founder_company(domain="financial-brief.example", registered=True)
         snapshot = {
@@ -1487,10 +1497,11 @@ class VibeRaisingApiTests(TestCase):
             organization__domain="financial-brief.example",
             month=date(2026, 3, 1),
         )
-        self.assertEqual(draft.structured_memo["financial_snapshot"], snapshot)
+        self.assertNotEqual(draft.structured_memo["financial_snapshot"], snapshot)
+        self.assertIsNone(draft.structured_memo["financial_snapshot"]["performance"][-1]["income"])
         self.assertEqual(draft.structured_memo["concise_analysis"], analysis)
         self.assertEqual(draft.structured_memo["presentation_mode"], "financial_charts_concise")
-        self.assertEqual(response.data["update"]["financialSnapshot"], snapshot)
+        self.assertEqual(response.data["update"]["financialSnapshot"], draft.current_revision.snapshot.payload["charts"])
         self.assertEqual(response.data["update"]["conciseAnalysis"], analysis)
 
     def test_monthly_update_post_preserves_display_config_when_omitted(self):
@@ -1623,12 +1634,8 @@ class VibeRaisingApiTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         history = response.data["metricHistory"]
-        self.assertEqual(history["revenue"]["points"][0]["value"], 3800.0)
-        self.assertEqual(history["revenue"]["unit"], "AUD")
-        self.assertEqual(
-            history["revenue"]["points"][0]["valueText"],
-            response.data["updates"][0]["metrics"]["revenue"],
-        )
+        self.assertNotIn("revenue", history)
+        self.assertEqual(history["activeUsers"]["points"][0]["value"], 25)
 
     def test_display_config_defaults_for_legacy_updates(self):
         self.client.force_authenticate(user=self.user)
@@ -1772,7 +1779,7 @@ class VibeRaisingApiTests(TestCase):
             "/api/v1/vibe-raising/email-draft/runs/run-123/draft-results/",
         )
 
-    def test_startup_update_bootstrap_returns_needs_domain_for_missing_domain(self):
+    def test_startup_update_bootstrap_accepts_domainless_startup(self):
         self.client.force_authenticate(user=self.user)
         self._create_founder_company(domain="")
 
@@ -1782,8 +1789,10 @@ class VibeRaisingApiTests(TestCase):
             format="json",
         )
 
-        self.assertEqual(response.status_code, 400)
-        self.assertEqual(response.data["state"], "needs_domain")
+        self.assertEqual(response.status_code, 200)
+        company = VibeRaisingCompany.objects.get(profile__user=self.user)
+        self.assertEqual(company.domain, "")
+        self.assertEqual(company.organization.domain, f"startup-{company.pk}.invalid")
 
     def test_startup_update_run_returns_needs_google_auth_until_connected(self):
         self.client.force_authenticate(user=self.user)
@@ -1988,7 +1997,7 @@ class VibeRaisingApiTests(TestCase):
         self.assertEqual(response.data["draft"]["year"], 2026)
         self.assertEqual(response.data["draft"]["metrics"]["revenue"], "$45,000")
         self.assertEqual(response.data["draft"]["metrics"]["activeUsers"], "1250")
-        self.assertNotIn("ARR", response.data["draft"]["metrics"])
+        self.assertEqual(response.data["draft"]["metrics"]["ARR"], "$500,000")
         self.assertEqual(response.data["draft"]["highlights"], "Closed two new pilots\nRevenue expanded")
         self.assertEqual(response.data["draft"]["challenges"], "Hiring is still slow\nSales pipeline slipped")
         self.assertEqual(response.data["draft"]["asks"], "Customer intros\nHiring referrals")
@@ -2325,6 +2334,9 @@ class VibeRaisingApiTests(TestCase):
             "slack_relevance_classification",
             "slack_event_extraction",
             "timeline_merge",
+            "reconciliation_enrichment",
+            "candidate_curation",
+            "founder_review",
             "draft_generation",
             "groundedness_review",
         ]
@@ -2887,7 +2899,7 @@ class VibeRaisingApiTests(TestCase):
         self.assertEqual(results_response.data["months"][0]["month"], "March")
         self.assertEqual(results_response.data["months"][0]["highlights"], "March highlight\nMarch second highlight")
 
-    def test_email_draft_results_hydrate_revenue_from_xero_observations(self):
+    def test_email_draft_results_do_not_hydrate_live_revenue(self):
         self.client.force_authenticate(user=self.user)
         self._create_founder_company()
         google_connection = self._create_google_connection()
@@ -2961,11 +2973,11 @@ class VibeRaisingApiTests(TestCase):
         )
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data["draft"]["metrics"]["revenue"], "AUD 3800.00")
+        self.assertNotIn("revenue", response.data["draft"]["metrics"])
         self.assertEqual(response.data["draft"]["metrics"]["activeUsers"], "25")
-        self.assertEqual(response.data["draft"]["pastMonths"][0]["metrics"]["revenue"], "AUD 2735.75")
-        self.assertEqual(response.data["currentMonth"]["metrics"]["revenue"], "AUD 3800.00")
-        self.assertEqual(response.data["pastMonths"][0]["metrics"]["revenue"], "AUD 2735.75")
+        self.assertNotIn("revenue", response.data["draft"]["pastMonths"][0]["metrics"])
+        self.assertNotIn("revenue", response.data["currentMonth"]["metrics"])
+        self.assertNotIn("revenue", response.data["pastMonths"][0]["metrics"])
         stored_draft = MonthlyUpdateDraft.objects.get(organization=organization, month=date(2026, 4, 1))
         self.assertNotIn(
             "revenue",

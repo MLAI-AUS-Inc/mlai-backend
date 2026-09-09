@@ -24,6 +24,7 @@ from startup_updates.models import (
     LinearProjectSelection,
     LinearProjectUpdateArtifact,
     MonthlyUpdateDraft,
+    MonthlyEvidenceSnapshot,
     SlackChannelSelection,
     SlackMessageArtifact,
     SlackThreadArtifact,
@@ -70,6 +71,7 @@ DELETED_COUNT_KEYS = (
     "startupEvents",
     "startupMetrics",
     "monthlyDrafts",
+    "evidenceSnapshots",
     "orgMemorySourcesTombstoned",
     "orgMemoryVersionsRetired",
     "orgMemoryChunksDeactivated",
@@ -492,7 +494,15 @@ def _delete_gmail_derived_outputs(
     counts = _zero_deleted_counts()
     run_ids = [run.id for run in gmail_runs]
     if gmail_only:
-        counts["monthlyDrafts"] = _delete_count(
+        # Founder edits may no longer reference the generating run, but copied evidence still does.
+        snapshot_ids = []
+        for snapshot in MonthlyEvidenceSnapshot.objects.filter(organization_id__in=organization_ids):
+            if "gmail" in (snapshot.payload or {}).get("source_providers", []):
+                snapshot_ids.append(snapshot.pk)
+        if snapshot_ids:
+            counts["monthlyDrafts"] += _delete_count(MonthlyUpdateDraft.objects.filter(revisions__snapshot_id__in=snapshot_ids))
+            counts["evidenceSnapshots"] += _delete_count(MonthlyEvidenceSnapshot.objects.filter(pk__in=snapshot_ids))
+        counts["monthlyDrafts"] += _delete_count(
             MonthlyUpdateDraft.objects.filter(organization_id__in=organization_ids, run_id__in=run_ids)
         )
         counts["startupEvents"] = _delete_count(
@@ -510,6 +520,7 @@ def _delete_gmail_derived_outputs(
         return counts
 
     counts["monthlyDrafts"] = _delete_count(MonthlyUpdateDraft.objects.filter(organization_id__in=organization_ids))
+    counts["evidenceSnapshots"] = _delete_count(MonthlyEvidenceSnapshot.objects.filter(organization_id__in=organization_ids))
     counts["startupEvents"] = _delete_count(StartupEvent.objects.filter(organization_id__in=organization_ids))
     counts["startupMetrics"] = _delete_count(StartupMetricObservation.objects.filter(organization_id__in=organization_ids))
     return counts

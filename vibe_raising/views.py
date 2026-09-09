@@ -12,6 +12,7 @@ from uuid import uuid4
 from django.conf import settings
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
+from django.db.models import Q
 from django.shortcuts import get_object_or_404
 from django.urls import reverse
 from django.utils import timezone
@@ -40,6 +41,7 @@ from startup_updates.models import (
     MonthlyUpdateDraft,
     MonthlyUpdateDraftStatus,
     StartupManualDocument,
+    StartupProfile,
 )
 from startup_updates.manual_documents import parse_manual_document
 from startup_updates.metric_catalog import (
@@ -811,32 +813,20 @@ def _structured_memo_concise_analysis(structured_memo):
 
 
 def _structured_memo_with_xero_metrics(draft):
-    # Merges connector-backed metrics (Xero + Luma) into the draft's kpi_snapshot.
-    structured_memo = draft.structured_memo or {}
-    if not getattr(draft, "organization_id", None):
-        return structured_memo
-
-    evidence_metric_ids = getattr(draft, "evidence_metric_ids", []) or []
-    merged_memo, evidence_metric_ids = merge_xero_metrics_into_structured_memo(
-        organization=draft.organization,
-        month=draft.month,
-        structured_memo=structured_memo,
-        evidence_metric_ids=evidence_metric_ids,
-    )
-    merged_memo, _evidence_metric_ids = merge_luma_metrics_into_structured_memo(
-        organization=draft.organization,
-        month=draft.month,
-        structured_memo=merged_memo,
-        evidence_metric_ids=evidence_metric_ids,
-    )
-    return merged_memo
+    # Historical values must never be replaced during a read.
+    from startup_updates.revisions import frozen_memo
+    return frozen_memo(draft)
 
 
 def _serialize_draft_for_form(draft):
+    from startup_updates.revisions import revision_payload
     structured_memo = _structured_memo_with_xero_metrics(draft)
     video_metadata = _structured_memo_video_metadata(structured_memo)
     month_value = draft.month
     return {
+        "id": draft.id,
+        **(revision_payload(draft.current_revision) if draft.current_revision_id else {}),
+        "audienceVisibility": structured_memo.get("_audience_visibility", ["just_me"]),
         "month": calendar.month_name[month_value.month],
         "year": month_value.year,
         "summary": _structured_memo_text(structured_memo, "summary", "topline"),
@@ -905,7 +895,8 @@ def _structured_memo_video_metadata(structured_memo):
 
 def _build_manual_kpi_snapshot(metrics):
     snapshot = []
-    for metric_key, label in MANUAL_METRIC_LABELS.items():
+    for metric_key in (metrics or {}):
+        label = MANUAL_METRIC_LABELS.get(metric_key, metric_key)
         value = str((metrics or {}).get(metric_key) or "").strip()
         if not value:
             continue
@@ -986,13 +977,22 @@ def _build_manual_structured_memo(payload):
     return memo
 
 
-def _serialize_monthly_update(draft, structured_memo=None):
+def _serialize_monthly_update(draft, structured_memo=None, *, published=False):
+    from startup_updates.revisions import frozen_memo, revision_payload
+    revision = draft.published_revision if published and draft.published_revision_id else draft.current_revision
+    if revision:
+        structured_memo = frozen_memo(draft, published=published and bool(draft.published_revision_id))
     if structured_memo is None:
         structured_memo = _structured_memo_with_xero_metrics(draft)
     video_metadata = _structured_memo_video_metadata(structured_memo)
     published_at = getattr(draft, "published_at", None)
+    if revision and revision.pk != draft.published_revision_id:
+        published_at = None
     return {
         "id": draft.id,
+        **(revision_payload(revision, include_evidence=not published) if revision else {}),
+        "evidenceStatus": "snapshot" if revision and not revision.validation.get("legacy_unverified") else "legacy_unverified",
+        "metricEvidence": {item.get("metric_key"): {key: item.get(key) for key in ("quality", "source_provider", "basis", "limitations")} for item in structured_memo.get("kpi_snapshot", []) if isinstance(item, dict)},
         "isoMonth": draft.month.isoformat(),
         "month": f"{calendar.month_name[draft.month.month]} {draft.month.year}",
         "monthName": calendar.month_name[draft.month.month],
@@ -1000,7 +1000,7 @@ def _serialize_monthly_update(draft, structured_memo=None):
         "date": draft.updated_at.isoformat(),
         "status": draft.status,
         "visibility": "published" if published_at else "private",
-        "audienceVisibility": monthly_update_visibility(draft),
+        "audienceVisibility": structured_memo.get("_audience_visibility") or monthly_update_visibility(draft),
         "publishedAt": published_at.isoformat() if published_at else None,
         "summary": _structured_memo_text(structured_memo, "summary", "topline"),
         "sourceUrl": _structured_memo_text(structured_memo, "sourceUrl", "source_url"),
@@ -1057,11 +1057,13 @@ def _serialize_draft_bundle(drafts):
 
 
 def _serialize_email_draft_month(draft):
+    from startup_updates.revisions import revision_payload
     structured_memo = _structured_memo_with_xero_metrics(draft)
     video_metadata = _structured_memo_video_metadata(structured_memo)
     month_value = draft.month
     return {
         "draftId": draft.id,
+        **(revision_payload(draft.current_revision) if draft.current_revision_id else {}),
         "isoMonth": month_value.isoformat(),
         "month": calendar.month_name[month_value.month],
         "year": month_value.year,
@@ -1161,7 +1163,8 @@ def _get_founder_company_context_or_response(request):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-    domain = normalize_domain(company.domain or "")
+    organization = ensure_company_organization(company)
+    domain = organization.domain
     return {
         "profile": profile,
         "company": company,
@@ -1170,7 +1173,8 @@ def _get_founder_company_context_or_response(request):
 
 
 def _ensure_binding_for_company(*, user, company, enforce_ownership=True):
-    organization, startup_profile = resolve_or_create_profile(domain=company.domain)
+    organization = ensure_company_organization(company)
+    startup_profile, _ = StartupProfile.objects.get_or_create(organization=organization)
     if (
         enforce_ownership
         and not _is_admin_user(user)
@@ -2479,16 +2483,17 @@ class VibeRaisingMonthlyUpdateView(APIView):
                 draft_queryset = draft_queryset.visible_to_audience(audience)
             except ValueError:
                 return Response(
-                    {"detail": "audience must be founder, community, or investor."},
+                    {"detail": "audience must be founder or community."},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
+        from startup_updates.revisions import frozen_memo
         draft_memo_pairs = [
-            (draft, _structured_memo_with_xero_metrics(draft))
+            (draft, frozen_memo(draft, published=bool(draft.published_revision_id)))
             for draft in draft_queryset.order_by("-month", "-updated_at")
         ]
         updates = [
-            _serialize_monthly_update(draft, structured_memo=memo)
+            _serialize_monthly_update(draft, structured_memo=memo, published=bool(draft.published_at))
             for draft, memo in draft_memo_pairs
         ]
         metric_history = build_metric_history(
@@ -2499,6 +2504,7 @@ class VibeRaisingMonthlyUpdateView(APIView):
             status=status.HTTP_200_OK,
         )
 
+    @transaction.atomic
     def post(self, request):
         context, error_response = _get_founder_company_context_or_response(request)
         if error_response:
@@ -2561,7 +2567,8 @@ class VibeRaisingMonthlyUpdateView(APIView):
         if "audienceVisibility" in serializer.validated_data:
             audience_visibility = serializer.validated_data["audienceVisibility"]
         elif existing_draft is not None:
-            audience_visibility = monthly_update_visibility(existing_draft)
+            audience_visibility = (existing_draft.current_revision.structured_memo.get("_audience_visibility")
+                if existing_draft.current_revision_id else monthly_update_visibility(existing_draft))
         else:
             audience_visibility = normalize_audience_visibility(
                 getattr(company, "default_audience_visibility", None)
@@ -2585,18 +2592,32 @@ class VibeRaisingMonthlyUpdateView(APIView):
                 for document in manual_documents
             ],
         }
-        draft, created = MonthlyUpdateDraft.objects.update_or_create(
-            organization=organization,
-            month=month_bucket,
-            defaults={
-                "status": draft_status,
-                "title": f"{company.name} {serializer.validated_data['month']} {serializer.validated_data['year']} Update",
-                "model_name": "vibe-raising-manual",
-                "structured_memo": _build_manual_structured_memo(structured_payload),
-                "audience_visibility": audience_visibility,
-                "published_at": existing_draft.published_at if existing_draft else None,
-            },
-        )
+        from startup_updates.revisions import capture_snapshot, save_revision
+        Organization.objects.select_for_update().get(pk=organization.pk)
+        draft, created = MonthlyUpdateDraft.objects.get_or_create(organization=organization, month=month_bucket)
+        previous_metrics = _extract_metrics(draft.current_revision.structured_memo) if draft.current_revision_id else {}
+        incoming_metrics = serializer.validated_data.get("metrics") or {}
+        changed_metrics = {key: value for key, value in incoming_metrics.items() if previous_metrics.get(key) != value}
+        snapshot = draft.current_revision.snapshot if draft.current_revision_id and not changed_metrics else capture_snapshot(organization, month_bucket, manual_metrics=changed_metrics, base_snapshot=draft.current_revision.snapshot if draft.current_revision_id else None)
+        memo = _build_manual_structured_memo(structured_payload)
+        if draft.current_revision_id:
+            # Only the server's frozen chart is eligible for reuse.
+            old = draft.current_revision.structured_memo
+            if "financial_snapshot" in old and not changed_metrics:
+                memo["financial_snapshot"] = old["financial_snapshot"]
+            else:
+                memo.pop("financial_snapshot", None)
+        else:
+            memo.pop("financial_snapshot", None)
+        revision = save_revision(draft, memo, snapshot=snapshot,
+            expected_revision=serializer.validated_data.get("expectedRevision"),
+            audience="community" if "community" in audience_visibility else "private")
+        draft.refresh_from_db()
+        draft.title = f"{company.name} {serializer.validated_data['month']} {serializer.validated_data['year']} Update"
+        draft.status = MonthlyUpdateDraftStatus.DRAFT
+        draft.run = None
+        # Disclosure is part of the reviewed revision, not a mutable publication flag.
+        draft.save(update_fields=["title", "status", "run", "updated_at"])
 
         # Reward verified-company founders for completing the month's update (once per
         # company per month; best-effort, never blocks the save).
@@ -2632,7 +2653,7 @@ class VibeRaisingDraftView(APIView):
         drafts = [
             _serialize_monthly_update(draft)
             for draft in organization.monthly_update_drafts.filter(
-                published_at__isnull=True,
+                Q(published_at__isnull=True) | Q(status__in=["draft", "needs_review"])
             ).order_by("-month", "-updated_at")
         ]
         return Response({"drafts": drafts}, status=status.HTTP_200_OK)
@@ -2662,13 +2683,20 @@ class VibeRaisingMonthlyUpdatePublishView(APIView):
             pk=update_id,
             organization=organization,
         )
-        was_unpublished = draft.published_at is None
-        update_fields = ["status", "updated_at"]
-        draft.status = MonthlyUpdateDraftStatus.READY
-        if was_unpublished:
-            draft.published_at = timezone.now()
-            update_fields.append("published_at")
-        draft.save(update_fields=update_fields)
+        from startup_updates.revisions import approve_and_publish
+        was_unpublished = draft.published_revision_id is None
+        revision_id = request.data.get("revisionId")
+        revision_hash = request.data.get("revisionHash")
+        if not revision_id or not revision_hash:
+            return Response({"detail": "Review the exact saved revision before publishing."}, status=409)
+        try:
+            visibility = normalize_audience_visibility(request.data.get("audienceVisibility"))
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=400)
+        if visibility not in (["just_me"], ["community"]):
+            return Response({"detail": "Choose private or community visibility."}, status=400)
+        draft = approve_and_publish(draft, actor=request.user, revision_id=revision_id,
+            revision_hash=revision_hash, audience_visibility=visibility)
 
         if was_unpublished:
             from roo.services import StartupUpdateRewardService
@@ -3309,3 +3337,64 @@ class VibeRaisingEmailDraftLatestView(APIView):
             ),
             status=status.HTTP_200_OK,
         )
+
+
+class VibeRaisingBusinessHealthView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        from startup_updates.revisions import capture_snapshot
+        from startup_updates.evidence_contract import health_assessment
+        context, error = _get_founder_company_context_or_response(request)
+        if error:
+            return error
+        organization, profile, _ = _ensure_binding_for_company(user=request.user, company=context["company"])
+        draft = MonthlyUpdateDraft.objects.filter(organization=organization, current_revision__isnull=False).order_by("-month").first()
+        # Health is the same evidence version as the latest saved update.
+        if draft:
+            snapshot = draft.current_revision.snapshot
+            health = health_assessment(snapshot.payload)
+        else:
+            health = {"summary": "Create an update to capture your first evidence snapshot.", "metrics": [], "attention": [], "period": None}
+        return Response({**health, "configuration": {"timezone": profile.reporting_timezone,
+            "currency": profile.default_currency, "version": profile.reporting_config_version, "metricDefinitions": profile.kpi_definitions}})
+
+    @transaction.atomic
+    def post(self, request):
+        from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+        context, error = _get_founder_company_context_or_response(request)
+        if error:
+            return error
+        organization, profile, _ = _ensure_binding_for_company(user=request.user, company=context["company"])
+        profile = StartupProfile.objects.select_for_update().get(pk=profile.pk)
+        timezone_name = str(request.data.get("timezone", profile.reporting_timezone))
+        currency = str(request.data.get("currency", profile.default_currency)).upper()
+        try:
+            ZoneInfo(timezone_name)
+        except (ZoneInfoNotFoundError, ValueError):
+            return Response({"detail": "Use an IANA reporting timezone."}, status=400)
+        if len(currency) != 3 or not currency.isalpha():
+            return Response({"detail": "Use a three-letter currency code."}, status=400)
+        definitions = request.data.get("metricDefinitions", profile.kpi_definitions)
+        if not isinstance(definitions, list) or any(not isinstance(item, dict) for item in definitions):
+            return Response({"detail": "Metric definitions must be a list of objects."}, status=400)
+        if request.data.get("metricLabel"):
+            label = str(request.data["metricLabel"]).strip()[:100]
+            key = "custom_" + slugify(label).replace("-", "_")[:55]
+            definition = str(request.data.get("metricDefinition") or "").strip()
+            if not definition:
+                return Response({"detail": "Explain how this metric is measured."}, status=400)
+            definitions = [item for item in definitions if item.get("key") != key] + [{"key": key, "label": label, "definition": definition, "version": profile.reporting_config_version + 1}]
+
+        if any(not isinstance(item.get(field), str) or not item[field].strip()
+               for item in definitions for field in ("key", "label", "definition")):
+            return Response({"detail": "Metric definitions require key, label and definition."}, status=400)
+        import re
+        if any(not re.fullmatch(r"[A-Za-z][A-Za-z0-9_.]{0,63}", item["key"]) for item in definitions) or len({item["key"] for item in definitions}) != len(definitions):
+            return Response({"detail": "Metric keys must be unique identifiers of at most 64 characters."}, status=400)
+        if any(item["key"] == "revenue" for item in definitions):
+            return Response({"detail": "Revenue uses the system financial definition."}, status=400)
+        profile.reporting_timezone, profile.default_currency, profile.kpi_definitions = timezone_name, currency, definitions
+        profile.reporting_config_version += 1
+        profile.save(update_fields=["reporting_timezone", "default_currency", "kpi_definitions", "reporting_config_version", "updated_at"])
+        return Response({"saved": True, "version": profile.reporting_config_version})
