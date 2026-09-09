@@ -3801,16 +3801,23 @@ def _claim_ready_private_delivery_batch(*, limit: int) -> list[SlackDmMirrorDeli
 
     with transaction.atomic():
         claim_now = timezone.now()
+        from integrations.services.slack_chat_refresh import (
+            prioritize_open_conversations,
+        )
+
         candidate_conversation_id = (
-            SlackDmMirrorDelivery.objects.filter(
-                status=CommunityBridgeDeliveryStatus.PENDING,
-                available_at__lte=claim_now,
-                conversation__status=SlackDmMirrorConversationStatus.LIVE,
-                conversation__grant__status=SlackDmMirrorGrantStatus.ACTIVE,
-                conversation__grant__revoked_at__isnull=True,
+            prioritize_open_conversations(
+                SlackDmMirrorDelivery.objects.filter(
+                    status=CommunityBridgeDeliveryStatus.PENDING,
+                    available_at__lte=claim_now,
+                    conversation__status=SlackDmMirrorConversationStatus.LIVE,
+                    conversation__grant__status=SlackDmMirrorGrantStatus.ACTIVE,
+                    conversation__grant__revoked_at__isnull=True,
+                ),
+                conversation_field="conversation_id",
             )
             .exclude(source_message_id__startswith=REGISTRATION_STATE_PREFIX)
-            .order_by("available_at", "id")
+            .order_by("-foreground_refresh", "available_at", "id")
             .values_list("conversation_id", flat=True)
             .first()
         )
@@ -4676,14 +4683,21 @@ def _history_reconciliation_boundary_locked(
     return next(iter(boundaries), ("", ""))
 
 
-def _clear_history_scan_states(conversation_ids: list[int]) -> None:
+def _clear_history_scan_states(
+    conversation_ids: list[int], *, preserve_foreground=False
+) -> None:
     if not conversation_ids:
         return
-    SlackDmMirrorDelivery.objects.filter(
+    rows = SlackDmMirrorDelivery.objects.filter(
         conversation_id__in=conversation_ids,
         source_platform=CommunityBridgePlatform.SLACK,
         source_message_id__startswith=HISTORY_STATE_PREFIX,
-    ).delete()
+    )
+    if preserve_foreground:
+        from integrations.services.slack_chat_refresh import FOREGROUND_STATE_ID
+
+        rows = rows.exclude(source_message_id=FOREGROUND_STATE_ID)
+    rows.delete()
 
 
 def _restart_incomplete_history_scans_locked(
@@ -4893,12 +4907,18 @@ def process_due_history_backfills(limit: int = 1) -> int:
     for _ in range(scan_limit):
         now = timezone.now()
         with transaction.atomic():
+            from integrations.services.slack_chat_refresh import (
+                prioritize_open_conversations,
+            )
+
             candidate = (
-                SlackDmMirrorConversation.objects.filter(
-                    history_backfilled_at__isnull=True,
-                    status=SlackDmMirrorConversationStatus.LIVE,
-                    grant__status=SlackDmMirrorGrantStatus.ACTIVE,
-                    grant__revoked_at__isnull=True,
+                prioritize_open_conversations(
+                    SlackDmMirrorConversation.objects.filter(
+                        history_backfilled_at__isnull=True,
+                        status=SlackDmMirrorConversationStatus.LIVE,
+                        grant__status=SlackDmMirrorGrantStatus.ACTIVE,
+                        grant__revoked_at__isnull=True,
+                    )
                 )
                 .exclude(
                     last_error__startswith="history_scan_processing:",
@@ -4911,7 +4931,9 @@ def process_due_history_backfills(limit: int = 1) -> int:
                         output_field=IntegerField(),
                     )
                 )
-                .order_by("history_page_priority", "updated_at", "id")
+                .order_by(
+                    "-foreground_refresh", "history_page_priority", "updated_at", "id"
+                )
                 .values("id", "grant_id")
                 .first()
             )
@@ -6059,7 +6081,7 @@ def _finish_history_scan(conversation: SlackDmMirrorConversation) -> None:
     _complete_dependency_reconciliation_locked(conversation)
     _release_history_deliveries(conversation)
     _supersede_unrecovered_backfill_rows_locked(conversation)
-    _clear_history_scan_states([conversation.pk])
+    _clear_history_scan_states([conversation.pk], preserve_foreground=True)
 
 
 def _complete_dependency_reconciliation_locked(
