@@ -19,7 +19,10 @@ class SlackChannelRefreshTests(SimpleTestCase):
             pk=12,
             mlai_channel_id=uuid4(),
             history_backfilled_at=timezone.now() - timedelta(hours=1),
-            grant=SimpleNamespace(history_days=30),
+            slack_conversation_id="DPRIVATE",
+            grant=SimpleNamespace(
+                history_days=30, connection=SimpleNamespace(provider_metadata={})
+            ),
             deliveries=MagicMock(),
             last_error="",
         )
@@ -127,18 +130,12 @@ class SlackChannelRefreshTests(SimpleTestCase):
                 rows = MagicMock()
                 rows.exclude.return_value = rows
 
-                def filter_rows(*args, **kwargs):
-                    if "status__in" in kwargs:
-                        result = MagicMock()
-                        result.exists.return_value = (
-                            failed
-                            if kwargs["status__in"] == ("failed", "dead")
-                            else pending
-                        )
-                        return result
-                    return rows
-
-                rows.filter.side_effect = filter_rows
+                rows.filter.return_value = rows
+                rows.aggregate.return_value = {
+                    "imported_messages": 2,
+                    "queued_messages": int(pending),
+                    "failed_messages": int(failed),
+                }
                 conversation.deliveries = rows
                 self.assertEqual(
                     refresh._refresh_status(conversation)["status"], expected

@@ -1906,7 +1906,8 @@ def complete_oauth_callback(request, provider: str) -> str:
             from urllib.parse import parse_qs, urlsplit
 
             options = parse_qs(urlsplit(next_url).query)
-            history_days = 30 if options.get("slack_history_days") == ["30"] else 7
+            selected_history = options.get("slack_history_days")
+            history_days = 0 if selected_history == ["0"] else 30 if selected_history == ["30"] else 7
             activate_connection(
                 connection, history_days=history_days,
                 include_private_channels=options.get("slack_private_channels") == ["1"],

@@ -94,12 +94,15 @@ from integrations.services.slack_dm_registration_ledger import (
     update_registration_cleanup_summary_locked as _update_registration_cleanup_summary_locked,
 )
 from integrations.services.slack_chat_catalog import (
+    ALL_HISTORY_CONSENT,
     CATALOG_KEY,
     PRIVATE_CHANNEL_CONSENT,
+    PRIVATE_CHANNEL_CONSENTS,
     PRIVATE_CHANNEL_SCOPES,
     catalog_payload,
     catalog_tombstones,
     conversation_kind,
+    conversation_metadata,
     raw_conversation_kind,
     private_channels_enabled,
 )
@@ -144,6 +147,7 @@ MAX_PRIVATE_DELIVERY_BATCH = 20
 MAX_PRIVATE_DELIVERY_BATCH_TEXT_BYTES = 700_000
 HISTORY_STATE_PREFIX = "history-state:"
 HISTORY_MAIN_STATE_ID = f"{HISTORY_STATE_PREFIX}main"
+HISTORY_RECONCILIATION_STATE_ID = f"{HISTORY_STATE_PREFIX}reconciliation"
 DISCOVERY_CHECKPOINT_KEY = "slack_dm_mirror_discovery_v1"
 PENDING_EVENT_CHECKPOINT_KEY = "slack_dm_mirror_pending_events_v1"
 MAX_PENDING_UNKNOWN_EVENTS = 5000
@@ -670,7 +674,7 @@ def _store_conversation_membership_intent(
     slack_conversation_id: str,
     participant_slack_ids: list[str],
     participant_profiles: dict[str, dict[str, str]] | None = None,
-    channel_metadata: dict[str, str] | None = None,
+    channel_metadata: dict[str, Any] | None = None,
 ) -> tuple[SlackDmMirrorConversation, bool]:
     """Expose a Slack membership snapshot only after fencing old authority."""
 
@@ -789,13 +793,12 @@ def _store_conversation_profiles(
     required_scopes: set[str] | frozenset[str],
     participant_slack_ids: list[str],
     participant_profiles: dict[str, dict[str, str]],
-    activity_seconds: int | None = None,
 ) -> SlackDmMirrorConversation:
     """Persist profiles only if the locked membership intent is still current."""
 
     expected_ids = sorted(participant_slack_ids)
     with transaction.atomic():
-        grant, connection = _lock_slack_grant_api_authority(
+        grant, _ = _lock_slack_grant_api_authority(
             authority,
             required_scopes=required_scopes,
         )
@@ -811,16 +814,6 @@ def _store_conversation_profiles(
             raise SlackDmMirrorAuthorizationError(
                 "Slack private conversation membership changed during profile lookup."
             )
-        if activity_seconds is not None:
-            metadata = dict(connection.provider_metadata or {})
-            catalog = dict(metadata.get(CATALOG_KEY) or {})
-            catalog[conversation.slack_conversation_id] = {
-                **(catalog.get(conversation.slack_conversation_id) or {}),
-                "latest_message_ts": str(activity_seconds),
-            }
-            metadata[CATALOG_KEY] = catalog
-            connection.provider_metadata = metadata
-            connection.save(update_fields=("provider_metadata", "updated_at"))
         conversation.grant = grant
         conversation.participant_profiles = participant_profiles
         conversation.save(update_fields=("participant_profiles", "updated_at"))
@@ -1112,6 +1105,7 @@ def status_payload(
         "pending": backfill_conversations.count() - complete,
         "imported_messages": backfill_deliveries.filter(
             status=CommunityBridgeDeliveryStatus.COMPLETED,
+            operation=CommunityBridgeDeliveryType.CREATE,
         )
         .filter(
             Q(metadata__history_outside_window__isnull=True)
@@ -1131,7 +1125,7 @@ def status_payload(
             )
         ).count(),
     }
-    history_days = _bounded_history_days(grant.history_days if grant else 7)
+    history_days = _grant_history_days(grant) if grant else _bounded_history_days(7)
     return {
         "connected": connection is not None,
         "needs_reauthorization": bool(
@@ -1140,7 +1134,7 @@ def status_payload(
                 connection is None
                 or (
                     grant is not None
-                    and grant.consent_version != PRIVATE_CHANNEL_CONSENT
+                    and grant.consent_version not in PRIVATE_CHANNEL_CONSENTS
                 )
                 or not REQUIRED_SCOPES.issubset(set(connection.scopes or []))
                 or connection.status
@@ -1157,6 +1151,7 @@ def status_payload(
         "workspace_id": grant.slack_workspace_id if grant else "",
         "slack_user_id": grant.slack_user_id if grant else "",
         "history_days": history_days,
+        "history_scope": "all" if history_days == 0 else "recent",
         "consent_version": (
             grant.consent_version if grant else SlackDmMirrorGrant.CONSENT_VERSION
         ),
@@ -1188,8 +1183,8 @@ def status_payload(
             "owner_controlled": True,
             "included_in_roo": False,
             "included_in_analytics": False,
-            "history_is_bounded": True,
-            "full_history": False,
+            "history_is_bounded": history_days > 0,
+            "full_history": history_days == 0,
         },
     }
 
@@ -1250,11 +1245,18 @@ def activate_connection(
         )
     if _preferred_device(connection.user_id) is None:
         raise SlackDmMirrorError("Verify an MLAI Chat device before linking Slack DMs.")
+    if history_days == 0 and not include_private_channels:
+        raise SlackDmMirrorError(
+            "Choose all available history from MLAI Chat to consent."
+        )
     consent_version = (
-        PRIVATE_CHANNEL_CONSENT
+        (ALL_HISTORY_CONSENT if history_days == 0 else PRIVATE_CHANNEL_CONSENT)
         if include_private_channels
         and PRIVATE_CHANNEL_SCOPES.issubset(set(connection.scopes or []))
         else SlackDmMirrorGrant.CONSENT_VERSION
+    )
+    requested_history_days = _bounded_history_days(
+        history_days, allow_all=consent_version == ALL_HISTORY_CONSENT
     )
     existing_grant = SlackDmMirrorGrant.objects.filter(
         slack_workspace_id=workspace_id,
@@ -1290,7 +1292,7 @@ def activate_connection(
                     "updated_at",
                 )
             )
-            if _bounded_history_days(history_days) != current.history_days:
+            if requested_history_days != current.history_days:
                 backfill_grant(current, history_days=history_days)
             current.refresh_from_db()
         return current
@@ -1363,7 +1365,7 @@ def activate_connection(
                 slack_user_id=slack_user_id,
                 status=SlackDmMirrorGrantStatus.ACTIVE,
                 consent_version=consent_version,
-                history_days=_bounded_history_days(history_days),
+                history_days=requested_history_days,
                 consented_at=now,
             )
         else:
@@ -1387,7 +1389,7 @@ def activate_connection(
                 grant.connection = locked_connection
                 grant.status = SlackDmMirrorGrantStatus.ACTIVE
                 grant.consent_version = consent_version
-                grant.history_days = _bounded_history_days(history_days)
+                grant.history_days = requested_history_days
                 grant.consented_at = now
                 grant.paused_at = None
                 grant.revoked_at = None
@@ -1504,15 +1506,30 @@ def backfill_grant(
     grant = SlackDmMirrorGrant.objects.select_for_update().get(pk=grant.pk)
     if grant.status != SlackDmMirrorGrantStatus.ACTIVE or grant.revoked_at is not None:
         raise SlackDmMirrorError("Resume Slack mirroring before starting a backfill.")
-    # `full_history` is retained only so older MLAI Chat releases can keep
-    # calling this method while they upgrade. An owner-triggered import is
-    # always bounded now; a legacy `backfill_all` request must never remove
-    # Slack's `oldest` timestamp.
+    # Only an explicit new history_days=0 selection widens consent. Keep the
+    # historical full_history/backfill_all alias bounded for installed clients.
+    if history_days == 0 and not full_history:
+        if not private_channels_enabled(grant):
+            raise SlackDmMirrorError(
+                "Reconnect Slack before importing all available history."
+            )
+        grant.consent_version = ALL_HISTORY_CONSENT
+    selected_days = history_days if history_days is not None else grant.history_days
     grant.history_days = _bounded_history_days(
-        history_days if history_days is not None else grant.history_days
+        selected_days,
+        allow_all=grant.consent_version == ALL_HISTORY_CONSENT and not full_history,
     )
+    if grant.history_days > 0 and grant.consent_version == ALL_HISTORY_CONSENT:
+        grant.consent_version = PRIVATE_CHANNEL_CONSENT
     grant.last_discovery_at = None
-    grant.save(update_fields=("history_days", "last_discovery_at", "updated_at"))
+    grant.save(
+        update_fields=(
+            "history_days",
+            "consent_version",
+            "last_discovery_at",
+            "updated_at",
+        )
+    )
     now = timezone.now()
     conversations = list(
         SlackDmMirrorConversation.objects.select_for_update()
@@ -1531,7 +1548,6 @@ def backfill_grant(
     SlackDmMirrorConversation.objects.filter(pk__in=conversation_ids).update(
         history_backfilled_at=None,
         oldest_synced_ts="",
-        latest_synced_ts="",
         last_error="",
         updated_at=now,
     )
@@ -2444,16 +2460,15 @@ def discover_conversations(
             if isinstance(profile, dict):
                 profile_cache.setdefault(str(slack_user_id), profile)
     staged_channel_ids = _staged_slack_channel_ids(grant.connection)
-    activity_cutoff = (
-        int(time.time()) - _bounded_history_days(grant.history_days) * 86_400
-    )
+    history_days = _grant_history_days(grant)
+    activity_cutoff = int(time.time()) - history_days * 86_400 if history_days else 0
     while True:
         response = _call_slack_with_grant_authority(
             authority,
             "users_conversations",
             required_scopes=DIRECT_DM_SCOPES,
             types=conversation_types,
-            exclude_archived=True,
+            exclude_archived=grant.consent_version != ALL_HISTORY_CONSENT,
             limit=20,
             cursor=cursor,
         )
@@ -2480,7 +2495,10 @@ def discover_conversations(
             if not channel_id:
                 continue
             seen_channel_ids.add(channel_id)
-            if bool(raw.get("is_archived")):
+            if (
+                bool(raw.get("is_archived"))
+                and grant.consent_version != ALL_HISTORY_CONSENT
+            ):
                 _retire_ineligible_from_slack_response(
                     authority,
                     channel_id,
@@ -2728,6 +2746,9 @@ def _discover_conversation(
             required_scopes=required_scopes,
         )
         return None
+    activity = _discover_conversation_activity(
+        authority, raw, required_scopes=required_scopes
+    )
     conversation, _ = _store_conversation_membership_intent(
         grant.pk,
         authority=authority,
@@ -2737,6 +2758,8 @@ def _discover_conversation(
         channel_metadata={
             "kind": kind,
             "name": str(raw.get("name") or "")[:255],
+            "source_archived": bool(raw.get("is_archived")),
+            **({"latest_message_ts": str(activity)} if activity is not None else {}),
         },
     )
     _preload_slack_profiles(authority, set(participant_ids), profile_cache)
@@ -2749,10 +2772,6 @@ def _discover_conversation(
         )
         for slack_user_id in participant_ids
     }
-    # Fence changed membership before any optional metadata network lookup.
-    activity = _discover_conversation_activity(
-        authority, raw, required_scopes=required_scopes
-    )
     conversation = _store_conversation_profiles(
         grant.pk,
         conversation.pk,
@@ -2760,7 +2779,6 @@ def _discover_conversation(
         required_scopes=required_scopes,
         participant_slack_ids=participant_ids,
         participant_profiles=participant_profiles,
-        activity_seconds=activity,
     )
     periodic_reconciliation_due = bool(
         conversation.history_backfilled_at is not None
@@ -3608,6 +3626,9 @@ def ingest_mlai_dm_event(payload: dict[str, Any]) -> dict[str, Any] | None:
         )
         if conversation is None:
             return {"status": "ignored"}
+        conversation.grant = grant
+        if conversation_metadata(conversation).get("source_archived"):
+            return {"status": "rejected", "error": "slack_conversation_archived"}
         owner_device_pubkeys = _conversation_owner_device_pubkeys(conversation)
         if author_pubkey not in owner_device_pubkeys:
             return {"status": "ignored"}
@@ -3674,7 +3695,14 @@ def _backfill_delivery_is_outside_history_window(
     now = now or timezone.now()
     if history_days is None:
         history_days = delivery.conversation.grant.history_days
-    cutoff = int(now.timestamp()) - _bounded_history_days(history_days) * 86_400
+    history_days = _bounded_history_days(
+        history_days,
+        allow_all=getattr(delivery.conversation.grant, "consent_version", "")
+        == ALL_HISTORY_CONSENT,
+    )
+    if history_days == 0:
+        return False
+    cutoff = int(now.timestamp()) - history_days * 86_400
     return _delivery_created_at(delivery) < cutoff
 
 
@@ -4563,6 +4591,14 @@ def _mark_conversation_history_due(
     reset_deliveries: bool,
     reconcile_current_state: bool = False,
 ) -> None:
+    # A refresh must not throw away a background import cursor. Source events
+    # and periodic discovery can arrive repeatedly during a large archive scan.
+    if (
+        reconcile_current_state
+        and not reset_deliveries
+        and conversation.history_backfilled_at is None
+    ):
+        return
     now = timezone.now()
     _clear_history_scan_states([conversation.pk])
     conversation.history_backfilled_at = None
@@ -4577,7 +4613,7 @@ def _mark_conversation_history_due(
         )
     )
     if reconcile_current_state:
-        _mark_history_reconciliation_candidates_locked(conversation)
+        _mark_history_reconciliation_candidates_locked(conversation, recent_only=True)
     if reset_deliveries:
         SlackDmMirrorDelivery.objects.filter(
             conversation=conversation,
@@ -4595,15 +4631,13 @@ def _mark_conversation_history_due(
 
 def _mark_history_reconciliation_candidates_locked(
     conversation: SlackDmMirrorConversation,
+    *,
+    recent_only: bool = False,
 ) -> None:
     """Mark current Slack state whose later absence implies delete/remove."""
 
     reconcile_epoch = uuid.uuid4().hex
-    reconcile_oldest = ""
-    if conversation.grant.history_days:
-        reconcile_oldest = str(
-            max(0, int(time.time()) - int(conversation.grant.history_days) * 86_400)
-        )
+    reconcile_oldest = _reconciliation_oldest(conversation, recent_only=recent_only)
     rows = list(
         SlackDmMirrorDelivery.objects.select_for_update().filter(
             conversation=conversation,
@@ -4639,7 +4673,10 @@ def _mark_history_reconciliation_candidates_locked(
                 row.metadata = metadata
                 changed.append(row)
             continue
-        if reconcile_oldest and seconds < int(reconcile_oldest):
+        if reconcile_oldest and (
+            seconds < int(reconcile_oldest)
+            or not _message_is_within_reconciliation_scope(row, reconcile_oldest)
+        ):
             if metadata != original_metadata:
                 row.metadata = metadata
                 changed.append(row)
@@ -4651,6 +4688,50 @@ def _mark_history_reconciliation_candidates_locked(
         changed.append(row)
     if changed:
         SlackDmMirrorDelivery.objects.bulk_update(changed, ("metadata", "updated_at"))
+
+    # Persist even an empty scan's boundary; inferring it only from imported
+    # message rows would accidentally restart an all-history scan on every open.
+    _ensure_history_state(
+        conversation,
+        source_message_id=HISTORY_RECONCILIATION_STATE_ID,
+        metadata={
+            "history_scan_state": "reconciliation",
+            HISTORY_RECONCILE_EPOCH_KEY: reconcile_epoch,
+            HISTORY_RECONCILE_OLDEST_KEY: reconcile_oldest,
+        },
+    )
+
+
+def _message_is_within_reconciliation_scope(
+    row: SlackDmMirrorDelivery, oldest: str
+) -> bool:
+    """Only infer deletion when this history scan can observe the whole thread."""
+    if not oldest:
+        return True
+    metadata = row.metadata or {}
+    if row.source_platform == CommunityBridgePlatform.BUZZ and metadata.get(
+        "source_parent_message_id"
+    ):
+        # This is a relay event ID, not a Slack timestamp. Until its thread is
+        # explicitly fetched, a main-history page cannot prove the reply absent.
+        return False
+    parent_ts = str(
+        metadata.get("thread_ts") or metadata.get("original_thread_ts") or ""
+    ).strip()
+    source_ts = (
+        row.source_message_id
+        if row.source_platform == CommunityBridgePlatform.SLACK
+        else str(metadata.get("slack_ts") or "")
+    )
+    if not parent_ts or parent_ts == source_ts:
+        return True
+    try:
+        parent_seconds, _ = _slack_ts_sort_key(parent_ts)
+    except SlackDmMirrorError:
+        return False
+    # conversations.history does not enumerate replies on roots before oldest.
+    # Signed delete callbacks remain authoritative for these excluded replies.
+    return parent_seconds >= int(oldest)
 
 
 def _clear_history_reconciliation_metadata(metadata: dict[str, Any]) -> None:
@@ -4675,6 +4756,15 @@ def _history_reconciliation_boundary_locked(
         )
         .values_list("metadata", flat=True)
     }
+    marker = _history_state(conversation, HISTORY_RECONCILIATION_STATE_ID)
+    if marker is not None:
+        metadata = marker.metadata or {}
+        boundaries.add(
+            (
+                str(metadata.get(HISTORY_RECONCILE_EPOCH_KEY) or ""),
+                str(metadata.get(HISTORY_RECONCILE_OLDEST_KEY) or ""),
+            )
+        )
     boundaries.discard(("", ""))
     if len(boundaries) > 1:
         raise SlackDmMirrorError(
@@ -5070,7 +5160,11 @@ def _history_scan_authority_from_state(
         or not authority.registration_generation
         or authority.history_days < 0
         or (authority.history_days > 0 and not authority.oldest.isdigit())
-        or (authority.history_days == 0 and authority.oldest)
+        or (
+            authority.history_days == 0
+            and authority.oldest
+            and not authority.oldest.isdigit()
+        )
     ):
         raise SlackDmMirrorAuthorizationError("Slack history scan state is invalid.")
     return authority
@@ -5280,7 +5374,7 @@ def _enqueue_history_page(
         "channel": slack_conversation_id,
         "limit": HISTORY_PAGE_LIMIT,
     }
-    if scan_authority.history_days > 0:
+    if scan_authority.oldest:
         request_kwargs["oldest"] = scan_authority.oldest
         request_kwargs["inclusive"] = True
     if oldest_synced_ts:
@@ -5407,14 +5501,34 @@ def _persist_history_page_locked(
         except SlackDmMirrorError:
             continue
         boundary_ids.append(message_id)
+    if (
+        (
+            response.get("has_more")
+            or (response.get("response_metadata") or {}).get("next_cursor")
+        )
+        and boundary_ids
+        and conversation.oldest_synced_ts
+    ):
+        if min(map(_slack_ts_sort_key, boundary_ids)) >= _slack_ts_sort_key(
+            conversation.oldest_synced_ts
+        ):
+            raise SlackDmMirrorError("Slack history pagination made no progress.")
     history = []
     participant_ids = set(conversation.participant_slack_ids or [])
     for message in raw_messages:
         if not _history_message_author_allowed(conversation, message):
             continue
+        message = _normalize_history_author(conversation, message)
         message_id = str(message.get("ts") or "").strip()
         author_id = str(message.get("user") or "").strip()
-        if not message_id or author_id not in participant_ids:
+        if (
+            not message_id
+            or not author_id
+            or (
+                author_id not in participant_ids
+                and not _all_history_group_import(conversation)
+            )
+        ):
             continue
         _slack_ts_sort_key(message_id)
         history.append(message)
@@ -5430,6 +5544,7 @@ def _persist_history_page_locked(
         if (
             parent_message_id
             and parent_message_id != str(message.get("ts") or "")
+            and scan_authority.history_days > 0
             and scan_authority.oldest
         ):
             parent_seconds, _ = _slack_ts_sort_key(parent_message_id)
@@ -5473,8 +5588,7 @@ def _persist_history_page_locked(
         oldest_in_page = min(boundary_ids, key=_slack_ts_sort_key)
         newest_in_page = max(boundary_ids, key=_slack_ts_sort_key)
         conversation.oldest_synced_ts = oldest_in_page
-        if not conversation.latest_synced_ts:
-            conversation.latest_synced_ts = newest_in_page
+        _advance_latest_synced_ts(conversation, newest_in_page)
         update_fields.extend(("oldest_synced_ts", "latest_synced_ts"))
     if has_more and boundary_ids:
         conversation.history_backfilled_at = None
@@ -5581,10 +5695,79 @@ def _persist_reply_page(
         )
 
 
+def _all_history_group_import(conversation: SlackDmMirrorConversation) -> bool:
+    """Allow source-only historical authors within an explicitly consented group."""
+    return getattr(
+        conversation.grant, "consent_version", ""
+    ) == ALL_HISTORY_CONSENT and conversation_kind(conversation) in {
+        "mpim",
+        "private_channel",
+    }
+
+
+def _normalize_history_author(
+    conversation: SlackDmMirrorConversation, message: dict[str, Any]
+) -> dict[str, Any]:
+    """Preserve departed-member/bot attribution without granting them relay access."""
+    if not _all_history_group_import(conversation):
+        return message
+    message = dict(message)
+    author_id = str(message.get("user") or message.get("bot_id") or "").strip()
+    profile = message.get("user_profile") or message.get("bot_profile") or {}
+    if not isinstance(profile, dict):
+        profile = {}
+    icons = profile.get("icons") if isinstance(profile.get("icons"), dict) else {}
+    message["user"] = author_id
+    message["_mlai_history_author"] = {
+        "display_name": str(
+            profile.get("display_name")
+            or profile.get("real_name")
+            or profile.get("name")
+            or message.get("username")
+            or author_id
+        )[:255],
+        "avatar_url": str(
+            profile.get("image_72")
+            or profile.get("image_48")
+            or icons.get("image_48")
+            or ""
+        )[:2000],
+    }
+    return message
+
+
+def _history_delivery_author_pubkey(delivery: SlackDmMirrorDelivery) -> str:
+    """Use only an already registered source identity; never add a recipient."""
+    conversation = delivery.conversation
+    linked = str(
+        (conversation.participant_identity_map or {}).get(delivery.source_author_id)
+        or ""
+    ).lower()
+    metadata = delivery.metadata or {}
+    if linked:
+        return linked
+    if (
+        delivery.source_platform != CommunityBridgePlatform.SLACK
+        or not metadata.get("backfill")
+        or not _all_history_group_import(conversation)
+    ):
+        return ""
+    # This deterministic key was registered before any page could be scanned.
+    # It is shared by group authors and is never one of the owner's devices.
+    import_key = _shadow_pubkey(conversation, "private-channel-import")
+    return (
+        import_key
+        if import_key in (conversation.participant_buzz_pubkeys or [])
+        else ""
+    )
+
+
 def _history_message_author_allowed(conversation, message):
     """Preserve Roo replies only in the owner's actual one-to-one Roo mirror."""
     from integrations.services.slack_roo import is_public_roo_reply
 
+    if _all_history_group_import(conversation):
+        return True
     if not message.get("bot_id") and message.get("subtype") != "bot_message":
         return True
     return is_public_roo_reply(
@@ -5612,9 +5795,17 @@ def _persist_reply_page_locked(
             conversation, message
         ):
             continue
+        message = _normalize_history_author(conversation, message)
         message_id = str(message.get("ts") or "").strip()
         author_id = str(message.get("user") or "").strip()
-        if not message_id or author_id not in participant_ids:
+        if (
+            not message_id
+            or not author_id
+            or (
+                author_id not in participant_ids
+                and not _all_history_group_import(conversation)
+            )
+        ):
             continue
         _slack_ts_sort_key(message_id)
         if (
@@ -5639,7 +5830,9 @@ def _persist_reply_page_locked(
         (response.get("response_metadata") or {}).get("next_cursor") or ""
     ).strip()
     has_more = bool(response.get("has_more") or next_cursor)
-    if has_more and not next_cursor:
+    if has_more and (
+        not next_cursor or next_cursor == str(metadata.get("cursor") or "").strip()
+    ):
         raise SlackDmMirrorError("Slack thread pagination made no progress.")
     metadata["cursor"] = next_cursor
     metadata["complete"] = not has_more
@@ -5697,6 +5890,10 @@ def _enqueue_history_message(
         "participant_hash": conversation.participant_hash,
         "history_scan_epoch": scan_authority.epoch,
     }
+    if _all_history_group_import(conversation):
+        metadata["history_author"] = message.get("_mlai_history_author") or {
+            "display_name": author_id
+        }
     original_thread_ts = str(message.get("_mlai_original_thread_ts") or "").strip()
     if original_thread_ts:
         metadata.update(
@@ -5801,7 +5998,10 @@ def _enqueue_history_message(
             continue
         for reaction_author_id in reaction.get("users") or []:
             reaction_author_id = str(reaction_author_id or "").strip()
-            if reaction_author_id not in set(conversation.participant_slack_ids or []):
+            if not reaction_author_id or (
+                reaction_author_id not in set(conversation.participant_slack_ids or [])
+                and not _all_history_group_import(conversation)
+            ):
                 continue
             semantic_id = reaction_object_id(
                 message_id=message_id,
@@ -6477,19 +6677,16 @@ def _deliver_private_batch(claimed: list[SlackDmMirrorDelivery]) -> None:
                 raise SlackDmMirrorError(
                     "Private delivery batch changed while claimed."
                 )
-            linked_pubkey = str(
-                (conversation.participant_identity_map or {}).get(
-                    delivery.source_author_id
-                )
-                or ""
-            ).lower()
+            linked_pubkey = _history_delivery_author_pubkey(delivery)
             if not linked_pubkey:
                 raise SlackDmMirrorError(
                     "Slack author is not part of this owner mirror."
                 )
-            profile = (conversation.participant_profiles or {}).get(
-                delivery.source_author_id
-            ) or {}
+            profile = (
+                (conversation.participant_profiles or {}).get(delivery.source_author_id)
+                or (delivery.metadata or {}).get("history_author")
+                or {}
+            )
             source_metadata = dict(delivery.metadata or {})
             source_metadata_by_id[delivery.pk] = source_metadata
             payloads.append(
@@ -6561,8 +6758,7 @@ def _deliver_private_batch(claimed: list[SlackDmMirrorDelivery]) -> None:
             ) > _slack_ts_sort_key(latest_timestamp):
                 latest_timestamp = event_timestamp
         conversation.last_synced_at = now
-        if latest_timestamp:
-            conversation.latest_synced_ts = latest_timestamp
+        _advance_latest_synced_ts(conversation, latest_timestamp)
         conversation.save(
             update_fields=("last_synced_at", "latest_synced_ts", "updated_at")
         )
@@ -6798,9 +6994,20 @@ def _supersede_stale_slack_mutation_locked(
     return False
 
 
+def _assert_slack_conversation_writable(
+    conversation: SlackDmMirrorConversation,
+) -> None:
+    """Archived source history is readable but never a destination for writes."""
+    if conversation_metadata(conversation).get("source_archived"):
+        raise SlackDmMirrorAuthorizationError(
+            "This Slack conversation is archived and read-only."
+        )
+
+
 def _deliver_to_slack(delivery: SlackDmMirrorDelivery) -> None:
     conversation = delivery.conversation
     grant = conversation.grant
+    _assert_slack_conversation_writable(conversation)
     if (
         conversation.status != SlackDmMirrorConversationStatus.LIVE
         or grant.status != SlackDmMirrorGrantStatus.ACTIVE
@@ -7054,15 +7261,14 @@ def _deliver_to_mlai(delivery: SlackDmMirrorDelivery) -> None:
         raise SlackDmMirrorAuthorizationError(
             "The private conversation participants changed."
         )
-    linked_pubkey = str(
-        (conversation.participant_identity_map or {}).get(delivery.source_author_id)
-        or ""
-    ).lower()
+    linked_pubkey = _history_delivery_author_pubkey(delivery)
     if not linked_pubkey:
         raise SlackDmMirrorError("Slack author is not part of this owner mirror.")
-    profile = (conversation.participant_profiles or {}).get(
-        delivery.source_author_id
-    ) or {}
+    profile = (
+        (conversation.participant_profiles or {}).get(delivery.source_author_id)
+        or (delivery.metadata or {}).get("history_author")
+        or {}
+    )
     source_metadata = delivery.metadata or {}
     if _supersede_stale_slack_mutation_locked(delivery):
         return
@@ -7194,8 +7400,7 @@ def _deliver_to_mlai(delivery: SlackDmMirrorDelivery) -> None:
         _slack_ts_sort_key(event_timestamp)
     except SlackDmMirrorError:
         event_timestamp = ""
-    if event_timestamp:
-        conversation.latest_synced_ts = event_timestamp
+    _advance_latest_synced_ts(conversation, event_timestamp)
     conversation.save(
         update_fields=("last_synced_at", "latest_synced_ts", "updated_at")
     )
@@ -7299,6 +7504,18 @@ def _delivery_created_at(delivery: SlackDmMirrorDelivery) -> int:
         except SlackDmMirrorError:
             continue
     return int(delivery.created_at.timestamp())
+
+
+def _advance_latest_synced_ts(
+    conversation: SlackDmMirrorConversation, timestamp: str
+) -> None:
+    """Historical page delivery must never move a conversation's recency backward."""
+    if timestamp and (
+        not conversation.latest_synced_ts
+        or _slack_ts_sort_key(timestamp)
+        > _slack_ts_sort_key(conversation.latest_synced_ts)
+    ):
+        conversation.latest_synced_ts = timestamp
 
 
 def _slack_ts_sort_key(value: str) -> tuple[int, int]:
@@ -7646,21 +7863,48 @@ def _history_days() -> int:
     return max(1, min(configured, MAX_HISTORY_DAYS))
 
 
-def _bounded_history_days(value: Any) -> int:
+def _bounded_history_days(value: Any, *, allow_all: bool = False) -> int:
     configured = _history_days()
     try:
         current = int(value)
     except (TypeError, ValueError):
         current = configured
+    if current == 0 and allow_all:
+        return 0
     if current <= 0:
         return configured
     return min(current, configured, MAX_HISTORY_DAYS)
 
 
-def _normalize_grant_history_window_locked(grant: SlackDmMirrorGrant) -> bool:
-    """Fence legacy unbounded scans before any further Slack history I/O."""
+def _grant_history_days(grant: SlackDmMirrorGrant) -> int:
+    """Honor zero only for grants carrying the explicit all-history consent."""
+    return _bounded_history_days(
+        grant.history_days,
+        allow_all=getattr(grant, "consent_version", "") == ALL_HISTORY_CONSENT,
+    )
 
-    bounded_days = _bounded_history_days(grant.history_days)
+
+def _reconciliation_oldest(
+    conversation: SlackDmMirrorConversation, *, recent_only: bool
+) -> str:
+    """Refresh recent source state and any offline gap without rescanning archives."""
+    now_seconds = int(time.time())
+    days = _grant_history_days(conversation.grant)
+    if days:
+        return str(max(0, now_seconds - days * 86_400))
+    if not recent_only:
+        return ""
+    oldest = max(0, now_seconds - MAX_HISTORY_DAYS * 86_400)
+    if conversation.latest_synced_ts:
+        latest, _ = _slack_ts_sort_key(conversation.latest_synced_ts)
+        oldest = min(oldest, max(0, latest - 86_400))
+    return str(oldest)
+
+
+def _normalize_grant_history_window_locked(grant: SlackDmMirrorGrant) -> bool:
+    """Fence legacy zero-valued scans unless the owner explicitly selected all."""
+
+    bounded_days = _grant_history_days(grant)
     if grant.history_days == bounded_days:
         return False
     grant.history_days = bounded_days

@@ -9,6 +9,10 @@ from decimal import Decimal, InvalidOperation
 
 CATALOG_KEY = "mlai_chat_conversations_v1"
 PRIVATE_CHANNEL_CONSENT = "slack-chat-v4-private-channels"
+# Zero is all available history only after this explicit owner consent. Legacy
+# zero-valued grants remain bounded until the owner chooses the new option.
+ALL_HISTORY_CONSENT = "slack-chat-v5-all-available-history"
+PRIVATE_CHANNEL_CONSENTS = frozenset({PRIVATE_CHANNEL_CONSENT, ALL_HISTORY_CONSENT})
 PRIVATE_CHANNEL_SCOPES = {"groups:read", "groups:history"}
 
 
@@ -48,7 +52,7 @@ def raw_conversation_kind(raw):
 
 def private_channels_enabled(grant):
     return (
-        grant.consent_version == PRIVATE_CHANNEL_CONSENT
+        grant.consent_version in PRIVATE_CHANNEL_CONSENTS
         and PRIVATE_CHANNEL_SCOPES.issubset(set(grant.connection.scopes or []))
     )
 
@@ -61,6 +65,9 @@ def catalog_payload(conversations, public_key):
             "channel_id": str(conversation.mlai_channel_id),
             "kind": conversation_kind(conversation),
             "last_message_at": conversation_activity_at(conversation),
+            "source_archived": bool(
+                conversation_metadata(conversation).get("source_archived")
+            ),
             **(
                 {"participants": catalog_participants(conversation)}
                 if conversation_kind(conversation) in {"im", "mpim"}
