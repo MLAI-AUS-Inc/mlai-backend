@@ -172,7 +172,10 @@ History requests fetch up to 200 messages, run at the 50-requests/minute
 baseline, persist the oldest timestamp boundary, and honor Slack's
 `Retry-After` response without blocking OAuth or Community Home. Each persisted
 page is released to delivery immediately, so a large scan becomes visible while
-older pages continue loading. Consecutive top-level creates for one private
+older pages continue loading. Conversations awaiting their first history page
+are scanned before deeper pages; the remaining queue is ordered by least recent
+attempt. These server workers continue when the client closes. Discovery,
+metadata lookup and history all respect retry cooldowns and saved progress. Consecutive top-level creates for one private
 conversation are delivered in ordered batches of up to 20 through
 `POST /v1/private-deliveries/batch`; the adapter then uses the relay's
 trusted-private `POST /events/batch` route. One grant/conversation revocation
@@ -320,9 +323,15 @@ link exists; normal retries retain the original timestamp and signed event ID.
 
 The existing authenticated `GET /api/v1/community-chat/slack/` response adds
 `discovery_pending`, `private_channels_enabled`, and `channel_catalog` entries
-of `{channel_id, kind}` (`im`, `mpim`, or `private_channel`). Only mirrors
+of `{channel_id, kind, last_message_at}` (`im`, `mpim`, or `private_channel`). Only mirrors
 provisioned for the caller's verified device appear in that catalog. Clients
-use source type rather than relay participant count to classify chats.
+use source type rather than relay participant count to classify chats. The
+nullable ISO UTC `last_message_at` is the latest known Slack message timestamp,
+not the import or channel update time. Discovery reads `conversations.info`
+when the directory omits the latest marker; only its timestamp is retained.
+Catalog timestamps allow clients to sort pending imports, while newer live
+message activity takes precedence. Group avatars exclude `is_owner` participants;
+1:1 avatars come from the counterpart, never the owner's other device profiles.
 
 `POST` accepts `{"history_days": 7}` (default) or `{"history_days": 30}`. Other
 values return 400. It either activates the existing sufficiently scoped user

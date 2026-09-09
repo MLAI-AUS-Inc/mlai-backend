@@ -75,7 +75,13 @@ class SlackChatCatalogTests(SimpleTestCase):
         conversation = self.conversation()
         self.assertEqual(
             catalog_payload([conversation], "owner-device"),
-            [{"channel_id": "mirror", "kind": "private_channel"}],
+            [
+                {
+                    "channel_id": "mirror",
+                    "kind": "private_channel",
+                    "last_message_at": None,
+                }
+            ],
         )
         self.assertEqual(catalog_payload([conversation], "other-member"), [])
         self.assertEqual(catalog_payload([conversation], None), [])
@@ -158,3 +164,100 @@ class SlackChatCatalogTests(SimpleTestCase):
         self.assertTrue(people[0]["is_owner"])
         self.assertFalse(people[1]["is_owner"])
         self.assertEqual(catalog_payload([conversation], "another-account"), [])
+
+    def test_catalog_activity_uses_source_time_before_history_delivery(self):
+        conversation = self.conversation()
+        metadata = conversation.grant.connection.provider_metadata[CATALOG_KEY][
+            "CPRIVATE"
+        ]
+        metadata["latest_message_ts"] = "1700000000.123456"
+        conversation.latest_synced_ts = "1600000000.000001"
+        self.assertEqual(
+            catalog_payload([conversation], "owner-device")[0]["last_message_at"],
+            "2023-11-14T22:13:20.123456+00:00",
+        )
+        conversation.latest_synced_ts = "999999999999.000001"
+        self.assertEqual(
+            catalog_payload([conversation], "owner-device")[0]["last_message_at"],
+            "2023-11-14T22:13:20.123456+00:00",
+        )
+        conversation.latest_synced_ts = "1700000001.000001"
+        self.assertEqual(
+            catalog_payload([conversation], "owner-device")[0]["last_message_at"],
+            "2023-11-14T22:13:21.000001+00:00",
+        )
+        self.assertEqual(catalog_payload([conversation], "other-account"), [])
+
+    def test_invalid_activity_never_falls_back_to_import_or_channel_update_time(self):
+        conversation = self.conversation()
+        metadata = conversation.grant.connection.provider_metadata[CATALOG_KEY][
+            "CPRIVATE"
+        ]
+        metadata["updated"] = "1700000000"
+        for value in (None, "", "invalid", "NaN", "Infinity", "1e9999", "-1"):
+            metadata["latest_message_ts"] = value
+            conversation.latest_synced_ts = value
+            self.assertIsNone(
+                catalog_payload([conversation], "owner-device")[0]["last_message_at"]
+            )
+
+    @patch.object(mirror, "_call_slack_with_grant_authority")
+    def test_discovery_reads_timestamp_when_list_omits_latest(self, call):
+        call.return_value = {
+            "channel": {
+                "id": "DM",
+                "latest": {"ts": "1700000000.123456", "text": "Never expose this body"},
+            }
+        }
+        self.assertEqual(
+            mirror._discover_conversation_activity(
+                None, {"id": "DM"}, required_scopes=mirror.DIRECT_DM_SCOPES
+            ),
+            1700000000,
+        )
+        self.assertEqual(call.call_args.args[1], "conversations_info")
+        self.assertEqual(call.call_args.kwargs["channel"], "DM")
+
+    @patch.object(mirror, "_call_slack_with_grant_authority")
+    def test_discovery_uses_embedded_activity_without_extra_request(self, call):
+        self.assertEqual(
+            mirror._discover_conversation_activity(
+                None,
+                {"id": "DM", "latest": {"ts": "1700000000.000001"}},
+                required_scopes=mirror.DIRECT_DM_SCOPES,
+            ),
+            1700000000,
+        )
+        call.assert_not_called()
+
+    @patch.object(mirror, "_call_slack_with_grant_authority")
+    def test_discovery_does_not_use_another_conversation_activity(self, call):
+        call.return_value = {
+            "channel": {"id": "OTHER", "latest": {"ts": "1700000000.000001"}}
+        }
+        self.assertIsNone(
+            mirror._discover_conversation_activity(
+                None, {"id": "DM"}, required_scopes=mirror.DIRECT_DM_SCOPES
+            )
+        )
+
+    @patch.object(mirror, "_call_slack_with_grant_authority")
+    def test_discovery_preserves_rate_limit_and_revocation_errors(self, call):
+        for error in (
+            mirror.SlackDmMirrorRateLimited("retry"),
+            mirror.SlackDmMirrorAuthorizationError("revoked"),
+        ):
+            call.side_effect = error
+            with self.assertRaises(type(error)):
+                mirror._discover_conversation_activity(
+                    None, {"id": "DM"}, required_scopes=mirror.DIRECT_DM_SCOPES
+                )
+
+    @patch.object(mirror, "_call_slack_with_grant_authority")
+    def test_missing_info_falls_back_to_background_history(self, call):
+        call.side_effect = RuntimeError("Unavailable")
+        self.assertIsNone(
+            mirror._discover_conversation_activity(
+                None, {"id": "DM"}, required_scopes=mirror.DIRECT_DM_SCOPES
+            )
+        )
