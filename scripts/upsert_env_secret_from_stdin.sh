@@ -10,6 +10,9 @@ case "$key" in
   SLACK_BRIDGE_SIGNING_SECRET|\
   BUZZ_BRIDGE_ADAPTER_TOKEN|\
   BUZZ_BRIDGE_CALLBACK_SECRET|\
+  ROO_API_KEY|\
+  INTERNAL_API_KEY|\
+  OFFICE_MANAGER_SLACK_BOT_TOKEN|\
   LINEAR_API_KEY) ;;
   *)
     echo "Unsupported production secret key" >&2

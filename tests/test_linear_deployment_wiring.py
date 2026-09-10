@@ -227,6 +227,27 @@ class LinearDeploymentWiringTests(unittest.TestCase):
             self.assertNotIn(secret, result.stdout + result.stderr)
             self.assertEqual((root / ".env").read_text(), f"LINEAR_API_KEY={secret}\n")
 
+    def test_secret_helper_accepts_every_deployment_secret(self):
+        import re
+
+        keys = set(re.findall(r"^\s*install_remote_env_secret ([A-Z_]+)", (REPO_ROOT / "deploy.sh").read_text(), re.MULTILINE))
+        keys.add("OFFICE_MANAGER_SLACK_BOT_TOKEN")
+        for key in sorted(keys):
+            with self.subTest(key=key), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / "scripts").mkdir()
+                shutil.copy(REPO_ROOT / "scripts/upsert_env_secret_from_stdin.sh", root / "scripts")
+                (root / ".env").write_text("KEEP_ME=yes\n")
+                secret = "test-service-credential-at-least-32-characters"
+                result = subprocess.run(
+                    ["bash", "scripts/upsert_env_secret_from_stdin.sh", key],
+                    cwd=root, input=secret, text=True, capture_output=True,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertNotIn(secret, result.stdout + result.stderr)
+                self.assertEqual((root / ".env").read_text(), f"KEEP_ME=yes\n{key}={secret}\n")
+                self.assertEqual((root / ".env").stat().st_mode & 0o777, 0o600)
+
     def test_managed_value_helper_rejects_multiline_payload(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
