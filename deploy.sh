@@ -84,7 +84,7 @@ if [ "$ROO_API_KEY" = "$INTERNAL_API_KEY" ]; then
     echo "❌ ROO_API_KEY and INTERNAL_API_KEY must be distinct trust-domain credentials."
     exit 1
 fi
-if [[ ! "${OFFICE_MANAGER_SLACK_BOT_TOKEN:-}" =~ ^xoxb-[A-Za-z0-9-]+$ ]]; then
+if [ "$OFFICE_MANAGER_ENABLED" = "true" ] && [[ ! "${OFFICE_MANAGER_SLACK_BOT_TOKEN:-}" =~ ^xoxb-[A-Za-z0-9-]+$ ]]; then
     echo "❌ OFFICE_MANAGER_SLACK_BOT_TOKEN must be retained for durable Office Manager recovery."
     exit 1
 fi
@@ -294,7 +294,9 @@ echo "🔐 Updating distinct Roo and internal service credentials (values redact
 install_remote_env_secret ROO_API_KEY "$ROO_API_KEY"
 install_remote_env_secret INTERNAL_API_KEY "$INTERNAL_API_KEY"
 echo "🔐 Updating Public Roo Office Manager Slack credential (value redacted)..."
-install_remote_env_secret OFFICE_MANAGER_SLACK_BOT_TOKEN "$OFFICE_MANAGER_SLACK_BOT_TOKEN"
+if [ -n "${OFFICE_MANAGER_SLACK_BOT_TOKEN:-}" ]; then
+    install_remote_env_secret OFFICE_MANAGER_SLACK_BOT_TOKEN "$OFFICE_MANAGER_SLACK_BOT_TOKEN"
+fi
 case "${LINEAR_CHANNEL_ISSUE_WRITES_ENABLED:-false}" in
     1|[Tt][Rr][Uu][Ee]|[Yy][Ee][Ss]|[Oo][Nn])
         linear_channel_writes_enabled_normalized="true"
@@ -739,7 +741,6 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     fi
     unset health_hack_key roo_sim_key roo_api_key internal_api_key victor_ai_roo_secret
 
-    require_env_value OFFICE_MANAGER_SLACK_BOT_TOKEN "Retain the Public Roo bot token for durable Office Manager recovery."
     require_env_value OFFICE_MANAGER_SLACK_CHANNEL_ID "Retain the coworking channel for durable Office Manager recovery."
     require_env_value OFFICE_MANAGER_TIMEZONE "Retain the Office Manager timezone for durable recovery."
         office_manager_timezone=\$(read_env_value OFFICE_MANAGER_TIMEZONE)
@@ -836,7 +837,18 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     }
     run_office_manager_migration_audit "\$office_manager_pre_attestation"
 
-    if [ "true" = "true" ]; then
+    # Bootstrap can precede Roo only with claims disabled and no persisted
+    # Office Manager state. The preceding migration audit remains mandatory.
+    # A currently enabled old web process could create state during preflight.
+    # Unknown old runtime state also retains the full integration requirement.
+    office_manager_previous_enabled=\$(docker compose exec -T web python -c "import os; os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'mlai.settings'); import django; django.setup(); from django.conf import settings; print('true' if getattr(settings, 'OFFICE_MANAGER_ENABLED', False) else 'false')" 2>/dev/null || printf true)
+    office_manager_integration_required=\$(compose_run_web python manage.py office_manager_deploy_requirements)
+    case "\$office_manager_integration_required" in
+        true|false) ;;
+        *) echo "Invalid Office Manager deployment requirement result"; exit 1 ;;
+    esac
+    if [ "\$office_manager_enabled" = "true" ] || [ "\$office_manager_previous_enabled" != "false" ] || [ "\$office_manager_integration_required" = "true" ]; then
+        require_env_value OFFICE_MANAGER_SLACK_BOT_TOKEN "Retain the Public Roo bot token for durable Office Manager recovery."
         echo "🧪 Verifying the actual Public Roo Slack app and coworking channel..."
         office_manager_slack_token=\$(read_env_value OFFICE_MANAGER_SLACK_BOT_TOKEN)
         office_manager_channel_id=\$(read_env_value OFFICE_MANAGER_SLACK_CHANNEL_ID)

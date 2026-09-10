@@ -361,6 +361,38 @@ class ResearchAutomationCallbackTests(TestCase):
         self.assertEqual(email_payload["to"], ["writer@example.com"])
         self.assertIn("Approve this topic", email_payload["html"])
 
+    @override_settings(TWILIO_ACCOUNT_SID="ACtest", TWILIO_AUTH_TOKEN="test-token",
+                       TWILIO_WHATSAPP_FROM="+61400000000",
+                       TWILIO_WHATSAPP_TOPIC_CONTENT_SID="HXtopic")
+    @patch("integrations.services.notification_adapters.http_client.post")
+    def test_whatsapp_callback_accepts_null_slack_route_and_replay_is_idempotent(self, mock_post):
+        channel = self.automation.notification_channel
+        channel.channel_type = NotificationChannelType.WHATSAPP
+        channel.route_id = "+61400000001"
+        channel.save(update_fields=["channel_type", "route_id"])
+        mock_post.return_value = _Response(201, {"sid": "SMtest"})
+        payload = {
+            "event_type": "topic_selection", "event_id": "whatsapp-null-route",
+            "job_id": self.run.content_factory_run_id, "domain": self.org.domain,
+            "slack_user_id": None,
+            "notification_context": notification_context_for_run(self.run),
+            "selection": {"selected_keyword": "automation ideas", "options": [
+                {"keyword": "automation ideas", "suggested_title": "Automation Ideas"}
+            ]},
+        }
+        first = self.client.post(reverse("content_factory_callback"), payload, format="json")
+        self.assertEqual(first.status_code, status.HTTP_200_OK)
+        self.run.refresh_from_db()
+        self.assertEqual(self.run.status, AutomationRunStatus.TOPIC_SELECTION_SENT)
+        self.assertEqual(ContentFactoryJob.objects.get(job_id=self.run.content_factory_run_id).slack_user_id, "")
+        delivery = NotificationDelivery.objects.get(automation_run=self.run, channel=channel)
+        self.assertEqual(delivery.status, NotificationDeliveryStatus.SENT)
+        self.assertEqual(delivery.provider_message_id, "SMtest")
+        replay = self.client.post(reverse("content_factory_callback"), payload, format="json")
+        self.assertEqual(replay.status_code, status.HTTP_200_OK)
+        self.assertEqual(replay.data["status"], "duplicate")
+        self.assertEqual(mock_post.call_count, 1)
+
     @patch("integrations.services.notification_adapters.confirm_topic")
     def test_signed_approval_queues_article_with_same_notification_context(self, mock_confirm_topic):
         mock_confirm_topic.return_value = {"run_id": "article-run-1", "status": "queued"}
