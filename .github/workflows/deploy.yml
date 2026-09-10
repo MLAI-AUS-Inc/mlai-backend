@@ -165,6 +165,7 @@ jobs:
           tests.test_validate_prod_urls \
           tests.test_deploy_command_wiring \
           tests.test_office_manager_deploy_requirements \
+          tests.test_research_automations \
           tests.test_linear_deployment_wiring \
           tests.test_health_check \
           tests.test_content_factory_org_config \
@@ -194,6 +195,7 @@ jobs:
           community_chat.tests.test_slack_endpoint_errors \
           community_chat.tests.test_slack_chat_catalog \
           community_chat.tests.test_slack_chat_import \
+          community_chat.tests.test_slack_all_history \
           community_chat.tests.test_slack_deletion \
           community_chat.tests.test_volunteer_policy \
           community_chat.tests.test_volunteer \

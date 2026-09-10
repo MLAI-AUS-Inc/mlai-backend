@@ -2658,6 +2658,8 @@ class SlackDmMirrorOwnerTests(APITestCase):
         self.assertFalse(
             conversation.deliveries.filter(
                 source_message_id__startswith=slack_dm_mirror.HISTORY_STATE_PREFIX
+            ).exclude(
+                source_message_id=slack_dm_mirror.HISTORY_RECONCILIATION_STATE_ID
             ).exists()
         )
         self.assertEqual(process_due_history_backfills(), 1)
@@ -4387,6 +4389,8 @@ class SlackDmMirrorOwnerTests(APITestCase):
                     CommunityBridgeDeliveryType.CREATE,
                     CommunityBridgeDeliveryType.REACTION_ADD,
                 ),
+            ).exclude(
+                source_message_id__startswith=slack_dm_mirror.HISTORY_STATE_PREFIX
             ).exists()
         )
 
