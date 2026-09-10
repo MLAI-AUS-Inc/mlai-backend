@@ -199,3 +199,10 @@ reach the relay promptly; revocation and other scan resets clear it normally.
 Desktop/web and mobile show progress and retry controls, poll only for the open
 conversation, and refresh the relay timeline as delivery progresses. Deploy the
 backend API/history/delivery workers together with the clients for this path.
+
+History scan failures use a durable five-minute retry fence in the existing
+conversation error marker. The scheduler skips both recent processing leases
+and recent retry markers before applying foreground priority, so an inaccessible
+Slack conversation cannot monopolize the scan loop. This does not mark missing
+history as imported, delete existing messages, widen consent, or bypass Slack's
+Retry-After handling. Successful retries clear the normal scan error state.
