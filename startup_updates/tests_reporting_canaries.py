@@ -80,6 +80,22 @@ class ReportingCohortCanaries(TestCase):
                 self.assertIn(revenue["display_value"], revision.structured_memo["highlights"][0])
                 self.assertEqual(revision.structured_memo["kpi_snapshot"][0]["snapshot_id"], snapshot.pk)
 
+    def test_mtd_balance_sheet_for_month_end_cannot_supply_runway(self):
+        from integrations.tests_connectors import _xero_profit_and_loss_report, _xero_balance_sheet_report
+        from startup_updates.services import publish_xero_metric_observations
+        from integrations.services.xero_scopes import XERO_REPORT_SCOPE
+        org, _, run = self.startup("balance-cutoff", ["xero"], month=date(2026, 9, 1))
+        ExternalServiceConnection.objects.create(organization=org, user=self.user, provider="xero", scopes=[XERO_REPORT_SCOPE])
+        def report(connection, name, *, params):
+            if name == "BalanceSheet":
+                return _xero_balance_sheet_report(total_bank="9000", as_of="30 Sep 2026")
+            return _xero_profit_and_loss_report(total_income="100", total_expenses="200", net_profit="-100")
+        with patch("integrations.services.external_connectors.fetch_xero_base_currency", return_value="EUR"), patch("integrations.services.external_connectors.fetch_xero_accounting_report", side_effect=report):
+            result = publish_xero_metric_observations(organization=org, run=run, start_date=date(2026,9,1), end_date=date(2026,9,10))
+        self.assertFalse(StartupMetricObservation.objects.filter(organization=org, metric_key="runway").exists())
+        self.assertTrue(StartupMetricObservation.objects.filter(organization=org, metric_key="revenue", period_month=date(2026,9,1), value_number=100).exists())
+        self.assertTrue(any("does not match the source cutoff" in warning for warning in result["warnings"]))
+
     def test_domainless_narrative_startup_keeps_uploaded_only_evidence(self):
         org, company, run = self.startup("domainless", ["manual_documents"])
         text = "Background. " * 4000 + "On 23 August 2026, we shipped our first offline release."

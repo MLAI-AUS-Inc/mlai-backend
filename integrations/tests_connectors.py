@@ -120,11 +120,12 @@ def _xero_profit_and_loss_report(
     }
 
 
-def _xero_balance_sheet_report(*, total_bank: str) -> dict:
+def _xero_balance_sheet_report(*, total_bank: str, as_of: str = "30 Apr 2026") -> dict:
     return {
         "Reports": [
             {
                 "Rows": [
+                    {"RowType": "Header", "Cells": [{"Value": ""}, {"Value": as_of}]},
                     {
                         "RowType": "Section",
                         "Title": "Bank",

@@ -85,6 +85,27 @@ class NotionCoverageTests(unittest.TestCase):
                 _fetch_notion_children(None, "page")
 
 class AccountingReportTests(unittest.TestCase):
+    def test_balance_sheet_uses_current_column_and_ignores_comparative_year(self):
+        from decimal import Decimal
+        from startup_updates.services import _parse_xero_balance_sheet_report, _xero_balance_sheet_date
+        from datetime import date
+        payload = {"Reports": [{"Rows": [
+            {"RowType": "Header", "Cells": [{"Value": ""}, {"Value": "31 Aug 2026"}, {"Value": "31 Aug 2025"}]},
+            {"RowType": "SummaryRow", "Cells": [{"Value": "Total Bank"}, {"Value": "1200.50"}, {"Value": "9000.00"}]},
+        ]}]}
+        self.assertEqual(_parse_xero_balance_sheet_report(payload)["cash"]["amount"], Decimal("1200.50"))
+        self.assertEqual(_xero_balance_sheet_date(payload), date(2026, 8, 31))
+        payload["Reports"][0]["Rows"][1]["Cells"][1]["Value"] = ""
+        self.assertIsNone(_parse_xero_balance_sheet_report(payload)["cash"])
+        payload["Reports"][0]["Rows"][1]["Cells"][1]["Value"] = "0"
+        self.assertEqual(_parse_xero_balance_sheet_report(payload)["cash"]["amount"], 0)
+
+    def test_profit_and_loss_uses_requested_column_even_when_comparison_is_larger(self):
+        from startup_updates.services import _parse_xero_profit_and_loss_report
+        payload = self.report([("Total Income", 100)])
+        payload["Reports"][0]["Rows"][0]["Rows"][0]["Cells"].append({"Value": "900"})
+        self.assertEqual(_parse_xero_profit_and_loss_report(payload)["revenue"]["amount"], 100)
+
     def report(self, rows):
         return {"Reports": [{"Rows": [{"RowType": "Section", "Title": "Income", "Rows": [
             {"RowType": "SummaryRow", "Cells": [{"Value": label}, {"Value": str(amount)}]} for label, amount in rows

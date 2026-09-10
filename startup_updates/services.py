@@ -1000,11 +1000,9 @@ def _iter_xero_report_entries(rows: Any, *, section: str = "") -> Iterable[dict[
             if isinstance(cell, dict)
         ]
         label = title or (values[0] if values else "")
-        amount = None
-        for value in reversed(values[1:] or values):
-            amount = _report_decimal(value)
-            if amount is not None:
-                break
+        # Standard Xero reports put the requested period in the first value
+        # column. Later columns are comparisons, never missing-value fallbacks.
+        amount = _report_decimal(values[1]) if len(values) > 1 and row_type.lower() != "header" else None
         if label and amount is not None:
             yield {
                 "label": label,
@@ -1023,6 +1021,22 @@ def _xero_report_entries(payload: dict[str, Any]) -> list[dict[str, Any]]:
     reports = payload.get("Reports") or payload.get("reports") or []
     report = reports[0] if reports and isinstance(reports[0], dict) else {}
     return list(_iter_xero_report_entries(report.get("Rows") or report.get("rows") or []))
+
+
+def _xero_balance_sheet_date(payload: dict[str, Any]) -> Optional[date]:
+    reports = payload.get("Reports") or []
+    report = reports[0] if reports and isinstance(reports[0], dict) else {}
+    for row in report.get("Rows") or []:
+        if str(row.get("RowType", "")).lower() != "header":
+            continue
+        cells = row.get("Cells") or []
+        value = str(cells[1].get("Value") or "").strip() if len(cells) > 1 else ""
+        for fmt in ("%d %b %Y", "%d %B %Y", "%d %b %y", "%Y-%m-%d"):
+            try:
+                return datetime.strptime(value, fmt).date()
+            except ValueError:
+                continue
+    return None
 
 
 def _xero_report_entry_labels(entries: list[dict[str, Any]]) -> list[str]:
@@ -1583,8 +1597,14 @@ def publish_xero_metric_observations(
                 warnings.append(f"Xero Profit and Loss unavailable for {month.isoformat()}: {type(exc).__name__}. Cached values require confirmation.")
         balance_payload = {}
         try:
+            balance_cutoff = min(end_date, _month_end(current_month))
             balance_payload = fetch_xero_accounting_report(connection, "BalanceSheet",
-                params={"date": min(end_date, _month_end(current_month)).isoformat()})
+                params={"date": balance_cutoff.isoformat(), "paymentsOnly": "false", "standardLayout": "true"})
+            if _xero_balance_sheet_date(balance_payload) != balance_cutoff:
+                # Xero's Balance Sheet endpoint returns the end of the requested
+                # month. It cannot establish an in-month cash/runway observation.
+                balance_payload = {}
+                warnings.append("Xero Balance Sheet reporting date does not match the source cutoff; cash and runway are unavailable for that cutoff.")
         except Exception as exc:
             warnings.append(f"Xero Balance Sheet unavailable: {type(exc).__name__}.")
         report_metrics_available = report_metrics_available or bool(profit_and_loss_by_month)

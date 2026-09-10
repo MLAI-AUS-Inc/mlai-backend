@@ -2,6 +2,14 @@
 
 Status: local reporting verification passed and release PRs are in progress. No live reporting canary has completed and no historical publication has been replaced.
 
+## Resumed verification
+
+- Remaining worker workflow expectation fixed; all 138 Valley tests pass. The cutoff/revision suite passes 23 tests.
+- A fresh private report comparison found that comparison columns could be read as the requested financial period. Standard Xero reports now use the first value column, retain unknowns rather than falling back to comparison values, and exclude headers from amounts.
+- Xero Balance Sheet responses can describe month end for an in-month date request. Returned first-column dates are now checked against the requested cutoff; mismatched cash/runway evidence is withheld. This matches the [Xero report contract](https://developer.xero.com/documentation/api/accounting/reports).
+- Financial connector, source evidence and cohort regression checks pass 76 tests. No new migrations were introduced; production's read-only migration plan remains empty.
+- Backend and frontend release PRs require GitHub code-owner approval. CI and that approval remain release gates. A separately hashed, private source review and replacement comparison are being prepared; these are not completed live generation or publication canaries.
+
 ## Production evidence handling
 
 Keep live financial amounts, source documents, account identifiers and draft identifiers in the private audit record. Public repository documentation records the test procedure and pass/fail outcomes only. Compare each generated Revenue value against an authoritative report with identical dates, currency and calculation basis; accounting entries may change between fetches.
