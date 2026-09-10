@@ -122,6 +122,29 @@ class AccountingReportTests(unittest.TestCase):
         parsed = _parse_xero_profit_and_loss_report(self.report([("Other Income", 500)]))
         self.assertIsNone(parsed["revenue"])
 
+    def test_cost_total_cannot_be_replaced_by_individual_expense_account(self):
+        from startup_updates.services import _parse_xero_profit_and_loss_report
+        payload = self.report([("Total Income", 1000), ("Contractor Expenses", 300), ("General Expenses", 200), ("Total Operating Expenses", 500), ("Net Profit", 500)])
+        parsed = _parse_xero_profit_and_loss_report(payload)
+        self.assertEqual(parsed["monthly_costs"]["amount"], 500)
+        self.assertEqual(parsed["revenue"]["amount"] - parsed["monthly_costs"]["amount"], parsed["net"]["amount"])
+
+    def test_summary_cost_of_sales_precedes_individual_cost_account(self):
+        from startup_updates.services import _parse_xero_profit_and_loss_report
+        parsed = _parse_xero_profit_and_loss_report(self.report([("Cost of Goods Sold", 10), ("Total Cost of Sales", 30), ("Total Operating Expenses", 20)]))
+        self.assertEqual(parsed["monthly_costs"]["amount"], 50)
+
+    def test_missing_expense_total_stays_unknown(self):
+        from startup_updates.services import _parse_xero_profit_and_loss_report
+        parsed = _parse_xero_profit_and_loss_report(self.report([("Contractor Expenses", 300), ("General Expenses", 200)]))
+        self.assertIsNone(parsed["monthly_costs"])
+
+    def test_report_breakdown_keeps_signed_adjustments(self):
+        from startup_updates.services import _xero_report_breakdown_rows
+        from decimal import Decimal
+        rows = _xero_report_breakdown_rows([{"label": "Ticket adjustment", "normalized_label": "ticket adjustment", "amount": Decimal("-20"), "section": "Income", "normalized_section": "income"}], section_terms=("income",))
+        self.assertEqual(rows[0]["amount"], "-20")
+
 class ClassificationContractTests(unittest.TestCase):
     def test_cache_changes_with_period_or_startup_context_but_not_run_id(self):
         from startup_updates.source_evidence import classification_version

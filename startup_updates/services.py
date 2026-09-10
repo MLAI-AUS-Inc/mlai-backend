@@ -1080,7 +1080,7 @@ def _xero_report_breakdown_rows(
         rows.append(
             {
                 "label": label,
-                "amount": str(abs(Decimal(str(amount)))),
+                "amount": str(Decimal(str(amount))),
                 "section": str(entry.get("section") or ""),
             }
         )
@@ -1088,13 +1088,13 @@ def _xero_report_breakdown_rows(
 
 
 def _find_xero_report_amount(entries: list[dict[str, Any]], labels: Iterable[str]) -> Optional[dict[str, Any]]:
-    normalized_labels = {_normalize_report_label(label) for label in labels}
-    for entry in entries:
-        if entry["normalized_label"] in normalized_labels:
-            return entry
-    for entry in entries:
-        if any(label in entry["normalized_label"] for label in normalized_labels if label):
-            return entry
+    # Match explicit report labels in priority order. Substring matching turns
+    # an account such as "Contractor Expenses" into whole-business expenses.
+    for label in labels:
+        normalized = _normalize_report_label(label)
+        for entry in entries:
+            if entry["normalized_label"] == normalized:
+                return entry
     return None
 
 
