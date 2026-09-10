@@ -5,6 +5,7 @@ from typing import Any, Optional, Tuple
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.db import OperationalError, transaction
+from django.db.models import Q
 from django.shortcuts import get_object_or_404
 from django.utils.dateparse import parse_datetime
 from django.urls import reverse
@@ -834,7 +835,6 @@ def _get_prioritized_run_thread_ids(
     organization: Organization,
     google_connection: GoogleConnection,
 ) -> list[str]:
-    thread_limit = _get_run_max_source_threads(run)
     queryset = _apply_run_window(
         GmailMessageArtifact.objects.filter(
             organization=organization,
@@ -856,8 +856,6 @@ def _get_prioritized_run_thread_ids(
             continue
         seen_thread_ids.add(artifact.gmail_thread_id)
         thread_ids.append(artifact.gmail_thread_id)
-        if len(thread_ids) >= thread_limit:
-            break
     return thread_ids
 
 
@@ -1523,13 +1521,13 @@ class StartupUpdateClassificationBatchView(APIView):
             return _gmail_connection_required_response()
         _update_run_step(run, step_key="relevance_classification")
 
+        from startup_updates.source_evidence import classification_version
+        classifier_version = classification_version(run)
         queryset = _apply_run_window(
             GmailMessageArtifact.objects.filter(
                 organization=organization,
                 google_connection=google_connection,
-                relevance_label__in=[GmailRelevanceLabel.AMBIGUOUS, GmailRelevanceLabel.PENDING],
-                classified_at__isnull=True,
-            ).order_by("-heuristic_score", "-internal_date"),
+            ).filter(Q(header_values__reporting_classifier_version__isnull=True) | ~Q(header_values__reporting_classifier_version=classifier_version)).order_by("-heuristic_score", "-internal_date"),
             run,
             "internal_date",
         )[:limit]
@@ -1595,6 +1593,8 @@ class StartupUpdateClassificationResultsView(APIView):
             artifact.relevance_score = item.get("relevance_score", 0.0)
             artifact.relevance_reason = item.get("relevance_reason", "")
             artifact.needs_thread_context = bool(item.get("needs_thread_context", False))
+            from startup_updates.source_evidence import classification_version
+            artifact.header_values = {**(artifact.header_values or {}), "reporting_classifier_version": classification_version(run)}
             artifact.classified_at = timezone.now()
             artifact.save(
                 update_fields=[
@@ -1603,6 +1603,7 @@ class StartupUpdateClassificationResultsView(APIView):
                     "relevance_reason",
                     "needs_thread_context",
                     "classified_at",
+                    "header_values",
                     "updated_at",
                 ]
             )
@@ -1657,33 +1658,34 @@ class StartupUpdateExtractionBatchView(APIView):
                 status=status.HTTP_200_OK,
             )
 
-        queryset = _apply_run_window(
-            GmailThreadArtifact.objects.filter(
-                organization=organization,
-                google_connection=google_connection,
-                gmail_thread_id__in=eligible_thread_ids,
-                hydration_status=ArtifactProcessingStatus.HYDRATED,
-                extraction_status__in=[ArtifactProcessingStatus.PENDING, ArtifactProcessingStatus.HYDRATED],
-            ).order_by("-latest_message_internal_date", "-updated_at"),
-            run,
-            "latest_message_internal_date",
-        )[:limit]
-
+        from startup_updates.source_evidence import period_gmail_bundle, stage_source
+        # Membership is decided by in-period messages, not the latest reply.
+        queryset = GmailThreadArtifact.objects.filter(
+            organization=organization, google_connection=google_connection,
+            gmail_thread_id__in=eligible_thread_ids,
+            hydration_status=ArtifactProcessingStatus.HYDRATED,
+        ).exclude(gmail_thread_id__in=[key.removeprefix("gmail:") for key, receipt in (run.result or {}).get("source_evidence", {}).items() if key.startswith("gmail:") and receipt.get("output") is not None]).order_by("gmail_thread_id")
         bundles = []
+        start, end = _get_run_window_bounds(run)
         try:
             for thread_artifact in queryset:
                 attachments = ensure_thread_attachments_hydrated(
-                    organization=organization,
-                    connection=google_connection,
-                    thread_artifact=thread_artifact,
+                    organization=organization, connection=google_connection, thread_artifact=thread_artifact,
                 )
-                bundles.append(
-                    compact_gmail_thread_bundle(
-                        thread_artifact,
-                        profile=profile,
-                        attachments=[_serialize_attachment(attachment) for attachment in attachments],
-                    )
-                )
+                eligible_messages = _apply_run_window(GmailMessageArtifact.objects.filter(
+                    organization=organization, google_connection=google_connection,
+                    gmail_thread_id=thread_artifact.gmail_thread_id), run, "internal_date")
+                message_ids = set(eligible_messages.values_list("gmail_message_id", flat=True))
+                eligible_attachments = [item for item in attachments if item.message_artifact.gmail_message_id in message_ids]
+                bundle = period_gmail_bundle(thread_artifact, start=start, end=end,
+                    attachments=[_serialize_attachment(item) for item in eligible_attachments])
+                staged = stage_source(run, "gmail", thread_artifact.gmail_thread_id, bundle)
+                if staged is not None:
+                    bundles.append(staged)
+                if len(bundles) >= limit:
+                    break
+            run.save(update_fields=["result", "updated_at"])
+
         except Exception as exc:
             if is_gmail_insufficient_permissions_error(exc):
                 payload = _gmail_source_unavailable_payload(run, request, connection=google_connection)
@@ -1726,7 +1728,9 @@ class StartupUpdateExtractionResultsView(APIView):
         event_count = 0
         metric_count = 0
         attachment_count = 0
+        from startup_updates.source_evidence import complete_source
         for item in serializer.validated_data["results"]:
+            complete_source(run, "gmail", item["gmail_thread_id"], item)
             thread_artifact = get_object_or_404(
                 GmailThreadArtifact,
                 organization=organization,
@@ -1823,7 +1827,7 @@ class StartupUpdateExtractionResultsView(APIView):
                         "evidence_attachment_ids": metric_data.get("evidence_attachment_ids", []),
                         "source_provider": "gmail",
                         "source_record_ids": [],
-                        "source_metadata": {"source": "gmail_thread_extraction"},
+                        "source_metadata": {"source": "gmail_thread_extraction", "source_fingerprint": item.get("source_fingerprint"), "quality": "model_extracted"},
                         "summary": metric_data.get("summary", ""),
                     },
                 )
@@ -1831,7 +1835,7 @@ class StartupUpdateExtractionResultsView(APIView):
 
         if backups_changed:
             set_startup_update_run_cancel_backups(run, backups)
-            run.save(update_fields=["result", "updated_at"])
+        run.save(update_fields=["result", "updated_at"])
 
         return Response(
             {
@@ -3066,17 +3070,20 @@ def _notion_block_text(block: dict[str, Any]) -> Tuple[str, Optional[str]]:
     block_type = str(block.get("type") or "")
     payload = block.get(block_type) if isinstance(block.get(block_type), dict) else {}
     text = _notion_plain_text(payload.get("rich_text"))
+    if block_type == "table_row":
+        text = " | ".join(_notion_plain_text(cell) for cell in payload.get("cells", []))
     if not text and block_type == "child_page":
         text = str(payload.get("title") or "").strip()
     heading = text if block_type in {"heading_1", "heading_2", "heading_3"} and text else None
     return text, heading
 
 
-def _fetch_notion_children(connection, block_id: str, *, max_blocks: int = 80) -> list[dict[str, Any]]:
+def _fetch_notion_children(connection, block_id: str, *, max_blocks: Optional[int] = None) -> list[dict[str, Any]]:
     blocks: list[dict[str, Any]] = []
     cursor = None
-    while len(blocks) < max_blocks:
-        params = {"page_size": min(100, max_blocks - len(blocks))}
+    seen_cursors = set()
+    while max_blocks is None or len(blocks) < max_blocks:
+        params = {"page_size": 100 if max_blocks is None else min(100, max_blocks - len(blocks))}
         if cursor:
             params["start_cursor"] = cursor
         response = requests.get(
@@ -3092,13 +3099,27 @@ def _fetch_notion_children(connection, block_id: str, *, max_blocks: int = 80) -
         if not payload.get("has_more") or not payload.get("next_cursor"):
             break
         cursor = payload.get("next_cursor")
+        if cursor in seen_cursors:
+            raise ValueError("Notion pagination did not advance; source coverage is incomplete.")
+        seen_cursors.add(cursor)
     return blocks
 
 
 def _build_notion_page_bundle(connection, page: dict[str, Any]) -> dict[str, Any]:
     page_id = str(page.get("id") or "").strip()
     title = _notion_page_title(page)
-    blocks = _fetch_notion_children(connection, page_id) if page_id else []
+    blocks = []
+    visited = set()
+    def walk(parent_id, depth=0):
+        if depth > 64 or parent_id in visited:
+            raise ValueError("Notion block hierarchy cannot be fully traversed.")
+        visited.add(parent_id)
+        for block in _fetch_notion_children(connection, parent_id):
+            blocks.append(block)
+            if block.get("has_children") and block.get("id"):
+                walk(str(block["id"]), depth + 1)
+    if page_id:
+        walk(page_id)
     text_lines = [title]
     source_block_ids: list[str] = []
     heading_path: list[str] = []
@@ -3142,7 +3163,7 @@ def _build_notion_page_bundle(connection, page: dict[str, Any]) -> dict[str, Any
         "relevance_reason": "",
         "extraction_hints": {},
         "omitted_block_count": max(len(blocks) - len(source_block_ids), 0),
-        "compression_notes": ["notion_page_children_compacted"],
+        "compression_notes": ["Complete paginated block tree, including nested blocks and tables."],
     }
 
 
@@ -3242,8 +3263,19 @@ class StartupUpdateNotionBackfillView(APIView):
             if not isinstance(page, dict):
                 continue
             try:
-                bundle = _build_notion_page_bundle(connection, page)
-            except requests.RequestException as exc:
+                from startup_updates.evidence_contract import content_hash
+                version_key = content_hash({"page": page, "extractor": "notion-block-tree-v2"})
+                cached_pages = (connection.sync_cursor or {}).get("reporting_page_versions", {})
+                bundle = cached_pages.get(version_key) or _build_notion_page_bundle(connection, page)
+                if version_key not in cached_pages:
+                    connection.sync_cursor = {**(connection.sync_cursor or {}), "reporting_page_versions": {**cached_pages, version_key: bundle}}
+                bundle = {**bundle, "source_version": version_key}
+                _, period_end = _get_run_window_bounds(run)
+                edited_at = parse_datetime(str(bundle.get("last_edited_time") or ""))
+                if edited_at and period_end and edited_at > period_end:
+                    bundle["temporal_warning"] = "Document edited after this reporting period. Historical contents are unavailable; explicitly dated retrospective claims require review."
+
+            except (requests.RequestException, ValueError) as exc:
                 warnings.append(f"notion_page_children_failed:{page.get('id')}")
                 bundle = {
                     "notion_page_id": str(page.get("id") or ""),
@@ -3267,7 +3299,13 @@ class StartupUpdateNotionBackfillView(APIView):
                     "omitted_block_count": 0,
                     "compression_notes": [str(exc)[:200]],
                 }
-            existing_by_chunk[bundle["notion_chunk_id"]] = bundle
+            text = str(bundle.get("cleaned_text") or "")
+            # Overlap retains dates/headings at a chunk boundary.
+            for offset in range(0, max(len(text), 1), 15600):
+                chunk_id = f"{bundle['notion_page_id']}:{offset // 15600}"
+                existing_by_chunk[chunk_id] = {**bundle, "notion_chunk_id": chunk_id,
+                    "cleaned_text": text[offset:offset + 16000], "chunk_index": offset // 15600,
+                    "chunk_count": max(1, (len(text) + 15599) // 15600)}
             pages_synced += 1
 
         store["pages"] = list(existing_by_chunk.values())
@@ -3421,9 +3459,13 @@ class StartupUpdateNotionExtractionBatchView(APIView):
             page["relevance_score"] = classification.get("relevance_score", 0.0)
             page["relevance_reason"] = classification.get("relevance_reason", "")
             page["extraction_hints"] = classification.get("extraction_hints") or {}
-            pages.append(page)
+            from startup_updates.source_evidence import stage_source
+            staged = stage_source(run, "notion", chunk_id, page)
+            if staged is not None:
+                pages.append(staged)
             if len(pages) >= limit:
                 break
+        run.save(update_fields=["result", "updated_at"])
         return Response({"run": _serialize_run(run, request), "count": len(pages), "pages": pages}, status=status.HTTP_200_OK)
 
 
@@ -3454,6 +3496,8 @@ class StartupUpdateNotionExtractionResultsView(APIView):
         metric_count = 0
         for item in serializer.validated_data["results"]:
             chunk_id = item.get("notion_chunk_id") or f"{item['notion_page_id']}:main"
+            from startup_updates.source_evidence import complete_source
+            complete_source(run, "notion", chunk_id, item)
             source_record_ids = [f"notion:page:{item['notion_page_id']}", chunk_id]
             source_metadata = {
                 "source": "notion_page_extraction",
@@ -3530,7 +3574,7 @@ class StartupUpdateNotionExtractionResultsView(APIView):
         _save_notion_run_store(connection, run.run_id, store)
         if backups_changed:
             set_startup_update_run_cancel_backups(run, backups)
-            run.save(update_fields=["result", "updated_at"])
+        run.save(update_fields=["result", "updated_at"])
         return Response(
             {
                 "run": _serialize_run(run, request),
@@ -3861,13 +3905,13 @@ class StartupUpdateCurationContextView(APIView):
         prior_updates = []
         draft_queryset = organization.monthly_update_drafts.order_by("-month", "-updated_at")
         if current_month is not None:
-            draft_queryset = draft_queryset.exclude(month=current_month)
+            draft_queryset = draft_queryset.filter(month__lt=current_month)
         for draft in draft_queryset[:6]:
             prior_updates.append(_serialize_draft(draft))
         return Response(
             {
                 "run": _serialize_run(run, request),
-                "timeline": build_timeline_payload(organization=organization),
+                "timeline": build_timeline_payload(organization=organization, requested_months=(run.run_request or {}).get("draft_months")),
                 "startup_context": (run.run_request or {}).get("startup_context") or {},
                 "external_context": (run.run_request or {}).get("external_context") or {},
                 "startup_memory": (run.run_request or {}).get("startup_memory") or {},
@@ -4016,7 +4060,7 @@ class StartupUpdateCuratedTimelineView(APIView):
                 approved_event_ids.add(int(candidate["event_id"]))
             if candidate.get("metric_id"):
                 approved_metric_ids.add(int(candidate["metric_id"]))
-        timeline = build_timeline_payload(organization=organization)
+        timeline = build_timeline_payload(organization=organization, requested_months=(run.run_request or {}).get("draft_months"))
         for bucket in (timeline.get("months") or {}).values():
             if not isinstance(bucket, dict):
                 continue
@@ -4056,7 +4100,7 @@ class StartupUpdateTimelineView(APIView):
         return Response(
             {
                 "run": _serialize_run(run, request),
-                "timeline": build_timeline_payload(organization=organization),
+                "timeline": build_timeline_payload(organization=organization, requested_months=(run.run_request or {}).get("draft_months")),
             },
             status=status.HTTP_200_OK,
         )
@@ -4325,6 +4369,10 @@ class StartupUpdateEvidenceSnapshotView(APIView):
         run_request = dict(run.run_request or {})
         pinned = run_request.get("evidence_snapshots")
         if pinned is None:
+            if "source_evidence_refresh" in (run.step_order or []) and not run_request.get("source_evidence_refreshed"):
+                return Response({"error": "Refresh source evidence before capturing the reporting snapshot."}, status=409)
+            if any(receipt.get("output") is None for receipt in (run.result or {}).get("source_evidence", {}).values()):
+                return Response({"error": "Complete staged source extraction before capturing the reporting snapshot."}, status=409)
             pinned = {}
             for raw_month in run_request.get("draft_months", []):
                 month = date.fromisoformat(raw_month)
@@ -4339,3 +4387,51 @@ class StartupUpdateEvidenceSnapshotView(APIView):
             snapshot = get_object_or_404(MonthlyEvidenceSnapshot, pk=item["snapshot_id"], organization=organization)
             snapshots[month] = {**item, "payload": snapshot.payload}
         return Response({"snapshots": snapshots})
+
+
+class StartupUpdateSourceEvidenceRefreshView(APIView):
+    """Refresh selected uploads/Stripe before freezing reporting evidence."""
+    authentication_classes = []
+    permission_classes = [HasRooApiKey]
+
+    @transaction.atomic
+    def post(self, request, run_id):
+        run, organization, binding, connection, profile = _locked_pipeline_run_context(run_id)
+        cancelled = _reject_if_run_cancelled(run)
+        if cancelled is not None:
+            return cancelled
+        run_request = dict(run.run_request or {})
+        if run_request.get("source_evidence_refreshed"):
+            return Response(run_request["source_evidence_refreshed"])
+        from startup_updates.source_evidence import refresh_manual_documents, EXTRACTION_VERSION
+        sources = set(run_request.get("input_sources", []))
+        warnings = refresh_manual_documents(organization, run) if "manual_documents" in sources else []
+        stripe_complete = False
+        if "stripe" in sources:
+            from integrations.services.finance import sync_stripe_connection, publish_financial_metric_observations
+            connections = list(ExternalServiceConnection.objects.filter(organization=organization,
+                user=binding.user, provider=ExternalServiceProvider.STRIPE).exclude(status=ExternalServiceConnectionStatus.DISCONNECTED))
+            stripe_complete = bool(connections)
+            if not connections:
+                warnings.append("Stripe was selected but no connected account is available.")
+            for stripe in connections:
+                try:
+                    sync_stripe_connection(stripe)
+                except Exception as exc:
+                    stripe_complete = False
+                    warnings.append(f"Stripe evidence unavailable ({type(exc).__name__}); cached values require confirmation.")
+            if stripe_complete:
+                # Xero was already refreshed for the exact target period; the
+                # Stripe publisher must not refresh a different month here.
+                if "xero" not in sources:
+                    run.run_request = {**run_request, "source_evidence_refreshed": {"stripe_complete": True}}
+                    publish_financial_metric_observations(organization=organization, run=run)
+        receipt = {"version": EXTRACTION_VERSION, "stripe_complete": stripe_complete,
+            "warnings": warnings, "completed_at": timezone.now().isoformat()}
+        run_request["source_evidence_refreshed"] = receipt
+        external = dict(run_request.get("external_context") or {})
+        external["source_refresh"] = receipt
+        run_request["external_context"] = external
+        run.run_request = run_request
+        run.save(update_fields=["run_request", "updated_at"])
+        return Response(receipt)

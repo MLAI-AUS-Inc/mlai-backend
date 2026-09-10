@@ -231,6 +231,7 @@ class MetricResultSerializer(serializers.Serializer):
 
 
 class ExtractionResultItemSerializer(serializers.Serializer):
+    source_fingerprint = serializers.CharField(required=False, allow_blank=True)
     gmail_thread_id = serializers.CharField()
     extraction_status = serializers.ChoiceField(
         choices=ArtifactProcessingStatus.choices,
@@ -277,6 +278,7 @@ class LinearExtractionResultsSerializer(serializers.Serializer):
 
 
 class NotionExtractionResultItemSerializer(serializers.Serializer):
+    source_fingerprint = serializers.CharField(required=False, allow_blank=True)
     notion_page_id = serializers.CharField()
     notion_chunk_id = serializers.CharField(required=False, allow_blank=True, default="")
     extraction_status = serializers.ChoiceField(

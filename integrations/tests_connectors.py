@@ -1395,6 +1395,8 @@ class ConnectorEndpointTests(TestCase):
         )
 
         def fake_get(url, **kwargs):
+            if url.endswith("/Organisation"):
+                return _json_response({"Organisations": [{"BaseCurrency": "AUD"}]})
             if "RepeatingInvoices" in url:
                 return _json_response({"RepeatingInvoices": []})
             if "Invoices" in url:
@@ -2151,7 +2153,7 @@ class ConnectorEndpointTests(TestCase):
                 return _xero_balance_sheet_report(total_bank="9000.00")
             raise AssertionError(f"Unexpected report {report_name}")
 
-        with patch("integrations.services.external_connectors.fetch_xero_accounting_report", side_effect=fake_report):
+        with patch("integrations.services.external_connectors.fetch_xero_base_currency", return_value="AUD"), patch("integrations.services.external_connectors.fetch_xero_accounting_report", side_effect=fake_report):
             summary = publish_xero_metric_observations(
                 organization=organization,
                 run=None,
@@ -2265,7 +2267,7 @@ class ConnectorEndpointTests(TestCase):
                 return _xero_balance_sheet_report(total_bank="12000.00")
             raise AssertionError(f"Unexpected report {report_name}")
 
-        with patch("integrations.services.external_connectors.fetch_xero_accounting_report", side_effect=fake_report):
+        with patch("integrations.services.external_connectors.fetch_xero_base_currency", return_value="AUD"), patch("integrations.services.external_connectors.fetch_xero_accounting_report", side_effect=fake_report):
             publish_xero_metric_observations(
                 organization=organization,
                 run=None,

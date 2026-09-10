@@ -94,6 +94,7 @@ class MonthlyEvidencePipelineTests(StartupUpdateApiTestCase):
         binding = UserStartupBinding.objects.create(user=self.user, organization=self.organization, google_connection=self.google_connection)
         self.run = create_startup_update_run(organization=self.organization, binding=binding)
         self.run.run_request["draft_months"] = ["2026-03-01"]
+        self.run.run_request["input_sources"] = ["gmail", "xero"]
         self.run.save(update_fields=["run_request"])
         self.observation = StartupMetricObservation.objects.create(
             organization=self.organization, period_month=date(2026, 3, 1),
@@ -103,6 +104,8 @@ class MonthlyEvidencePipelineTests(StartupUpdateApiTestCase):
 
     def pin(self):
         with self._with_key():
+            refresh = self.client.post(reverse("startup_updates_source_evidence_refresh", args=[self.run.run_id]), {}, format="json", **self.headers)
+            self.assertEqual(refresh.status_code, 200, refresh.data)
             response = self.client.post(reverse("startup_updates_evidence_snapshot", args=[self.run.run_id]), {}, format="json", **self.headers)
         self.assertEqual(response.status_code, 200, response.data)
         return response.data["snapshots"]["2026-03-01"]

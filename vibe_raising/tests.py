@@ -1498,7 +1498,7 @@ class VibeRaisingApiTests(TestCase):
             month=date(2026, 3, 1),
         )
         self.assertNotEqual(draft.structured_memo["financial_snapshot"], snapshot)
-        self.assertIsNone(draft.structured_memo["financial_snapshot"]["performance"][-1]["income"])
+        self.assertIsNone(draft.structured_memo["financial_snapshot"])
         self.assertEqual(draft.structured_memo["concise_analysis"], analysis)
         self.assertEqual(draft.structured_memo["presentation_mode"], "financial_charts_concise")
         self.assertEqual(response.data["update"]["financialSnapshot"], draft.current_revision.snapshot.payload["charts"])
@@ -2333,6 +2333,7 @@ class VibeRaisingApiTests(TestCase):
             "slack_backfill",
             "slack_relevance_classification",
             "slack_event_extraction",
+            "source_evidence_refresh",
             "timeline_merge",
             "reconciliation_enrichment",
             "candidate_curation",

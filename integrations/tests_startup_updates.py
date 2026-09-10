@@ -2455,7 +2455,7 @@ class StartupUpdateWorkflowViewsTest(StartupUpdateApiTestCase):
             google_connection=self.google_connection,
             gmail_thread_id="thread-123",
             source_message_ids=["msg-123"],
-            message_payloads=[{"message_id": "msg-123", "cleaned_text": "We closed the pilot and now have $24000 ARR."}],
+            message_payloads=[{"message_id": "msg-123", "internal_date": message_timestamp.isoformat(), "cleaned_text": "We closed the pilot and now have $24000 ARR."}],
             cleaned_text="We closed the pilot and now have $24000 ARR.",
             hydration_status=ArtifactProcessingStatus.HYDRATED,
             extraction_status=ArtifactProcessingStatus.PENDING,
@@ -2521,8 +2521,11 @@ class StartupUpdateWorkflowViewsTest(StartupUpdateApiTestCase):
         )
 
         self.run.run_request["draft_months"] = [month_bucket.isoformat()]
+        self.run.run_request["input_sources"] = ["gmail", "xero"]
         self.run.save(update_fields=["run_request"])
         with self._with_key():
+            refresh = self.client.post(reverse("startup_updates_source_evidence_refresh", args=[self.run.run_id]), {}, format="json", **self.headers)
+            self.assertEqual(refresh.status_code, 200, refresh.data)
             pinned = self.client.post(reverse("startup_updates_evidence_snapshot", args=[self.run.run_id]), {}, format="json", **self.headers)
         self.assertEqual(pinned.status_code, 200, pinned.data)
         pin = pinned.data["snapshots"][month_bucket.isoformat()]
@@ -2661,8 +2664,11 @@ class StartupUpdateWorkflowViewsTest(StartupUpdateApiTestCase):
         )
 
         self.run.run_request["draft_months"] = [month_bucket.isoformat()]
+        self.run.run_request["input_sources"] = ["gmail", "xero"]
         self.run.save(update_fields=["run_request"])
         with self._with_key():
+            refresh = self.client.post(reverse("startup_updates_source_evidence_refresh", args=[self.run.run_id]), {}, format="json", **self.headers)
+            self.assertEqual(refresh.status_code, 200, refresh.data)
             pinned = self.client.post(reverse("startup_updates_evidence_snapshot", args=[self.run.run_id]), {}, format="json", **self.headers)
         self.assertEqual(pinned.status_code, 200, pinned.data)
         pin = pinned.data["snapshots"][month_bucket.isoformat()]
@@ -3066,8 +3072,8 @@ class StartupUpdateWorkflowViewsTest(StartupUpdateApiTestCase):
             )
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data["count"], 1)
-        self.assertEqual(response.data["threads"][0]["gmail_thread_id"], "thread-top-thread")
+        self.assertEqual(response.data["count"], 2)
+        self.assertEqual({item["gmail_thread_id"] for item in response.data["threads"]}, {"thread-top-thread", "thread-123"})
 
     @patch("integrations.services.gmail.get_attachment_payload")
     def test_extraction_batch_lazily_hydrates_missing_attachments(self, mock_get_attachment_payload):
@@ -3191,11 +3197,11 @@ class StartupUpdateWorkflowViewsTest(StartupUpdateApiTestCase):
         attachment_payload = second_response.data["threads"][0]["attachments"][0]
         self.assertEqual(attachment_payload["extraction_status"], ArtifactProcessingStatus.ERROR)
 
-    def test_extraction_batch_compacts_quoted_gmail_history(self):
+    def test_extraction_batch_preserves_complete_in_period_source_text(self):
         self.thread.message_payloads = [
             {
                 "message_id": "msg-123",
-                "internal_date": timezone.now().isoformat(),
+                "internal_date": self.message.internal_date.isoformat(),
                 "subject": "ACME pilot converted",
                 "from_address": "ceo@acme.com",
                 "cleaned_text": (
@@ -3205,7 +3211,7 @@ class StartupUpdateWorkflowViewsTest(StartupUpdateApiTestCase):
             },
             {
                 "message_id": "msg-noise",
-                "internal_date": timezone.now().isoformat(),
+                "internal_date": self.message.internal_date.isoformat(),
                 "subject": "FYI",
                 "from_address": "ops@acme.com",
                 "cleaned_text": "unsubscribe\nview in browser",
@@ -3234,8 +3240,8 @@ class StartupUpdateWorkflowViewsTest(StartupUpdateApiTestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         bundle = response.data["threads"][0]
         self.assertIn("We closed the pilot", bundle["cleaned_text"])
-        self.assertNotIn("old quoted reply", bundle["cleaned_text"])
-        self.assertIn("compression", bundle["participant_summary"])
+        self.assertIn("old quoted reply", bundle["cleaned_text"])
+        self.assertEqual(bundle["omitted_message_count"], 0)
 
     @patch("integrations.services.gmail.get_attachment_payload")
     def test_extraction_batch_accepts_long_gmail_attachment_ids(self, mock_get_attachment_payload):
@@ -3352,8 +3358,8 @@ class StartupUpdateWorkflowViewsTest(StartupUpdateApiTestCase):
             )
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data["count"], 1)
-        self.assertEqual(response.data["threads"][0]["gmail_thread_id"], "thread-newest-thread")
+        self.assertEqual(response.data["count"], 2)
+        self.assertEqual({item["gmail_thread_id"] for item in response.data["threads"]}, {"thread-newest-thread", "thread-123"})
 
     def test_hydration_candidates_ignore_threads_from_other_connections(self):
         GmailThreadArtifact.objects.filter(pk=self.thread.pk).update(hydration_status=ArtifactProcessingStatus.PENDING)
@@ -3432,6 +3438,7 @@ class StartupUpdateWorkflowViewsTest(StartupUpdateApiTestCase):
                     "results": [
                         {
                             "gmail_thread_id": self.thread.gmail_thread_id,
+                            "source_fingerprint": extraction_batch.data["threads"][0]["source_fingerprint"],
                             "extraction_status": ArtifactProcessingStatus.PROCESSED,
                             "attachment_updates": [],
                             "events": [],
@@ -3647,6 +3654,7 @@ class StartupUpdateWorkflowViewsTest(StartupUpdateApiTestCase):
                     "results": [
                         {
                             "gmail_thread_id": self.thread.gmail_thread_id,
+                            "source_fingerprint": extraction_batch.data["threads"][0]["source_fingerprint"],
                             "attachment_updates": [
                                 {
                                     "id": self.attachment.id,
@@ -3712,8 +3720,11 @@ class StartupUpdateWorkflowViewsTest(StartupUpdateApiTestCase):
         self.assertIn(month_bucket.isoformat(), timeline_response.data["timeline"]["months"])
 
         self.run.run_request["draft_months"] = [month_bucket.isoformat()]
+        self.run.run_request["input_sources"] = ["gmail", "xero"]
         self.run.save(update_fields=["run_request"])
         with self._with_key():
+            refresh = self.client.post(reverse("startup_updates_source_evidence_refresh", args=[self.run.run_id]), {}, format="json", **self.headers)
+            self.assertEqual(refresh.status_code, 200, refresh.data)
             pinned = self.client.post(reverse("startup_updates_evidence_snapshot", args=[self.run.run_id]), {}, format="json", **self.headers)
         self.assertEqual(pinned.status_code, 200, pinned.data)
         pin = pinned.data["snapshots"][month_bucket.isoformat()]
@@ -3775,7 +3786,7 @@ class StartupUpdateWorkflowViewsTest(StartupUpdateApiTestCase):
         self.assertEqual(draft_list.status_code, status.HTTP_200_OK)
         self.assertEqual(len(draft_list.data["drafts"]), 1)
         self.assertEqual(draft_detail.status_code, status.HTTP_200_OK)
-        self.assertEqual(draft_detail.data["events"], [])
+        self.assertEqual([item["id"] for item in draft_detail.data["events"]], [event.pk])
         self.assertEqual(draft_detail.data["metrics"], [])
         self.assertEqual(draft_results.status_code, status.HTTP_200_OK)
         self.assertEqual(

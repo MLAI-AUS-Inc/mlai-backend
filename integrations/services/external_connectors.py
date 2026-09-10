@@ -2618,6 +2618,15 @@ def _xero_collection(
     return items
 
 
+def fetch_xero_base_currency(connection: ExternalServiceConnection) -> str:
+    payload = _xero_get_json(connection, "/Organisation")
+    organizations = payload.get("Organisations") or []
+    currencies = {str(item.get("BaseCurrency") or "").upper() for item in organizations}
+    if len(currencies) != 1 or not next(iter(currencies)):
+        raise ValueError("Xero did not identify the organisation's base currency.")
+    return next(iter(currencies))
+
+
 def fetch_xero_accounting_report(
     connection: ExternalServiceConnection,
     report_name: str,
