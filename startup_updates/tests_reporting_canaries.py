@@ -35,6 +35,13 @@ class ReportingCohortCanaries(TestCase):
 
     def metric(self, org, provider, amount, *, key="revenue", month=date(2026, 8, 1), currency="EUR"):
         metadata = {"source_metric": "xero_profit_and_loss_revenue", "report_hash": "authoritative", "report_start_date": month.isoformat(), "report_end_date": "2026-08-31", "accounting_basis": "accrual"} if provider == "xero" else {"definition_version": 2, "basis": "paid_stripe_invoice_sales_excluding_tax"}
+        if provider == "xero":
+            import calendar
+            from integrations.tests_connectors import _xero_profit_and_loss_report
+            from startup_updates.evidence_contract import content_hash
+            payload = _xero_profit_and_loss_report(total_income=str(amount or 0), total_expenses=str(amount or 0) if key == "monthlyCosts" else "0", net_profit=str(amount or 0))
+            metadata.update(report_payload=payload, report_hash=content_hash(payload), report_end_date=date(month.year, month.month, calendar.monthrange(month.year, month.month)[1]).isoformat(),
+                source_metric={"revenue": "xero_profit_and_loss_revenue", "monthlyCosts": "xero_profit_and_loss_monthly_costs", "netProfitLoss": "xero_profit_and_loss_net"}.get(key))
         return StartupMetricObservation.objects.create(organization=org, metric_key=key, metric_name=key, period_month=month,
             value_number=amount, value_text=f"{currency} {amount}" if amount is not None else "", unit=currency, source_provider=provider, source_metadata=metadata)
 
@@ -126,6 +133,31 @@ class ReportingCohortCanaries(TestCase):
         self.assertEqual(Decimal(metrics["monthlyCosts"]["value"]), 0)
         self.assertIsNone(snapshot.payload["charts"]["performance"][-1]["income"])
         self.assertEqual(snapshot.payload["charts"]["performance"][-1]["expenses"], 0)
+
+    def test_chart_history_omits_legacy_costs_and_freezes_report_evidence(self):
+        from startup_updates.services import build_monthly_financial_snapshot
+        from startup_updates.evidence_contract import content_hash
+        org, _, run = self.startup("chart-history", ["xero"])
+        old = self.metric(org, "xero", 40, key="monthlyCosts", month=date(2026,7,1))
+        old.source_metadata = {}
+        old.save()
+        self.metric(org, "xero", 100)
+        snapshot = self.capture(org, run)
+        history = snapshot.payload["charts"]
+        july = next(point for point in history["performance"] if point["month"] == "2026-07-01")
+        self.assertIsNone(july["expenses"])
+        august = history["performance"][-1]
+        report_hash = august["metric_evidence"]["income"]["report_hash"]
+        self.assertEqual(content_hash(history["source_reports"][report_hash]), report_hash)
+        # Later mutations cannot change the frozen report or its chart value.
+        metric = StartupMetricObservation.objects.get(pk=august["metric_evidence"]["income"]["observation_id"])
+        metric.source_metadata = {}
+        metric.value_number = 999
+        metric.save()
+        snapshot.refresh_from_db()
+        self.assertEqual(snapshot.payload["charts"]["performance"][-1]["income"], 100)
+        self.assertEqual(content_hash(snapshot.payload["charts"]["source_reports"][report_hash]), report_hash)
+        self.assertIsNone(build_monthly_financial_snapshot(organization=org, target_month=date(2026,8,1)))
 
     def test_source_reuse_and_exact_revision_approval_keep_old_publication(self):
         org, _, run = self.startup("revision", ["manual_documents"])

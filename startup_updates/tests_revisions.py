@@ -96,11 +96,15 @@ class MonthlyEvidencePipelineTests(StartupUpdateApiTestCase):
         self.run.run_request["draft_months"] = ["2026-03-01"]
         self.run.run_request["input_sources"] = ["gmail", "xero"]
         self.run.save(update_fields=["run_request"])
+        from integrations.tests_connectors import _xero_profit_and_loss_report
+        report = _xero_profit_and_loss_report(total_income="100", total_expenses="0", net_profit="100")
         self.observation = StartupMetricObservation.objects.create(
             organization=self.organization, period_month=date(2026, 3, 1),
             metric_key="revenue", metric_name="Revenue", value_number=100,
             value_text="AUD 100", unit="AUD", source_provider="xero",
-            source_metadata={"source_metric": "xero_profit_and_loss_revenue"})
+            source_metadata={"source_metric": "xero_profit_and_loss_revenue", "report_payload": report,
+                "report_hash": content_hash(report), "accounting_basis": "accrual",
+                "report_start_date": "2026-03-01", "report_end_date": "2026-03-31"})
 
     def pin(self):
         with self._with_key():

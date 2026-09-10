@@ -1,6 +1,6 @@
 # Monthly update evidence and revision contract
 
-Implementation: 9 September 2026. The user approved the specific additive migration and disposable local database verification. The migration has been created and exercised locally; production deployment has not been performed.
+Implementation began 9 September 2026. The evidence API, matching worker and frontend were deployed on 11 September in the reporting timezone, after approved database verification and passing release checks. Later contract changes still require their own deployment verification.
 
 Monthly updates now have one versioned evidence snapshot, immutable content revisions, and an approval receipt for the exact revision and audience. The active product supports private business health and founder-approved community updates. Investor discovery, fabricated activity, and investor-specific publication choices have been removed. Historical enum values remain readable for compatibility.
 
@@ -12,9 +12,9 @@ Revenue uses Xero Profit and Loss revenue when available. In the separate financ
 
 Only observations with the accepted calculation basis enter Revenue snapshots. Missing currency-matched observations stay unknown. Last-good Xero observations are retained on failed refreshes. Current-month report requests stop at the reporting cutoff. Stripe paid timestamps are bucketed in the configured timezone. Currency exponent conversion supports zero-, two-, and three-decimal currencies. Stripe pagination continues to completion and rejects a non-advancing cursor.
 
-The former invoice/bill fallback charts and proportional category allocations have been removed. Historical chart gaps are null. New memo KPIs carry numeric values and units from the snapshot; the history serializer does not regex-parse unquantified founder assertions or join different currencies into one series.
+The former invoice/bill fallback charts and proportional category allocations have been removed. Historical chart gaps are null. Accounting chart points must match the corrected parser against a hashed report with matching dates and accrual basis; unverified legacy observations cannot populate chart history. The snapshot retains each accepted report once and links chart points to its hash. Historical partial reports retain their partial-period flag. New memo KPIs carry numeric values and units from the snapshot; the history serializer does not regex-parse unquantified founder assertions or join different currencies into one series.
 
-Generated financial claims must use `{{metric:revenue}}` style references. The server substitutes the snapshot display value, replaces generated KPI displays with snapshot values, and rejects detected unbound financial amounts. This is a deterministic guard, not a proof that every narrative claim is true. Groundedness review and founder review remain necessary.
+Generated financial claims must use `{{metric:revenue}}` style references. The server substitutes the snapshot display value, and replaces generated KPI displays with snapshot values. Free-form financial claims still require evidence review. This is a deterministic guard, not a proof that every narrative claim is true. Groundedness review and founder review remain necessary.
 
 ## Worker protocol
 
@@ -59,7 +59,7 @@ Created migration: `startup_updates.0022_reporting_evidence_revisions`, dependin
 
 This is an additive schema migration. It does not rewrite existing updates, approve old content, contact providers, or publish anything. Django created and applied these operations successfully in a disposable SQLite test database. Migration consistency checks report no remaining model changes.
 
-Deployment remains a separate action. Release in this order:
+Deployment requires explicit authorization. For subsequent contract changes, use this sequence (the initial schema is already deployed):
 
 1. Pause monthly-update worker dispatch while the incompatible API contract changes.
 2. Apply `startup_updates.0022_reporting_evidence_revisions` in the separately authorized deployment environment, then release Django's API.

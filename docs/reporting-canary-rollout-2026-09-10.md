@@ -1,6 +1,6 @@
 # Reporting canaries and historical replacements — 10 September 2026
 
-Status: local reporting verification passed and release PRs are in progress. No live reporting canary has completed and no historical publication has been replaced.
+Status: the backend, worker and frontend baseline releases are deployed (11 September in the reporting timezone), and the first private live canary is processing. Original updates have been retained as legacy revisions. Historical replacements have not yet been approved. A follow-up chart guard excludes unverified historical observations and freezes accepted chart-report provenance; its release validation is pending.
 
 ## Resumed verification
 

@@ -2397,6 +2397,11 @@ class ConnectorEndpointTests(TestCase):
             },
         )
         for key, value in (("revenue", "10000.00"), ("monthlyCosts", "7000.00"), ("netProfitLoss", "3000.00")):
+            from startup_updates.evidence_contract import content_hash
+            report = _xero_profit_and_loss_report(total_income="10000", total_expenses="7000", net_profit="3000")
+            metadata = {} if key == "revenue" else {"report_payload": report, "report_hash": content_hash(report),
+                "accounting_basis": "accrual", "report_start_date": "2026-04-01", "report_end_date": "2026-04-30",
+                "source_metric": "xero_profit_and_loss_monthly_costs" if key == "monthlyCosts" else "xero_profit_and_loss_net"}
             StartupMetricObservation.objects.create(
                 organization=organization,
                 source_provider=ExternalServiceProvider.XERO,
@@ -2407,6 +2412,7 @@ class ConnectorEndpointTests(TestCase):
                 unit="AUD",
                 period_month=date(2026, 4, 1),
                 confidence=1.0,
+                source_metadata=metadata,
             )
 
         snapshot = build_monthly_financial_snapshot(
@@ -2420,6 +2426,7 @@ class ConnectorEndpointTests(TestCase):
         self.assertIsNone(snapshot["performance"][-1]["income"])
         self.assertEqual(snapshot["performance"][-1]["expenses"], 7000.0)
         self.assertEqual(snapshot["performance"][-1]["net"], 3000.0)
+        self.assertEqual(snapshot["source_reports"][content_hash(report)], report)
         self.assertEqual(snapshot["revenue_mix"], [])
         self.assertEqual(snapshot["event_contribution"], [])
         self.assertEqual(snapshot["overhead"], [])
