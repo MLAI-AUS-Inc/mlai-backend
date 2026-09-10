@@ -2025,6 +2025,36 @@ def _financial_revenue_rows_from_metric(metric: Optional[StartupMetricObservatio
     return parsed
 
 
+def _verified_chart_observation(metric):
+    """Legacy observations cannot become verified history just by being frozen."""
+    metadata = metric.source_metadata or {}
+    if metric.source_provider == "financial":
+        return (metric.metric_key == "revenue" and metadata.get("definition_version") == 2
+            and metadata.get("basis") == "paid_stripe_invoice_sales_excluding_tax")
+    if metric.source_provider != "xero":
+        return False
+    from startup_updates.evidence_contract import content_hash
+    payload = metadata.get("report_payload")
+    if not payload or content_hash(payload) != metadata.get("report_hash") or metadata.get("accounting_basis") != "accrual":
+        return False
+    try:
+        start = date.fromisoformat(metadata.get("report_start_date", ""))
+        end = date.fromisoformat(metadata.get("report_end_date", ""))
+    except (TypeError, ValueError):
+        return False
+    if start != metric.period_month or not start <= end <= _month_end(start):
+        return False
+    parsed = _parse_xero_profit_and_loss_report(payload)
+    key, source_metric = {
+        "revenue": ("revenue", "xero_profit_and_loss_revenue"),
+        "monthlyCosts": ("monthly_costs", "xero_profit_and_loss_monthly_costs"),
+        "netProfitLoss": ("net", "xero_profit_and_loss_net"),
+    }.get(metric.metric_key, (None, None))
+    entry = parsed.get(key)
+    amount = _signed_xero_net_amount(entry) if key == "net" and entry else entry.get("amount") if entry else None
+    return bool(entry and metadata.get("source_metric") == source_metric and metric.value_number == amount)
+
+
 def build_monthly_financial_snapshot(
     *,
     organization: Organization,
@@ -2046,9 +2076,13 @@ def build_monthly_financial_snapshot(
         source_provider__in=source_providers if source_providers is not None else ("xero", "financial"),
         metric_key__in=("revenue", "monthlyCosts", "netProfitLoss"),
     ).order_by("-observed_at", "-id"))
+    observations = [metric for metric in observations if _verified_chart_observation(metric)]
     performance = []
+    source_reports = {}
     for month in months:
         values = {}
+        evidence = {}
+        partial = False
         for key, output in (("revenue", "income"), ("monthlyCosts", "expenses"), ("netProfitLoss", "net")):
             candidates = [m for m in observations if m.period_month == month and m.metric_key == key]
             if key == "revenue":
@@ -2058,8 +2092,17 @@ def build_monthly_financial_snapshot(
             accounting = [m for m in candidates if m.source_provider == "xero"]
             chosen = next(iter(accounting or candidates), None)
             values[output] = float(chosen.value_number) if chosen and chosen.value_number is not None else None
+            if chosen:
+                metadata = chosen.source_metadata or {}
+                evidence[output] = {"observation_id": chosen.pk, "source_provider": chosen.source_provider,
+                    "observed_at": chosen.observed_at.isoformat() if chosen.observed_at else None, "unit": chosen.unit,
+                    **{key: metadata[key] for key in ("report_hash", "report_start_date", "report_end_date", "accounting_basis", "definition_version", "basis", "limitations") if key in metadata}}
+                if metadata.get("report_hash"):
+                    source_reports[metadata["report_hash"]] = metadata["report_payload"]
+                    partial |= date.fromisoformat(metadata["report_end_date"]) < _month_end(month)
         performance.append({"month": month.isoformat(), **values,
-            "is_partial": month == target_month and (as_of_date or timezone.localdate()) < _month_end(month),
+            "is_partial": partial or (month == target_month and (as_of_date or timezone.localdate()) < _month_end(month)),
+            "metric_evidence": evidence,
             "basis": "recorded_metrics"})
     if not any(point[field] is not None for point in performance for field in ("income", "expenses", "net")):
         return None
@@ -2067,8 +2110,9 @@ def build_monthly_financial_snapshot(
         "schema_version": 2, "target_month": target_month.isoformat(),
         "as_of_date": (as_of_date or timezone.localdate()).isoformat(), "currency": currency,
         "generated_at": timezone.now().isoformat(), "performance": performance,
+        "source_reports": source_reports,
         "revenue_mix": [], "event_contribution": [], "overhead": [],
-        "data_quality": {"warnings": ["Missing periods remain unknown. Category allocations are not inferred."],
+        "data_quality": {"warnings": ["Missing or unverified historical periods remain unknown. Category allocations are not inferred."],
             "calculation_basis": "Accounting revenue from Xero, otherwise paid Stripe sales. Sources are never summed."},
     }
 

@@ -157,3 +157,40 @@ class ClassificationContractTests(unittest.TestCase):
         renamed = classification_version(run)
         run.run_request["draft_months"] = ["2026-08-01"]
         self.assertNotEqual(classification_version(run), renamed)
+
+
+class ChartEvidenceTests(unittest.TestCase):
+    def metric(self, **changes):
+        from datetime import date
+        from decimal import Decimal
+        from integrations.tests_connectors import _xero_profit_and_loss_report
+        from startup_updates.evidence_contract import content_hash
+        report = _xero_profit_and_loss_report(total_income='100', total_expenses='70', net_profit='30')
+        metadata = {'source_metric': 'xero_profit_and_loss_monthly_costs', 'report_hash': content_hash(report),
+            'report_payload': report, 'accounting_basis': 'accrual', 'report_start_date': '2026-08-01', 'report_end_date': '2026-08-31'}
+        metric = SimpleNamespace(source_provider='xero', metric_key='monthlyCosts', period_month=date(2026,8,1), value_number=Decimal('70'), source_metadata=metadata)
+        for key,value in changes.items(): setattr(metric,key,value)
+        return metric
+
+    def test_historical_cost_must_match_corrected_report_parser(self):
+        from decimal import Decimal
+        from startup_updates.services import _verified_chart_observation
+        self.assertTrue(_verified_chart_observation(self.metric()))
+        # An old contractor-only total remains invalid even with the same raw report.
+        self.assertFalse(_verified_chart_observation(self.metric(value_number=Decimal('40'))))
+        self.assertFalse(_verified_chart_observation(self.metric(source_metadata={})))
+
+    def test_wrong_hash_period_basis_and_source_label_are_not_chart_evidence(self):
+        from startup_updates.services import _verified_chart_observation
+        for key,value in [('report_hash','changed'),('report_start_date','2026-07-01'),('report_end_date','2026-09-01'),('report_end_date',None),('accounting_basis','cash'),('source_metric','contractor_expenses')]:
+            with self.subTest(key=key,value=value):
+                metric=self.metric();metric.source_metadata[key]=value
+                self.assertFalse(_verified_chart_observation(metric))
+
+    def test_stripe_requires_versioned_paid_sales_and_never_supplies_costs(self):
+        from startup_updates.services import _verified_chart_observation
+        metadata={'definition_version':2,'basis':'paid_stripe_invoice_sales_excluding_tax'}
+        metric=self.metric(source_provider='financial',metric_key='revenue',source_metadata=metadata)
+        self.assertTrue(_verified_chart_observation(metric))
+        metric.metric_key='monthlyCosts';self.assertFalse(_verified_chart_observation(metric))
+        metric.metric_key='revenue';metadata.pop('definition_version');self.assertFalse(_verified_chart_observation(metric))
