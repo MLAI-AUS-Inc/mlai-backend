@@ -841,8 +841,8 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     # Office Manager state. The preceding migration audit remains mandatory.
     # A currently enabled old web process could create state during preflight.
     # Unknown old runtime state also retains the full integration requirement.
-    office_manager_previous_enabled=\$(docker compose exec -T web python -c "import os; os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'mlai.settings'); import django; django.setup(); from django.conf import settings; print('true' if getattr(settings, 'OFFICE_MANAGER_ENABLED', False) else 'false')" 2>/dev/null || printf true)
-    office_manager_integration_required=\$(compose_run_web python manage.py office_manager_deploy_requirements)
+    office_manager_previous_enabled=\$(docker compose exec -T web python -c "import os; os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'mlai.settings'); import django; django.setup(); from django.conf import settings; print('true' if getattr(settings, 'OFFICE_MANAGER_ENABLED', False) else 'false')" </dev/null 2>/dev/null || printf true)
+    office_manager_integration_required=\$(compose_run_web python manage.py office_manager_deploy_requirements --skip-checks)
     case "\$office_manager_integration_required" in
         true|false) ;;
         *) echo "Invalid Office Manager deployment requirement result"; exit 1 ;;
@@ -1568,5 +1568,14 @@ if slugs != expected:
         docker image rm "\$rollback_tag" >/dev/null 2>&1 || true
     done
 EOF
+
+# Independently verify the release outside SSH so an early remote exit can
+# never turn a skipped migration/restart into a successful deployment.
+curl -fsS https://api.mlai.au/healthz/ready | python3 -c '
+import json, sys
+payload = json.load(sys.stdin)
+if payload.get("status") != "ok" or payload.get("release") != sys.argv[1]:
+    raise SystemExit("Production release verification failed")
+' "$APP_RELEASE_SHORT"
 
 echo "✅ Deployment complete! Check http://$DROPLET_IP or https://api.mlai.au"

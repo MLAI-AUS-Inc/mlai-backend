@@ -276,6 +276,18 @@ class LinearDeploymentWiringTests(unittest.TestCase):
                 self.assertEqual((root / ".env").read_text(), f"KEEP_ME=yes\n{key}={value}\n")
                 self.assertEqual((root / ".env").stat().st_mode & 0o777, 0o600)
 
+    def test_deployment_probe_does_not_consume_remote_script_stdin(self):
+        deploy = (REPO_ROOT / "deploy.sh").read_text()
+        line = next(line for line in deploy.splitlines() if "office_manager_previous_enabled=" in line)
+        line = line.replace("\\$", "$")
+        # Docker eagerly reads stdin even though its Python command does not.
+        script = "docker() { cat >/dev/null; printf false; };\n" + line + "\nprintf 'REMAINDER_EXECUTED'\n"
+        result = subprocess.run(["bash"], input=script, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("REMAINDER_EXECUTED", result.stdout)
+        self.assertIn("office_manager_deploy_requirements --skip-checks", deploy)
+        self.assertIn("Production release verification failed", deploy)
+
     def test_managed_value_helper_rejects_multiline_payload(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
