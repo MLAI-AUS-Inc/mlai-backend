@@ -42,3 +42,19 @@ class OfficeManagerDeployRequirementsTests(unittest.TestCase):
         database.cursor.return_value.__enter__.return_value.execute.side_effect = RuntimeError('query failed')
         with self.assertRaises(RuntimeError):
             integration_required(database, enabled=False)
+
+    def test_passive_booking_provenance_does_not_require_slack(self):
+        database = self.database([
+            'roo_officemanagerprovenancereconciliation',
+            'roo_officemanagerprovenancebucketrepair',
+            'roo_officemanagerrefundreversalprovenance',
+        ])
+        self.assertFalse(integration_required(database, enabled=False))
+        database.cursor.return_value.__enter__.return_value.execute.assert_not_called()
+
+    def test_runtime_state_still_requires_slack_alongside_provenance(self):
+        database = self.database([
+            'roo_officemanagerprovenancereconciliation',
+            'roo_officemanagerday',
+        ], [(1,)])
+        self.assertTrue(integration_required(database, enabled=False))

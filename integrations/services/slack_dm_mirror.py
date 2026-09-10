@@ -7362,7 +7362,17 @@ def _deliver_to_mlai(delivery: SlackDmMirrorDelivery) -> None:
         text=delivery.encrypted_text,
         source_workspace_id=conversation.slack_workspace_id,
         source_channel_id=conversation.slack_conversation_id,
-        source_message_id=delivery.source_message_id,
+        # Queue IDs distinguish successive edits/reactions (slack-event:... or
+        # reaction:...). The adapter's source reference must remain the actual
+        # Slack message timestamp. delivery_id retains operation idempotency.
+        source_message_id=(
+            delivery.source_message_id
+            if delivery.operation == CommunityBridgeDeliveryType.CREATE
+            else str(
+                source_metadata.get("target_source_message_id")
+                or delivery.source_message_id
+            ).strip()
+        ),
         source_author_id=delivery.source_author_id,
         source_author_display_name=str(
             profile.get("display_name") or delivery.source_author_id

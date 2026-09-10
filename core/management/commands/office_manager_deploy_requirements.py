@@ -9,8 +9,16 @@ def integration_required(database, *, enabled):
         return True
     # Any historical state requires the full integration, including disabled
     # days and completed claims: late accepted messages can still need repair.
+    # Immutable provenance records can describe ordinary paid bookings without
+    # any Office Manager execution or pending external delivery. They do not
+    # require a Slack companion. Runtime rows and unknown future tables do.
+    passive_evidence_tables = {
+        "roo_officemanagerprovenancereconciliation",
+        "roo_officemanagerprovenancebucketrepair",
+        "roo_officemanagerrefundreversalprovenance",
+    }
     tables = sorted(t for t in database.introspection.table_names()
-                    if t.startswith("roo_officemanager"))
+                    if t.startswith("roo_officemanager") and t not in passive_evidence_tables)
     with database.cursor() as cursor:
         for table in tables:
             cursor.execute(f"SELECT 1 FROM {database.ops.quote_name(table)} LIMIT 1")
