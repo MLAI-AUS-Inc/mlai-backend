@@ -57,6 +57,16 @@ def private_channels_enabled(grant):
     )
 
 
+def catalog_conversations(conversations):
+    """Load the account's shared catalogue once instead of once per mirror.
+
+    A connection's provider_metadata can contain thousands of conversations.
+    Joining it onto every mirror row multiplies transfer and JSON decoding.
+    Prefetch preserves the caller's owner/status filters and shares FK objects.
+    """
+    return conversations.select_related(None).prefetch_related("grant__connection")
+
+
 def catalog_payload(conversations, public_key):
     """Expose only mirrors provisioned for this verified device."""
     key = str(public_key or "").lower()

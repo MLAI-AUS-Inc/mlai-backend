@@ -100,6 +100,7 @@ from integrations.services.slack_chat_catalog import (
     PRIVATE_CHANNEL_CONSENTS,
     PRIVATE_CHANNEL_SCOPES,
     catalog_payload,
+    catalog_conversations,
     catalog_tombstones,
     conversation_kind,
     conversation_metadata,
@@ -1181,7 +1182,7 @@ def status_payload(
             and grant.last_discovery_at is None
         ),
         "channel_catalog": catalog_payload(
-            backfill_conversations.select_related("grant__connection"),
+            catalog_conversations(backfill_conversations),
             authenticated_public_key,
         ),
         "private_channels_enabled": bool(grant and private_channels_enabled(grant)),

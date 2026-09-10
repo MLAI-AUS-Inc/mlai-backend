@@ -119,6 +119,13 @@ accepted a session yet; true with zero window totals means the member has
 history but no session that began in that period.
 
 
+### Slack status read performance
+
+Status reads prefetch the shared grant and connector catalogue once. Do not
+join `grant__connection` onto every conversation: its large `provider_metadata`
+JSON then repeats for every mirror, making large accounts slow to open.
+Account/device filtering is unchanged; status remains a read of stored data.
+
 ### Slack catalog member presentation
 
 The authenticated Slack status response's `channel_catalog` now includes a
