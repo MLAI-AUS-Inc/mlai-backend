@@ -14,8 +14,7 @@ coding agents must also read [`AGENTS.md`](AGENTS.md).
 - Founder Tools, startup updates, content workflows, and integrations
 - Hackathon APIs for eSafety, Watt The Hack, HealthHack, and MedHack
 - Roo points and internal service endpoints
-- Dormant account, membership, and bridge APIs created for the inactive
-  Buzz/MLAI Chat deployment experiment
+- Account, membership, and Slack bridge APIs used by MLAI Chat
 - Organisational memory ingestion, retrieval, review, and publication services
 - Scheduled jobs and background workers
 

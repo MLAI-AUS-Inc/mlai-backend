@@ -19,12 +19,11 @@ subsystem-specific contracts and runbooks.
 - [`community-chat-coworking.md`](community-chat-coworking.md) — signed booking handoff to Public Roo
 - [`volunteer-api.md`](volunteer-api.md) — gated member journey, recognition and Roo contracts
 
-## Inactive Buzz / MLAI Chat experiment
+## MLAI Chat bridge
 
-These documents describe integration work for the inactive experiment in
-deploying the open-source Buzz platform. Retain them as historical technical
-context; they are not current production runbooks or evidence of an active MLAI
-Chat service.
+The bridge contract describes the live MLAI Chat integration. Dated staging and
+release evidence may describe earlier deployment stages; verify current runtime
+state when using those operational documents.
 
 - [`mlai-chat-bridge-contract.md`](mlai-chat-bridge-contract.md)
 - [`mlai-chat-bridge-staging.md`](mlai-chat-bridge-staging.md)

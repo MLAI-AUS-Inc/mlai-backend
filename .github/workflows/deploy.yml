@@ -142,6 +142,9 @@ jobs:
         CSRF_TRUSTED_ORIGINS: https://mlai.au,https://www.mlai.au,https://api.mlai.au,https://ops.mlai.au,https://chat.mlai.au
       run: python manage.py validate_prod_urls
 
+    - name: Verify private Slack delivery payloads without database access
+      run: python -m unittest integrations.tests_slack_dm_payload_contract -v
+
     - name: Run targeted Django tests
       run: |
         python manage.py test \
