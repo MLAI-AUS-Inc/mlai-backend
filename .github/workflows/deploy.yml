@@ -143,7 +143,7 @@ jobs:
       run: python manage.py validate_prod_urls
 
     - name: Verify private Slack delivery payloads without database access
-      run: python -m unittest integrations.tests_slack_dm_payload_contract integrations.tests_slack_catalog_queries -v
+      run: python -m unittest integrations.tests_slack_dm_payload_contract integrations.tests_slack_catalog_queries integrations.tests_slack_history_scheduling -v
 
     - name: Run targeted Django tests
       run: |

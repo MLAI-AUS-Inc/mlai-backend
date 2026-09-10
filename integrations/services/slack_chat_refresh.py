@@ -19,6 +19,19 @@ from integrations.models import (
 FOREGROUND_STATE_ID = "history-state:foreground-refresh"
 
 
+# Stored in the existing conversation error field; survives worker restarts.
+HISTORY_RETRY_PREFIX = "history_scan_retry:"
+
+
+def exclude_recent_history_attempts(queryset, *, now):
+    """Allow other imports to proceed while failed or leased scans cool down."""
+    return queryset.exclude(
+        Q(last_error__startswith="history_scan_processing:")
+        | Q(last_error__startswith=HISTORY_RETRY_PREFIX),
+        updated_at__gte=now - timedelta(minutes=5),
+    )
+
+
 def prioritize_open_conversations(queryset, *, conversation_field="pk"):
     """Prefer recently opened conversations without bypassing worker rate limits."""
     return queryset.annotate(

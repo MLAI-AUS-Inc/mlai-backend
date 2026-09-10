@@ -5012,20 +5012,21 @@ def process_due_history_backfills(limit: int = 1) -> int:
         with transaction.atomic():
             from integrations.services.slack_chat_refresh import (
                 prioritize_open_conversations,
+                exclude_recent_history_attempts,
+                HISTORY_RETRY_PREFIX,
             )
 
             candidate = (
-                prioritize_open_conversations(
-                    SlackDmMirrorConversation.objects.filter(
-                        history_backfilled_at__isnull=True,
-                        status=SlackDmMirrorConversationStatus.LIVE,
-                        grant__status=SlackDmMirrorGrantStatus.ACTIVE,
-                        grant__revoked_at__isnull=True,
-                    )
-                )
-                .exclude(
-                    last_error__startswith="history_scan_processing:",
-                    updated_at__gte=now - timedelta(minutes=5),
+                exclude_recent_history_attempts(
+                    prioritize_open_conversations(
+                        SlackDmMirrorConversation.objects.filter(
+                            history_backfilled_at__isnull=True,
+                            status=SlackDmMirrorConversationStatus.LIVE,
+                            grant__status=SlackDmMirrorGrantStatus.ACTIVE,
+                            grant__revoked_at__isnull=True,
+                        )
+                    ),
+                    now=now,
                 )
                 .annotate(
                     history_page_priority=Case(
@@ -5110,7 +5111,7 @@ def process_due_history_backfills(limit: int = 1) -> int:
                     )
                     if locked_conversation is not None:
                         locked_conversation.last_error = (
-                            f"{exc.__class__.__name__}: {exc}"[:2000]
+                            f"{HISTORY_RETRY_PREFIX}{exc.__class__.__name__}: {exc}"[:2000]
                         )
                         locked_conversation.save(
                             update_fields=("last_error", "updated_at")
