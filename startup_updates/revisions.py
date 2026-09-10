@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import copy
+from datetime import timedelta
 from django.db import transaction
 from django.db.models import Max
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 from rest_framework.exceptions import APIException, ValidationError
 
 from startup_updates.evidence_contract import (
@@ -25,7 +27,20 @@ class RevisionConflict(APIException):
 def capture_snapshot(organization, month, *, run=None, manual_metrics=None, base_snapshot=None):
     profile, _ = StartupProfile.objects.get_or_create(organization=organization)
     try:
-        period = reporting_period(month, profile.reporting_timezone)
+        request = (run.run_request or {}) if run else {}
+        zone = request.get("reporting_timezone") or profile.reporting_timezone
+        window_end = request.get("backfill_window_end")
+        if base_snapshot is not None:
+            period = copy.deepcopy(base_snapshot.payload["period"])
+        elif window_end:
+            cutoff = parse_datetime(str(window_end))
+            if cutoff is None or timezone.is_naive(cutoff):
+                raise ValueError("The source cutoff must be a valid timestamp with a timezone.")
+            # Source windows include their final instant; snapshot cutoffs are
+            # exclusive. A delayed or resumed run must retain its original MTD.
+            period = reporting_period(month, zone, as_of=cutoff + timedelta(microseconds=1))
+        else:
+            period = reporting_period(month, zone)
     except (ValueError, KeyError) as exc:
         raise ValidationError(str(exc)) from exc
     definitions = [REVENUE_DEFINITION, *[item for item in profile.kpi_definitions if isinstance(item, dict) and item.get("key") != "revenue"]]

@@ -40,8 +40,29 @@ class ReportingCohortCanaries(TestCase):
 
     def capture(self, org, run):
         month = date.fromisoformat(run.run_request["draft_months"][0])
-        with patch("startup_updates.revisions.reporting_period", side_effect=lambda month, zone: reporting_period(month, zone, as_of=self.now)):
+        with patch("startup_updates.revisions.reporting_period", side_effect=lambda month, zone, **kwargs: reporting_period(month, zone, as_of=kwargs.get("as_of", self.now))):
             return capture_snapshot(org, month, run=run)
+
+    def test_delayed_snapshot_keeps_original_source_cutoff_and_timezone(self):
+        org, _, run = self.startup("delayed", ["manual_documents"], month=date(2026, 9, 1))
+        run.run_request.update(reporting_timezone="Australia/Melbourne", backfill_window_end="2026-09-03T12:00:00+10:00")
+        self.now = datetime(2026, 10, 5, tzinfo=timezone.utc)
+        snapshot = self.capture(org, run)
+        self.assertTrue(snapshot.payload["period"]["is_partial"])
+        self.assertEqual(snapshot.payload["period"]["cutoff"], "2026-09-03T12:00:00.000001+10:00")
+        self.assertEqual(snapshot.payload["period"]["timezone"], "Australia/Melbourne")
+        edited = capture_snapshot(org, snapshot.month, base_snapshot=snapshot, manual_metrics={"revenue": "12"})
+        self.assertEqual(edited.payload["period"], snapshot.payload["period"])
+        run.run_request.update(draft_months=["2026-08-01"], backfill_window_end="2026-08-31T23:59:59.999999+10:00")
+        self.assertFalse(self.capture(org, run).payload["period"]["is_partial"])
+
+    def test_invalid_source_cutoff_is_rejected(self):
+        from rest_framework.exceptions import ValidationError
+        org, _, run = self.startup("invalid-cutoff", ["manual_documents"])
+        for value in ("invalid", "2026-09-03T12:00:00"):
+            with self.subTest(value=value), self.assertRaises(ValidationError):
+                run.run_request["backfill_window_end"] = value
+                self.capture(org, run)
 
     def test_stripe_only_and_xero_plus_stripe_never_add_sources(self):
         for name, sources, expected in [("stripe-only", ["stripe"], "100.0000"), ("combined", ["xero", "stripe"], "250.0000")]:
