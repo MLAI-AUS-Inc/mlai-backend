@@ -155,8 +155,11 @@ token is stored.
 
 Each linked member receives an independent, owner-controlled mirror of direct
 and multi-person Slack DMs, plus private channels after explicit consent.
-The authenticated user token lists all active internal memberships with
-`users.conversations`, using `im,mpim,private_channel` and pages of 20.
+The authenticated user token lists internal memberships with
+`users.conversations`, using `im,mpim,private_channel` and pages of 20. Existing
+7/30-day grants list active conversations. Explicit all-history consent also
+lists archived conversations that Slack still allows the owner to read; those
+mirrors expose `source_archived: true` and are read-only.
 Discovery, paced history and delivery run independently; new mirrors appear
 before history completes. Discovery sorts explicit Slack latest-message metadata newest-first and
 skips the history request when that marker proves its latest activity is older
@@ -188,18 +191,33 @@ updated.
 Backfill status is complete only after every queued history delivery completes;
 transient dead rows are safely repopulated from Slack, while a permanently
 rejected adapter delivery stays fenced until explicit backfill or renewed
-consent. New imports default to seven days; members can explicitly choose 30 days.
-The configured maximum remains 30 days. The legacy
-`backfill_all` action is accepted as a compatibility alias for the same bounded
-rescan, and every Slack history request includes an `oldest` parameter. The
+consent. New API callers that omit a history choice retain the seven-day default.
+Members can explicitly choose 7 days, 30 days, or **all available history**
+(`history_days: 0`). Zero is honored only with the new
+`slack-chat-v5-all-available-history` consent; legacy zero-valued grants remain
+bounded until the owner opts in. The configured maximum still caps bounded
+7/30-day imports, without silently widening their consent. The legacy
+`backfill_all` action remains a bounded compatibility alias. Initial all-history
+scans omit `oldest`; bounded imports always supply it. The
 idempotency key prevents duplicate deliveries. A queued or failed backfill row
 that ages past the rolling cutoff is completed as a content-free tombstone
 instead of being sent or retried. Periodic source reconciliation rehydrates any
 current row that an older importer incorrectly classified as outside the
 window.
 
-The backend also starts an hourly bounded reconciliation and immediately starts
-one after Slack reports `app_rate_limited`. A message that disappeared from an
+The backend also starts an hourly reconciliation and requests one after Slack
+reports `app_rate_limited`. These refresh requests preserve an incomplete
+archive scan's durable cursor. After an all-history import completes, refresh
+scans cover the most recent 30 days plus any gap since the latest imported
+source timestamp, with a one-day overlap. A content-free queue marker saves
+that boundary even for an empty conversation, so reopening it does not restart
+an entire archive scan. Delivery and history pages advance `latest_synced_ts`
+monotonically; delivering older archive pages cannot move recency backward.
+Choosing a wider history scope preserves that latest timestamp while resetting
+only the older-page cursor. A recent refresh cannot infer deletion of replies
+whose roots are outside its scan boundary; signed deletion callbacks remain
+authoritative for those threads. All-history refreshes retain the original
+thread relationship even when the root predates the recent refresh cutoff. A message that disappeared from an
 otherwise complete bounded scan is mirrored as a delete. Slack history may
 truncate the actor list on a reaction (`count` can exceed `users.length`), so
 absence from history is deliberately **not** treated as a reaction removal;
@@ -248,7 +266,7 @@ Community Chat exposes these owner-authenticated endpoints:
 
 - `GET /api/v1/community-chat/slack/` returns delivery-aware backfill (including
   imported and queued message counts), identity-repair, device-capacity, and
-  bounded-history status.
+  history scope (`history_scope: "recent" | "all"`) and delivery-aware progress.
 - `GET /api/v1/community-chat/slack/users/?q=...&limit=...&cursor=...` searches
   internal human Slack users. It excludes deleted, bot, app, Slack Connect, and
   owner rows and never returns email addresses or OAuth tokens.
@@ -257,9 +275,18 @@ Community Chat exposes these owner-authenticated endpoints:
   private MLAI conversation, and returns its participant public keys and
   sanitized profiles. The owner key always comes from the authenticated active
   verified Community Chat device; body-supplied owner keys are ignored.
-- `PATCH /api/v1/community-chat/slack/` accepts `pause`, `resume`, and
-  `backfill`. The legacy `backfill_all` value remains a bounded compatibility
-  alias for older installed clients.
+- `PATCH /api/v1/community-chat/slack/` accepts `pause`, `resume`, `backfill`, and
+  `refresh_channel`. `backfill` accepts `history_days: 0` only as an explicit
+  all-history selection and records the v5 consent. The legacy `backfill_all`
+  value remains a bounded compatibility alias for older installed clients.
+- `PATCH .../slack/` with `action: "refresh_channel"` and `channel_id`, or
+  `GET .../slack/?channel_id=...`, returns only a mirror provisioned for the
+  authenticated owner/device. Fields are `status` (`syncing`, `complete`,
+  `error`), `history_days`, `history_scan_complete`, `last_synced_at`,
+  `imported_messages`, `queued_messages`, `failed_messages`, and
+  `source_archived`. Scanning complete alone does not mean message delivery is
+  complete. Rapid repeated opens share a refresh; they never reset a partial
+  scan.
 - `DELETE /api/v1/community-chat/slack/` revokes local consent and Slack token
   access, erases queued private bodies, then makes one best-effort call to the
   adapter's authenticated, idempotent
@@ -455,3 +482,65 @@ Workspace-specific image assets still use the existing custom-emoji transport;
 this catalog contains Unicode glyphs, not workspace images.
 Regenerate using `python scripts/generate_slack_emoji.py /path/to/@emoji-mart/data/sets/15/native.json`.
 Verify without a database using `python -m unittest integrations.tests_slack_emoji`.
+
+
+## History consistency audit — 10 September 2026
+
+The directory, backend import queue, and relay history are distinct stores.
+Provisioning a directory entry means the owner's devices can address its private
+relay destination; it does not mean Slack history has been fetched or delivered.
+Clients must show importing/retrying status instead of interpreting a temporarily
+empty relay response as an empty Slack conversation. Routine reads use the relay
+and a scoped client cache, rather than waiting for Slack history HTTP calls.
+
+The backend persists each list-page checkpoint in connector state. Main history
+uses a persisted oldest timestamp; thread replies use per-thread cursors bound to
+the same consent, registration, participant boundary, and scan epoch. A page is
+queued atomically and released immediately. A repeated/non-progressing main or
+reply boundary now raises a retryable import error; it cannot run forever or
+falsely mark the conversation complete. Queue bodies remain encrypted until
+relay delivery, then are erased. Content-free delivery receipts preserve
+idempotency and progress. Relay storage is the durable message read model.
+
+The all-history selection covers supported owner-readable Slack IMs, MPIMs,
+and private channels, including archived readable memberships. Historical
+messages and reactions by former members or bots in groups use the existing
+conversation import identity while preserving source author IDs and available
+names/avatars. They never add those people to the relay audience. One-to-one
+DMs retain the exact owner/counterpart boundary. Slack Connect remains excluded.
+Public channels use the separate explicitly mapped bot bridge; owner consent
+never publishes private history into those shared channels.
+
+Validation for this change ran 57 database-free tests covering consent upgrade,
+legacy consent preservation, archive cursors, recent refresh boundaries, expired
+queues, delivery-aware status, author/audience separation, archived write
+rejection, and pagination failures. The runner forcibly disabled both database
+connections and network access. No migration was created or applied, and no
+production integration was exercised.
+
+Remaining operational and parity gaps:
+
+- A shared cache stores Slack cooldowns by workspace and method, but a
+  `Retry-After` also pauses the process-wide history loop. Rate limiting in one
+  workspace can therefore delay another workspace. Multiple worker processes do
+  not share a proactive request budget; they share only the response-driven
+  cooldown. Replace this with a shared per-workspace/method token budget before
+  scaling worker replicas. The current loop paces a history call every 1.2
+  seconds, plus actual I/O and persistence time. Discovery and profile calls
+  consume their own method quotas. Completion time is not a guaranteed day.
+- After an initial all-history scan, a missed Events API callback for a new reply
+  to an old thread root can fall outside the recent history scan. Completed
+  thread checkpoints are currently discarded. A follow-up should retain a
+  content-free registry of known roots and rotate durable replies checkpoints
+  through them under the same quota, with a persisted fairness cursor. This
+  requires database integration tests before claiming complete offline recovery.
+- Bot-origin live callbacks retain the existing bot filtering (Roo is the
+  deliberate exception). Group bot history is recovered by history scans;
+  immediate bot-message parity is not claimed. Archived history remains readable
+  but cannot be sent to Slack; old clients should upgrade to display the
+  `source_archived` state before editing or composing.
+- Scope/retention restrictions in Slack still limit what can be read. Public
+  channel history requires its independently reviewed mapping/import path.
+- Actual worker deployment, queue age, Slack app rate tier, and relay read latency
+  were not inspected against production. Validate these with aggregate
+  instrumentation before asserting production completion or full Slack parity.

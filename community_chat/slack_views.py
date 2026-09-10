@@ -32,7 +32,10 @@ from integrations.services.slack_dm_mirror import (
 )
 from integrations.views import mint_connector_connect_ticket
 
-from integrations.services.slack_chat_catalog import PRIVATE_CHANNEL_CONSENT
+from integrations.services.slack_chat_catalog import (
+    ALL_HISTORY_CONSENT,
+    PRIVATE_CHANNEL_CONSENT,
+)
 
 
 from .authentication import (
@@ -44,8 +47,10 @@ from .throttles import CommunityChatScopedThrottle
 
 def _import_history_days(data, *, default=7):
     days = data.get("history_days", default)
-    if type(days) is not int or days not in (7, 30):
-        raise ValidationError({"history_days": "Choose 7 or 30 days."})
+    if type(days) is not int or days not in (0, 7, 30):
+        raise ValidationError(
+            {"history_days": "Choose 7 days, 30 days, or all available history (0)."}
+        )
     return days
 
 
@@ -201,12 +206,20 @@ class SlackDmMirrorView(SlackDmMirrorApiView):
         )
         payload["authorization_url"] = connect_url
         payload["consent"] = {
-            "version": PRIVATE_CHANNEL_CONSENT,
+            "version": (
+                ALL_HISTORY_CONSENT if history_days == 0 else PRIVATE_CHANNEL_CONSENT
+            ),
             "summary": (
                 "Import private channels, group chats and DMs visible to your Slack account into "
                 "private, owner-controlled conversations in MLAI Chat. The other person "
                 "or group members do not need to link Slack and cannot see your imported "
-                f"copy unless they link independently. The last {history_days} days are imported. Private messages are "
+                "copy unless they link independently. "
+                + (
+                    "All available history is imported in the background. "
+                    if history_days == 0
+                    else f"The last {history_days} days are imported. "
+                )
+                + "Private messages are "
                 "excluded from Roo, organization memory, public search, and analytics."
             ),
         }
@@ -271,6 +284,7 @@ class SlackDmMirrorView(SlackDmMirrorApiView):
             try:
                 backfill_grant(
                     grant,
+                    full_history=True,
                     history_days=_import_history_days(
                         request.data, default=grant.history_days
                     ),

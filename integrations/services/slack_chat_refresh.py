@@ -4,7 +4,7 @@ from datetime import timedelta
 from uuid import UUID
 
 from django.db import transaction
-from django.db.models import Exists, OuterRef, Q
+from django.db.models import Count, Exists, OuterRef, Q
 from django.utils import timezone
 from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
 
@@ -92,8 +92,13 @@ def _refresh_status(conversation):
             | Q(metadata__history_recovery_superseded=False)
         )
     )
-    failed = rows.filter(status__in=("failed", "dead")).exists()
-    pending = rows.filter(status__in=("pending", "processing")).exists()
+    counts = rows.aggregate(
+        imported_messages=Count("pk", filter=Q(status="completed", operation="create")),
+        queued_messages=Count("pk", filter=Q(status__in=("pending", "processing"))),
+        failed_messages=Count("pk", filter=Q(status__in=("failed", "dead"))),
+    )
+    failed = counts["failed_messages"] > 0
+    pending = counts["queued_messages"] > 0
     scan_error = bool(
         conversation.last_error
         and not conversation.last_error.startswith("history_scan_processing:")
@@ -107,10 +112,18 @@ def _refresh_status(conversation):
             else "complete"
         )
     )
+    from integrations.services.slack_chat_catalog import conversation_metadata
+
     return {
         "channel_id": str(conversation.mlai_channel_id),
         "status": state,
+        "source_archived": bool(
+            conversation_metadata(conversation).get("source_archived")
+        ),
         "history_days": conversation.grant.history_days,
+        "history_scan_complete": conversation.history_backfilled_at is not None,
+        "last_synced_at": conversation.history_backfilled_at,
+        **counts,
     }
 
 

@@ -38,10 +38,11 @@ class SlackChatCatalogTests(SimpleTestCase):
             participant_buzz_pubkeys=["owner-device", "import-shadow"],
         )
 
-    def test_default_is_seven_and_only_seven_or_thirty_can_be_requested(self):
+    def test_default_is_seven_and_all_history_requires_explicit_zero(self):
         self.assertEqual(_import_history_days({}), 7)
         self.assertEqual(_import_history_days({"history_days": 30}), 30)
-        for value in (0, -1, 31, 365, True, "30", None):
+        self.assertEqual(_import_history_days({"history_days": 0}), 0)
+        for value in (-1, 31, 365, True, "30", None):
             with self.subTest(value=value), self.assertRaises(ValidationError):
                 _import_history_days({"history_days": value})
 
@@ -80,6 +81,7 @@ class SlackChatCatalogTests(SimpleTestCase):
                     "channel_id": "mirror",
                     "kind": "private_channel",
                     "last_message_at": None,
+                    "source_archived": False,
                 }
             ],
         )
