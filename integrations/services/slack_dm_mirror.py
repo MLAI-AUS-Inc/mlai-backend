@@ -55,6 +55,7 @@ from integrations.models import (
 )
 from integrations.services.community_bridge.buzz import BuzzBridgeClient
 from integrations.services.community_bridge.formatting import (
+    approved_slack_avatar_url,
     emoji_to_slack_reaction,
     normalize_slack_files,
     reaction_object_id,
@@ -6460,7 +6461,12 @@ def _supersede_unrecovered_backfill_rows_locked(
                 CommunityBridgeDeliveryStatus.DEAD,
             ),
         )
-        .exclude(metadata__permanent_failure=True)
+        # Missing JSON keys are SQL NULL, not false. Include legacy rows that
+        # never had a permanent-failure flag so completed scans can retire them.
+        .filter(
+            Q(metadata__permanent_failure__isnull=True)
+            | Q(metadata__permanent_failure=False)
+        )
         .order_by("id")
     )
     now = timezone.now()
@@ -6720,8 +6726,9 @@ def _deliver_private_batch(claimed: list[SlackDmMirrorDelivery]) -> None:
                     "source_author_display_name": str(
                         profile.get("display_name") or delivery.source_author_id
                     ),
-                    "source_author_avatar_url": str(profile.get("avatar_url") or "")
-                    or None,
+                    "source_author_avatar_url": (
+                        approved_slack_avatar_url(profile.get("avatar_url")) or None
+                    ),
                     "linked_pubkey": linked_pubkey,
                     "target_message_id": None,
                     "parent_message_id": None,
@@ -7379,7 +7386,7 @@ def _deliver_to_mlai(delivery: SlackDmMirrorDelivery) -> None:
         source_author_display_name=str(
             profile.get("display_name") or delivery.source_author_id
         ),
-        source_author_avatar_url=str(profile.get("avatar_url") or ""),
+        source_author_avatar_url=approved_slack_avatar_url(profile.get("avatar_url")),
         linked_pubkey=linked_pubkey,
         target_message_id=target_message_id,
         parent_message_id=parent_message_id,

@@ -189,6 +189,12 @@ is the target Slack message timestamp from `target_source_message_id`. Internal
 `slack-event:` and `reaction:` queue keys remain unchanged for deduplication;
 `delivery_id` identifies the individual adapter operation. A newly created
 message continues to use its own Slack timestamp.
+Optional author avatars are checked against the adapter's HTTPS Slack CDN and
+Gravatar host rules at delivery time, including cached profiles and batches.
+An unsupported or malformed avatar is omitted so it cannot reject the message.
+After a completed authoritative recovery scan, absent legacy failed rows without
+a permanent-failure flag become content-free superseded tombstones; a missing
+JSON key must be handled explicitly rather than treated as Boolean false.
 During a rolling deployment, a backend that reaches an older adapter falls
 back to the same deterministic single-delivery endpoint; an adapter that
 reaches an older relay returns a retryable upstream failure until the relay is

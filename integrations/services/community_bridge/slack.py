@@ -3,13 +3,15 @@ import hmac
 import logging
 import time
 from typing import Optional
-from urllib.parse import urlparse
 
 from django.conf import settings
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
-from integrations.services.community_bridge.formatting import sanitize_slack_text
+from integrations.services.community_bridge.formatting import (
+    approved_slack_avatar_url,
+    sanitize_slack_text,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -210,20 +212,8 @@ class SlackBridgeClient:
     @staticmethod
     def _approved_avatar_url(profile: dict) -> str:
         for field_name in ("image_192", "image_512", "image_72", "image_48", "image_original"):
-            value = str(profile.get(field_name) or "").strip()
-            if not value or len(value) > 2048:
-                continue
-            parsed = urlparse(value)
-            host = str(parsed.hostname or "").lower()
-            is_slack_cdn = host == "avatars.slack-edge.com"
-            is_gravatar = host == "secure.gravatar.com"
-            if (
-                parsed.scheme == "https"
-                and parsed.netloc
-                and not parsed.username
-                and not parsed.password
-                and (is_slack_cdn or is_gravatar)
-            ):
+            value = approved_slack_avatar_url(profile.get(field_name))
+            if value:
                 return value
         return ""
 

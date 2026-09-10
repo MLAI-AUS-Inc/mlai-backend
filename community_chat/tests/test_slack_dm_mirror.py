@@ -1283,6 +1283,12 @@ class SlackDmMirrorOwnerTests(APITestCase):
         deliver_private_batch,
     ):
         _, conversation = self._live_conversation()
+        # A cached unsupported avatar is optional metadata, not a reason to
+        # reject an otherwise authorized batch of messages.
+        conversation.participant_profiles = {
+            "UTWO": {"avatar_url": "https://a.slack-edge.com/default-avatar.png"},
+        }
+        conversation.save(update_fields=("participant_profiles", "updated_at"))
         for offset in range(3):
             conversation.deliveries.create(
                 source_platform=CommunityBridgePlatform.SLACK,
@@ -1309,6 +1315,10 @@ class SlackDmMirrorOwnerTests(APITestCase):
 
         deliver_private.assert_not_called()
         payloads = deliver_private_batch.call_args.args[0]
+        self.assertEqual(
+            [payload["source_author_avatar_url"] for payload in payloads],
+            [None, None, None],
+        )
         self.assertEqual(
             [payload["text"] for payload in payloads],
             ["message 0", "message 1", "message 2"],
@@ -4653,6 +4663,35 @@ class SlackDmMirrorOwnerTests(APITestCase):
         self.assertNotIn("permanent_failure", delivery.metadata)
         self.assertTrue(delivery.metadata["history_recovery_scheduled"])
         self.assertIsNone(conversation.history_backfilled_at)
+
+    def test_completed_recovery_handles_an_absent_permanent_failure_key(self):
+        _, conversation = self._live_conversation()
+        rows = []
+        for index, flag in enumerate((None, False, True)):
+            metadata = {"backfill": True, "history_recovery_scheduled": True}
+            if flag is not None:
+                metadata["permanent_failure"] = flag
+            rows.append(SlackDmMirrorDelivery.objects.create(
+                conversation=conversation,
+                source_platform=CommunityBridgePlatform.SLACK,
+                source_message_id=f"178790203{index}.000100",
+                source_author_id="UTWO",
+                operation=CommunityBridgeDeliveryType.CREATE,
+                encrypted_text="",
+                metadata=metadata,
+                status=CommunityBridgeDeliveryStatus.DEAD,
+                available_at=timezone.now(),
+            ))
+        with transaction.atomic():
+            slack_dm_mirror._supersede_unrecovered_backfill_rows_locked(conversation)
+        for row in rows:
+            row.refresh_from_db()
+        for row in rows[:2]:
+            self.assertTrue(row.metadata["history_recovery_superseded"])
+            self.assertNotIn("history_recovery_scheduled", row.metadata)
+            self.assertEqual(row.encrypted_text, "")
+        self.assertNotIn("history_recovery_superseded", rows[2].metadata)
+        self.assertTrue(rows[2].metadata["permanent_failure"])
 
     def test_app_rate_limit_schedules_current_state_reconciliation(self):
         _, conversation = self._live_conversation()
