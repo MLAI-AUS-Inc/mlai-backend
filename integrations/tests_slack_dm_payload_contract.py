@@ -105,6 +105,48 @@ class SlackPrivatePayloadContractTests(unittest.TestCase):
         self.service._deliver_to_mlai(delivery)
         self.assertEqual(self.adapter.call_args.kwargs["source_message_id"], "1788650002.000789")
 
+    def test_optional_unusable_avatar_does_not_block_a_message(self):
+        for avatar in (
+            "https://a.slack-edge.com/default-avatar.png",
+            "https://example.com/avatar.png",
+            "https://[broken/avatar.png",
+            "https://user:secret@avatars.slack-edge.com/avatar.png",
+        ):
+            with self.subTest(avatar=avatar):
+                delivery = self.delivery("create", "1788650002.000789")
+                delivery.conversation.participant_profiles["UTEST"] = {
+                    "display_name": "Member", "avatar_url": avatar,
+                }
+                self.service._deliver_to_mlai(delivery)
+                self.assertEqual(self.adapter.call_args.kwargs["source_author_avatar_url"], "")
+                self.assertEqual(delivery.status, "completed")
+
+    def test_approved_avatar_is_preserved_on_a_message(self):
+        delivery = self.delivery("create", "1788650002.000789")
+        avatar = "https://avatars.slack-edge.com/member.png"
+        delivery.conversation.participant_profiles["UTEST"] = {"avatar_url": avatar}
+        self.service._deliver_to_mlai(delivery)
+        self.assertEqual(self.adapter.call_args.kwargs["source_author_avatar_url"], avatar)
+
+    def test_avatar_validation_matches_adapter_optional_metadata_contract(self):
+        validate = self.service.approved_slack_avatar_url
+        for value in (
+            None, "", "http://avatars.slack-edge.com/a.png",
+            "https://avatars.slack-edge.com.evil.example/a.png",
+            "https://avatars.slack-edge.com:invalid/a.png",
+            "https://avatars.slack-edge.com:99999/a.png",
+            "https://avatars.slack-edge.com/a\nb.png",
+            "https://avatars.slack-edge.com/" + "é" * 1024,
+        ):
+            with self.subTest(value=value):
+                self.assertEqual(validate(value), "")
+        for value in (
+            "https://avatars.slack-edge.com/a.png",
+            "https://secure.gravatar.com/avatar/abc?s=192",
+        ):
+            with self.subTest(value=value):
+                self.assertEqual(validate(value), value)
+
     def test_legacy_mutation_with_timestamp_queue_id_still_works(self):
         delivery = self.delivery("edit", "1788650002.000789", target=None)
         self.service._deliver_to_mlai(delivery)

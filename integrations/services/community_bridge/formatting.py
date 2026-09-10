@@ -2,6 +2,7 @@ import html
 import hashlib
 import re
 from typing import Callable, Iterable, Optional
+from urllib.parse import urlsplit
 
 from integrations.models import CommunityBridgePlatform
 from ..slack_emoji import emoji_to_slack_reaction, slack_reaction_to_emoji  # noqa: F401
@@ -16,6 +17,29 @@ DISCORD_USER_MENTION_RE = re.compile(r"<@!?\d+>")
 DISCORD_CHANNEL_MENTION_RE = re.compile(r"<#\d+>")
 DISCORD_ROLE_MENTION_RE = re.compile(r"<@&\d+>")
 DISCORD_EMOJI_RE = re.compile(r"<a?:([A-Za-z0-9_]+):\d+>")
+
+
+def approved_slack_avatar_url(value: str | None) -> str:
+    """Return an adapter-compatible optional avatar, or omit unusable metadata."""
+    value = str(value or "").strip()
+    if not value or any(ord(character) < 32 or ord(character) == 127 for character in value):
+        return ""
+    try:
+        if len(value.encode("utf-8")) > 2048:
+            return ""
+        parsed = urlsplit(value)
+        # Evaluate the port so malformed authorities cannot reach the adapter.
+        _ = parsed.port
+        if (
+            parsed.scheme == "https"
+            and parsed.hostname in {"avatars.slack-edge.com", "secure.gravatar.com"}
+            and parsed.username in {None, ""}
+            and parsed.password is None
+        ):
+            return value
+    except (ValueError, UnicodeError):
+        pass
+    return ""
 
 
 def reaction_object_id(*, message_id: str, reaction: str, author_id: str) -> str:
