@@ -3,7 +3,7 @@ set -euo pipefail
 
 key="${1:-}"
 case "$key" in
-  LINEAR_MEETING_REQUIRED_TEAM_KEYS|LINEAR_CHANNEL_ISSUE_BINDINGS_JSON|LINEAR_CHANNEL_ISSUE_MAX_COMMENTS|LINEAR_CHANNEL_ISSUE_WRITES_ENABLED) ;;
+  LINEAR_MEETING_REQUIRED_TEAM_KEYS|LINEAR_CHANNEL_ISSUE_BINDINGS_JSON|LINEAR_CHANNEL_ISSUE_MAX_COMMENTS|LINEAR_CHANNEL_ISSUE_WRITES_ENABLED|OFFICE_MANAGER_SLACK_CHANNEL_ID|OFFICE_MANAGER_TIMEZONE) ;;
   *)
     echo "Unsupported production environment key" >&2
     exit 64
@@ -21,6 +21,18 @@ if [[ -z "$value" || "$value" == *$'\n'* || "$value" == *$'\r'* ]]; then
 fi
 
 case "$key" in
+  OFFICE_MANAGER_SLACK_CHANNEL_ID)
+    [[ "$value" =~ ^[CG][A-Z0-9]+$ ]] || {
+      echo "OFFICE_MANAGER_SLACK_CHANNEL_ID must be a Slack channel ID" >&2
+      exit 1
+    }
+    ;;
+  OFFICE_MANAGER_TIMEZONE)
+    [[ "$value" == "Australia/Melbourne" ]] || {
+      echo "OFFICE_MANAGER_TIMEZONE must be Australia/Melbourne" >&2
+      exit 1
+    }
+    ;;
   LINEAR_MEETING_REQUIRED_TEAM_KEYS)
     [[ "$value" =~ ^[A-Za-z0-9_-]+(,[A-Za-z0-9_-]+)*$ ]] || {
       echo "LINEAR_MEETING_REQUIRED_TEAM_KEYS must be a comma-separated team-key list" >&2

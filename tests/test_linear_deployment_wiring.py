@@ -248,6 +248,34 @@ class LinearDeploymentWiringTests(unittest.TestCase):
                 self.assertEqual((root / ".env").read_text(), f"KEEP_ME=yes\n{key}={secret}\n")
                 self.assertEqual((root / ".env").stat().st_mode & 0o777, 0o600)
 
+    def test_managed_value_helper_accepts_every_deployment_key(self):
+        import re
+
+        values = {
+            "LINEAR_MEETING_REQUIRED_TEAM_KEYS": "TECH,STU,MLA",
+            "LINEAR_CHANNEL_ISSUE_BINDINGS_JSON": VALID_BINDINGS,
+            "LINEAR_CHANNEL_ISSUE_MAX_COMMENTS": "250",
+            "LINEAR_CHANNEL_ISSUE_WRITES_ENABLED": "false",
+            "OFFICE_MANAGER_SLACK_CHANNEL_ID": "C0BRM181EDV",
+            "OFFICE_MANAGER_TIMEZONE": "Australia/Melbourne",
+        }
+        keys = set(re.findall(r"^\s*install_remote_env_value ([A-Z_]+)", (REPO_ROOT / "deploy.sh").read_text(), re.MULTILINE))
+        self.assertEqual(keys, set(values))
+        for key, value in values.items():
+            with self.subTest(key=key), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / "scripts").mkdir()
+                for name in ("upsert_env_value_from_stdin.sh", "validate_linear_channel_issue_deploy_config.py"):
+                    shutil.copy(REPO_ROOT / "scripts" / name, root / "scripts")
+                (root / ".env").write_text("KEEP_ME=yes\n")
+                result = subprocess.run(
+                    ["bash", "scripts/upsert_env_value_from_stdin.sh", key],
+                    cwd=root, input=value, text=True, capture_output=True,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual((root / ".env").read_text(), f"KEEP_ME=yes\n{key}={value}\n")
+                self.assertEqual((root / ".env").stat().st_mode & 0o777, 0o600)
+
     def test_managed_value_helper_rejects_multiline_payload(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
