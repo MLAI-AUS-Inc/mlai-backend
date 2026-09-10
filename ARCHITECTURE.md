@@ -52,10 +52,9 @@ package and its tests before changing a contract.
 
 The deployed and full local topologies contain more than the web server. They
 include schedulers and workers for discovery, analytics, organisational memory,
-and password email. The repository also contains community-bridge workers from
-the inactive Buzz/MLAI Chat experiment; code presence does not establish that
-they are deployed. These processes share Django configuration and may share the
-same database and cache when enabled.
+and password email. Dedicated community-bridge workers run the live MLAI Chat
+Slack import and mirroring service. These processes share Django configuration
+and may share the same database and cache when enabled.
 
 Consequences for changes:
 

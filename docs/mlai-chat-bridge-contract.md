@@ -184,6 +184,11 @@ conversation are delivered in ordered batches of up to 20 through
 trusted-private `POST /events/batch` route. One grant/conversation revocation
 fence and one adapter registration lease cover the whole batch, while every
 signed event still passes the normal relay ingest pipeline.
+For private edits, deletions, and reactions, the adapter's `source_message_id`
+is the target Slack message timestamp from `target_source_message_id`. Internal
+`slack-event:` and `reaction:` queue keys remain unchanged for deduplication;
+`delivery_id` identifies the individual adapter operation. A newly created
+message continues to use its own Slack timestamp.
 During a rolling deployment, a backend that reaches an older adapter falls
 back to the same deterministic single-delivery endpoint; an adapter that
 reaches an older relay returns a retryable upstream failure until the relay is
