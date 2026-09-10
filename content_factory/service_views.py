@@ -3825,7 +3825,11 @@ class ContentFactoryCallbackView(APIView):
     permission_classes = [HasRooApiKey]
 
     def post(self, request):
-        data = request.data
+        data = request.data.copy()
+        # WhatsApp/email research has no Slack delivery route. JSON null must
+        # not reach the non-null job column or block notification callbacks.
+        if data.get("slack_user_id") is None:
+            data["slack_user_id"] = ""
         event_type = data.get('event_type') or data.get('event')
         job_id = data.get('job_id')
         domain = data.get('domain', '')
