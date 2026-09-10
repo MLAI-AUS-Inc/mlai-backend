@@ -29,7 +29,9 @@ def _text_from_pdf(raw_bytes: bytes) -> ParsedManualDocument:
 
     reader = PdfReader(io.BytesIO(raw_bytes))
     pages = [page.extract_text() or "" for page in reader.pages]
-    return ParsedManualDocument("\n".join(item.strip() for item in pages if item.strip()), "processed", "pdf_parsed")
+    missing = [str(index + 1) for index, text in enumerate(pages) if not text.strip()]
+    notes = "pdf_parsed" + ("; text unavailable on pages " + ", ".join(missing) + "; OCR review required" if missing else "")
+    return ParsedManualDocument("\n".join(f"Page {index + 1}:\n{text.strip()}" for index, text in enumerate(pages)), "processed", notes)
 
 
 def _text_from_docx(raw_bytes: bytes) -> ParsedManualDocument:
@@ -39,7 +41,17 @@ def _text_from_docx(raw_bytes: bytes) -> ParsedManualDocument:
         return _text_from_zipped_xml(raw_bytes, "word/document.xml", "docx_xml_parsed")
 
     doc = Document(io.BytesIO(raw_bytes))
-    text = "\n".join(paragraph.text.strip() for paragraph in doc.paragraphs if paragraph.text.strip())
+    from docx.oxml.ns import qn
+    from docx.text.paragraph import Paragraph
+    from docx.table import Table
+    lines = []
+    for element in doc.element.body:
+        if element.tag == qn("w:p"):
+            lines.append(Paragraph(element, doc).text)
+        elif element.tag == qn("w:tbl"):
+            for row in Table(element, doc).rows:
+                lines.append(" | ".join(cell.text for cell in row.cells))
+    text = "\n".join(line for line in lines if line.strip())
     return ParsedManualDocument(text, "processed", "docx_parsed")
 
 
@@ -53,6 +65,8 @@ def _text_from_pptx(raw_bytes: bytes) -> ParsedManualDocument:
     lines = []
     for slide in presentation.slides:
         for shape in slide.shapes:
+            if getattr(shape, "has_table", False):
+                lines.extend(" | ".join(cell.text for cell in row.cells) for row in shape.table.rows)
             text = str(getattr(shape, "text", "") or "").strip()
             if text:
                 lines.append(text)
@@ -70,7 +84,7 @@ def _text_from_xlsx(raw_bytes: bytes) -> ParsedManualDocument:
     for sheet in workbook.worksheets:
         lines.append(f"# Sheet: {sheet.title}")
         for row in sheet.iter_rows(values_only=True):
-            cells = [str(cell).strip() for cell in row if cell is not None and str(cell).strip()]
+            cells = [str(cell).strip() if cell is not None else "[empty or unavailable]" for cell in row]
             if cells:
                 lines.append(" | ".join(cells))
     return ParsedManualDocument("\n".join(lines), "processed", "xlsx_parsed")
@@ -79,7 +93,7 @@ def _text_from_xlsx(raw_bytes: bytes) -> ParsedManualDocument:
 def _text_from_csv(raw_bytes: bytes) -> ParsedManualDocument:
     stream = io.StringIO(raw_bytes.decode("utf-8", errors="ignore"))
     reader = csv.reader(stream)
-    text = "\n".join(" | ".join(cell.strip() for cell in row if cell.strip()) for row in reader if row)
+    text = "\n".join(" | ".join(cell.strip() or "[empty]" for cell in row) for row in reader if row)
     return ParsedManualDocument(text, "processed", "csv_parsed")
 
 

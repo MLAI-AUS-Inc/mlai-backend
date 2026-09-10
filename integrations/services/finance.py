@@ -205,7 +205,8 @@ def calculate_and_publish_monthly_revenue(*, run: ContentFactoryRun) -> dict[str
 
 def publish_financial_metric_observations(*, organization: Organization, run: Optional[ContentFactoryRun] = None) -> list[StartupMetricObservation]:
     """One Revenue metric: Xero books win; never add invoices or bill payments."""
-    if ExternalServiceConnection.objects.filter(organization=organization, provider=ExternalServiceProvider.XERO).exclude(status=ExternalServiceConnectionStatus.DISCONNECTED).exists():
+    selected_sources = set((run.run_request or {}).get("input_sources") or []) if run else set()
+    if (not selected_sources or "xero" in selected_sources) and ExternalServiceConnection.objects.filter(organization=organization, provider=ExternalServiceProvider.XERO).exclude(status=ExternalServiceConnectionStatus.DISCONNECTED).exists():
         from startup_updates.services import publish_xero_metric_observations
         from startup_updates.models import StartupProfile
         from zoneinfo import ZoneInfo
@@ -242,6 +243,9 @@ def publish_financial_metric_observations(*, organization: Organization, run: Op
         else:
             bucket["amount"] += _minor_units(minor_amount, currency)
         bucket["ids"].append(_record_source_id(record))
+    if run and (run.run_request or {}).get("source_evidence_refreshed", {}).get("stripe_complete"):
+        for month in (run.run_request or {}).get("draft_months", []):
+            buckets.setdefault((date.fromisoformat(month), profile.default_currency), {"amount": Decimal("0"), "ids": [], "unknown": False})
     metrics = []
     for (month, currency), values in sorted(buckets.items()):
         # The semantic key is independent of a workflow retry/run.

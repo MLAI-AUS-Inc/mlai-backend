@@ -237,6 +237,8 @@ jobs:
           tests.test_editorial_learning_loop \
           startup_updates.tests_monthly_update_reminders \
           startup_updates.tests_evidence_contract \
+          startup_updates.tests_source_evidence \
+          startup_updates.tests_reporting_canaries \
           startup_updates.tests_revisions \
           hospital.test_sim_contest \
           hospital.test_sim_guess_proxy \

@@ -920,8 +920,11 @@ class ContentFactoryRunSyncTests(TestCase):
             result={},
         )
 
+        pinned = self.client.post("/api/v1/integrations/startup-updates/runs/startup-update-lock-1/evidence-snapshot", {}, format="json")
+        self.assertEqual(pinned.status_code, 200, pinned.data)
+        pin = pinned.data["snapshots"]["2026-03-01"]
         with patch(
-            "startup_updates.api_views.upsert_monthly_update_draft",
+            "startup_updates.revisions.save_revision",
             side_effect=OperationalError("database is locked"),
         ):
             response = self.client.post(
@@ -930,6 +933,8 @@ class ContentFactoryRunSyncTests(TestCase):
                     "drafts": [
                         {
                             "month": "2026-03-01",
+                            "snapshot_id": pin["snapshot_id"],
+                            "expected_revision": pin["expected_revision"],
                             "status": "ready",
                             "structured_memo": {"title": "Acme Investor Update"},
                         }

@@ -8799,6 +8799,15 @@ def _sync_content_factory_run_snapshot(*, run_id: str, data: dict, step_states: 
                 existing_run.result,
                 data.get("result"),
             )
+        if existing_run is not None and existing_run.workflow == "startup_monthly_update":
+            # Worker checkpoints cannot replace source receipts, approval inputs,
+            # connector authority or founder choices with a stale local copy.
+            data["run_request"] = existing_run.run_request
+            result = dict(data.get("result") or {})
+            for key in ("source_evidence", "update_candidates", "_cancel_backups"):
+                if key in (existing_run.result or {}):
+                    result[key] = existing_run.result[key]
+            data["result"] = result
         if active_snapshot:
             # Clean after the Django-owned merge as a final invariant: no local
             # augmentation may reintroduce a blocker into an active snapshot.

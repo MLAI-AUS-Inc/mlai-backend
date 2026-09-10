@@ -487,6 +487,7 @@ def build_startup_update_step_order(input_sources: Optional[list[str]]) -> list[
             "google_analytics_event_extraction",
         ])
     steps.extend([
+        "source_evidence_refresh",
         "timeline_merge",
         "reconciliation_enrichment",
         "candidate_curation",
@@ -999,11 +1000,9 @@ def _iter_xero_report_entries(rows: Any, *, section: str = "") -> Iterable[dict[
             if isinstance(cell, dict)
         ]
         label = title or (values[0] if values else "")
-        amount = None
-        for value in reversed(values[1:] or values):
-            amount = _report_decimal(value)
-            if amount is not None:
-                break
+        # Standard Xero reports put the requested period in the first value
+        # column. Later columns are comparisons, never missing-value fallbacks.
+        amount = _report_decimal(values[1]) if len(values) > 1 and row_type.lower() != "header" else None
         if label and amount is not None:
             yield {
                 "label": label,
@@ -1022,6 +1021,22 @@ def _xero_report_entries(payload: dict[str, Any]) -> list[dict[str, Any]]:
     reports = payload.get("Reports") or payload.get("reports") or []
     report = reports[0] if reports and isinstance(reports[0], dict) else {}
     return list(_iter_xero_report_entries(report.get("Rows") or report.get("rows") or []))
+
+
+def _xero_balance_sheet_date(payload: dict[str, Any]) -> Optional[date]:
+    reports = payload.get("Reports") or []
+    report = reports[0] if reports and isinstance(reports[0], dict) else {}
+    for row in report.get("Rows") or []:
+        if str(row.get("RowType", "")).lower() != "header":
+            continue
+        cells = row.get("Cells") or []
+        value = str(cells[1].get("Value") or "").strip() if len(cells) > 1 else ""
+        for fmt in ("%d %b %Y", "%d %B %Y", "%d %b %y", "%Y-%m-%d"):
+            try:
+                return datetime.strptime(value, fmt).date()
+            except ValueError:
+                continue
+    return None
 
 
 def _xero_report_entry_labels(entries: list[dict[str, Any]]) -> list[str]:
@@ -1065,7 +1080,7 @@ def _xero_report_breakdown_rows(
         rows.append(
             {
                 "label": label,
-                "amount": str(abs(Decimal(str(amount)))),
+                "amount": str(Decimal(str(amount))),
                 "section": str(entry.get("section") or ""),
             }
         )
@@ -1073,22 +1088,22 @@ def _xero_report_breakdown_rows(
 
 
 def _find_xero_report_amount(entries: list[dict[str, Any]], labels: Iterable[str]) -> Optional[dict[str, Any]]:
-    normalized_labels = {_normalize_report_label(label) for label in labels}
-    for entry in entries:
-        if entry["normalized_label"] in normalized_labels:
-            return entry
-    for entry in entries:
-        if any(label in entry["normalized_label"] for label in normalized_labels if label):
-            return entry
+    # Match explicit report labels in priority order. Substring matching turns
+    # an account such as "Contractor Expenses" into whole-business expenses.
+    for label in labels:
+        normalized = _normalize_report_label(label)
+        for entry in entries:
+            if entry["normalized_label"] == normalized:
+                return entry
     return None
 
 
-def _positive_xero_report_entry(entry: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
+def _xero_report_amount_entry(entry: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
     if not entry or entry.get("amount") is None:
         return None
     return {
         **entry,
-        "amount": abs(entry["amount"]),
+        "amount": entry["amount"],
     }
 
 
@@ -1106,9 +1121,9 @@ def _xero_monthly_cost_entry(
     operating_expenses: Optional[dict[str, Any]],
     total_expenses: Optional[dict[str, Any]],
 ) -> Optional[dict[str, Any]]:
-    cost_of_sales = _positive_xero_report_entry(cost_of_sales)
-    operating_expenses = _positive_xero_report_entry(operating_expenses)
-    total_expenses = _positive_xero_report_entry(total_expenses)
+    cost_of_sales = _xero_report_amount_entry(cost_of_sales)
+    operating_expenses = _xero_report_amount_entry(operating_expenses)
+    total_expenses = _xero_report_amount_entry(total_expenses)
     if cost_of_sales and operating_expenses:
         return {
             "label": "Cost of Sales + Operating Expenses",
@@ -1125,7 +1140,7 @@ def _xero_monthly_cost_entry(
 
 def _parse_xero_profit_and_loss_report(payload: dict[str, Any]) -> dict[str, Any]:
     entries = _xero_report_entries(payload)
-    revenue = _find_xero_report_amount(entries, ["Total Income", "Total Revenue", "Income"])
+    revenue = next((entry for label in ("total income", "total revenue") for entry in entries if entry["normalized_label"] == label), None)
     net = _find_xero_report_amount(entries, ["Net Profit", "Net Loss", "Net Profit/(Loss)", "Net Profit / (Loss)"])
     cost_of_sales = _find_xero_report_amount(
         entries,
@@ -1156,8 +1171,8 @@ def _parse_xero_profit_and_loss_report(payload: dict[str, Any]) -> dict[str, Any
         "entries": entries,
         "revenue": revenue,
         "net": net,
-        "cost_of_sales": _positive_xero_report_entry(cost_of_sales),
-        "operating_expenses": _positive_xero_report_entry(operating_expenses or total_expenses),
+        "cost_of_sales": _xero_report_amount_entry(cost_of_sales),
+        "operating_expenses": _xero_report_amount_entry(operating_expenses or total_expenses),
         "monthly_costs": _xero_monthly_cost_entry(
             cost_of_sales=cost_of_sales,
             operating_expenses=operating_expenses,
@@ -1552,6 +1567,7 @@ def publish_xero_metric_observations(
         _previous_month_start(current_month),
         _previous_month_start(_previous_month_start(current_month)),
     ]
+    report_months = sorted(set(report_months) | {date.fromisoformat(value) for value in ((run.run_request or {}).get("draft_months", []) if run else [])})
     report_metrics_available = False
     for connection in connections:
         if not xero_has_report_scope(connection.scopes):
@@ -1560,36 +1576,38 @@ def publish_xero_metric_observations(
             )
             continue
         profit_and_loss_by_month: dict[date, dict[str, Any]] = {}
+        report_evidence = {}
+        from integrations.services.external_connectors import fetch_xero_accounting_report, fetch_xero_base_currency
+        from startup_updates.evidence_contract import content_hash
         try:
-            from integrations.services.external_connectors import fetch_xero_accounting_report
-
-            for month in report_months:
-                month_payload = fetch_xero_accounting_report(
-                    connection,
-                    "ProfitAndLoss",
-                    params={"fromDate": month.isoformat(), "toDate": min(end_date, _month_end(month)).isoformat()},
-                )
-                profit_and_loss_by_month[month] = _parse_xero_profit_and_loss_report(month_payload)
-            balance_payload = fetch_xero_accounting_report(
-                connection,
-                "BalanceSheet",
-                params={"date": min(end_date, _month_end(current_month)).isoformat()},
-            )
-        except http_client.HTTPError as exc:
-            status_code = getattr(getattr(exc, "response", None), "status_code", None)
-            if status_code == 403:
-                warnings.append(
-                    "Xero reports permission was denied; reconnect Xero with Profit and Loss and Balance Sheet report scopes to calculate Revenue, Burn Rate, Runway, and Revenue Growth."
-                )
-            else:
-                warnings.append(f"Xero reports could not be fetched: {str(exc) or 'request failed'}")
-            continue
+            currency = fetch_xero_base_currency(connection)
         except Exception as exc:
-            warnings.append(f"Xero reports could not be fetched: {str(exc) or 'request failed'}")
+            warnings.append(f"Xero reporting currency could not be verified: {type(exc).__name__}.")
             continue
-
-        report_metrics_available = True
-        currency = _xero_connection_currency(connection, records)
+        for month in report_months:
+            cutoff = min(end_date, _month_end(month))
+            try:
+                month_payload = fetch_xero_accounting_report(connection, "ProfitAndLoss",
+                    params={"fromDate": month.isoformat(), "toDate": cutoff.isoformat(), "paymentsOnly": "false", "standardLayout": "true"})
+                profit_and_loss_by_month[month] = _parse_xero_profit_and_loss_report(month_payload)
+                report_evidence[month] = {"report_hash": content_hash(month_payload),
+                    "report_payload": month_payload, "accounting_basis": "accrual",
+                    "fetched_at": timezone.now().isoformat()}
+            except Exception as exc:
+                warnings.append(f"Xero Profit and Loss unavailable for {month.isoformat()}: {type(exc).__name__}. Cached values require confirmation.")
+        balance_payload = {}
+        try:
+            balance_cutoff = min(end_date, _month_end(current_month))
+            balance_payload = fetch_xero_accounting_report(connection, "BalanceSheet",
+                params={"date": balance_cutoff.isoformat(), "paymentsOnly": "false", "standardLayout": "true"})
+            if _xero_balance_sheet_date(balance_payload) != balance_cutoff:
+                # Xero's Balance Sheet endpoint returns the end of the requested
+                # month. It cannot establish an in-month cash/runway observation.
+                balance_payload = {}
+                warnings.append("Xero Balance Sheet reporting date does not match the source cutoff; cash and runway are unavailable for that cutoff.")
+        except Exception as exc:
+            warnings.append(f"Xero Balance Sheet unavailable: {type(exc).__name__}.")
+        report_metrics_available = report_metrics_available or bool(profit_and_loss_by_month)
         current_report = profit_and_loss_by_month.get(current_month) or {}
         previous_report = profit_and_loss_by_month.get(_previous_month_start(current_month)) or {}
         current_revenue = current_report.get("revenue")
@@ -1622,6 +1640,7 @@ def publish_xero_metric_observations(
             shared_detail = {
                 "connection_id": connection.id,
                 "source_currency": currency,
+                **report_evidence.get(report_month, {}),
                 "parsed_row_labels": report_labels,
                 "income_rows": income_rows,
                 "expense_rows": expense_rows,
@@ -1641,7 +1660,7 @@ def publish_xero_metric_observations(
                         warnings=warnings,
                         report_name="ProfitAndLoss",
                         start_date=report_month,
-                        end_date=_month_end(report_month),
+                        end_date=min(end_date, _month_end(report_month)),
                         entry=revenue,
                         extra={**shared_detail, "calculation_basis": "profit_and_loss_total_income"},
                     ),
@@ -1661,7 +1680,7 @@ def publish_xero_metric_observations(
                         warnings=warnings,
                         report_name="ProfitAndLoss",
                         start_date=report_month,
-                        end_date=_month_end(report_month),
+                        end_date=min(end_date, _month_end(report_month)),
                         entry=report_monthly_costs,
                         extra={
                             **shared_detail,
@@ -1687,7 +1706,7 @@ def publish_xero_metric_observations(
                         warnings=warnings,
                         report_name="ProfitAndLoss",
                         start_date=report_month,
-                        end_date=_month_end(report_month),
+                        end_date=min(end_date, _month_end(report_month)),
                         entry=report_net,
                         extra={**shared_detail, "calculation_basis": "profit_and_loss_net_profit_or_loss"},
                     ),
@@ -1707,9 +1726,10 @@ def publish_xero_metric_observations(
                     warnings=warnings,
                     report_name="ProfitAndLoss",
                     start_date=current_month,
-                    end_date=_month_end(current_month),
+                    end_date=min(end_date, _month_end(current_month)),
                     entry=operating_expenses,
                     extra={
+                        **report_evidence.get(current_month, {}),
                         "connection_id": connection.id,
                         "source_currency": currency,
                         "parsed_row_labels": current_report_labels,
@@ -1732,9 +1752,10 @@ def publish_xero_metric_observations(
                     warnings=warnings,
                     report_name="ProfitAndLoss",
                     start_date=current_month,
-                    end_date=_month_end(current_month),
+                    end_date=min(end_date, _month_end(current_month)),
                     entry=cost_of_sales,
                     extra={
+                        **report_evidence.get(current_month, {}),
                         "connection_id": connection.id,
                         "source_currency": currency,
                         "parsed_row_labels": current_report_labels,
@@ -1742,7 +1763,10 @@ def publish_xero_metric_observations(
                     },
                 ),
             )
-        if current_revenue and previous_revenue and previous_revenue["amount"] > 0:
+        if end_date < _month_end(current_month):
+            StartupMetricObservation.objects.filter(organization=organization, period_month=current_month,
+                metric_key="revenueGrowthRate", source_provider=ExternalServiceProvider.XERO).delete()
+        if end_date >= _month_end(current_month) and current_revenue and previous_revenue and previous_revenue["amount"] > 0:
             growth = (current_revenue["amount"] - previous_revenue["amount"]) / previous_revenue["amount"]
             save_metric(
                 month=current_month,
@@ -1758,9 +1782,11 @@ def publish_xero_metric_observations(
                     warnings=warnings,
                     report_name="ProfitAndLoss",
                     start_date=_previous_month_start(current_month),
-                    end_date=_month_end(current_month),
+                    end_date=min(end_date, _month_end(current_month)),
                     entry=current_revenue,
                     extra={
+                        **report_evidence.get(current_month, {}),
+                        "comparison_report_hash": report_evidence.get(_previous_month_start(current_month), {}).get("report_hash"),
                         "connection_id": connection.id,
                         "source_currency": currency,
                         "previous_month": _previous_month_start(current_month).isoformat(),
@@ -1792,7 +1818,7 @@ def publish_xero_metric_observations(
                     warnings=warnings,
                     report_name="ProfitAndLoss",
                     start_date=current_month,
-                    end_date=_month_end(current_month),
+                    end_date=min(end_date, _month_end(current_month)),
                     entry=current_net,
                     extra={
                         "connection_id": connection.id,
@@ -1832,7 +1858,7 @@ def publish_xero_metric_observations(
                         warnings=warnings,
                         report_name="BalanceSheet",
                         start_date=None,
-                        end_date=_month_end(current_month),
+                        end_date=min(end_date, _month_end(current_month)),
                         entry=cash_entry,
                         extra={
                             "connection_id": connection.id,
@@ -2004,6 +2030,7 @@ def build_monthly_financial_snapshot(
     organization: Organization,
     target_month: date,
     as_of_date: Optional[date] = None,
+    source_providers=None,
 ) -> Optional[dict[str, Any]]:
     """Build a frozen, chart-ready snapshot from cached Xero data only.
 
@@ -2016,7 +2043,7 @@ def build_monthly_financial_snapshot(
     months = iter_recent_month_starts(12, reference=target_month)
     observations = list(StartupMetricObservation.objects.filter(
         organization=organization, period_month__in=months, unit=currency,
-        source_provider__in=("xero", "financial"),
+        source_provider__in=source_providers if source_providers is not None else ("xero", "financial"),
         metric_key__in=("revenue", "monthlyCosts", "netProfitLoss"),
     ).order_by("-observed_at", "-id"))
     performance = []
@@ -2034,6 +2061,8 @@ def build_monthly_financial_snapshot(
         performance.append({"month": month.isoformat(), **values,
             "is_partial": month == target_month and (as_of_date or timezone.localdate()) < _month_end(month),
             "basis": "recorded_metrics"})
+    if not any(point[field] is not None for point in performance for field in ("income", "expenses", "net")):
+        return None
     return {
         "schema_version": 2, "target_month": target_month.isoformat(),
         "as_of_date": (as_of_date or timezone.localdate()).isoformat(), "currency": currency,
@@ -5317,11 +5346,15 @@ def compact_linear_project_bundle(project: LinearProjectArtifact) -> dict[str, A
     }
 
 
-def build_timeline_payload(*, organization: Organization) -> dict:
+def build_timeline_payload(*, organization: Organization, requested_months=None) -> dict:
     months = iter_recent_month_starts(6)
     event_queryset = organization.startup_events.order_by("month_bucket", "-investor_importance", "title")
     metric_queryset = organization.startup_metric_observations.order_by("period_month", "metric_key")
 
+    if requested_months:
+        event_queryset = event_queryset.filter(month_bucket__in=requested_months)
+        metric_queryset = metric_queryset.filter(period_month__in=requested_months)
+        months = [date.fromisoformat(str(item)) for item in requested_months]
     grouped = {month.isoformat(): {"events": [], "metrics": []} for month in months}
     for event in event_queryset:
         bucket = event.month_bucket.isoformat()
