@@ -150,6 +150,7 @@ MAX_PRIVATE_DELIVERY_BATCH_TEXT_BYTES = 700_000
 HISTORY_STATE_PREFIX = "history-state:"
 HISTORY_MAIN_STATE_ID = f"{HISTORY_STATE_PREFIX}main"
 HISTORY_RECONCILIATION_STATE_ID = f"{HISTORY_STATE_PREFIX}reconciliation"
+RECENT_ACTIVITY_CACHE_KEY = "slack_recent_activity_v1"
 DISCOVERY_CHECKPOINT_KEY = "slack_dm_mirror_discovery_v1"
 PENDING_EVENT_CHECKPOINT_KEY = "slack_dm_mirror_pending_events_v1"
 MAX_PENDING_UNKNOWN_EVENTS = 5000
@@ -1138,7 +1139,7 @@ def status_payload(
             )
         ).count(),
     }
-    history_days = _grant_history_days(grant) if grant else _bounded_history_days(7)
+    history_days = _grant_history_days(grant) if grant else _bounded_history_days(30)
     return {
         "connected": connection is not None,
         "needs_reauthorization": bool(
@@ -1243,7 +1244,7 @@ def _complete_registration_cleanup_before_activation(
 def activate_connection(
     connection: ExternalServiceConnection,
     *,
-    history_days: int = 7,
+    history_days: int = 30,
     include_private_channels: bool = False,
 ) -> SlackDmMirrorGrant:
     """Record consent, bind the Slack identity, discover IMs, and provision eligible DMs."""
@@ -2219,35 +2220,25 @@ def _slack_conversation_activity_seconds(raw: dict[str, Any]) -> int | None:
     Slack's conversation ``updated`` field describes channel metadata rather
     than reliably proving the time of the latest message. Treating it as
     message activity can incorrectly skip an active DM forever. Missing
-    ``latest`` therefore fails open to the bounded ``conversations.history``
-    request, whose ``oldest`` parameter remains the privacy boundary.
+    ``latest`` needs a bounded source probe; metadata creation/update dates
+    must never make an old conversation appear recently active.
     """
 
     latest = raw.get("latest")
+    values = [raw.get("latest_reply")]
     if isinstance(latest, dict):
-        latest = latest.get("ts")
-    latest_text = str(latest or "").strip()
-    if latest_text:
+        values.extend((latest.get("ts"), latest.get("latest_reply")))
+    else:
+        values.append(latest)
+    timestamps = []
+    for value in values:
         try:
-            return _slack_ts_sort_key(latest_text)[0]
+            seconds = _slack_ts_sort_key(str(value or ""))[0]
+            if 0 < seconds <= int(time.time()) + 300:
+                timestamps.append(seconds)
         except SlackDmMirrorError:
-            pass
-    return None
-
-
-def _slack_conversation_is_recent(
-    raw: dict[str, Any],
-    *,
-    activity_cutoff: int,
-    staged_channel_ids: set[str],
-) -> bool:
-    channel_id = str(raw.get("id") or "").strip()
-    if channel_id in staged_channel_ids:
-        return True
-    activity_seconds = _slack_conversation_activity_seconds(raw)
-    # Missing activity is deliberately fail-open. The bounded history query is
-    # the authoritative fallback and still cannot import content before cutoff.
-    return activity_seconds is None or activity_seconds >= activity_cutoff
+            continue
+    return max(timestamps) if timestamps else None
 
 
 def _discover_conversation_activity(authority, raw, *, required_scopes):
@@ -2277,30 +2268,111 @@ def _discover_conversation_activity(authority, raw, *, required_scopes):
         # An unavailable metadata hint must not prevent the bounded history scan.
         return None
     details = response.get("channel")
-    if (
-        not isinstance(details, dict)
-        or details.get("id") != raw.get("id")
-        or _is_external_shared_conversation(details)
-    ):
+    if not isinstance(details, dict):
         return None
+    if details.get("id") != raw.get("id"):
+        raise SlackDmMirrorUpstreamError("Slack returned a different conversation.")
+    if _is_external_shared_conversation(details):
+        _retire_ineligible_from_slack_response(
+            authority,
+            str(raw["id"]),
+            reason=SLACK_CONNECT_INELIGIBLE_REASON,
+            required_scopes=required_scopes,
+        )
+        raise SlackDmMirrorError(SLACK_CONNECT_INELIGIBLE_REASON)
     return _slack_conversation_activity_seconds(details)
 
 
-def _embedded_conversation_participant_ids(
-    raw_channels: list[dict[str, Any]],
-    *,
-    owner_slack_user_id: str,
-) -> set[str]:
-    participant_ids = {owner_slack_user_id}
-    for raw in raw_channels:
-        direct_user_id = str(raw.get("user") or "").strip()
-        if direct_user_id:
-            participant_ids.add(direct_user_id)
-        for value in raw.get("members") or []:
-            user_id = str(value or "").strip()
-            if user_id:
-                participant_ids.add(user_id)
-    return participant_ids
+def _recent_discovery_activity(grant, authority, raw, *, required_scopes):
+    """Check source activity before fetching members/profiles or provisioning.
+
+    Cache timestamps only, scoped to the exact OAuth/consent epoch and window.
+    Quiet results expire hourly; recent results expire after five minutes.
+    Live events bypass this probe. Zero means a confirmed empty history window;
+    malformed responses and failed checks raise instead of hiding conversations.
+    """
+    explicit = _slack_conversation_activity_seconds(raw)
+    if explicit is not None:
+        return explicit
+    history_days = _grant_history_days(grant)
+    scope = {**_discovery_checkpoint_identity(authority), "history_days": history_days}
+    channel_id = str(raw["id"])
+    now = int(time.time())
+    cutoff = now - history_days * 86_400
+    with transaction.atomic():
+        _, connection = _lock_slack_grant_api_authority(
+            authority,
+            required_scopes=required_scopes,
+        )
+        entries = _recent_activity_cache_entries(connection, scope)
+        entry = entries.get(channel_id)
+        if isinstance(entry, dict):
+            checked = entry.get("checked_at")
+            activity = entry.get("activity")
+            if (
+                type(checked) is int
+                and type(activity) is int
+                and 0 <= activity <= now + 300
+            ):
+                ttl = 300 if activity >= cutoff else 3600
+                if 0 <= now - checked < ttl:
+                    return activity
+    activity = _discover_conversation_activity(
+        authority,
+        raw,
+        required_scopes=required_scopes,
+    )
+    if activity is None:
+        response = _call_slack_with_grant_authority(
+            authority,
+            "conversations_history",
+            required_scopes=required_scopes,
+            channel=channel_id,
+            oldest=str(cutoff),
+            inclusive=True,
+            limit=1,
+        )
+        messages = response.get("messages")
+        if not isinstance(messages, list):
+            raise SlackDmMirrorUpstreamError(
+                "Slack recent activity is not available yet."
+            )
+        timestamps = [
+            _slack_conversation_activity_seconds({"latest": item})
+            for item in messages
+            if isinstance(item, dict)
+        ]
+        valid_timestamps = [value for value in timestamps if value is not None]
+        if messages and len(valid_timestamps) != len(messages):
+            raise SlackDmMirrorUpstreamError(
+                "Slack recent activity is not available yet."
+            )
+        activity = max(valid_timestamps, default=0)
+    with transaction.atomic():
+        _, connection = _lock_slack_grant_api_authority(
+            authority,
+            required_scopes=required_scopes,
+        )
+        cursor = dict(connection.sync_cursor or {})
+        entries = dict(_recent_activity_cache_entries(connection, scope))
+        entries[channel_id] = {"activity": activity, "checked_at": now}
+        # Use the durable directory's bound for this timestamp-only inventory.
+        if len(entries) > MAX_DISCOVERY_CONVERSATIONS:
+            entries = dict(list(entries.items())[-MAX_DISCOVERY_CONVERSATIONS:])
+        cursor[RECENT_ACTIVITY_CACHE_KEY] = {**scope, "entries": entries}
+        connection.sync_cursor = cursor
+        connection.save(update_fields=("sync_cursor", "updated_at"))
+    return activity
+
+
+def _recent_activity_cache_entries(connection, scope):
+    cache_data = (connection.sync_cursor or {}).get(RECENT_ACTIVITY_CACHE_KEY)
+    if not isinstance(cache_data, dict):
+        return {}
+    if any(cache_data.get(key) != value for key, value in scope.items()):
+        return {}
+    entries = cache_data.get("entries")
+    return entries if isinstance(entries, dict) else {}
 
 
 def _preload_slack_profiles(
@@ -2419,8 +2491,8 @@ def discover_conversations(
 ) -> int:
     """Discover owner-visible DMs with activity in the configured history window.
 
-    Slack sometimes omits conversation activity metadata. Those conversations
-    remain eligible so an incomplete list response can never hide a private DM.
+    Unknown activity is checked through a bounded source probe before creating
+    a mirror. Existing history remains stored when a conversation becomes quiet.
     """
 
     _, identity_repaired, _ = ensure_owner_identity(
@@ -2492,20 +2564,11 @@ def discover_conversations(
             key=lambda raw: _slack_conversation_activity_seconds(raw) or -1,
             reverse=True,
         )
-        eligible_channels = raw_channels
-        _preload_slack_profiles(
-            authority,
-            _embedded_conversation_participant_ids(
-                eligible_channels,
-                owner_slack_user_id=grant.slack_user_id,
-            ),
-            profile_cache,
-        )
         for raw in raw_channels:
             if not isinstance(raw, dict):
                 continue
             channel_id = str(raw.get("id") or "").strip()
-            if not channel_id:
+            if not channel_id or channel_id in seen_channel_ids:
                 continue
             seen_channel_ids.add(channel_id)
             if (
@@ -2529,20 +2592,35 @@ def discover_conversations(
                 )
                 _discard_staged_events_for_channel(authority, channel_id)
                 continue
-            conversation_is_recent = _slack_conversation_is_recent(
-                raw,
-                activity_cutoff=activity_cutoff,
-                staged_channel_ids=staged_channel_ids,
-            )
-            inactive_existing_conversation = bool(
-                not conversation_is_recent
-                and SlackDmMirrorConversation.objects.filter(
+            conversation = None
+            try:
+                kind = raw_conversation_kind(raw)
+                if kind is None:
+                    continue
+                required_scopes = _history_required_scopes(channel_id, kind=kind)
+                existing = SlackDmMirrorConversation.objects.filter(
                     grant=grant,
                     slack_conversation_id=channel_id,
                 ).exists()
-            )
-            conversation = None
-            try:
+                activity = _slack_conversation_activity_seconds(raw)
+                recent = True
+                check_recency = bool(
+                    history_days and channel_id not in staged_channel_ids
+                )
+                # Existing copies must fence membership changes before optional
+                # activity I/O can fail or be throttled.
+                if check_recency and not existing:
+                    activity = _recent_discovery_activity(
+                        grant,
+                        authority,
+                        raw,
+                        required_scopes=required_scopes,
+                    )
+                    recent = activity is not None and activity >= activity_cutoff
+                if not recent:
+                    # Keep only the timestamp inventory. No relay channel,
+                    # membership fan-out, author avatars, or history job.
+                    continue
                 conversation = _discover_conversation(
                     grant,
                     authority,
@@ -2550,31 +2628,34 @@ def discover_conversations(
                     profile_cache=profile_cache,
                     force_backfill=force_backfill,
                     reset_history=identity_repaired,
+                    activity_seconds=activity,
+                    recent_activity=recent,
+                    check_recent_activity=check_recency and existing,
                 )
                 if conversation is not None:
                     discovered += 1
-                    if not conversation_is_recent:
-                        # Existing mirrors still refresh their device and
-                        # participant boundary, but no out-of-window history is
-                        # fetched or requeued.
-                        _complete_inactive_conversation_history(
-                            authority,
-                            grant_id=grant.pk,
-                            channel_id=channel_id,
-                        )
-                    else:
-                        _drain_staged_events_for_conversation(
-                            authority,
-                            conversation.pk,
-                        )
+                    _drain_staged_events_for_conversation(
+                        authority,
+                        conversation.pk,
+                    )
                 else:
                     _discard_staged_events_for_channel(authority, channel_id)
             except Exception as exc:
-                if (
-                    _is_slack_auth_error(exc)
-                    or isinstance(exc, SlackDmMirrorRateLimited)
-                    or _slack_retry_after_seconds(exc)
-                ):
+                if _is_slack_auth_error(exc):
+                    raise
+                if isinstance(exc, SlackDmMirrorAuthorizationError):
+                    return discovered
+                if isinstance(
+                    exc, SlackDmMirrorRateLimited
+                ) or _slack_retry_after_seconds(exc):
+                    seen_channel_ids.discard(channel_id)
+                    _save_discovery_checkpoint(
+                        authority,
+                        cursor=cursor,
+                        seen_channel_ids=seen_channel_ids,
+                        failures=failures,
+                        started_at=discovery_started_at,
+                    )
                     raise
                 error_text = f"{exc.__class__.__name__}: {exc}"[:2000]
                 failures.append(f"{channel_id or 'unknown'}: {error_text}")
@@ -2728,6 +2809,9 @@ def _discover_conversation(
     profile_cache: dict[str, dict[str, str]],
     force_backfill: bool,
     reset_history: bool,
+    activity_seconds: int | None = None,
+    recent_activity: bool = True,
+    check_recent_activity: bool = False,
 ) -> SlackDmMirrorConversation | None:
     # Preserve the private test/helper call shape while never trusting a
     # caller-supplied raw client for production I/O.
@@ -2769,8 +2853,42 @@ def _discover_conversation(
             "kind": kind,
             "name": str(raw.get("name") or "")[:255],
             "source_archived": bool(raw.get("is_archived")),
+            **(
+                {"latest_message_ts": str(activity_seconds)} if activity_seconds else {}
+            ),
         },
     )
+    if check_recent_activity:
+        activity_seconds = _recent_discovery_activity(
+            grant,
+            authority,
+            raw,
+            required_scopes=required_scopes,
+        )
+        recent_activity = (
+            activity_seconds >= int(time.time()) - _grant_history_days(grant) * 86_400
+        )
+    if not recent_activity:
+        if activity_seconds:
+            conversation = _store_conversation_profiles(
+                grant.pk,
+                conversation.pk,
+                authority=authority,
+                required_scopes=required_scopes,
+                participant_slack_ids=participant_ids,
+                participant_profiles=conversation.participant_profiles,
+                activity_seconds=activity_seconds,
+            )
+        # Membership revocations still apply, but quiet mirrors need no avatar
+        # refresh or periodic archive scan. Cached messages remain untouched
+        # unless the membership boundary changed.
+        _provision_owner_conversation(conversation, reset_history=reset_history)
+        _complete_inactive_conversation_history(
+            authority,
+            grant_id=grant.pk,
+            channel_id=channel_id,
+        )
+        return conversation
     _preload_slack_profiles(authority, set(participant_ids), profile_cache)
     participant_profiles = {
         slack_user_id: _slack_profile(
@@ -2782,9 +2900,11 @@ def _discover_conversation(
         for slack_user_id in participant_ids
     }
     # Fence changed membership before optional Slack metadata network I/O.
-    activity = _discover_conversation_activity(
-        authority, raw, required_scopes=required_scopes
-    )
+    activity = activity_seconds
+    if activity is None:
+        activity = _discover_conversation_activity(
+            authority, raw, required_scopes=required_scopes
+        )
     conversation = _store_conversation_profiles(
         grant.pk,
         conversation.pk,

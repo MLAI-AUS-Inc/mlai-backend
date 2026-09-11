@@ -39,7 +39,7 @@ class SlackChatCatalogTests(SimpleTestCase):
         )
 
     def test_default_is_seven_and_all_history_requires_explicit_zero(self):
-        self.assertEqual(_import_history_days({}), 7)
+        self.assertEqual(_import_history_days({}), 30)
         self.assertEqual(_import_history_days({"history_days": 30}), 30)
         self.assertEqual(_import_history_days({"history_days": 0}), 0)
         for value in (-1, 31, 365, True, "30", None):
@@ -237,11 +237,10 @@ class SlackChatCatalogTests(SimpleTestCase):
         call.return_value = {
             "channel": {"id": "OTHER", "latest": {"ts": "1700000000.000001"}}
         }
-        self.assertIsNone(
+        with self.assertRaises(mirror.SlackDmMirrorUpstreamError):
             mirror._discover_conversation_activity(
                 None, {"id": "DM"}, required_scopes=mirror.DIRECT_DM_SCOPES
             )
-        )
 
     @patch.object(mirror, "_call_slack_with_grant_authority")
     def test_discovery_preserves_rate_limit_and_revocation_errors(self, call):
