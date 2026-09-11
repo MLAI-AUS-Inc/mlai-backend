@@ -52,7 +52,7 @@ class SlackAllHistoryTests(SimpleTestCase):
         )
 
     def test_all_is_an_explicit_numeric_choice(self):
-        self.assertEqual(slack_views._import_history_days({}), 7)
+        self.assertEqual(slack_views._import_history_days({}), 30)
         self.assertEqual(slack_views._import_history_days({"history_days": 0}), 0)
         for value in (False, "0", None, -1, 365):
             with self.subTest(value=value), self.assertRaises(ValidationError):

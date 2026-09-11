@@ -158,7 +158,13 @@ class SlackDmIoAuthorityTests(SlackDmIoAuthorityFixture, TransactionTestCase):
         def slack_call(_authority, method, **_kwargs):
             if method == "users_conversations":
                 return {
-                    "channels": [{"id": "DIOAUTH", "user": "UOTHER"}],
+                    "channels": [
+                        {
+                            "id": "DIOAUTH",
+                            "user": "UOTHER",
+                            "latest": f"{int(timezone.now().timestamp()) - 60}.000100",
+                        }
+                    ],
                     "response_metadata": {"next_cursor": ""},
                 }
             if method == "users_info":
@@ -172,7 +178,9 @@ class SlackDmIoAuthorityTests(SlackDmIoAuthorityFixture, TransactionTestCase):
                 side_effect=slack_call,
             ),
             patch("integrations.services.slack_dm_mirror._revoke_remote_token"),
-            patch("integrations.services.slack_dm_mirror._finish_grant_registration_revoke"),
+            patch(
+                "integrations.services.slack_dm_mirror._finish_grant_registration_revoke"
+            ),
         ):
             self.assertEqual(slack_dm_mirror.discover_conversations(self.grant), 0)
 
