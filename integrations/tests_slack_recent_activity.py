@@ -329,7 +329,7 @@ class SlackRecentActivityTests(unittest.TestCase):
             ),
             1,
         )
-        self.assertFalse(self.mirror.call_args.kwargs["recent_activity"])
+        self.assertTrue(self.mirror.call_args.kwargs["check_recent_activity"])
 
     def test_live_event_bypasses_cached_quiet_result(self):
         self.assertEqual(
@@ -399,3 +399,70 @@ class SlackRecentActivityTests(unittest.TestCase):
             1,
         )
         self.assertEqual(self.mirror.call_args.args[2]["id"], "DPENDING")
+
+    def test_existing_membership_is_fenced_before_a_throttled_activity_probe(self):
+        s = self.service
+        order = []
+        self.grant.pk = 17
+        self.grant.slack_user_id = "UONE"
+        conversation = SimpleNamespace(pk=42, participant_profiles={})
+
+        def membership(*args, **kwargs):
+            order.append("membership")
+            return conversation, True
+
+        def probe(*args, **kwargs):
+            order.append("probe")
+            raise s.SlackDmMirrorRateLimited("retry")
+
+        with (
+            patch.object(
+                s, "_capture_slack_grant_api_authority", return_value=self.authority
+            ),
+            patch.object(
+                s, "_conversation_participant_ids", return_value=["UONE", "UTWO"]
+            ),
+            patch.object(
+                s, "_store_conversation_membership_intent", side_effect=membership
+            ),
+            patch.object(s, "_recent_discovery_activity", side_effect=probe),
+            patch.object(s, "_preload_slack_profiles") as profiles,
+            self.assertRaises(s.SlackDmMirrorRateLimited),
+        ):
+            s._discover_conversation(
+                self.grant,
+                self.authority,
+                {"id": "DTEST", "user": "UTWO"},
+                profile_cache={},
+                force_backfill=False,
+                reset_history=False,
+                check_recent_activity=True,
+            )
+        self.assertEqual(order, ["membership", "probe"])
+        profiles.assert_not_called()
+
+    def test_removed_membership_retires_before_optional_activity_requests(self):
+        s = self.service
+        self.grant.pk = 17
+        self.grant.slack_user_id = "UONE"
+        with (
+            patch.object(
+                s, "_capture_slack_grant_api_authority", return_value=self.authority
+            ),
+            patch.object(s, "_conversation_participant_ids", return_value=[]),
+            patch.object(s, "_retire_ineligible_from_slack_response") as retire,
+            patch.object(s, "_recent_discovery_activity") as probe,
+        ):
+            self.assertIsNone(
+                s._discover_conversation(
+                    self.grant,
+                    self.authority,
+                    {"id": "DTEST", "user": "UTWO"},
+                    profile_cache={},
+                    force_backfill=False,
+                    reset_history=False,
+                    check_recent_activity=True,
+                )
+            )
+        retire.assert_called_once()
+        probe.assert_not_called()

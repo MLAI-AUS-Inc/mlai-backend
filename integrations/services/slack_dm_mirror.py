@@ -2598,9 +2598,18 @@ def discover_conversations(
                 if kind is None:
                     continue
                 required_scopes = _history_required_scopes(channel_id, kind=kind)
-                activity = None
+                existing = SlackDmMirrorConversation.objects.filter(
+                    grant=grant,
+                    slack_conversation_id=channel_id,
+                ).exists()
+                activity = _slack_conversation_activity_seconds(raw)
                 recent = True
-                if history_days and channel_id not in staged_channel_ids:
+                check_recency = bool(
+                    history_days and channel_id not in staged_channel_ids
+                )
+                # Existing copies must fence membership changes before optional
+                # activity I/O can fail or be throttled.
+                if check_recency and not existing:
                     activity = _recent_discovery_activity(
                         grant,
                         authority,
@@ -2608,11 +2617,7 @@ def discover_conversations(
                         required_scopes=required_scopes,
                     )
                     recent = activity is not None and activity >= activity_cutoff
-                existing = SlackDmMirrorConversation.objects.filter(
-                    grant=grant,
-                    slack_conversation_id=channel_id,
-                ).exists()
-                if not recent and not existing:
+                if not recent:
                     # Keep only the timestamp inventory. No relay channel,
                     # membership fan-out, author avatars, or history job.
                     continue
@@ -2625,23 +2630,14 @@ def discover_conversations(
                     reset_history=identity_repaired,
                     activity_seconds=activity,
                     recent_activity=recent,
+                    check_recent_activity=check_recency and existing,
                 )
                 if conversation is not None:
                     discovered += 1
-                    if not recent:
-                        # Existing mirrors still refresh their device and
-                        # participant boundary, but no out-of-window history is
-                        # fetched or requeued.
-                        _complete_inactive_conversation_history(
-                            authority,
-                            grant_id=grant.pk,
-                            channel_id=channel_id,
-                        )
-                    else:
-                        _drain_staged_events_for_conversation(
-                            authority,
-                            conversation.pk,
-                        )
+                    _drain_staged_events_for_conversation(
+                        authority,
+                        conversation.pk,
+                    )
                 else:
                     _discard_staged_events_for_channel(authority, channel_id)
             except Exception as exc:
@@ -2815,6 +2811,7 @@ def _discover_conversation(
     reset_history: bool,
     activity_seconds: int | None = None,
     recent_activity: bool = True,
+    check_recent_activity: bool = False,
 ) -> SlackDmMirrorConversation | None:
     # Preserve the private test/helper call shape while never trusting a
     # caller-supplied raw client for production I/O.
@@ -2861,11 +2858,36 @@ def _discover_conversation(
             ),
         },
     )
+    if check_recent_activity:
+        activity_seconds = _recent_discovery_activity(
+            grant,
+            authority,
+            raw,
+            required_scopes=required_scopes,
+        )
+        recent_activity = (
+            activity_seconds >= int(time.time()) - _grant_history_days(grant) * 86_400
+        )
     if not recent_activity:
+        if activity_seconds:
+            conversation = _store_conversation_profiles(
+                grant.pk,
+                conversation.pk,
+                authority=authority,
+                required_scopes=required_scopes,
+                participant_slack_ids=participant_ids,
+                participant_profiles=conversation.participant_profiles,
+                activity_seconds=activity_seconds,
+            )
         # Membership revocations still apply, but quiet mirrors need no avatar
         # refresh or periodic archive scan. Cached messages remain untouched
         # unless the membership boundary changed.
         _provision_owner_conversation(conversation, reset_history=reset_history)
+        _complete_inactive_conversation_history(
+            authority,
+            grant_id=grant.pk,
+            channel_id=channel_id,
+        )
         return conversation
     _preload_slack_profiles(authority, set(participant_ids), profile_cache)
     participant_profiles = {
