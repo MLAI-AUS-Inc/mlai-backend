@@ -832,6 +832,8 @@ def _serialize_draft_for_form(draft):
         "summary": _structured_memo_text(structured_memo, "summary", "topline"),
         "sourceUrl": _structured_memo_text(structured_memo, "sourceUrl", "source_url"),
         "manualDocuments": _structured_memo_manual_documents(structured_memo),
+        "coverImage": (structured_memo or {}).get("cover_image"),
+        "coverImageUrl": ((structured_memo or {}).get("cover_image") or {}).get("url"),
         "videoUrl": _structured_memo_video_url(structured_memo),
         "videoContentType": _structured_memo_text(video_metadata, "content_type", "contentType"),
         "videoOriginalFilename": _structured_memo_text(video_metadata, "original_filename", "originalFilename"),
@@ -925,6 +927,9 @@ def _build_manual_structured_memo(payload):
         "metric_suggestions": list(payload.get("metricSuggestions") or []),
     }
 
+    if "coverImage" in payload:
+        memo["cover_image"] = payload["coverImage"]
+
     display_config = payload.get("displayConfig")
     if display_config is not None:
         memo["display_config"] = display_config
@@ -1008,6 +1013,8 @@ def _serialize_monthly_update(draft, structured_memo=None, *, published=False):
         "summary": _structured_memo_text(structured_memo, "summary", "topline"),
         "sourceUrl": _structured_memo_text(structured_memo, "sourceUrl", "source_url"),
         "manualDocuments": _structured_memo_manual_documents(structured_memo),
+        "coverImage": (structured_memo or {}).get("cover_image"),
+        "coverImageUrl": ((structured_memo or {}).get("cover_image") or {}).get("url"),
         "videoUrl": _structured_memo_video_url(structured_memo),
         "videoContentType": _structured_memo_text(video_metadata, "content_type", "contentType"),
         "videoOriginalFilename": _structured_memo_text(video_metadata, "original_filename", "originalFilename"),
@@ -1076,6 +1083,8 @@ def _serialize_email_draft_month(draft):
         "summary": _structured_memo_text(structured_memo, "summary", "topline"),
         "sourceUrl": _structured_memo_text(structured_memo, "sourceUrl", "source_url"),
         "manualDocuments": _structured_memo_manual_documents(structured_memo),
+        "coverImage": (structured_memo or {}).get("cover_image"),
+        "coverImageUrl": ((structured_memo or {}).get("cover_image") or {}).get("url"),
         "videoUrl": _structured_memo_video_url(structured_memo),
         "videoContentType": _structured_memo_text(video_metadata, "content_type", "contentType"),
         "videoOriginalFilename": _structured_memo_text(video_metadata, "original_filename", "originalFilename"),

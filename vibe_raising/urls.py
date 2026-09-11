@@ -35,7 +35,12 @@ from .admin_views import (
 
 from .views import VibeRaisingBusinessHealthView
 
+from .cover_views import UpdateCoverUploadView, UpdateCoverGenerateView, UpdateCoverStatusView
+
 urlpatterns = [
+    path("updates/covers/upload/", UpdateCoverUploadView.as_view()),
+    path("updates/covers/generate/", UpdateCoverGenerateView.as_view()),
+    path("updates/covers/status/", UpdateCoverStatusView.as_view()),
     path("business-health/", VibeRaisingBusinessHealthView.as_view(), name="vibe-business-health"),
     path("admin/overview/", VibeRaisingAdminOverviewView.as_view(), name="vibe-raising-admin-overview"),
     path(
