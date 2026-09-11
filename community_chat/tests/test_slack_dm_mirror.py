@@ -2625,7 +2625,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
         )
 
     @patch("integrations.services.slack_dm_mirror.WebClient")
-    def test_same_identity_reauthorization_restarts_partial_history_epoch(
+    def test_same_identity_reauthorization_preserves_partial_history_epoch(
         self,
         web_client,
     ):
@@ -2679,8 +2679,8 @@ class SlackDmMirrorOwnerTests(APITestCase):
         activate_connection(self.first_connection)
 
         conversation.refresh_from_db()
-        self.assertEqual(conversation.oldest_synced_ts, "")
-        self.assertFalse(
+        self.assertEqual(conversation.oldest_synced_ts, "1787901300.000100")
+        self.assertTrue(
             conversation.deliveries.filter(
                 source_message_id__startswith=slack_dm_mirror.HISTORY_STATE_PREFIX
             ).exclude(
