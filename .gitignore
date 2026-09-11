@@ -223,3 +223,5 @@ cython_debug/
 medhack_backend/hospital/Eval_Labels.csv
 
 !/docs/monthly-update-evidence-contract.md
+
+!/docs/update-covers.md

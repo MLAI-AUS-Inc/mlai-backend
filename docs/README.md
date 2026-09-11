@@ -47,6 +47,7 @@ rollout sequence.
 - [`reconciliation-knowledge-export.md`](reconciliation-knowledge-export.md)
 - [`xero-statement-reconciliation.md`](xero-statement-reconciliation.md)
 - [`monthly-update-reminders.md`](monthly-update-reminders.md)
+- [`update-covers.md`](update-covers.md) — founder-selected cover uploads and GPT Image 2.5 generation
 
 ## HealthHack
 

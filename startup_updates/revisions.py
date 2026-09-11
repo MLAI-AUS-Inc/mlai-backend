@@ -244,6 +244,11 @@ def save_revision(draft, memo, *, snapshot, audience="private", expected_revisio
             validation={"legacy_unverified": True})
         draft.published_revision = legacy_revision
         draft.save(update_fields=["published_revision"])
+    from startup_updates.covers import inherit_cover
+    try:
+        memo = inherit_cover(copy.deepcopy(memo), current.structured_memo if current else (draft.structured_memo or {}), draft.organization_id)
+    except ValueError as exc:
+        raise ValidationError(str(exc)) from exc
     try:
         memo = render_metric_claims(memo, snapshot.payload["metrics"])
     except ValueError as exc:

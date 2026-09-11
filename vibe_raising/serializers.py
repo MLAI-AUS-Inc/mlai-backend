@@ -246,6 +246,7 @@ class VibeRaisingMonthlyUpdateUpsertSerializer(AliasInputSerializer):
         "presentationMode": ("presentation_mode",),
     }
 
+    coverImage = serializers.DictField(required=False, allow_null=True)
     month = serializers.CharField()
     year = serializers.IntegerField(min_value=2000, max_value=2100)
     audienceVisibility = AudienceVisibilityField(required=False)

@@ -2133,3 +2133,7 @@ COMMUNITY_CHAT_ROO_PUBLIC_KEY = os.getenv("COMMUNITY_CHAT_ROO_PUBLIC_KEY", "")
 # the first-party DM connection; no other bot is enabled by this setting.
 COMMUNITY_CHAT_ROO_SLACK_WORKSPACE_ID = os.getenv("COMMUNITY_CHAT_ROO_SLACK_WORKSPACE_ID", "T05N9C1QSJC")
 COMMUNITY_CHAT_ROO_SLACK_USER_ID = os.getenv("COMMUNITY_CHAT_ROO_SLACK_USER_ID", "U090FV0GTT4")
+
+# Optional startup-update editorial covers; all generation runs server-side.
+STARTUP_UPDATE_COVER_IMAGE_MODEL = os.getenv("STARTUP_UPDATE_COVER_IMAGE_MODEL", "gpt-image-2.5-flare")
+STARTUP_UPDATE_COVER_PROMPT_MODEL = os.getenv("STARTUP_UPDATE_COVER_PROMPT_MODEL", "gpt-6-astra")
