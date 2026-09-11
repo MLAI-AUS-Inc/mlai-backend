@@ -202,7 +202,7 @@ updated.
 Backfill status is complete only after every queued history delivery completes;
 transient dead rows are safely repopulated from Slack, while a permanently
 rejected adapter delivery stays fenced until explicit backfill or renewed
-consent. New API callers that omit a history choice retain the seven-day default.
+consent. New API callers that omit a history choice default to 30 days.
 Members can explicitly choose 7 days, 30 days, or **all available history**
 (`history_days: 0`). Zero is honored only with the new
 `slack-chat-v5-all-available-history` consent; legacy zero-valued grants remain
@@ -215,6 +215,34 @@ that ages past the rolling cutoff is completed as a content-free tombstone
 instead of being sent or retried. Periodic source reconciliation rehydrates any
 current row that an older importer incorrectly classified as outside the
 window.
+
+For bounded imports, discovery checks source activity before creating a new
+mirror, loading its participant profiles, or queuing history. Known latest
+message/reply timestamps are used directly. When absent, `conversations.info`
+and, if necessary, one `conversations.history` result with `oldest` set to the
+chosen cutoff establish activity. Only timestamps are cached in the existing
+connection cursor: recent checks for five minutes, quiet checks for one hour,
+scoped to the exact grant, OAuth generation, consent generation, owner,
+workspace and history window. Unknown/error results are never cached as empty.
+Slack does not offer a last-active filter on `users.conversations`, so directory
+pagination is still necessary. A throttled page saves its completed prefix and
+resumes at the unfinished conversation after the shared Retry-After cooldown.
+
+Existing quiet mirrors still refresh their membership/device boundary; their
+stored history remains available without scheduling regular archive scans.
+Staged live events bypass quiet-activity suppression so a conversation can
+become active again. The clients default private channels, group chats and DMs
+to 30 days of source/local message activity, preserving pinned/starred, unread,
+and currently open conversations. Public community channels remain browsable.
+“Show older” reveals already imported conversations and does not widen import
+consent. Importing previously unmirrored older conversations requires the
+explicit all-history option. Older stored messages are not deleted by this
+inbox visibility policy.
+
+Recent replies on old roots count when exposed through Slack activity hints or
+live events. A missed reply on a root outside the history window is subject to
+the recovery limitation below; a one-message activity probe is not a complete
+thread-history scan.
 
 The backend also starts an hourly reconciliation and requests one after Slack
 reports `app_rate_limited`. These refresh requests preserve an incomplete
@@ -371,8 +399,8 @@ Catalog timestamps allow clients to sort pending imports, while newer live
 message activity takes precedence. Group avatars exclude `is_owner` participants;
 1:1 avatars come from the counterpart, never the owner's other device profiles.
 
-`POST` accepts `{"history_days": 7}` (default) or `{"history_days": 30}`. Other
-values return 400. It either activates the existing sufficiently scoped user
+`POST` accepts `{"history_days": 30}` (default), `{"history_days": 7}`, or
+`{"history_days": 0}` with explicit all-history consent. Other values return 400. It either activates the existing sufficiently scoped user
 connection or returns the user OAuth authorization URL. The signed OAuth
 return state preserves the chosen window and private-channel consent. Old
 connections must explicitly reconnect for `groups:read` / `groups:history` and

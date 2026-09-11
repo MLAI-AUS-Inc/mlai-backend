@@ -121,9 +121,7 @@ class SlackDmMirrorApiTests(APITestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.data["authorization_url"].startswith("http"))
-        self.assertIn(
-            "/integrations/connect/slack?", response.data["authorization_url"]
-        )
+        self.assertIn("/integrations/connect/slack?", response.data["authorization_url"])
         self.assertIn(
             "slack-chat-v4-private-channels",
             response.data["consent"]["version"],
@@ -131,9 +129,7 @@ class SlackDmMirrorApiTests(APITestCase):
         self.assertIn(
             "private channels, group chats and DMs", response.data["consent"]["summary"]
         )
-        self.assertIn(
-            "The last 7 days are imported", response.data["consent"]["summary"]
-        )
+        self.assertIn("The last 30 days are imported", response.data["consent"]["summary"])
         self.assertFalse(response.data["privacy"]["requires_both_participants"])
         self.assertTrue(response.data["privacy"]["owner_controlled"])
         self.assertFalse(response.data["privacy"]["included_in_roo"])
@@ -1028,7 +1024,13 @@ class SlackDmMirrorOwnerTests(APITestCase):
         late_channel_id = uuid.uuid4()
         client = web_client.return_value
         client.users_conversations.return_value = {
-            "channels": [{"id": "DRACE", "user": "UTWO"}],
+            "channels": [
+                {
+                    "id": "DRACE",
+                    "user": "UTWO",
+                    "latest": f"{int(timezone.now().timestamp()) - 60}.000100",
+                }
+            ],
             "response_metadata": {"next_cursor": ""},
         }
         client.users_info.side_effect = lambda *, user: {
@@ -1052,9 +1054,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
             }
 
         provision_private_conversation.side_effect = revoke_before_adapter_returns
-        unregister_private_conversation.side_effect = RuntimeError(
-            "adapter unavailable"
-        )
+        unregister_private_conversation.side_effect = RuntimeError("adapter unavailable")
 
         self.assertEqual(slack_dm_mirror.discover_conversations(grant), 0)
 
@@ -1107,8 +1107,8 @@ class SlackDmMirrorOwnerTests(APITestCase):
 
         grant.refresh_from_db()
         payload = status_payload(self.first)
-        self.assertEqual(grant.history_days, 7)
-        self.assertEqual(payload["history_days"], 7)
+        self.assertEqual(grant.history_days, 30)
+        self.assertEqual(payload["history_days"], 30)
         self.assertTrue(payload["privacy"]["history_is_bounded"])
 
     @patch(
@@ -1125,7 +1125,13 @@ class SlackDmMirrorOwnerTests(APITestCase):
         first_ts = int(timezone.now().timestamp()) - 3600
         first_client = MagicMock()
         first_client.users_conversations.return_value = {
-            "channels": [{"id": "DONE", "user": "UTWO"}],
+            "channels": [
+                {
+                    "id": "DONE",
+                    "user": "UTWO",
+                    "latest": f"{int(timezone.now().timestamp()) - 60}.000100",
+                }
+            ],
             "response_metadata": {"next_cursor": ""},
         }
         first_client.users_info.side_effect = lambda *, user: {
@@ -1133,9 +1139,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
                 "id": user,
                 "name": user.lower(),
                 "profile": {
-                    "display_name": (
-                        "First person" if user == "UONE" else "Second person"
-                    ),
+                    "display_name": ("First person" if user == "UONE" else "Second person"),
                     "image_192": f"https://avatars.slack-edge.com/{user}.png",
                 },
             }
@@ -1157,9 +1161,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
         grant = activate_connection(self.first_connection)
         discover_conversations(grant)
         self.assertEqual(process_due_history_backfills(), 1)
-        conversation = SlackDmMirrorConversation.objects.get(
-            slack_conversation_id="DONE"
-        )
+        conversation = SlackDmMirrorConversation.objects.get(slack_conversation_id="DONE")
         self.assertEqual(conversation.status, SlackDmMirrorConversationStatus.LIVE)
         self.assertIsNotNone(conversation.mlai_channel_id)
         self.assertEqual(conversation.grant.slack_user_id, "UONE")
@@ -1210,7 +1212,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
         "integrations.services.slack_dm_mirror.BuzzBridgeClient.provision_private_conversation"
     )
     @patch("integrations.services.slack_dm_mirror.WebClient")
-    def test_discovery_prioritizes_recent_dms_and_bulk_preloads_profiles(
+    def test_discovery_skips_old_dms_before_profiles_and_provisioning(
         self,
         web_client,
         provision,
@@ -1231,22 +1233,10 @@ class SlackDmMirrorOwnerTests(APITestCase):
             ],
             "response_metadata": {"next_cursor": ""},
         }
-        client.users_list.return_value = {
-            "members": [
-                {
-                    "id": user_id,
-                    "profile": {"display_name": user_id.title()},
-                }
-                for user_id in (
-                    "UONE",
-                    "UAMBIGUOUS",
-                    "UOLD",
-                    "URECENT1",
-                    "URECENT2",
-                    "URECENT3",
-                )
-            ],
-            "response_metadata": {"next_cursor": ""},
+        client.conversations_info.return_value = {"channel": {"id": "DAMBIGUOUS"}}
+        client.conversations_history.return_value = {"messages": []}
+        client.users_info.side_effect = lambda *, user: {
+            "user": {"id": user, "profile": {"display_name": user.title()}},
         }
         provision.side_effect = lambda pubkeys, **_: {
             "channel_id": str(uuid.uuid4()),
@@ -1255,21 +1245,30 @@ class SlackDmMirrorOwnerTests(APITestCase):
 
         grant = activate_connection(self.first_connection)
 
-        self.assertEqual(discover_conversations(grant), 5)
+        self.assertEqual(discover_conversations(grant), 3)
         self.assertEqual(
             list(
                 SlackDmMirrorConversation.objects.filter(grant=grant)
                 .order_by("id")
                 .values_list("slack_conversation_id", flat=True)
             ),
-            ["DRECENT1", "DRECENT2", "DRECENT3", "DOLD", "DAMBIGUOUS"],
+            ["DRECENT1", "DRECENT2", "DRECENT3"],
         )
-        client.users_list.assert_called_once_with(limit=200, cursor="")
-        client.users_info.assert_not_called()
-        client.conversations_history.assert_not_called()
-        old = SlackDmMirrorConversation.objects.get(grant=grant, slack_conversation_id="DOLD")
-        self.assertIsNotNone(old.mlai_channel_id)
-        self.assertIsNotNone(old.history_backfilled_at)
+        client.users_list.assert_not_called()
+        self.assertEqual(
+            {call.kwargs["user"] for call in client.users_info.call_args_list},
+            {"UONE", "URECENT1", "URECENT2", "URECENT3"},
+        )
+        client.conversations_history.assert_called_once()
+        self.assertEqual(
+            client.conversations_history.call_args.kwargs["channel"], "DAMBIGUOUS"
+        )
+        self.assertEqual(client.conversations_history.call_args.kwargs["limit"], 1)
+        self.assertFalse(
+            grant.conversations.filter(
+                slack_conversation_id__in=["DOLD", "DAMBIGUOUS"]
+            ).exists()
+        )
 
     @patch(
         "integrations.services.slack_dm_mirror.BuzzBridgeClient.deliver_private_batch"
@@ -1450,12 +1449,24 @@ class SlackDmMirrorOwnerTests(APITestCase):
         client = web_client.return_value
         client.users_conversations.side_effect = [
             {
-                "channels": [{"id": "DONE", "user": "UTWO"}],
+                "channels": [
+                    {
+                        "id": "DONE",
+                        "user": "UTWO",
+                        "latest": f"{int(timezone.now().timestamp()) - 60}.000100",
+                    }
+                ],
                 "response_metadata": {"next_cursor": "page-2"},
             },
             RuntimeError("Slack rate limited page 2"),
             {
-                "channels": [{"id": "DTHREE", "user": "UTHREE"}],
+                "channels": [
+                    {
+                        "id": "DTHREE",
+                        "user": "UTHREE",
+                        "latest": f"{int(timezone.now().timestamp()) - 60}.000100",
+                    }
+                ],
                 "response_metadata": {"next_cursor": ""},
             },
         ]
@@ -1487,9 +1498,9 @@ class SlackDmMirrorOwnerTests(APITestCase):
             discover_conversations(grant)
         self.first_connection.refresh_from_db()
         self.assertEqual(
-            self.first_connection.sync_cursor[
-                slack_dm_mirror.DISCOVERY_CHECKPOINT_KEY
-            ]["cursor"],
+            self.first_connection.sync_cursor[slack_dm_mirror.DISCOVERY_CHECKPOINT_KEY][
+                "cursor"
+            ],
             "page-2",
         )
 
@@ -1502,10 +1513,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
             ["DONE", "DTHREE"],
         )
         self.assertEqual(
-            [
-                call.kwargs["cursor"]
-                for call in client.users_conversations.call_args_list
-            ],
+            [call.kwargs["cursor"] for call in client.users_conversations.call_args_list],
             ["", "page-2", "page-2"],
         )
         self.first_connection.refresh_from_db()
@@ -1620,6 +1628,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
                 {
                     "id": "GMPIM",
                     "is_mpim": True,
+                    "latest": f"{int(timezone.now().timestamp()) - 60}.000100",
                     # Slack can truncate this embedded list. Discovery must use
                     # the authoritative paginated members endpoint instead.
                     "members": ["UONE"],
@@ -1666,9 +1675,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
         discover_conversations(grant)
         self.assertEqual(process_due_history_backfills(), 1)
 
-        conversation = SlackDmMirrorConversation.objects.get(
-            slack_conversation_id="GMPIM"
-        )
+        conversation = SlackDmMirrorConversation.objects.get(slack_conversation_id="GMPIM")
         self.assertEqual(
             conversation.participant_slack_ids,
             ["UONE", "UTHREE", "UTWO"],
@@ -1712,7 +1719,13 @@ class SlackDmMirrorOwnerTests(APITestCase):
     ):
         client = MagicMock()
         client.users_conversations.return_value = {
-            "channels": [{"id": "DONE", "user": "UTWO"}],
+            "channels": [
+                {
+                    "id": "DONE",
+                    "user": "UTWO",
+                    "latest": f"{int(timezone.now().timestamp()) - 60}.000100",
+                }
+            ],
             "response_metadata": {"next_cursor": ""},
         }
         client.users_info.side_effect = lambda *, user: {
@@ -1738,9 +1751,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
         grant = activate_connection(self.first_connection)
         discover_conversations(grant)
         self.assertEqual(process_due_history_backfills(), 1)
-        conversation = SlackDmMirrorConversation.objects.get(
-            slack_conversation_id="DONE"
-        )
+        conversation = SlackDmMirrorConversation.objects.get(slack_conversation_id="DONE")
         first_marker = conversation.history_backfilled_at
         self.assertIsNotNone(first_marker)
         self.assertEqual(self._message_deliveries(conversation).count(), 1)
@@ -1767,7 +1778,13 @@ class SlackDmMirrorOwnerTests(APITestCase):
         self.first_connection.save(update_fields=("scopes", "updated_at"))
         client = MagicMock()
         client.users_conversations.return_value = {
-            "channels": [{"id": "DONE", "user": "UTWO"}],
+            "channels": [
+                {
+                    "id": "DONE",
+                    "user": "UTWO",
+                    "latest": f"{int(timezone.now().timestamp()) - 60}.000100",
+                }
+            ],
             "response_metadata": {"next_cursor": ""},
         }
         client.users_info.side_effect = lambda *, user: {
@@ -1788,9 +1805,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
         self.assertEqual(process_due_history_backfills(), 1)
         activate_connection(self.first_connection)
 
-        conversation = SlackDmMirrorConversation.objects.get(
-            slack_conversation_id="DONE"
-        )
+        conversation = SlackDmMirrorConversation.objects.get(slack_conversation_id="DONE")
         self.assertIsNotNone(conversation.history_backfilled_at)
         self.assertEqual(client.conversations_history.call_count, 1)
         client.users_conversations.assert_called_with(
@@ -2610,7 +2625,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
         )
 
     @patch("integrations.services.slack_dm_mirror.WebClient")
-    def test_same_identity_reauthorization_restarts_partial_history_epoch(
+    def test_same_identity_reauthorization_preserves_partial_history_epoch(
         self,
         web_client,
     ):
@@ -2664,8 +2679,8 @@ class SlackDmMirrorOwnerTests(APITestCase):
         activate_connection(self.first_connection)
 
         conversation.refresh_from_db()
-        self.assertEqual(conversation.oldest_synced_ts, "")
-        self.assertFalse(
+        self.assertEqual(conversation.oldest_synced_ts, "1787901300.000100")
+        self.assertTrue(
             conversation.deliveries.filter(
                 source_message_id__startswith=slack_dm_mirror.HISTORY_STATE_PREFIX
             ).exclude(
@@ -3930,8 +3945,16 @@ class SlackDmMirrorOwnerTests(APITestCase):
         client = web_client.return_value
         client.users_conversations.return_value = {
             "channels": [
-                {"id": "DFIRST", "user": "UTWO"},
-                {"id": "DSECOND", "user": "UTHREE"},
+                {
+                    "id": "DFIRST",
+                    "user": "UTWO",
+                    "latest": f"{int(timezone.now().timestamp()) - 60}.000100",
+                },
+                {
+                    "id": "DSECOND",
+                    "user": "UTHREE",
+                    "latest": f"{int(timezone.now().timestamp()) - 60}.000100",
+                },
             ],
             "response_metadata": {"next_cursor": ""},
         }
@@ -4098,7 +4121,13 @@ class SlackDmMirrorOwnerTests(APITestCase):
         )
         client = web_client.return_value
         client.users_conversations.return_value = {
-            "channels": [{"id": "DONE", "user": "UTWO"}],
+            "channels": [
+                {
+                    "id": "DONE",
+                    "user": "UTWO",
+                    "latest": f"{int(timezone.now().timestamp()) - 60}.000100",
+                }
+            ],
             "response_metadata": {"next_cursor": ""},
         }
         client.users_info.side_effect = lambda *, user: {

@@ -57,6 +57,9 @@ jobs:
     - name: Check migrations are committed
       run: python manage.py makemigrations --check --dry-run
 
+    - name: Run coworking account booking contract checks
+      run: python -m unittest community_chat.tests.test_coworking_unit
+
     - name: Scan tracked source for credentials
       run: python scripts/check_secrets.py
 
@@ -143,7 +146,7 @@ jobs:
       run: python manage.py validate_prod_urls
 
     - name: Verify private Slack delivery payloads without database access
-      run: python -m unittest integrations.tests_slack_dm_payload_contract integrations.tests_slack_catalog_queries integrations.tests_slack_history_scheduling -v
+      run: python -m unittest integrations.tests_slack_dm_payload_contract integrations.tests_slack_catalog_queries integrations.tests_slack_history_scheduling integrations.tests_slack_recent_activity -v
 
     - name: Run targeted Django tests
       run: |

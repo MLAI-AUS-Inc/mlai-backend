@@ -45,7 +45,7 @@ from .authentication import (
 from .throttles import CommunityChatScopedThrottle
 
 
-def _import_history_days(data, *, default=7):
+def _import_history_days(data, *, default=30):
     days = data.get("history_days", default)
     if type(days) is not int or days not in (0, 7, 30):
         raise ValidationError(
@@ -226,7 +226,7 @@ class SlackDmMirrorView(SlackDmMirrorApiView):
         return Response(payload, status=status.HTTP_200_OK)
 
     @staticmethod
-    def _authorization_url(request, *, history_days=7):
+    def _authorization_url(request, *, history_days=30):
         ticket = mint_connector_connect_ticket(request.user, "slack")
         frontend = str(settings.COMMUNITY_CHAT_FRONTEND_URL).strip().rstrip("/")
         next_url = f"{frontend}/home?slack=connected&slack_history_days={history_days}&slack_private_channels=1"

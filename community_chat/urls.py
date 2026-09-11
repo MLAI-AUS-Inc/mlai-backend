@@ -31,6 +31,7 @@ from .coding_views import (
     CodingTurnTicketRefreshView,
 )
 from .home_views import CommunityHomeView
+from .coworking_views import CoworkingTodayView
 from .slack_views import SlackDmMirrorView, SlackDmStartView, SlackUserDirectoryView
 from .usage_views import (
     TokenUsageHistoryView,
@@ -47,6 +48,7 @@ urlpatterns = [
     path("relay-roles/<str:public_key>/", RelayChatRoleView.as_view(), name="community_chat_relay_role"),
     path("volunteer/", include("community_chat.volunteer.urls")),
     path("home/", CommunityHomeView.as_view(), name="community_chat_home"),
+    path("coworking/today/", CoworkingTodayView.as_view(), name="community_chat_coworking_today"),
     path("slack/", SlackDmMirrorView.as_view(), name="community_chat_slack"),
     path(
         "slack/users/",

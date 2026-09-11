@@ -302,11 +302,13 @@ class SlackDmIneligibleRetirementTests(TestCase):
                 {
                     "id": "GREMOVED",
                     "is_mpim": True,
+                    "latest": f"{int(timezone.now().timestamp()) - 90 * 86400}.000100",
                     "members": ["UONE", "UTWO"],
                 },
                 {
                     "id": "GOVERSIZED",
                     "is_mpim": True,
+                    "latest": f"{int(timezone.now().timestamp()) - 90 * 86400}.000100",
                     "members": ["UOWNER", *[f"U{index}" for index in range(9)]],
                 },
             ],

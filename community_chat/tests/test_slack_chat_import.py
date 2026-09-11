@@ -26,9 +26,9 @@ class SlackChatImportTests(APITestCase):
             self.first_connection, include_private_channels=True
         )
 
-    def test_new_connection_defaults_to_seven_days(self):
+    def test_new_connection_defaults_to_thirty_days(self):
         grant = self.enable_private_channels()
-        self.assertEqual(grant.history_days, 7)
+        self.assertEqual(grant.history_days, 30)
         self.assertEqual(grant.consent_version, PRIVATE_CHANNEL_CONSENT)
         self.assertIsNone(grant.last_discovery_at)
 
@@ -108,7 +108,7 @@ class SlackChatImportTests(APITestCase):
                 {
                     "channel_id": str(conversation.mlai_channel_id),
                     "kind": "private_channel",
-                    "last_message_at": None,
+                    "last_message_at": conversation.last_message_at.isoformat(),
                     "source_archived": False,
                 }
             ],
