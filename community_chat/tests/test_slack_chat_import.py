@@ -1,6 +1,7 @@
 """Synthetic database regressions for the expanded Slack import."""
 
 import uuid
+from datetime import timedelta
 from unittest.mock import MagicMock, patch
 
 from django.utils import timezone
@@ -73,10 +74,11 @@ class SlackChatImportTests(APITestCase):
         client.users_info.side_effect = lambda *, user: {
             "user": {"id": user, "name": user, "profile": {}}
         }
+        message_at = timezone.now().replace(microsecond=0) - timedelta(minutes=1)
         client.conversations_history.return_value = {
             "messages": [
                 {
-                    "ts": f"{int(timezone.now().timestamp()) - 60}.000100",
+                    "ts": f"{int(message_at.timestamp())}.000000",
                     "user": "UTWO",
                     "text": "Private planning",
                 }
@@ -108,7 +110,7 @@ class SlackChatImportTests(APITestCase):
                 {
                     "channel_id": str(conversation.mlai_channel_id),
                     "kind": "private_channel",
-                    "last_message_at": conversation.last_message_at.isoformat(),
+                    "last_message_at": message_at.isoformat(),
                     "source_archived": False,
                 }
             ],
