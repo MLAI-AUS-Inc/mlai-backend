@@ -202,6 +202,7 @@ jobs:
           community_chat.tests.test_slack_chat_catalog \
           community_chat.tests.test_slack_chat_import \
           community_chat.tests.test_slack_all_history \
+          community_chat.tests.test_slack_private_mentions \
           community_chat.tests.test_slack_deletion \
           community_chat.tests.test_volunteer_policy \
           community_chat.tests.test_volunteer \

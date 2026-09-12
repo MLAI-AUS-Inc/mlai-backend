@@ -8,7 +8,7 @@ from integrations.models import CommunityBridgePlatform
 from ..slack_emoji import emoji_to_slack_reaction, slack_reaction_to_emoji  # noqa: F401
 
 
-SLACK_USER_MENTION_RE = re.compile(r"<@([^>]+)>")
+SLACK_USER_MENTION_RE = re.compile(r"<@([^>|]+)(?:\|([^>]*))?>")
 SLACK_CHANNEL_MENTION_RE = re.compile(r"<#([^>|]+)\|?([^>]*)>")
 SLACK_SPECIAL_MENTION_RE = re.compile(r"<!([^>|]+)\|?([^>]*)>")
 SLACK_LINK_RE = re.compile(r"<((?:https?|mailto):[^>|]+)\|?([^>]*)>")
@@ -58,6 +58,7 @@ def sanitize_slack_text(
     *,
     user_name_resolver: Optional[Callable[[str], str]] = None,
     channel_name_resolver: Optional[Callable[[str], str]] = None,
+    preserve_unresolved_mentions: bool = False,
 ) -> str:
     text = html.unescape(str(value or ""))
     text = SLACK_LINK_RE.sub(_replace_slack_link, text)
@@ -73,6 +74,7 @@ def sanitize_slack_text(
         lambda match: _replace_slack_user(
             match,
             user_name_resolver=user_name_resolver,
+            preserve_unresolved_mentions=preserve_unresolved_mentions,
         ),
         text,
     )
@@ -194,10 +196,13 @@ def _replace_slack_user(
     match: re.Match,
     *,
     user_name_resolver: Optional[Callable[[str], str]],
+    preserve_unresolved_mentions: bool = False,
 ) -> str:
     user_id = str(match.group(1) or "").strip()
     label = _resolved_slack_label(user_id, user_name_resolver)
-    return f"@{label}" if label else "@user"
+    if label:
+        return f"@{label}"
+    return match.group(0) if preserve_unresolved_mentions else "@user"
 
 
 def _replace_slack_channel(

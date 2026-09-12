@@ -171,6 +171,23 @@ unconsenting participant access to imported history. Participant profiles are
 bulk-preloaded with `users.list` and fall back to `users.info` for any IDs Slack
 omitted.
 
+Private message queues preserve Slack `<@USER_ID>` entities until delivery.
+Single messages, threaded replies, edits and batches resolve names from that
+conversation's participant profiles without a new profile lookup or a change
+to recipients. Spaces in the rendered `@Full Name` use non-breaking spaces so
+mobile treats the name as one mention. Missing profiles retain the source
+entity instead of replacing the identity with `@user`; code literals remain
+literal. Slack `<tel:number|label>` entities remain intact for client-side
+telephone-link rendering.
+
+Normal authorized history refreshes repair previously delivered lossy mentions
+from the current Slack source text. Each repair is an idempotent edit of the
+existing mirrored message, retains the source revision timestamp, and passes
+the existing consent, participant and stale-mutation checks. It does not expand
+the history window. Completion records `mention_format_version: 1` only for new queues whose
+entities resolved; legacy pending bodies and unresolved IDs remain eligible for
+a later source refresh. Queue bodies are still erased on completion. No database migration or operational repair is required.
+
 History requests fetch up to 200 messages, run at the 50-requests/minute
 baseline, persist the oldest timestamp boundary, and honor Slack's
 `Retry-After` response without blocking OAuth or Community Home. Each persisted

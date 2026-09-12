@@ -62,6 +62,10 @@ from integrations.services.community_bridge.formatting import (
     sanitize_slack_text,
     slack_reaction_to_emoji,
 )
+from integrations.services.slack_private_mentions import (
+    render_private_slack_mentions,
+    private_mention_repair,
+)
 from integrations.services.slack_dm_registration_ledger import (
     PRIVATE_REGISTRATION_REVOCATION_PENDING,
     REGISTRATION_CLEANUP_LEASE_SECONDS,
@@ -3016,6 +3020,7 @@ def _normalize_private_slack_event(
             "text": text,
             "metadata": {
                 "event_ts": source_message_id,
+                "slack_entities_preserved": True,
                 "thread_ts": str(event.get("thread_ts") or "").strip(),
             },
             "slack_target_ts": source_message_id,
@@ -3061,6 +3066,7 @@ def _normalize_private_slack_event(
             "text": text,
             "metadata": {
                 "event_ts": event_timestamp,
+                "slack_entities_preserved": True,
                 "target_source_message_id": target_message_id,
                 "thread_ts": str(message.get("thread_ts") or "").strip(),
             },
@@ -3174,7 +3180,9 @@ def _slack_message_text(message: dict[str, Any]) -> str:
             }
         )
     return _append_attachment_links(
-        sanitize_slack_text(str(message.get("text") or "")),
+        sanitize_slack_text(
+            str(message.get("text") or ""), preserve_unresolved_mentions=True
+        ),
         attachments,
     )
 
@@ -6020,6 +6028,7 @@ def _enqueue_history_message(
     text = _slack_message_text(message)
     metadata = {
         "backfill": True,
+        "slack_entities_preserved": True,
         "event_ts": message_id,
         "thread_ts": str(message.get("thread_ts") or ""),
         "participant_hash": conversation.participant_hash,
@@ -6060,7 +6069,7 @@ def _enqueue_history_message(
             .first()
         )
     if outbound_create is None:
-        _upsert_history_delivery(
+        original = _upsert_history_delivery(
             conversation,
             source_message_id=message_id,
             author_id=author_id,
@@ -6069,6 +6078,29 @@ def _enqueue_history_message(
             metadata=metadata,
             held_until=held_until,
         )
+        repair = private_mention_repair(
+            message,
+            text,
+            conversation.participant_profiles or {},
+            completed=original.status == CommunityBridgeDeliveryStatus.COMPLETED,
+            metadata=original.metadata or {},
+        )
+        if repair is not None:
+            repair_id, source_timestamp = repair
+            _upsert_history_delivery(
+                conversation,
+                source_message_id=repair_id,
+                author_id=author_id,
+                operation=CommunityBridgeDeliveryType.EDIT,
+                text=text,
+                metadata={
+                    **metadata,
+                    "event_ts": source_timestamp,
+                    "target_source_message_id": message_id,
+                    "mention_format_repair": True,
+                },
+                held_until=held_until,
+            )
     elif outbound_create.status in {
         CommunityBridgeDeliveryStatus.PENDING,
         CommunityBridgeDeliveryStatus.PROCESSING,
@@ -6828,6 +6860,13 @@ def _deliver_private_batch(claimed: list[SlackDmMirrorDelivery]) -> None:
                 or {}
             )
             source_metadata = dict(delivery.metadata or {})
+            rendered_text = render_private_slack_mentions(
+                delivery.encrypted_text, conversation.participant_profiles or {}
+            )
+            source_metadata["mention_format_version"] = int(
+                bool(source_metadata.get("slack_entities_preserved"))
+                and "<@" not in rendered_text
+            )
             source_metadata_by_id[delivery.pk] = source_metadata
             payloads.append(
                 {
@@ -6838,7 +6877,7 @@ def _deliver_private_batch(claimed: list[SlackDmMirrorDelivery]) -> None:
                     "participant_pubkeys": sorted(
                         conversation.participant_buzz_pubkeys or []
                     ),
-                    "text": delivery.encrypted_text,
+                    "text": rendered_text,
                     "source_workspace_id": conversation.slack_workspace_id,
                     "source_channel_id": conversation.slack_conversation_id,
                     "source_message_id": delivery.source_message_id,
@@ -7482,13 +7521,16 @@ def _deliver_to_mlai(delivery: SlackDmMirrorDelivery) -> None:
                 reason="The target Slack message is outside the mirrored history.",
             )
             return
+    rendered_text = render_private_slack_mentions(
+        delivery.encrypted_text, conversation.participant_profiles or {}
+    )
     result = BuzzBridgeClient.deliver_private(
         delivery_id=str(delivery.pk),
         created_at=_delivery_created_at(delivery),
         operation=delivery.operation,
         channel_id=str(conversation.mlai_channel_id),
         participant_pubkeys=list(conversation.participant_buzz_pubkeys or []),
-        text=delivery.encrypted_text,
+        text=rendered_text,
         source_workspace_id=conversation.slack_workspace_id,
         source_channel_id=conversation.slack_conversation_id,
         # Queue IDs distinguish successive edits/reactions (slack-event:... or
@@ -7517,6 +7559,10 @@ def _deliver_to_mlai(delivery: SlackDmMirrorDelivery) -> None:
     delivery.encrypted_text = ""
     delivery.metadata = {
         **source_metadata,
+        "mention_format_version": int(
+            bool(source_metadata.get("slack_entities_preserved"))
+            and "<@" not in rendered_text
+        ),
         "participant_hash": conversation.participant_hash,
     }
     if delivery.operation in {
