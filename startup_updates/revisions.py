@@ -121,16 +121,19 @@ def capture_snapshot(organization, month, *, run=None, manual_metrics=None, base
             "revenue_mix": [], "event_contribution": [], "overhead": [],
             "data_quality": {"warnings": ["Founder-entered values require source confirmation."], "calculation_basis": "Founder assertions"},
         }
-    for point in (payload.get("charts") or {}).get("performance", []):
-        if point["month"] == month.isoformat():
-            for key, field in (("revenue", "income"), ("monthlyCosts", "expenses")):
-                metric = next((item for item in metrics if item["key"] == key), None)
-                value = decimal_value(metric.get("value")) if metric else None
-                point[field] = float(value) if value is not None else None
-            net = next((item for item in metrics if item["key"] == "netProfitLoss"), None)
-            amount = decimal_value(net.get("value")) if net else None
-            point["net"] = float(amount) if amount is not None and not manual_metrics else None
-            point["is_partial"] = period["is_partial"]
+    # Nonfinancial edits retain the entire frozen chart, including net and unknown gaps.
+    from startup_updates.founder_metrics import FINANCIAL_KEYS
+    if not base_snapshot or FINANCIAL_KEYS.intersection(manual_metrics or {}):
+        for point in (payload.get("charts") or {}).get("performance", []):
+            if point["month"] == month.isoformat():
+                for key, field in (("revenue", "income"), ("monthlyCosts", "expenses")):
+                    metric = next((item for item in metrics if item["key"] == key), None)
+                    value = decimal_value(metric.get("value")) if metric else None
+                    point[field] = float(value) if value is not None else None
+                net = next((item for item in metrics if item["key"] == "netProfitLoss"), None)
+                amount = decimal_value(net.get("value")) if net else None
+                point["net"] = float(amount) if amount is not None and not ({"revenue", "monthlyCosts", "netProfitLoss"} & set(manual_metrics or {})) else None
+                point["is_partial"] = period["is_partial"]
     events = StartupEvent.objects.filter(organization=organization, month_bucket=month)
     if run is not None:
         from startup_updates.api_views import _run_result_candidates

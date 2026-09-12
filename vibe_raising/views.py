@@ -2612,8 +2612,15 @@ class VibeRaisingMonthlyUpdateView(APIView):
         draft, created = MonthlyUpdateDraft.objects.get_or_create(organization=organization, month=month_bucket)
         previous_metrics = _extract_metrics(draft.current_revision.structured_memo) if draft.current_revision_id else {}
         incoming_metrics = serializer.validated_data.get("metrics") or {}
-        changed_metrics = {key: value for key, value in incoming_metrics.items() if previous_metrics.get(key) != value}
-        snapshot = draft.current_revision.snapshot if draft.current_revision_id and not changed_metrics else capture_snapshot(organization, month_bucket, manual_metrics=changed_metrics, base_snapshot=draft.current_revision.snapshot if draft.current_revision_id else None)
+        from startup_updates.founder_metrics import snapshot_for_founder_edit, FinancialMetricEditError
+        try:
+            snapshot, changed_metrics = snapshot_for_founder_edit(
+                organization=organization, month=month_bucket, draft=draft,
+                incoming=incoming_metrics, previous=previous_metrics, capture=capture_snapshot,
+            )
+        except FinancialMetricEditError as exc:
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError({"detail": str(exc)}) from exc
         memo = _build_manual_structured_memo(structured_payload)
         if draft.current_revision_id:
             # Only the server's frozen chart is eligible for reuse.

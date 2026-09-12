@@ -714,7 +714,14 @@ def _structured_memo_with_xero_metrics(draft):
 def _serialize_draft_for_editor(draft) -> dict:
     structured_memo = _structured_memo_with_xero_metrics(draft)
     month_value = draft.month
+    from startup_updates.revisions import revision_payload
+    revision = getattr(draft, "current_revision", None)
     return {
+        **(revision_payload(revision, include_evidence=False) if revision else {}),
+        "summary": str(structured_memo.get("summary") or structured_memo.get("topline") or ""),
+        "reportingPeriod": structured_memo.get("reporting_period"),
+        "evidenceWarnings": structured_memo.get("evidence_warnings", []),
+        "metricEvidence": {item.get("metric_key"): {key: item.get(key) for key in ("quality", "source_provider", "basis", "limitations")} for item in structured_memo.get("kpi_snapshot", []) if isinstance(item, dict)},
         "month": month_value.strftime("%B"),
         "year": month_value.year,
         "highlights": _join_named_sections(structured_memo, _HIGHLIGHT_SECTIONS),
