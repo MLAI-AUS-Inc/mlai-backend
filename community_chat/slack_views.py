@@ -201,8 +201,10 @@ class SlackDmMirrorView(SlackDmMirrorApiView):
     def post(self, request):
         history_days = _import_history_days(request.data)
         connection = slack_connection_for_user(request.user)
-        if connection is not None and REQUIRED_SCOPES.issubset(
-            set(connection.scopes or [])
+        if (
+            request.data.get("refresh_permissions") is not True
+            and connection is not None
+            and REQUIRED_SCOPES.issubset(set(connection.scopes or []))
         ):
             try:
                 activate_connection(

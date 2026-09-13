@@ -646,3 +646,7 @@ IM/MPIM grants already request `im:write`/`mpim:write`; reconnecting Slack now a
 requests `groups:write` and `channels:write` for channel read positions. Source
 read failures retain the app's local acknowledgement. No schema migration is
 required.
+
+Connected clients may POST `refresh_permissions: true` with their current
+`history_days` to obtain a fresh Slack authorization URL. This opt-in permission
+upgrade preserves the active grant and import until OAuth completes.
