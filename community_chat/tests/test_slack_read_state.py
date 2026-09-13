@@ -11,6 +11,17 @@ from integrations.services.slack_dm_mirror import SlackDmMirrorAuthorizationErro
 
 
 class SlackReadStateTests(SimpleTestCase):
+    def test_latest_join_does_not_leave_an_unreachable_unread_frontier(self):
+        result = reads.read_state_snapshot(
+            {"last_read": "100.000001", "latest": {"ts": "103.000001", "subtype": "channel_join"}},
+            kind="public_channel",
+            messages=[{"ts": "102.000001", "user": "UOTHER", "text": "A real message"},
+                      {"ts": "103.000001", "subtype": "channel_join", "user": "UOWNER"}],
+            owner_id="UOWNER",
+        )
+        self.assertTrue(result["is_unread"])
+        self.assertEqual(result["latest_ts"], "102.000001")
+
     def test_membership_only_history_is_read_without_advancing_slack_cursor(self):
         messages = [
             {"ts": f"{101 + index}.000001", "user": "UALICE", "subtype": subtype,
@@ -160,6 +171,11 @@ class SlackReadStateTests(SimpleTestCase):
         self.assertEqual(calls[-1].args[1], "conversations_mark")
         self.assertEqual(calls[-1].kwargs["ts"], "101.000001")
 
+    def test_mark_read_returns_server_time_for_cross_device_reconciliation(self):
+        with patch.object(reads.time, "time", return_value=500):
+            result, _ = self.mark(["im:write"])
+        self.assertEqual(result["confirmed_at"], 500)
+
     def test_missing_write_scope_makes_no_slack_call(self):
         result, calls = self.mark(["groups:read"], kind="private_channel")
         self.assertFalse(result["synced"])
@@ -238,12 +254,13 @@ class PrivateUnreadHistoryTests(SimpleTestCase):
 
 
 class ReadStatePageTests(SimpleTestCase):
-    def page(self, requested=None):
+    def page(self, requested=None, on_request=lambda: None):
         authority = SlackReadStateTests().authority()
         grant = SimpleNamespace(slack_user_id="UOWNER")
         targets = [reads.ReadTarget(f"mirror-{i}", f"D{i}", "im") for i in range(8)]
 
         def response(*args, **kwargs):
+            on_request()
             return {
                 "channel": {
                     "id": kwargs["channel"],
@@ -276,6 +293,15 @@ class ReadStatePageTests(SimpleTestCase):
                 object(), public_key="key", channel_ids=requested
             )
             return result, call.call_args_list
+
+    def test_slow_read_keeps_request_start_time_so_it_cannot_undo_a_newer_write(self):
+        clock = [1000]
+        def slow_response():
+            clock[0] += 10
+        with patch.object(reads.time, "time", side_effect=lambda: clock[0]):
+            result, _ = self.page(["mirror-0"], on_request=slow_response)
+        self.assertEqual(result["channels"]["mirror-0"]["fetched_at"], 1000)
+        self.assertEqual(clock[0], 1010)
 
     def test_background_work_is_bounded_and_returns_a_continuation(self):
         result, calls = self.page()

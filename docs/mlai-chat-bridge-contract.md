@@ -621,6 +621,10 @@ uses the requesting member's Slack user token and existing consent/device fences
 it never substitutes a bot's read cursor. Public mappings also require source
 membership, and private mappings remain restricted to the provisioned device.
 
+Snapshots record `fetched_at` before the source read request starts, so a slow
+read cannot overwrite a newer acknowledgement. Join, leave, topic and other
+control messages never become a readable latest-message frontier.
+
 Source cursors use Slack's microsecond timestamps. IM counts come directly from
 `unread_count_display`. Slack does not supply that count for other conversation
 types. Other channel/group badges inspect an unread source history page. This avoids
@@ -639,7 +643,11 @@ See [Slack conversations.info](https://docs.slack.dev/reference/methods/conversa
 and [Slack's RTM availability](https://docs.slack.dev/tools/node-slack-sdk/rtm-api/).
 
 `PATCH slack/` with `{action: "mark_read", channel_id, source_ts}` advances the
-owner's Slack cursor through a displayed source message. A newer source cursor
+owner's Slack cursor through a displayed source message. Successful responses
+include `synced`, `last_read` and the server's `confirmed_at` timestamp. Clients
+retain durable acknowledgements and reject snapshots fetched before confirmation;
+a subsequent source cursor regression can represent an explicit Slack mark-unread.
+A newer source cursor
 is never moved backwards. Missing write scopes return
 `{synced: false, needs_reauthorization: true}` without writing to Slack. Existing
 IM/MPIM grants already request `im:write`/`mpim:write`; reconnecting Slack now also
