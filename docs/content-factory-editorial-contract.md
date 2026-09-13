@@ -26,6 +26,12 @@ Inventory scans send `generate_components=false`. Topic discovery can proceed wh
 
 Content-only delivery is a draft review surface. Exact website preview and publication retain the worker's integration/build/review checks. Existing callback deduplication, idempotent dispatch, organisation scoping and charging behavior remain in place.
 
+## Generation notifications
+
+Content Factory automation emails are sent only for a completed content draft or an article ready for review. Topic selections and delivery-mode prompts remain available in the application and on opted-in WhatsApp/Slack channels; they do not send email. WhatsApp daily research consent and delivery selection are unchanged.
+
+Generation/research errors update durable run diagnostics and operator logs without notifying customers. A late error callback cannot overwrite a completed automation run or its review link. Actual failures remain visible in the application; suppressing a notification never converts a failed article into a completed draft. This policy is limited to Content Factory automation delivery, not account/security emails.
+
 ## Verification and rollout
 
 Four pure catalog contract tests and edited-module syntax checks passed. Database-backed integration tests have not been run because the repository requires specific migration approval for test database construction. Deploy the backend, worker and frontend contracts together after end-to-end verification; the local OpenAI key currently returns 401, so live Astra/Fast verification remains outstanding.

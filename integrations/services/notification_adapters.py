@@ -29,6 +29,7 @@ from content_factory.models import (
     ResearchAutomationStatus,
 )
 from integrations import http_client
+from integrations.services.article_notification_policy import should_deliver_automation_event
 from integrations.services.article_generation import (
     CONTENT_FACTORY_REQUEST_SOURCE,
     confirm_topic,
@@ -1141,6 +1142,8 @@ def _fan_out_event(
     """
     deliveries: list[NotificationDelivery] = []
     for channel in _active_channels_for_run(run):
+        if not should_deliver_automation_event(event_type, channel.channel_type):
+            continue
         delivery, created = _delivery_for_event(
             run=run,
             channel=channel,
@@ -1308,8 +1311,12 @@ def send_review_ready(data: dict[str, Any]) -> list[NotificationDelivery]:
 
 
 def send_error(data: dict[str, Any]) -> list[NotificationDelivery]:
-    run = resolve_automation_run(data.get("notification_context"))
+    run = resolve_automation_run_for_callback(data)
     if not run:
+        return []
+    # A delayed failure callback must not undo a completed draft or overwrite
+    # its review link. Keep the run's normal completion notification idempotent.
+    if run.status == AutomationRunStatus.COMPLETED:
         return []
     job_id = _callback_job_id(data)
     run.callback_payload = data
@@ -1317,17 +1324,8 @@ def send_error(data: dict[str, Any]) -> list[NotificationDelivery]:
     run.last_error = str(data.get("error") or data.get("error_message") or "").strip()
     run.save(update_fields=["callback_payload", "status", "last_error", "updated_at"])
 
-    text = _error_text(run, data)
-    return _fan_out_event(
-        run=run,
-        event_type="error",
-        request_payload={"event_type": "error", "job_id": job_id, "error": run.last_error},
-        build_kwargs=lambda channel: {
-            "text": text,
-            "subject": f"Content research failed for {run.automation.organization.domain}",
-            "html_body": html.escape(text).replace("\n", "<br>"),
-        },
-    )
+    logger.warning("content_factory_failure_recorded_without_customer_notification automation_run=%s job=%s", run.id, job_id)
+    return []
 
 
 def approve_topic_for_run(
