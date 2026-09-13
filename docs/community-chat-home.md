@@ -206,3 +206,12 @@ and recent retry markers before applying foreground priority, so an inaccessible
 Slack conversation cannot monopolize the scan loop. This does not mark missing
 history as imported, delete existing messages, widen consent, or bypass Slack's
 Retry-After handling. Successful retries clear the normal scan error state.
+
+### iOS leaderboard discussion preview
+
+The mobile token leaderboard uses the normal channel message renderer for its
+single newest visible message: avatar, author/time, rich text, and attachments.
+The channel-title label is omitted and the open-chat button sits below the
+message. The small self-reporting attribution replaces the reporting-period
+subtitle under the leaderboard heading. Changing a leaderboard filter does not
+change the shared discussion channel.

@@ -368,6 +368,8 @@ def _slack_oauth_user_scope_list() -> list[str]:
             "mpim:write",
             "groups:read",
             "groups:history",
+            "groups:write",
+            "channels:write",
             "chat:write",
             "users:read",
             "reactions:read",

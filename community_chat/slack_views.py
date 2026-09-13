@@ -154,6 +154,29 @@ class SlackDmMirrorView(SlackDmMirrorApiView):
     """Inspect, connect, pause, resume, or disconnect Slack DM mirroring."""
 
     def get(self, request):
+        if request.query_params.get("read_state") == "1":
+            from integrations.services.slack_chat_read_state import read_state_page
+
+            try:
+                payload = read_state_page(
+                    request.user,
+                    public_key=getattr(request, "community_chat_public_key", None),
+                    cursor=request.query_params.get("cursor", "0"),
+                    channel_ids=(
+                        request.query_params["channel_ids"].split(",")
+                        if "channel_ids" in request.query_params
+                        else None
+                    ),
+                )
+            except (SlackDmMirrorCredentialError, SlackDmMirrorUpstreamError) as exc:
+                return _slack_endpoint_error_response(exc)
+            except SlackDmMirrorError as exc:
+                raise ValidationError({"slack": str(exc)}) from exc
+            except (SlackClientError, DatabaseError) as exc:
+                return _slack_endpoint_error_response(exc)
+            response = Response(payload)
+            response["Cache-Control"] = "private, no-store"
+            return response
         if "channel_id" in request.query_params:
             from integrations.services.slack_chat_refresh import (
                 conversation_refresh_status,
@@ -236,6 +259,24 @@ class SlackDmMirrorView(SlackDmMirrorApiView):
         )
 
     def patch(self, request):
+        if request.data.get("action") == "mark_read":
+            from integrations.services.slack_chat_read_state import mark_read
+
+            try:
+                return Response(
+                    mark_read(
+                        request.user,
+                        public_key=getattr(request, "community_chat_public_key", None),
+                        channel_id=request.data.get("channel_id"),
+                        source_ts=request.data.get("source_ts"),
+                    )
+                )
+            except (SlackDmMirrorCredentialError, SlackDmMirrorUpstreamError) as exc:
+                return _slack_endpoint_error_response(exc)
+            except SlackDmMirrorError as exc:
+                raise ValidationError({"slack": str(exc)}) from exc
+            except (SlackClientError, DatabaseError) as exc:
+                return _slack_endpoint_error_response(exc)
         if request.data.get("action") == "refresh_channel":
             from integrations.services.slack_chat_refresh import (
                 request_conversation_refresh,

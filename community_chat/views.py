@@ -22,7 +22,9 @@ from django.utils import timezone
 from django.utils.crypto import salted_hmac
 from rest_framework import status
 from rest_framework.exceptions import PermissionDenied, ValidationError
+from rest_framework.negotiation import DefaultContentNegotiation
 from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.renderers import JSONRenderer
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -1194,10 +1196,24 @@ class LinkPreviewView(APIView):
         return response
 
 
+class PreviewImageContentNegotiation(DefaultContentNegotiation):
+    """Allow image Accept headers while keeping API errors JSON encoded.
+
+    Successful downloads return an HttpResponse with the validated image MIME
+    type. DRF's default JSON negotiation otherwise rejects native image clients
+    with 406 before authentication or the download handler can run.
+    """
+
+    def select_renderer(self, request, renderers, format_suffix=None):
+        return renderers[0], renderers[0].media_type
+
+
 class LinkPreviewImageView(APIView):
     """Proxy one validated preview image so MLAI Chat keeps a narrow CSP."""
 
     authentication_classes = (CommunityChatAccountAuthentication,)
+    content_negotiation_class = PreviewImageContentNegotiation
+    renderer_classes = (JSONRenderer,)
     permission_classes = [IsAuthenticated]
     throttle_classes = [CommunityChatScopedThrottle]
     community_chat_throttle_scope = "community_chat_link_preview"
@@ -1206,9 +1222,15 @@ class LinkPreviewImageView(APIView):
         try:
             slack_file_id = str(request.query_params.get("slack_file") or "").strip()
             if slack_file_id:
+                options = (
+                    {"original": True}
+                    if request.query_params.get("original") == "1"
+                    else {}
+                )
                 content_type, body = fetch_slack_file_image(
                     slack_file_id,
                     user=request.user,
+                    **options,
                 )
             else:
                 content_type, body = fetch_preview_image(
