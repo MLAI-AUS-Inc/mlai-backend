@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal, DecimalException
 from zoneinfo import ZoneInfo
 
-VERSION = "mlai-volunteer-v2"
+VERSION = "mlai-volunteer-v3"
 MICROROO = 1_000_000
 MELBOURNE = ZoneInfo("Australia/Melbourne")
 LEVELS = (
@@ -273,12 +273,12 @@ def catalogue(monthly_reward=20):
         (
             "helpful_answer",
             "Answer a question",
-            "Help another member with a useful answer in #i-need-advice-or-help.",
-            3,
-            3,
-            False,
-            "week",
+            "Reply to a question in #i-need-advice-or-help. Earn 2 Roo Points when the questioner marks your reply useful, once per question.",
             2,
+            2,
+            False,
+            "post",
+            1,
             "answer",
             "human",
             "help",
@@ -389,7 +389,7 @@ def catalogue(monthly_reward=20):
             verification=verification,
             channel_key=channel,
             repeat_label=(
-                "Once per member" if period == "once" else "Once per post" if period == "post" else f"Up to {cap} per {period}"
+                "Once per person per question" if key == "helpful_answer" else "Once per member" if period == "once" else "Once per post" if period == "post" else f"Up to {cap} per {period}"
             ),
         )
         for key, title, description, reward, maximum, attendance, period, cap, group, verification, channel in rows

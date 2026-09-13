@@ -12,6 +12,7 @@ from roo.services import PointsService
 from .access import (
     VolunteerError,
     actor_for_key,
+    awards_enabled,
     channels,
     community_id,
     flag,
@@ -43,6 +44,7 @@ METADATA_FIELDS = {
     "invalidated",
     "reaction",
     "target_public_key",
+    "question_public_key",
     "company_id",
     "ledger_id",
     "checked_in_at",
@@ -83,9 +85,6 @@ def persist_receipt(payload):
         if origin == "relay"
         else linked_member(payload.get("actor_id"))
     )
-    lock_member(user)
-    # Initialise before creating a qualifying source, preserving legacy totals.
-    state_for(user)
     when = occurrence(payload.get("occurred_at"))
     source = public_source(payload.get("source", {}))
     key = payload.get("source_key")
@@ -122,6 +121,15 @@ def persist_receipt(payload):
         if metadata.get("target_public_key")
         else None
     )
+    # A questioner and helper can recognise each other concurrently. Acquire
+    # both canonical account locks in a stable order, even inside ATOMIC_REQUESTS.
+    participants = {user.pk: user}
+    if target is not None:
+        participants[target.pk] = target
+    for member_id in sorted(participants):
+        lock_member(participants[member_id])
+    # Initialise before creating a qualifying source, preserving legacy totals.
+    state_for(user)
     ineligible = ""
     if kind == "invalidation":
         deletion_kind = metadata.get("deletion_kind")
@@ -238,7 +246,24 @@ def process_receipt(receipt):
 def _process_receipt(receipt_id):
     # Lock member before receipt consistently with source persistence/reviews.
     initial = VolunteerSourceReceipt.objects.select_related("actor").get(pk=receipt_id)
-    user = lock_member(initial.actor)
+    if initial.status in ("processed", "ineligible", "recorded"):
+        return initial
+    helpful = (
+        initial.kind == "reaction"
+        and initial.source.get("channel_id") == channels().get("help")
+        and initial.metadata.get("reaction") == "✅"
+        and bool(initial.metadata.get("question_public_key"))
+    )
+    if helpful:
+        questioner = actor_for_key(initial.metadata["question_public_key"])
+        if (
+            questioner.pk != initial.actor_id
+            or not initial.target_id
+            or initial.target_id == questioner.pk
+            or not initial.source.get("thread_root_id")
+        ):
+            raise VolunteerError("ineligible_source", 409)
+    user = lock_member(initial.target if helpful else initial.actor)
     receipt = VolunteerSourceReceipt.objects.select_for_update().get(pk=receipt_id)
     if receipt.status in ("processed", "ineligible", "recorded"):
         return receipt
@@ -251,7 +276,9 @@ def _process_receipt(receipt_id):
     if source_is_invalidated(receipt) or not user.is_active:
         raise VolunteerError("ineligible_source", 409)
     action_key = None
-    if receipt.kind == "attendance":
+    if helpful:
+        action_key = "helpful_answer"
+    elif receipt.kind == "attendance":
         if not source.get("event_id") or not metadata.get("checked_in_at"):
             raise VolunteerError("ineligible_source", 409)
         when = occurrence(metadata["checked_in_at"])
@@ -302,11 +329,11 @@ def _process_receipt(receipt_id):
         receipt.status = "recorded"
         receipt.save(update_fields=("status", "updated_at"))
         return receipt
-    if action_key in ("introduce_yourself", "boost_startup"):
+    if action_key in ("introduce_yourself", "boost_startup", "helpful_answer"):
         start = getattr(settings, "COMMUNITY_CHAT_VOLUNTEER_ACTIVE_FROM", "")
         if not start or receipt.occurred_at < occurrence(start):
             raise VolunteerError("action_inactive", 409)
-    if not flag("awards_enabled"):
+    if not awards_enabled(action_key):
         receipt.status, receipt.error = "pending", "awards_disabled"
         receipt.save(update_fields=("status", "error", "updated_at"))
         return receipt

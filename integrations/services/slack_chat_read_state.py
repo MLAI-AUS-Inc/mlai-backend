@@ -73,6 +73,13 @@ def read_state_snapshot(details, *, kind, messages, owner_id):
     latest_stamp = max(_timestamp(latest) or Decimal(0), read_at)
     unread = []
     for message in messages:
+        # Slack history also contains joins, leaves, topic changes and hidden
+        # control messages. The importer does not show these as conversation
+        # posts, so they must not create a badge for an apparently empty chat.
+        if message.get("hidden") or str(message.get("subtype") or "") not in {
+            "", "bot_message", "file_share", "me_message", "thread_broadcast"
+        }:
+            continue
         stamp = _timestamp(message.get("ts"))
         if stamp is None:
             continue

@@ -11,6 +11,27 @@ from integrations.services.slack_dm_mirror import SlackDmMirrorAuthorizationErro
 
 
 class SlackReadStateTests(SimpleTestCase):
+    def test_membership_only_history_is_read_without_advancing_slack_cursor(self):
+        messages = [
+            {"ts": f"{101 + index}.000001", "user": "UALICE", "subtype": subtype,
+             "text": "<@UOWNER> joined the channel"}
+            for index, subtype in enumerate(("channel_join", "channel_leave", "channel_topic"))
+        ]
+        result = self.snapshot({"last_read": "100.000001"}, messages, kind="public_channel")
+        self.assertFalse(result["is_unread"])
+        self.assertEqual(result["unread_count"], 0)
+        self.assertEqual(result["last_read"], "100.000001")
+        self.assertEqual(result["latest_ts"], "100.000001")
+
+    def test_real_posts_and_file_shares_still_count_beside_join_notices(self):
+        for subtype in ("", "file_share", "me_message", "thread_broadcast"):
+            result = self.snapshot(
+                {"last_read": "100.000001"},
+                [{"ts": "101.000001", "user": "UALICE", "subtype": subtype,
+                  "text": "Hello <@UOWNER>"}], kind="public_channel")
+            self.assertTrue(result["is_unread"])
+            self.assertEqual(result["unread_count"], 1)
+
     def snapshot(self, details, messages=(), kind="im"):
         return reads.read_state_snapshot(
             details, kind=kind, messages=messages, owner_id="UOWNER"

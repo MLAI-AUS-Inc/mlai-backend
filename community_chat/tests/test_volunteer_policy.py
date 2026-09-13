@@ -15,6 +15,13 @@ from community_chat.volunteer.policy import (
 
 
 class VolunteerPolicyTests(unittest.TestCase):
+    def test_helpful_answer_is_two_points_once_per_person_per_question(self):
+        action = catalogue()["helpful_answer"]
+        self.assertEqual(action["reward_roo"], "2")
+        self.assertEqual(action["reward_max_roo"], "2")
+        self.assertEqual(action["period"], "post")
+        self.assertEqual(action["repeat_label"], "Once per person per question")
+
     def test_exact_amount_roundtrip(self):
         for amount in ("0", "4", "0.000001", "12.123456", "250"):
             self.assertEqual(roo(microroo(amount)), amount)

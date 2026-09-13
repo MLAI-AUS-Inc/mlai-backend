@@ -165,7 +165,7 @@ key. Luma permits `attendance`; the existing monthly pipeline permits
 `monthly_update`; fulfilment integrations permit `merch`.
 
 Metadata permits bounded `original`, `top_level`, `has_text`, `service_account`,
-`invalidated`, `reaction`, `target_public_key`, `company_id`, `ledger_id`,
+`invalidated`, `reaction`, `target_public_key`, `question_public_key`, `company_id`, `ledger_id`,
 `checked_in_at`, `fulfilled`, `refunded`. Message bodies are not replicated.
 For reactions, `source_id` names the canonical target post while `source_key`
 names the reaction event; toggling or multiple devices cannot multiply awards.
@@ -272,7 +272,7 @@ stay retryable; a failed client refresh cannot repeat a wallet transaction.
 ## Roo Points member guide refresh (September 2026)
 
 Home includes `boost_startup` (2 points, once for each distinct verified startup
-post) and `helpful_answer` (3 points, existing approval and weekly cap). The
+post) and `helpful_answer` (2 points, once per helper per question). The
 canonical volunteer policy supplies the amounts. Startup engagement retains
 source verification, activation flags and per-member/per-post idempotency;
 the former four-post monthly cap is removed prospectively. Existing awards
@@ -288,3 +288,11 @@ newsletter feature, which is requested through Roo.
 Clients display whole points and retain exact ledger strings. Reconciliation
 checks and audit timestamps are still returned but update timestamps are not
 shown on the simplified member pages. This change requires no migration.
+
+## Useful advice answers (September 2026)
+
+The questioner marks a native MLAI answer in the advice thread useful with a check-mark reaction. The trusted collector verifies the signed question, answer and reaction and provides `question_public_key` and `thread_root_id` with the existing reaction receipt. The backend resolves the questioner and helper to active canonical accounts, requires the actor to own the question, rejects self-awards, and credits the helper exactly 2 Roo Points. A helper can earn once per question, including across devices, repeated reactions and multiple answers. Imported Slack questions and answers are excluded from this native-receipt rollout.
+
+`COMMUNITY_CHAT_VOLUNTEER_ADVICE_REWARDS_ENABLED=true` enables this award independently of other Volunteer awards and bonuses. Configure the verified advice UUID as `COMMUNITY_CHAT_VOLUNTEER_CHANNELS["help"]`, a prospective `COMMUNITY_CHAT_VOLUNTEER_ACTIVE_FROM` UTC boundary, and a separate `COMMUNITY_CHAT_VOLUNTEER_RECEIPT_TOKEN` shared only with the trusted collector. The Chat collector activation timestamp must match that boundary. Keep existing unrelated flags unchanged. There is no backend schema change or historical award backfill.
+
+Question, answer and reaction invalidations block deferred awards. Existing credits preserve their audit trail and use the established correction mechanism. Member locks are acquired in canonical account order, and recognition plus wallet credit remain atomic and idempotent.
