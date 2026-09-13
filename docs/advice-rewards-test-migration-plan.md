@@ -2,6 +2,8 @@
 
 Apply only these existing migrations and their listed dependencies to a newly created loopback PostgreSQL test database. No production database, production credentials, new migration files or real wallet credits are involved. The runner deletes the disposable database after testing.
 
+The backend PR workflow also needs approval of the [CI migration plan](advice-rewards-ci-migration-plan.md), which includes 34 additional existing migrations and migration rollback/replay tests on disposable databases. This focused local plan remains limited to its exact dependency closure below.
+
 Targets:
 - `community_chat.0009_volunteer`
 - `community_chat.0010_moderator`
