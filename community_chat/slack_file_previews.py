@@ -97,12 +97,8 @@ def fetch_slack_file_preview(raw_url: str, *, user=None) -> SlackFilePreview | N
     if not file_id:
         return None
     file_data = _authorized_file(file_id, user=user).data
-    title = str(
-        file_data.get("title") or file_data.get("name") or "Slack file"
-    ).strip()
-    content_type = (
-        str(file_data.get("mimetype") or "").split(";", 1)[0].strip().lower()
-    )
+    title = str(file_data.get("title") or file_data.get("name") or "Slack file").strip()
+    content_type = str(file_data.get("mimetype") or "").split(";", 1)[0].strip().lower()
     href = str(file_data.get("permalink") or raw_url).strip()
     filetype = "image" if content_type in ALLOWED_IMAGE_TYPES else "file"
     return SlackFilePreview(
@@ -115,7 +111,20 @@ def fetch_slack_file_preview(raw_url: str, *, user=None) -> SlackFilePreview | N
     )
 
 
-def fetch_slack_file_image(file_id: str, *, user=None) -> tuple[str, bytes]:
+def slack_image_download_url(file_data, *, original=False):
+    """Use Slack's uncropped display rendition, preserving animated originals."""
+    if not original and file_data.get("mimetype") != "image/gif":
+        for field in ("thumb_1024", "thumb_960", "thumb_800", "thumb_720"):
+            if file_data.get(field):
+                return str(file_data[field]).strip()
+    return str(
+        file_data.get("url_private_download") or file_data.get("url_private") or ""
+    ).strip()
+
+
+def fetch_slack_file_image(
+    file_id: str, *, user=None, original=False
+) -> tuple[str, bytes]:
     """Download one authorized Slack image without exposing the bot token."""
 
     normalized_file_id = str(file_id or "").strip().upper()
@@ -123,24 +132,25 @@ def fetch_slack_file_image(file_id: str, *, user=None) -> tuple[str, bytes]:
         raise SlackFilePreviewError("A valid Slack file is required.")
     authorized = _authorized_file(normalized_file_id, user=user)
     file_data = authorized.data
-    content_type = (
-        str(file_data.get("mimetype") or "").split(";", 1)[0].strip().lower()
-    )
+    content_type = str(file_data.get("mimetype") or "").split(";", 1)[0].strip().lower()
     if content_type not in ALLOWED_IMAGE_TYPES:
         raise SlackFilePreviewError("The Slack file is not a supported image.")
 
-    cache_key = "community-chat-slack-file-image:" + hashlib.sha256(
-        f"{authorized.cache_scope}:{normalized_file_id}".encode("utf-8")
-    ).hexdigest()
+    cache_key = (
+        "community-chat-slack-file-image-v2:"
+        + hashlib.sha256(
+            f"{authorized.cache_scope}:{normalized_file_id}:{original}".encode("utf-8")
+        ).hexdigest()
+    )
     cached = cache.get(cache_key)
     if isinstance(cached, dict) and isinstance(cached.get("body"), bytes):
         return str(cached.get("content_type") or content_type), cached["body"]
 
-    private_url = str(
-        file_data.get("url_private_download") or file_data.get("url_private") or ""
-    ).strip()
+    private_url = slack_image_download_url(file_data, original=original)
     private_host = (urlparse(private_url).hostname or "").lower().rstrip(".")
-    if not private_url.startswith("https://") or not private_host.endswith(".slack.com"):
+    if not private_url.startswith("https://") or not private_host.endswith(
+        ".slack.com"
+    ):
         raise SlackFilePreviewError("The Slack image URL was unavailable.")
 
     token = authorized.access_token
@@ -223,11 +233,14 @@ def _file_is_in_mapped_public_channel(file_data: dict) -> bool:
     }
     public_shares = (file_data.get("shares") or {}).get("public") or {}
     shared_channel_ids.update(str(channel_id).strip() for channel_id in public_shares)
-    return bool(shared_channel_ids) and CommunityBridgeChannel.objects.filter(
-        enabled=True,
-        destination_platform=CommunityBridgePlatform.BUZZ,
-        slack_channel_id__in=shared_channel_ids,
-    ).exists()
+    return (
+        bool(shared_channel_ids)
+        and CommunityBridgeChannel.objects.filter(
+            enabled=True,
+            destination_platform=CommunityBridgePlatform.BUZZ,
+            slack_channel_id__in=shared_channel_ids,
+        ).exists()
+    )
 
 
 def _authorized_private_file(file_id: str, *, user=None) -> _AuthorizedSlackFile | None:
@@ -303,9 +316,10 @@ def _slack_file_info(
     access_token: str = "",
     cache_scope: str = "bot",
 ) -> dict:
-    cache_key = "community-chat-slack-file-info:" + hashlib.sha256(
-        f"{cache_scope}:{file_id}".encode("utf-8")
-    ).hexdigest()
+    cache_key = (
+        "community-chat-slack-file-info:"
+        + hashlib.sha256(f"{cache_scope}:{file_id}".encode("utf-8")).hexdigest()
+    )
     cached = cache.get(cache_key)
     if isinstance(cached, dict):
         return cached

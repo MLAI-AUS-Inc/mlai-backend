@@ -600,3 +600,49 @@ Remaining operational and parity gaps:
 - Actual worker deployment, queue age, Slack app rate tier, and relay read latency
   were not inspected against production. Validate these with aggregate
   instrumentation before asserting production completion or full Slack parity.
+
+### Native image requests and account unread state (September 2026)
+
+The authenticated `link-preview/image/` endpoint accepts image-only `Accept`
+headers, including the header shipped in iOS 1.0.0 (19). Binary success responses
+retain their validated image MIME type; authentication and download errors remain
+JSON. Slack timeline images use an uncropped `thumb_1024` (or the next available
+720–1024px rendition), with the animated original retained for GIFs.
+`?slack_file=F…&original=1` retrieves full resolution for the viewer. Authorization
+is checked before either cache; account/workspace scopes and rendition keys remain
+separate. No Slack credential or private download URL is returned to clients.
+
+`GET slack/?read_state=1&cursor=0` returns `channels`, `next_cursor`, and
+`retry_after_seconds`. Each channel has `available`, `last_read`, `latest_ts`,
+`is_unread`, `unread_count`, `count_source`, and `fetched_at`. Missing source state
+is unavailable, not zero. `channel_ids=<up to four comma-separated MLAI IDs>`
+prioritizes visible rows without waiting for a large directory scan. The service
+uses the requesting member's Slack user token and existing consent/device fences;
+it never substitutes a bot's read cursor. Public mappings also require source
+membership, and private mappings remain restricted to the provisioned device.
+
+Source cursors use Slack's microsecond timestamps. IM counts come directly from
+`unread_count_display`. Slack does not supply that count for other conversation
+types. Public-channel badges use imported source metadata; private-channel/group
+badges inspect an unread history page because completed private delivery bodies
+are intentionally erased. This probe respects the grant's history window and
+stores only cursor/count metadata. Thread-only replies and the owner's own
+messages do not create ordinary channel unreads. A truncated/consent-limited page
+returns an unknown numeric count rather than claiming a complete total.
+
+Cached snapshots survive for 24 hours and are revalidated on refresh; visible
+rows refresh after 30 seconds, with bounded background pages for other rows.
+These are polled snapshots, not Slack's first-party real-time unread feed. Custom
+Slack notification preferences and subteam notification counts are not exposed
+by this API, so complete first-party badge parity cannot be guaranteed.
+See [Slack conversations.info](https://docs.slack.dev/reference/methods/conversations.info/)
+and [Slack's RTM availability](https://docs.slack.dev/tools/node-slack-sdk/rtm-api/).
+
+`PATCH slack/` with `{action: "mark_read", channel_id, source_ts}` advances the
+owner's Slack cursor through a displayed source message. A newer source cursor
+is never moved backwards. Missing write scopes return
+`{synced: false, needs_reauthorization: true}` without writing to Slack. Existing
+IM/MPIM grants already request `im:write`/`mpim:write`; reconnecting Slack now also
+requests `groups:write` and `channels:write` for channel read positions. Source
+read failures retain the app's local acknowledgement. No schema migration is
+required.
