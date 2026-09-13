@@ -58,7 +58,7 @@ jobs:
       run: python manage.py makemigrations --check --dry-run
 
     - name: Run coworking account booking contract checks
-      run: python -m unittest community_chat.tests.test_coworking_unit
+      run: python -m unittest community_chat.tests.test_coworking_unit tests.test_article_notification_policy_unit
 
     - name: Scan tracked source for credentials
       run: python scripts/check_secrets.py

@@ -324,7 +324,7 @@ class ResearchAutomationCallbackTests(TestCase):
         self.override.disable()
 
     @patch("integrations.services.notification_adapters.http_client.post")
-    def test_topic_selection_callback_routes_to_email_adapter(self, mock_post):
+    def test_topic_selection_callback_saves_options_without_email(self, mock_post):
         mock_post.return_value = _Response(200, {"id": "email-1"})
 
         response = self.client.post(
@@ -351,15 +351,12 @@ class ResearchAutomationCallbackTests(TestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.run.refresh_from_db()
         self.assertEqual(self.run.status, AutomationRunStatus.TOPIC_SELECTION_SENT)
-        delivery = NotificationDelivery.objects.get(automation_run=self.run, event_type="topic_selection")
-        self.assertEqual(delivery.status, NotificationDeliveryStatus.SENT)
-        self.assertEqual(delivery.provider_message_id, "email-1")
+        self.assertFalse(NotificationDelivery.objects.filter(automation_run=self.run, event_type="topic_selection").exists())
+        self.assertTrue(self.run.callback_payload["selection"]["options"])
         job = ContentFactoryJob.objects.get(job_id="discovery-run-1")
         self.assertEqual(job.request_meta["notification_context"]["automation_run_id"], str(self.run.id))
         self.assertEqual(job.request_meta["user_email"], "writer@example.com")
-        email_payload = mock_post.call_args.kwargs["json"]
-        self.assertEqual(email_payload["to"], ["writer@example.com"])
-        self.assertIn("Approve this topic", email_payload["html"])
+        mock_post.assert_not_called()
 
     @override_settings(TWILIO_ACCOUNT_SID="ACtest", TWILIO_AUTH_TOKEN="test-token",
                        TWILIO_WHATSAPP_FROM="+61400000000",
@@ -757,18 +754,17 @@ class FanOutDeliveryTests(TestCase):
 
     @patch("integrations.services.notification_adapters.SlackService.send_dm", return_value=(True, "1.0"))
     @patch("integrations.services.notification_adapters.http_client.post")
-    def test_topic_selection_fans_out_to_all_active_channels(self, mock_post, mock_dm):
+    def test_topic_selection_fans_out_to_opted_in_whatsapp_and_slack(self, mock_post, mock_dm):
         mock_post.return_value = _Response(200, {"id": "email-1", "sid": "SM-1"})
 
         deliveries = send_topic_selection(self.callback_data)
 
-        self.assertEqual(len(deliveries), 3)
+        self.assertEqual(len(deliveries), 2)
         keys = {delivery.idempotency_key for delivery in deliveries}
         self.assertEqual(
             keys,
             {
                 f"{self.run.id}:{self.slack.id}:topic_selection",
-                f"{self.run.id}:{self.email.id}:topic_selection",
                 f"{self.run.id}:{self.whatsapp.id}:topic_selection",
             },
         )
@@ -776,7 +772,7 @@ class FanOutDeliveryTests(TestCase):
         mock_dm.assert_called_once()
 
         urls = [call.args[0] for call in mock_post.call_args_list]
-        self.assertTrue(any("resend.com" in url for url in urls))
+        self.assertFalse(any("resend.com" in url for url in urls))
         whatsapp_calls = [
             call for call in mock_post.call_args_list if "api.twilio.com" in call.args[0]
         ]
@@ -794,9 +790,9 @@ class FanOutDeliveryTests(TestCase):
 
         # Re-delivering the same callback sends nothing new.
         repeat = send_topic_selection(self.callback_data)
-        self.assertEqual(len(repeat), 3)
+        self.assertEqual(len(repeat), 2)
         self.assertEqual(mock_dm.call_count, 1)
-        self.assertEqual(len(mock_post.call_args_list), 2)
+        self.assertEqual(len(mock_post.call_args_list), 1)
 
     @patch("integrations.services.notification_adapters.SlackService.send_dm", return_value=(True, "2.0"))
     @patch("integrations.services.notification_adapters.http_client.post")
@@ -969,14 +965,8 @@ class FanOutDeliveryTests(TestCase):
 
         deliveries = send_topic_selection(self.callback_data)
 
-        email_delivery = next(d for d in deliveries if d.channel_id == self.email.id)
-        self.assertEqual(email_delivery.status, NotificationDeliveryStatus.SENT)
-        self.assertEqual(email_delivery.provider_message_id, "dl-9")
-        request_body = client.send_email.call_args.args[0]
-        self.assertEqual(request_body["to"], "writer@example.com")
-        self.assertEqual(request_body["identifiers"], {"id": str(self.user.id)})
-        self.assertIn("Approve this topic", request_body["body"])
-        # Resend was never used for the email channel; only WhatsApp hit http_client.
+        self.assertFalse(any(d.channel_id == self.email.id for d in deliveries))
+        client.send_email.assert_not_called()
         self.assertFalse(any("resend.com" in call.args[0] for call in mock_post.call_args_list))
 
     @override_settings(CUSTOMERIO_API_KEY="cio-key", CUSTOMERIO_TOPIC_TEMPLATE_ID="tmpl-77")
@@ -1006,19 +996,9 @@ class FanOutDeliveryTests(TestCase):
 
         deliveries = send_topic_selection(self.callback_data)
 
-        email_delivery = next(d for d in deliveries if d.channel_id == self.email.id)
-        self.assertEqual(email_delivery.status, NotificationDeliveryStatus.SENT)
-        self.assertEqual(email_delivery.provider_message_id, "dl-template")
-
-        request_body = client.send_email.call_args.args[0]
-        # Template branch: render through Customer.io, not a raw HTML body.
-        self.assertEqual(request_body["transactional_message_id"], "tmpl-77")
-        self.assertNotIn("body", request_body)
-        self.assertNotIn("subject", request_body)
-        self.assertEqual(request_body["to"], "writer@example.com")
-        self.assertEqual(request_body["identifiers"], {"id": str(self.user.id)})
-
-        message_data = request_body["message_data"]
+        self.assertFalse(any(d.channel_id == self.email.id for d in deliveries))
+        client.send_email.assert_not_called()
+        message_data = _topic_email_message_data(self.run, self.callback_data, self.email)
         self.assertEqual(message_data["domain"], "fanout.example.com")
         topics = message_data["topics"]
         self.assertEqual(len(topics), 3)
@@ -1126,7 +1106,7 @@ class FanOutDeliveryTests(TestCase):
 
         deliveries = send_topic_selection(self.callback_data)
 
-        self.assertEqual(len(deliveries), 2)
+        self.assertEqual(len(deliveries), 1)
         self.assertFalse(
             NotificationDelivery.objects.filter(channel=self.whatsapp).exists()
         )
