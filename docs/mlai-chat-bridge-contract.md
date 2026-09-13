@@ -623,9 +623,9 @@ membership, and private mappings remain restricted to the provisioned device.
 
 Source cursors use Slack's microsecond timestamps. IM counts come directly from
 `unread_count_display`. Slack does not supply that count for other conversation
-types. Public-channel badges use imported source metadata; private-channel/group
-badges inspect an unread history page because completed private delivery bodies
-are intentionally erased. This probe respects the grant's history window and
+types. Other channel/group badges inspect an unread source history page. This avoids
+waiting for the message import, and completed private delivery bodies are
+intentionally erased. This probe respects the grant's history window and
 stores only cursor/count metadata. Thread-only replies and the owner's own
 messages do not create ordinary channel unreads. A truncated/consent-limited page
 returns an unknown numeric count rather than claiming a complete total.

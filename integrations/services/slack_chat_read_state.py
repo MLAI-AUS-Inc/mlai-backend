@@ -11,7 +11,7 @@ from django.db import transaction
 from rest_framework.exceptions import ValidationError
 from slack_sdk.errors import SlackApiError
 
-from integrations.models import CommunityBridgeChannel, CommunityBridgeMessageLink
+from integrations.models import CommunityBridgeChannel
 from integrations.services.slack_chat_catalog import (
     catalog_conversations,
     conversation_kind,
@@ -62,7 +62,7 @@ def read_state_snapshot(details, *, kind, messages, owner_id):
     """Combine Slack's cursor with source messages, without fabricating counts.
 
     Slack exposes unread_count_display only for IMs. For other conversations,
-    imported top-level source messages establish unread activity; numeric channel
+    top-level source messages establish unread activity; numeric channel
     badges count explicit user/broadcast mentions, while group DMs count messages.
     Thread-only replies and the owner's own messages do not increment the list.
     """
@@ -184,63 +184,20 @@ def _cache_key(authority, target):
     return "slack-chat-read-v1:" + hashlib.sha256(scope.encode()).hexdigest()
 
 
-def _source_messages(target, last_read):
-    # Retention may omit older history. Exact DM counts still come from Slack;
-    # the response explicitly distinguishes counts based on imported messages.
-    if target.conversation is not None:
-        rows = (
-            target.conversation.deliveries.filter(
-                source_platform="slack",
-                operation="create",
-                status="completed",
-                source_message_id__gt=str(last_read),
-            )
-            .exclude(source_message_id__startswith="history-state:")
-            .order_by("-source_message_id")[:1000]
-        )
-        for row in rows:
-            yield {
-                "ts": row.source_message_id,
-                "user": row.source_author_id,
-                "thread_ts": (row.metadata or {}).get("thread_ts"),
-                "broadcast": (row.metadata or {}).get("thread_broadcast", False),
-                "text": row.encrypted_text,
-            }
-    else:
-        rows = CommunityBridgeMessageLink.objects.filter(
-            channel=target.bridge,
-            source_platform="slack",
-            source_deleted_at__isnull=True,
-            destination_deleted_at__isnull=True,
-            source_message_id__gt=str(last_read),
-        ).order_by("-source_message_id")[:1000]
-        for row in rows:
-            payload = row.source_payload or {}
-            yield {
-                "ts": row.source_message_id,
-                "user": row.source_author_id,
-                "thread_ts": row.source_parent_message_id,
-                "text": (payload.get("metadata") or {}).get("slack_raw_text")
-                or payload.get("text", ""),
-                "broadcast": (payload.get("metadata") or {}).get("broadcast", False),
-            }
-
-
 def _unread_messages(authority, target, last_read):
     if target.kind == "im":
         return [], "slack", False
-    imported = list(_source_messages(target, last_read))
-    if target.kind not in {"private_channel", "mpim"}:
-        return imported, "imported_messages", False
-    # Completed private deliveries intentionally erase bodies. Do not count
-    # mentions from that empty queue text: inspect only the unread source page,
-    # bounded by the owner's existing history consent, without storing bodies.
-    if not any(_timestamp(m.get("ts")) is not None for m in imported):
-        return imported, "imported_messages", False
+    # Read positions must not depend on the import being caught up. Completed
+    # private deliveries also erase their bodies, including mention entities.
+    # Inspect only source unread messages and retain only counts/cursors.
     oldest = _timestamp(last_read)
     if oldest is None:
         return [], "unknown", False
-    days = _grant_history_days(target.conversation.grant)
+    days = (
+        _grant_history_days(target.conversation.grant)
+        if target.conversation is not None
+        else 0
+    )
     limited = bool(days and oldest < Decimal(str(time.time() - days * 86400)))
     if limited:
         oldest = Decimal(str(time.time() - days * 86400))
@@ -248,7 +205,9 @@ def _unread_messages(authority, target, last_read):
         authority,
         "conversations_history",
         required_scopes={
-            "groups:history" if target.kind == "private_channel" else "mpim:history"
+            {"private_channel": "groups:history", "mpim": "mpim:history"}.get(
+                target.kind, "channels:history"
+            )
         },
         channel=target.slack_id,
         oldest=format(oldest, "f"),
@@ -356,10 +315,12 @@ def read_state_page(user, *, public_key, cursor=0, channel_ids=None):
                     snapshot["count_source"] = count_source
                     if partial:
                         snapshot["unread_count"] = None
+                        if not snapshot["is_unread"]:
+                            snapshot = None
                 if (
                     snapshot is not None
                     and not snapshot["is_unread"]
-                    and snapshot["count_source"] != "slack"
+                    and snapshot["count_source"] == "imported_messages"
                     and target.conversation is not None
                     and target.conversation.history_backfilled_at is None
                 ):

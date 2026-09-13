@@ -176,11 +176,7 @@ class PrivateUnreadHistoryTests(SimpleTestCase):
             "private_channel",
             conversation=SimpleNamespace(grant=object()),
         )
-        with patch.object(
-            reads,
-            "_source_messages",
-            return_value=[{"ts": "101.000001", "text": "", "user": "UALICE"}],
-        ), patch.object(reads, "_grant_history_days", return_value=0), patch.object(
+        with patch.object(reads, "_grant_history_days", return_value=0), patch.object(
             reads,
             "_call_slack_with_grant_authority",
             return_value={
@@ -209,9 +205,7 @@ class PrivateUnreadHistoryTests(SimpleTestCase):
         target = reads.ReadTarget(
             "mirror", "G123", "mpim", conversation=SimpleNamespace(grant=object())
         )
-        with patch.object(
-            reads, "_source_messages", return_value=[{"ts": "101.000001"}]
-        ), patch.object(reads, "_grant_history_days", return_value=7), patch.object(
+        with patch.object(reads, "_grant_history_days", return_value=7), patch.object(
             reads,
             "_call_slack_with_grant_authority",
             return_value={"messages": [], "has_more": False},
