@@ -267,3 +267,38 @@ class ReadStatePageTests(SimpleTestCase):
         self.assertEqual(set(result["channels"]), {"mirror-7"})
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0].kwargs["channel"], "D7")
+
+
+class SlackReadPermissionUpgradeTests(SimpleTestCase):
+    def test_permission_upgrade_starts_oauth_without_resetting_existing_import(self):
+        from rest_framework.test import APIRequestFactory, force_authenticate
+        from community_chat.slack_views import SlackDmMirrorView
+        from integrations.services.slack_dm_mirror import REQUIRED_SCOPES
+
+        connection = SimpleNamespace(scopes=list(REQUIRED_SCOPES))
+        request = APIRequestFactory().post(
+            "/community-chat/slack/",
+            {"history_days": 0, "refresh_permissions": True},
+            format="json",
+        )
+        force_authenticate(request, user=SimpleNamespace(is_authenticated=True))
+        with patch(
+            "community_chat.slack_views.slack_connection_for_user",
+            return_value=connection,
+        ), patch("community_chat.slack_views.activate_connection") as activate, patch(
+            "community_chat.slack_views.status_payload",
+            return_value={"connected": True, "enabled": True},
+        ), patch.object(
+            SlackDmMirrorView,
+            "_authorization_url",
+            return_value="https://api.mlai.au/oauth",
+        ) as authorize:
+            response = SlackDmMirrorView.as_view(throttle_classes=[])(request)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.data["authorization_url"], "https://api.mlai.au/oauth"
+        )
+        self.assertTrue(response.data["enabled"])
+        authorize.assert_called_once()
+        self.assertEqual(authorize.call_args.kwargs["history_days"], 0)
+        activate.assert_not_called()
