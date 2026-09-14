@@ -1,5 +1,7 @@
 from django.urls import include, path
 
+from .custom_island_views import CustomContentIslandView
+
 from .admin_views import VibeMarketingAdminUsageView
 from .notification_channel_views import (
     VibeMarketingNotificationChannelDeliveryView,
@@ -52,6 +54,8 @@ from .vibe_marketing_views import (
 
 
 urlpatterns = [
+    path("islands/custom", CustomContentIslandView.as_view(), name="vibe-marketing-custom-island-no-slash"),
+    path("islands/custom/", CustomContentIslandView.as_view(), name="vibe-marketing-custom-island"),
     path("admin/usage/", VibeMarketingAdminUsageView.as_view(), name="vibe-marketing-admin-usage"),
     path("analytics/", include("content_analytics.urls")),
     path("bootstrap/", VibeMarketingBootstrapView.as_view(), name="vibe-marketing-bootstrap"),
