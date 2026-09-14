@@ -1164,7 +1164,9 @@ if parsed.username or parsed.password or parsed.query or parsed.fragment:
 
     echo "⏸️ Pausing all runtime writers before DB migrations..."
     docker compose stop "\${all_runtime_writer_services[@]}" || true
-    trap restore_runtime_on_error ERR
+    # Recovery disables errexit while attempting each restoration step. Always
+    # preserve the original failure and stop; recovery is not a successful deploy.
+    trap 'deployment_status=\$?; restore_runtime_on_error; exit "\$deployment_status"' ERR
     trap 'deployment_status=\$?; if [ "\$deployment_status" != "0" ]; then restore_runtime_on_error; fi' EXIT
 
     echo "🗄️ Running migrations..."
@@ -1468,6 +1470,8 @@ expected = {
     "credential_scope": "strict_roo",
     "claim_generation_supported": True,
     "claim_generation_required": True,
+    "claim_channel_required": True,
+    "allowed_channel_id": "C0BRM181EDV",
     "timezone": "Australia/Melbourne",
 }
 expected_enabled = sys.argv[1] == "true"
