@@ -2179,9 +2179,14 @@ def _topic_pillars_for_bootstrap(organization, config, *, declined_keyword_keys=
         coverage_memory=coverage_memory,
         compact=compact,
     )
-    if cluster_pillars:
-        return cluster_pillars
-    return _topic_pillars_from_strategy(config, compact=compact)
+    fallback_pillars = cluster_pillars or _topic_pillars_from_strategy(config, compact=compact)
+    # User-created themes remain available even when the automatic graph is off.
+    from .custom_islands import custom_island_pillar
+    manual_pillars = [custom_island_pillar(island) for island in ContentIsland.objects.filter(
+        organization=organization, origin="manual", status=ContentIslandStatus.VISIBLE,
+    )]
+    manual_slugs = {pillar["slug"] for pillar in manual_pillars}
+    return manual_pillars + [pillar for pillar in fallback_pillars if pillar["slug"] not in manual_slugs]
 
 
 def _island_graph_for_bootstrap(organization, topic_pillars):
@@ -10671,7 +10676,7 @@ def _bootstrap_state_fingerprint(organization, company, config) -> str:
     # A daily island refresh writes no ResearchedKeyword rows at all, so without
     # these two terms the graph would sit behind the TTL until an unrelated write
     # happened to shift the fingerprint.
-    islands = {"c": None, "m": None}
+    islands = ContentIsland.objects.filter(organization=organization, origin="manual").aggregate(c=Count("id"), m=Max("updated_at"))
     island_members = {"c": None, "m": None}
     if _content_islands_enabled():
         islands = ContentIsland.objects.filter(organization=organization).aggregate(c=Count("id"), m=Max("updated_at"))
@@ -11588,6 +11593,7 @@ def _run_result_from_remote(remote_data):
         "content_island_icon_key",
         "contentIslandIconKey",
         "content_island_color_key",
+        "content_island_context",
         "contentIslandColorKey",
         "article_surface_mode",
         "article_surface_hint",
@@ -15062,18 +15068,16 @@ class VibeMarketingDiscoveryView(APIView):
         ).strip()
         billing_refund_context = None
         if content_island_slug:
-            content_island_name = str(
-                _request_value(request.data, "contentIslandName", "content_island_name", default="") or ""
-            ).strip()
-            content_island_keyword = str(
-                _request_value(request.data, "contentIslandKeyword", "content_island_keyword", default="") or ""
-            ).strip()
-            content_island_icon_key = str(
-                _request_value(request.data, "contentIslandIconKey", "content_island_icon_key", default="") or ""
-            ).strip()
-            content_island_color_key = str(
-                _request_value(request.data, "contentIslandColorKey", "content_island_color_key", default="") or ""
-            ).strip()
+            from .custom_islands import resolve_island_discovery_scope
+            try:
+                island_scope = resolve_island_discovery_scope(context.organization, config, content_island_slug)
+            except ValueError as exc:
+                return Response({"detail": str(exc)}, status=400)
+            content_island_name = island_scope["name"]
+            content_island_keyword = island_scope["keyword"]
+            content_island_icon_key = island_scope["icon_key"]
+            content_island_color_key = island_scope["color_key"]
+            island_context = island_scope["context"]
             try:
                 requested_topic_count = int(
                     _request_value(request.data, "requestedTopicCount", "requested_topic_count", default=4) or 4
@@ -15087,6 +15091,7 @@ class VibeMarketingDiscoveryView(APIView):
                     "content_island_keyword": content_island_keyword or content_island_name,
                     "content_island_icon_key": content_island_icon_key,
                     "content_island_color_key": content_island_color_key,
+                    "content_island_context": island_context,
                     "requested_topic_count": max(1, min(requested_topic_count, 8)),
                 }
             )

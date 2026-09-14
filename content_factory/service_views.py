@@ -8253,12 +8253,13 @@ class SEOContentIslandBulkSyncView(APIView):
                     created_slugs.append(slug)
                 else:
                     # Visuals are stamped at creation and never reassigned.
-                    if name:
-                        island.name = name
-                    if description:
-                        island.description = description
-                    if pillar_keyword:
-                        island.pillar_keyword = pillar_keyword
+                    if island.origin != ContentIslandOrigin.MANUAL:
+                        if name:
+                            island.name = name
+                        if description:
+                            island.description = description
+                        if pillar_keyword:
+                            island.pillar_keyword = pillar_keyword
                     if centroid:
                         island.centroid_embedding = centroid
                     island.consecutive_misses = 0
@@ -8296,7 +8297,7 @@ class SEOContentIslandBulkSyncView(APIView):
             archive_after = int(getattr(settings, 'CONTENT_ISLANDS_ARCHIVE_AFTER_MISSES', 5) or 0)
             missed_islands = ContentIsland.objects.filter(organization=org).exclude(
                 status=ContentIslandStatus.ARCHIVED
-            ).exclude(slug__in=touched_slugs)
+            ).exclude(slug__in=touched_slugs).exclude(origin=ContentIslandOrigin.MANUAL)
             for island in missed_islands:
                 island.articles_written = _island_articles_written(island)
                 if island.last_missed_on == captured_on:

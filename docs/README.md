@@ -8,6 +8,10 @@ subsystem-specific contracts and runbooks.
 
 - [Editorial and onboarding contract](content-factory-editorial-contract.md) — approved audience/offer persistence and drafting during website setup
 
+## Content Factory
+
+- [Custom content islands](content-islands.md) — subject briefs, durable islands and scoped topic discovery
+
 ## Community chat APIs
 
 - [`community-chat-administration.md`](community-chat-administration.md) — account roles and Moderator appointments

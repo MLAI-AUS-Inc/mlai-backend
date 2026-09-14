@@ -346,6 +346,7 @@ class ContentIslandGraphNodeSerializer(serializers.ModelSerializer):
     iconKey = serializers.CharField(source='icon_key', read_only=True)
     colorKey = serializers.CharField(source='color_key', read_only=True)
     isNew = serializers.SerializerMethodField()
+    researchPending = serializers.SerializerMethodField()
     keywordCount = serializers.IntegerField(source='keyword_count', read_only=True)
     totalVolume = serializers.IntegerField(source='total_volume', read_only=True)
     avgDifficulty = serializers.FloatField(source='avg_difficulty', read_only=True)
@@ -358,7 +359,7 @@ class ContentIslandGraphNodeSerializer(serializers.ModelSerializer):
         model = ContentIsland
         fields = [
             'id', 'slug', 'name', 'description', 'pillarKeyword',
-            'iconKey', 'colorKey', 'status', 'isNew',
+            'iconKey', 'colorKey', 'status', 'isNew', 'researchPending',
             'keywordCount', 'totalVolume', 'avgDifficulty',
             'opportunityScore', 'aiSearchVolume', 'ideaCount', 'articlesWritten',
         ]
@@ -366,6 +367,9 @@ class ContentIslandGraphNodeSerializer(serializers.ModelSerializer):
 
     def get_id(self, obj):
         return f"island:{obj.slug}"
+
+    def get_researchPending(self, obj):
+        return obj.origin == "manual" and obj.last_refreshed_at is None
 
     def get_isNew(self, obj):
         if not obj.promoted_at:
