@@ -2098,7 +2098,8 @@ class CoworkingViewSetTests(APITestCase):
         self,
         mock_permission,
     ):
-        booking_date = date.today() + timedelta(days=1)
+        # Keep this replay fixture before the refund cutoff at any execution hour.
+        booking_date = timezone.localdate() + timedelta(days=2)
         operation_id = str(uuid4())
         request_data = {
             'slack_user_id': self.user.slack_id,
@@ -2109,7 +2110,8 @@ class CoworkingViewSetTests(APITestCase):
         first = self.client.post(self.url, request_data, format='json')
         self.assertEqual(first.status_code, status.HTTP_201_CREATED)
         booking = CoworkingBooking.objects.get(pk=first.data['id'])
-        CoworkingService.cancel(str(booking.id), self.user.slack_id)
+        _, refunded = CoworkingService.cancel(str(booking.id), self.user.slack_id)
+        self.assertTrue(refunded)
         current = self.client.get(
             reverse('coworking-my-bookings'),
             {
@@ -2701,7 +2703,8 @@ class CoworkingViewSetTests(APITestCase):
         mock_permission,
     ):
         target = self._create_member_with_points('UCOBATCHREPLAY', balance=10)
-        booking_date = date.today() + timedelta(days=1)
+        # Keep this replay fixture before the refund cutoff at any execution hour.
+        booking_date = timezone.localdate() + timedelta(days=2)
         request_data = {
             'admin_slack_user_id': self.admin_slack_id,
             'target_slack_user_ids': [target.slack_id],
@@ -2711,7 +2714,8 @@ class CoworkingViewSetTests(APITestCase):
         first = self.client.post(self.batch_url, request_data, format='json')
         self.assertEqual(first.status_code, status.HTTP_201_CREATED)
         booking = CoworkingBooking.objects.get(user=target, date=booking_date)
-        CoworkingService.cancel(str(booking.id), self.admin_slack_id)
+        _, refunded = CoworkingService.cancel(str(booking.id), self.admin_slack_id)
+        self.assertTrue(refunded)
         PointsAdmin.objects.filter(slack_user_id=self.admin_slack_id).update(
             is_active=False
         )
