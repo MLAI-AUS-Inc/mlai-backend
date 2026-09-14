@@ -252,6 +252,11 @@ class LinearDeploymentWiringTests(unittest.TestCase):
         import re
 
         values = {
+            "MESSAGE_SYNC_ENABLED": "false",
+            "MESSAGE_SYNC_SLACK_APP_ID": "ATEST",
+            "MESSAGE_SYNC_SLACK_USER_APP_ID": "APRIVATE",
+            "MESSAGE_SYNC_SLACK_BOT_WORKSPACE_ID": "TTEST",
+            "MESSAGE_SYNC_SLACK_DISTRIBUTION": "internal",
             "LINEAR_MEETING_REQUIRED_TEAM_KEYS": "TECH,STU,MLA",
             "LINEAR_CHANNEL_ISSUE_BINDINGS_JSON": VALID_BINDINGS,
             "LINEAR_CHANNEL_ISSUE_MAX_COMMENTS": "250",

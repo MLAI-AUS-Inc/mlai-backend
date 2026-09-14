@@ -88,6 +88,25 @@ class MessageSyncWorkerUnitTests(IsolatedAsyncioTestCase):
         complete.assert_not_called()
         send.assert_not_called()
 
+    async def test_disabled_sync_preserves_sequential_legacy_one_shot(self):
+        order = []
+
+        async def private(_limit):
+            order.append("private_start")
+            await asyncio.sleep(0)
+            order.append("private_done")
+
+        async def public(_limit):
+            order.append("public")
+
+        with (
+            patch(f"{WORKER}.message_sync_enabled", return_value=False),
+            patch.object(self.client, "process_private_deliveries_once", side_effect=private),
+            patch.object(self.client, "process_public_deliveries_once", side_effect=public),
+        ):
+            await self.client.process_pending_deliveries_once()
+        self.assertEqual(order, ["private_start", "private_done", "public"])
+
     async def test_slow_private_lane_cannot_hold_up_public_delivery(self):
         release_private = asyncio.Event()
         public_finished = asyncio.Event()
@@ -99,6 +118,7 @@ class MessageSyncWorkerUnitTests(IsolatedAsyncioTestCase):
             public_finished.set()
 
         with (
+            patch(f"{WORKER}.message_sync_enabled", return_value=True),
             patch.object(self.client, "process_private_deliveries_once", side_effect=private),
             patch.object(self.client, "process_public_deliveries_once", side_effect=public),
         ):

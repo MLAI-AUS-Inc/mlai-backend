@@ -3,6 +3,7 @@ set -euo pipefail
 
 key="${1:-}"
 case "$key" in
+  MESSAGE_SYNC_ENABLED|MESSAGE_SYNC_SLACK_APP_ID|MESSAGE_SYNC_SLACK_USER_APP_ID|MESSAGE_SYNC_SLACK_BOT_WORKSPACE_ID|MESSAGE_SYNC_SLACK_DISTRIBUTION|\
   LINEAR_MEETING_REQUIRED_TEAM_KEYS|LINEAR_CHANNEL_ISSUE_BINDINGS_JSON|LINEAR_CHANNEL_ISSUE_MAX_COMMENTS|LINEAR_CHANNEL_ISSUE_WRITES_ENABLED|OFFICE_MANAGER_SLACK_CHANNEL_ID|OFFICE_MANAGER_TIMEZONE) ;;
   *)
     echo "Unsupported production environment key" >&2
@@ -21,6 +22,30 @@ if [[ -z "$value" || "$value" == *$'\n'* || "$value" == *$'\r'* ]]; then
 fi
 
 case "$key" in
+  MESSAGE_SYNC_ENABLED)
+    [[ "$value" == "true" || "$value" == "false" ]] || {
+      echo "MESSAGE_SYNC_ENABLED must be true or false" >&2
+      exit 1
+    }
+    ;;
+  MESSAGE_SYNC_SLACK_APP_ID|MESSAGE_SYNC_SLACK_USER_APP_ID)
+    [[ "$value" =~ ^A[A-Z0-9]+$ ]] || {
+      echo "${key} must be a Slack app ID" >&2
+      exit 1
+    }
+    ;;
+  MESSAGE_SYNC_SLACK_BOT_WORKSPACE_ID)
+    [[ "$value" =~ ^T[A-Z0-9]+$ ]] || {
+      echo "${key} must be a Slack workspace ID" >&2
+      exit 1
+    }
+    ;;
+  MESSAGE_SYNC_SLACK_DISTRIBUTION)
+    [[ "$value" == "restricted" || "$value" == "internal" || "$value" == "marketplace" ]] || {
+      echo "Invalid MESSAGE_SYNC_SLACK_DISTRIBUTION" >&2
+      exit 1
+    }
+    ;;
   OFFICE_MANAGER_SLACK_CHANNEL_ID)
     [[ "$value" =~ ^[CG][A-Z0-9]+$ ]] || {
       echo "OFFICE_MANAGER_SLACK_CHANNEL_ID must be a Slack channel ID" >&2

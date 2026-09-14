@@ -248,6 +248,12 @@ class CommunityBridgeDiscordClient(discord.Client):
 
     async def process_pending_deliveries_once(self, limit: int = 10) -> None:
         """Compatibility one-shot runner; production lanes run independently."""
+        if not message_sync_enabled():
+            # Preserve the legacy one-shot contract, including SQLite callers
+            # that cannot run concurrent writes from different connections.
+            await self.process_private_deliveries_once(limit)
+            await self.process_public_deliveries_once(limit)
+            return
         await asyncio.gather(
             self.process_private_deliveries_once(limit),
             self.process_public_deliveries_once(limit),
