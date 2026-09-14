@@ -1,4 +1,7 @@
 import asyncio
+import os
+import socket
+import time
 import logging
 import uuid
 from typing import Optional
@@ -24,9 +27,11 @@ from integrations.services.community_bridge.identity import (
 )
 from integrations.services.community_bridge.slack import SlackBridgeClient
 from integrations.services.community_bridge.store import (
+    freeze_buzz_delivery,
     claim_ready_deliveries,
     complete_create_delivery,
     complete_delivery,
+    defer_delivery,
     ingest_discord_event,
     mark_delivery_waiting_for_parent,
     mark_delivery_retry,
@@ -42,7 +47,14 @@ from integrations.services.slack_dm_mirror import (
     process_ready_deliveries as process_slack_dm_deliveries,
 )
 
+from integrations.services.message_sync.inbox import enabled as message_sync_enabled, process_inbox_once
+from integrations.services.message_sync.scheduler import BudgetDeferred, LeaseLost, heartbeat
+from integrations.services.message_sync.delivery import delivery_context, supersede_stale_mutation
+from integrations.services.message_sync.runner import process_history_once
+from integrations.services.message_sync.history import seed_states
+
 logger = logging.getLogger(__name__)
+WORKER_ID = f"{socket.gethostname()}:{os.getpid()}"[:100]
 
 
 class ParentMappingPending(Exception):
@@ -60,6 +72,12 @@ class CommunityBridgeDiscordClient(discord.Client):
         intents.messages = True
         intents.message_content = True
         super().__init__(intents=intents, max_messages=5000)
+        self._sync_heartbeat_at = 0.0
+        self._sync_completed_count = 0
+        self._history_seed_at = 0.0
+        self._history_heartbeat_at = 0.0
+        self._history_completed_count = 0
+        self._delivery_heartbeat_at = {}
         self._delivery_loop_started = False
         self._slack_dm_maintenance_started = False
 
@@ -70,11 +88,22 @@ class CommunityBridgeDiscordClient(discord.Client):
             self._delivery_loop_started = True
         if not self._slack_dm_maintenance_started:
             self.slack_dm_discovery_loop.start()
+            if message_sync_enabled():
+                self.slack_dm_history_loop.change_interval(seconds=1.0)
             self.slack_dm_history_loop.start()
+            self.slack_dm_delivery_loop.start()
+            self.sync_inbox_loop.start()
             self._slack_dm_maintenance_started = True
 
     async def on_ready(self) -> None:
         logger.info("community_bridge_discord_ready user=%s", getattr(self.user, "id", ""))
+
+    async def close(self) -> None:
+        """Stop every maintenance lane before releasing the Discord connection."""
+        for loop in (self.delivery_loop, self.slack_dm_delivery_loop,
+                     self.slack_dm_discovery_loop, self.slack_dm_history_loop, self.sync_inbox_loop):
+            loop.cancel()
+        await super().close()
 
     async def on_message(self, message: discord.Message) -> None:
         if not self._should_process_message(message):
@@ -164,7 +193,7 @@ class CommunityBridgeDiscordClient(discord.Client):
 
     @tasks.loop(seconds=1.0)
     async def delivery_loop(self) -> None:
-        await self.process_pending_deliveries_once(limit=20)
+        await self.process_public_deliveries_once(limit=20)
 
     @tasks.loop(seconds=5.0)
     async def slack_dm_discovery_loop(self) -> None:
@@ -174,9 +203,57 @@ class CommunityBridgeDiscordClient(discord.Client):
     async def slack_dm_history_loop(self) -> None:
         # Stay within Slack's documented history baseline while Retry-After
         # responses can pause this independently from delivery retries.
-        await asyncio.to_thread(process_due_history_backfills, 1)
+        await self.process_sync_history_once()
+
+    async def process_sync_history_once(self) -> None:
+        if not message_sync_enabled():
+            await asyncio.to_thread(process_due_history_backfills, 1)
+            return
+        try:
+            # Bounded lanes let one slow workspace release capacity to others;
+            # durable conversation leases and method budgets govern admission.
+            if time.monotonic() - self._history_seed_at >= 5:
+                await asyncio.to_thread(seed_states)
+                self._history_seed_at = time.monotonic()
+            completed = await asyncio.gather(*(asyncio.to_thread(process_history_once, seed=False) for _ in range(4)))
+            self._history_completed_count += sum(completed)
+            if time.monotonic() - self._history_heartbeat_at >= 10:
+                await asyncio.to_thread(heartbeat, WORKER_ID, "history", completed=self._history_completed_count)
+                self._history_completed_count = 0
+                self._history_heartbeat_at = time.monotonic()
+        except Exception as exc:
+            logger.warning("message_sync_history_tick_failed error_code=%s", type(exc).__name__)
+            await asyncio.sleep(5)
+
+    @tasks.loop(seconds=1.0)
+    async def slack_dm_delivery_loop(self) -> None:
+        await self.process_private_deliveries_once(limit=20)
+
+    @tasks.loop(seconds=0.1)
+    async def sync_inbox_loop(self) -> None:
+        await self.process_sync_inbox_once()
+
+    async def process_sync_inbox_once(self) -> None:
+        if not message_sync_enabled():
+            return
+        try:
+            self._sync_completed_count += await asyncio.to_thread(process_inbox_once)
+            if time.monotonic() - self._sync_heartbeat_at >= 10:
+                await asyncio.to_thread(heartbeat, WORKER_ID, "inbox", completed=self._sync_completed_count)
+                self._sync_completed_count = 0
+                self._sync_heartbeat_at = time.monotonic()
+        except Exception as exc:
+            logger.warning("message_sync_inbox_tick_failed error_code=%s", type(exc).__name__)
+            await asyncio.sleep(5)
 
     async def process_pending_deliveries_once(self, limit: int = 10) -> None:
+        """Compatibility one-shot runner; production lanes run independently."""
+        await asyncio.gather(
+            self.process_private_deliveries_once(limit),
+            self.process_public_deliveries_once(limit),
+        )
+
+    async def process_private_deliveries_once(self, limit: int = 10) -> None:
         private_batch_size = max(
             1,
             min(
@@ -184,15 +261,50 @@ class CommunityBridgeDiscordClient(discord.Client):
                 20,
             ),
         )
-        await asyncio.to_thread(
-            process_slack_dm_deliveries,
-            limit,
-            batch_size=private_batch_size,
-        )
-        deliveries = await asyncio.to_thread(claim_ready_deliveries, limit)
-        for delivery in deliveries:
+        if not message_sync_enabled():
+            await asyncio.to_thread(process_slack_dm_deliveries, limit, batch_size=private_batch_size)
+            return
+        # Independent owners can progress while one adapter call is slow. The
+        # existing conversation/grant locks retain ordering and revocation.
+        workers = min(4, max(1, limit))
+        counts = [limit // workers + (1 if index < limit % workers else 0) for index in range(workers)]
+        await asyncio.gather(*(asyncio.to_thread(
+            process_slack_dm_deliveries, count, batch_size=private_batch_size,
+        ) for count in counts))
+        await self._record_delivery_health("private_delivery")
+
+    async def _record_delivery_health(self, lane):
+        if message_sync_enabled() and time.monotonic() - self._delivery_heartbeat_at.get(lane, 0) >= 10:
+            await asyncio.to_thread(heartbeat, WORKER_ID, lane)
+            self._delivery_heartbeat_at[lane] = time.monotonic()
+
+    async def process_public_deliveries_once(self, limit: int = 10) -> None:
+        async def deliver(delivery):
             try:
+                await self._process_claimed_public_delivery(delivery)
+            except LeaseLost:
+                logger.info("message_sync_stale_delivery_discarded delivery_id=%s", delivery["id"])
+        remaining = max(1, limit)
+        while remaining:
+            # Claim only when an execution slot is available. Leasing a large
+            # serial batch lets later rows expire before their first send.
+            batch_size = min(4 if message_sync_enabled() else 1, remaining)
+            deliveries = await asyncio.to_thread(claim_ready_deliveries, batch_size)
+            if not deliveries:
+                await self._record_delivery_health("public_delivery")
+                break
+            remaining -= len(deliveries)
+            await asyncio.gather(*(deliver(delivery) for delivery in deliveries))
+            await self._record_delivery_health("public_delivery")
+
+    async def _process_claimed_public_delivery(self, delivery: dict) -> None:
+        with delivery_context(delivery):
+            try:
+                if message_sync_enabled() and await asyncio.to_thread(supersede_stale_mutation, delivery["id"]):
+                    return
                 await self._process_delivery(delivery)
+            except BudgetDeferred as exc:
+                await asyncio.to_thread(defer_delivery, delivery_id=delivery["id"], retry_after=exc.retry_after)
             except ParentMappingPending as exc:
                 logger.info(
                     "community_bridge_waiting_for_parent delivery_id=%s parent_message_id=%s",
@@ -479,6 +591,12 @@ class CommunityBridgeDiscordClient(discord.Client):
 
     async def _deliver_to_buzz(self, delivery: dict) -> None:
         payload = dict(delivery["payload"] or {})
+        frozen = delivery.get("canonical_envelope") or payload.get("_buzz_envelope_v1")
+        if frozen is not None:
+            if not isinstance(frozen, dict) or not frozen:
+                raise RuntimeError("Invalid durable Buzz envelope")
+            await self._send_frozen_buzz_delivery(delivery, frozen)
+            return
         operation = delivery["delivery_type"]
         channel = dict(delivery.get("channel") or {})
         slack_workspace_id = str(channel.get("slack_workspace_id") or "").strip()
@@ -562,12 +680,12 @@ class CommunityBridgeDiscordClient(discord.Client):
                     await asyncio.to_thread(complete_delivery, delivery_id=delivery["id"])
                     return
                 text = str(payload.get("text") or "").strip()
-            response = await asyncio.to_thread(
-                BuzzBridgeClient.deliver,
+            await self._freeze_and_send_buzz_delivery(
+                delivery,
                 delivery_id=str(delivery["id"]),
-                # Relay channel writes have a deliberate freshness floor. Keep
-                # the Nostr protocol timestamp fresh and carry Slack's trusted
-                # chronology in bridge-source-created-at instead.
+                # Preserve this timestamp across every retry. The relay admits
+                # delayed deliveries only for its configured public bridge;
+                # Slack chronology remains in bridge-source-created-at.
                 created_at=int(delivery["created_at"]),
                 operation=operation,
                 channel_id=delivery["target_channel_id"],
@@ -583,14 +701,6 @@ class CommunityBridgeDiscordClient(discord.Client):
                 else False,
                 **provenance,
             )
-            await asyncio.to_thread(
-                complete_create_delivery,
-                delivery_id=delivery["id"],
-                destination_message_id=response["message_id"],
-                destination_channel_id=response["channel_id"],
-                destination_parent_message_id=parent_message_id,
-                destination_payload=response,
-            )
             return
 
         override_target_message_id = str(
@@ -601,8 +711,8 @@ class CommunityBridgeDiscordClient(discord.Client):
                 override_target_message_id
             ):
                 raise RuntimeError("Invalid reconciliation destination override")
-            await asyncio.to_thread(
-                BuzzBridgeClient.deliver,
+            await self._freeze_and_send_buzz_delivery(
+                delivery,
                 delivery_id=str(delivery["id"]),
                 created_at=int(delivery["created_at"]),
                 operation=operation,
@@ -611,7 +721,6 @@ class CommunityBridgeDiscordClient(discord.Client):
                 target_message_id=override_target_message_id,
                 **provenance,
             )
-            await asyncio.to_thread(complete_delivery, delivery_id=delivery["id"])
             return
 
         link = await asyncio.to_thread(
@@ -622,11 +731,12 @@ class CommunityBridgeDiscordClient(discord.Client):
             destination_platform=CommunityBridgePlatform.BUZZ,
         )
         if not link:
-            await asyncio.to_thread(complete_delivery, delivery_id=delivery["id"])
-            return
+            # An edit/delete can overtake a delayed create. Park it on the
+            # same durable dependency machinery used by thread replies.
+            raise ParentMappingPending(delivery["source_message_id"])
 
-        await asyncio.to_thread(
-            BuzzBridgeClient.deliver,
+        await self._freeze_and_send_buzz_delivery(
+            delivery,
             delivery_id=str(delivery["id"]),
             created_at=int(delivery["created_at"]),
             operation=operation,
@@ -635,10 +745,34 @@ class CommunityBridgeDiscordClient(discord.Client):
             target_message_id=link["destination_message_id"],
             **provenance,
         )
+
+    async def _freeze_and_send_buzz_delivery(self, delivery: dict, **envelope) -> None:
+        frozen = await asyncio.to_thread(
+            freeze_buzz_delivery, delivery_id=delivery["id"], envelope=envelope,
+        )
+        await self._send_frozen_buzz_delivery(delivery, frozen)
+
+    async def _send_frozen_buzz_delivery(self, delivery: dict, envelope: dict) -> None:
+        response = await asyncio.to_thread(BuzzBridgeClient.deliver, **envelope)
+        operation = delivery["delivery_type"]
+        if operation in {
+            CommunityBridgeDeliveryType.CREATE,
+            CommunityBridgeDeliveryType.REACTION_ADD,
+        }:
+            await asyncio.to_thread(
+                complete_create_delivery,
+                delivery_id=delivery["id"],
+                destination_message_id=response["message_id"],
+                destination_channel_id=response["channel_id"],
+                destination_parent_message_id=envelope.get("parent_message_id", ""),
+                destination_payload=response,
+            )
+            return
+        metadata = (delivery.get("payload") or {}).get("metadata") or {}
         if operation in {
             CommunityBridgeDeliveryType.DELETE,
             CommunityBridgeDeliveryType.REACTION_REMOVE,
-        }:
+        } and not metadata.get("destination_message_id_override"):
             await asyncio.to_thread(
                 mark_link_deleted,
                 source_platform=delivery["source_platform"],
@@ -764,15 +898,27 @@ async def _run_headless_delivery_worker(client: CommunityBridgeDiscordClient) ->
 
     async def history_loop():
         while True:
-            await asyncio.to_thread(process_due_history_backfills, 1)
-            await asyncio.sleep(HISTORY_REQUEST_INTERVAL_SECONDS)
+            await client.process_sync_history_once()
+            await asyncio.sleep(1.0 if message_sync_enabled() else HISTORY_REQUEST_INTERVAL_SECONDS)
 
     async def delivery_loop():
         while True:
-            await client.process_pending_deliveries_once(limit=20)
+            await client.process_public_deliveries_once(limit=20)
             await asyncio.sleep(poll_seconds)
 
+    async def private_delivery_loop():
+        while True:
+            await client.process_private_deliveries_once(limit=20)
+            await asyncio.sleep(poll_seconds)
+
+    async def inbox_loop():
+        while True:
+            await client.process_sync_inbox_once()
+            await asyncio.sleep(0.1)
+
     async with asyncio.TaskGroup() as group:
+        group.create_task(inbox_loop())
         group.create_task(discovery_loop())
         group.create_task(history_loop())
         group.create_task(delivery_loop())
+        group.create_task(private_delivery_loop())

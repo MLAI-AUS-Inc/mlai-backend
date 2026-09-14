@@ -816,6 +816,10 @@ class CommunityBridgeDelivery(models.Model):
     source_parent_message_id = models.CharField(max_length=100, blank=True, default="")
     target_channel_id = models.CharField(max_length=100, blank=True, default="")
     payload = models.JSONField(default=dict, blank=True)
+    canonical_envelope = models.JSONField(default=dict, blank=True)
+    lease_token = models.UUIDField(null=True, blank=True)
+    lease_expires_at = models.DateTimeField(null=True, blank=True)
+    source_revision = models.CharField(max_length=100, blank=True, default="")
     attempts = models.PositiveSmallIntegerField(default=0)
     max_attempts = models.PositiveSmallIntegerField(default=5)
     dependency_attempts = models.PositiveSmallIntegerField(default=0)
@@ -2148,3 +2152,10 @@ class LinearProjectSizingItem(models.Model):
 
     def __str__(self):
         return f"{self.identifier or self.issue_id}:{self.status}"
+
+
+# Keep the sync metadata separate from the domain models while registering it
+# with Django's normal model and migration discovery.
+from .message_sync_models import (  # noqa: E402,F401
+    BridgeApiBudget, BridgeSyncInbox, BridgeSyncJob, BridgeSyncState, BridgeWorkerHeartbeat,
+)

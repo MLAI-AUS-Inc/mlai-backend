@@ -50,7 +50,7 @@ jobs:
         python-version: "3.11"
 
     - name: Test deployment failure handling and live contract
-      run: python -m unittest tests.test_deploy_runtime_checks -v
+      run: python -m unittest tests.test_deploy_runtime_checks tests.test_message_sync_deploy_config -v
 
     - name: Install dependencies
       run: |
@@ -356,6 +356,18 @@ jobs:
           org_memory.tests.test_drive_processing.DriveProcessingTests.test_unchanged_accessible_version_restores_policy_revoked_chunks \
           --verbosity 2
 
+    - name: Run durable message synchronization PostgreSQL tests
+      run: |
+        python manage.py test \
+          integrations.tests_message_sync_unit \
+          integrations.tests_message_sync_configuration \
+          integrations.tests_message_sync_transactions \
+          integrations.tests_message_sync_scheduler \
+          integrations.tests_message_sync_discovery \
+          integrations.tests_message_sync_history \
+          integrations.tests_message_sync_public_repair \
+          --verbosity 2
+
     - name: Run meeting-room PostgreSQL tests
       run: python manage.py test roo.tests_meeting_rooms --verbosity 2
 
@@ -468,6 +480,14 @@ jobs:
         COMMUNITY_CHAT_EMAIL_CODE_DELIVERY_SECRET: ${{ secrets.COMMUNITY_CHAT_EMAIL_CODE_DELIVERY_SECRET }}
         COMMUNITY_CHAT_ADAPTER_TOKEN: ${{ secrets.COMMUNITY_CHAT_ADAPTER_TOKEN }}
         COMMUNITY_CHAT_ADAPTER_URL: ${{ vars.COMMUNITY_CHAT_ADAPTER_URL }}
+        MESSAGE_SYNC_ENABLED: ${{ vars.MESSAGE_SYNC_ENABLED || 'false' }}
+        MESSAGE_SYNC_SLACK_APP_ID: ${{ vars.MESSAGE_SYNC_SLACK_APP_ID }}
+        MESSAGE_SYNC_SLACK_APP_TOKEN: ${{ secrets.MESSAGE_SYNC_SLACK_APP_TOKEN }}
+        MESSAGE_SYNC_SLACK_USER_APP_ID: ${{ vars.MESSAGE_SYNC_SLACK_USER_APP_ID }}
+        MESSAGE_SYNC_SLACK_USER_APP_TOKEN: ${{ secrets.MESSAGE_SYNC_SLACK_USER_APP_TOKEN }}
+        MESSAGE_SYNC_SLACK_USER_SIGNING_SECRET: ${{ secrets.MESSAGE_SYNC_SLACK_USER_SIGNING_SECRET }}
+        MESSAGE_SYNC_SLACK_BOT_WORKSPACE_ID: ${{ vars.SLACK_BRIDGE_WORKSPACE_ID }}
+        MESSAGE_SYNC_SLACK_DISTRIBUTION: ${{ vars.MESSAGE_SYNC_SLACK_DISTRIBUTION || 'restricted' }}
         SLACK_BRIDGE_BOT_TOKEN: ${{ secrets.SLACK_BRIDGE_BOT_TOKEN }}
         SLACK_BRIDGE_SIGNING_SECRET: ${{ secrets.SLACK_BRIDGE_SIGNING_SECRET }}
         SLACK_BRIDGE_BOT_USER_ID: ${{ vars.SLACK_BRIDGE_BOT_USER_ID }}
