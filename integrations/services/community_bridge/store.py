@@ -1,10 +1,11 @@
 import logging
+import re
 from datetime import timedelta
 from typing import Optional
 
 from django.conf import settings
 from django.db import IntegrityError, connection, transaction
-from django.db.models import F
+from django.db.models import F, Q
 from django.utils import timezone
 
 from integrations.models import (
@@ -17,6 +18,7 @@ from integrations.models import (
     CommunityBridgeReceipt,
     CommunityBridgeReceiptStatus,
 )
+from integrations.services.message_sync.delivery import guard_delivery, guard_current_delivery
 from integrations.services.community_bridge.formatting import (
     emoji_to_slack_reaction,
     normalize_slack_files,
@@ -79,6 +81,7 @@ def ingest_discord_event(
     )
 
 
+@transaction.atomic
 def ingest_inbound_event(
     *,
     source_platform: str,
@@ -126,15 +129,25 @@ def ingest_inbound_event(
                 payload=raw_payload or {},
             )
     except IntegrityError:
-        existing = CommunityBridgeReceipt.objects.filter(
+        existing = CommunityBridgeReceipt.objects.select_for_update().filter(
             platform=source_platform,
             receipt_key=normalized_receipt_key,
         ).first()
-        return {
-            "status": "duplicate",
-            "receipt_id": existing.id if existing else None,
-            "receipt_key": normalized_receipt_key,
-        }
+        if (
+            existing is not None
+            and existing.status == CommunityBridgeReceiptStatus.ACCEPTED
+            and existing.source_channel_id == normalized_channel_id
+            and not CommunityBridgeDelivery.objects.filter(receipt=existing).exists()
+        ):
+            # Recover an orphan left by the old receipt-before-outbox flow.
+            # Enqueued/completed/ignored receipts remain ordinary duplicates.
+            receipt = existing
+        else:
+            return {
+                "status": "duplicate",
+                "receipt_id": existing.id if existing else None,
+                "receipt_key": normalized_receipt_key,
+            }
 
     if channel is None:
         return _mark_receipt_ignored(receipt, reason="unmapped_channel")
@@ -183,6 +196,7 @@ def ingest_inbound_event(
         delivery_type=normalized_event["delivery_type"],
         status=CommunityBridgeDeliveryStatus.PENDING,
         source_event_key=normalized_receipt_key,
+        source_revision=_source_revision(raw_payload) if source_platform == CommunityBridgePlatform.SLACK else "",
         source_channel_id=normalized_channel_id,
         source_message_id=str(normalized_event.get("source_message_id") or "").strip(),
         source_parent_message_id=str(normalized_event.get("source_parent_message_id") or "").strip(),
@@ -202,7 +216,42 @@ def ingest_inbound_event(
     }
 
 
+def freeze_buzz_delivery(*, delivery_id: int, envelope: dict) -> dict:
+    """Persist the first public adapter request before an uncertain network send.
+
+    Keep this checkpoint in the existing public outbox payload so the loss fix
+    can ship independently of the new scheduler schema. Normalizers construct
+    this payload themselves; provider input cannot populate the reserved key.
+    """
+    with transaction.atomic():
+        delivery = CommunityBridgeDelivery.objects.select_for_update().get(id=delivery_id)
+        guard_delivery(delivery)
+        if delivery.target_platform != CommunityBridgePlatform.BUZZ:
+            raise ValueError("Only public Buzz deliveries use this checkpoint")
+        payload = dict(delivery.payload or {})
+        existing = delivery.canonical_envelope or payload.get("_buzz_envelope_v1")
+        if existing is not None:
+            if not isinstance(existing, dict) or not existing:
+                raise ValueError("Invalid durable Buzz envelope")
+            if not delivery.canonical_envelope:
+                delivery.canonical_envelope = dict(existing)
+                delivery.save(update_fields=["canonical_envelope", "updated_at"])
+            return dict(existing)
+        if str(envelope.get("delivery_id")) != str(delivery.id):
+            raise ValueError("Buzz envelope does not match its delivery")
+        payload["_buzz_envelope_v1"] = dict(envelope)
+        delivery.payload = payload
+        delivery.canonical_envelope = dict(envelope)
+        delivery.save(update_fields=["payload", "canonical_envelope", "updated_at"])
+        return dict(envelope)
+
+
 def claim_ready_deliveries(limit: int = 10) -> list[dict]:
+    if getattr(settings, "MESSAGE_SYNC_ENABLED", False):
+        from integrations.services.message_sync.delivery import claim_public, recover_public_leases
+        recover_public_leases()
+        reset_stale_processing_deliveries()
+        return claim_public(limit)
     now = timezone.now()
     items = []
     with transaction.atomic():
@@ -305,7 +354,8 @@ def complete_create_delivery(
 ) -> None:
     """Record the destination before any dependent work, then optionally finish."""
     with transaction.atomic():
-        delivery = CommunityBridgeDelivery.objects.select_related("channel").get(id=delivery_id)
+        delivery = CommunityBridgeDelivery.objects.select_for_update(of=("self",)).select_related("channel").get(id=delivery_id)
+        guard_delivery(delivery)
         payload = dict(delivery.payload or {})
         CommunityBridgeMessageLink.objects.update_or_create(
             source_platform=delivery.source_platform,
@@ -327,18 +377,22 @@ def complete_create_delivery(
         )
         if not mark_completed:
             return
+        delivery.lease_token = None
+        delivery.lease_expires_at = None
         delivery.status = CommunityBridgeDeliveryStatus.COMPLETED
         delivery.completed_at = timezone.now()
         delivery.locked_at = None
         delivery.last_error = ""
-        delivery.save(update_fields=["status", "completed_at", "locked_at", "last_error", "updated_at"])
+        delivery.save(update_fields=["lease_token", "lease_expires_at", "status", "completed_at", "locked_at", "last_error", "updated_at"])
         _wake_waiting_child_deliveries(delivery)
 
 
 def complete_delivery(*, delivery_id: int, wake_waiting_children: bool = False) -> None:
     """Finish delivery without rewriting a previously checkpointed message link."""
     with transaction.atomic():
+        guard_delivery(CommunityBridgeDelivery.objects.select_for_update().get(id=delivery_id))
         CommunityBridgeDelivery.objects.filter(id=delivery_id).update(
+            lease_token=None, lease_expires_at=None,
             status=CommunityBridgeDeliveryStatus.COMPLETED,
             completed_at=timezone.now(),
             locked_at=None,
@@ -349,6 +403,7 @@ def complete_delivery(*, delivery_id: int, wake_waiting_children: bool = False) 
             _wake_waiting_child_deliveries(CommunityBridgeDelivery.objects.get(id=delivery_id))
 
 
+@transaction.atomic
 def mark_link_deleted(
     *,
     source_platform: str,
@@ -356,6 +411,7 @@ def mark_link_deleted(
     source_message_id: str,
     destination_platform: str,
 ) -> None:
+    guard_current_delivery()
     timestamp = timezone.now()
     CommunityBridgeMessageLink.objects.filter(
         source_platform=source_platform,
@@ -365,13 +421,16 @@ def mark_link_deleted(
     ).update(source_deleted_at=timestamp, destination_deleted_at=timestamp, updated_at=timestamp)
 
 
+@transaction.atomic
 def mark_delivery_retry(*, delivery_id: int, error_text: str, permanent: bool = False) -> None:
-    delivery = CommunityBridgeDelivery.objects.filter(id=delivery_id).first()
+    delivery = CommunityBridgeDelivery.objects.select_for_update().filter(id=delivery_id).first()
     if not delivery:
         return
+    guard_delivery(delivery)
     now = timezone.now()
     error_message = str(error_text or "").strip()
-    if permanent or int(delivery.attempts or 0) >= int(delivery.max_attempts or 0):
+    durable = bool(getattr(settings, "MESSAGE_SYNC_ENABLED", False))
+    if permanent or (not durable and int(delivery.attempts or 0) >= int(delivery.max_attempts or 0)):
         delivery.status = CommunityBridgeDeliveryStatus.DEAD
         delivery.available_at = now
     else:
@@ -379,10 +438,32 @@ def mark_delivery_retry(*, delivery_id: int, error_text: str, permanent: bool = 
         backoff = RETRY_DELAYS_SECONDS[min(max(int(delivery.attempts or 1) - 1, 0), len(RETRY_DELAYS_SECONDS) - 1)]
         delivery.available_at = now + timedelta(seconds=backoff)
     delivery.locked_at = None
+    delivery.lease_token = None
+    delivery.lease_expires_at = None
     delivery.last_error = error_message[:2000]
-    delivery.save(update_fields=["status", "available_at", "locked_at", "last_error", "updated_at"])
+    delivery.save(update_fields=["status", "available_at", "locked_at", "lease_token", "lease_expires_at", "last_error", "updated_at"])
 
 
+def defer_delivery(*, delivery_id: int, retry_after: int) -> None:
+    """Quota waits do not consume a provider failure or lose a queued message."""
+    with transaction.atomic():
+        from integrations.services.message_sync.delivery import refund_current_delivery_turn
+        refund_current_delivery_turn()
+        row = CommunityBridgeDelivery.objects.select_for_update().get(pk=delivery_id)
+        guard_delivery(row)
+        if row.status != CommunityBridgeDeliveryStatus.PROCESSING:
+            return
+        row.status = CommunityBridgeDeliveryStatus.PENDING
+        row.attempts = max(0, row.attempts - 1)
+        row.available_at = timezone.now() + timedelta(seconds=max(1, retry_after))
+        row.locked_at = None
+        row.last_error = "provider_budget_deferred"
+        row.lease_token = None
+        row.lease_expires_at = None
+        row.save(update_fields=["lease_token", "lease_expires_at", "status", "attempts", "available_at", "locked_at", "last_error", "updated_at"])
+
+
+@transaction.atomic
 def mark_delivery_waiting_for_parent(
     *, delivery_id: int, parent_message_id: str
 ) -> None:
@@ -393,13 +474,14 @@ def mark_delivery_waiting_for_parent(
     delivery's bounded provider-attempt budget.
     """
 
-    delivery = CommunityBridgeDelivery.objects.filter(id=delivery_id).first()
+    delivery = CommunityBridgeDelivery.objects.select_for_update().filter(id=delivery_id).first()
     if not delivery:
         return
+    guard_delivery(delivery)
 
     now = timezone.now()
     first_seen = delivery.dependency_first_seen_at or now
-    dependency_attempts = int(delivery.dependency_attempts or 0) + 1
+    dependency_attempts = min(int(delivery.dependency_attempts or 0) + 1, 32_767)
     max_age_seconds = max(
         1,
         int(
@@ -422,7 +504,7 @@ def mark_delivery_waiting_for_parent(
             or 360
         ),
     )
-    expired = (
+    expired = not getattr(settings, "MESSAGE_SYNC_ENABLED", False) and (
         dependency_attempts >= max_attempts
         or (now - first_seen).total_seconds() >= max_age_seconds
     )
@@ -439,6 +521,8 @@ def mark_delivery_waiting_for_parent(
         now if expired else now + timedelta(seconds=PARENT_DEPENDENCY_RETRY_SECONDS)
     )
     delivery.locked_at = None
+    delivery.lease_token = None
+    delivery.lease_expires_at = None
     delivery.last_error = (
         f"parent_mapping_timeout:{str(parent_message_id or '').strip()}"
         if expired
@@ -452,6 +536,8 @@ def mark_delivery_waiting_for_parent(
             "dependency_first_seen_at",
             "available_at",
             "locked_at",
+            "lease_token",
+            "lease_expires_at",
             "last_error",
             "updated_at",
         ]
@@ -466,9 +552,14 @@ def _wake_waiting_child_deliveries(parent: CommunityBridgeDelivery) -> int:
         channel=parent.channel,
         source_platform=parent.source_platform,
         source_channel_id=parent.source_channel_id,
-        source_parent_message_id=parent.source_message_id,
         target_platform=parent.target_platform,
         status=CommunityBridgeDeliveryStatus.WAITING_FOR_PARENT,
+    ).filter(
+        Q(source_parent_message_id=parent.source_message_id)
+        | Q(source_message_id=parent.source_message_id, delivery_type__in=[
+            CommunityBridgeDeliveryType.EDIT, CommunityBridgeDeliveryType.DELETE,
+            CommunityBridgeDeliveryType.REACTION_REMOVE,
+        ])
     ).update(
         status=CommunityBridgeDeliveryStatus.PENDING,
         available_at=now,
@@ -723,9 +814,19 @@ def _slack_timestamp_seconds(value: str) -> int:
     return max(0, seconds)
 
 
+def _source_revision(payload: dict) -> str:
+    event = payload.get("event") if isinstance(payload.get("event"), dict) else {}
+    message = event.get("message") if isinstance(event.get("message"), dict) else {}
+    edited = message.get("edited") if isinstance(message.get("edited"), dict) else {}
+    revision = str(event.get("event_ts") or edited.get("ts") or event.get("ts") or "")
+    return revision if re.fullmatch(r"[0-9]{1,20}\.[0-9]{1,6}", revision) else ""
+
+
 def _serialize_delivery(delivery: CommunityBridgeDelivery) -> dict:
     return {
         "id": delivery.id,
+        "lease_token": str(delivery.lease_token) if delivery.lease_token else None,
+        "canonical_envelope": dict(delivery.canonical_envelope or {}),
         "created_at": int(delivery.created_at.timestamp()),
         "channel_id": delivery.channel_id,
         "target_platform": delivery.target_platform,

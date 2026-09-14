@@ -31,6 +31,10 @@ from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
+from integrations.services.message_sync.slack_client import budgeted_client
+from integrations.services.message_sync.configuration import user_app_id
+from integrations.services.message_sync.scheduler import BudgetDeferred, LeaseLost
+from integrations.services.message_sync.private_delivery import fair_private_candidate, guard_private_delivery
 
 from community_chat.models import CommunityChatDevice, DeviceBindingStatus
 from integrations.fields import (
@@ -537,6 +541,8 @@ def _lock_slack_grant_api_authority(
         raise SlackDmMirrorAuthorizationError(
             "Slack consent changed before the private response could be stored."
         )
+    from integrations.services.message_sync.discovery import guard_discovery
+    guard_discovery(grant, connection)
     return grant, connection
 
 
@@ -565,10 +571,10 @@ def _call_slack_with_grant_authority(
             authority,
             required_scopes=required_scopes,
         )
-        client = WebClient(
+        client = budgeted_client(WebClient(
             token=str(connection.access_token or "").strip(),
             timeout=_slack_sdk_timeout_seconds(),
-        )
+        ), workspace_id=authority.workspace_id, app_id=user_app_id())
         try:
             return getattr(client, method)(**kwargs)
         except SlackApiError as exc:
@@ -3546,6 +3552,8 @@ def ingest_slack_dm_event(payload: dict[str, Any]) -> dict[str, Any] | None:
     )
     if normalized is None:
         return {"status": "ignored"}
+    if payload.get("_sync_authorizations_complete") and not _slack_event_authorized_user_ids(payload):
+        return {"status": "ignored"}
     if not channel_id.startswith("D"):
         # MPIM/private-channel membership can change independently of message delivery. Never
         # persist a body against a stale participant hash: stage the ciphertext
@@ -4001,28 +4009,37 @@ def _claim_ready_private_delivery_batch(*, limit: int) -> list[SlackDmMirrorDeli
             prioritize_open_conversations,
         )
 
-        candidate_conversation_id = (
-            prioritize_open_conversations(
-                SlackDmMirrorDelivery.objects.filter(
-                    status=CommunityBridgeDeliveryStatus.PENDING,
-                    available_at__lte=claim_now,
-                    conversation__status=SlackDmMirrorConversationStatus.LIVE,
-                    conversation__grant__status=SlackDmMirrorGrantStatus.ACTIVE,
-                    conversation__grant__revoked_at__isnull=True,
-                ),
-                conversation_field="conversation_id",
+        if getattr(settings, "MESSAGE_SYNC_ENABLED", False):
+            candidate_conversation_id = fair_private_candidate(claim_now, REGISTRATION_STATE_PREFIX)
+        else:
+            candidate_conversation_id = (
+                prioritize_open_conversations(
+                    SlackDmMirrorDelivery.objects.filter(
+                        status=CommunityBridgeDeliveryStatus.PENDING,
+                        available_at__lte=claim_now,
+                        conversation__status=SlackDmMirrorConversationStatus.LIVE,
+                        conversation__grant__status=SlackDmMirrorGrantStatus.ACTIVE,
+                        conversation__grant__revoked_at__isnull=True,
+                    ),
+                    conversation_field="conversation_id",
+                )
+                .exclude(source_message_id__startswith=REGISTRATION_STATE_PREFIX)
+                .order_by("-foreground_refresh", "available_at", "id")
+                .values_list("conversation_id", flat=True)
+                .first()
             )
-            .exclude(source_message_id__startswith=REGISTRATION_STATE_PREFIX)
-            .order_by("-foreground_refresh", "available_at", "id")
-            .values_list("conversation_id", flat=True)
-            .first()
-        )
         if candidate_conversation_id is None:
             return []
+        # Follow the same privacy lock order as response persistence/revocation.
+        # A busy owner can be skipped without blocking other users' deliveries.
+        owner_id = SlackDmMirrorConversation.objects.filter(pk=candidate_conversation_id).values_list("grant__user_id", flat=True).first()
+        if not get_user_model().objects.select_for_update(skip_locked=True).filter(pk=owner_id).exists():
+            return []
+        list(SlackDmMirrorGrant.objects.select_for_update().filter(user_id=owner_id).order_by("id"))
         # Conversation-first locking prevents two worker processes from
         # claiming different rows in the same DM and reversing their order.
         conversation = (
-            SlackDmMirrorConversation.objects.select_for_update(skip_locked=True)
+            SlackDmMirrorConversation.objects.select_for_update(skip_locked=True, of=("self",))
             .select_related("grant__connection")
             .filter(
                 pk=candidate_conversation_id,
@@ -4040,6 +4057,14 @@ def _claim_ready_private_delivery_batch(*, limit: int) -> list[SlackDmMirrorDeli
             ).exists()
         ):
             return []
+        state = None
+        previous_turn = None
+        if getattr(settings, "MESSAGE_SYNC_ENABLED", False):
+            from integrations.services.message_sync.history import ensure_state
+            from integrations.models import BridgeSyncState
+            state = ensure_state(conversation)
+            state = BridgeSyncState.objects.select_for_update().get(pk=state.pk)
+            previous_turn = state.last_served_at
         seed = None
         for _ in range(100):
             seed = (
@@ -4112,7 +4137,13 @@ def _claim_ready_private_delivery_batch(*, limit: int) -> list[SlackDmMirrorDeli
                 bounded_candidates.append(candidate)
                 text_bytes = next_text_bytes
             candidates = bounded_candidates or [seed]
+        if state is not None:
+            state.last_served_at = claim_now
+            state.save(update_fields=["last_served_at"])
         for delivery in candidates:
+            if getattr(settings, "MESSAGE_SYNC_ENABLED", False):
+                delivery.metadata = {**(delivery.metadata or {}), "sync_delivery_lease": uuid.uuid4().hex}
+                delivery._sync_turn = (state.pk, previous_turn, claim_now)
             _prepare_outbound_echo_metadata(delivery)
             delivery.status = CommunityBridgeDeliveryStatus.PROCESSING
             delivery.save(update_fields=("metadata", "status", "updated_at"))
@@ -4194,6 +4225,8 @@ def _record_private_delivery_failure(
 ) -> None:
     """Retry a failed body only while its consent boundary remains current."""
 
+    if isinstance(exc, LeaseLost):
+        return
     if _is_slack_auth_error(exc):
         user_id = (
             SlackDmMirrorGrant.objects.filter(pk=claimed_delivery.conversation.grant_id)
@@ -4210,6 +4243,7 @@ def _record_private_delivery_failure(
         return
 
     with transaction.atomic():
+        get_user_model().objects.select_for_update().get(pk=claimed_delivery.conversation.grant.user_id)
         grant = (
             SlackDmMirrorGrant.objects.select_for_update()
             .filter(pk=claimed_delivery.conversation.grant_id)
@@ -4224,6 +4258,12 @@ def _record_private_delivery_failure(
         )
         if conversation is None:
             return
+        # Refund only quota waits, and only while this exact fairness turn is
+        # still current. State precedes outbox rows throughout the sync worker.
+        turn = getattr(claimed_delivery, "_sync_turn", None)
+        if isinstance(exc, BudgetDeferred) and turn is not None:
+            from integrations.models import BridgeSyncState
+            BridgeSyncState.objects.filter(pk=turn[0], last_served_at=turn[2]).update(last_served_at=turn[1])
         delivery = (
             SlackDmMirrorDelivery.objects.select_for_update()
             .filter(pk=claimed_delivery.pk, conversation=conversation)
@@ -4235,9 +4275,16 @@ def _record_private_delivery_failure(
         ):
             # Revoke/device replacement may already have cleared this row.  Do
             # not save the stale in-memory claim and resurrect its body.
+            transaction.set_rollback(True)
+            return
+        try:
+            guard_private_delivery(delivery, (claimed_delivery.metadata or {}).get("sync_delivery_lease"))
+        except LeaseLost:
+            # Roll back the conditional fairness refund with the stale claim.
+            transaction.set_rollback(True)
             return
         dependency_pending = isinstance(exc, SlackDmMirrorDependencyPending)
-        if not dependency_pending:
+        if not dependency_pending and not isinstance(exc, BudgetDeferred):
             delivery.attempts = min(delivery.attempts + 1, 32_767)
         dependency_metadata_changed = False
         if (
@@ -4358,6 +4405,10 @@ def discover_grants_if_due() -> None:
                 cleanup_grant_id,
                 exc.__class__.__name__,
             )
+    if getattr(settings, "MESSAGE_SYNC_ENABLED", False):
+        from integrations.services.message_sync.discovery import discover_once
+        discover_once(GRANT_DISCOVERY_INTERVAL_SECONDS)
+        return
     cutoff = timezone.now() - timedelta(seconds=GRANT_DISCOVERY_INTERVAL_SECONDS)
     grants = (
         SlackDmMirrorGrant.objects.select_related("connection")
@@ -5595,6 +5646,8 @@ def _locked_history_write_context(
             "Slack DM mirroring was paused during history ingestion."
         )
     conversation.grant = grant
+    from integrations.services.message_sync.runner import fence_current_page
+    fence_current_page()
     _require_private_channel_consent(conversation)
     if scan_authority is not None:
         state = (
@@ -6428,6 +6481,10 @@ def _ensure_thread_state(
     *,
     scan_epoch: str,
 ) -> SlackDmMirrorDelivery:
+    if getattr(settings, "MESSAGE_SYNC_ENABLED", False):
+        from integrations.services.message_sync.history import ensure_state
+        from integrations.services.message_sync.scheduler import schedule_job
+        schedule_job(ensure_state(conversation), "thread", source_object_key=parent_message_id)
     return _ensure_history_state(
         conversation,
         source_message_id=f"{HISTORY_STATE_PREFIX}thread:{parent_message_id}",
@@ -6717,6 +6774,8 @@ def _apply_slack_retry_after(exc: Exception) -> None:
 
 
 def _slack_retry_after_seconds(exc: Exception) -> int:
+    if isinstance(exc, BudgetDeferred):
+        return exc.retry_after
     response = getattr(exc, "response", None)
     headers = getattr(response, "headers", {}) or {}
     try:
@@ -6730,6 +6789,7 @@ def _deliver_private(delivery: SlackDmMirrorDelivery) -> None:
     # that boundary through the private network call means revoke either wins
     # before the body is read or waits and erases it immediately afterwards;
     # no post-I/O stale save can resurrect revoked content.
+    claimed_lease = (delivery.metadata or {}).get("sync_delivery_lease")
     conversation_id = delivery.conversation_id
     grant_id = delivery.conversation.grant_id
     grant_snapshot = (
@@ -6789,6 +6849,7 @@ def _deliver_private(delivery: SlackDmMirrorDelivery) -> None:
             raise SlackDmMirrorAuthorizationError(
                 "The private delivery is no longer authorized."
             )
+        guard_private_delivery(delivery, claimed_lease)
         if (
             delivery.source_platform != claimed_source_platform
             or str(delivery.source_author_id or "").strip().lower()
@@ -6869,6 +6930,9 @@ def _deliver_private_batch(claimed: list[SlackDmMirrorDelivery]) -> None:
             raise SlackDmMirrorAuthorizationError(
                 "The private delivery batch is no longer authorized."
             )
+
+        for snapshot in claimed:
+            guard_private_delivery(deliveries_by_id[snapshot.pk], (snapshot.metadata or {}).get("sync_delivery_lease"))
 
         payloads = []
         source_metadata_by_id: dict[int, dict[str, Any]] = {}
@@ -7277,10 +7341,10 @@ def _deliver_to_slack(delivery: SlackDmMirrorDelivery) -> None:
         )
     operation = delivery.operation
     source_metadata = dict(delivery.metadata or {})
-    client = WebClient(
+    client = budgeted_client(WebClient(
         token=grant.connection.access_token,
         timeout=_slack_sdk_timeout_seconds(),
-    )
+    ), workspace_id=grant.slack_workspace_id, app_id=user_app_id())
     _verify_roo_mentions_before_send(delivery, client)
     client_message_id = ""
     slack_ts = ""

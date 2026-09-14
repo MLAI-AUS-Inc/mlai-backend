@@ -21,6 +21,12 @@ class Command(BaseCommand):
         parser.add_argument("--wait-seconds", type=int, default=60)
 
     def handle(self, *args, **options):
+        from integrations.services.message_sync.inbox import enabled
+        if enabled():
+            from integrations.services.message_sync.history import seed_states
+            seed_states()
+            self.stdout.write(json.dumps({"scheduler": "durable", "legacy_scan_skipped": True}))
+            return
         lookback_seconds = int(options["lookback_seconds"])
         max_roots = int(options["max_roots_per_channel"])
         maximum_history_messages = int(options["maximum_history_messages"])

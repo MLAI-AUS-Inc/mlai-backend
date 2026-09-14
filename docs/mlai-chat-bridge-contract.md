@@ -56,6 +56,16 @@ deliberately retain no message content.
 
 - `(source platform, receipt key)` is the ingestion idempotency boundary.
 - A durable outbox is claimed transactionally and retried with bounded backoff.
+- Receipt creation, outbox creation and receipt status commit in one transaction.
+  A crash before enqueue rolls back the receipt so Slack can retry.
+- Public Buzz deliveries checkpoint their complete adapter request in the
+  reserved `_buzz_envelope_v1` outbox payload field before the first network
+  send. Retries reuse that request, including attribution and timestamp, even
+  after an uncertain acknowledgement or an author profile change. This uses
+  the existing public outbox schema; private message storage remains encrypted.
+- Public and private delivery loops run independently. A slow private batch
+  cannot delay public delivery. This lane separation does not yet provide the
+  durable per-conversation fairness scheduler described in the reliability plan.
 - Message links map source IDs to destination IDs so replies, edits, and deletes
   address the correct provider object.
 - Slack sends use a deterministic `client_msg_id` derived from the durable
@@ -69,6 +79,8 @@ deliberately retain no message content.
   bounded age and dependency-attempt limit dead-letters unresolved children
   instead of flattening them into top-level messages.
 - Exhausted deliveries enter a dead state for operator inspection and replay.
+- Public Buzz edits/deletes whose create has not yet been mapped use the
+  dependency queue. Completing the create wakes both replies and mutations.
 
 The backend reaches the Rust sidecar with `BUZZ_BRIDGE_ADAPTER_TOKEN`. When the
 backend and MLAI Chat share a private network, it uses the adapter's private
@@ -684,3 +696,63 @@ maximum 5000); `--oldest`/`--latest` bound the Slack history interval. Explicit
 normal bridge outbox. It never creates replacement posts. Deleted posts,
 concurrent/pending updates, and already-restored references are skipped. The
 report contains counts and a pagination timestamp, never message bodies.
+
+## Durable synchronization rollout (14 September 2026)
+
+Migration `integrations.0047_message_sync_reliability` adds the encrypted callback
+inbox, conversation scheduling state, resumable page/thread jobs, shared provider
+budgets, heartbeat records and public delivery leases/canonical requests. Apply
+this migration before deploying code that reads the new columns. Enable
+`MESSAGE_SYNC_ENABLED` only after all bridge worker replicas use this version.
+
+Configure `MESSAGE_SYNC_SLACK_APP_ID`, `MESSAGE_SYNC_SLACK_APP_TOKEN` (an app-level
+token with `authorizations:read`) and, when the public bot is enabled,
+`MESSAGE_SYNC_SLACK_BOT_WORKSPACE_ID`. Slack event recipient expansion is
+paginated and checkpointed in the encrypted inbox. Private routing occurs only
+after expansion completes; another workspace's installations are excluded.
+
+`MESSAGE_SYNC_SLACK_DISTRIBUTION` defaults to `restricted` (one history/replies
+request per minute). Use `internal` or `marketplace` only after verifying that
+classification with Slack. Admission and Retry-After are shared by app,
+workspace and method across bot/user tokens and worker replicas. Quota updates
+use a separate, short PostgreSQL transaction so a rolled-back delivery cannot
+refund an upstream API request. Other bridged methods currently use a
+conservative tier-2 admission interval. Privacy revocation calls remain exempt.
+See [Slack rate limits](https://docs.slack.dev/apis/web-api/rate-limits/) and
+[recipient authorizations](https://docs.slack.dev/reference/methods/apps.event.authorizations.list/).
+
+The worker seeds every enabled public mapping and live owner-private
+conversation in bounded batches without login. Recent-head, archive and known
+thread jobs retain separate checkpoints. Each claim admits one conversation's
+page; workspaces and conversations rotate by last served time. Foreground
+activity does not override that rotation. Archived thread jobs remain durable
+and recur after scan completion. Private pages revalidate the existing grant,
+registration, membership and history-window boundaries before their writes.
+
+Public delivery claims admit one row per conversation, with at most four sends
+in parallel. The first complete public adapter request is persisted before I/O;
+retry uses that immutable request. UUID leases fence stale completion/failure
+writes. Private deliveries retain encrypted storage and their consent locks;
+claim generations reject results from replaced workers, and quiet conversations
+receive turns ahead of more work from recently served conversations.
+
+`python manage.py message_sync_status` reports backlog age, overdue jobs,
+expired leases and worker heartbeats without message bodies. A verified callback
+is acknowledged only after its encrypted receipt commits; downstream failure
+retains it for retry, and successful routing clears its body while retaining the
+deduplication identity. Job errors contain bounded machine codes.
+
+These source changes do not certify Slack source parity or deployed readiness.
+Public absence-based deletion repair, full discovery pacing, relay ingestion
+sequence replay, persistent client bootstrap and the release/soak qualification
+are tracked in the cross-repository implementation plan. Operational rollback
+stops admission to the new lanes and retains their tables and checkpoints;
+never reverse/drop a used sync schema as a routine rollback.
+
+### Distinct public and private Slack apps
+
+MLAI's public bot (`A0BDH1ZG76X`) and owner OAuth app (`A0B0NDG6VL0`) are separate apps. Configure `MESSAGE_SYNC_SLACK_APP_ID` / `MESSAGE_SYNC_SLACK_APP_TOKEN` for the public bot and `MESSAGE_SYNC_SLACK_USER_APP_ID` / `MESSAGE_SYNC_SLACK_USER_APP_TOKEN` / `MESSAGE_SYNC_SLACK_USER_SIGNING_SECRET` for owner OAuth. Each app-level token needs only `authorizations:read`; these credentials belong in deployment secrets. Callback signatures bind the claimed app to its signing secret, and recipient expansion and API budgets use that same app identity. A single-app deployment can omit the user-app overrides.
+
+Deploy callback verification with `MESSAGE_SYNC_ENABLED=false` before verifying a newly configured Slack event URL. The private app's event subscriptions were disabled during the 14 September inspection and must be enabled for live user events after URL verification. Existing users' token scopes and explicit mirror consent remain authoritative; adding a subscription does not authorize additional private access.
+
+The Docker worker health probe runs `message_sync_status --check --local-worker`, checking fresh inbox, history, public-delivery and private-delivery heartbeats from the current container. Enabled deployments wait for these heartbeats and fail if a previous container is the only worker reporting. Status output contains queue ages, expired leases, source coverage classifications and shared provider cooldowns without message bodies or credentials. History and live delivery run in independent bounded lanes, and source-limited scans report unknown absence instead of claiming empty or deleting records.
