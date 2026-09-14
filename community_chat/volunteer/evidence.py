@@ -33,6 +33,14 @@ def source_is_invalidated(receipt):
             actor_id=receipt.actor_id,
             metadata__deletion_kind=5,
         )
+    if receipt.metadata.get("question_public_key") and receipt.source.get("thread_root_id"):
+        question_id = receipt.source["thread_root_id"]
+        target_ids.append(question_id)
+        authors |= Q(
+            source__source_id=question_id,
+            actor_id=receipt.actor_id,
+            metadata__deletion_kind=5,
+        )
     moderation = Q(
         source__source_id__in=target_ids,
         metadata__deletion_kind=9005,

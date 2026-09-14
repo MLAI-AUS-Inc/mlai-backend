@@ -69,10 +69,23 @@ def read_state_snapshot(details, *, kind, messages, owner_id):
     read_at = _timestamp(details.get("last_read"))
     if read_at is None:
         return None
-    latest = (details.get("latest") or {}).get("ts")
-    latest_stamp = max(_timestamp(latest) or Decimal(0), read_at)
+    latest = details.get("latest") or {}
+    # conversations.info.latest can itself be a join/topic control event. It
+    # must not become an unreachable read frontier for the visible timeline.
+    visible_subtypes = {"", "bot_message", "file_share", "me_message", "thread_broadcast"}
+    latest_ts = (
+        latest.get("ts")
+        if not latest.get("hidden") and str(latest.get("subtype") or "") in visible_subtypes
+        else None
+    )
+    latest_stamp = max(_timestamp(latest_ts) or Decimal(0), read_at)
     unread = []
     for message in messages:
+        # Slack history also contains joins, leaves, topic changes and hidden
+        # control messages. The importer does not show these as conversation
+        # posts, so they must not create a badge for an apparently empty chat.
+        if message.get("hidden") or str(message.get("subtype") or "") not in visible_subtypes:
+            continue
         stamp = _timestamp(message.get("ts"))
         if stamp is None:
             continue
@@ -272,6 +285,7 @@ def read_state_page(user, *, public_key, cursor=0, channel_ids=None):
             if calls >= 4 or time.monotonic() >= deadline:
                 break
             calls += 1
+            observed_at = time.time()
             try:
                 response = _call_slack_with_grant_authority(
                     authority,
@@ -288,7 +302,6 @@ def read_state_page(user, *, public_key, cursor=0, channel_ids=None):
                 results[target.channel_id] = {"available": False}
                 index += 1
                 continue
-            observed_at = time.time()
             details = response.get("channel") or {}
             if details.get("id") != target.slack_id:
                 raise SlackDmMirrorError("Slack returned a different conversation.")
@@ -394,4 +407,8 @@ def mark_read(user, *, public_key, channel_id, source_ts):
                 ts=str(source_ts),
             )
         cache.delete(_cache_key(authority, target))
-    return {"synced": True, "last_read": format(max(previous, stamp), "f")}
+    return {
+        "synced": True,
+        "last_read": format(max(previous, stamp), "f"),
+        "confirmed_at": time.time(),
+    }

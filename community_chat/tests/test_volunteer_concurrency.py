@@ -18,6 +18,7 @@ from community_chat.volunteer.models import (
     VolunteerRecognition,
 )
 from community_chat.volunteer.policy import MELBOURNE, microroo
+from community_chat.volunteer.receipts import ingest_receipt
 from community_chat.volunteer.services import (
     contribution_total,
     decision,
@@ -109,6 +110,76 @@ class VolunteerConcurrencyTests(TransactionTestCase):
             note="Welcomed attendees",
             idempotency_key=request_key,
         )
+
+    def useful_answer(self, key, actor, target, question):
+        # Match the request transaction used by the trusted receipt endpoint.
+        with transaction.atomic():
+            receipt = ingest_receipt(
+                dict(
+                    source_key=key,
+                    origin="relay",
+                    kind="reaction",
+                    actor_public_key=actor * 64,
+                    source={
+                        "channel_id": "help",
+                        "source_id": "answer-" + key,
+                        "message_id": key,
+                        "thread_root_id": question,
+                    },
+                    occurred_at=(timezone.now() - timedelta(minutes=1)).isoformat(),
+                    metadata={
+                        "reaction": "✅",
+                        "target_public_key": target * 64,
+                        "question_public_key": actor * 64,
+                    },
+                )
+            )
+            self.assertEqual(receipt.status, "processed", receipt.error)
+            return receipt.recognition_id
+
+    @override_settings(
+        COMMUNITY_CHAT_VOLUNTEER_AWARDS_ENABLED=False,
+        COMMUNITY_CHAT_VOLUNTEER_ADVICE_REWARDS_ENABLED=True,
+        COMMUNITY_CHAT_VOLUNTEER_BONUSES_ENABLED=False,
+        COMMUNITY_CHAT_VOLUNTEER_CHANNELS={"help": "help"},
+        COMMUNITY_CHAT_VOLUNTEER_ACTIVE_FROM="2020-01-01T00:00:00Z",
+    )
+    def test_simultaneous_useful_answers_credit_helper_once_per_question(self):
+        records = self.race(
+            lambda *_: self.useful_answer("first", "e", "d", "same-question"),
+            lambda *_: self.useful_answer("second", "e", "d", "same-question"),
+        )
+        self.assertEqual(records[0], records[1])
+        self.assertEqual(
+            Ledger.objects.filter(
+                user=self.member, reference_type="VOLUNTEER_CONTRIBUTION"
+            ).count(),
+            1,
+        )
+        self.assertEqual(PointsService.get_available_microroo(self.member), microroo("2"))
+        self.assertEqual(PointsService.get_available_microroo(self.reviewer), 0)
+
+    @override_settings(
+        COMMUNITY_CHAT_VOLUNTEER_AWARDS_ENABLED=False,
+        COMMUNITY_CHAT_VOLUNTEER_ADVICE_REWARDS_ENABLED=True,
+        COMMUNITY_CHAT_VOLUNTEER_BONUSES_ENABLED=False,
+        COMMUNITY_CHAT_VOLUNTEER_CHANNELS={"help": "help"},
+        COMMUNITY_CHAT_VOLUNTEER_ACTIVE_FROM="2020-01-01T00:00:00Z",
+    )
+    def test_reciprocal_useful_answers_credit_both_helpers_without_deadlock(self):
+        records = self.race(
+            lambda *_: self.useful_answer("for-member", "e", "d", "reviewer-question"),
+            lambda *_: self.useful_answer("for-reviewer", "d", "e", "member-question"),
+        )
+        self.assertNotEqual(records[0], records[1])
+        for user in (self.member, self.reviewer):
+            self.assertEqual(PointsService.get_available_microroo(user), microroo("2"))
+            self.assertEqual(
+                Ledger.objects.filter(
+                    user=user, reference_type="VOLUNTEER_CONTRIBUTION"
+                ).count(),
+                1,
+            )
 
     def test_member_request_and_direct_recognition_share_one_outcome(self):
         event_id = str(self.event.pk)

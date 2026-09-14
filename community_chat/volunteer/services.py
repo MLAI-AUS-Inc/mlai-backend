@@ -15,6 +15,7 @@ from roo.services import PointsService
 
 from .access import (
     VolunteerError,
+    awards_enabled,
     capabilities,
     channels,
     community_id,
@@ -388,6 +389,11 @@ def outcome_key(action, source, when):
         raw = f"event:{source.get('event_id', '')}"
     elif action["cap_group"] == "monthly_update":
         raw = f"monthly:{period_bounds(when, 'month')[0].date().isoformat()}"
+    elif key == "helpful_answer":
+        question = source.get("thread_root_id") or source_id
+        if not question:
+            raise VolunteerError("public_thread_required")
+        raw = f"answer:{question}"
     elif key == "boost_startup":
         raw = f"boost:{source_id}"
     else:
@@ -735,7 +741,7 @@ def decision(record, actor, payload, *, automatic=False, existing_ledger=None):
         if record.status not in ("pending", "needs_update"):
             raise VolunteerError("conflict", 409)
         if requested == "approve":
-            if not flag("awards_enabled") and existing_ledger is None:
+            if not awards_enabled(record.action_key) and existing_ledger is None:
                 raise VolunteerError("awards_disabled", 503)
             first_human = not any(
                 any(

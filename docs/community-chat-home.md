@@ -158,7 +158,7 @@ Source: [Luma cover image field](https://docs.luma.com/reference/post_v1-events-
 ## Roo Points member guide refresh (September 2026)
 
 Home includes `boost_startup` (2 points, once for each distinct verified startup
-post) and `helpful_answer` (3 points, existing approval and weekly cap). The
+post) and `helpful_answer` (2 points, once per helper per question). The
 canonical volunteer policy supplies the amounts. Startup engagement retains
 source verification, activation flags and per-member/per-post idempotency;
 the former four-post monthly cap is removed prospectively. Existing awards

@@ -32,6 +32,13 @@ def flag(name):
     return bool(getattr(settings, f"COMMUNITY_CHAT_VOLUNTEER_{name.upper()}", False))
 
 
+def awards_enabled(action_key):
+    """Permit advice rewards without enabling unrelated Volunteer credits."""
+    return flag("awards_enabled") or (
+        action_key == "helpful_answer" and flag("advice_rewards_enabled")
+    )
+
+
 def capabilities(user):
     """Resolve account-linked Points Admin authority; rank never grants a role."""
     current = get_user_model().objects.filter(pk=user.pk, is_active=True).first()

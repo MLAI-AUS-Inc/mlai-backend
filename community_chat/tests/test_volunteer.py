@@ -111,6 +111,63 @@ class VolunteerTests(TestCase):
             )
         )
 
+    def useful_answer(self, key="useful", actor="a", target="b", question="root", questioner="a"):
+        return ingest_receipt(dict(
+            source_key=key, origin="relay", kind="reaction",
+            actor_public_key=actor * 64,
+            source={"channel_id": "help", "source_id": "answer-" + key,
+                    "message_id": key, "thread_root_id": question},
+            occurred_at=(timezone.now() - timedelta(minutes=1)).isoformat(),
+            metadata={"reaction": "✅", "target_public_key": target * 64,
+                      "question_public_key": questioner * 64},
+        ))
+
+    @override_settings(COMMUNITY_CHAT_VOLUNTEER_AWARDS_ENABLED=False,
+                       COMMUNITY_CHAT_VOLUNTEER_ADVICE_REWARDS_ENABLED=True)
+    def test_questioner_credits_answer_author_exactly_two_without_enabling_other_rewards(self):
+        receipt = self.useful_answer()
+        self.assertEqual(receipt.status, "processed")
+        self.assertEqual(receipt.recognition.user_id, self.other.pk)
+        self.assertEqual(receipt.recognition.reward_microroo, microroo("2"))
+        self.assertEqual(PointsService.get_available_microroo(self.other), microroo("2"))
+        self.assertEqual(PointsService.get_available_microroo(self.member), 0)
+        self.assertEqual(self.receipt(key="still-disabled-intro").error, "awards_disabled")
+
+    def test_useful_answer_deduplicates_reactions_and_multiple_answers_to_same_question(self):
+        first = self.useful_answer()
+        again = process_receipt(first)
+        another = self.useful_answer(key="another-answer")
+        self.assertEqual(first.recognition_id, again.recognition_id)
+        self.assertEqual(first.recognition_id, another.recognition_id)
+        self.assertEqual(Ledger.objects.filter(user=self.other, reference_type="VOLUNTEER_CONTRIBUTION").count(), 1)
+        self.assertEqual(PointsService.get_available_microroo(self.other), microroo("2"))
+
+    @override_settings(COMMUNITY_CHAT_VOLUNTEER_BONUSES_ENABLED=False)
+    def test_distinct_questions_can_each_reward_the_same_helper(self):
+        self.useful_answer()
+        self.useful_answer(key="next", question="other-question")
+        self.assertEqual(PointsService.get_available_microroo(self.other), microroo("4"))
+
+    def test_useful_answers_reject_self_awards_and_other_peoples_approvals(self):
+        self.assertEqual(self.useful_answer(target="a").error, "ineligible_source")
+        self.assertEqual(self.useful_answer(key="stranger", actor="c").error, "ineligible_source")
+        self.assertFalse(Ledger.objects.filter(reference_type="VOLUNTEER_CONTRIBUTION").exists())
+
+    def test_questioners_other_verified_device_can_mark_answer_useful(self):
+        CommunityChatDevice.objects.create(user=self.member, public_key="d" * 64, status="verified")
+        receipt = self.useful_answer(actor="d")
+        self.assertEqual(receipt.status, "processed")
+        self.assertEqual(receipt.recognition.user_id, self.other.pk)
+
+    @override_settings(COMMUNITY_CHAT_VOLUNTEER_AWARDS_ENABLED=False)
+    def test_deleted_question_blocks_deferred_useful_answer_award(self):
+        receipt = self.useful_answer()
+        self.assertEqual(receipt.status, "pending")
+        self.invalidation("root", actor="a")
+        with override_settings(COMMUNITY_CHAT_VOLUNTEER_ADVICE_REWARDS_ENABLED=True):
+            self.assertEqual(process_receipt(receipt).error, "ineligible_source")
+        self.assertFalse(VolunteerRecognition.objects.filter(user=self.other).exists())
+
     def event(self, key="event-1"):
         now = timezone.now()
         return VolunteerOpportunity.objects.create(
@@ -958,14 +1015,14 @@ class VolunteerTests(TestCase):
                 note="Explained the fix",
             ),
         )
-        self.approve(record, amount="3")
-        self.assertEqual(contribution_total(self.member), microroo("13"))
+        self.approve(record, amount="2")
+        self.assertEqual(contribution_total(self.member), microroo("12"))
         self.assertFalse(VolunteerMilestone.objects.filter(user=self.member).exists())
         current = journey(self.member)["current_level"]
         self.assertFalse(current["bonus_awarded"])
         self.assertFalse(current["bonus_eligible"])
         self.approve(
-            self.request_event(self.event("new-threshold")), amount="7", key="cross-20"
+            self.request_event(self.event("new-threshold")), amount="8", key="cross-20"
         )
         self.assertEqual(contribution_total(self.member), microroo("20"))
         self.assertEqual(
