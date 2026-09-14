@@ -658,3 +658,29 @@ required.
 Connected clients may POST `refresh_permissions: true` with their current
 `history_days` to obtain a fresh Slack authorization URL. This opt-in permission
 upgrade preserves the active grant and import until OAuth completes.
+
+### Thread references (September 2026)
+
+Slack message attachments with canonical `original_url`, `from_url`, or
+`title_link` permalinks are retained as `Thread` links in both public and private
+imports, including edits. Quoted bodies and quoted-author metadata are never
+copied from these attachments: a private thread may be forwarded into a public
+channel.
+
+The existing authenticated `GET /api/v1/community-chat/link-preview/?url=…`
+returns `thread: {channel_id, message_id}` for an available mirrored Slack
+message. This is an address only. Clients fetch the original event plus its
+edits/deletions with their own relay identity, use the relay's canonical channel
+routing after a move, and open that thread within MLAI Chat. Private mappings
+require the requesting account's live/paused mirror and non-revoked grant.
+Unknown, disabled, or deleted mappings return 422 without public URL scraping.
+Thread mapping responses use `Cache-Control: private, no-store`.
+
+To repair older public posts whose reference attachments were dropped, run
+`python manage.py backfill_community_bridge_thread_references --slack-channel-id C…`
+as an authorized operator. It is a bounded dry run (500 posts by default,
+maximum 5000); `--oldest`/`--latest` bound the Slack history interval. Explicit
+`--apply --confirm-historical-edits` queues existing-post edits through the
+normal bridge outbox. It never creates replacement posts. Deleted posts,
+concurrent/pending updates, and already-restored references are skipped. The
+report contains counts and a pagination timestamp, never message bodies.

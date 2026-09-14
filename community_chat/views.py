@@ -93,6 +93,10 @@ from .email_codes import (
     issue_email_code_challenge,
 )
 from .link_previews import LinkPreviewError, fetch_link_preview, fetch_preview_image
+from .slack_message_references import (
+    resolve_slack_message_reference,
+    SlackMessageReferenceError,
+)
 from .slack_file_previews import (
     SlackFilePreviewError,
     fetch_slack_file_image,
@@ -1172,6 +1176,19 @@ class LinkPreviewView(APIView):
 
     def get(self, request):
         raw_url = str(request.query_params.get("url") or "").strip()
+        try:
+            reference = resolve_slack_message_reference(raw_url, user=request.user)
+        except SlackMessageReferenceError as exc:
+            response = Response(
+                {"error": "preview_unavailable", "detail": str(exc)},
+                status=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            )
+            response["Cache-Control"] = "private, no-store"
+            return response
+        if reference is not None:
+            response = Response(reference)
+            response["Cache-Control"] = "private, no-store"
+            return response
         try:
             slack_preview = fetch_slack_file_preview(raw_url, user=request.user)
             preview = slack_preview or fetch_link_preview(raw_url)
