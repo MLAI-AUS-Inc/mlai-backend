@@ -58,6 +58,8 @@ from integrations.services.community_bridge.formatting import (
     approved_slack_avatar_url,
     emoji_to_slack_reaction,
     normalize_slack_files,
+    normalize_slack_thread_references,
+    slack_message_reference,
     reaction_object_id,
     sanitize_slack_text,
     slack_reaction_to_emoji,
@@ -3160,6 +3162,7 @@ def _buzz_delivery_source_id(
 
 def _slack_message_text(message: dict[str, Any]) -> str:
     attachments = list(normalize_slack_files(message.get("files") or []))
+    attachments.extend(normalize_slack_thread_references(message.get("attachments") or []))
     for item in message.get("attachments") or []:
         if not isinstance(item, dict):
             continue
@@ -3171,7 +3174,7 @@ def _slack_message_text(message: dict[str, Any]) -> str:
             or item.get("thumb_url")
             or ""
         ).strip()
-        if not url.startswith(("https://", "http://")):
+        if not url.startswith(("https://", "http://")) or slack_message_reference(url):
             continue
         attachments.append(
             {

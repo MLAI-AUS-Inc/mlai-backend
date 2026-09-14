@@ -20,6 +20,7 @@ from integrations.models import (
 from integrations.services.community_bridge.formatting import (
     emoji_to_slack_reaction,
     normalize_slack_files,
+    normalize_slack_thread_references,
     reaction_object_id,
     sanitize_slack_text,
     slack_reaction_to_emoji,
@@ -525,7 +526,8 @@ def _normalize_slack_event(payload: dict) -> Optional[dict]:
             "source_author_id": user_id,
             "source_author_display_name": "",
             "text": sanitize_slack_text(raw_text),
-            "attachments": normalize_slack_files(event.get("files") or []),
+            "attachments": normalize_slack_files(event.get("files") or [])
+            + normalize_slack_thread_references(event.get("attachments") or []),
             "metadata": {
                 "broadcast": subtype == "thread_broadcast"
                 or bool(event.get("reply_broadcast")),
@@ -553,7 +555,8 @@ def _normalize_slack_event(payload: dict) -> Optional[dict]:
             "source_author_id": user_id,
             "source_author_display_name": "",
             "text": sanitize_slack_text(raw_text),
-            "attachments": normalize_slack_files(message.get("files") or []),
+            "attachments": normalize_slack_files(message.get("files") or [])
+            + normalize_slack_thread_references(message.get("attachments") or []),
             "metadata": {
                 "broadcast": str(message.get("subtype") or "").strip()
                 == "thread_broadcast"

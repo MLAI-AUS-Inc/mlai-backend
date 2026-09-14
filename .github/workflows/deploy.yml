@@ -192,6 +192,7 @@ jobs:
           community_chat.tests.test_device_auth \
           community_chat.tests.test_throttles \
           community_chat.tests.test_link_previews \
+          community_chat.tests.test_message_references \
           community_chat.tests.test_preview_image_negotiation \
           community_chat.tests.test_slack_read_state \
           community_chat.tests.test_token_usage \

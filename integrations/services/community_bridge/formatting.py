@@ -115,6 +115,43 @@ def normalize_slack_files(files: Iterable[dict]) -> list[dict]:
     return attachments
 
 
+def slack_message_reference(value: str) -> tuple[str, str] | None:
+    """Parse a canonical Slack message permalink without requesting its URL."""
+    value = str(value or "").strip()
+    if len(value) > 2048 or any(character.isspace() or ord(character) < 32 for character in value):
+        return None
+    try:
+        parsed = urlsplit(value)
+        match = re.fullmatch(r"/archives/([CDG][A-Z0-9]+)/p([0-9]{7,26})/?", parsed.path)
+        if (parsed.scheme != "https" or parsed.username or parsed.password
+                or parsed.port not in (None, 443)
+                or not re.fullmatch(r"[a-z0-9-]+\.slack\.com", parsed.hostname or "")
+                or not match):
+            return None
+        channel, timestamp = match.groups()
+        return channel, f"{timestamp[:-6]}.{timestamp[-6:]}"
+    except ValueError:
+        return None
+
+
+def normalize_slack_thread_references(attachments: Iterable[dict]) -> list[dict]:
+    """Retain reference URLs, never copy a potentially private quoted body."""
+    result = []
+    seen = set()
+    for item in attachments or []:
+        if not isinstance(item, dict):
+            continue
+        for field in ("original_url", "from_url", "title_link"):
+            url = str(item.get(field) or "").strip()
+            identity = slack_message_reference(url)
+            if identity:
+                if identity not in seen:
+                    seen.add(identity)
+                    result.append({"title": "Thread", "url": url})
+                break
+    return result
+
+
 def normalize_discord_attachments(attachments: Iterable[object]) -> list[dict]:
     normalized = []
     for item in attachments or []:
