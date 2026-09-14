@@ -2936,6 +2936,8 @@ def _discover_conversation(
 def _normalize_private_slack_event(
     payload: dict[str, Any],
     event: dict[str, Any],
+    *,
+    allow_roo_channels: bool = False,
 ) -> dict[str, Any] | None:
     from integrations.services.slack_roo import is_public_roo_reply
 
@@ -2944,6 +2946,7 @@ def _normalize_private_slack_event(
             message,
             workspace_id=str(payload.get("team_id") or ""),
             conversation_id=str(event.get("channel") or ""),
+            allow_channels=allow_roo_channels,
         )
 
     event_type = str(event.get("type") or "message").strip()
@@ -3529,7 +3532,18 @@ def ingest_slack_dm_event(payload: dict[str, Any]) -> dict[str, Any] | None:
     }
     if not channel_id.startswith("D") and not known_group_dm and not is_group_dm_event:
         return None
-    normalized = _normalize_private_slack_event(payload, event)
+    private_channel = str(event.get("channel_type") or "") == "group" or (
+        known_group_dm
+        and any(
+            conversation_kind(item) == "private_channel"
+            for item in SlackDmMirrorConversation.objects.select_related(
+                "grant__connection"
+            ).filter(slack_workspace_id=workspace_id, slack_conversation_id=channel_id)
+        )
+    )
+    normalized = _normalize_private_slack_event(
+        payload, event, allow_roo_channels=bool(private_channel)
+    )
     if normalized is None:
         return {"status": "ignored"}
     if not channel_id.startswith("D"):
@@ -3537,15 +3551,6 @@ def ingest_slack_dm_event(payload: dict[str, Any]) -> dict[str, Any] | None:
         # persist a body against a stale participant hash: stage the ciphertext
         # under the exact Slack event recipient and let the paced discovery path
         # re-fetch conversations.members before routing it.
-        private_channel = str(event.get("channel_type") or "") == "group" or any(
-            conversation_kind(item) == "private_channel"
-            for item in SlackDmMirrorConversation.objects.select_related(
-                "grant__connection"
-            ).filter(
-                slack_workspace_id=workspace_id,
-                slack_conversation_id=channel_id,
-            )
-        )
         staged = _stage_unknown_slack_event(
             workspace_id,
             channel_id,
@@ -3782,6 +3787,24 @@ def ingest_mlai_dm_event(payload: dict[str, Any]) -> dict[str, Any] | None:
         # linear privacy boundary just like grant revocation.
         if _locked_active_verified_device(grant.user_id, author_pubkey) is None:
             return {"status": "ignored"}
+        if operation in {
+            CommunityBridgeDeliveryType.CREATE,
+            CommunityBridgeDeliveryType.EDIT,
+        }:
+            from integrations.services.slack_channel_mentions import (
+                render_outgoing_roo_mentions,
+            )
+
+            raw_payload = payload.get("raw_payload")
+            tags = raw_payload.get("tags", []) if isinstance(raw_payload, dict) else []
+            try:
+                queued_text, mention_ids = render_outgoing_roo_mentions(
+                    queued_text, tags if isinstance(tags, list) else [], conversation
+                )
+            except ValueError:
+                return {"status": "rejected", "error": "slack_mention_unavailable"}
+            if mention_ids:
+                delivery_metadata["slack_mention_ids"] = mention_ids
         delivery, created = SlackDmMirrorDelivery.objects.get_or_create(
             conversation=conversation,
             source_platform=CommunityBridgePlatform.BUZZ,
@@ -5909,21 +5932,27 @@ def _history_delivery_author_pubkey(delivery: SlackDmMirrorDelivery) -> str:
 
 
 def _history_message_author_allowed(conversation, message):
-    """Preserve Roo replies only in the owner's actual one-to-one Roo mirror."""
+    """Preserve verified Roo replies in owner IMs and authorized private channels."""
     from integrations.services.slack_roo import is_public_roo_reply
 
     if _all_history_group_import(conversation):
         return True
     if not message.get("bot_id") and message.get("subtype") != "bot_message":
         return True
+    private_channel = (
+        not conversation.slack_conversation_id.startswith("D")
+        and conversation_kind(conversation) == "private_channel"
+    )
+    required = {conversation.grant.slack_user_id, str(message.get("user") or "")}
+    participants = set(conversation.participant_slack_ids or [])
     return is_public_roo_reply(
         message,
         workspace_id=conversation.slack_workspace_id,
         conversation_id=conversation.slack_conversation_id,
-    ) and set(conversation.participant_slack_ids or []) == {
-        conversation.grant.slack_user_id,
-        str(message.get("user") or ""),
-    }
+        allow_channels=private_channel,
+    ) and (
+        required.issubset(participants) if private_channel else participants == required
+    )
 
 
 def _persist_reply_page_locked(
@@ -7187,6 +7216,47 @@ def _assert_slack_conversation_writable(
         )
 
 
+def _verify_roo_mentions_before_send(delivery, client):
+    """Revalidate a queued mention with Slack while the owner grant is locked."""
+    from integrations.services.slack_channel_mentions import validate_roo_channel_access
+    from integrations.services.slack_roo import public_roo_target
+
+    ids = (delivery.metadata or {}).get("slack_mention_ids") or []
+    if not ids:
+        return
+    target = public_roo_target()
+    if not target or ids != [target[1]]:
+        raise SlackDmMirrorAuthorizationError(
+            "Roo is no longer available in this channel."
+        )
+    conversation = delivery.conversation
+    channel = (
+        client.conversations_info(channel=conversation.slack_conversation_id).get(
+            "channel"
+        )
+        or {}
+    )
+    members = set()
+    cursor = ""
+    seen = set()
+    while True:
+        response = client.conversations_members(
+            channel=conversation.slack_conversation_id, limit=200, cursor=cursor
+        )
+        members.update(response.get("members") or [])
+        cursor = str((response.get("response_metadata") or {}).get("next_cursor") or "")
+        if not cursor:
+            break
+        if cursor in seen:
+            raise SlackDmMirrorError("Slack member pagination made no progress.")
+        seen.add(cursor)
+    bot = client.users_info(user=target[1]).get("user") or {}
+    if not validate_roo_channel_access(conversation, channel, members, bot):
+        raise SlackDmMirrorAuthorizationError(
+            "Roo is no longer available in this channel."
+        )
+
+
 def _deliver_to_slack(delivery: SlackDmMirrorDelivery) -> None:
     conversation = delivery.conversation
     grant = conversation.grant
@@ -7211,6 +7281,7 @@ def _deliver_to_slack(delivery: SlackDmMirrorDelivery) -> None:
         token=grant.connection.access_token,
         timeout=_slack_sdk_timeout_seconds(),
     )
+    _verify_roo_mentions_before_send(delivery, client)
     client_message_id = ""
     slack_ts = ""
     reaction = ""
