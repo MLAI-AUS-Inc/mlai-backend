@@ -69,6 +69,8 @@ def catalog_conversations(conversations):
 
 def catalog_payload(conversations, public_key):
     """Expose only mirrors provisioned for this verified device."""
+    from integrations.services.slack_channel_mentions import roo_channel_targets
+
     key = str(public_key or "").lower()
     return [
         {
@@ -77,6 +79,11 @@ def catalog_payload(conversations, public_key):
             "last_message_at": conversation_activity_at(conversation),
             "source_archived": bool(
                 conversation_metadata(conversation).get("source_archived")
+            ),
+            **(
+                {"mention_targets": targets}
+                if (targets := roo_channel_targets(conversation))
+                else {}
             ),
             **(
                 {"participants": catalog_participants(conversation)}

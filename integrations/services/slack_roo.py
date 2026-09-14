@@ -34,15 +34,21 @@ def is_public_roo_user(user, *, workspace_id):
     )
 
 
-def is_public_roo_reply(message, *, workspace_id, conversation_id):
+def is_public_roo_reply(
+    message, *, workspace_id, conversation_id, allow_channels=False
+):
     """Accept only Roo-authored replies in a verified Slack direct conversation.
 
     The caller must still enforce the owner grant and exact participant boundary.
-    Group/private channel bot messages keep their existing exclusion.
+    Private channel callers must additionally verify the conversation type and
+    refresh Slack membership before routing. Other bots remain excluded.
     """
     target = public_roo_target()
     return bool(
         target
         and target == (workspace_id, str(message.get("user") or ""))
-        and re.fullmatch(r"D[A-Z0-9]+", str(conversation_id or ""))
+        and re.fullmatch(
+            r"[DCG][A-Z0-9]+" if allow_channels else r"D[A-Z0-9]+",
+            str(conversation_id or ""),
+        )
     )
