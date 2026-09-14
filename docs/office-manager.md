@@ -199,7 +199,8 @@ backend claim path. It must also report the same non-secret Slack `team_id` and
 posts the buttons is the app whose interactions are routed to Roo. After startup,
 `GET /api/v1/points/coworking/office-manager/preflight/` verifies the exact
 contract with the Roo credential while internal and missing credentials are
-rejected. It does not create a day, booking, or assignment.
+rejected. This includes `claim_channel_required: true` and the approved
+`allowed_channel_id: C0BRM181EDV`. It does not create a day, booking, or assignment.
 
 ### Historical migration identity audit
 
@@ -360,4 +361,7 @@ of the graph, so neither binary is assumed compatible. Treat the failed deploy
 as an operator alert, inspect the recorded migration/schema audit, and repair
 forward before restarting services. Do not reverse shared migrations, remove `0034`–`0039`, or
 delete Office Manager accounting/provenance rows; roll application code forward
-with a new append-only migration when schema recovery is required.
+with a new append-only migration when schema recovery is required. Successful
+runtime recovery does not turn a failed deployment green: the script exits with
+the original failing status and does not continue to later checks or its success
+message. Verify the recovered runtime separately before retrying a deployment.

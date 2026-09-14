@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 import subprocess
 
 from django.test import SimpleTestCase
@@ -273,8 +274,10 @@ class RuntimeHardeningConfigTests(SimpleTestCase):
             'docker compose up -d --force-recreate "\\${restored_services[@]}"',
             deploy,
         )
+        failure_trap = re.search(r"^    trap .* ERR$", deploy, re.MULTILINE)
+        self.assertIsNotNone(failure_trap)
         self.assertLess(
-            deploy.index("trap restore_runtime_on_error ERR"),
+            failure_trap.start(),
             deploy.index("Verifying external Vibe Raising video upload CORS preflight"),
         )
         self.assertGreater(
@@ -282,7 +285,7 @@ class RuntimeHardeningConfigTests(SimpleTestCase):
             deploy.index("Verifying external Vibe Raising video upload CORS preflight"),
         )
         trapped_deploy = deploy[
-            deploy.index("trap restore_runtime_on_error ERR") : deploy.rindex(
+            failure_trap.start() : deploy.rindex(
                 "trap - ERR"
             )
         ]
