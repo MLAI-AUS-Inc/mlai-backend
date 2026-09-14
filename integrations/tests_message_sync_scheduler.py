@@ -6,7 +6,7 @@ from threading import Barrier
 from unittest.mock import patch
 
 from django.db import IntegrityError, connection, connections, transaction
-from django.test import TransactionTestCase
+from django.test import TransactionTestCase, override_settings
 from django.utils import timezone
 
 from integrations.models import BridgeApiBudget, BridgeSyncInbox, BridgeSyncJob, BridgeSyncState, CommunityBridgeChannel
@@ -196,6 +196,43 @@ class PublicDeliveryLeaseTests(TransactionTestCase):
                 "delivery_type": "create", "source_channel_id": channel, "source_message_id": key,
                 "source_author_id": "U1", "source_author_display_name": "Fixture", "text": "fixture", "attachments": [],
             })["delivery_id"]
+
+    @override_settings(MESSAGE_SYNC_ENABLED=True)
+    def test_long_outage_keeps_retryable_delivery_after_legacy_attempt_limit(self):
+        from integrations.models import CommunityBridgeDelivery
+        from integrations.services.community_bridge.store import mark_delivery_retry
+        from integrations.services.message_sync.delivery import claim_public, delivery_context
+        self.state("A")
+        row_id = self.enqueue("A", "1700000000.000001")
+        CommunityBridgeDelivery.objects.filter(pk=row_id).update(attempts=32_767)
+        claim = claim_public(1)[0]
+        with delivery_context(claim):
+            mark_delivery_retry(delivery_id=row_id, error_text="temporary outage")
+        row = CommunityBridgeDelivery.objects.get(pk=row_id)
+        self.assertEqual((row.status, row.attempts), ("failed", 32_767))
+        self.assertIsNone(row.lease_token)
+        CommunityBridgeDelivery.objects.filter(pk=row_id).update(available_at=timezone.now())
+        retry = claim_public(1)[0]
+        with delivery_context(retry):
+            mark_delivery_retry(delivery_id=row_id, error_text="permanent rejection", permanent=True)
+        self.assertEqual(CommunityBridgeDelivery.objects.get(pk=row_id).status, "dead")
+
+    @override_settings(MESSAGE_SYNC_ENABLED=True)
+    def test_archive_delay_does_not_discard_child_waiting_for_parent(self):
+        from integrations.models import CommunityBridgeDelivery
+        from integrations.services.community_bridge.store import mark_delivery_waiting_for_parent
+        from integrations.services.message_sync.delivery import claim_public, delivery_context
+        self.state("A")
+        row_id = self.enqueue("A", "1700000000.000001")
+        CommunityBridgeDelivery.objects.filter(pk=row_id).update(
+            dependency_attempts=32_767, dependency_first_seen_at=timezone.now()-timedelta(days=14),
+        )
+        claim = claim_public(1)[0]
+        with delivery_context(claim):
+            mark_delivery_waiting_for_parent(delivery_id=row_id, parent_message_id="1700000000.000000")
+        row = CommunityBridgeDelivery.objects.get(pk=row_id)
+        self.assertEqual((row.status, row.dependency_attempts), ("waiting_parent", 32_767))
+        self.assertIsNone(row.lease_token)
 
     def test_busy_channel_claims_only_one_slot_and_other_channel_gets_a_turn(self):
         from integrations.services.message_sync.delivery import claim_public

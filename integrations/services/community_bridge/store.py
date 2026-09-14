@@ -429,7 +429,8 @@ def mark_delivery_retry(*, delivery_id: int, error_text: str, permanent: bool = 
     guard_delivery(delivery)
     now = timezone.now()
     error_message = str(error_text or "").strip()
-    if permanent or int(delivery.attempts or 0) >= int(delivery.max_attempts or 0):
+    durable = bool(getattr(settings, "MESSAGE_SYNC_ENABLED", False))
+    if permanent or (not durable and int(delivery.attempts or 0) >= int(delivery.max_attempts or 0)):
         delivery.status = CommunityBridgeDeliveryStatus.DEAD
         delivery.available_at = now
     else:
@@ -437,8 +438,10 @@ def mark_delivery_retry(*, delivery_id: int, error_text: str, permanent: bool = 
         backoff = RETRY_DELAYS_SECONDS[min(max(int(delivery.attempts or 1) - 1, 0), len(RETRY_DELAYS_SECONDS) - 1)]
         delivery.available_at = now + timedelta(seconds=backoff)
     delivery.locked_at = None
+    delivery.lease_token = None
+    delivery.lease_expires_at = None
     delivery.last_error = error_message[:2000]
-    delivery.save(update_fields=["status", "available_at", "locked_at", "last_error", "updated_at"])
+    delivery.save(update_fields=["status", "available_at", "locked_at", "lease_token", "lease_expires_at", "last_error", "updated_at"])
 
 
 def defer_delivery(*, delivery_id: int, retry_after: int) -> None:
@@ -478,7 +481,7 @@ def mark_delivery_waiting_for_parent(
 
     now = timezone.now()
     first_seen = delivery.dependency_first_seen_at or now
-    dependency_attempts = int(delivery.dependency_attempts or 0) + 1
+    dependency_attempts = min(int(delivery.dependency_attempts or 0) + 1, 32_767)
     max_age_seconds = max(
         1,
         int(
@@ -501,7 +504,7 @@ def mark_delivery_waiting_for_parent(
             or 360
         ),
     )
-    expired = (
+    expired = not getattr(settings, "MESSAGE_SYNC_ENABLED", False) and (
         dependency_attempts >= max_attempts
         or (now - first_seen).total_seconds() >= max_age_seconds
     )
@@ -518,6 +521,8 @@ def mark_delivery_waiting_for_parent(
         now if expired else now + timedelta(seconds=PARENT_DEPENDENCY_RETRY_SECONDS)
     )
     delivery.locked_at = None
+    delivery.lease_token = None
+    delivery.lease_expires_at = None
     delivery.last_error = (
         f"parent_mapping_timeout:{str(parent_message_id or '').strip()}"
         if expired
@@ -531,6 +536,8 @@ def mark_delivery_waiting_for_parent(
             "dependency_first_seen_at",
             "available_at",
             "locked_at",
+            "lease_token",
+            "lease_expires_at",
             "last_error",
             "updated_at",
         ]

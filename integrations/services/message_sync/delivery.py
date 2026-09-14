@@ -62,7 +62,6 @@ def claim_public(limit):
         ready = CommunityBridgeDelivery.objects.filter(
             channel_id=OuterRef("public_channel_id"),
             status__in=["pending", "failed", "waiting_parent"], available_at__lte=now,
-            attempts__lt=F("max_attempts"),
         )
         active = CommunityBridgeDelivery.objects.filter(
             channel_id=OuterRef("public_channel_id"), status="processing",
@@ -77,7 +76,7 @@ def claim_public(limit):
                 break
             row = CommunityBridgeDelivery.objects.filter(
                 channel_id=state.public_channel_id, status__in=["pending", "failed", "waiting_parent"],
-                available_at__lte=now, attempts__lt=F("max_attempts"),
+                available_at__lte=now,
             ).select_for_update(skip_locked=True).order_by("available_at", "id").first()
             if row is None:
                 continue
@@ -85,7 +84,7 @@ def claim_public(limit):
             row.lease_expires_at = now + timedelta(seconds=120)
             row.status = "processing"
             row.locked_at = now
-            row.attempts += 1
+            row.attempts = min(row.attempts + 1, 32_767)
             row.save(update_fields=["lease_token", "lease_expires_at", "status", "locked_at", "attempts", "updated_at"])
             previous_turn = state.last_served_at
             state.last_served_at = now
