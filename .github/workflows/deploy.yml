@@ -63,6 +63,9 @@ jobs:
     - name: Run coworking account booking contract checks
       run: python -m unittest community_chat.tests.test_coworking_unit tests.test_article_notification_policy_unit
 
+    - name: Check paid island research contracts without database access
+      run: python -m unittest content_factory.tests_island_research_unit content_factory.tests_custom_islands_unit -q
+
     - name: Scan tracked source for credentials
       run: python scripts/check_secrets.py
 
@@ -178,6 +181,7 @@ jobs:
           tests.test_linear_deployment_wiring \
           tests.test_health_check \
           tests.test_content_factory_org_config \
+          tests.test_island_research_contract \
           tests.test_new_endpoints.EndpointTests \
           tests.test_new_endpoints.ContentFactoryCallbackTests \
           tests.test_content_factory_callback_idempotency \
