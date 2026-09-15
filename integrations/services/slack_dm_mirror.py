@@ -6467,6 +6467,8 @@ def _upsert_history_delivery(
     if created:
         return delivery
     if bool((delivery.metadata or {}).get("permanent_failure")):
+        from integrations.services.message_sync.reaction_recovery import stage_observed_reaction
+        stage_observed_reaction(delivery, author_id=author_id, metadata=metadata)
         # Automatic hourly scans may observe the same source message forever.
         # Only explicit backfill or renewed consent clears this durable fence.
         return delivery
@@ -6644,6 +6646,8 @@ def _finish_history_scan(conversation: SlackDmMirrorConversation) -> None:
     # Limited retention/access is not evidence that an unseen message or target
     # disappeared. Only a qualified complete scan can resolve those absences.
     if not source_limited:
+        from integrations.services.message_sync.reaction_recovery import finish_reaction_recovery
+        finish_reaction_recovery(conversation, scan_epoch=str(metadata.get("scan_epoch") or ""), source_limited=source_limited)
         _reconcile_absent_slack_state_locked(conversation)
         _complete_dependency_reconciliation_locked(conversation)
         _supersede_unrecovered_backfill_rows_locked(conversation)

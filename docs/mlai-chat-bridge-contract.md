@@ -230,8 +230,9 @@ reaches an older relay returns a retryable upstream failure until the relay is
 updated.
 Backfill status is complete only after every queued history delivery completes;
 transient dead rows are safely repopulated from Slack, while a permanently
-rejected adapter delivery stays fenced until explicit backfill or renewed
-consent. New API callers that omit a history choice default to 30 days.
+rejected adapter delivery stays fenced until explicit backfill, renewed consent,
+or the narrowly verified legacy reaction compatibility recovery documented below.
+New API callers that omit a history choice default to 30 days.
 Members can explicitly choose 7 days, 30 days, or **all available history**
 (`history_days: 0`). Zero is honored only with the new
 `slack-chat-v5-all-available-history` consent; legacy zero-valued grants remain
@@ -633,6 +634,13 @@ uses the requesting member's Slack user token and existing consent/device fences
 it never substitutes a bot's read cursor. Public mappings also require source
 membership, and private mappings remain restricted to the provisioned device.
 
+Private cursor sweeps exclude old or unknown directory entries outside the
+selected 7/30-day window, except current explicitly opened empty IMs. Recent
+pending imports remain eligible for read-state prewarming. Shared public targets
+are unchanged. Explicit mark-read operations retain the full authorized target
+set and source/device/consent checks, so a new displayed message can be acknowledged
+before discovery updates its conversation activity.
+
 Snapshots record `fetched_at` before the source read request starts, so a slow
 read cannot overwrite a newer acknowledgement. Join, leave, topic and other
 control messages never become a readable latest-message frontier.
@@ -806,3 +814,49 @@ and Marketplace Slack apps use 200-item history pages, while restricted apps
 retain 15-item pages and their existing shared request budget. Larger pages do
 not raise the number of allowed requests. Unbounded history omits `oldest`
 instead of sending a zero timestamp.
+
+Shared public channel mappings have their own community-wide archive policy and
+no owner grant. The selected private-import window applies to every grant-backed
+mirror, including private channels; it does not change shared public retention.
+
+### Bounded source recovery for failed imports
+
+The durable worker's existing state-seeding tick schedules fresh source recovery
+for erased terminal backfill rows. Each round considers at most five owners and
+one conversation per owner, with a durable owner turn so a busy or blocked owner
+cannot monopolize the queue. Each conversation marks at most 200 rows. Current
+grant, scope, consent and registration checks fence the operation. Active leases,
+partial history states and between-page checkpoints are preserved; an incomplete
+scan finishes before a new recovery begins. No OAuth refresh or message body I/O
+runs in this scheduling step.
+
+Scheduling keeps terminal rows terminal and erases any retained old payload. It
+marks the selected rows for a fresh scan of the current consent window. Only
+source observations can repopulate their bodies through the normal guarded
+history writer. After a complete unrestricted scan, remaining absent rows become
+superseded tombstones; a source-limited scan leaves them unqualified. Already
+scheduled or superseded rows do not continually restart recovery. Rows that have
+aged outside consent are recorded as excluded without a provider request.
+
+One explicit compatibility exception addresses private `reaction_add` failures
+from the retired seven-emoji adapter allowlist. The successful production rollout
+of [chat PR #145](https://github.com/MLAI-AUS-Inc/mlai-chat/actions/runs/34502746861)
+completed on 10 September 2026 at 16:52:06 UTC. Recovery requires an exact adapter
+HTTP 400 failure before that bound, a standard Unicode reaction accepted by the
+current pinned emoji data but rejected by the old allowlist, an in-window source
+target, the current participant boundary and a verified registered owner device.
+An existing legacy `history_recovery_scheduled` flag can acquire this audited
+exception once; staged exceptions remain excluded from repeated scheduling.
+
+The exception preserves the original failure time and fixed error code. The
+reaction remains DEAD, permanently fenced and body-free while a fresh archive
+records its source metadata. Only completion of that exact unrestricted archive
+can reconstruct and release the reaction, or supersede it after qualified
+absence. Other scan epochs, source-limited pages, revoked devices, later HTTP 400
+errors and all nonmatching permanent failures remain fenced. This does not clear
+the separate current create failures found during rollout diagnostics.
+
+This path needs no database migration or manual dead-row requeue. Recovery waits
+for the existing provider budgets and fair scheduling; a cooldown expiry is not
+an import-completion deadline. `integrations.tests_message_sync_recovery` runs in
+the durable PostgreSQL CI gate.

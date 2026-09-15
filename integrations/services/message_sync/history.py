@@ -43,6 +43,10 @@ def seed_states(limit=100):
             state = ensure_state(owner)
             schedule_job(state, "head")
             schedule_job(state, "archive")
+    # Durable mode replaces the legacy history loop, including its recovery
+    # scheduler. Keep source recovery alive without depending on a user login.
+    from .recovery import schedule_private_recoveries
+    schedule_private_recoveries(limit=min(5, max(1, limit)))
 
 
 def timestamp(value):

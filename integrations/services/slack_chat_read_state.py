@@ -1,6 +1,7 @@
 """Owner-scoped Slack read cursors; never infer 'read' from absent API fields."""
 
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal, InvalidOperation
 import hashlib
 import re
@@ -13,8 +14,12 @@ from slack_sdk.errors import SlackApiError
 
 from integrations.models import CommunityBridgeChannel
 from integrations.services.slack_chat_catalog import (
+    OWNER_OPENED_KEY,
     catalog_conversations,
+    conversation_activity_at,
     conversation_kind,
+    conversation_metadata,
+    owner_open_intent,
     private_channels_enabled,
 )
 from integrations.services.slack_dm_mirror import (
@@ -138,11 +143,13 @@ def read_state_snapshot(details, *, kind, messages, owner_id):
     }
 
 
-def _targets(grant, public_key):
+def _targets(grant, public_key, *, recent_only=True):
     key = str(public_key or "").strip().lower()
     if not re.fullmatch(r"[0-9a-f]{64}", key):
         raise ValidationError({"device": "Use a verified MLAI Chat device."})
     targets = []
+    days = _grant_history_days(grant) if recent_only else 0
+    oldest = int(time.time() - days * 86400) if days else None
     conversations = catalog_conversations(
         grant.conversations.filter(
             status="live", mlai_channel_id__isnull=False
@@ -154,6 +161,16 @@ def _targets(grant, public_key):
             continue
         if kind == "private_channel" and not private_channels_enabled(grant):
             continue
+        if oldest is not None:
+            # Prewarm recent imports without spending Slack quota on the full
+            # historical directory or waiting for their delivery queue to drain.
+            activity = conversation_activity_at(conversation)
+            if activity is None:
+                if (kind != "im" or conversation_metadata(conversation).get(OWNER_OPENED_KEY)
+                        != owner_open_intent(grant, key)):
+                    continue
+            elif datetime.fromisoformat(activity).timestamp() < oldest:
+                continue
         targets.append(
             ReadTarget(
                 str(conversation.mlai_channel_id),
@@ -364,7 +381,10 @@ def mark_read(user, *, public_key, channel_id, source_ts):
     grant = active_grant_for_user(user)
     _assert_grant_connection_authorized(grant)
     target = next(
-        (t for t in _targets(grant, public_key) if t.channel_id == str(channel_id)),
+        # A user can read a new message before discovery updates its activity.
+        # Keep explicit acknowledgements independent of the polling window.
+        (t for t in _targets(grant, public_key, recent_only=False)
+         if t.channel_id == str(channel_id)),
         None,
     )
     if target is None:
