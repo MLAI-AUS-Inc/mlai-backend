@@ -2265,6 +2265,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
             "c" * 64,
         )
 
+    @override_settings(MESSAGE_SYNC_SLACK_DISTRIBUTION="internal")
     @patch("integrations.services.slack_dm_mirror.WebClient")
     def test_history_scans_thread_replies_one_page_per_tick(self, web_client):
         _, conversation = self._live_conversation()
@@ -2327,15 +2328,15 @@ class SlackDmMirrorOwnerTests(APITestCase):
         self.assertEqual(process_due_history_backfills(), 1)
         conversation.refresh_from_db()
         self.assertIsNone(conversation.history_backfilled_at)
+        thread_oldest = web_client.return_value.conversations_replies.call_args_list[0].kwargs["oldest"]
+        self.assertGreaterEqual(int(thread_oldest), int(web_client.return_value.conversations_history.call_args.kwargs["oldest"]))
         self.assertEqual(
             web_client.return_value.conversations_replies.call_args_list[0].kwargs,
             {
                 "channel": "DONE",
                 "ts": root_ts,
                 "limit": 200,
-                "oldest": web_client.return_value.conversations_history.call_args.kwargs[
-                    "oldest"
-                ],
+                "oldest": thread_oldest,
                 "inclusive": True,
             },
         )
@@ -2350,9 +2351,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
                 "ts": root_ts,
                 "limit": 200,
                 "cursor": "reply-page-2",
-                "oldest": web_client.return_value.conversations_history.call_args.kwargs[
-                    "oldest"
-                ],
+                "oldest": thread_oldest,
                 "inclusive": True,
             },
         )
@@ -2361,9 +2360,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
             ts=root_ts,
             limit=200,
             cursor="reply-page-2",
-            oldest=web_client.return_value.conversations_history.call_args.kwargs[
-                "oldest"
-            ],
+            oldest=thread_oldest,
             inclusive=True,
         )
         reply = conversation.deliveries.get(
@@ -2979,7 +2976,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
             operation=CommunityBridgeDeliveryType.EDIT,
             encrypted_text="private edit",
             metadata={
-                "target_source_message_id": "1700000000.000100",
+                "target_source_message_id": f"{int(timezone.now().timestamp()) - 60}.000100",
                 "dependency_outside_history": True,
             },
             available_at=timezone.now(),

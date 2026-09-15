@@ -369,6 +369,7 @@ jobs:
           integrations.tests_message_sync_scheduler \
           integrations.tests_message_sync_discovery \
           integrations.tests_message_sync_history \
+          integrations.tests_slack_import_readiness \
           integrations.tests_message_sync_public_repair \
           --verbosity 2
 

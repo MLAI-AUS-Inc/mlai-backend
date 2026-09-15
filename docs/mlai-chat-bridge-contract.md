@@ -756,3 +756,47 @@ MLAI's public bot (`A0BDH1ZG76X`) and owner OAuth app (`A0B0NDG6VL0`) are separa
 Deploy callback verification with `MESSAGE_SYNC_ENABLED=false` before verifying a newly configured Slack event URL. The private app's event subscriptions were disabled during the 14 September inspection and must be enabled for live user events after URL verification. Existing users' token scopes and explicit mirror consent remain authoritative; adding a subscription does not authorize additional private access.
 
 The Docker worker health probe runs `message_sync_status --check --local-worker`, checking fresh inbox, history, public-delivery and private-delivery heartbeats from the current container. Enabled deployments wait for these heartbeats and fail if a previous container is the only worker reporting. Status output contains queue ages, expired leases, source coverage classifications and shared provider cooldowns without message bodies or credentials. History and live delivery run in independent bounded lanes, and source-limited scans report unknown absence instead of claiming empty or deleting records.
+
+### Selected-window publication and retired registrations (September 2026)
+
+Owner Slack import honours the selected 7-day or 30-day window using the original
+Slack message timestamp. A recent edit or a delayed callback does not turn an old
+message into a newly eligible message. Recent replies may be shown without an
+out-of-window parent body. Deletions still remove content previously imported.
+Explicit all-history consent remains separate; legacy zero-valued grants remain
+bounded. Provider pagination is rechecked before persistence, including after
+restarts and changes to the consent window. Source-limited responses preserve
+unknown absence: they cannot infer deletions or certify a first complete import.
+
+`channel_catalog` now includes `ready_for_display` and `history_oldest_ts` for
+each device-authorized mirror. The latter is a numeric Unix-seconds string, or an
+empty string for explicitly authorized all-history. `last_message_at` is source
+activity, never relay arrival time. Initial publication requires a completed
+selected-window scan, successful delivery of its relevant backfill, an active
+current grant and a live conversation with activity inside the selected window.
+Clients hide unready imports while preserving native chats. They also filter
+cached Slack bodies by the same source cutoff and use full Slack timestamps to
+order messages sharing a second.
+
+Once an import is published, a presentation cache bound to the owner, consent,
+room, participant hash and selected history window preserves it during ordinary
+background refreshes. A new consent or membership boundary invalidates that
+qualification. The source activity/window and active grant are checked on every
+response. Cache loss fails closed until the import qualifies again; it does not
+make the cache an authorization source.
+
+ID-only `ready_for_display: false` catalogue entries fence older registration
+UUIDs for the verified owner. These contain no historical names, participants or
+bodies and confer no relay access. Clients must retain these entries as hidden
+IDs, rather than counting old relay memberships as native group chats. Group/DM
+classification uses Slack's conversation type and people, not device or shadow
+identity counts. Missing Slack read snapshots mean unknown unread state; imports
+must not fabricate unread badges while those snapshots are loading. No wholesale
+Slack mark-read operation is performed by import.
+
+Confirmed quiet conversations skip relay reprovisioning and receive a bounded
+background-history cooldown; new callbacks remain independently active. Internal
+and Marketplace Slack apps use 200-item history pages, while restricted apps
+retain 15-item pages and their existing shared request budget. Larger pages do
+not raise the number of allowed requests. Unbounded history omits `oldest`
+instead of sending a zero timestamp.

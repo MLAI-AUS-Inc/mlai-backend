@@ -4,8 +4,12 @@ This contains names, member profiles and types, never message bodies. The
 existing owner mirror remains the authority for membership and relay access.
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
+import hashlib
+
+from django.core.cache import cache
+from django.db.models import Exists, OuterRef, Q
 
 CATALOG_KEY = "mlai_chat_conversations_v1"
 PRIVATE_CHANNEL_CONSENT = "slack-chat-v4-private-channels"
@@ -64,7 +68,73 @@ def catalog_conversations(conversations):
     Joining it onto every mirror row multiplies transfer and JSON decoding.
     Prefetch preserves the caller's owner/status filters and shares FK objects.
     """
-    return conversations.select_related(None).prefetch_related("grant__connection")
+    from integrations.models import BridgeSyncState, SlackDmMirrorDelivery
+
+    unfinished = SlackDmMirrorDelivery.objects.filter(
+        conversation_id=OuterRef("pk"), source_platform="slack",
+        metadata__backfill=True,
+        status__in=["pending", "processing", "failed", "dead"],
+    ).filter(
+        Q(metadata__history_recovery_superseded__isnull=True)
+        | Q(metadata__history_recovery_superseded=False),
+    ).filter(
+        Q(metadata__history_outside_window__isnull=True)
+        | Q(metadata__history_outside_window=False),
+    )
+    return conversations.select_related(None).prefetch_related(
+        "grant__connection",
+    ).annotate(
+        _import_pending=Exists(unfinished),
+        _import_limited=Exists(BridgeSyncState.objects.filter(
+            private_conversation_id=OuterRef("pk"),
+            verified_ranges__archive__classification="source_limited",
+        )),
+    )
+
+
+def history_oldest_ts(conversation, *, now=None):
+    """Return the current consent cutoff without treating legacy zero as all."""
+    from integrations.services.slack_dm_mirror import _grant_history_days
+
+    days = _grant_history_days(conversation.grant)
+    now = now or datetime.now(timezone.utc)
+    return str(int((now - timedelta(days=days)).timestamp())) if days else ""
+
+
+def ready_for_display(conversation, *, now=None, published=False):
+    """Publish a mirror only after its selected source window has been delivered."""
+    now = now or datetime.now(timezone.utc)
+    grant = conversation.grant
+    completed = conversation.history_backfilled_at
+    activity = conversation_activity_at(conversation)
+    if (
+        grant.status != "active" or grant.revoked_at is not None
+        or conversation.status != "live"
+        or activity is None
+    ):
+        return False
+    if not published and (
+        completed is None or completed < grant.consented_at
+        or getattr(conversation, "_import_pending", True)
+        or getattr(conversation, "_import_limited", False)
+    ):
+        return False
+    oldest = history_oldest_ts(conversation, now=now)
+    return not oldest or datetime.fromisoformat(activity).timestamp() >= int(oldest)
+
+
+def _publication_key(conversation):
+    """Bind a presentation latch to the exact owner, consent, room and devices."""
+    from integrations.services.slack_dm_mirror import _grant_history_days
+
+    grant = conversation.grant
+    value = ":".join(str(v) for v in (
+        getattr(grant, "pk", ""), grant.consented_at.isoformat(),
+        conversation.mlai_channel_id, getattr(conversation, "participant_hash", ""),
+        ",".join(sorted(conversation.participant_buzz_pubkeys or [])),
+        _grant_history_days(grant),
+    ))
+    return "slack-import-published-v1:" + hashlib.sha256(value.encode()).hexdigest()
 
 
 def catalog_payload(conversations, public_key):
@@ -72,11 +142,37 @@ def catalog_payload(conversations, public_key):
     from integrations.services.slack_channel_mentions import roo_channel_targets
 
     key = str(public_key or "").lower()
+    conversations = [
+        conversation for conversation in conversations
+        if key and conversation.mlai_channel_id
+        and key in (conversation.participant_buzz_pubkeys or [])
+    ]
+    publication_keys = {id(c): _publication_key(c) for c in conversations}
+    try:
+        published = cache.get_many(publication_keys.values()) if conversations else {}
+    except Exception:
+        # This optional presentation latch must not take the status API down.
+        # Durable scan and outbox state can still qualify a completed import.
+        published = {}
+    readiness = {
+        id(c): ready_for_display(c, published=published.get(publication_keys[id(c)]) is True)
+        for c in conversations
+    }
+    # The first complete import opens the chat. Routine background refreshes
+    # then preserve that usable snapshot instead of making chats disappear.
+    # Losing this presentation cache fails closed and repeats qualification.
+    if conversations:
+        try:
+            cache.set_many({publication_keys[id(c)]: True for c in conversations if readiness[id(c)]}, 86400)
+        except Exception:
+            pass
     return [
         {
             "channel_id": str(conversation.mlai_channel_id),
             "kind": conversation_kind(conversation),
             "last_message_at": conversation_activity_at(conversation),
+            "ready_for_display": readiness[id(conversation)],
+            "history_oldest_ts": history_oldest_ts(conversation),
             "source_archived": bool(
                 conversation_metadata(conversation).get("source_archived")
             ),
@@ -92,9 +188,34 @@ def catalog_payload(conversations, public_key):
             ),
         }
         for conversation in conversations
-        if key
-        and conversation.mlai_channel_id
-        and key in (conversation.participant_buzz_pubkeys or [])
+    ]
+
+
+def retired_catalog_payload(grant, public_key, current_channel_ids):
+    """Return owner-scoped ID-only fences for superseded relay registrations.
+
+    Old relay memberships can outlive an adapter registration. These entries
+    prevent them being counted as native group chats; they confer no access and
+    disclose no historical names, people or message bodies.
+    """
+    from community_chat.models import CommunityChatDevice
+    from integrations.models import SlackDmMirrorDelivery
+
+    key = str(public_key or "").lower()
+    if not key or not CommunityChatDevice.objects.filter(
+        user_id=grant.user_id, public_key=key, status="verified", revoked_at__isnull=True,
+    ).exists():
+        return []
+    rows = SlackDmMirrorDelivery.objects.filter(
+        conversation__grant__user_id=grant.user_id, source_platform="buzz",
+        source_message_id__startswith="registration-state:",
+        metadata__registration_control=True,
+    ).order_by("metadata__channel_id").values_list("metadata__channel_id", flat=True).distinct()
+    return [
+        {"channel_id": channel_id, "kind": "mpim", "ready_for_display": False,
+         "last_message_at": None, "history_oldest_ts": ""}
+        for channel_id in rows
+        if channel_id and channel_id not in current_channel_ids
     ]
 
 

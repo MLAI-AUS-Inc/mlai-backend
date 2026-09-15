@@ -67,6 +67,27 @@ def schedule_job(state, kind, *, source_object_key="", due_at=None):
     return job
 
 
+def defer_quiet_history_jobs(conversation, *, delay_seconds=3600):
+    """Defer a source-confirmed quiet mirror after its current authority check.
+
+    Call inside discovery's grant/conversation transaction. Keep active leases,
+    durable cursors, callback ingestion and delivery scheduling unchanged.
+    """
+    due_at = timezone.now() + timedelta(seconds=max(1, delay_seconds))
+    state, _ = BridgeSyncState.objects.get_or_create(
+        private_conversation=conversation,
+        defaults={"workspace_id": conversation.slack_workspace_id,
+                  "source_channel_id": conversation.slack_conversation_id},
+    )
+    for kind in ("head", "archive"):
+        schedule_job(state, kind, due_at=due_at)
+    return state.jobs.filter(
+        kind__in=("head", "archive", "thread"), due_at__lt=due_at,
+    ).filter(
+        Q(lease_expires_at__isnull=True) | Q(lease_expires_at__lte=timezone.now()),
+    ).update(due_at=due_at)
+
+
 def eligible_states():
     return BridgeSyncState.objects.filter(
         Q(public_channel__enabled=True)
