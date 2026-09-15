@@ -5,6 +5,7 @@ from django.test import override_settings
 from content_factory.island_research import refund_empty_or_failed_research
 from content_factory.models import ContentIsland, ContentIslandKeyword, ContentIslandSnapshot
 from content_factory.vibe_marketing_views import _serialize_run, _topic_pillars_for_bootstrap
+from organizations.models import Organization
 from roo.models import Ledger, PointsAccount
 from workflow_runs.models import ContentFactoryRun
 from tests.test_content_island_bootstrap import ContentIslandBootstrapTestCase
@@ -84,8 +85,10 @@ class IslandResearchContractTests(ContentIslandBootstrapTestCase):
         response = self.client.post(f"{URL}/{run.run_id}/adopt", {"proposalId": PROPOSAL["id"]}, format="json")
         self.assertEqual(response.status_code, 400)
         self.complete(run, [PROPOSAL])
-        run.domain = "another-company.test"
-        run.save(update_fields=["domain"])
+        # Run ownership uses the organization FK, not a mutable domain label.
+        run.organization = Organization.objects.create(name="Other company", domain="another-company.test")
+        run.domain = run.organization.domain
+        run.save(update_fields=["organization", "domain"])
         response = self.client.post(f"{URL}/{run.run_id}/adopt", {"proposalId": PROPOSAL["id"]}, format="json")
         self.assertEqual(response.status_code, 404)
         self.assertEqual(ContentIsland.objects.count(), 0)
