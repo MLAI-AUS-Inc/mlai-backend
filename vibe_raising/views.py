@@ -304,7 +304,7 @@ def _monthly_update_drafts_cover_input_sources(
     if MANUAL_DOCUMENTS_SOURCE in set(normalize_startup_update_input_sources(input_sources)):
         return False
 
-    draft_queryset = organization.monthly_update_drafts.select_related("run")
+    draft_queryset = organization.monthly_update_drafts.monthly_slots().select_related("run")
     if target_month is not None:
         draft_queryset = draft_queryset.filter(month=target_month)
     draft = draft_queryset.order_by("-month", "-updated_at").first()
@@ -823,7 +823,9 @@ def _serialize_draft_for_form(draft):
     structured_memo = _structured_memo_with_xero_metrics(draft)
     video_metadata = _structured_memo_video_metadata(structured_memo)
     month_value = draft.month
+    from startup_updates.update_identity import identity_payload
     return {
+        **identity_payload(draft, structured_memo),
         "id": draft.id,
         **(revision_payload(draft.current_revision) if draft.current_revision_id else {}),
         "audienceVisibility": structured_memo.get("_audience_visibility", ["just_me"]),
@@ -996,7 +998,9 @@ def _serialize_monthly_update(draft, structured_memo=None, *, published=False):
     published_at = getattr(draft, "published_at", None)
     if revision and revision.pk != draft.published_revision_id:
         published_at = None
+    from startup_updates.update_identity import identity_payload
     return {
+        **identity_payload(draft, structured_memo),
         "id": draft.id,
         **(revision_payload(revision, include_evidence=not published) if revision else {}),
         "evidenceStatus": "snapshot" if revision and not revision.validation.get("legacy_unverified") else "legacy_unverified",
@@ -1074,7 +1078,9 @@ def _serialize_email_draft_month(draft):
     structured_memo = _structured_memo_with_xero_metrics(draft)
     video_metadata = _structured_memo_video_metadata(structured_memo)
     month_value = draft.month
+    from startup_updates.update_identity import identity_payload
     return {
+        **identity_payload(draft, structured_memo),
         "draftId": draft.id,
         **(revision_payload(draft.current_revision) if draft.current_revision_id else {}),
         "isoMonth": month_value.isoformat(),
@@ -1913,9 +1919,9 @@ def _build_email_draft_payload(
                 google_connection_id=google_connection_id,
             )
         drafts = _get_drafts_for_run(latest_run)
-        if requested_target_month is not None:
+        if requested_target_month is not None and not (latest_run and (latest_run.run_request or {}).get("update_id")):
             target_drafts = list(
-                organization.monthly_update_drafts.filter(month=requested_target_month).order_by("-month", "-updated_at")
+                organization.monthly_update_drafts.monthly_slots().filter(month=requested_target_month).order_by("-month", "-updated_at")
             )
             if target_drafts:
                 drafts = target_drafts
@@ -1968,6 +1974,10 @@ def _build_email_draft_payload(
         error = "Draft generation has not started yet."
 
     return {
+        "updateId": (latest_run.run_request or {}).get("update_id") if latest_run else None,
+        "creationKey": (latest_run.run_request or {}).get("creation_key") if latest_run else None,
+        "updateDate": (latest_run.run_request or {}).get("update_date") if latest_run else None,
+        "narrativePeriod": (latest_run.run_request or {}).get("narrative_period") if latest_run else None,
         "state": state,
         "gmailConnected": google_connected,
         **google_scope_status,
@@ -2491,7 +2501,7 @@ class VibeRaisingMonthlyUpdateView(APIView):
         if organization is None:
             return Response({"updates": [], "metricHistory": {}}, status=status.HTTP_200_OK)
 
-        draft_queryset = organization.monthly_update_drafts.all()
+        draft_queryset = organization.monthly_update_drafts.published()
         audience = str(request.query_params.get("audience") or "").strip().lower().replace("-", "_")
         if audience and audience != "founder":
             try:
@@ -2555,10 +2565,36 @@ class VibeRaisingMonthlyUpdateView(APIView):
             1,
         )
 
-        existing_draft = MonthlyUpdateDraft.objects.filter(
-            organization=organization,
-            month=month_bucket,
-        ).first()
+        from startup_updates.update_identity import resolve_update
+        draft, created = resolve_update(
+            organization, month=month_bucket,
+            update_id=serializer.validated_data.get("updateId"),
+            creation_key=serializer.validated_data.get("creationKey"),
+            update_date=serializer.validated_data.get("updateDate"),
+        )
+        existing_draft = None if created else draft
+        from startup_updates.evidence_contract import content_hash
+        from rest_framework.utils.encoders import JSONEncoder
+        import json
+        creation_request_hash = content_hash(json.loads(json.dumps(serializer.validated_data, cls=JSONEncoder)))
+        is_creation_request = bool(serializer.validated_data.get("creationKey") and not serializer.validated_data.get("updateId") and not serializer.validated_data.get("expectedRevision"))
+        if is_creation_request and draft.current_revision_id and draft.current_revision.structured_memo.get("_creation_request_hash") == creation_request_hash:
+            return Response({"update": _serialize_monthly_update(draft)}, status=status.HTTP_200_OK)
+        # Dates organise publications; existing financial evidence keeps its month.
+        month_bucket = draft.month
+        if "updateDate" in serializer.validated_data:
+            candidate_date = serializer.validated_data["updateDate"]
+            from zoneinfo import ZoneInfo
+            zone = ZoneInfo(_startup_profile.reporting_timezone or "UTC")
+            if draft.creation_key and candidate_date is None:
+                from rest_framework.exceptions import ValidationError
+                raise ValidationError({"updateDate": "Choose an update date."})
+            if candidate_date and candidate_date > timezone.now().astimezone(zone).date():
+                from rest_framework.exceptions import ValidationError
+                raise ValidationError({"updateDate": "Choose today or an earlier date."})
+            draft.update_date = candidate_date
+            draft.save(update_fields=["update_date"])
+
         display_config = serializer.validated_data.get("displayConfig")
         if display_config is None:
             # Saves that omit displayConfig (older clients, the frontend's
@@ -2609,12 +2645,20 @@ class VibeRaisingMonthlyUpdateView(APIView):
         }
         from startup_updates.revisions import capture_snapshot, save_revision
         Organization.objects.select_for_update().get(pk=organization.pk)
-        draft, created = MonthlyUpdateDraft.objects.get_or_create(organization=organization, month=month_bucket)
         previous_metrics = _extract_metrics(draft.current_revision.structured_memo) if draft.current_revision_id else {}
         incoming_metrics = serializer.validated_data.get("metrics") or {}
-        changed_metrics = {key: value for key, value in incoming_metrics.items() if previous_metrics.get(key) != value}
-        snapshot = draft.current_revision.snapshot if draft.current_revision_id and not changed_metrics else capture_snapshot(organization, month_bucket, manual_metrics=changed_metrics, base_snapshot=draft.current_revision.snapshot if draft.current_revision_id else None)
+        from startup_updates.founder_metrics import snapshot_for_founder_edit, FinancialMetricEditError
+        try:
+            snapshot, changed_metrics = snapshot_for_founder_edit(
+                organization=organization, month=month_bucket, draft=draft,
+                incoming=incoming_metrics, previous=previous_metrics, capture=capture_snapshot,
+            )
+        except FinancialMetricEditError as exc:
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError({"detail": str(exc)}) from exc
         memo = _build_manual_structured_memo(structured_payload)
+        if is_creation_request and not draft.current_revision_id:
+            memo["_creation_request_hash"] = creation_request_hash
         if draft.current_revision_id:
             # Only the server's frozen chart is eligible for reuse.
             old = draft.current_revision.structured_memo
@@ -2988,6 +3032,50 @@ class VibeRaisingEmailDraftStartView(APIView):
             binding.google_connection = google_connection
             binding.save(update_fields=["google_connection", "updated_at"])
 
+        if request.data.get("updateId") or request.data.get("creationKey"):
+            from startup_updates.update_identity import resolve_update, narrative_window, identity_payload
+            from startup_updates.revisions import RevisionConflict
+            from rest_framework.exceptions import ValidationError
+            try:
+                requested_date = date.fromisoformat(str(request.data.get("updateDate")))
+                requested_id = int(request.data["updateId"]) if request.data.get("updateId") else None
+            except (ValueError, TypeError):
+                raise ValidationError({"updateDate": "Choose a valid update date."})
+            with transaction.atomic():
+                draft, _ = resolve_update(organization, month=target_month, update_id=requested_id,
+                    creation_key=request.data.get("creationKey"), update_date=requested_date)
+                if str(request.data.get("expectedRevision") or "") != str(draft.current_revision_id or ""):
+                    raise RevisionConflict()
+                target_month = draft.month
+                period = narrative_window(organization, draft, requested_date,
+                    requested_start=request.data.get("narrativeStart"), requested_end=request.data.get("narrativeEnd"))
+                existing_run = get_open_startup_update_run(organization=organization)
+                if existing_run and str((existing_run.run_request or {}).get("update_id")) != str(draft.pk):
+                    raise RevisionConflict("Another update is being drafted. Finish or cancel that run first.")
+                force = str(request.data.get("forceRegenerate") or request.data.get("force_regenerate") or "").strip().lower() in {"1", "true", "yes"}
+                if existing_run and force:
+                    cancel_startup_update_run(run_id=existing_run.run_id, organization=organization,
+                        binding_id=binding.id, google_connection_id=google_connection.id if google_connection else None,
+                        cancelled_by_user_id=request.user.id)
+                    existing_run = None
+                    draft.refresh_from_db()
+                if not existing_run:
+                    draft.update_date = requested_date
+                    draft.save(update_fields=["update_date"])
+                run = existing_run or create_startup_update_run(organization=organization, binding=binding,
+                    input_sources=input_sources, source_warnings=source_warnings, target_month=target_month,
+                    manual_document_ids=manual_document_ids, manual_summary=manual_summary,
+                    force_regenerate=force, update_draft=draft, narrative_period=period)
+            if not existing_run or _should_dispatch_existing_run(run):
+                dispatch_result = _dispatch_run_to_valley(run)
+                if not dispatch_result:
+                    return Response(_valley_dispatch_failure_payload(run, dispatch_result), status=503)
+            payload = _build_email_draft_payload(request=request, user=request.user, company=company,
+                domain=domain, run_id=run.run_id, target_month=target_month)
+            payload.update(identity_payload(draft))
+            payload["narrativePeriod"] = (run.run_request or {}).get("narrative_period")
+            return Response(payload, status=200 if existing_run else 201)
+
         raw_force_regenerate = request.data.get("force_regenerate") or request.data.get("forceRegenerate")
         force_regenerate = str(raw_force_regenerate or "").strip().lower() in {
             "1",
@@ -3063,7 +3151,7 @@ class VibeRaisingEmailDraftStartView(APIView):
                 source_warnings=source_warnings,
                 target_month=target_month,
             )
-            latest_draft = organization.monthly_update_drafts.filter(month=target_month).order_by("-updated_at").first()
+            latest_draft = organization.monthly_update_drafts.monthly_slots().filter(month=target_month).order_by("-updated_at").first()
             logger.info(
                 "Skipping Valley dispatch for Vibe Raising email draft start because reusable drafts already exist",
                 extra={

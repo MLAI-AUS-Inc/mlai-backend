@@ -29,7 +29,7 @@ def capture_snapshot(organization, month, *, run=None, manual_metrics=None, base
     try:
         request = (run.run_request or {}) if run else {}
         zone = request.get("reporting_timezone") or profile.reporting_timezone
-        window_end = request.get("backfill_window_end")
+        window_end = request.get("financial_cutoff") or request.get("backfill_window_end")
         if base_snapshot is not None:
             period = copy.deepcopy(base_snapshot.payload["period"])
         elif window_end:
@@ -121,17 +121,30 @@ def capture_snapshot(organization, month, *, run=None, manual_metrics=None, base
             "revenue_mix": [], "event_contribution": [], "overhead": [],
             "data_quality": {"warnings": ["Founder-entered values require source confirmation."], "calculation_basis": "Founder assertions"},
         }
-    for point in (payload.get("charts") or {}).get("performance", []):
-        if point["month"] == month.isoformat():
-            for key, field in (("revenue", "income"), ("monthlyCosts", "expenses")):
-                metric = next((item for item in metrics if item["key"] == key), None)
-                value = decimal_value(metric.get("value")) if metric else None
-                point[field] = float(value) if value is not None else None
-            net = next((item for item in metrics if item["key"] == "netProfitLoss"), None)
-            amount = decimal_value(net.get("value")) if net else None
-            point["net"] = float(amount) if amount is not None and not manual_metrics else None
-            point["is_partial"] = period["is_partial"]
-    events = StartupEvent.objects.filter(organization=organization, month_bucket=month)
+    # Nonfinancial edits retain the entire frozen chart, including net and unknown gaps.
+    from startup_updates.founder_metrics import FINANCIAL_KEYS
+    if not base_snapshot or FINANCIAL_KEYS.intersection(manual_metrics or {}):
+        for point in (payload.get("charts") or {}).get("performance", []):
+            if point["month"] == month.isoformat():
+                for key, field in (("revenue", "income"), ("monthlyCosts", "expenses")):
+                    metric = next((item for item in metrics if item["key"] == key), None)
+                    value = decimal_value(metric.get("value")) if metric else None
+                    point[field] = float(value) if value is not None else None
+                net = next((item for item in metrics if item["key"] == "netProfitLoss"), None)
+                amount = decimal_value(net.get("value")) if net else None
+                point["net"] = float(amount) if amount is not None and not ({"revenue", "monthlyCosts", "netProfitLoss"} & set(manual_metrics or {})) else None
+                point["is_partial"] = period["is_partial"]
+    narrative = (run.run_request or {}).get("narrative_period") if run else None
+    payload["narrative_period"] = copy.deepcopy(narrative)
+    events = StartupEvent.objects.filter(organization=organization)
+    if narrative:
+        zone = __import__("zoneinfo").ZoneInfo(narrative["timezone"])
+        start = parse_datetime(narrative["start"]).astimezone(zone)
+        end = (parse_datetime(narrative["end"]) - timedelta(microseconds=1)).astimezone(zone)
+        # Extracted event dates have day precision. The frozen source window retains exact boundaries.
+        events = events.filter(event_date__gte=start.date(), event_date__lte=end.date())
+    else:
+        events = events.filter(month_bucket=month)
     if run is not None:
         from startup_updates.api_views import _run_result_candidates
         approved = {int(item["event_id"]) for item in _run_result_candidates(run)
@@ -183,7 +196,7 @@ def capture_snapshot(organization, month, *, run=None, manual_metrics=None, base
     if payload.get("charts"):
         payload["charts"]["data_quality"]["warnings"].extend(warnings)
     from vibe_raising.metric_history import build_metric_history
-    prior = MonthlyUpdateDraft.objects.filter(organization=organization, month__lt=month).select_related("published_revision__snapshot", "current_revision__snapshot")
+    prior = MonthlyUpdateDraft.objects.filter(organization=organization, month__lt=month).order_by("-month", "-first_published_at", "-id").select_related("published_revision__snapshot", "current_revision__snapshot")
     pairs = []
     for item in prior:
         revision = item.published_revision or item.current_revision
@@ -193,7 +206,7 @@ def capture_snapshot(organization, month, *, run=None, manual_metrics=None, base
     payload["metric_history"] = build_metric_history([*pairs, (month, current_memo)])
     if base_snapshot is not None:
         payload["amended_at"] = timezone.now().isoformat()
-        for field in ("events", "startup", "period", "definitions", "config_version", "source_providers", "manual_sources", "source_evidence", "source_coverage", "extraction_version", "editorial_event_ids"):
+        for field in ("events", "startup", "period", "definitions", "config_version", "source_providers", "manual_sources", "source_evidence", "source_coverage", "extraction_version", "editorial_event_ids", "narrative_period"):
             payload[field] = copy.deepcopy(base_snapshot.payload.get(field))
     payload["hash"] = content_hash(payload)
     snapshot, _ = MonthlyEvidenceSnapshot.objects.get_or_create(
@@ -229,6 +242,7 @@ def save_revision(draft, memo, *, snapshot, audience="private", expected_revisio
         # Preserve historical publication verbatim on the first edit. This is
         # archival evidence only: no fresh provider values or approval are implied.
         legacy_memo = copy.deepcopy(draft.structured_memo or {})
+        legacy_memo.setdefault("update_date", None)
         legacy_payload = {"legacy_unverified": True, "organization_id": draft.organization_id,
             "month": draft.month.isoformat(), "metrics": [], "events": [],
             "published_memo": legacy_memo}
@@ -268,6 +282,8 @@ def save_revision(draft, memo, *, snapshot, audience="private", expected_revisio
     memo["financial_snapshot"] = copy.deepcopy(snapshot.payload.get("charts")) if audience == "private" else None
     memo["_audience_visibility"] = ["community" if audience == "community" else "just_me"]
     memo["reporting_period"] = copy.deepcopy(snapshot.payload.get("period"))
+    memo["update_date"] = draft.update_date.isoformat() if draft.update_date else None
+    memo["narrative_period"] = copy.deepcopy(snapshot.payload.get("narrative_period") or (current.structured_memo.get("narrative_period") if current else None))
     memo["evidence_warnings"] = sorted({str(warning) for source in snapshot.payload.get("source_coverage", {}).values() for warning in source.get("warnings", [])}) if audience == "private" else []
     memo["evidence_snapshot_id"] = snapshot.pk
     memo["evidence_snapshot_hash"] = snapshot.content_hash
@@ -316,7 +332,8 @@ def approve_and_publish(draft, *, actor, revision_id, revision_hash, audience_vi
     draft.published_revision = revision
     draft.audience_visibility = audience_visibility
     draft.published_at = timezone.now() if previous_published_id != revision.pk or not draft.published_at else draft.published_at
+    draft.first_published_at = draft.first_published_at or draft.published_at
     draft.status = "ready"
     draft.run = None  # A cancelled worker cannot delete an explicitly approved publication.
-    draft.save(update_fields=["published_revision", "audience_visibility", "published_at", "status", "run", "updated_at"])
+    draft.save(update_fields=["published_revision", "audience_visibility", "published_at", "first_published_at", "status", "run", "updated_at"])
     return draft

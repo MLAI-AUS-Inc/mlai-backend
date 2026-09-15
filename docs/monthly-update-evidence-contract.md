@@ -33,7 +33,7 @@ Candidate auto-selection is not publication approval. Generated revisions start 
 
 `POST /api/v1/vibe-raising/business-health/` accepts `companyId`, `timezone`, `currency`, and optional metric definitions (`key`, `label`, `definition`). The UI can add a definition with `metricLabel` and `metricDefinition`. Changes increment the configuration version; prior snapshots do not change.
 
-`POST /api/v1/vibe-raising/updates/` requires the form's `companyId` and `expectedRevision` for edits. It returns a saved revision receipt. A changed founder value becomes a clearly labelled founder assertion in a new snapshot. Unchanged evidence is copied from the previous snapshot.
+`POST /api/v1/vibe-raising/updates/` requires the form's `companyId` and `expectedRevision` for edits. It returns a saved revision receipt. Financial values are read-only: the server rejects attempts to replace or clear the frozen value, including attempts to supply unavailable financial data manually. Equivalent formatted values and omitted keys retain the existing evidence. Other changed metrics become clearly labelled founder assertions in a new snapshot. Text and cover edits retain the existing cutoff and snapshot. Refresh financial evidence through the existing source-assisted draft workflow, then review its new revision. The browser cannot supply its own financial provenance or charts. Existing founder-asserted historical values retain their label.
 
 `POST /api/v1/vibe-raising/updates/{id}/publish/` requires `companyId`, `revisionId`, `revisionHash`, and `audienceVisibility`. Approval and publication occur in one transaction. Audience must match the saved disclosure choice. A changed revision or disclosure returns 409. Duplicate approval is idempotent.
 

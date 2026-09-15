@@ -3,13 +3,14 @@
 The series produced here must always agree with the metric strings each
 month's update displays, so extraction mirrors ``_extract_metrics`` in
 ``vibe_raising.views`` (same key normalization, same value precedence,
-last writer wins within a month).
+the latest financial cutoff wins within a month).
 """
 
 import re
 from datetime import date
 from decimal import Decimal, InvalidOperation
 from typing import Any, Iterable, Optional, Tuple
+from django.utils.dateparse import parse_datetime
 
 from startup_updates.metric_catalog import (
     startup_update_metric_key,
@@ -107,14 +108,22 @@ def build_metric_history(
     ``max_months`` months. Values that don't parse to a number are skipped;
     metrics with no numeric points are omitted entirely.
     """
-    pairs = sorted(
-        (
-            (month, memo)
-            for month, memo in month_memo_pairs
-            if isinstance(month, date)
-        ),
-        key=lambda pair: pair[0],
-    )
+    # Prefer the latest frozen financial cutoff; never sum repeated publications.
+    # Callers supply newest snapshots first to break ties and handle legacy memos.
+    def cutoff(memo):
+        value = ((memo or {}).get("reporting_period") or {}).get("cutoff")
+        try:
+            parsed = parse_datetime(str(value)) if value else None
+            return parsed.timestamp() if parsed and parsed.tzinfo else float("-inf")
+        except (ValueError, TypeError):
+            return float("-inf")
+
+    by_month = {}
+    for month, memo in month_memo_pairs:
+        if isinstance(month, date):
+            if month not in by_month or cutoff(memo) > cutoff(by_month[month]):
+                by_month[month] = memo
+    pairs = sorted(by_month.items(), key=lambda pair: pair[0])
     if max_months and len(pairs) > max_months:
         pairs = pairs[-max_months:]
 
