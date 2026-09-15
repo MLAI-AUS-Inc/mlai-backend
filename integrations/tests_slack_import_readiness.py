@@ -31,6 +31,9 @@ class SlackImportReadinessTests(SlackDmIoAuthorityFixture, TransactionTestCase):
         self.conversation.latest_synced_ts = f"{int(timezone.now().timestamp()) - 31 * 86400}.000001"
         self.conversation.save()
         self.assertFalse(self.catalog()[0]["ready_for_display"])
+        status = dm.status_payload(self.user, authenticated_public_key=self.owner_key)
+        self.assertEqual(status["backfill"]["complete"], 1)
+        self.assertEqual(status["backfill"]["pending"], 0)
 
     def test_seven_day_selection_hides_eight_day_activity(self):
         self.grant.history_days = 7
@@ -59,6 +62,9 @@ class SlackImportReadinessTests(SlackDmIoAuthorityFixture, TransactionTestCase):
         self.grant.consented_at = timezone.now() + timedelta(seconds=1)
         self.grant.save()
         self.assertFalse(self.catalog()[0]["ready_for_display"])
+        status = dm.status_payload(self.user, authenticated_public_key=self.owner_key)
+        self.assertEqual(status["backfill"]["complete"], 0)
+        self.assertEqual(status["backfill"]["pending"], 1)
 
     def test_paused_chat_stays_in_catalog_as_a_hidden_type_fence(self):
         self.conversation.status = "paused"
@@ -83,7 +89,7 @@ class SlackImportReadinessTests(SlackDmIoAuthorityFixture, TransactionTestCase):
         self.assertFalse(entries[0]["ready_for_display"])
         self.assertNotIn("private name", str(entries))
         self.assertEqual(retired_catalog_payload(self.grant, "f" * 64, set()), [])
-        self.assertEqual(retired_catalog_payload(self.grant, self.owner_key, {old_id}), [])
+        self.assertEqual(retired_catalog_payload(self.grant, self.owner_key, {old_id, str(self.conversation.mlai_channel_id)}), [])
 
     def test_delayed_live_create_and_edit_obey_original_message_time(self):
         old_ts = f"{int(timezone.now().timestamp()) - 31 * 86400}.000001"
@@ -154,12 +160,21 @@ class SlackImportReadinessTests(SlackDmIoAuthorityFixture, TransactionTestCase):
 
     def test_source_limited_archive_cannot_publish_first_import(self):
         from integrations.models import BridgeSyncState
-        BridgeSyncState.objects.create(
+        state = BridgeSyncState.objects.create(
             private_conversation=self.conversation, workspace_id="TIOAUTH",
             source_channel_id="DIOAUTH",
             verified_ranges={"archive": {"classification": "source_limited"}},
         )
         self.assertFalse(self.catalog()[0]["ready_for_display"])
+        status = dm.status_payload(self.user, authenticated_public_key=self.owner_key)
+        self.assertEqual(status["backfill"]["complete"], 0)
+        self.assertEqual(status["backfill"]["pending"], 1)
+        state.verified_ranges = {"archive": {"classification": "verified"}}
+        state.save(update_fields=["verified_ranges"])
+        status = dm.status_payload(self.user, authenticated_public_key=self.owner_key)
+        self.assertEqual(status["backfill"]["complete"], 1)
+        self.assertEqual(status["backfill"]["pending"], 0)
+        self.assertTrue(status["channel_catalog"][0]["ready_for_display"])
 
     def test_retired_ids_from_previous_slack_identity_remain_owner_scoped(self):
         from integrations.models import ExternalServiceConnection, SlackDmMirrorGrant, SlackDmMirrorConversation
@@ -180,4 +195,94 @@ class SlackImportReadinessTests(SlackDmIoAuthorityFixture, TransactionTestCase):
             source_author_id="", operation="create", status="completed", available_at=timezone.now(),
             metadata={"registration_control": True, "channel_id": old_id},
         )
-        self.assertEqual(retired_catalog_payload(self.grant, self.owner_key, set())[0]["channel_id"], old_id)
+        self.assertIn(old_id, {entry["channel_id"] for entry in retired_catalog_payload(self.grant, self.owner_key, set())})
+
+    def test_inactive_or_disconnected_status_returns_only_owner_id_fences(self):
+        old_id = str(uuid.uuid4())
+        SlackDmMirrorDelivery.objects.create(
+            conversation=self.conversation, source_platform="buzz", source_message_id="registration-state:old",
+            source_author_id="", operation="create", status="completed", available_at=timezone.now(),
+            metadata={"registration_control": True, "channel_id": old_id, "conversation_name": "private name"},
+        )
+        for grant_status, connection_status in (("paused", "connected"), ("revoked", "disconnected"), ("active", "disconnected")):
+            with self.subTest(grant_status=grant_status, connection_status=connection_status):
+                self.grant.status = grant_status
+                self.grant.revoked_at = timezone.now() if grant_status == "revoked" else None
+                self.grant.save()
+                self.connection.status = connection_status
+                self.connection.save()
+                self.conversation.participant_buzz_pubkeys = []
+                self.conversation.save()
+                payload = dm.status_payload(self.user, authenticated_public_key=self.owner_key)
+                entries = payload["channel_catalog"]
+                self.assertEqual({entry["channel_id"] for entry in entries}, {old_id, str(self.conversation.mlai_channel_id)})
+                for entry in entries:
+                    self.assertFalse(entry["ready_for_display"])
+                    self.assertEqual(set(entry), {"channel_id", "kind", "ready_for_display", "last_message_at", "history_oldest_ts"})
+                self.assertNotIn("private name", str(entries))
+
+    def test_status_catalog_rejects_revoked_or_foreign_device(self):
+        from community_chat.models import CommunityChatDevice
+        from django.contrib.auth import get_user_model
+        self.assertTrue(dm.status_payload(self.user, authenticated_public_key=self.owner_key)["channel_catalog"])
+        foreign = get_user_model().objects.create_user(email="foreign-fence-owner@example.com")
+        self.assertEqual(dm.status_payload(foreign, authenticated_public_key=self.owner_key)["channel_catalog"], [])
+        CommunityChatDevice.objects.filter(user=self.user).update(status="revoked", revoked_at=timezone.now())
+        self.assertEqual(dm.status_payload(self.user, authenticated_public_key=self.owner_key)["channel_catalog"], [])
+
+    def test_no_grant_status_has_no_fences_and_no_provider_io(self):
+        from community_chat.models import CommunityChatDevice
+        from django.contrib.auth import get_user_model
+        user = get_user_model().objects.create_user(email="no-grant-fence-owner@example.com")
+        key = "e" * 64
+        CommunityChatDevice.objects.create(user=user, public_key=key, status="verified", verified_at=timezone.now())
+        with patch.object(dm, "WebClient") as provider:
+            payload = dm.status_payload(user, authenticated_public_key=key)
+        self.assertEqual(payload["status"], "not_connected")
+        self.assertEqual(payload["channel_catalog"], [])
+        provider.assert_not_called()
+
+    def test_completed_empty_dm_requires_exact_owner_open_intent(self):
+        from integrations.services.slack_chat_catalog import CATALOG_KEY, OWNER_OPENED_KEY, owner_open_intent
+        self.conversation.latest_synced_ts = ""
+        self.conversation.save()
+        self.assertFalse(self.catalog()[0]["ready_for_display"])
+        marker = owner_open_intent(self.grant, self.owner_key)
+        self.connection.provider_metadata = {**self.connection.provider_metadata,
+            CATALOG_KEY: {self.conversation.slack_conversation_id: {OWNER_OPENED_KEY: marker}}}
+        self.connection.save()
+        self.assertTrue(self.catalog()[0]["ready_for_display"])
+        self.assertIsNone(self.catalog()[0]["last_message_at"])
+        cache.clear()
+        self.conversation.history_backfilled_at = None
+        self.conversation.save()
+        self.assertFalse(self.catalog()[0]["ready_for_display"])
+        self.conversation.history_backfilled_at = timezone.now()
+        self.conversation.latest_synced_ts = f"{int(timezone.now().timestamp()) - 31 * 86400}.000001"
+        self.conversation.save()
+        self.assertFalse(self.catalog()[0]["ready_for_display"])
+
+    def test_empty_open_intent_expires_on_device_consent_or_oauth_change(self):
+        from integrations.services.slack_chat_catalog import CATALOG_KEY, OWNER_OPENED_KEY, owner_open_intent
+        from integrations.services.slack_oauth_authority import SLACK_OAUTH_GENERATION_KEY
+        self.conversation.latest_synced_ts = ""
+        self.conversation.save()
+        marker = owner_open_intent(self.grant, self.owner_key)
+        metadata = {**self.connection.provider_metadata,
+            CATALOG_KEY: {self.conversation.slack_conversation_id: {OWNER_OPENED_KEY: marker}}}
+        self.connection.provider_metadata = metadata
+        self.connection.save()
+        self.assertTrue(self.catalog()[0]["ready_for_display"])
+        foreign_key = "e" * 64
+        self.conversation.participant_buzz_pubkeys.append(foreign_key)
+        self.conversation.save()
+        entries = catalog_payload(catalog_conversations(self.grant.conversations.all()), foreign_key)
+        self.assertFalse(entries[0]["ready_for_display"])
+        self.connection.provider_metadata = {**metadata, SLACK_OAUTH_GENERATION_KEY: 1}
+        self.connection.save()
+        self.assertFalse(self.catalog()[0]["ready_for_display"])
+        self.connection.provider_metadata = metadata
+        self.connection.save()
+        self.grant.consented_at = timezone.now() + timedelta(seconds=1)
+        self.grant.save()
+        self.assertFalse(self.catalog()[0]["ready_for_display"])

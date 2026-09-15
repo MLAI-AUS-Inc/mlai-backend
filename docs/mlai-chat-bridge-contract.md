@@ -774,6 +774,11 @@ empty string for explicitly authorized all-history. `last_message_at` is source
 activity, never relay arrival time. Initial publication requires a completed
 selected-window scan, successful delivery of its relevant backfill, an active
 current grant and a live conversation with activity inside the selected window.
+An explicit open-DM action can qualify an empty conversation after its completed
+empty scan, using an intent bound to the exact consent, OAuth generation and
+owner device. This does not make a background-discovered empty conversation or
+a conversation with actual old activity eligible. Progress counts use the same
+durable scan, consent, source-limit and delivery prerequisites.
 Clients hide unready imports while preserving native chats. They also filter
 cached Slack bodies by the same source cutoff and use full Slack timestamps to
 order messages sharing a second.
@@ -786,7 +791,8 @@ response. Cache loss fails closed until the import qualifies again; it does not
 make the cache an authorization source.
 
 ID-only `ready_for_display: false` catalogue entries fence older registration
-UUIDs for the verified owner. These contain no historical names, participants or
+UUIDs for the verified owner, including after pause or disconnect and across old
+Slack connections. These contain no historical names, participants or
 bodies and confer no relay access. Clients must retain these entries as hidden
 IDs, rather than counting old relay memberships as native group chats. Group/DM
 classification uses Slack's conversation type and people, not device or shadow

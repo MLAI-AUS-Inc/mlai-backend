@@ -850,6 +850,9 @@ class SlackDmMirrorOwnerTests(APITestCase):
         self.assertEqual(
             set(grant.conversations.get().participant_slack_ids), {"UONE", "UROO"}
         )
+        from integrations.services.slack_chat_catalog import OWNER_OPENED_KEY, conversation_metadata, owner_open_intent
+        current = grant.conversations.select_related("grant__connection").get()
+        self.assertEqual(conversation_metadata(current)[OWNER_OPENED_KEY], owner_open_intent(grant, "1" * 64))
         client.chat_postMessage.assert_not_called()
         for users in [["UOTHER"], ["UROO", "UOTHER"]]:
             with self.subTest(users=users), self.assertRaises(slack_dm_mirror.SlackDmMirrorError):

@@ -27,7 +27,7 @@ from django.conf import settings
 from django.core.cache import cache
 from django.contrib.auth import get_user_model
 from django.db import transaction
-from django.db.models import Case, IntegerField, Min, Q, Value, When
+from django.db.models import Case, F, IntegerField, Min, Q, Value, When
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from slack_sdk import WebClient
@@ -970,6 +970,8 @@ def open_slack_dm(
         profile_cache,
         required_scopes=required_scopes,
     )
+    from integrations.services.slack_chat_catalog import OWNER_OPENED_KEY, owner_open_intent
+
     participant_ids = sorted({grant.slack_user_id, *requested_ids})
     conversation, _ = _store_conversation_membership_intent(
         grant.pk,
@@ -977,6 +979,7 @@ def open_slack_dm(
         required_scopes=required_scopes,
         slack_conversation_id=channel_id,
         participant_slack_ids=participant_ids,
+        channel_metadata={OWNER_OPENED_KEY: owner_open_intent(grant, authenticated_public_key)},
         participant_profiles={
             slack_user_id: profile_cache[slack_user_id]
             for slack_user_id in participant_ids
@@ -1088,11 +1091,15 @@ def status_payload(
             "error": SlackDmMirrorConversationStatus.ERROR,
         }.items()
     }
-    active_device_count = CommunityChatDevice.objects.filter(
+    active_device_keys = set(CommunityChatDevice.objects.filter(
         user=user,
         status=DeviceBindingStatus.VERIFIED,
         revoked_at__isnull=True,
-    ).count()
+    ).values_list("public_key", flat=True))
+    active_device_count = len(active_device_keys)
+    catalog_key = str(authenticated_public_key or "").strip().lower()
+    if catalog_key not in active_device_keys:
+        catalog_key = ""
     counts["device_capacity_limited"] = sum(
         1
         for participant_ids in backfill_conversations.values_list(
@@ -1114,21 +1121,14 @@ def status_payload(
             Q(metadata__history_outside_window__isnull=True)
             | Q(metadata__history_outside_window=False)
         )
-    incomplete_statuses = (
-        CommunityBridgeDeliveryStatus.PENDING,
-        CommunityBridgeDeliveryStatus.PROCESSING,
-        CommunityBridgeDeliveryStatus.FAILED,
-        CommunityBridgeDeliveryStatus.DEAD,
-    )
-    incomplete_conversation_ids = backfill_deliveries.filter(
-        status__in=incomplete_statuses,
-    ).values_list("conversation_id", flat=True)
+    # Use the same durable prerequisites as initial catalogue publication.
+    # A verified quiet scan is complete even though it has no recent chat to show.
     complete = (
-        backfill_conversations.filter(history_backfilled_at__isnull=False)
-        .exclude(
-            id__in=incomplete_conversation_ids,
-        )
-        .count()
+        catalog_conversations(backfill_conversations).filter(
+            history_backfilled_at__gte=F("grant__consented_at"),
+            _import_pending=False,
+            _import_limited=False,
+        ).count()
     )
     backfill_counts = {
         "complete": complete,
@@ -1157,14 +1157,20 @@ def status_payload(
     }
     from integrations.services.slack_chat_catalog import retired_catalog_payload
 
-    channel_catalog = catalog_payload(
-        catalog_conversations(conversations), authenticated_public_key,
+    selected_grant_connected = bool(
+        grant is not None and grant.status == SlackDmMirrorGrantStatus.ACTIVE
+        and grant.revoked_at is None
+        and grant.connection.status in (
+            ExternalServiceConnectionStatus.CONNECTED, ExternalServiceConnectionStatus.SYNCING,
+        )
+        and str(grant.connection.access_token or "").strip()
     )
-    if grant is not None:
-        channel_catalog.extend(retired_catalog_payload(
-            grant, authenticated_public_key,
-            {entry["channel_id"] for entry in channel_catalog},
-        ))
+    channel_catalog = catalog_payload(
+        catalog_conversations(conversations), catalog_key,
+    ) if selected_grant_connected else []
+    channel_catalog.extend(retired_catalog_payload(
+        user, catalog_key, {entry["channel_id"] for entry in channel_catalog},
+    ))
     history_days = _grant_history_days(grant) if grant else _bounded_history_days(30)
     return {
         "connected": connection is not None,

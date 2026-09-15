@@ -18,6 +18,7 @@ PRIVATE_CHANNEL_CONSENT = "slack-chat-v4-private-channels"
 ALL_HISTORY_CONSENT = "slack-chat-v5-all-available-history"
 PRIVATE_CHANNEL_CONSENTS = frozenset({PRIVATE_CHANNEL_CONSENT, ALL_HISTORY_CONSENT})
 PRIVATE_CHANNEL_SCOPES = {"groups:read", "groups:history"}
+OWNER_OPENED_KEY = "owner_opened_v1"
 
 
 def catalog_tombstones(metadata):
@@ -101,7 +102,21 @@ def history_oldest_ts(conversation, *, now=None):
     return str(int((now - timedelta(days=days)).timestamp())) if days else ""
 
 
-def ready_for_display(conversation, *, now=None, published=False):
+def owner_open_intent(grant, public_key):
+    """Bind an explicit compose action to the current owner consent and device."""
+    from integrations.services.slack_dm_mirror import _grant_history_days
+    from integrations.services.slack_oauth_authority import connection_slack_oauth_generation
+
+    return {
+        "grant_id": grant.pk,
+        "consented_at": grant.consented_at.isoformat(),
+        "history_days": _grant_history_days(grant),
+        "oauth_generation": connection_slack_oauth_generation(grant.connection),
+        "public_key": str(public_key or "").strip().lower(),
+    }
+
+
+def ready_for_display(conversation, *, now=None, published=False, public_key=None):
     """Publish a mirror only after its selected source window has been delivered."""
     now = now or datetime.now(timezone.utc)
     grant = conversation.grant
@@ -110,7 +125,6 @@ def ready_for_display(conversation, *, now=None, published=False):
     if (
         grant.status != "active" or grant.revoked_at is not None
         or conversation.status != "live"
-        or activity is None
     ):
         return False
     if not published and (
@@ -119,6 +133,11 @@ def ready_for_display(conversation, *, now=None, published=False):
         or getattr(conversation, "_import_limited", False)
     ):
         return False
+    if activity is None:
+        # A deliberately opened empty DM needs a composer after its first scan.
+        # Background discovery and actual old source activity never take this path.
+        return bool(public_key and conversation_metadata(conversation).get(OWNER_OPENED_KEY)
+                    == owner_open_intent(grant, public_key))
     oldest = history_oldest_ts(conversation, now=now)
     return not oldest or datetime.fromisoformat(activity).timestamp() >= int(oldest)
 
@@ -155,7 +174,7 @@ def catalog_payload(conversations, public_key):
         # Durable scan and outbox state can still qualify a completed import.
         published = {}
     readiness = {
-        id(c): ready_for_display(c, published=published.get(publication_keys[id(c)]) is True)
+        id(c): ready_for_display(c, published=published.get(publication_keys[id(c)]) is True, public_key=key)
         for c in conversations
     }
     # The first complete import opens the chat. Routine background refreshes
@@ -191,7 +210,7 @@ def catalog_payload(conversations, public_key):
     ]
 
 
-def retired_catalog_payload(grant, public_key, current_channel_ids):
+def retired_catalog_payload(owner, public_key, current_channel_ids):
     """Return owner-scoped ID-only fences for superseded relay registrations.
 
     Old relay memberships can outlive an adapter registration. These entries
@@ -199,23 +218,29 @@ def retired_catalog_payload(grant, public_key, current_channel_ids):
     disclose no historical names, people or message bodies.
     """
     from community_chat.models import CommunityChatDevice
-    from integrations.models import SlackDmMirrorDelivery
+    from integrations.models import SlackDmMirrorConversation, SlackDmMirrorDelivery
 
-    key = str(public_key or "").lower()
+    owner_id = getattr(owner, "user_id", None) or owner.pk
+    key = str(public_key or "").strip().lower()
     if not key or not CommunityChatDevice.objects.filter(
-        user_id=grant.user_id, public_key=key, status="verified", revoked_at__isnull=True,
+        user_id=owner_id, public_key=key, status="verified", revoked_at__isnull=True,
     ).exists():
         return []
     rows = SlackDmMirrorDelivery.objects.filter(
-        conversation__grant__user_id=grant.user_id, source_platform="buzz",
+        conversation__grant__user_id=owner_id, source_platform="buzz",
         source_message_id__startswith="registration-state:",
         metadata__registration_control=True,
     ).order_by("metadata__channel_id").values_list("metadata__channel_id", flat=True).distinct()
+    known_ids = {str(value) for value in rows if value}
+    # Pre-ledger mirrors can retain a current relay ID after participant cleanup.
+    # These ID-only owner fences survive paused/disconnected grants as well.
+    known_ids.update(str(value) for value in SlackDmMirrorConversation.objects.filter(
+        grant__user_id=owner_id, mlai_channel_id__isnull=False,
+    ).values_list("mlai_channel_id", flat=True))
     return [
         {"channel_id": channel_id, "kind": "mpim", "ready_for_display": False,
          "last_message_at": None, "history_oldest_ts": ""}
-        for channel_id in rows
-        if channel_id and channel_id not in current_channel_ids
+        for channel_id in sorted(known_ids - set(current_channel_ids))
     ]
 
 
