@@ -321,10 +321,12 @@ def _serialize_attachment(attachment) -> dict:
 
 def _serialize_draft(draft) -> dict:
     from startup_updates.revisions import revision_payload
+    from startup_updates.update_identity import identity_payload
     audience_visibility = monthly_update_visibility(draft)
     published_at = draft.published_at.isoformat() if draft.published_at else None
     return {
         "id": draft.id,
+        **identity_payload(draft, draft.current_revision.structured_memo if draft.current_revision_id else None),
         **(revision_payload(draft.current_revision) if draft.current_revision_id else {}),
         "organization_id": draft.organization_id,
         "month": draft.month.isoformat(),
@@ -445,7 +447,7 @@ def _backup_draft_if_needed(run: ContentFactoryRun, draft: MonthlyUpdateDraft, b
         return False
 
     draft_backups = dict((backups or {}).get("drafts") or {})
-    draft_key = draft.month.isoformat()
+    draft_key = f"update:{draft.pk}" if draft.creation_key else draft.month.isoformat()
     if draft_key in draft_backups:
         return False
 
@@ -716,7 +718,9 @@ def _serialize_draft_for_editor(draft) -> dict:
     month_value = draft.month
     from startup_updates.revisions import revision_payload
     revision = getattr(draft, "current_revision", None)
+    from startup_updates.update_identity import identity_payload
     return {
+        **identity_payload(draft, structured_memo),
         **(revision_payload(revision, include_evidence=False) if revision else {}),
         "summary": str(structured_memo.get("summary") or structured_memo.get("topline") or ""),
         "reportingPeriod": structured_memo.get("reporting_period"),
@@ -3912,15 +3916,22 @@ class StartupUpdateCurationContextView(APIView):
         _update_run_step(run, step_key="candidate_curation")
         current_month = get_startup_update_run_target_month(run)
         prior_updates = []
-        draft_queryset = organization.monthly_update_drafts.order_by("-month", "-updated_at")
-        if current_month is not None:
-            draft_queryset = draft_queryset.filter(month__lt=current_month)
-        for draft in draft_queryset[:6]:
-            prior_updates.append(_serialize_draft(draft))
+        if (run.run_request or {}).get("update_date"):
+            from startup_updates.update_identity import previous_publications, identity_payload
+            from startup_updates.revisions import revision_payload
+            for draft, memo, _ in previous_publications(organization, run.run_request["update_id"], date.fromisoformat(run.run_request["update_date"]))[:6]:
+                prior_updates.append({**_serialize_draft(draft), **identity_payload(draft, memo),
+                    **(revision_payload(draft.published_revision) if draft.published_revision_id else {}),
+                    "structured_memo": memo, "rendered_markdown": draft.published_revision.rendered_markdown if draft.published_revision_id else draft.rendered_markdown})
+        else:
+            draft_queryset = organization.monthly_update_drafts.monthly_slots().order_by("-month", "-updated_at")
+            if current_month is not None:
+                draft_queryset = draft_queryset.filter(month__lt=current_month)
+            prior_updates = [_serialize_draft(draft) for draft in draft_queryset[:6]]
         return Response(
             {
                 "run": _serialize_run(run, request),
-                "timeline": build_timeline_payload(organization=organization, requested_months=(run.run_request or {}).get("draft_months")),
+                "timeline": build_timeline_payload(organization=organization, requested_months=(run.run_request or {}).get("draft_months"), run=run),
                 "startup_context": (run.run_request or {}).get("startup_context") or {},
                 "external_context": (run.run_request or {}).get("external_context") or {},
                 "startup_memory": (run.run_request or {}).get("startup_memory") or {},
@@ -4069,7 +4080,7 @@ class StartupUpdateCuratedTimelineView(APIView):
                 approved_event_ids.add(int(candidate["event_id"]))
             if candidate.get("metric_id"):
                 approved_metric_ids.add(int(candidate["metric_id"]))
-        timeline = build_timeline_payload(organization=organization, requested_months=(run.run_request or {}).get("draft_months"))
+        timeline = build_timeline_payload(organization=organization, requested_months=(run.run_request or {}).get("draft_months"), run=run)
         for bucket in (timeline.get("months") or {}).values():
             if not isinstance(bucket, dict):
                 continue
@@ -4109,7 +4120,7 @@ class StartupUpdateTimelineView(APIView):
         return Response(
             {
                 "run": _serialize_run(run, request),
-                "timeline": build_timeline_payload(organization=organization, requested_months=(run.run_request or {}).get("draft_months")),
+                "timeline": build_timeline_payload(organization=organization, requested_months=(run.run_request or {}).get("draft_months"), run=run),
             },
             status=status.HTTP_200_OK,
         )
@@ -4167,10 +4178,8 @@ class StartupUpdateDraftResultsView(APIView):
         saved = []
         try:
             for item in serializer.validated_data["drafts"]:
-                existing_draft = MonthlyUpdateDraft.objects.filter(
-                    organization=organization,
-                    month=item["month"],
-                ).first()
+                from startup_updates.update_identity import run_update
+                existing_draft = run_update(run, item["month"])
                 if existing_draft is not None:
                     backups_changed = _backup_draft_if_needed(run, existing_draft, backups) or backups_changed
                 from startup_updates.revisions import save_revision, RevisionConflict
@@ -4180,7 +4189,7 @@ class StartupUpdateDraftResultsView(APIView):
                     raise RevisionConflict("Capture this run's evidence before generation.")
                 snapshot = get_object_or_404(MonthlyEvidenceSnapshot, pk=item["snapshot_id"], organization=organization)
                 Organization.objects.select_for_update().get(pk=organization.pk)
-                draft, _ = MonthlyUpdateDraft.objects.get_or_create(organization=organization, month=item["month"])
+                draft = run_update(run, item["month"], create=True)
                 draft = MonthlyUpdateDraft.objects.select_for_update().get(pk=draft.pk)
                 if item.get("revision_id"):
                     revision = draft.current_revision
@@ -4386,7 +4395,11 @@ class StartupUpdateEvidenceSnapshotView(APIView):
             for raw_month in run_request.get("draft_months", []):
                 month = date.fromisoformat(raw_month)
                 snapshot = capture_snapshot(organization, month, run=run)
-                draft = MonthlyUpdateDraft.objects.filter(organization=organization, month=month).first()
+                from startup_updates.update_identity import run_update
+                draft = run_update(run, month)
+                if run_request.get("update_id") and (draft.current_revision_id if draft else None) != run_request.get("base_revision"):
+                    from startup_updates.revisions import RevisionConflict
+                    raise RevisionConflict("The update changed after generation started.")
                 pinned[raw_month] = {"snapshot_id": snapshot.pk, "expected_revision": draft.current_revision_id if draft else None}
             run_request["evidence_snapshots"] = pinned
             run.run_request = run_request

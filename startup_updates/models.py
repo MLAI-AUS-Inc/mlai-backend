@@ -1031,6 +1031,10 @@ class StartupEvent(models.Model):
 
 
 class MonthlyUpdateDraftQuerySet(models.QuerySet):
+    def monthly_slots(self):
+        """Compatibility targets for scheduled/month-keyed writers only."""
+        return self.filter(creation_key__isnull=True)
+
     def published(self):
         return self.filter(published_at__isnull=False)
 
@@ -1056,6 +1060,11 @@ class MonthlyUpdateDraft(models.Model):
         related_name="monthly_update_drafts",
     )
     month = models.DateField(db_index=True)
+    # Publication identity is independent of its financial reporting month.
+    # Null dates preserve the precision of historical month-only records.
+    update_date = models.DateField(null=True, blank=True, db_index=True)
+    creation_key = models.UUIDField(null=True, blank=True)
+    first_published_at = models.DateTimeField(null=True, blank=True)
     status = models.CharField(
         max_length=20,
         choices=MonthlyUpdateDraftStatus.choices,
@@ -1088,7 +1097,10 @@ class MonthlyUpdateDraft(models.Model):
 
     class Meta:
         db_table = "integrations_monthlyupdatedraft"
-        unique_together = [("organization", "month")]
+        constraints = [
+            models.UniqueConstraint(fields=["organization", "creation_key"], name="update_org_creation_key"),
+            models.UniqueConstraint(fields=["organization", "month"], condition=models.Q(creation_key__isnull=True), name="update_legacy_month_slot"),
+        ]
         indexes = [
             models.Index(fields=["organization", "status", "month"], name="monthly_draft_org_status_idx"),
         ]

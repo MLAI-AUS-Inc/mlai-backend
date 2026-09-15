@@ -222,6 +222,9 @@ class VibeRaisingActiveCompanySerializer(AliasInputSerializer):
 
 
 class VibeRaisingMonthlyUpdateUpsertSerializer(AliasInputSerializer):
+    updateId = serializers.IntegerField(required=False, min_value=1, allow_null=True)
+    creationKey = serializers.UUIDField(required=False, allow_null=True)
+    updateDate = serializers.DateField(required=False, allow_null=True)
     expectedRevision = serializers.IntegerField(required=False, allow_null=True)
     input_aliases = {
         "audienceVisibility": (
@@ -301,6 +304,8 @@ class VibeRaisingMonthlyUpdateUpsertSerializer(AliasInputSerializer):
 
         attrs["month"] = calendar.month_name[month_number]
         attrs["month_number"] = month_number
+        if attrs.get("creationKey") and not attrs.get("updateDate") and not attrs.get("updateId"):
+            raise serializers.ValidationError({"updateDate": "Choose an update date."})
 
         for field in ("highlights", "challenges", "asks", "learnings", "next30Days"):
             attrs[field] = str(attrs.get(field) or "").strip()

@@ -801,6 +801,11 @@ def set_startup_update_run_target_month(
     reference: Optional[datetime] = None,
     window_months: Optional[int] = None,
 ) -> ContentFactoryRun:
+    if (run.run_request or {}).get("update_id"):
+        if get_startup_update_run_target_month(run) != _month_start(target_month):
+            from startup_updates.revisions import RevisionConflict
+            raise RevisionConflict("This run belongs to a different update period.")
+        return run
     windows = build_startup_update_target_windows(target_month, reference=reference, timezone_name=(run.run_request or {}).get("reporting_timezone", "UTC"))
     month = windows["target_month"]
     run_request = dict(run.run_request or {})
@@ -3464,11 +3469,17 @@ def create_startup_update_run(
     manual_document_ids: Optional[list[str]] = None,
     manual_summary: Optional[str] = None,
     force_regenerate: bool = False,
+    update_draft=None,
+    narrative_period=None,
 ) -> ContentFactoryRun:
     now = timezone.now()
     profile = getattr(organization, "startup_profile", None)
     reporting_timezone = profile.reporting_timezone if profile else "UTC"
-    windows = build_startup_update_target_windows(target_month, reference=now, timezone_name=reporting_timezone)
+    financial_reference = now
+    if update_draft and update_draft.update_date and update_draft.update_date.replace(day=1) == update_draft.month:
+        from zoneinfo import ZoneInfo
+        financial_reference = min(now, datetime.combine(update_draft.update_date, time.max, ZoneInfo(reporting_timezone)))
+    windows = build_startup_update_target_windows(target_month, reference=financial_reference, timezone_name=reporting_timezone)
     selected_target_month = windows["target_month"]
     selected_input_sources = normalize_startup_update_input_sources(input_sources)
     from integrations.services.external_connectors import google_connection_for_org
@@ -3491,6 +3502,11 @@ def create_startup_update_run(
         target_month=selected_target_month,
         input_sources=selected_input_sources,
     )
+    if existing and str((existing.run_request or {}).get("update_id") or "") != str(update_draft.pk if update_draft else ""):
+        from startup_updates.revisions import RevisionConflict
+        raise RevisionConflict("Another update is being drafted. Finish or cancel that run first.")
+    if existing and update_draft:
+        return existing
     if existing:
         pin_startup_update_run_connection(existing, google_connection_id)
         set_startup_update_run_target_month(
@@ -3554,6 +3570,17 @@ def create_startup_update_run(
         "backfill_window_end": backfill_end.isoformat(),
         "startup_context": startup_context,
     }
+    if update_draft:
+        run_request["update_id"] = update_draft.pk
+        run_request["creation_key"] = str(update_draft.creation_key) if update_draft.creation_key else None
+        run_request["update_date"] = update_draft.update_date.isoformat() if update_draft.update_date else None
+        run_request["base_revision"] = update_draft.current_revision_id
+        run_request["narrative_period"] = narrative_period
+        run_request["backfill_window_start"] = narrative_period["start"]
+        # Connector windows historically include the final instant.
+        from django.utils.dateparse import parse_datetime
+        run_request["backfill_window_end"] = (parse_datetime(narrative_period["end"]) - timedelta(microseconds=1)).isoformat()
+        run_request["financial_cutoff"] = windows["narrative_end"].isoformat()
     run_request["input_sources"] = list(selected_input_sources)
     run_request["force_regenerate"] = bool(force_regenerate)
     if MANUAL_DOCUMENTS_SOURCE in selected_source_set:
@@ -3694,6 +3721,10 @@ def _iso_datetime(value) -> str | None:
 
 def build_cancel_backup_for_draft(draft: MonthlyUpdateDraft) -> dict:
     return {
+        "draft_id": draft.pk,
+        "creation_key": str(draft.creation_key) if draft.creation_key else None,
+        "update_date": draft.update_date.isoformat() if draft.update_date else None,
+        "first_published_at": _iso_datetime(draft.first_published_at),
         "current_revision_id": draft.current_revision_id,
         "published_revision_id": draft.published_revision_id,
         "run_id": getattr(draft.run, "run_id", None),
@@ -3762,7 +3793,10 @@ def _restore_cancelled_run_drafts(*, organization: Organization, backups: dict) 
     restored = 0
     for snapshot in (backups or {}).values():
         month_value = date.fromisoformat(str(snapshot["month"]))
-        current = MonthlyUpdateDraft.objects.filter(organization=organization, month=month_value).first()
+        lookup = {"pk": snapshot["draft_id"]} if snapshot.get("draft_id") else {"month": month_value, "creation_key__isnull": True}
+        current = MonthlyUpdateDraft.objects.filter(organization=organization, **lookup).first()
+        if snapshot.get("creation_key") and current is None:
+            continue  # Never resurrect a removed independent publication from a cancelled worker.
         if current and current.current_revision_id:
             validation = current.current_revision.validation or {}
             if not current.run_id or validation.get("run_id") != current.run.run_id:
@@ -3774,8 +3808,11 @@ def _restore_cancelled_run_drafts(*, organization: Organization, backups: dict) 
         ready_at = datetime.fromisoformat(str(ready_at_raw)) if ready_at_raw else None
         MonthlyUpdateDraft.objects.update_or_create(
             organization=organization,
-            month=month_value,
+            **lookup,
             defaults={
+                "month": month_value,
+                "update_date": date.fromisoformat(snapshot["update_date"]) if snapshot.get("update_date") else None,
+                "first_published_at": parse_datetime(snapshot["first_published_at"]) if snapshot.get("first_published_at") else None,
                 "current_revision_id": snapshot.get("current_revision_id"),
                 "published_revision_id": snapshot.get("published_revision_id"),
                 "run": previous_run,
@@ -5390,18 +5427,26 @@ def compact_linear_project_bundle(project: LinearProjectArtifact) -> dict[str, A
     }
 
 
-def build_timeline_payload(*, organization: Organization, requested_months=None) -> dict:
+def build_timeline_payload(*, organization: Organization, requested_months=None, run=None) -> dict:
     months = iter_recent_month_starts(6)
     event_queryset = organization.startup_events.order_by("month_bucket", "-investor_importance", "title")
     metric_queryset = organization.startup_metric_observations.order_by("period_month", "metric_key")
 
+    narrative = (run.run_request or {}).get("narrative_period") if run else None
     if requested_months:
-        event_queryset = event_queryset.filter(month_bucket__in=requested_months)
+        if not narrative:
+            event_queryset = event_queryset.filter(month_bucket__in=requested_months)
         metric_queryset = metric_queryset.filter(period_month__in=requested_months)
         months = [date.fromisoformat(str(item)) for item in requested_months]
+    if narrative:
+        from zoneinfo import ZoneInfo
+        zone = ZoneInfo(narrative["timezone"])
+        start = parse_datetime(narrative["start"]).astimezone(zone).date()
+        end = (parse_datetime(narrative["end"]) - timedelta(microseconds=1)).astimezone(zone).date()
+        event_queryset = event_queryset.filter(run=run, event_date__gte=start, event_date__lte=end)
     grouped = {month.isoformat(): {"events": [], "metrics": []} for month in months}
     for event in event_queryset:
-        bucket = event.month_bucket.isoformat()
+        bucket = str((run.run_request or {})["target_month"]) if narrative else event.month_bucket.isoformat()
         grouped.setdefault(bucket, {"events": [], "metrics": []})
         grouped[bucket]["events"].append(_serialize_event(event))
     for metric in metric_queryset:
@@ -5412,6 +5457,7 @@ def build_timeline_payload(*, organization: Organization, requested_months=None)
     return {
         "organization_id": organization.id,
         "domain": organization.domain,
+        "narrative_period": narrative,
         "months": grouped,
     }
 
@@ -5788,8 +5834,11 @@ def upsert_monthly_update_draft(
     audience_visibility: Optional[list[str]] = None,
     replace: bool = False,
 ) -> MonthlyUpdateDraft:
+    if run and (run.run_request or {}).get("update_id"):
+        from startup_updates.revisions import RevisionConflict
+        raise RevisionConflict("Independent updates must be saved through the revision-aware draft results endpoint.")
     month_start = _month_start(month)
-    existing_draft = MonthlyUpdateDraft.objects.filter(
+    existing_draft = MonthlyUpdateDraft.objects.monthly_slots().filter(
         organization=organization,
         month=month_start,
     ).first()
@@ -5828,7 +5877,7 @@ def upsert_monthly_update_draft(
 
     rendered_markdown = render_monthly_update_markdown(structured_memo)
     title = str((structured_memo or {}).get("title") or "").strip()
-    draft, _ = MonthlyUpdateDraft.objects.update_or_create(
+    draft, _ = MonthlyUpdateDraft.objects.monthly_slots().update_or_create(
         organization=organization,
         month=month_start,
         defaults={
