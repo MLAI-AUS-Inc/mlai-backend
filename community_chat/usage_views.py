@@ -28,7 +28,7 @@ from .authentication import (
     CommunityChatBootstrapAuthentication,
     TokenUsageAuthentication,
 )
-from hospital.authentication import CustomJWTAuthentication
+from core.authentication import CustomJWTAuthentication
 
 from .models import (
     CommunityChatDevice,

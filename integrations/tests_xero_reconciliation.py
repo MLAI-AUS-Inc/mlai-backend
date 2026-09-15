@@ -5050,6 +5050,20 @@ class ReconciliationWorkflowApiTests(APITestCase):
 
     @patch("core.permissions.HasRooApiKey.has_permission", return_value=True)
     def test_complete_empty_scan_confirms_match_ready_posting_and_preserves_pattern(self, _permission):
+        # The legacy empty scan no longer carries the prior capture's cached
+        # account selection, so the next preview refreshes the live catalogue.
+        bank_accounts = patch(
+            "integrations.services.reconciliation_bank_accounts.fetch_active_xero_bank_accounts",
+            return_value=[{"bank_account_id": "bank-1", "name": "Operating"}],
+        )
+        bank_accounts.start()
+        self.addCleanup(bank_accounts.stop)
+        projects = patch(
+            "integrations.services.xero_statement_reconciliation.active_xero_project_options",
+            return_value=[],
+        )
+        projects.start()
+        self.addCleanup(projects.stop)
         run, suggestion = self._agent_run_suggestion(
             run_id="xero-agent-outcome",
             line_id="contractor-outcome-845",

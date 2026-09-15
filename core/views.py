@@ -61,7 +61,10 @@ from .slack_founder_links import (
     start_slack_founder_link,
 )
 from .throttles import AuthEndpointRateThrottle, MagicLinkSendRateThrottle
-from .user_compat import DEFAULT_USER_ROLE, get_compat_user_role, user_has_team
+from .user_compat import (
+    DEFAULT_USER_ROLE, get_compat_user_role, user_has_team, user_team_profile,
+    active_hospital_team as _active_hospital_team,
+)
 from .slack_users import (
     SlackProfileUnavailableError,
     register_slack_side_user_for_founder_link,
@@ -72,8 +75,6 @@ User = get_user_model()
 logger = logging.getLogger(__name__)
 
 ALLOWED_PERSONAS = {"hacker", "hustler", "hipster", "healer"}
-MEDHACK_TEAM_MIN_MEMBERS = 2
-MEDHACK_TEAM_MAX_MEMBERS = 6
 HEALTHHACK_ADMIN_ONLY_MESSAGE = "HealthHack has closed. Administrator access only."
 OPERATIONS_ADMIN_ONLY_MESSAGE = "MLAI Operations administrator access only."
 OPERATIONS_FRONTEND_ORIGIN = "https://ops.mlai.au"
@@ -107,21 +108,6 @@ APP_CONTEXT_ALIASES = {
     "chat": "community-chat",
     "admin": "admin",
 }
-
-
-def _team_member_payload_from_values(member):
-    return {
-        "full_name": f"{member['first_name']} {member['last_name']}".strip(),
-        "avatar_url": member["avatar_url"],
-        "role": DEFAULT_USER_ROLE,
-    }
-
-
-def _active_hospital_team(user):
-    manager = getattr(user, 'hospital_teams', None)
-    if manager is None:
-        return None
-    return manager.filter(round__status='active').first()
 
 
 def _normalize_app_context(app_value, default='hospital'):
@@ -675,34 +661,7 @@ class CurrentUserView(APIView):
             response._has_been_logged = True
             return response
         
-        # Retrieve hospital team
-        hospital_team = _active_hospital_team(user)
-        hospital_team_data = None
-        if hospital_team:
-            members = hospital_team.members.all().values("first_name", "last_name", "avatar_url")
-            hospital_team_data = {
-                "team_name": hospital_team.team_name,
-                "team_id": hospital_team.team_id,
-                "avatar_url": hospital_team.avatar_url,
-                "member_count": hospital_team.members.count(),
-                "is_valid_team_size": MEDHACK_TEAM_MIN_MEMBERS <= hospital_team.members.count() <= MEDHACK_TEAM_MAX_MEMBERS,
-                "members": [_team_member_payload_from_values(m) for m in members]
-            }
-
-        # Retrieve esafety team
-        esafety_team = user.esafety_teams.first() if hasattr(user, 'esafety_teams') else None
-        esafety_team_data = None
-        if esafety_team:
-            members = esafety_team.members.all().values("first_name", "last_name", "avatar_url")
-            esafety_team_data = {
-                "team_name": esafety_team.team_name,
-                "team_id": esafety_team.team_id,
-                "avatar_url": esafety_team.avatar_url,
-                "members": [_team_member_payload_from_values(m) for m in members]
-            }
-        
-        # Determine primary team for backward compatibility (prefer hospital)
-        primary_team_data = hospital_team_data or esafety_team_data
+        team_profile = user_team_profile(user)
 
         # PointsAdmin-based admin flag, consumed by the founder-tools / Vibe
         # Raising frontend to gate the admin dashboard. Resolves from
@@ -721,10 +680,10 @@ class CurrentUserView(APIView):
             'role': get_compat_user_role(user),
             'is_superuser': user.is_superuser,
             'is_vibe_raising_admin': is_points_admin_user(user),
-            'has_team': user_has_team(user),
-            'team': primary_team_data,  # Backward compatibility
-            'hospital_team': hospital_team_data,
-            'esafety_team': esafety_team_data,
+            'has_team': team_profile["has_team"],
+            'team': team_profile["team"],  # Backward compatibility
+            'hospital_team': team_profile["hospital_team"],
+            'esafety_team': team_profile["esafety_team"],
             'avatar_url': user.avatar_url,
             'personas': user.personas,
         }
@@ -882,33 +841,7 @@ class UpdateProfileView(APIView):
             else:
                 logger.warning(f"User {user.email} uploaded team_avatar but has no team")
 
-        # Return the updated profile — team data is read-only here,
-        # managed via /api/v1/hackathons/{app}/teams/ endpoints.
-        hospital_team = _active_hospital_team(user)
-        hospital_team_data = None
-        if hospital_team:
-            members = hospital_team.members.all().values("first_name", "last_name", "avatar_url")
-            hospital_team_data = {
-                "team_name": hospital_team.team_name,
-                "team_id": hospital_team.team_id,
-                "avatar_url": hospital_team.avatar_url,
-                "member_count": hospital_team.members.count(),
-                "is_valid_team_size": MEDHACK_TEAM_MIN_MEMBERS <= hospital_team.members.count() <= MEDHACK_TEAM_MAX_MEMBERS,
-                "members": [_team_member_payload_from_values(m) for m in members]
-            }
-
-        esafety_team = user.esafety_teams.first()
-        esafety_team_data = None
-        if esafety_team:
-            members = esafety_team.members.all().values("first_name", "last_name", "avatar_url")
-            esafety_team_data = {
-                "team_name": esafety_team.team_name,
-                "team_id": esafety_team.team_id,
-                "avatar_url": esafety_team.avatar_url,
-                "members": [_team_member_payload_from_values(m) for m in members]
-            }
-
-        primary_team_data = hospital_team_data or esafety_team_data
+        team_profile = user_team_profile(user)
 
         data = {
             'id': user.id,
@@ -918,10 +851,10 @@ class UpdateProfileView(APIView):
             'about': user.about,
             'role': get_compat_user_role(user),
             'is_superuser': user.is_superuser,
-            'team': primary_team_data,
-            'hospital_team': hospital_team_data,
-            'esafety_team': esafety_team_data,
-            'has_team': user_has_team(user),
+            'team': team_profile["team"],
+            'hospital_team': team_profile["hospital_team"],
+            'esafety_team': team_profile["esafety_team"],
+            'has_team': team_profile["has_team"],
             'avatar_url': user.avatar_url,
             'personas': user.personas,
         }

@@ -346,6 +346,14 @@ class TokenUsageLeaderboardTests(APITestCase):
 
     def setUp(self):
         cache.clear()
+        # Local ranking fixtures must not depend on the live public board.
+        # Federation-specific cases below supply their own upstream entries.
+        federation = patch(
+            "community_chat.usage_views.fetch_public_tokenmaxer_entries",
+            return_value=[],
+        )
+        federation.start()
+        self.addCleanup(federation.stop)
         self.user = get_user_model().objects.create_user(email="member@example.com")
         self.rival = get_user_model().objects.create_user(email="rival@example.com")
         self.client.force_authenticate(user=self.user)

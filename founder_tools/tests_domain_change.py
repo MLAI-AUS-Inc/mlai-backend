@@ -54,6 +54,14 @@ class CompanyDomainChangeGuardTests(TestCase):
             scope="",
         )
 
+    def _share_organization(self, company):
+        other_user = User.objects.create_user(email="shared-domain-owner@example.test")
+        profile = VibeRaisingProfile.objects.create(user=other_user)
+        VibeRaisingCompany.objects.create(
+            profile=profile, name="Shared organisation", domain=company.domain,
+            organization=company.organization,
+        )
+
     def test_safe_domain_edit_renames_the_org_in_place(self):
         company = self._create_company()
         organization = company.organization
@@ -75,9 +83,9 @@ class CompanyDomainChangeGuardTests(TestCase):
         company = self._create_company()
         old_org = company.organization
         self._add_gmail(old_org)
-        # The target domain already has an Organization (e.g. content-factory
-        # only), so the org cannot be renamed onto it — moving strands data.
-        Organization.objects.create(name="Taken", domain="taken.example")
+        # The current org is shared, so it cannot be renamed for one founder.
+        # A move to a new domain still needs explicit stranding confirmation.
+        self._share_organization(company)
 
         response = self._edit(company, "taken.example")
         self.assertEqual(response.status_code, 409)
@@ -94,26 +102,31 @@ class CompanyDomainChangeGuardTests(TestCase):
         company = self._create_company()
         old_org = company.organization
         connection = self._add_gmail(old_org)
-        target = Organization.objects.create(name="Taken", domain="taken.example")
+        self._share_organization(company)
 
         response = self._edit(company, "taken.example", confirm=True)
         self.assertEqual(response.status_code, 200)
 
         company.refresh_from_db()
         connection.refresh_from_db()
-        self.assertEqual(company.organization_id, target.id)
+        self.assertNotEqual(company.organization_id, old_org.id)
+        self.assertEqual(company.organization.domain, "taken.example")
         # The stranding is explicit and confirmed; the data stays discoverable
         # on the old org rather than being deleted.
         self.assertEqual(connection.organization_id, old_org.id)
 
-    def test_dataless_org_repoints_without_confirmation(self):
+    def test_dataless_org_cannot_claim_existing_unowned_tenant(self):
         company = self._create_company()
+        original_org_id = company.organization_id
         target = Organization.objects.create(name="Taken", domain="taken2.example")
 
-        response = self._edit(company, "taken2.example")
-        self.assertEqual(response.status_code, 200)
-        company.refresh_from_db()
-        self.assertEqual(company.organization_id, target.id)
+        for confirm in (False, True):
+            response = self._edit(company, "taken2.example", confirm=confirm)
+            self.assertEqual(response.status_code, 409)
+            company.refresh_from_db()
+            self.assertEqual(company.organization_id, original_org_id)
+            self.assertEqual(company.domain, "acme.com")
+            self.assertFalse(VibeRaisingCompany.objects.filter(organization=target).exists())
 
     def test_org_shared_with_another_founder_is_never_renamed(self):
         company = self._create_company()
@@ -169,7 +182,7 @@ class CompanyDomainChangeGuardTests(TestCase):
     def test_twin_endpoint_honours_the_same_guard(self):
         company = self._create_company()
         self._add_gmail(company.organization)
-        Organization.objects.create(name="Taken", domain="taken3.example")
+        self._share_organization(company)
 
         response = self.client.post(
             "/api/v1/vibe-raising/companies/",

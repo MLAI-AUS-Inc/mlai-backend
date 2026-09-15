@@ -12,11 +12,11 @@ permissions:
   pull-requests: read
 
 jobs:
-  # Pull requests run the complete suite and record the exact Git tree that
+  # Pull requests run the configured regression lanes and record the exact Git tree that
   # passed. A main push reuses that result only when GitHub associates the
   # commit with the same PR and the deployed tree is byte-for-byte identical.
   # Everything else (direct pushes, stale-base merges, missing/expired
-  # artifacts, or API errors) fails closed to the full suite below.
+  # artifacts, or API errors) fails closed to the regression lanes below.
   validation-route:
     runs-on: ubuntu-latest
     outputs:
@@ -54,8 +54,15 @@ jobs:
 
     - name: Install dependencies
       run: |
+        python scripts/check_dependency_lock.py
         python -m pip install --upgrade pip
-        pip install -r requirements.txt -r requirements-engine.txt
+        pip install --require-hashes -r requirements.lock
+
+    - name: Check test-module assignment
+      run: python scripts/check_test_assignment.py
+
+    - name: Run isolated refactor checks without database access
+      run: python scripts/test_without_database.py tests.test_refactor_unit tests.test_refactor_django_unit roo.test_event_ticket_price
 
     - name: Check migrations are committed
       run: python manage.py makemigrations --check --dry-run
@@ -64,7 +71,7 @@ jobs:
       run: python -m unittest community_chat.tests.test_coworking_unit tests.test_article_notification_policy_unit
 
     - name: Check paid island research contracts without database access
-      run: python -m unittest content_factory.tests_island_research_unit content_factory.tests_custom_islands_unit -q
+      run: python -m unittest content_factory.tests_island_research_unit content_factory.tests_custom_islands_unit content_factory.tests_editorial_catalog_unit -q
 
     - name: Scan tracked source for credentials
       run: python scripts/check_secrets.py
@@ -165,6 +172,19 @@ jobs:
           roo.tests_meeting_rooms \
           core.tests.test_auth_contract \
           core.tests.test_auth_session \
+          core.tests.test_password_api \
+          founder_tools.tests \
+          founder_tools.tests_domain_change \
+          founder_tools.tests_offboarding \
+          startup_updates.tests_covers \
+          startup_updates.tests_founder_metrics \
+          startup_updates.tests_update_identity \
+          integrations.tests_financial_record_ownership \
+          content_factory.tests_github_credential_migrations \
+          tests.test_jobs_scheduler \
+          tests.test_content_island_scheduler \
+          tests.test_content_analytics \
+          roo.tests_coding \
           core.test_slack_user_creation \
           core.tests_slack_founder_links \
           core.tests_user_merge \
@@ -328,7 +348,7 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install -r requirements.txt -r requirements-engine.txt
+        pip install --require-hashes -r requirements.lock
 
     - name: Verify PostgreSQL search infrastructure
       run: |
@@ -430,7 +450,7 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install -r requirements.txt -r requirements-engine.txt
+        pip install --require-hashes -r requirements.lock
 
     - name: Run migration tests
       run: |
@@ -442,6 +462,8 @@ jobs:
           core.tests_slack_founder_links.SlackFounderActorOrphanedPrincipalGuardTests \
           core.tests_slack_founder_links.SlackFounderActorDeletedBeforeHistoryGuardTests \
           org_memory.tests.test_migrations \
+          content_factory.tests_github_credential_migrations \
+          integrations.tests_financial_record_ownership \
           --verbosity 2
 
   deploy:

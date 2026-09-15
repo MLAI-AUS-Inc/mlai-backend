@@ -481,7 +481,7 @@ REST_FRAMEWORK = {
         'rest_framework.permissions.IsAuthenticated',
     ],
     'DEFAULT_AUTHENTICATION_CLASSES': [
-        'hospital.authentication.CustomJWTAuthentication',
+        'core.authentication.CustomJWTAuthentication',
     ],
     'DEFAULT_THROTTLE_RATES': {
         'anon': '100/hour',  # Rate limit for MedHack endpoints

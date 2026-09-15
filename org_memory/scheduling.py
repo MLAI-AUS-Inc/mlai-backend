@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, time, timedelta
+from datetime import UTC, datetime, time, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from django.conf import settings
@@ -95,7 +95,7 @@ def reconciliation_timezone() -> ZoneInfo:
 def reconciliation_window(now=None):
     now = now or timezone.now()
     if timezone.is_naive(now):
-        now = timezone.make_aware(now, timezone.utc)
+        now = timezone.make_aware(now, UTC)
     target_timezone = reconciliation_timezone()
     local_now = now.astimezone(target_timezone)
     hour = _positive_integer(
@@ -112,6 +112,6 @@ def reconciliation_window(now=None):
         "due": local_now >= local_start,
         "report_date": local_now.date(),
         "time_zone": target_timezone.key,
-        "window_started_at": local_start.astimezone(timezone.utc),
-        "next_window_at": (local_start + timedelta(days=1)).astimezone(timezone.utc),
+        "window_started_at": local_start.astimezone(UTC),
+        "next_window_at": (local_start + timedelta(days=1)).astimezone(UTC),
     }

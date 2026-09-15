@@ -12,8 +12,10 @@ from django.db import transaction
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
-from core.models import ContentFactoryRun, ContentFactoryRunStatus, Organization
+from organizations.models import Organization
+from workflow_runs.models import ContentFactoryRun, ContentFactoryRunStatus
 from integrations import http_client as requests
+from integrations.services.financial_records import upsert_financial_record
 from integrations.models import (
     ExternalFinancialRecord,
     ExternalServiceConnection,
@@ -386,7 +388,7 @@ def _upsert_stripe_invoices(connection: ExternalServiceConnection, invoices: lis
         amount = _minor_units(invoice.get("amount_paid"), str(invoice.get("currency") or "USD"))
         occurred_at = _timestamp(invoice.get("status_transitions", {}).get("paid_at") or invoice.get("created"))
         transaction_date = occurred_at.date() if occurred_at else None
-        ExternalFinancialRecord.objects.update_or_create(
+        upsert_financial_record(
             connection=connection,
             record_type=STRIPE_RECORD_INVOICE,
             external_record_id=invoice_id,
@@ -417,7 +419,7 @@ def _upsert_stripe_subscriptions(connection: ExternalServiceConnection, subscrip
         if not subscription_id:
             continue
         occurred_at = _timestamp(subscription.get("created"))
-        ExternalFinancialRecord.objects.update_or_create(
+        upsert_financial_record(
             connection=connection,
             record_type=STRIPE_RECORD_SUBSCRIPTION,
             external_record_id=subscription_id,

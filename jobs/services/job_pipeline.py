@@ -675,10 +675,17 @@ def run_daily_jobs(
         raise
 
 
-def run_daily_jobs_scheduler(now: datetime | None = None) -> dict[str, Any]:
-    queued_result = process_next_queued_run()
-    if queued_result.get("status") != "skipped":
-        return {"status": "ok", "queued_run": queued_result}
+def enqueue_daily_jobs(now: datetime | None = None) -> dict[str, Any]:
+    """Bounded scheduler entry point; execution belongs to run_jobs_worker."""
+    return run_daily_jobs_scheduler(now=now, execute=False)
+
+
+def run_daily_jobs_scheduler(now: datetime | None = None, *, execute: bool = True) -> dict[str, Any]:
+    # Preserve explicit callers of the historical run-and-schedule helper.
+    if execute:
+        queued_result = process_next_queued_run()
+        if queued_result.get("status") != "skipped":
+            return {"status": "ok", "queued_run": queued_result}
 
     if not settings.jobs_scheduler_enabled:
         return {"status": "skipped", "reason": "scheduler_disabled"}
@@ -766,6 +773,8 @@ def run_daily_jobs_scheduler(now: datetime | None = None) -> dict[str, Any]:
         per_keyword_limit=settings.jobs_scheduler_per_keyword_limit,
         trigger_source="daily_scheduler",
     )
+    if not execute:
+        return {"status": "queued", "run_id": run.run_id, "run_date": run.run_date, "attempt": failed_count + 1}
     run_daily_jobs(
         run.run_id,
         collect_live=run.collect_live,

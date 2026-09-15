@@ -13,7 +13,6 @@ from .views import (
     EmailCodeRequestView,
     EmailCodeVerifyView,
     DeviceView,
-    HomeView,
     InviteView,
     LinkPreviewImageView,
     LinkPreviewView,
@@ -82,7 +81,6 @@ urlpatterns = [
         name="community_chat_coding_turn_finalize",
     ),
     path("account/", AccountView.as_view(), name="community_chat_account"),
-    path("home/", HomeView.as_view(), name="community_chat_home"),
     path(
         "upcoming-events/",
         UpcomingEventsView.as_view(),
@@ -116,11 +114,6 @@ urlpatterns = [
         name="community_chat_auth_exchange",
     ),
     path("session/", SessionView.as_view(), name="community_chat_session"),
-    path(
-        "messages/delete-slack-origin/",
-        SlackOriginMessageDeleteView.as_view(),
-        name="community_chat_delete_slack_origin",
-    ),
     path(
         "messages/delete-slack-origin/",
         SlackOriginMessageDeleteView.as_view(),

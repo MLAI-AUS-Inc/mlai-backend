@@ -336,7 +336,9 @@ class SlackFounderSyntheticIdentityMigrationTests(TransactionTestCase):
 class SlackFounderActorReferenceMigrationTests(TransactionTestCase):
     migrate_from = [
         ("core", "0062_slackfounderlinkrequest_created_index"),
-        ("content_factory", "0037_content_islands"),
+        # Actor fields are unchanged by the later credential conversion. Keep
+        # its forward-only backfill applied while rewinding the actor history.
+        ("content_factory", "0040_backfill_github_credential_envelopes"),
         ("integrations", "0041_linear_project_sizing_runs"),
         ("workflow_runs", "0005_contentfactoryrun_reconciled_at"),
     ]
@@ -1393,7 +1395,7 @@ class SlackFounderActorOrphanedPrincipalGuardTests(TransactionTestCase):
 class SlackFounderActorDeletedBeforeHistoryGuardTests(TransactionTestCase):
     migrate_from = [
         ("core", "0062_slackfounderlinkrequest_created_index"),
-        ("content_factory", "0037_content_islands"),
+        ("content_factory", "0040_backfill_github_credential_envelopes"),
         ("integrations", "0041_linear_project_sizing_runs"),
         ("workflow_runs", "0005_contentfactoryrun_reconciled_at"),
     ]

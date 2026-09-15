@@ -776,15 +776,14 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
         fi
         unset office_manager_timezone
 
-    all_runtime_writer_services=(web scheduler memory-worker memory-scheduler community-email-worker bridge-worker bridge-reconciler bridge-retention analytics-sync)
-    runtime_services=(web scheduler memory-worker memory-scheduler community-email-worker)
+    source scripts/runtime-services.sh
     if [ "\$community_bridge_production_enabled" = "true" ] \
         && env_has_value SLACK_BRIDGE_BOT_TOKEN \
         && { env_has_value DISCORD_BRIDGE_BOT_TOKEN \
             || { env_has_value BUZZ_BRIDGE_ADAPTER_URL \
                 && env_has_value BUZZ_BRIDGE_ADAPTER_TOKEN \
                 && env_has_value BUZZ_BRIDGE_CALLBACK_SECRET; }; }; then
-        runtime_services+=(bridge-worker bridge-reconciler bridge-retention)
+        runtime_services+=("\${bridge_runtime_services[@]}")
         bridge_worker_enabled=1
     else
         bridge_worker_enabled=0
@@ -798,12 +797,17 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
         && { env_has_value UMAMI_API_TOKEN || { env_has_value UMAMI_USERNAME && env_has_value UMAMI_PASSWORD; }; } \
         && env_has_value CONTENT_ANALYTICS_TRACKER_SCRIPT_URL \
         && env_has_value CONTENT_ANALYTICS_HOST_URL; then
-        runtime_services+=(analytics-sync)
+        runtime_services+=("\${analytics_runtime_services[@]}")
         analytics_sync_enabled=1
     else
         analytics_sync_enabled=0
         echo "ℹ️ Skipping analytics-sync startup because the Umami analytics contract is not fully configured."
     fi
+
+    case "\$(read_env_value COMMITTEE_REMUNERATION_ENABLED)" in
+        true|TRUE|True|1|yes|YES|Yes|on|ON|On)
+            runtime_services+=("\${committee_runtime_services[@]}") ;;
+    esac
 
     docker network inspect mlai-shared >/dev/null 2>&1 || docker network create mlai-shared
 
@@ -1189,11 +1193,11 @@ if parsed.username or parsed.password or parsed.query or parsed.fragment:
     }
 
     echo "⏸️ Pausing all runtime writers before DB migrations..."
-    docker compose stop "\${all_runtime_writer_services[@]}" || true
     # Recovery disables errexit while attempting each restoration step. Always
     # preserve the original failure and stop; recovery is not a successful deploy.
     trap 'deployment_status=\$?; restore_runtime_on_error; exit "\$deployment_status"' ERR
     trap 'deployment_status=\$?; if [ "\$deployment_status" != "0" ]; then restore_runtime_on_error; fi' EXIT
+    docker compose stop "\${all_runtime_writer_services[@]}"
 
     echo "🗄️ Running migrations..."
     # From this point a failed migrate may still have committed earlier

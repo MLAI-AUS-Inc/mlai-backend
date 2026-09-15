@@ -227,3 +227,11 @@ medhack_backend/hospital/Eval_Labels.csv
 !/docs/monthly-update-evidence-contract.md
 
 !/docs/update-covers.md
+
+# Maintained refactor and release documentation.
+!/docs/backend-runtime.md
+!/docs/feature-lifecycle.md
+!/docs/backend-refactor-audit-2026-09-14.md
+!/docs/backend-refactor-implementation-2026-09-14.md
+!/docs/backend-refactor-migration-proposal-2026-09-14.md
+!/docs/backend-refactor-release-2026-09-15.md

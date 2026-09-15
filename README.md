@@ -25,7 +25,8 @@ boundaries. Subsystem documentation is indexed in
 ## Requirements
 
 - Python 3.11
-- Dependencies from `requirements.txt` and `requirements-engine.txt`
+- Dependencies declared in `requirements.txt` and `requirements-engine.txt`,
+  resolved together in `requirements.lock`
 - Docker only for the multi-service local stack
 - PostgreSQL and Redis/Valkey for production-like integration work
 
@@ -37,7 +38,7 @@ The smallest local checks use SQLite and do not require production secrets.
 python3.11 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
-pip install -r requirements.txt -r requirements-engine.txt
+pip install --require-hashes -r requirements.lock
 test -f .env || cp .env.example .env
 
 DATABASE_URL=sqlite:////tmp/mlai_backend_dev.sqlite3 \
@@ -102,7 +103,7 @@ The root URL map is [`mlai/urls.py`](mlai/urls.py). Major route families include
 | `/api/v1/auth/` | Core authentication |
 | `/api/v1/founder-tools/` | Founder Tools |
 | `/api/v1/hackathons/` | Hackathon APIs |
-| `/api/v1/community-chat/` | Dormant Buzz/MLAI Chat experiment integration |
+| `/api/v1/community-chat/` | Community identity, membership and Slack bridge |
 | `/api/v1/org-memory/` | Private organisational memory |
 | `/api/v1/public-brain/` | Reviewed public memory |
 | `/api/v1/jobs/` | Jobs and scheduled-work APIs |
@@ -126,6 +127,13 @@ Architecture and operational documents describe current behavior. Files under
 `plans/`, dated audits, and implementation plans are historical context unless
 another current document explicitly adopts them.
 
-The `community_chat` application and its runbooks were created for the inactive
-Buzz/MLAI Chat deployment experiment. Their presence in the codebase does not
-identify an active or supported MLAI product surface.
+The [14 September 2026 refactor audit](docs/backend-refactor-audit-2026-09-14.md)
+records source findings and a staged refactor backlog.
+The [implementation status](docs/backend-refactor-implementation-2026-09-14.md)
+records completed code changes, validation and the approved migration scope.
+See the [runtime contract](docs/backend-runtime.md) for worker ownership,
+dependency lock regeneration and CI test assignment.
+
+The `community_chat` application owns community identity, membership and the
+live MLAI Chat Slack bridge. Dedicated bridge workers run in production; dated
+experiment and staging documents describe earlier deployment stages.

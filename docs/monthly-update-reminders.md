@@ -38,7 +38,7 @@ Every API request explicitly sets `send_to_unsubscribed=false`. The call-to-acti
 3. Preview any local date without writes or email:
 
    ```sh
-   docker compose exec backend python manage.py run_monthly_update_reminders --date 2026-07-23
+   docker compose exec web python manage.py run_monthly_update_reminders --date 2026-07-23
    ```
 
 4. Send Customer.io test payloads from the comments in each template.
@@ -48,7 +48,7 @@ Every API request explicitly sets `send_to_unsubscribed=false`. The call-to-acti
 The normal send command is intentionally explicit:
 
 ```sh
-docker compose exec backend python manage.py run_monthly_update_reminders --date 2026-07-23 --send
+docker compose exec web python manage.py run_monthly_update_reminders --date 2026-07-23 --send
 ```
 
 The scheduler uses the same sending path once enabled.

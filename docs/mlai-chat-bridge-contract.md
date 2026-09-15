@@ -418,7 +418,7 @@ link exists; normal retries retain the original timestamp and signed event ID.
 
 The existing authenticated `GET /api/v1/community-chat/slack/` response adds
 `discovery_pending`, `private_channels_enabled`, and `channel_catalog` entries
-of `{channel_id, kind, last_message_at}` (`im`, `mpim`, or `private_channel`). Only mirrors
+of `{channel_id, kind, last_message_at, source_archived}` (`im`, `mpim`, or `private_channel`). Only mirrors
 provisioned for the caller's verified device appear in that catalog. Clients
 use source type rather than relay participant count to classify chats. The
 nullable ISO UTC `last_message_at` is the latest known Slack message timestamp,
