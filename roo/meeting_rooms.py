@@ -249,6 +249,10 @@ class MeetingRoomService:
             availability=False,
             now=now,
         )
+        if duration_half_hours not in (2, 4):
+            raise MeetingRoomError(
+                'invalid_time', 'Meeting-room bookings must be exactly 1 or 2 hours',
+            )
         # Roo Points are integer-valued, so each started hour costs one point.
         points_cost = (duration_half_hours + 1) // 2
         return starts_at, ends_at, points_cost
@@ -270,7 +274,10 @@ class MeetingRoomService:
             now=now,
         )
         max_booking_hours = getattr(settings, 'MEETING_ROOM_MAX_BOOKING_HOURS', 2)
-        bookable = 2 <= duration_half_hours <= max_booking_hours * 2
+        bookable = (
+            duration_half_hours in (2, 4)
+            and duration_half_hours <= max_booking_hours * 2
+        )
         points_cost = (duration_half_hours + 1) // 2 if bookable else None
         return starts_at, ends_at, points_cost, bookable
 
