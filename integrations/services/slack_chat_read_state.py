@@ -240,7 +240,9 @@ def _unread_messages(authority, target, last_read):
             )
         },
         channel=target.slack_id,
-        oldest=format(oldest, "f"),
+        # Slack's unread cursor may be zero for a never-read conversation.
+        # Omit an unbounded oldest, as in the archive worker's source request.
+        **({"oldest": format(oldest, "f")} if oldest else {}),
         inclusive=False,
         limit=100,
     )

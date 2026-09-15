@@ -312,6 +312,17 @@ class PrivateReadTargetTests(SimpleTestCase):
 
 
 class PrivateUnreadHistoryTests(SimpleTestCase):
+    def test_never_read_public_channel_omits_zero_oldest(self):
+        target = reads.ReadTarget("public", "C123", "public_channel")
+        with patch.object(
+            reads, "_call_slack_with_grant_authority",
+            return_value={"messages": [], "has_more": False},
+        ) as call:
+            reads._unread_messages(object(), target, "0.000000")
+        self.assertNotIn("oldest", call.call_args.kwargs)
+        self.assertEqual(call.call_args.kwargs["limit"], 100)
+        self.assertEqual(call.call_args.kwargs["required_scopes"], {"channels:history"})
+
     def test_erased_queue_bodies_cannot_hide_source_mentions(self):
         target = reads.ReadTarget(
             "mirror",
