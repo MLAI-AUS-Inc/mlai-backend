@@ -586,6 +586,9 @@ def _build_content_factory_charge_description(resolved_domain: str, article_requ
 
 
 def _build_content_factory_topic_generation_charge_description(resolved_domain: str, article_request: dict) -> str:
+    if article_request.get("island_research_brief"):
+        subject = str(article_request["island_research_brief"].get("subject") or "a new topic").strip()
+        return f"Content island research for {resolved_domain}: {subject[:180]}"
     island = str(
         article_request.get("content_island_name")
         or article_request.get("contentIslandName")

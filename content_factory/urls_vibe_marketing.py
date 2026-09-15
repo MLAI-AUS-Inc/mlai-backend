@@ -1,6 +1,7 @@
 from django.urls import include, path
 
 from .custom_island_views import CustomContentIslandView
+from .island_research_views import ContentIslandResearchView, ContentIslandResearchAdoptView
 
 from .admin_views import VibeMarketingAdminUsageView
 from .notification_channel_views import (
@@ -54,6 +55,9 @@ from .vibe_marketing_views import (
 
 
 urlpatterns = [
+    path("islands/research", ContentIslandResearchView.as_view(), name="vibe-marketing-island-research-no-slash"),
+    path("islands/research/", ContentIslandResearchView.as_view(), name="vibe-marketing-island-research"),
+    path("islands/research/<str:run_id>/adopt", ContentIslandResearchAdoptView.as_view(), name="vibe-marketing-island-research-adopt"),
     path("islands/custom", CustomContentIslandView.as_view(), name="vibe-marketing-custom-island-no-slash"),
     path("islands/custom/", CustomContentIslandView.as_view(), name="vibe-marketing-custom-island"),
     path("admin/usage/", VibeMarketingAdminUsageView.as_view(), name="vibe-marketing-admin-usage"),

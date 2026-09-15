@@ -8663,6 +8663,8 @@ def _is_retryable_sqlite_lock(exc: Exception) -> bool:
 
 _DJANGO_OWNED_RUN_RESULT_KEYS = frozenset(
     {
+        "island_research_refunded",
+        "refunded_points",
         "article_system_review_comments",
         "daily_automation_channel_warning",
         "latest_article_system_revision_response",
@@ -8819,6 +8821,8 @@ def _sync_content_factory_run_snapshot(*, run_id: str, data: dict, step_states: 
             )
         if existing_run is not None and _content_factory_run_snapshot_unchanged(existing_run, data=data, step_states=step_states):
             existing_run._content_factory_sync_unchanged = True
+            from .island_research import refund_empty_or_failed_research
+            refund_empty_or_failed_research(existing_run)
             return existing_run, False
 
         run, created = ContentFactoryRun.objects.update_or_create(
@@ -8885,6 +8889,8 @@ def _sync_content_factory_run_snapshot(*, run_id: str, data: dict, step_states: 
         if seen_steps:
             ContentFactoryRunStep.objects.filter(run=run).exclude(step_key__in=seen_steps).delete()
 
+    from .island_research import refund_empty_or_failed_research
+    refund_empty_or_failed_research(run)
     return run, created
 
 

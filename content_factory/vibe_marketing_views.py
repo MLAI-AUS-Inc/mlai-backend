@@ -214,6 +214,7 @@ FIXED_ARTICLE_REVIEW_COMPONENTS = (
     {"id": "events-cta", "type": "events-cta", "label": "Upcoming events CTA"},
 )
 REMOTE_REQUIRED_WORKFLOWS = {
+    "island_refresh",
     "article_system_setup",
     "article_generation",
     "content_factory_article",
@@ -10020,6 +10021,14 @@ def _compact_autofill_payload_from_sources(sources):
 
 def _compact_result_for_run(run):
     result = _run_mapping(run.result)
+    if result.get("island_research"):
+        return {
+            **{key: result.get(key) for key in ("island_research", "message", "keyword_count", "market", "source", "researched_at", "island_research_refunded", "refunded_points")},
+            "suggested_islands": [
+                {key: item.get(key) for key in ("id", "name", "description", "pillar_keyword", "metrics", "keywords")}
+                for item in result.get("suggested_islands", []) if isinstance(item, dict)
+            ],
+        }
     compact = {}
     sources = [result, _run_mapping(result.get("result")), _run_mapping(result.get("latest_control_response"))]
     keys = set(COMPACT_RUN_RESULT_KEYS)
@@ -12381,6 +12390,7 @@ def _sync_local_run_from_remote(run, remote_data):
 # Scan stays single-attempt: content-factory ignores the field there, so a
 # retry could double-enqueue.
 CONTENT_FACTORY_KEYED_DISPATCH_ENDPOINTS = {
+    "island-research",
     "article",
     "discovery",
     "autofill",
@@ -12388,6 +12398,7 @@ CONTENT_FACTORY_KEYED_DISPATCH_ENDPOINTS = {
     "article-system-setup",
 }
 CONTENT_FACTORY_KEYED_DISPATCH_WORKFLOWS = {
+    "island_refresh",
     "article_generation",
     "auto_discovery",
     "startup_autofill",
@@ -15839,7 +15850,11 @@ class VibeMarketingRunView(APIView):
             refreshed_run, setup_pr_refreshed = _refresh_pending_article_system_setup_pr_status(context=context, run=run)
             if setup_pr_refreshed and refreshed_run is not None:
                 run = ContentFactoryRun.objects.prefetch_related("steps").get(pk=refreshed_run.pk)
+        from .island_research import refund_empty_or_failed_research
+        refund_empty_or_failed_research(run)
         payload = _serialize_run(run, context=context, mode=view)
+        if (run.run_request or {}).get("island_research_brief") and _run_pending_remote_dispatch(run):
+            payload["status"] = "queued"
         if view == "status":
             _log_terminal_repo_scan_status(run, payload)
         return _timed_vibe_response(payload, started_at=started_at, metric_name="vibe_run", view=view)
