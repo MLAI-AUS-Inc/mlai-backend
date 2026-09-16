@@ -53,6 +53,12 @@ def resolve_island_discovery_scope(organization, config, slug):
     island = ContentIsland.objects.filter(
         organization=organization, slug=slug, status=ContentIslandStatus.VISIBLE,
     ).first()
+    if not island:
+        from .island_selection import selection_runs, resolve_alias, STATE_KEY
+        for run in selection_runs(organization):
+            slug = resolve_alias(slug, run.result[STATE_KEY].get("redirects", {}))
+        island = ContentIsland.objects.filter(organization=organization, slug=slug,
+            status=ContentIslandStatus.VISIBLE).first()
     if island:
         return {"name": island.name, "keyword": island.pillar_keyword, "context": island.description,
                 "icon_key": island.icon_key, "color_key": island.color_key}

@@ -10023,6 +10023,7 @@ def _compact_result_for_run(run):
     result = _run_mapping(run.result)
     if result.get("island_research"):
         return {
+            "adopted_proposal_ids": result.get("island_research_selection", {}).get("selected_ids", []),
             **{key: result.get(key) for key in ("island_research", "message", "keyword_count", "market", "source", "researched_at", "island_research_refunded", "refunded_points")},
             "suggested_islands": [
                 {key: item.get(key) for key in ("id", "name", "description", "pillar_keyword", "metrics", "keywords")}

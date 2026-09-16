@@ -149,3 +149,47 @@ class IslandResearchTests(unittest.TestCase):
             ]:
                 refund_empty_or_failed_research(SimpleNamespace(status=status, run_request=request, result=result))
         points.refund.assert_not_called()
+
+class SelectionPlanningTests(unittest.TestCase):
+    def proposal(self, key, vector, intent="informational", keyword=None):
+        return {"id": key, "name": key, "description": key, "pillar_keyword": keyword or key,
+            "centroid_embedding": vector, "keywords": [{"keyword": keyword or key, "volume": 100,
+                "difficulty": 10, "opportunity_index": 3, "intent": intent}],
+            "metrics": {"total_volume": 100}}
+
+    def test_grouping_requires_every_pair_and_matching_intent(self):
+        import math
+        from .island_selection import group_proposals
+        p = lambda key, angle: self.proposal(key, [math.cos(angle), math.sin(angle)])
+        groups = group_proposals([p("a", 0), p("b", .4), p("c", .8)])
+        self.assertEqual(sorted(map(len, groups)), [1, 2])
+        self.assertEqual(len(group_proposals([self.proposal("a", [1, 0]),
+            self.proposal("b", [1, 0], "transactional")])), 2)
+        self.assertEqual(len(group_proposals([self.proposal("a", [1, 0]), self.proposal("b", [0, 1])])), 2)
+
+    def test_shared_keywords_are_not_double_counted(self):
+        from .island_selection import combine_proposals
+        merged = combine_proposals([self.proposal("a", [1, 0], keyword="same"), self.proposal("b", [1, 0], keyword="same")])
+        self.assertEqual(merged["metrics"]["keyword_count"], 1)
+        self.assertEqual(merged["metrics"]["total_volume"], 100)
+        self.assertEqual(merged["metrics"]["opportunity_score"], 3)
+
+    def test_topology_confirmation_needs_two_increasing_dates(self):
+        from .island_selection import confirm_topology
+        state = {}
+        self.assertFalse(confirm_topology(state, "merge", "2026-09-16"))
+        self.assertFalse(confirm_topology(state, "merge", "2026-09-16"))
+        self.assertFalse(confirm_topology(state, "merge", "2026-09-15"))
+        self.assertTrue(confirm_topology(state, "merge", "2026-09-17"))
+        self.assertFalse(confirm_topology(state, "split", "2026-09-17"))
+
+    def test_preview_rejects_forgery_and_excludes_already_saved_choices(self):
+        from .island_selection import selection_preview, STATE_KEY
+        p = self.proposal("a", [1, 0])
+        run = SimpleNamespace(status="completed", run_request={"island_research_brief": BRIEF},
+            result={"island_research": True, "suggested_islands": [p]})
+        for ids in ([], "a", ["fake"], [None], ["a"] * 6):
+            with self.assertRaises(ValueError): selection_preview(run, ids)
+        self.assertEqual(len(selection_preview(run, ["a"])["groups"]), 1)
+        run.result[STATE_KEY] = {"selected_ids": ["a"]}
+        self.assertEqual(selection_preview(run, ["a"]), {"groups": [], "already_added": ["a"]})

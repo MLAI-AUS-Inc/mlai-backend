@@ -8119,7 +8119,9 @@ class SEOContentIslandListView(APIView):
             status=ContentIslandStatus.ARCHIVED
         )
         serializer = ContentIslandSerializer(islands, many=True)
+        from .island_selection import dynamic_scopes
         return Response({
+            'dynamic_scopes': dynamic_scopes(org),
             'domain': domain,
             'count': len(serializer.data),
             'islands': serializer.data,
@@ -8204,12 +8206,19 @@ class SEOContentIslandBulkSyncView(APIView):
         expanded_applied = []
 
         with transaction.atomic():
+            Organization.objects.select_for_update().get(pk=org.pk)
+            existing_by_slug = {island.slug: island for island in ContentIsland.objects.filter(organization=org)}
+            from .island_selection import selection_runs, STATE_KEY
+            managed_slugs = {slug for run in selection_runs(org)
+                for slug in run.result[STATE_KEY].get("managed_slugs", [])}
             taken_slugs = set(existing_by_slug.keys())
             used_color_keys = [island.color_key for island in existing_by_slug.values()]
             touched_slugs = set()
 
             for entry in entries:
                 entry_slug = str(_request_value(entry, 'slug', default='') or '').strip()
+                if entry_slug in managed_slugs:
+                    continue  # only a revision-checked evolution may change a managed theme
                 island = existing_by_slug.get(entry_slug) if entry_slug else None
                 name = str(_request_value(entry, 'name', default='') or '').strip()[:ISLAND_NAME_MAX_LENGTH]
                 description = str(_request_value(entry, 'description', default='') or '').strip()
@@ -8316,6 +8325,8 @@ class SEOContentIslandBulkSyncView(APIView):
                     archived_slugs.append(island.slug)
                 island.save()
 
+            from .island_selection import apply_evolution
+            evolution = apply_evolution(org, payload.get('dynamic_scopes'), captured_on, now)
             promoted_slugs = _promote_eligible_islands(org, now)
             edge_count = rebuild_island_edges(org)
 
@@ -8353,6 +8364,7 @@ class SEOContentIslandBulkSyncView(APIView):
             'archived': archived_slugs,
             'expanded': expanded_applied,
             'skipped_keywords': skipped_keywords,
+            'evolution': evolution,
             'edges': edge_count,
         }, status=status.HTTP_200_OK)
 
@@ -8664,6 +8676,7 @@ def _is_retryable_sqlite_lock(exc: Exception) -> bool:
 _DJANGO_OWNED_RUN_RESULT_KEYS = frozenset(
     {
         "island_research_refunded",
+        "island_research_selection",
         "refunded_points",
         "article_system_review_comments",
         "daily_automation_channel_warning",
