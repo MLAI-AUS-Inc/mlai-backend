@@ -290,6 +290,11 @@ class SlackRecentActivityTests(unittest.TestCase):
         self.mirror = self.stack.enter_context(
             patch.object(s, "_discover_conversation")
         )
+        # This policy-only fixture replaces all persistence, including the
+        # nested directory checkpoint covered by the PostgreSQL regressions.
+        self.stack.enter_context(
+            patch.object(s, "conversation_progress", side_effect=lambda *args: nullcontext())
+        )
         self.call.side_effect = None
         self.call.return_value = {
             "channels": raw,

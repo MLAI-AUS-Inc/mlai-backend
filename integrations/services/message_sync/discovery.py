@@ -16,7 +16,7 @@ from django.db.models.functions import Cast
 from django.utils import timezone
 
 from integrations.models import ExternalServiceConnection, SlackDmMirrorGrant
-from .scheduler import LeaseLost
+from .scheduler import BudgetDeferred, LeaseLost
 
 KEY = "message_sync_discovery"
 _claim = ContextVar("message_sync_discovery_claim", default=None)
@@ -133,6 +133,10 @@ def discover_once(interval_seconds):
             dm.discover_conversations(grant)
     except LeaseLost:
         return False
+    except BudgetDeferred as exc:
+        # Local admission pacing is not a provider failure. Keep the exact
+        # shared-budget delay instead of adding thirty seconds to every page.
+        error, delay = type(exc).__name__, exc.retry_after
     except Exception as exc:
         error = type(exc).__name__
         delay = max(30, dm._slack_retry_after_seconds(exc))

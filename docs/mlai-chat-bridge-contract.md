@@ -257,6 +257,19 @@ workspace and history window. Unknown/error results are never cached as empty.
 Slack does not offer a last-active filter on `users.conversations`, so directory
 pagination is still necessary. A throttled page saves its completed prefix and
 resumes at the unfinished conversation after the shared Retry-After cooldown.
+Nested member pages, completed membership and sanitized profile lookups also
+checkpoint independently in that connection cursor. A deferral resumes the
+next member/user-list page or missing individual profile instead of repeatedly
+spending quota on the first page. These checkpoints are scoped to the exact
+grant, OAuth/consent generation, selected window, conversation and discovery
+cycle. Partial membership is never published; it expires after one hour, while
+a completed membership snapshot expires after five minutes. Expiring membership
+does not discard profile progress. Current consent, verified devices and final
+registration authority are still checked before provisioning. A concurrent
+membership update, retirement or room-boundary change invalidates cached
+membership and fences any in-flight directory write. Budget deferrals
+use the provider's actual retry delay and the existing fair owner rotation;
+ordinary failures retain their separate backoff. No quotas are raised.
 
 Existing quiet mirrors still refresh their membership/device boundary; their
 stored history remains available without scheduling regular archive scans.
