@@ -31,6 +31,8 @@ TERMINAL_COMPLETED_STATUSES = [
     "completed_no_results",
     "completed_with_source_errors",
     "completed_no_results_with_source_errors",
+    "completed_no_new_picks",
+    "completed_no_new_picks_with_source_errors",
     "completed_with_publish_errors",
 ]
 
@@ -305,11 +307,16 @@ def fetch_raw_jobs(
     return raw_jobs, failed_sources
 
 
-def _build_run_status(*, top_jobs_count: int, source_errors: list[str], slack_error: str | None) -> str:
+def _build_run_status(
+    *, top_jobs_count: int, source_errors: list[str], slack_error: str | None,
+    matched_count: int = 0,
+) -> str:
     if slack_error:
         return "completed_with_publish_errors"
     if source_errors and top_jobs_count:
         return "completed_with_source_errors"
+    if not top_jobs_count and matched_count:
+        return "completed_no_new_picks_with_source_errors" if source_errors else "completed_no_new_picks"
     if source_errors:
         return "completed_no_results_with_source_errors"
     if top_jobs_count:
@@ -500,6 +507,7 @@ def select_top_jobs(run: JobRun, limit: int | None = None) -> list[JobListing]:
     limit = limit or settings.jobs_top_pick_limit
     JobListing.objects.filter(run=run, is_top_pick=True).update(is_top_pick=False, rank=None)
     candidates = list(JobListing.objects.filter(run=run).order_by("-ranking_score", "id"))
+    candidate_count = len(candidates)
     previous_top_pick_keys = set(
         JobListing.objects.filter(run_date__lt=run.run_date, is_top_pick=True).values_list("dedupe_key", flat=True)
     )
@@ -510,6 +518,7 @@ def select_top_jobs(run: JobRun, limit: int | None = None) -> list[JobListing]:
         ).values_list("title", "company_name")
     }
     candidates = [job for job in candidates if apply_publish_screen(job)]
+    screened_count = len(candidates)
     for job in candidates:
         job.save(
             update_fields=[
@@ -536,7 +545,13 @@ def select_top_jobs(run: JobRun, limit: int | None = None) -> list[JobListing]:
         if job.dedupe_key not in previous_top_pick_keys
         and f"{normalize_words(job.title)}|{normalize_words(job.company_name)}" not in previous_top_pick_pairs
     ]
+    unseen_count = len(unseen_candidates)
     unseen_candidates, llm_reasons = judge_top_candidates(unseen_candidates, candidate_limit=10)
+    logger.info(
+        "Jobs selection run=%s candidates=%s screened=%s historical_exclusions=%s judged=%s",
+        run.run_id, candidate_count, screened_count,
+        screened_count - unseen_count, len(unseen_candidates),
+    )
 
     selected: list[JobListing] = []
     companies: set[str] = set()
@@ -657,12 +672,18 @@ def run_daily_jobs(
 
         run.status = _build_run_status(
             top_jobs_count=len(top_jobs),
+            matched_count=run.deduped_count,
             source_errors=source_errors,
             slack_error=slack_error,
         )
         run.error_message = _summarize_run_issues(source_errors, slack_error)
         run.completed_at = timezone.now()
         run.save()
+        logger.info(
+            "Jobs completed run=%s status=%s fetched=%s matched=%s picks=%s slack_posted=%s",
+            run.run_id, run.status, run.fetched_count, run.deduped_count,
+            run.ranked_count, bool(run.slack_posted_at),
+        )
     except Exception as exc:
         run.status = "failed"
         run.error_message = str(exc)
