@@ -59,6 +59,7 @@ CONTENT_ACTIONS = {
     "proofread",
     "event_recap",
     "test_ai_tutorial",
+    "newsletter_article",
 }
 
 
