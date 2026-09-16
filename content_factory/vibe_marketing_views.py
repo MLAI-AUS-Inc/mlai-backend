@@ -15085,6 +15085,7 @@ class VibeMarketingDiscoveryView(APIView):
                 island_scope = resolve_island_discovery_scope(context.organization, config, content_island_slug)
             except ValueError as exc:
                 return Response({"detail": str(exc)}, status=400)
+            content_island_slug = island_scope.get("slug") or content_island_slug
             content_island_name = island_scope["name"]
             content_island_keyword = island_scope["keyword"]
             content_island_icon_key = island_scope["icon_key"]

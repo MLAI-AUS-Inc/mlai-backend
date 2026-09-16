@@ -181,6 +181,7 @@ class IslandResearchContractTests(ContentIslandBootstrapTestCase):
         self.assertEqual(retired.memberships.count(), 3)
         scope = resolve_island_discovery_scope(self.organization, self.config, retired.slug)
         self.assertTrue(scope['keyword'])
+        self.assertNotEqual(scope['slug'], retired.slug)
         split = proposal([group([PROPOSAL]), group([other])])
         with transaction.atomic():
             self.assertEqual(apply_evolution(self.organization, split, date(2026, 9, 18), timezone.now()), [])

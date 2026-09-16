@@ -60,7 +60,7 @@ def resolve_island_discovery_scope(organization, config, slug):
         island = ContentIsland.objects.filter(organization=organization, slug=slug,
             status=ContentIslandStatus.VISIBLE).first()
     if island:
-        return {"name": island.name, "keyword": island.pillar_keyword, "context": island.description,
+        return {"slug": island.slug, "name": island.name, "keyword": island.pillar_keyword, "context": island.description,
                 "icon_key": island.icon_key, "color_key": island.color_key}
     from .vibe_marketing_views import _topic_pillars_for_bootstrap
     pillar = next((pillar for pillar in _topic_pillars_for_bootstrap(organization, config, compact=True)
