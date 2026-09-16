@@ -85,6 +85,7 @@ def adopt_selection(organization, run, ids):
         proposals = selected_proposals(run, ids)
         state = dict((run.result or {}).get(STATE_KEY, {}))
         added = set(state.get("selected_ids", []))
+        has_new = any(p["id"] not in added for p in proposals)
         groups = list(state.get("groups", []))
         managed = set(state.get("managed_slugs", []))
         managed_ids = set(state.get("managed_proposal_ids", []))
@@ -95,17 +96,22 @@ def adopt_selection(organization, run, ids):
             proposal = combine_proposals(group)
             existing = ContentIsland.objects.filter(organization=organization, pillar_keyword__iexact=proposal["pillar_keyword"]).first()
             other_owned = existing and existing.slug in ownership
-            island, created = adopt_researched_island(organization, run, proposal, merge_evidence=not other_owned)
+            island, created = adopt_researched_island(organization, run, proposal,
+                merge_evidence=True, preserve_positioning=bool(other_owned))
             groups.append({"slug": island.slug, "proposal_ids": proposal["proposal_ids"]})
             # Never take over another run's evolving theme or an existing manual island.
-            if island.origin == "manual" and island.slug not in ownership:
+            if island.slug not in ownership:
+                if island.origin != "manual":
+                    island.origin = "manual"
+                    island.save(update_fields=["origin", "updated_at"])
                 managed.add(island.slug)
                 managed_ids.update(proposal["proposal_ids"])
         state.update(version=1, selected_ids=sorted(added | {p["id"] for p in proposals}),
-                     groups=groups, managed_slugs=sorted(managed), managed_proposal_ids=sorted(managed_ids), revision=state.get("revision", 0) + 1)
-        state.pop("pending", None)
-        run.result = {**run.result, STATE_KEY: state}
-        run.save(update_fields=["result", "updated_at"])
+                     groups=groups, managed_slugs=sorted(managed), managed_proposal_ids=sorted(managed_ids), revision=state.get("revision", 0) + int(has_new))
+        if has_new:
+            state.pop("pending", None)
+            run.result = {**run.result, STATE_KEY: state}
+            run.save(update_fields=["result", "updated_at"])
         slugs = {g["slug"] for g in groups if set(g["proposal_ids"]) & set(ids)}
         aliases = state.get("redirects", {})
         slugs = {resolve_alias(slug, aliases) for slug in slugs}

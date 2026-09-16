@@ -136,6 +136,7 @@ class IslandResearchContractTests(ContentIslandBootstrapTestCase):
         run.refresh_from_db()
         self.assertEqual(sorted(run.result[STATE_KEY]['selected_ids']), sorted(ids))
         self.assertEqual(len(dynamic_scopes(self.organization)), 1)
+        self.assertEqual(run.result[STATE_KEY]['revision'], 1)
         self.assertEqual(PointsAccount.objects.get(user=self.user).balance, 19)
         self.assertEqual(ContentIslandKeyword.objects.filter(island__slug__in=run.result[STATE_KEY]['managed_slugs']).count(), 7)
 
@@ -156,6 +157,12 @@ class IslandResearchContractTests(ContentIslandBootstrapTestCase):
         self.assertEqual(response.status_code, 200, response.data)
         slugs = {i['slug'] for i in response.data['islands']}
         original_members = ContentIslandKeyword.objects.count()
+        from content_factory.models import ResearchedKeyword, WrittenArticle
+        article = WrittenArticle.objects.create(organization=self.organization, title='AI guide',
+            slug='ai-guide', category='AI', primary_keyword=PROPOSAL['pillar_keyword'])
+        keyword = ResearchedKeyword.objects.get(organization=self.organization, keyword_normalized=PROPOSAL['pillar_keyword'])
+        keyword.written_article, keyword.status = article, 'written'
+        keyword.save(update_fields=['written_article', 'status'])
         def proposal(parts):
             scope = dynamic_scopes(self.organization)[0]
             return [{'run_id': run.run_id, 'revision': scope['revision'], 'groups': parts}]
@@ -183,3 +190,8 @@ class IslandResearchContractTests(ContentIslandBootstrapTestCase):
         self.assertGreaterEqual(ContentIslandKeyword.objects.count(), original_members)
         run.refresh_from_db()
         self.assertEqual(len(run.result[STATE_KEY]['history']), 2)
+        keyword.refresh_from_db()
+        self.assertEqual(keyword.written_article_id, article.pk)
+        self.assertEqual(keyword.status, 'written')
+        self.assertEqual(ContentIsland.objects.filter(organization=self.organization, status='visible',
+            memberships__keyword=keyword).count(), 1)

@@ -85,7 +85,7 @@ def proposal_for_adoption(run, proposal_id):
     return proposal
 
 
-def adopt_researched_island(organization, run, proposal, *, merge_evidence=False):
+def adopt_researched_island(organization, run, proposal, *, merge_evidence=False, preserve_positioning=False):
     from django.db import transaction
     from django.utils import timezone
     from django.utils.text import slugify
@@ -156,8 +156,9 @@ def adopt_researched_island(organization, run, proposal, *, merge_evidence=False
                 avg_difficulty=Avg("difficulty"), opportunity_score=Sum("opportunity_index"), ai_search_volume=Sum("ai_search_volume"))
             for field, value in metrics.items():
                 setattr(island, field, value or 0)
-            island.name = defaults["name"]
-            island.description = defaults["description"]
+            if not preserve_positioning:
+                island.name = defaults["name"]
+                island.description = defaults["description"]
             island.save()
         ContentIslandSnapshot.objects.update_or_create(island=island, captured_on=now.date(),
             defaults={**{key: getattr(island, key) for key in proposal["metrics"]}, "status": island.status})
