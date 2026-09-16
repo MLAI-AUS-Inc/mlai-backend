@@ -118,6 +118,8 @@ def adopt_selection(organization, run, ids):
             state.pop("pending", None)
             run.result = {**run.result, STATE_KEY: state}
             run.save(update_fields=["result", "updated_at"])
+            from integrations.services.daily_research_policy import record_engagement
+            record_engagement(organization, resume=True)
         slugs = {g["slug"] for g in groups if set(g["proposal_ids"]) & set(ids)}
         aliases = state.get("redirects", {})
         slugs = {resolve_alias(slug, aliases) for slug in slugs}

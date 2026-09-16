@@ -136,6 +136,17 @@ class DailyResearchPolicyTests(TestCase):
         preferences = daily_topic_policy(self.sent(0, sent=False), now=self.now)["preferences"]
         self.assertEqual({k for p in preferences for k in p["keywords"]}, {"balcony gardens", "compost"})
 
+    def test_direct_custom_island_gets_one_preference_without_double_counting_managed_islands(self):
+        from integrations.services.daily_research_policy import daily_topic_policy
+        from content_factory.models import ContentIsland
+        from workflow_runs.models import ContentFactoryRun
+        ContentIsland.objects.create(organization=self.org, slug="direct", name="Direct", pillar_keyword="gardening", origin="manual", status="visible")
+        ContentIsland.objects.create(organization=self.org, slug="managed", name="Managed", pillar_keyword="compost", origin="manual", status="visible")
+        ContentFactoryRun.objects.create(run_id="managed-owner", organization=self.org, workflow="island_refresh", status="completed",
+            result={"island_research_selection": {"managed_slugs": ["managed"]}})
+        policy = daily_topic_policy(self.sent(0, sent=False), now=self.now)
+        self.assertEqual([p["keywords"] for p in policy["preferences"]], [["gardening"]])
+
 
 class _Response:
     def __init__(self, status_code=202, payload=None):

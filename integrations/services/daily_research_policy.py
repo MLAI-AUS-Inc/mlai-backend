@@ -3,6 +3,7 @@ from datetime import timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
@@ -93,7 +94,7 @@ def pause_if_unanswered(organization, *, now=None):
 
 def daily_topic_policy(run, *, now=None):
     """Use actual sent cards, not research attempts, to expire novelty/preferences."""
-    from content_factory.models import NotificationDelivery
+    from content_factory.models import ContentIsland, NotificationDelivery
     from workflow_runs.models import ContentFactoryRun
     current = now or timezone.now()
     organization = run.automation.organization
@@ -111,10 +112,17 @@ def daily_topic_policy(run, *, now=None):
             keyword = str(option.get("keyword") or option.get("primary_keyword") or "").strip()
             if keyword:
                 recent[keyword.casefold()] = {"keyword": keyword, "suggested_title": option.get("suggested_title", "")}
-    preferences = []
-    for source in ContentFactoryRun.objects.filter(organization=organization, updated_at__gte=current - timedelta(days=30)).order_by("created_at"):
+    preferences, managed_slugs = [], set()
+    sources = ContentFactoryRun.objects.filter(organization=organization).filter(
+        Q(result__island_research_selection__isnull=False)
+        | Q(run_request__custom_topic_keyword__isnull=False)
+        | Q(run_request__custom_topic_title__isnull=False)
+        | Q(run_request__custom_topic_seed__isnull=False)
+    ).only("run_id", "created_at", "status", "run_request", "result").order_by("created_at")
+    for source in sources:
         request, result = source.run_request or {}, source.result or {}
         state = result.get("island_research_selection", {})
+        managed_slugs.update(state.get("managed_slugs", []))
         events = state.get("daily_priority_events", [])
         if not events and state.get("selected_ids"):
             events = [{"id": f"island-selection:{source.run_id}:initial", "created_at": source.created_at.isoformat(),
@@ -130,5 +138,11 @@ def daily_topic_policy(run, *, now=None):
         if keyword and key not in consumed and source.created_at >= current - timedelta(days=30) and source.status not in {"failed", "blocked", "cancelled"}:
             options = (result.get("selection") or {}).get("options") or []
             preferences.append({"id": key, "keywords": list(dict.fromkeys([keyword] + [o["keyword"] for o in options if o.get("keyword")]))[:40]})
+    # Older direct custom-island creation predates researched selection runs.
+    for island in ContentIsland.objects.filter(organization=organization, origin="manual", status="visible",
+            created_at__gte=current - timedelta(days=30)).exclude(slug__in=managed_slugs):
+        key = f"custom-island:{island.pk}"
+        if key not in consumed:
+            preferences.append({"id": key, "keywords": [island.pillar_keyword or island.name]})
     return {"version": 1, "cooldown_days": COOLDOWN_DAYS, "recent_topics": list(recent.values()),
             "preferences": preferences[:20]}
