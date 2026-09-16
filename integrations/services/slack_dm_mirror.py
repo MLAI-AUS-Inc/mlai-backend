@@ -33,6 +33,7 @@ from django.utils.dateparse import parse_datetime
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 from integrations.services.message_sync.slack_client import budgeted_client
+from integrations.services.message_sync.discovery import discovery_poll_seconds
 from integrations.services.message_sync.configuration import user_app_id
 from integrations.services.message_sync.scheduler import BudgetDeferred, LeaseLost
 from integrations.services.message_sync.private_delivery import fair_private_candidate, guard_private_delivery
@@ -148,6 +149,7 @@ DIRECT_DM_SCOPES = {
 GROUP_DM_SCOPES = {"mpim:read", "mpim:history", "mpim:write"}
 REQUIRED_SCOPES = DIRECT_DM_SCOPES | GROUP_DM_SCOPES | PRIVATE_CHANNEL_SCOPES
 _last_grant_discovery_scan = 0.0
+_last_registration_cleanup_scan = 0.0
 _history_scan_available_at = 0.0
 _history_expiration_cursor = 0
 _history_expiration_scan_available_at = 0.0
@@ -4462,48 +4464,15 @@ def _record_private_delivery_failure(
 def discover_grants_if_due() -> None:
     """Periodically discover new IM channels without blocking Slack webhooks."""
 
-    global _last_grant_discovery_scan
+    global _last_grant_discovery_scan, _last_registration_cleanup_scan
     now_monotonic = time.monotonic()
-    if now_monotonic - _last_grant_discovery_scan < 5:
+    if now_monotonic - _last_grant_discovery_scan < discovery_poll_seconds():
         return
     _last_grant_discovery_scan = now_monotonic
-    now = timezone.now()
-    stale_processing_cutoff = now - timedelta(
-        seconds=REGISTRATION_CLEANUP_LEASE_SECONDS
-    )
-    cleanup_grant_ids = list(
-        SlackDmMirrorDelivery.objects.filter(
-            source_platform=CommunityBridgePlatform.BUZZ,
-            source_message_id__startswith=REGISTRATION_STATE_PREFIX,
-            operation=CommunityBridgeDeliveryType.CREATE,
-        )
-        .filter(
-            Q(
-                status=CommunityBridgeDeliveryStatus.PENDING,
-                available_at__lte=now,
-            )
-            | Q(
-                status=CommunityBridgeDeliveryStatus.PROCESSING,
-                updated_at__lt=stale_processing_cutoff,
-            )
-        )
-        .values("conversation__grant_id")
-        .annotate(next_cleanup_at=Min("available_at"))
-        .order_by("next_cleanup_at", "conversation__grant_id")
-        .values_list("conversation__grant_id", flat=True)[:10]
-    )
-    for cleanup_grant_id in cleanup_grant_ids:
-        try:
-            _reconcile_registration_cleanup(
-                cleanup_grant_id,
-                raise_on_pending=False,
-            )
-        except Exception as exc:
-            logger.warning(
-                "slack_dm_mirror_registration_cleanup_failed " "grant_id=%s error=%s",
-                cleanup_grant_id,
-                exc.__class__.__name__,
-            )
+    # Faster durable claims must not multiply unrelated adapter-cleanup scans.
+    if now_monotonic - _last_registration_cleanup_scan >= 5:
+        _last_registration_cleanup_scan = now_monotonic
+        _reconcile_due_registration_cleanup()
     if getattr(settings, "MESSAGE_SYNC_ENABLED", False):
         from integrations.services.message_sync.discovery import discover_once
         discover_once(GRANT_DISCOVERY_INTERVAL_SECONDS)
@@ -4552,6 +4521,47 @@ def discover_grants_if_due() -> None:
                 "slack_dm_mirror_discovery_failed grant_id=%s error=%s",
                 grant.pk,
                 exc,
+            )
+
+
+def _reconcile_due_registration_cleanup() -> None:
+    """Keep adapter cleanup maintenance on its existing five-second cadence."""
+    now = timezone.now()
+    stale_processing_cutoff = now - timedelta(
+        seconds=REGISTRATION_CLEANUP_LEASE_SECONDS
+    )
+    cleanup_grant_ids = list(
+        SlackDmMirrorDelivery.objects.filter(
+            source_platform=CommunityBridgePlatform.BUZZ,
+            source_message_id__startswith=REGISTRATION_STATE_PREFIX,
+            operation=CommunityBridgeDeliveryType.CREATE,
+        )
+        .filter(
+            Q(
+                status=CommunityBridgeDeliveryStatus.PENDING,
+                available_at__lte=now,
+            )
+            | Q(
+                status=CommunityBridgeDeliveryStatus.PROCESSING,
+                updated_at__lt=stale_processing_cutoff,
+            )
+        )
+        .values("conversation__grant_id")
+        .annotate(next_cleanup_at=Min("available_at"))
+        .order_by("next_cleanup_at", "conversation__grant_id")
+        .values_list("conversation__grant_id", flat=True)[:10]
+    )
+    for cleanup_grant_id in cleanup_grant_ids:
+        try:
+            _reconcile_registration_cleanup(
+                cleanup_grant_id,
+                raise_on_pending=False,
+            )
+        except Exception as exc:
+            logger.warning(
+                "slack_dm_mirror_registration_cleanup_failed " "grant_id=%s error=%s",
+                cleanup_grant_id,
+                exc.__class__.__name__,
             )
 
 

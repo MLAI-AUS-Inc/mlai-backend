@@ -52,6 +52,7 @@ from integrations.services.message_sync.scheduler import BudgetDeferred, LeaseLo
 from integrations.services.message_sync.delivery import delivery_context, supersede_stale_mutation
 from integrations.services.message_sync.runner import process_history_once
 from integrations.services.message_sync.history import seed_states
+from integrations.services.message_sync.discovery import discovery_poll_seconds
 
 logger = logging.getLogger(__name__)
 WORKER_ID = f"{socket.gethostname()}:{os.getpid()}"[:100]
@@ -87,6 +88,7 @@ class CommunityBridgeDiscordClient(discord.Client):
             self.delivery_loop.start()
             self._delivery_loop_started = True
         if not self._slack_dm_maintenance_started:
+            self.slack_dm_discovery_loop.change_interval(seconds=discovery_poll_seconds())
             self.slack_dm_discovery_loop.start()
             if message_sync_enabled():
                 self.slack_dm_history_loop.change_interval(seconds=1.0)
@@ -897,11 +899,6 @@ async def _run_headless_delivery_worker(client: CommunityBridgeDiscordClient) ->
         min(float(getattr(settings, "COMMUNITY_BRIDGE_WORKER_POLL_SECONDS", 1.0)), 60.0),
     )
     logger.info("community_bridge_headless_worker_ready target=mlai_chat")
-    async def discovery_loop():
-        while True:
-            await asyncio.to_thread(discover_grants_if_due)
-            await asyncio.sleep(5.0)
-
     async def history_loop():
         while True:
             await client.process_sync_history_once()
@@ -924,7 +921,14 @@ async def _run_headless_delivery_worker(client: CommunityBridgeDiscordClient) ->
 
     async with asyncio.TaskGroup() as group:
         group.create_task(inbox_loop())
-        group.create_task(discovery_loop())
+        group.create_task(_run_discovery_loop())
         group.create_task(history_loop())
         group.create_task(delivery_loop())
         group.create_task(private_delivery_loop())
+
+
+async def _run_discovery_loop() -> None:
+    """Poll once per configured turn even with no work; never spin on deferral."""
+    while True:
+        await asyncio.to_thread(discover_grants_if_due)
+        await asyncio.sleep(discovery_poll_seconds())

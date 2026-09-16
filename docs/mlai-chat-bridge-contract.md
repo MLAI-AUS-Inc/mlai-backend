@@ -270,6 +270,20 @@ membership update, retirement or room-boundary change invalidates cached
 membership and fences any in-flight directory write. Budget deferrals
 use the provider's actual retry delay and the existing fair owner rotation;
 ordinary failures retain their separate backoff. No quotas are raised.
+Durable discovery dispatches at most once per second per worker, including when
+idle, and successful partial-directory turns become eligible after one second.
+The existing workspace/owner rotation, per-grant leases and shared provider
+admission still choose when actual source requests may run. Provider cooldowns
+and ordinary-error backoff are never shortened. Legacy discovery and adapter
+registration-cleanup maintenance retain their five-second cadence. This removes
+fixed dispatch idle time; it does not increase Slack quotas or promise an import
+completion time.
+An owner whose initial directory-list request loses shared-budget admission
+keeps its previous fair turn while waiting for the budget deadline. No provider
+request has run in that case. A successful list followed by a nested deferral,
+or an actual provider rate-limit response, consumes the turn normally. This
+prevents a one-second worker cadence from repeatedly favoring the same owner
+at a three-second shared admission boundary.
 
 Existing quiet mirrors still refresh their membership/device boundary; their
 stored history remains available without scheduling regular archive scans.
