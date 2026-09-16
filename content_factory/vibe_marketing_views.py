@@ -10023,6 +10023,7 @@ def _compact_result_for_run(run):
     result = _run_mapping(run.result)
     if result.get("island_research"):
         return {
+            "adopted_proposal_ids": result.get("island_research_selection", {}).get("selected_ids", []),
             **{key: result.get(key) for key in ("island_research", "message", "keyword_count", "market", "source", "researched_at", "island_research_refunded", "refunded_points")},
             "suggested_islands": [
                 {key: item.get(key) for key in ("id", "name", "description", "pillar_keyword", "metrics", "keywords")}
@@ -15084,6 +15085,7 @@ class VibeMarketingDiscoveryView(APIView):
                 island_scope = resolve_island_discovery_scope(context.organization, config, content_island_slug)
             except ValueError as exc:
                 return Response({"detail": str(exc)}, status=400)
+            content_island_slug = island_scope.get("slug") or content_island_slug
             content_island_name = island_scope["name"]
             content_island_keyword = island_scope["keyword"]
             content_island_icon_key = island_scope["icon_key"]

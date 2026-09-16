@@ -79,20 +79,59 @@ worker's normal run-sync callback performs this even after the browser closes;
 status polling also reconciles it. The existing ledger refund idempotency key is
 used. A new deliberate attempt after a terminal result uses a new request ID.
 
-### Add a measured result
+### Select several measured themes
+
+The results screen has individual checkboxes, Select all/Clear selection, and a
+review step before the free batch save. Selection survives closing the dialog or
+refreshing the page. Already-added themes are labelled and cannot be duplicated.
+The success screen can return to remaining results without another research fee.
 
 `POST /api/v1/vibe-marketing/islands/research/<runId>/adopt` accepts `companyId`
-and `proposalId`. The server verifies the run belongs to the authorised company
-and is complete, and loads the proposal from its stored result. Client-supplied
-names, metrics or keywords have no authority. No payment occurs here.
+and `proposalIds` (1–5 stored proposal identifiers). With `preview: true` it
+returns `groups` (names, proposal IDs and deduplicated metrics) and `already_added`
+without writing. Without preview it atomically saves and returns `islands`.
+The legacy singular `proposalId` request remains supported.
 
-An exact existing theme is reused. New themes use a deterministic keyword-based
-slug and the existing manual-island origin so they remain on the founder's map.
-Their measured keywords, centroid, metrics and snapshot are persisted atomically;
-related edges are rebuilt. The original brief and intent guide subsequent article
-idea research. No unrelated islands are renamed, missed, archived or removed.
-Retries return the same island. Legacy manual islands without research can acquire
-the first measurements through this path.
+Only stored, completed, company-owned research is authoritative. Compatible
+search intents and complete-link centroid similarity of at least 0.90 group
+closely related selections; a chain of loosely related themes cannot bridge
+otherwise distant islands. Keyword metrics are deduplicated. Existing exact
+islands are reused. Requests and concurrent retries serialize on the organisation
+and research run, recording adopted IDs in `result.island_research_selection`.
+No extra payment or research dispatch occurs during review or adoption.
+
+### Daily growth, merging and splitting
+
+Founder-selected measured islands join the existing daily refresh and rotating
+DataForSEO expansion. `GET /api/seo/islands/` includes service-only
+`dynamic_scopes`: the saved brief, selected seed centroids, existing memberships,
+and a revision. Written keyword associations remain available to evolution.
+These members bypass the normal global opportunity-ranked keyword cap, so a
+smaller selected theme cannot disappear just because other keywords rank higher.
+
+The worker assigns new keywords to the closest selected scope with similarity
+at least 0.80. Separate research briefs remain boundaries in this first version.
+It clusters that scope's measured keywords, preserves sparse selected themes,
+and proposes merges using stricter complete-link centroid similarity of 0.90.
+Declined topics remain excluded. The normal unselected company pool follows its
+existing lifecycle independently.
+
+Bulk sync applies those partitions under the same organisation lock as adoption.
+Membership/metric growth keeps island identities. A structural merge or split
+needs the same topology on two distinct increasing research dates. Duplicate
+callbacks, old dates and stale selection revisions cannot confirm or overwrite
+newer choices. Missing evidence does not retire an island. The largest membership
+overlap keeps its stable slug; additional split branches receive durable slugs.
+Merged records and their snapshots are archived, never deleted; their retained
+memberships preserve article history. Old island discovery links resolve to the
+current survivor. The run records redirects and the last 100 topology changes.
+The compact browser run exposes only adopted proposal IDs, not this internal
+state. Worker callbacks preserve this Django-owned state.
+
+This uses the existing run JSON, island membership and snapshot models; no schema
+migration is required. Existing manual islands do not change behavior unless a
+founder selects their measured theme through the batch flow. A theme already
+managed by another research brief is reused without transferring ownership.
 
 ## Existing manual islands and older clients
 

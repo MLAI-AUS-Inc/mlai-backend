@@ -85,7 +85,7 @@ def proposal_for_adoption(run, proposal_id):
     return proposal
 
 
-def adopt_researched_island(organization, run, proposal):
+def adopt_researched_island(organization, run, proposal, *, merge_evidence=False, preserve_positioning=False):
     from django.db import transaction
     from django.utils import timezone
     from django.utils.text import slugify
@@ -106,7 +106,7 @@ def adopt_researched_island(organization, run, proposal):
             seed_islands_from_bootstrap_pillars(org)
         # An existing measured theme is reused; its members and positioning stay intact.
         existing = ContentIsland.objects.filter(organization=org, pillar_keyword__iexact=keyword).first()
-        if existing and existing.keyword_count > 0:
+        if existing and existing.keyword_count > 0 and not merge_evidence:
             if existing.status != "visible":
                 existing.status, existing.promoted_at = "visible", now
                 existing.archived_at = None
@@ -128,7 +128,7 @@ def adopt_researched_island(organization, run, proposal):
         else:
             island, created = ContentIsland.objects.get_or_create(organization=org, slug=slug, defaults=defaults)
         if not created:
-            if island.keyword_count > 0 and island.status == "visible":
+            if island.keyword_count > 0 and island.status == "visible" and not merge_evidence:
                 return island, False
             for field in ("status", "promoted_at", "last_matched_at", "last_refreshed_at", "centroid_embedding", *proposal["metrics"]):
                 setattr(island, field, defaults[field])
@@ -149,7 +149,18 @@ def adopt_researched_island(organization, run, proposal):
             member = members.get(normalized, {})
             ContentIslandKeyword.objects.update_or_create(island=island, keyword=researched, defaults={
                 "similarity_score": member.get("similarity_score", 0), "is_centroid": member.get("is_centroid", False)})
+        if merge_evidence:
+            from django.db.models import Sum, Avg, Count
+            measured = ResearchedKeyword.objects.filter(island_memberships__island=island)
+            metrics = measured.aggregate(keyword_count=Count("id"), total_volume=Sum("volume"),
+                avg_difficulty=Avg("difficulty"), opportunity_score=Sum("opportunity_index"), ai_search_volume=Sum("ai_search_volume"))
+            for field, value in metrics.items():
+                setattr(island, field, value or 0)
+            if not preserve_positioning:
+                island.name = defaults["name"]
+                island.description = defaults["description"]
+            island.save()
         ContentIslandSnapshot.objects.update_or_create(island=island, captured_on=now.date(),
-            defaults={**proposal["metrics"], "status": island.status})
+            defaults={**{key: getattr(island, key) for key in proposal["metrics"]}, "status": island.status})
         rebuild_island_edges(org)
     return island, created

@@ -106,3 +106,93 @@ class IslandResearchContractTests(ContentIslandBootstrapTestCase):
         response = self.client.post(f"{URL}/{run.run_id}/adopt", {"proposalId": PROPOSAL["id"]}, format="json")
         self.assertEqual(response.status_code, 404)
         self.assertEqual(ContentIsland.objects.count(), 0)
+
+    def test_batch_preview_atomic_adoption_and_repeat_save_are_free(self):
+        from copy import deepcopy
+        from content_factory.island_selection import STATE_KEY, dynamic_scopes
+        run = self.start()
+        close = deepcopy(PROPOSAL)
+        close.update(id="close", name="AI adoption services", pillar_keyword="ai adoption services", centroid_embedding=[.99, .01])
+        close['keywords'][0]['keyword'] = close['members'][0]['keyword_normalized'] = close['pillar_keyword']
+        distant = deepcopy(PROPOSAL)
+        distant.update(id="distant", name="Home composting", pillar_keyword="home composting", centroid_embedding=[0., 1.])
+        for index, row in enumerate(distant['keywords']):
+            row['keyword'] = distant['members'][index]['keyword_normalized'] = f'composting {index}'
+        self.complete(run, [PROPOSAL, close, distant])
+        url = f"{URL}/{run.run_id}/adopt"
+        ids = [PROPOSAL['id'], close['id'], distant['id']]
+        preview = self.client.post(url, {'proposalIds': ids, 'preview': True}, format='json')
+        self.assertEqual(preview.status_code, 200, preview.data)
+        self.assertEqual(len(preview.data['groups']), 2)
+        self.assertFalse(ContentIsland.objects.exists())
+        invalid = self.client.post(url, {'proposalIds': [ids[0], 'forged']}, format='json')
+        self.assertEqual(invalid.status_code, 400)
+        self.assertFalse(ContentIsland.objects.exists())
+        first = self.client.post(url, {'proposalIds': ids}, format='json')
+        self.assertEqual(first.status_code, 200, first.data)
+        second = self.client.post(url, {'proposalIds': ids[::-1]}, format='json')
+        self.assertEqual(first.data, second.data)
+        self.assertEqual(len(first.data['islands']), 2)
+        run.refresh_from_db()
+        self.assertEqual(sorted(run.result[STATE_KEY]['selected_ids']), sorted(ids))
+        self.assertEqual(len(dynamic_scopes(self.organization)), 1)
+        self.assertEqual(run.result[STATE_KEY]['revision'], 1)
+        self.assertEqual(PointsAccount.objects.get(user=self.user).balance, 19)
+        self.assertEqual(ContentIslandKeyword.objects.filter(island__slug__in=run.result[STATE_KEY]['managed_slugs']).count(), 7)
+
+    def test_daily_merge_split_preserve_records_and_reject_stale_refresh(self):
+        from copy import deepcopy
+        from datetime import date
+        from django.db import transaction
+        from django.utils import timezone
+        from content_factory.island_selection import STATE_KEY, apply_evolution, dynamic_scopes
+        from content_factory.custom_islands import resolve_island_discovery_scope
+        run = self.start()
+        other = deepcopy(PROPOSAL)
+        other.update(id='second', name='AI implementation', pillar_keyword='ai implementation', centroid_embedding=[0., 1.])
+        for index, row in enumerate(other['keywords']):
+            row['keyword'] = other['members'][index]['keyword_normalized'] = f'ai implementation {index}'
+        self.complete(run, [PROPOSAL, other])
+        response = self.client.post(f'{URL}/{run.run_id}/adopt', {'proposalIds': [PROPOSAL['id'], 'second']}, format='json')
+        self.assertEqual(response.status_code, 200, response.data)
+        slugs = {i['slug'] for i in response.data['islands']}
+        original_members = ContentIslandKeyword.objects.count()
+        from content_factory.models import ResearchedKeyword, WrittenArticle
+        article = WrittenArticle.objects.create(organization=self.organization, title='AI guide',
+            slug='ai-guide', category='AI', primary_keyword=PROPOSAL['pillar_keyword'])
+        keyword = ResearchedKeyword.objects.get(organization=self.organization, keyword_normalized=PROPOSAL['pillar_keyword'])
+        keyword.written_article, keyword.status = article, 'written'
+        keyword.save(update_fields=['written_article', 'status'])
+        def proposal(parts):
+            scope = dynamic_scopes(self.organization)[0]
+            return [{'run_id': run.run_id, 'revision': scope['revision'], 'groups': parts}]
+        def group(parts):
+            return {'name': 'Evolving theme', 'description': 'Measured theme', 'pillar_keyword': parts[0]['pillar_keyword'],
+                'keywords': [k['keyword'] for p in parts for k in p['keywords']],
+                'members': [k for p in parts for k in p['members']], 'centroid_embedding': [1., 0.],
+                'metrics': {**PROPOSAL['metrics'], 'keyword_count': 3 * len(parts), 'total_volume': 600 * len(parts)}}
+        merged = proposal([group([PROPOSAL, other])])
+        with transaction.atomic():
+            self.assertEqual(apply_evolution(self.organization, merged, date(2026, 9, 16), timezone.now()), [])
+            self.assertEqual(apply_evolution(self.organization, merged, date(2026, 9, 16), timezone.now()), [])
+            self.assertEqual(len(apply_evolution(self.organization, merged, date(2026, 9, 17), timezone.now())), 1)
+        self.assertEqual(ContentIsland.objects.filter(slug__in=slugs).count(), 2)
+        retired = ContentIsland.objects.get(slug__in=slugs, status='archived')
+        self.assertEqual(retired.memberships.count(), 3)
+        scope = resolve_island_discovery_scope(self.organization, self.config, retired.slug)
+        self.assertTrue(scope['keyword'])
+        self.assertNotEqual(scope['slug'], retired.slug)
+        split = proposal([group([PROPOSAL]), group([other])])
+        with transaction.atomic():
+            self.assertEqual(apply_evolution(self.organization, split, date(2026, 9, 18), timezone.now()), [])
+            self.assertEqual(len(apply_evolution(self.organization, split, date(2026, 9, 19), timezone.now())), 1)
+            self.assertEqual(apply_evolution(self.organization, merged, date(2026, 9, 20), timezone.now()), [])
+        self.assertEqual(len(dynamic_scopes(self.organization)[0]['islands']), 2)
+        self.assertGreaterEqual(ContentIslandKeyword.objects.count(), original_members)
+        run.refresh_from_db()
+        self.assertEqual(len(run.result[STATE_KEY]['history']), 2)
+        keyword.refresh_from_db()
+        self.assertEqual(keyword.written_article_id, article.pk)
+        self.assertEqual(keyword.status, 'written')
+        self.assertEqual(ContentIsland.objects.filter(organization=self.organization, status='visible',
+            memberships__keyword=keyword).count(), 1)
