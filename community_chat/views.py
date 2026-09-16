@@ -1156,7 +1156,15 @@ class PublicProfileBatchView(APIView):
         for device in devices:
             devices_by_key.setdefault(device.public_key, device)
         profiles = {
-            public_key: public_chat_profile(devices_by_key[public_key].user)
+            public_key: {
+                **public_chat_profile(devices_by_key[public_key].user),
+                # Historical keys retain attribution but must not be offered
+                # as current notification targets by mention autocomplete.
+                "mentionable": (
+                    devices_by_key[public_key].status == DeviceBindingStatus.VERIFIED
+                    and devices_by_key[public_key].revoked_at is None
+                ),
+            }
             for public_key in public_keys
             if public_key in devices_by_key
         }

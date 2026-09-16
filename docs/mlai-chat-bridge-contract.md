@@ -55,6 +55,15 @@ deliberately retain no message content.
 ## Delivery guarantees
 
 - `(source platform, receipt key)` is the ingestion idempotency boundary.
+- Public Slack-to-Buzz creates also deduplicate by mapped destination and Slack
+  channel/message identity. Live callbacks and history scans hold the same
+  mapping lock before checking existing creates, deletion tombstones and message
+  links. A different callback receipt cannot create another copy or replace a
+  failed delivery's frozen request. A later explicit thread broadcast retains
+  its separate channel representation once; repeat scans do not recreate it.
+  Edits, reactions and explicit operator repair queues keep their own paths.
+  This prevents new duplicates; existing delivered duplicates require reviewed
+  reconciliation that preserves replies and reactions, not deletion by text.
 - A durable outbox is claimed transactionally and retried with bounded backoff.
 - Receipt creation, outbox creation and receipt status commit in one transaction.
   A crash before enqueue rolls back the receipt so Slack can retry.

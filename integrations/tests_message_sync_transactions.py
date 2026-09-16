@@ -2,7 +2,7 @@
 
 from unittest.mock import patch
 
-from django.test import TestCase, TransactionTestCase
+from django.test import TestCase, TransactionTestCase, skipUnlessDBFeature
 
 from integrations.models import CommunityBridgeChannel, CommunityBridgeDelivery, CommunityBridgeReceipt
 from integrations.services.community_bridge.store import (
@@ -25,7 +25,7 @@ class MessageSyncTransactionTests(TransactionTestCase):
             event_type="message", raw_payload={}, normalized_event={
                 "delivery_type": operation, "source_channel_id": "C123",
                 "source_message_id": "1700000000.000001", "source_author_id": "U123",
-                "source_author_display_name": "Synthetic fixture", "text": "fixture",
+                "source_author_display_name": "Synthetic fixture", "text": "" if operation == "delete" else "fixture",
                 "attachments": [],
             },
         )
@@ -39,6 +39,70 @@ class MessageSyncTransactionTests(TransactionTestCase):
         self.assertEqual(self.ingest()["status"], "enqueued")
         self.assertEqual(self.ingest()["status"], "duplicate")
         self.assertEqual(CommunityBridgeReceipt.objects.count(), 1)
+        self.assertEqual(CommunityBridgeDelivery.objects.count(), 1)
+
+    def test_different_receipts_for_the_same_source_keep_one_create(self):
+        first = self.ingest()
+        duplicate = self.ingest("sync:create:history")
+        self.assertEqual(duplicate["reason"], "duplicate_source_message")
+        self.assertEqual(CommunityBridgeDelivery.objects.count(), 1)
+        self.assertEqual(CommunityBridgeReceipt.objects.count(), 2)
+        # A failed or uncertain send must retry its original immutable request.
+        CommunityBridgeDelivery.objects.filter(pk=first["delivery_id"]).update(status="failed")
+        self.assertEqual(self.ingest("late-callback")["reason"], "duplicate_source_message")
+        self.assertEqual(CommunityBridgeDelivery.objects.count(), 1)
+        self.assertEqual(self.ingest("edit", "edit")["status"], "enqueued")
+
+    def test_link_survives_outbox_retention_and_prevents_reimport(self):
+        first = self.ingest()["delivery_id"]
+        complete_create_delivery(delivery_id=first, destination_message_id="a" * 64,
+            destination_channel_id=self.channel.destination_channel_id)
+        CommunityBridgeDelivery.objects.all().delete()
+        self.assertEqual(self.ingest("after-retention")["reason"], "duplicate_source_message")
+        self.assertEqual(CommunityBridgeDelivery.objects.count(), 0)
+
+    def test_deleted_source_is_not_resurrected_by_a_late_create(self):
+        self.ingest("delete", "delete")
+        self.assertEqual(self.ingest()["reason"], "duplicate_source_message")
+        self.assertEqual(CommunityBridgeDelivery.objects.filter(delivery_type="create").count(), 0)
+
+    def test_new_destination_does_not_reuse_an_old_destination_create(self):
+        self.ingest()
+        self.channel.destination_channel_id = "new-room"
+        self.channel.save()
+        self.assertEqual(self.ingest("new-destination")["status"], "enqueued")
+        self.assertEqual(CommunityBridgeDelivery.objects.count(), 2)
+
+    def test_broadcast_promotion_is_preserved_once_without_recreating_ordinary_reply(self):
+        from integrations.services.community_bridge.store import ingest_slack_event
+        def reply(key, broadcast=False):
+            return ingest_slack_event({"event_id": key, "team_id": "T123", "event": {
+                "type": "message", "channel": "C123", "channel_type": "channel",
+                "user": "U123", "ts": "1700000001.000001", "thread_ts": "1700000000.000001",
+                "text": "reply", "subtype": "thread_broadcast" if broadcast else "",
+            }})
+        self.assertEqual(reply("reply")["status"], "enqueued")
+        self.assertEqual(reply("broadcast", True)["status"], "enqueued")
+        self.assertEqual(reply("history-broadcast", True)["reason"], "duplicate_source_message")
+        self.assertEqual(reply("history-reply")["reason"], "duplicate_source_message")
+        self.assertEqual(CommunityBridgeDelivery.objects.count(), 2)
+
+    @skipUnlessDBFeature("has_select_for_update")
+    def test_concurrent_callback_and_history_create_commit_once(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from threading import Barrier
+        from django.db import close_old_connections
+        start = Barrier(2)
+        def run(key):
+            close_old_connections()
+            try:
+                start.wait(timeout=10)
+                return self.ingest(key)["status"]
+            finally:
+                close_old_connections()
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(run, ["callback", "history"]))
+        self.assertCountEqual(results, ["enqueued", "ignored"])
         self.assertEqual(CommunityBridgeDelivery.objects.count(), 1)
 
     def test_first_frozen_envelope_survives_a_worker_restart(self):

@@ -115,6 +115,28 @@ class PublicHistoryTests(TransactionTestCase):
         self.assertEqual(CommunityBridgeReceipt.objects.count(), 0)
         self.assertEqual(BridgeSyncJob.objects.get(pk=job.pk).checkpoint, {})
 
+    def test_live_create_and_history_share_source_identity_in_either_order(self):
+        from integrations.services.community_bridge.store import ingest_slack_event
+        for history_first in [False, True]:
+            with self.subTest(history_first=history_first):
+                channel_id = "CHISTORY" if history_first else "CLIVE"
+                state = self.state(channel_id)
+                message = {"ts": "1700000000.000001", "user": "U1", "text": "fixture"}
+                payload = {"team_id": "T1", "event_id": f"live:{channel_id}", "event": {
+                    **message, "type": "message", "channel": channel_id, "channel_type": "channel",
+                }}
+                client = MagicMock()
+                client.conversations_history.return_value = {"ok": True, "messages": [message]}
+                if not history_first:
+                    ingest_slack_event(payload)
+                with patch('integrations.services.message_sync.history.SlackBridgeClient.get_client', return_value=client):
+                    public_page(claim_job(kinds=["archive"]), state)
+                if history_first:
+                    ingest_slack_event(payload)
+                self.assertEqual(CommunityBridgeDelivery.objects.filter(
+                    channel=state.public_channel, delivery_type="create").count(), 1)
+
+
 
 class PrivateHeadTests(SlackDmIoAuthorityFixture, TransactionTestCase):
     def test_recent_head_imports_while_archive_is_incomplete(self):

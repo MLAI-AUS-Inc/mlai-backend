@@ -53,3 +53,14 @@ The user subsequently approved the expanded
 [334-migration setup](community-chat-full-test-proposal.md). The complete
 334-test selection, including these 10 profile tests and the Slack/Volunteer
 regressions, passed. See [the regression evidence](community-chat-test-results-2026-09-07.md).
+
+### Mention identity across devices
+
+The authenticated `/community-chat/profiles/batch/` response includes
+`mentionable` for every resolved key. It is true only for a currently verified,
+non-revoked device of an active account. Historical verified keys still return
+their public profile for message attribution, with `mentionable: false`.
+Clients can group active keys by the returned `public_id` in mention pickers,
+preferring a key already in the current channel. Display names and self-published
+profile metadata do not prove that two keys belong to the same person. This is
+presentation metadata; relay permission checks still authorize every action.
