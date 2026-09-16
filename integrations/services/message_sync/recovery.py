@@ -9,20 +9,24 @@ from integrations.models import BridgeSyncJob, BridgeSyncState, SlackDmMirrorCon
 def recoverable_rows():
     """Exclude irreversible rejection and previously handled source tombstones."""
     rows = SlackDmMirrorDelivery.objects.filter(
-        source_platform="slack", metadata__backfill=True,
+        source_platform="slack",
         status__in=["failed", "dead"], available_at__lte=timezone.now(),
     ).exclude(operation="delete")
     from .reaction_recovery import CONTRACT_KEY, legacy_failure_query
+
+    from .parent_recovery import CONTRACT_KEY as PARENT_KEY, stale_parent_failure_query
+    parent_failure = stale_parent_failure_query() & Q(**{f"metadata__{PARENT_KEY}__isnull": True})
+    rows = rows.filter(Q(metadata__backfill=True) | parent_failure)
 
     # Original permanent-failure handling already set recovery_scheduled. Those
     # known legacy reactions may acquire the new audited exception exactly once.
     legacy = legacy_failure_query() & Q(**{f"metadata__{CONTRACT_KEY}__isnull": True})
     rows = rows.filter(
         Q(metadata__permanent_failure__isnull=True) | Q(metadata__permanent_failure=False)
-        | legacy,
+        | legacy | parent_failure,
     ).filter(
         Q(metadata__history_recovery_scheduled__isnull=True)
-        | Q(metadata__history_recovery_scheduled=False) | legacy,
+        | Q(metadata__history_recovery_scheduled=False) | legacy | parent_failure,
     )
     for key in ("history_recovery_superseded", "history_outside_window"):
         rows = rows.filter(Q(**{f"metadata__{key}__isnull": True}) | Q(**{f"metadata__{key}": False}))
@@ -55,13 +59,18 @@ def schedule_private_recoveries(limit=5, *, row_limit=200):
     """
     from integrations.services import slack_dm_mirror as dm
 
-    candidates = SlackDmMirrorConversation.objects.filter(
+    from .private_coverage import coverage_attempt_rows, recent_conversations
+    recent_ids = recent_conversations(SlackDmMirrorConversation.objects.all()).values('pk')
+    candidates = SlackDmMirrorConversation.objects.annotate(
+        coverage_current=Exists(coverage_attempt_rows()),
+    ).filter(
         status="live", grant__status="active", grant__revoked_at__isnull=True,
         grant__connection__status__in=["connected", "syncing"],
         sync_state__isnull=False,
         history_backfilled_at__gte=F("grant__consented_at"),
     ).exclude(sync_state__status__in=["paused", "revoked"]).exclude(grant__connection__access_token="").filter(
-        Exists(recoverable_rows().filter(conversation_id=OuterRef("pk"))),
+        Q(Exists(recoverable_rows().filter(conversation_id=OuterRef("pk"))))
+        | Q(coverage_current=False, pk__in=Subquery(recent_ids)),
         ~Exists(BridgeSyncJob.objects.filter(state__private_conversation_id=OuterRef("pk"), lease_expires_at__gt=timezone.now())),
     )
     # Read turns from ALL owner states, including conversations already removed
@@ -111,7 +120,11 @@ def schedule_private_recoveries(limit=5, *, row_limit=200):
                 rows = list(recoverable_rows().filter(conversation=conversation).select_for_update().defer(
                     "encrypted_text",
                 ).order_by("id")[:max(1, min(int(row_limit), 1000))])
-                if not rows:
+                needs_coverage = (
+                    not SlackDmMirrorConversation.objects.filter(pk=conversation.pk).filter(Exists(coverage_attempt_rows())).exists()
+                    and recent_conversations(SlackDmMirrorConversation.objects.filter(pk=conversation.pk)).exists()
+                )
+                if not rows and not needs_coverage:
                     continue
                 current_rows = []
                 excluded_rows = 0
@@ -119,12 +132,17 @@ def schedule_private_recoveries(limit=5, *, row_limit=200):
                     row.conversation = conversation
                     if (row.metadata or {}).get("permanent_failure"):
                         from .reaction_recovery import CONTRACT_KEY, legacy_failure_eligible
-                        if not legacy_failure_eligible(row, conversation):
-                            continue
-                        row.metadata = {**row.metadata, CONTRACT_KEY: {
-                            "failed_at": row.updated_at.isoformat(), "error_code": "adapter_http_400",
-                            "contract": "pre_145_unicode_reaction",
-                        }}
+                        if legacy_failure_eligible(row, conversation):
+                            row.metadata = {**row.metadata, CONTRACT_KEY: {
+                                "failed_at": row.updated_at.isoformat(), "error_code": "adapter_http_400",
+                                "contract": "pre_145_unicode_reaction",
+                            }}
+                        else:
+                            from .parent_recovery import CONTRACT_KEY as PARENT_KEY, stale_parent_failure_audit
+                            audit = stale_parent_failure_audit(row, conversation)
+                            if audit is None:
+                                continue
+                            row.metadata = {**row.metadata, "backfill": True, PARENT_KEY: audit}
                     if dm._backfill_delivery_is_outside_history_window(row, now=now, history_days=dm._grant_history_days(grant)):
                         # Old terminal rows cannot block a currently active chat.
                         # This erases data and records exclusion; it sends nothing.
@@ -135,10 +153,11 @@ def schedule_private_recoveries(limit=5, *, row_limit=200):
                     row.encrypted_text = ""
                     row.updated_at = now
                     current_rows.append(row)
-                if not current_rows and not excluded_rows:
+                if not current_rows and not excluded_rows and not needs_coverage:
                     continue
                 if current_rows:
                     SlackDmMirrorDelivery.objects.bulk_update(current_rows, ["metadata", "updated_at", "encrypted_text"])
+                if current_rows or needs_coverage:
                     dm._mark_conversation_history_due(
                         conversation, reason="Source recovery for erased backfill rows",
                         reset_deliveries=False,

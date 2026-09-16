@@ -306,3 +306,93 @@ class PrivateSourceRecoveryTests(SlackDmIoAuthorityFixture, TransactionTestCase)
             self.assertTrue(row.metadata["permanent_failure"])
             self.assertTrue(row.metadata["history_recovery_scheduled"])
             self.assertNotIn(CONTRACT_KEY, row.metadata)
+
+    def test_pre_version_recent_scan_is_rebuilt_once_with_current_room_proof(self):
+        from django.db.models import Exists
+        from integrations.services.message_sync.private_coverage import current_coverage_rows
+        self.conversation.latest_synced_ts = f"{int(timezone.now().timestamp())-60}.000001"
+        self.conversation.save()
+        self.assertEqual(schedule_private_recoveries(), 1)
+        self.conversation.refresh_from_db()
+        self.assertIsNone(self.conversation.history_backfilled_at)
+        self.scan([])
+        self.assertTrue(SlackDmMirrorConversation.objects.filter(pk=self.conversation.pk).filter(Exists(current_coverage_rows())).exists())
+        self.assertEqual(schedule_private_recoveries(), 0)
+
+    def test_resumed_old_partial_scan_finishes_without_proof_then_gets_fresh_scan(self):
+        from django.db import transaction
+        from django.db.models import Exists
+        from integrations.services.message_sync.private_coverage import current_coverage_rows
+        self.conversation.latest_synced_ts = f"{int(timezone.now().timestamp())-60}.000001"
+        self.conversation.save()
+        main = dm._ensure_history_state(self.conversation, source_message_id=dm.HISTORY_MAIN_STATE_ID,
+            metadata={"history_scan_state":"main", "scan_epoch":"old-code-scan", "cursor":"keep-me",
+                      "participant_hash":self.conversation.participant_hash, "mlai_channel_id":str(self.conversation.mlai_channel_id)})
+        self.assertEqual(schedule_private_recoveries(),0)
+        main.refresh_from_db()
+        self.assertEqual(main.metadata["cursor"],"keep-me")
+        with transaction.atomic():
+            dm._finish_history_scan(self.conversation)
+        self.assertFalse(SlackDmMirrorConversation.objects.filter(pk=self.conversation.pk).filter(Exists(current_coverage_rows())).exists())
+        self.assertEqual(schedule_private_recoveries(),1)
+        self.scan([])
+        self.assertTrue(SlackDmMirrorConversation.objects.filter(pk=self.conversation.pk).filter(Exists(current_coverage_rows())).exists())
+
+    def test_version_repair_uses_source_activity_and_skips_old_unknown_and_future(self):
+        from integrations.services.message_sync.private_coverage import recent_conversations
+        self.assertEqual(schedule_private_recoveries(),0)
+        self.conversation.latest_synced_ts=f"{int(timezone.now().timestamp())-31*86400}.000001"
+        self.conversation.save()
+        self.assertEqual(schedule_private_recoveries(),0)
+        self.conversation.latest_synced_ts=f"{int(timezone.now().timestamp())+3600}.000001"
+        self.conversation.save()
+        self.assertEqual(schedule_private_recoveries(),0)
+        self.connection.provider_metadata={**self.connection.provider_metadata, "mlai_chat_conversations_v1":{
+            self.conversation.slack_conversation_id:{"latest_message_ts":f"{int(timezone.now().timestamp())-60}.000001"}}}
+        self.connection.save()
+        self.assertTrue(recent_conversations(SlackDmMirrorConversation.objects.filter(pk=self.conversation.pk)).exists())
+        self.assertEqual(schedule_private_recoveries(),1)
+
+    def test_version_repair_respects_configured_window_and_partial_job(self):
+        from django.test import override_settings
+        self.grant.history_days=90
+        self.grant.save()
+        self.conversation.latest_synced_ts=f"{int(timezone.now().timestamp())-8*86400}.000001"
+        self.conversation.save()
+        with override_settings(SLACK_DM_MIRROR_HISTORY_DAYS=7):
+            self.assertEqual(schedule_private_recoveries(),0)
+        job=self.state.jobs.get(kind="head")
+        job.checkpoint={"cursor":"preserved"}
+        job.save()
+        self.assertEqual(schedule_private_recoveries(),0)
+        job.refresh_from_db()
+        self.assertEqual(job.checkpoint,{"cursor":"preserved"})
+
+    def test_source_limited_current_version_does_not_repeatedly_restart_repair(self):
+        from django.db.models import Exists
+        from integrations.services.message_sync.private_coverage import current_coverage_rows
+        self.conversation.latest_synced_ts=f"{int(timezone.now().timestamp())-60}.000001"
+        self.conversation.save()
+        self.assertEqual(schedule_private_recoveries(),1)
+        self.scan([], limited=True)
+        self.assertFalse(SlackDmMirrorConversation.objects.filter(pk=self.conversation.pk).filter(Exists(current_coverage_rows())).exists())
+        self.assertEqual(schedule_private_recoveries(),0)
+
+    def test_explicit_empty_compose_refreshes_missing_proof_without_resetting_active_scan(self):
+        from integrations.services.message_sync.private_coverage import request_current_coverage
+        authority=dm._capture_slack_grant_api_authority(self.grant, refresh_token=False)
+        self.assertEqual(schedule_private_recoveries(),0)
+        job=self.state.jobs.get(kind="head")
+        job.checkpoint={"cursor":"keep-empty-scan"}
+        job.save()
+        self.assertFalse(request_current_coverage(self.conversation, authority, set(SCOPES)))
+        job.refresh_from_db()
+        self.assertEqual(job.checkpoint,{"cursor":"keep-empty-scan"})
+        job.checkpoint={}
+        job.save()
+        self.assertTrue(request_current_coverage(self.conversation, authority, set(SCOPES)))
+        self.conversation.refresh_from_db()
+        self.assertIsNone(self.conversation.history_backfilled_at)
+        self.scan([])
+        self.conversation.refresh_from_db()
+        self.assertFalse(request_current_coverage(self.conversation, authority, set(SCOPES)))

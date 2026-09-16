@@ -70,6 +70,7 @@ def catalog_conversations(conversations):
     Prefetch preserves the caller's owner/status filters and shares FK objects.
     """
     from integrations.models import BridgeSyncState, SlackDmMirrorDelivery
+    from integrations.services.message_sync.private_coverage import current_coverage_rows
 
     unfinished = SlackDmMirrorDelivery.objects.filter(
         conversation_id=OuterRef("pk"), source_platform="slack",
@@ -86,6 +87,7 @@ def catalog_conversations(conversations):
         "grant__connection",
     ).annotate(
         _import_pending=Exists(unfinished),
+        _import_verified=Exists(current_coverage_rows()),
         _import_limited=Exists(BridgeSyncState.objects.filter(
             private_conversation_id=OuterRef("pk"),
             verified_ranges__archive__classification="source_limited",
@@ -129,6 +131,7 @@ def ready_for_display(conversation, *, now=None, published=False, public_key=Non
         return False
     if not published and (
         completed is None or completed < grant.consented_at
+        or not getattr(conversation, "_import_verified", False)
         or getattr(conversation, "_import_pending", True)
         or getattr(conversation, "_import_limited", False)
     ):
@@ -153,7 +156,7 @@ def _publication_key(conversation):
         ",".join(sorted(conversation.participant_buzz_pubkeys or [])),
         _grant_history_days(grant),
     ))
-    return "slack-import-published-v1:" + hashlib.sha256(value.encode()).hexdigest()
+    return "slack-import-published-v2:" + hashlib.sha256(value.encode()).hexdigest()
 
 
 def catalog_payload(conversations, public_key):

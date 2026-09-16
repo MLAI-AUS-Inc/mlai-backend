@@ -18,6 +18,7 @@ from community_chat.models import (
     DeviceBindingStatus,
 )
 from integrations.models import (
+    BridgeSyncState,
     CommunityBridgeDeliveryStatus,
     CommunityBridgeDeliveryType,
     CommunityBridgeIdentityLink,
@@ -772,6 +773,19 @@ class SlackDmMirrorOwnerTests(APITestCase):
             source_message_id__startswith=slack_dm_mirror.REGISTRATION_STATE_PREFIX,
         )
 
+    @staticmethod
+    def _record_archive_proof(conversation):
+        BridgeSyncState.objects.create(
+            private_conversation=conversation,
+            workspace_id=conversation.slack_workspace_id,
+            source_channel_id=conversation.slack_conversation_id,
+            verified_ranges={"archive": {
+                "classification": "accessible_range", "import_contract_version": 2,
+                "participant_hash": conversation.participant_hash,
+                "channel_id": str(conversation.mlai_channel_id),
+            }},
+        )
+
     def _live_conversation(
         self,
         *,
@@ -797,6 +811,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
             participant_slack_ids=participant_slack_ids,
             participant_buzz_pubkeys=sorted(set(participant_identity_map.values())),
             participant_identity_map=participant_identity_map,
+            participant_hash="c" * 64,
             participant_profiles={
                 slack_user_id: {"display_name": slack_user_id}
                 for slack_user_id in participant_slack_ids
@@ -2194,7 +2209,10 @@ class SlackDmMirrorOwnerTests(APITestCase):
             source_message_id=source_ts,
             source_author_id="UTWO",
             operation=CommunityBridgeDeliveryType.CREATE,
-            metadata={"destination_message_id": "a" * 64},
+            metadata={
+                "participant_hash": conversation.participant_hash,
+                "destination_message_id": "a" * 64,
+            },
             status=CommunityBridgeDeliveryStatus.COMPLETED,
             available_at=timezone.now(),
             completed_at=timezone.now(),
@@ -2711,7 +2729,10 @@ class SlackDmMirrorOwnerTests(APITestCase):
             source_author_id="UTWO",
             operation=CommunityBridgeDeliveryType.CREATE,
             encrypted_text="parent",
-            metadata={"backfill": True},
+            metadata={
+                "participant_hash": conversation.participant_hash,
+                "backfill": True,
+            },
             attempts=4,
             available_at=timezone.now() - timedelta(seconds=2),
         )
@@ -2722,7 +2743,11 @@ class SlackDmMirrorOwnerTests(APITestCase):
             source_author_id="UTWO",
             operation=CommunityBridgeDeliveryType.CREATE,
             encrypted_text="child",
-            metadata={"backfill": True, "thread_ts": parent_ts},
+            metadata={
+                "participant_hash": conversation.participant_hash,
+                "backfill": True,
+                "thread_ts": parent_ts,
+            },
             available_at=timezone.now() - timedelta(seconds=1),
         )
         deliver_private.side_effect = [
@@ -2881,7 +2906,10 @@ class SlackDmMirrorOwnerTests(APITestCase):
             source_message_id=target_ts,
             source_author_id="UTWO",
             operation=CommunityBridgeDeliveryType.CREATE,
-            metadata={"destination_message_id": "a" * 64},
+            metadata={
+                "participant_hash": conversation.participant_hash,
+                "destination_message_id": "a" * 64,
+            },
             status=CommunityBridgeDeliveryStatus.COMPLETED,
             completed_at=timezone.now(),
             available_at=timezone.now(),
@@ -3089,10 +3117,12 @@ class SlackDmMirrorOwnerTests(APITestCase):
             slack_workspace_id="TMLAI",
             slack_conversation_id="DONE",
             participant_slack_ids=["UONE", "UTWO"],
+            participant_hash="c" * 64,
             mlai_channel_id=uuid.uuid4(),
             status=SlackDmMirrorConversationStatus.LIVE,
             history_backfilled_at=timezone.now(),
         )
+        self._record_archive_proof(conversation)
         delivery = SlackDmMirrorDelivery.objects.create(
             conversation=conversation,
             source_platform=CommunityBridgePlatform.SLACK,
@@ -3120,6 +3150,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
         grant, live = self._live_conversation()
         live.history_backfilled_at = timezone.now()
         live.save(update_fields=("history_backfilled_at", "updated_at"))
+        self._record_archive_proof(live)
         retired = SlackDmMirrorConversation.objects.create(
             grant=grant,
             slack_workspace_id="TMLAI",
@@ -3506,7 +3537,10 @@ class SlackDmMirrorOwnerTests(APITestCase):
             source_message_id=source_event_id,
             source_author_id="1" * 64,
             operation=CommunityBridgeDeliveryType.CREATE,
-            metadata={"slack_ts": slack_ts},
+            metadata={
+                "participant_hash": conversation.participant_hash,
+                "slack_ts": slack_ts,
+            },
             status=CommunityBridgeDeliveryStatus.COMPLETED,
             completed_at=timezone.now(),
             available_at=timezone.now(),
@@ -3590,6 +3624,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
             source_author_id="1" * 64,
             operation=CommunityBridgeDeliveryType.CREATE,
             metadata={
+                "participant_hash": conversation.participant_hash,
                 "source_event_id": root_event_id,
                 "slack_ts": root_slack_ts,
             },
@@ -3873,6 +3908,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
             participant_slack_ids=["UONE", "UTWO"],
             participant_buzz_pubkeys=["1" * 64, "3" * 64],
             participant_identity_map={"UONE": "1" * 64, "UTWO": "3" * 64},
+            participant_hash="c" * 64,
             mlai_channel_id=uuid.uuid4(),
             status=SlackDmMirrorConversationStatus.LIVE,
         )
@@ -3884,7 +3920,10 @@ class SlackDmMirrorOwnerTests(APITestCase):
             source_message_id=parent_source_id,
             source_author_id="UTWO",
             operation=CommunityBridgeDeliveryType.CREATE,
-            metadata={"destination_message_id": parent_destination_id},
+            metadata={
+                "participant_hash": conversation.participant_hash,
+                "destination_message_id": parent_destination_id,
+            },
             status=CommunityBridgeDeliveryStatus.COMPLETED,
             available_at=timezone.now(),
             completed_at=timezone.now(),
@@ -3897,7 +3936,10 @@ class SlackDmMirrorOwnerTests(APITestCase):
             source_author_id="UTWO",
             operation=CommunityBridgeDeliveryType.CREATE,
             encrypted_text="reply",
-            metadata={"thread_ts": parent_source_id},
+            metadata={
+                "participant_hash": conversation.participant_hash,
+                "thread_ts": parent_source_id,
+            },
             available_at=timezone.now(),
         )
         deliver_private.return_value = {
@@ -3919,7 +3961,10 @@ class SlackDmMirrorOwnerTests(APITestCase):
             source_author_id="UTWO",
             operation=CommunityBridgeDeliveryType.EDIT,
             encrypted_text="edited reply",
-            metadata={"target_source_message_id": reply_source_id},
+            metadata={
+                "participant_hash": conversation.participant_hash,
+                "target_source_message_id": reply_source_id,
+            },
             available_at=timezone.now(),
         )
         deliver_private.return_value = {
@@ -4280,7 +4325,10 @@ class SlackDmMirrorOwnerTests(APITestCase):
             source_author_id="UTWO",
             operation=CommunityBridgeDeliveryType.CREATE,
             encrypted_text="eventually threaded",
-            metadata={"thread_ts": parent_ts},
+            metadata={
+                "participant_hash": conversation.participant_hash,
+                "thread_ts": parent_ts,
+            },
             available_at=timezone.now(),
         )
         SlackDmMirrorDelivery.objects.filter(pk=child.pk).update(
@@ -4296,7 +4344,10 @@ class SlackDmMirrorOwnerTests(APITestCase):
             source_author_id="UTWO",
             operation=CommunityBridgeDeliveryType.CREATE,
             encrypted_text="",
-            metadata={"destination_message_id": "p" * 64},
+            metadata={
+                "participant_hash": conversation.participant_hash,
+                "destination_message_id": "p" * 64,
+            },
             status=CommunityBridgeDeliveryStatus.COMPLETED,
             completed_at=timezone.now(),
             available_at=timezone.now(),
@@ -4323,7 +4374,10 @@ class SlackDmMirrorOwnerTests(APITestCase):
             source_author_id="UTWO",
             operation=CommunityBridgeDeliveryType.DELETE,
             encrypted_text="",
-            metadata={"target_source_message_id": target_ts},
+            metadata={
+                "participant_hash": conversation.participant_hash,
+                "target_source_message_id": target_ts,
+            },
             available_at=timezone.now(),
         )
         SlackDmMirrorDelivery.objects.filter(pk=deletion.pk).update(
@@ -4339,7 +4393,10 @@ class SlackDmMirrorOwnerTests(APITestCase):
             source_author_id="UTWO",
             operation=CommunityBridgeDeliveryType.CREATE,
             encrypted_text="",
-            metadata={"destination_message_id": "t" * 64},
+            metadata={
+                "participant_hash": conversation.participant_hash,
+                "destination_message_id": "t" * 64,
+            },
             status=CommunityBridgeDeliveryStatus.COMPLETED,
             completed_at=timezone.now(),
             available_at=timezone.now(),
@@ -4369,7 +4426,10 @@ class SlackDmMirrorOwnerTests(APITestCase):
             source_author_id="1" * 64,
             operation=CommunityBridgeDeliveryType.CREATE,
             encrypted_text="",
-            metadata={"slack_ts": slack_ts},
+            metadata={
+                "participant_hash": conversation.participant_hash,
+                "slack_ts": slack_ts,
+            },
             status=CommunityBridgeDeliveryStatus.COMPLETED,
             completed_at=timezone.now(),
             available_at=timezone.now(),
@@ -4386,7 +4446,10 @@ class SlackDmMirrorOwnerTests(APITestCase):
             source_author_id="1" * 64,
             operation=CommunityBridgeDeliveryType.REACTION_ADD,
             encrypted_text="",
-            metadata={"slack_reaction_object_id": reaction_id},
+            metadata={
+                "participant_hash": conversation.participant_hash,
+                "slack_reaction_object_id": reaction_id,
+            },
             status=CommunityBridgeDeliveryStatus.COMPLETED,
             completed_at=timezone.now(),
             available_at=timezone.now(),
@@ -4441,7 +4504,10 @@ class SlackDmMirrorOwnerTests(APITestCase):
             source_author_id="1" * 64,
             operation=CommunityBridgeDeliveryType.CREATE,
             encrypted_text="",
-            metadata={"slack_ts": deleted_slack_ts},
+            metadata={
+                "participant_hash": conversation.participant_hash,
+                "slack_ts": deleted_slack_ts,
+            },
             status=CommunityBridgeDeliveryStatus.COMPLETED,
             completed_at=timezone.now(),
             available_at=timezone.now(),
@@ -4453,7 +4519,10 @@ class SlackDmMirrorOwnerTests(APITestCase):
             source_author_id="1" * 64,
             operation=CommunityBridgeDeliveryType.DELETE,
             encrypted_text="",
-            metadata={"slack_ts": deleted_slack_ts},
+            metadata={
+                "participant_hash": conversation.participant_hash,
+                "slack_ts": deleted_slack_ts,
+            },
             status=CommunityBridgeDeliveryStatus.COMPLETED,
             completed_at=timezone.now(),
             available_at=timezone.now(),
@@ -4506,7 +4575,10 @@ class SlackDmMirrorOwnerTests(APITestCase):
             source_author_id="1" * 64,
             operation=CommunityBridgeDeliveryType.CREATE,
             encrypted_text="ambiguous create",
-            metadata={"client_msg_id": client_message_id},
+            metadata={
+                "participant_hash": conversation.participant_hash,
+                "client_msg_id": client_message_id,
+            },
             status=CommunityBridgeDeliveryStatus.PENDING,
             available_at=timezone.now(),
         )
@@ -4523,7 +4595,10 @@ class SlackDmMirrorOwnerTests(APITestCase):
             source_author_id="1" * 64,
             operation=CommunityBridgeDeliveryType.EDIT,
             encrypted_text="edited in MLAI",
-            metadata={"slack_echo_key": edit_echo_key},
+            metadata={
+                "participant_hash": conversation.participant_hash,
+                "slack_echo_key": edit_echo_key,
+            },
             status=CommunityBridgeDeliveryStatus.PENDING,
             available_at=timezone.now(),
         )
@@ -4539,7 +4614,10 @@ class SlackDmMirrorOwnerTests(APITestCase):
             source_author_id="1" * 64,
             operation=CommunityBridgeDeliveryType.REACTION_ADD,
             encrypted_text="👍",
-            metadata={"slack_reaction_object_id": reaction_id},
+            metadata={
+                "participant_hash": conversation.participant_hash,
+                "slack_reaction_object_id": reaction_id,
+            },
             status=CommunityBridgeDeliveryStatus.PENDING,
             available_at=timezone.now(),
         )

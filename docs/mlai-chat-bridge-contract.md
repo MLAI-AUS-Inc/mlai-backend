@@ -819,6 +819,23 @@ Shared public channel mappings have their own community-wide archive policy and
 no owner grant. The selected private-import window applies to every grant-backed
 mirror, including private channels; it does not change shared public retention.
 
+### Current-room archive proof
+
+First publication requires archive `import_contract_version=2`, the current
+participant hash and channel ID, and complete unrestricted source coverage.
+The contract version is recorded when the archive starts. Finishing a resumed
+pre-version cursor does not certify pages read under older code. The completed
+old scan is followed by a fresh selected-window scan; active leases, partial
+checkpoints and provider backoff are preserved.
+
+The fair recovery turn also upgrades known recent conversations missing that
+proof, at most one conversation per owner per round. Old and unknown quiet
+conversations are not swept. An explicit compose action can refresh an old empty
+DM that lacks proof, while preserving any active scan. A source-limited current-version attempt stays
+unqualified without causing an immediate rescan loop. The presentation latch
+uses a versioned namespace and retains an already qualified view only within
+its exact existing owner, consent, device and participant scope.
+
 ### Bounded source recovery for failed imports
 
 The durable worker's existing state-seeding tick schedules fresh source recovery
@@ -853,10 +870,33 @@ reaction remains DEAD, permanently fenced and body-free while a fresh archive
 records its source metadata. Only completion of that exact unrestricted archive
 can reconstruct and release the reaction, or supersede it after qualified
 absence. Other scan epochs, source-limited pages, revoked devices, later HTTP 400
-errors and all nonmatching permanent failures remain fenced. This does not clear
-the separate current create failures found during rollout diagnostics.
+errors and all nonmatching permanent failures remain fenced.
+
+A separate diagnosed exception handles a permanently rejected reply whose
+completed parent mapping belongs to a retired participant boundary. Target and
+outbound-echo lookups require the current boundary; observing an old completed
+message in Slack rebuilds its mapping without relabeling the old destination.
+Before that replacement, affected failed children retain a content-free audit
+of the old parent mapping. Only the exact HTTP 400 / stale-parent condition,
+current owner device, registration, consent and selected source window authorize
+recovery; ordinary create failures remain fenced. Previously live failures are
+included in this narrowly diagnosed repair.
+
+The old failed body is erased first. A new archive may stage a freshly fetched
+reply while it remains DEAD and permanently fenced. An unrestricted complete
+scan qualifies the reply; normal dependency handling waits for the current
+parent and only flattens when that parent cannot progress. Limited coverage
+erases staging. A source-body hash prevents retention cleanup from releasing an
+empty replacement; a later fresh source observation can recover it. Scalar and
+batch delivery keep the existing backend delivery ID: the adapter rebuilds the
+signed event with its current channel/audience and deduplicates by event ID, so
+a new room cannot reuse an old accepted receipt. Older outbound rows without any
+recorded boundary are not relabeled: fresh Slack import may duplicate an old
+native root in the same room, because its original destination cannot be proven
+from the retained metadata alone.
 
 This path needs no database migration or manual dead-row requeue. Recovery waits
 for the existing provider budgets and fair scheduling; a cooldown expiry is not
 an import-completion deadline. `integrations.tests_message_sync_recovery` runs in
-the durable PostgreSQL CI gate.
+the durable PostgreSQL CI gate, alongside
+`integrations.tests_slack_private_target_boundaries`.

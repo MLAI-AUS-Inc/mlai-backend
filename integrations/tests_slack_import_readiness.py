@@ -7,10 +7,10 @@ from django.core.cache import cache
 from django.test import TransactionTestCase
 from django.utils import timezone
 from community_chat.tests.test_slack_dm_io_authority import SlackDmIoAuthorityFixture
-from integrations.models import SlackDmMirrorDelivery
+from integrations.models import BridgeSyncState, SlackDmMirrorDelivery
 from integrations.services import slack_dm_mirror as dm
 from integrations.services.slack_chat_catalog import (
-    catalog_conversations, catalog_payload, retired_catalog_payload,
+    _publication_key, catalog_conversations, catalog_payload, retired_catalog_payload,
 )
 
 
@@ -22,9 +22,79 @@ class SlackImportReadinessTests(SlackDmIoAuthorityFixture, TransactionTestCase):
         self.conversation.latest_synced_ts = f"{int(timezone.now().timestamp()) - 60}.000001"
         self.conversation.history_backfilled_at = timezone.now()
         self.conversation.save()
+        self.state = BridgeSyncState.objects.create(
+            private_conversation=self.conversation, workspace_id="TIOAUTH",
+            source_channel_id="DIOAUTH", verified_ranges={"archive": self.archive_proof()},
+        )
+
+    def archive_proof(self, **overrides):
+        return {
+            "classification": "accessible_range", "import_contract_version": 2,
+            "participant_hash": self.conversation.participant_hash,
+            "channel_id": str(self.conversation.mlai_channel_id), **overrides,
+        }
 
     def catalog(self):
         return catalog_payload(catalog_conversations(self.grant.conversations.all()), self.owner_key)
+
+    def test_recent_import_requires_versioned_current_room_archive_proof(self):
+        for proof in (
+            {}, {"classification": "accessible_range"},
+            self.archive_proof(import_contract_version=1),
+            self.archive_proof(participant_hash="old-audience"),
+            self.archive_proof(channel_id=str(uuid.uuid4())),
+            self.archive_proof(classification="unknown"),
+        ):
+            with self.subTest(proof=proof):
+                self.state.verified_ranges = {"archive": proof}
+                self.state.save(update_fields=["verified_ranges"])
+                self.assertFalse(self.catalog()[0]["ready_for_display"])
+                status = dm.status_payload(self.user, authenticated_public_key=self.owner_key)
+                self.assertEqual(status["backfill"]["complete"], 0)
+                self.assertEqual(status["backfill"]["pending"], 1)
+        self.state.verified_ranges = {"archive": self.archive_proof()}
+        self.state.save(update_fields=["verified_ranges"])
+        self.assertTrue(self.catalog()[0]["ready_for_display"])
+
+    def test_previous_publication_cache_cannot_bypass_current_room_proof(self):
+        self.state.verified_ranges = {}
+        self.state.save(update_fields=["verified_ranges"])
+        old_key = _publication_key(self.conversation).replace("published-v2:", "published-v1:")
+        cache.set(old_key, True, 86400)
+        self.assertFalse(self.catalog()[0]["ready_for_display"])
+
+    def test_completed_old_activity_does_not_require_recent_room_reimport(self):
+        self.state.verified_ranges = {}
+        self.state.save(update_fields=["verified_ranges"])
+        self.conversation.latest_synced_ts = f"{int(timezone.now().timestamp()) - 31 * 86400}.000001"
+        self.conversation.save()
+        status = dm.status_payload(self.user, authenticated_public_key=self.owner_key)
+        self.assertEqual(status["backfill"]["complete"], 1)
+        self.assertEqual(status["backfill"]["pending"], 0)
+        self.assertFalse(status["channel_catalog"][0]["ready_for_display"])
+
+    def test_only_fresh_scoped_quiet_source_check_completes_unverified_progress(self):
+        self.state.verified_ranges = {}
+        self.state.save(update_fields=["verified_ranges"])
+        self.conversation.latest_synced_ts = ""
+        self.conversation.save()
+        authority = dm._capture_slack_grant_api_authority(self.grant, refresh_token=False)
+        scope = {**dm._discovery_checkpoint_identity(authority), "history_days": 30}
+        for age, history_days, expected in ((30, 30, 1), (3601, 30, 0), (30, 7, 0)):
+            with self.subTest(age=age, history_days=history_days):
+                self.connection.sync_cursor = {dm.RECENT_ACTIVITY_CACHE_KEY: {
+                    **scope, "history_days": history_days,
+                    "entries": {self.conversation.slack_conversation_id: {
+                        "activity": 0, "checked_at": int(timezone.now().timestamp()) - age,
+                    }},
+                }}
+                self.connection.save(update_fields=["sync_cursor"])
+                with patch.object(dm, "WebClient") as provider:
+                    status = dm.status_payload(self.user, authenticated_public_key=self.owner_key)
+                provider.assert_not_called()
+                self.assertEqual(status["backfill"]["complete"], expected)
+                self.assertEqual(status["backfill"]["pending"], 1 - expected)
+                self.assertFalse(status["channel_catalog"][0]["ready_for_display"])
 
     def test_completed_recent_window_is_visible_but_old_activity_is_hidden(self):
         self.assertTrue(self.catalog()[0]["ready_for_display"])
@@ -159,17 +229,14 @@ class SlackImportReadinessTests(SlackDmIoAuthorityFixture, TransactionTestCase):
         self.assertTrue(status["channel_catalog"][0]["ready_for_display"])
 
     def test_source_limited_archive_cannot_publish_first_import(self):
-        from integrations.models import BridgeSyncState
-        state = BridgeSyncState.objects.create(
-            private_conversation=self.conversation, workspace_id="TIOAUTH",
-            source_channel_id="DIOAUTH",
-            verified_ranges={"archive": {"classification": "source_limited"}},
-        )
+        state = self.state
+        state.verified_ranges = {"archive": self.archive_proof(classification="source_limited")}
+        state.save(update_fields=["verified_ranges"])
         self.assertFalse(self.catalog()[0]["ready_for_display"])
         status = dm.status_payload(self.user, authenticated_public_key=self.owner_key)
         self.assertEqual(status["backfill"]["complete"], 0)
         self.assertEqual(status["backfill"]["pending"], 1)
-        state.verified_ranges = {"archive": {"classification": "verified"}}
+        state.verified_ranges = {"archive": self.archive_proof()}
         state.save(update_fields=["verified_ranges"])
         status = dm.status_payload(self.user, authenticated_public_key=self.owner_key)
         self.assertEqual(status["backfill"]["complete"], 1)

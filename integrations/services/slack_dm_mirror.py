@@ -990,6 +990,8 @@ def open_slack_dm(
         reset_history=identity_repaired,
         required_owner_public_key=authenticated_public_key,
     )
+    from integrations.services.message_sync.private_coverage import request_current_coverage
+    request_current_coverage(conversation, authority, required_scopes)
     conversation.refresh_from_db()
     active_device_count = CommunityChatDevice.objects.filter(
         user_id=grant.user_id,
@@ -1121,15 +1123,44 @@ def status_payload(
             Q(metadata__history_outside_window__isnull=True)
             | Q(metadata__history_outside_window=False)
         )
-    # Use the same durable prerequisites as initial catalogue publication.
-    # A verified quiet scan is complete even though it has no recent chat to show.
-    complete = (
-        catalog_conversations(backfill_conversations).filter(
-            history_backfilled_at__gte=F("grant__consented_at"),
-            _import_pending=False,
-            _import_limited=False,
-        ).count()
-    )
+    # A timestamp from an older import cannot certify messages in this room.
+    # Confirmed quiet/outside-window rooms still finish progress without being
+    # published, because there is no selected history to deliver for them.
+    from integrations.services.slack_chat_catalog import conversation_activity_at, history_oldest_ts
+
+    quiet_entries = {}
+    if grant is not None:
+        try:
+            authority = _capture_slack_grant_api_authority(grant, refresh_token=False)
+            quiet_entries = _recent_activity_cache_entries(grant.connection, {
+                **_discovery_checkpoint_identity(authority),
+                "history_days": _grant_history_days(grant),
+            })
+        except SlackDmMirrorError:
+            pass
+    now = timezone.now()
+    complete = 0
+    for conversation in catalog_conversations(backfill_conversations).filter(
+        history_backfilled_at__gte=F("grant__consented_at"),
+        _import_pending=False,
+        _import_limited=False,
+    ):
+        if conversation._import_verified:
+            complete += 1
+            continue
+        activity = conversation_activity_at(conversation)
+        oldest = history_oldest_ts(conversation, now=now)
+        if activity and oldest and parse_datetime(activity).timestamp() < int(oldest):
+            complete += 1
+            continue
+        quiet = quiet_entries.get(conversation.slack_conversation_id)
+        if activity is None and isinstance(quiet, dict) and quiet.get("activity") == 0:
+            try:
+                age = now.timestamp() - float(quiet.get("checked_at", 0))
+            except (TypeError, ValueError):
+                continue
+            if 0 <= age < 3600:
+                complete += 1
     backfill_counts = {
         "complete": complete,
         "pending": backfill_conversations.count() - complete,
@@ -3833,6 +3864,10 @@ def ingest_mlai_dm_event(payload: dict[str, Any]) -> dict[str, Any] | None:
                 return {"status": "rejected", "error": "slack_mention_unavailable"}
             if mention_ids:
                 delivery_metadata["slack_mention_ids"] = mention_ids
+        # Bind the callback to the room/audience we just locked and authorized.
+        # Outgoing roots and mutations must retain this for later target/echo
+        # resolution; a completed row from an earlier room is not a target.
+        delivery_metadata["participant_hash"] = conversation.participant_hash
         delivery, created = SlackDmMirrorDelivery.objects.get_or_create(
             conversation=conversation,
             source_platform=CommunityBridgePlatform.BUZZ,
@@ -5521,6 +5556,7 @@ def _prepare_history_scan_page(
             .first()
         )
         if state is None:
+            from integrations.services.message_sync.private_coverage import IMPORT_CONTRACT_VERSION
             registration = _ensure_current_registration_row_locked(
                 conversation,
                 grant,
@@ -5546,6 +5582,7 @@ def _prepare_history_scan_page(
                 source_message_id=HISTORY_MAIN_STATE_ID,
                 metadata={
                     "history_scan_state": "main",
+                    "import_contract_version": IMPORT_CONTRACT_VERSION,
                     "complete": False,
                     "scan_epoch": uuid.uuid4().hex,
                     "participant_hash": _history_participant_boundary(conversation),
@@ -6214,8 +6251,7 @@ def _enqueue_history_message(
             }
         )
     client_message_id = str(message.get("client_msg_id") or "").strip()
-    outbound_create_query = SlackDmMirrorDelivery.objects.select_for_update().filter(
-        conversation=conversation,
+    outbound_create_query = _current_private_delivery_rows(conversation).select_for_update().filter(
         source_platform=CommunityBridgePlatform.BUZZ,
         operation=CommunityBridgeDeliveryType.CREATE,
     )
@@ -6383,7 +6419,7 @@ def _recent_or_ambiguous_outbound_mutation(
     metadata_filter: dict[str, Any],
 ) -> SlackDmMirrorDelivery | None:
     return (
-        SlackDmMirrorDelivery.objects.select_for_update()
+        _current_private_delivery_rows(conversation).select_for_update()
         .filter(
             conversation=conversation,
             source_platform=CommunityBridgePlatform.BUZZ,
@@ -6469,15 +6505,31 @@ def _upsert_history_delivery(
     if bool((delivery.metadata or {}).get("permanent_failure")):
         from integrations.services.message_sync.reaction_recovery import stage_observed_reaction
         stage_observed_reaction(delivery, author_id=author_id, metadata=metadata)
+        from integrations.services.message_sync.parent_recovery import stage_observed_reply
+        stage_observed_reply(delivery, author_id=author_id, text=text, metadata=metadata)
         # Automatic hourly scans may observe the same source message forever.
-        # Only explicit backfill or renewed consent clears this durable fence.
+        # Only explicit recovery or a diagnosed, source-qualified repair may
+        # clear this durable fence.
         return delivery
+    if (delivery.status == CommunityBridgeDeliveryStatus.COMPLETED
+            and (delivery.metadata or {}).get("participant_hash") != conversation.participant_hash
+            and metadata.get("participant_hash") == conversation.participant_hash):
+        from integrations.services.message_sync.parent_recovery import preserve_failed_children
+        delivery.conversation = conversation
+        preserve_failed_children(delivery)
     if delivery.status in (
         CommunityBridgeDeliveryStatus.FAILED,
         CommunityBridgeDeliveryStatus.DEAD,
     ) or (
         delivery.status == CommunityBridgeDeliveryStatus.COMPLETED
-        and bool((delivery.metadata or {}).get("history_outside_window"))
+        and (
+            bool((delivery.metadata or {}).get("history_outside_window"))
+            or (
+                bool(metadata.get("participant_hash"))
+                and metadata.get("participant_hash") == conversation.participant_hash
+                and (delivery.metadata or {}).get("participant_hash") != conversation.participant_hash
+            )
+        )
     ):
         delivery.source_author_id = author_id
         delivery.encrypted_text = text
@@ -6635,6 +6687,15 @@ def _finish_history_scan(conversation: SlackDmMirrorConversation) -> None:
         "checked_at": now.isoformat(),
         "absence": "unknown",
     }
+    from integrations.services.message_sync.private_coverage import IMPORT_CONTRACT_VERSION
+    if (metadata.get("import_contract_version") == IMPORT_CONTRACT_VERSION
+            and metadata.get("participant_hash") == conversation.participant_hash
+            and metadata.get("mlai_channel_id") == str(conversation.mlai_channel_id or "")):
+        ranges["archive"].update({
+            "import_contract_version": IMPORT_CONTRACT_VERSION,
+            "participant_hash": conversation.participant_hash,
+            "channel_id": str(conversation.mlai_channel_id or ""),
+        })
     sync_state.verified_ranges = ranges
     sync_state.status = "source_limited" if source_limited else "current"
     sync_state.save(update_fields=("verified_ranges", "status"))
@@ -6642,6 +6703,11 @@ def _finish_history_scan(conversation: SlackDmMirrorConversation) -> None:
     conversation.last_error = ""
     conversation.save(
         update_fields=("history_backfilled_at", "last_error", "updated_at")
+    )
+    from integrations.services.message_sync.parent_recovery import qualify_reply_recovery
+    qualify_reply_recovery(
+        conversation, scan_epoch=str(metadata.get("scan_epoch") or ""),
+        source_limited=source_limited or ranges["archive"].get("import_contract_version") != IMPORT_CONTRACT_VERSION,
     )
     # Limited retention/access is not evidence that an unseen message or target
     # disappeared. Only a qualified complete scan can resolve those absences.
@@ -7262,7 +7328,7 @@ def _slack_target_dependency_can_progress(
     source_message_id: str,
 ) -> bool:
     target = str(source_message_id or "").strip().lower()
-    rows = SlackDmMirrorDelivery.objects.filter(conversation=conversation).filter(
+    rows = _current_private_delivery_rows(conversation).filter(
         Q(
             source_platform=CommunityBridgePlatform.BUZZ,
             source_message_id=target,
@@ -7284,8 +7350,7 @@ def _mlai_target_dependency_can_progress(
     operation: str = CommunityBridgeDeliveryType.CREATE,
 ) -> bool:
     target = str(source_message_id or "").strip()
-    rows = SlackDmMirrorDelivery.objects.filter(
-        conversation=conversation,
+    rows = _current_private_delivery_rows(conversation).filter(
         operation=operation,
     ).filter(
         Q(
@@ -7655,8 +7720,7 @@ def _slack_destination_message_id(
     if not normalized_id:
         return ""
     outgoing = (
-        SlackDmMirrorDelivery.objects.filter(
-            conversation=conversation,
+        _current_private_delivery_rows(conversation).filter(
             source_platform=CommunityBridgePlatform.BUZZ,
             source_message_id=normalized_id,
             operation=CommunityBridgeDeliveryType.CREATE,
@@ -7668,8 +7732,7 @@ def _slack_destination_message_id(
     if outgoing is not None:
         return str((outgoing.metadata or {}).get("slack_ts") or "").strip()
     mirrored = (
-        SlackDmMirrorDelivery.objects.filter(
-            conversation=conversation,
+        _current_private_delivery_rows(conversation).filter(
             source_platform=CommunityBridgePlatform.SLACK,
             operation=CommunityBridgeDeliveryType.CREATE,
             status=CommunityBridgeDeliveryStatus.COMPLETED,
@@ -7867,14 +7930,23 @@ def _deliver_to_mlai(delivery: SlackDmMirrorDelivery) -> None:
     conversation.grant.save(update_fields=("last_synced_at", "updated_at"))
 
 
+def _current_private_delivery_rows(conversation: SlackDmMirrorConversation):
+    """Keep relay targets and source echoes inside the current owner audience."""
+    if not conversation.participant_hash:
+        return SlackDmMirrorDelivery.objects.none()
+    return SlackDmMirrorDelivery.objects.filter(
+        conversation=conversation,
+        metadata__participant_hash=conversation.participant_hash,
+    )
+
+
 def _private_destination_message_id(
     conversation: SlackDmMirrorConversation,
     source_message_id: str,
 ) -> str:
     normalized_source_id = str(source_message_id or "").strip()
     delivery = (
-        SlackDmMirrorDelivery.objects.filter(
-            conversation=conversation,
+        _current_private_delivery_rows(conversation).filter(
             source_platform=CommunityBridgePlatform.SLACK,
             source_message_id=normalized_source_id,
             operation=CommunityBridgeDeliveryType.CREATE,
@@ -7888,8 +7960,7 @@ def _private_destination_message_id(
             (delivery.metadata or {}).get("destination_message_id") or ""
         ).strip()
     outgoing = (
-        SlackDmMirrorDelivery.objects.filter(
-            conversation=conversation,
+        _current_private_delivery_rows(conversation).filter(
             source_platform=CommunityBridgePlatform.BUZZ,
             operation=CommunityBridgeDeliveryType.CREATE,
             status=CommunityBridgeDeliveryStatus.COMPLETED,
@@ -7923,7 +7994,7 @@ def _private_destination_operation_message_id(
     else:
         filters["source_message_id"] = str(source_message_id or "").strip()
     delivery = (
-        SlackDmMirrorDelivery.objects.filter(**filters)
+        _current_private_delivery_rows(conversation).filter(**filters)
         .order_by("-completed_at", "-id")
         .first()
     )
@@ -7931,8 +8002,7 @@ def _private_destination_operation_message_id(
         if metadata_key != "reaction_object_id":
             return ""
         outgoing = (
-            SlackDmMirrorDelivery.objects.filter(
-                conversation=conversation,
+            _current_private_delivery_rows(conversation).filter(
                 source_platform=CommunityBridgePlatform.BUZZ,
                 operation=CommunityBridgeDeliveryType.REACTION_ADD,
                 status=CommunityBridgeDeliveryStatus.COMPLETED,
