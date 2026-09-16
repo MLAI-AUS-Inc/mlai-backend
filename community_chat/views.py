@@ -134,7 +134,7 @@ DESKTOP_AUTHORIZATION_CODE_SALT = "community-chat.desktop-authorization.v1"
 DESKTOP_AUTHORIZATION_CODE_INVALID_DETAIL = "Desktop authorization code is invalid."
 PKCE_CHALLENGE_RE = re.compile(r"^[A-Za-z0-9_-]{43}$")
 HOME_ITEM_LIMIT = 12
-UPCOMING_EVENTS_CACHE_KEY = "community-chat:upcoming-events:v2"
+UPCOMING_EVENTS_CACHE_KEY = "community-chat:upcoming-events:v3"
 UPCOMING_EVENT_FIELDS = (
     "id",
     "cover_url",
@@ -1066,27 +1066,28 @@ class UpcomingEventsView(APIView):
     community_chat_throttle_scope = "community_chat_upcoming_events"
 
     def get(self, request):
-        raw_limit = request.query_params.get("limit") or 5
+        raw_limit = request.query_params.get("limit")
         try:
-            requested_limit = int(raw_limit)
+            requested_limit = int(raw_limit) if raw_limit is not None else None
         except (TypeError, ValueError):
             return Response(
                 {"error": "invalid_limit"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        if requested_limit < 1:
+        if requested_limit is not None and requested_limit < 1:
             return Response(
                 {"error": "invalid_limit"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        requested_limit = min(requested_limit, 10)
+        if requested_limit is not None:
+            requested_limit = min(requested_limit, 10)
 
         events = cache.get(UPCOMING_EVENTS_CACHE_KEY)
         if not isinstance(events, list):
             try:
                 events = LumaAttendeeReportService(
                     timeout=settings.LUMA_API_TIMEOUT_SECONDS,
-                ).list_upcoming_events(limit=10)
+                ).list_upcoming_events()
             except LumaConfigurationError:
                 return Response(
                     {"error": "upcoming_events_unavailable"},

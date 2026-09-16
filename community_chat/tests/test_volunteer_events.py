@@ -72,7 +72,7 @@ class VolunteerEventTests(SimpleTestCase):
         ]
         self.assertEqual(public_event("evt-public")["description"], "From Luma")
         self.assertIsNone(public_event("evt-other"))
-        service.return_value.list_upcoming_events.assert_called_once_with(limit=10)
+        service.return_value.list_upcoming_events.assert_called_once_with()
 
     @patch("community_chat.volunteer.events.LumaAttendeeReportService")
     def test_unavailable_calendar_does_not_invent_event_copy(self, service):

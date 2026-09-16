@@ -163,27 +163,28 @@ class LumaAttendeeReportService:
         *,
         now: Optional[datetime] = None,
         timezone_name: str = MELBOURNE_TIMEZONE,
-        limit: int = 5,
+        limit: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
-        """Return a bounded, public-only event-card projection.
+        """Return public cards for the calendar's managed and listed events.
 
         The calendar API key can read private event settings and attendee data.
         This method therefore fails closed unless Luma explicitly marks an
         event public, then copies only the fields needed by MLAI Chat's Home
-        screen. The legacy endpoint is retained because it is already verified
-        by the existing integration and remains backwards compatible.
+        screen. With no limit, exhaust calendar pagination; an incomplete scan
+        is an error rather than a silently truncated calendar.
         """
         if not self.api_key:
             raise LumaConfigurationError("LUMA_API_KEY is not configured on mlai-backend.")
 
-        result_limit = max(1, min(int(limit or 5), 10))
+        result_limit = max(1, min(int(limit), 10)) if limit is not None else None
         now_utc = _local_now_utc(now, timezone_name)
         events: List[Dict[str, Any]] = []
+        seen_events = set()
         cursor = None
         seen_cursors = set()
         pages_fetched = 0
 
-        while len(events) < result_limit and pages_fetched < 10:
+        while pages_fetched < 10:
             pages_fetched += 1
             params: Dict[str, Any] = {
                 "after": _isoformat_z(now_utc),
@@ -191,26 +192,34 @@ class LumaAttendeeReportService:
                 "sort_column": "start_at",
                 "sort_direction": "asc",
                 "status": "approved",
+                "access": ["manage", "view"],
+                "platforms": ["luma", "external"],
             }
             if cursor:
                 params["pagination_cursor"] = cursor
 
-            page = self._get("/v1/calendar/list-events", params=params)
-            for raw_event in page.get("entries", []):
+            page = self._get("/v1/calendars/events/list", params=params)
+            entries = page.get("entries")
+            if not isinstance(entries, list):
+                raise LumaAPIError("Luma returned an invalid calendar page.")
+            for raw_event in entries:
                 event = _public_upcoming_event(raw_event, now_utc=now_utc)
-                if event is None:
+                if event is None or event["id"] in seen_events:
                     continue
+                seen_events.add(event["id"])
                 events.append(event)
-                if len(events) >= result_limit:
+                if result_limit is not None and len(events) >= result_limit:
                     break
 
-            if len(events) >= result_limit or not page.get("has_more"):
+            if (result_limit is not None and len(events) >= result_limit) or not page.get("has_more"):
                 break
             next_cursor = str(page.get("next_cursor") or "").strip()
             if not next_cursor or next_cursor in seen_cursors:
-                break
+                raise LumaAPIError("Luma returned incomplete calendar pagination.")
             seen_cursors.add(next_cursor)
             cursor = next_cursor
+        else:
+            raise LumaAPIError("Luma calendar pagination exceeded the request budget.")
 
         return sorted(events, key=lambda event: event["start_at"])[:result_limit]
 
