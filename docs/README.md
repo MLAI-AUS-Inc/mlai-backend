@@ -42,6 +42,7 @@ rollout sequence.
 
 ## Reconciliation and scheduled work
 
+- [`jobs-daily.md`](jobs-daily.md)
 - [`stripe-xero-reconciliation.md`](stripe-xero-reconciliation.md)
 - [`humanitix-xero-reconciliation.md`](humanitix-xero-reconciliation.md)
 - [`reconciliation-bill-binding.md`](reconciliation-bill-binding.md)

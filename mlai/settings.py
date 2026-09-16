@@ -813,6 +813,11 @@ LOGGING = {
         },
     },
     'loggers': {
+        'jobs': {
+            'handlers': ['console'],
+            'level': DJANGO_LOG_LEVEL,
+            'propagate': False,
+        },
         'core': {
             'handlers': ['console'],
             'level': DJANGO_LOG_LEVEL,
@@ -1142,7 +1147,7 @@ JOBS_NOTION_TOP_PICK_LIMIT = int(os.getenv('JOBS_NOTION_TOP_PICK_LIMIT', '7'))
 JOBS_NOTION_API_TOKEN = os.getenv('JOBS_NOTION_API_TOKEN', '')
 JOBS_NOTION_PARENT_PAGE_ID = os.getenv('JOBS_NOTION_PARENT_PAGE_ID', '')
 JOBS_NOTION_API_VERSION = os.getenv('JOBS_NOTION_API_VERSION', '2022-06-28')
-JOBS_SLACK_CHANNEL = os.getenv('JOBS_SLACK_CHANNEL', '#jobs')
+JOBS_SLACK_CHANNEL = os.getenv('JOBS_SLACK_CHANNEL', 'C05QE82M2KE')
 JOBS_SLACK_WEBHOOK_URL = os.getenv('JOBS_SLACK_WEBHOOK_URL', '')
 SLACK_BOT_TOKEN = os.getenv('SLACK_BOT_TOKEN', '')
 COMMITTEE_REMUNERATION_ENABLED = _env_is_true('COMMITTEE_REMUNERATION_ENABLED', False)
