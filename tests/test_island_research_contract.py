@@ -23,6 +23,20 @@ PROPOSAL = {"id": "measured-proposal", "name": "AI Workflow Integration", "descr
 
 @override_settings(CONTENT_ISLANDS_ENABLED=True)
 class IslandResearchContractTests(ContentIslandBootstrapTestCase):
+    def test_small_measured_island_can_be_adopted_without_another_charge(self):
+        run = self.start()
+        proposal = {**PROPOSAL, "keywords": PROPOSAL["keywords"][:1], "members": PROPOSAL["members"][:1],
+                    "limited_data": True, "metrics": {**PROPOSAL["metrics"], "keyword_count": 1,
+                    "total_volume": 300, "opportunity_score": 30.}}
+        self.complete(run, [proposal])
+        response = self.client.post(f"{URL}/{run.run_id}/adopt", {"proposalId": proposal["id"]}, format="json")
+        self.assertEqual(response.status_code, 201, response.data)
+        island = ContentIsland.objects.get(organization=self.organization, slug=response.data["island"]["slug"])
+        self.assertEqual(island.keyword_count, 1)
+        self.assertEqual(island.total_volume, 300)
+        self.assertEqual(ContentIslandKeyword.objects.filter(island=island).count(), 1)
+        self.assertEqual(PointsAccount.objects.get(user=self.user).balance, 19)
+
     def start(self):
         def dispatch(**kwargs):
             payload = kwargs["payload"]
