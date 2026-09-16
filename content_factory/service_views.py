@@ -8296,7 +8296,7 @@ class SEOContentIslandBulkSyncView(APIView):
                 if island.slug in expanded_slugs or _bool_from_wire(
                     _request_value(entry, 'expanded', default=False)
                 ):
-                    island.last_expanded_on = captured_on
+                    island.last_expanded_on = max(island.last_expanded_on or captured_on, captured_on)
                     expanded_applied.append(island.slug)
 
                 island.articles_written = _island_articles_written(island)
@@ -8325,6 +8325,12 @@ class SEOContentIslandBulkSyncView(APIView):
                     archived_slugs.append(island.slug)
                 island.save()
 
+            # Managed islands travel in dynamic_scopes, not the normal entry list.
+            # Advance their expansion cursor even when a topology is awaiting confirmation.
+            expanded_islands = ContentIsland.objects.filter(organization=org, slug__in=expanded_slugs)
+            expanded_applied = sorted(set(expanded_applied) | set(expanded_islands.values_list("slug", flat=True)))
+            expanded_islands.filter(Q(last_expanded_on__isnull=True) | Q(last_expanded_on__lt=captured_on)).update(
+                last_expanded_on=captured_on)
             from .island_selection import apply_evolution
             evolution = apply_evolution(org, payload.get('dynamic_scopes'), captured_on, now)
             promoted_slugs = _promote_eligible_islands(org, now)
