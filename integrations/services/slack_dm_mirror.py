@@ -36,6 +36,9 @@ from integrations.services.message_sync.slack_client import budgeted_client
 from integrations.services.message_sync.configuration import user_app_id
 from integrations.services.message_sync.scheduler import BudgetDeferred, LeaseLost
 from integrations.services.message_sync.private_delivery import fair_private_candidate, guard_private_delivery
+from integrations.services.slack_discovery_progress import (
+    KEY as DIRECTORY_PROGRESS_KEY, conversation_progress, current_progress,
+)
 
 from community_chat.models import CommunityChatDevice, DeviceBindingStatus
 from integrations.fields import (
@@ -729,6 +732,9 @@ def _store_conversation_membership_intent(
             )
             .first()
         )
+        progress = current_progress(authority)
+        if progress is not None:
+            progress.assert_membership_locked(conversation)
         created = conversation is None
         if conversation is None:
             conversation = SlackDmMirrorConversation.objects.create(
@@ -738,6 +744,8 @@ def _store_conversation_membership_intent(
                 participant_slack_ids=normalized_ids,
                 participant_profiles=participant_profiles or {},
             )
+            if progress is not None:
+                progress.adopt_membership_locked(connection, conversation)
             return conversation, False
 
         conversation.grant = grant
@@ -798,6 +806,8 @@ def _store_conversation_membership_intent(
                 "updated_at",
             )
         )
+        if progress is not None:
+            progress.adopt_membership_locked(connection, conversation)
     return conversation, not created and membership_changed
 
 
@@ -2117,9 +2127,10 @@ def _clear_discovery_checkpoint_locked(
     connection: ExternalServiceConnection,
 ) -> None:
     sync_cursor = dict(connection.sync_cursor or {})
-    if DISCOVERY_CHECKPOINT_KEY not in sync_cursor:
+    if DISCOVERY_CHECKPOINT_KEY not in sync_cursor and DIRECTORY_PROGRESS_KEY not in sync_cursor:
         return
     sync_cursor.pop(DISCOVERY_CHECKPOINT_KEY, None)
+    sync_cursor.pop(DIRECTORY_PROGRESS_KEY, None)
     connection.sync_cursor = sync_cursor
     connection.save(update_fields=("sync_cursor", "updated_at"))
 
@@ -2440,11 +2451,17 @@ def _preload_slack_profiles(
     participant_ids: set[str],
     cache: dict[str, dict[str, str]],
 ) -> None:
+    progress = current_progress(authority)
+    if progress is not None:
+        cache.update(progress.profiles())
     missing_ids = {user_id for user_id in participant_ids if user_id not in cache}
     if len(missing_ids) < PROFILE_BULK_PRELOAD_THRESHOLD:
         return
-    cursor = ""
-    seen_cursors: set[str] = set()
+    bulk = (progress.value.get("bulk") or {}) if progress is not None else {}
+    if bulk.get("complete"):
+        return
+    cursor = str(bulk.get("cursor") or "")
+    seen_cursors: set[str] = set(bulk.get("seen_cursors") or [])
     while missing_ids:
         response = _call_slack_with_grant_authority(
             authority,
@@ -2458,7 +2475,10 @@ def _preload_slack_profiles(
         # partial/unexpected page, leave the missing users to the established
         # per-user lookup path instead of failing discovery.
         if not isinstance(members, list):
+            if progress is not None:
+                progress.save_profiles({}, bulk={"complete": True})
             return
+        page_profiles = {}
         for user in members:
             if not isinstance(user, dict):
                 continue
@@ -2466,15 +2486,22 @@ def _preload_slack_profiles(
             if user_id not in missing_ids:
                 continue
             cache[user_id] = _profile_from_slack_user(user)
+            page_profiles[user_id] = cache[user_id]
             missing_ids.discard(user_id)
         next_cursor = str(
             (response.get("response_metadata") or {}).get("next_cursor") or ""
         ).strip()
+        if len(next_cursor) > 1000 or next_cursor in seen_cursors:
+            raise SlackDmMirrorError("Slack user pagination made no progress.")
+        if next_cursor:
+            seen_cursors.add(next_cursor)
+        if progress is not None:
+            progress.save_profiles(page_profiles, bulk={
+                "cursor": next_cursor, "seen_cursors": sorted(seen_cursors),
+                "complete": not next_cursor,
+            })
         if not next_cursor:
             return
-        if next_cursor in seen_cursors:
-            raise SlackDmMirrorError("Slack user pagination made no progress.")
-        seen_cursors.add(next_cursor)
         cursor = next_cursor
 
 
@@ -2598,6 +2625,12 @@ def discover_conversations(
         failures,
         discovery_started_at,
     ) = _load_discovery_checkpoint(authority)
+    # Establish the cycle before any nested page succeeds. A worker restart
+    # must not discard durable member/profile progress by minting a new epoch.
+    _save_discovery_checkpoint(
+        authority, cursor=cursor, seen_channel_ids=seen_channel_ids,
+        failures=failures, started_at=discovery_started_at,
+    )
     discovered = 0
     profile_cache: dict[str, dict[str, str]] = {}
     for stored_profiles in grant.conversations.values_list(
@@ -2685,17 +2718,20 @@ def discover_conversations(
                     # Keep only the timestamp inventory. No relay channel,
                     # membership fan-out, author avatars, or history job.
                     continue
-                conversation = _discover_conversation(
-                    grant,
-                    authority,
-                    raw,
-                    profile_cache=profile_cache,
-                    force_backfill=force_backfill,
-                    reset_history=identity_repaired,
-                    activity_seconds=activity,
-                    recent_activity=recent,
-                    check_recent_activity=check_recency and existing,
-                )
+                with conversation_progress(
+                    authority, channel_id, kind, discovery_started_at,
+                ):
+                    conversation = _discover_conversation(
+                        grant,
+                        authority,
+                        raw,
+                        profile_cache=profile_cache,
+                        force_backfill=force_backfill,
+                        reset_history=identity_repaired,
+                        activity_seconds=activity,
+                        recent_activity=recent,
+                        check_recent_activity=check_recency and existing,
+                    )
                 if conversation is not None:
                     discovered += 1
                     _drain_staged_events_for_conversation(
@@ -8493,6 +8529,11 @@ def _slack_profile(
     *,
     required_scopes: set[str] | frozenset[str],
 ) -> dict[str, str]:
+    progress = current_progress(authority)
+    if progress is not None and slack_user_id not in cache:
+        saved = progress.profile(slack_user_id)
+        if saved is not None:
+            cache[slack_user_id] = saved
     cached = cache.get(slack_user_id)
     if cached is not None:
         return cached
@@ -8505,6 +8546,8 @@ def _slack_profile(
     user = response.get("user") if isinstance(response.get("user"), dict) else {}
     profile = _profile_from_slack_user(user)
     cache[slack_user_id] = profile
+    if progress is not None:
+        progress.save_profiles({slack_user_id: profile})
     return profile
 
 
@@ -8630,10 +8673,12 @@ def _conversation_participant_ids(
     # truncated. Always page the authoritative members endpoint; otherwise a
     # tenth participant or a removed owner can be missed and private content
     # can be provisioned with the wrong boundary.
-    participant_ids: set[str] = set()
-    cursor = ""
-    seen_cursors: set[str] = set()
-    while True:
+    progress = current_progress(authority)
+    checkpoint = progress.members() if progress is not None else {}
+    participant_ids: set[str] = set(checkpoint.get("ids") or [])
+    cursor = str(checkpoint.get("cursor") or "")
+    seen_cursors: set[str] = set(checkpoint.get("seen_cursors") or [])
+    while not checkpoint.get("complete"):
         response = _call_slack_with_grant_authority(
             authority,
             "conversations_members",
@@ -8645,19 +8690,26 @@ def _conversation_participant_ids(
             limit=200,
             cursor=cursor,
         )
+        if not isinstance(response.get("members"), list):
+            raise SlackDmMirrorUpstreamError("Slack membership page is unavailable.")
         participant_ids.update(
             str(value or "").strip()
             for value in response.get("members") or []
-            if str(value or "").strip()
+            if 0 < len(str(value or "").strip()) <= 100
         )
         next_cursor = str(
             (response.get("response_metadata") or {}).get("next_cursor") or ""
         ).strip()
-        if next_cursor and next_cursor in seen_cursors:
+        if len(next_cursor) > 1000 or (next_cursor and next_cursor in seen_cursors):
             raise SlackDmMirrorError("Slack member pagination made no progress.")
+        if next_cursor:
+            seen_cursors.add(next_cursor)
+        if progress is not None:
+            progress.save_members(
+                participant_ids, next_cursor, seen_cursors, checkpoint["started_at"],
+            )
         if not next_cursor:
             break
-        seen_cursors.add(next_cursor)
         cursor = next_cursor
     if owner_slack_user_id not in participant_ids or (
         kind == "mpim" and not 2 <= len(participant_ids) <= 9

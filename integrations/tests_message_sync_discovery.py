@@ -12,7 +12,7 @@ from integrations.services import slack_dm_mirror as dm
 from integrations.services.message_sync.discovery import (
     KEY, claim_discovery, discovery_context, finish_discovery,
 )
-from integrations.services.message_sync.scheduler import LeaseLost
+from integrations.services.message_sync.scheduler import BudgetDeferred, LeaseLost
 
 
 class DiscoveryTests(SlackDmIoAuthorityFixture, TransactionTestCase):
@@ -71,3 +71,35 @@ class DiscoveryTests(SlackDmIoAuthorityFixture, TransactionTestCase):
         self.assertEqual(claim_discovery(900).grant_id, other.pk)
         self.connection.refresh_from_db()
         self.assertEqual(self.connection.sync_cursor[dm.DISCOVERY_CHECKPOINT_KEY], {"cursor": "next-page"})
+
+    def test_provider_admission_delay_is_preserved_without_thirty_second_floor(self):
+        from integrations.services.message_sync.discovery import discover_once
+
+        other = self.make_grant(100, "TIOAUTH")
+        before = timezone.now().timestamp()
+        with patch.object(dm, "discover_conversations", side_effect=BudgetDeferred(3)):
+            self.assertFalse(discover_once(300))
+        self.connection.refresh_from_db()
+        state = self.connection.sync_cursor[KEY]
+        self.assertEqual(state["error"], "BudgetDeferred")
+        self.assertGreaterEqual(state["due"], before + 3)
+        self.assertLess(state["due"], before + 10)
+        self.assertEqual(claim_discovery(300).grant_id, other.pk)
+
+    def test_real_discovery_failures_keep_failure_backoff(self):
+        from integrations.services.message_sync.discovery import discover_once
+
+        before = timezone.now().timestamp()
+        with patch.object(dm, "discover_conversations", side_effect=TimeoutError()):
+            self.assertFalse(discover_once(300))
+        self.connection.refresh_from_db()
+        self.assertGreaterEqual(self.connection.sync_cursor[KEY]["due"], before + 30)
+
+    def test_provider_retry_after_is_not_shortened(self):
+        from integrations.services.message_sync.discovery import discover_once
+
+        before = timezone.now().timestamp()
+        with patch.object(dm, "discover_conversations", side_effect=BudgetDeferred(120)):
+            self.assertFalse(discover_once(300))
+        self.connection.refresh_from_db()
+        self.assertGreaterEqual(self.connection.sync_cursor[KEY]["due"], before + 120)
