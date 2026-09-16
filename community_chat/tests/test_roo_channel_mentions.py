@@ -43,8 +43,15 @@ def conversation_fixture():
         },
         participant_buzz_pubkeys=["1" * 64],
         mlai_channel_id="private-mirror",
+        status="live",
+        history_backfilled_at=None,
         grant=SimpleNamespace(
             slack_user_id="UONE",
+            status="active",
+            revoked_at=None,
+            consented_at=timezone.now(),
+            history_days=30,
+            consent_version=PRIVATE_CHANNEL_CONSENT,
             connection=SimpleNamespace(
                 provider_metadata={
                     CATALOG_KEY: {"CMASTER": {"kind": "private_channel"}}

@@ -1,12 +1,20 @@
 """Database-free regression coverage for Slack's per-account unread contract."""
 
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
+from datetime import timedelta
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from django.test import SimpleTestCase
+from django.utils import timezone
 
 from integrations.services import slack_chat_read_state as reads
+from integrations.services.slack_chat_catalog import (
+    ALL_HISTORY_CONSENT,
+    CATALOG_KEY,
+    OWNER_OPENED_KEY,
+    PRIVATE_CHANNEL_CONSENT,
+)
 from integrations.services.slack_dm_mirror import SlackDmMirrorAuthorizationError
 
 
@@ -205,7 +213,116 @@ class SlackReadStateTests(SimpleTestCase):
             cached.assert_not_called()
 
 
+class PrivateReadTargetTests(SimpleTestCase):
+    def setUp(self):
+        self.now = timezone.now().replace(microsecond=0)
+        self.key = "1" * 64
+        self.grant = SimpleNamespace(
+            pk=1, slack_user_id="UOWNER", slack_workspace_id="TWORK",
+            history_days=30, consent_version=PRIVATE_CHANNEL_CONSENT,
+            consented_at=self.now, conversations=MagicMock(),
+            connection=SimpleNamespace(
+                scopes=["groups:read", "groups:history", "im:read", "im:write"],
+                provider_metadata={CATALOG_KEY: {}},
+            ),
+        )
+
+    def conversation(self, name, *, age=None, kind="im", opened=False):
+        metadata = {"kind": kind}
+        if opened:
+            metadata[OWNER_OPENED_KEY] = reads.owner_open_intent(self.grant, self.key)
+        self.grant.connection.provider_metadata[CATALOG_KEY][name] = metadata
+        return SimpleNamespace(
+            grant=self.grant, slack_conversation_id=name, mlai_channel_id=name,
+            participant_buzz_pubkeys=[self.key], history_backfilled_at=None,
+            latest_synced_ts=(
+                f"{int((self.now-timedelta(days=age)).timestamp())}.000001"
+                if age is not None else ""
+            ),
+        )
+
+    @contextmanager
+    def source_catalog(self, conversations):
+        public = SimpleNamespace(destination_channel_id="public", slack_channel_id="CPUBLIC")
+        with patch.object(reads, "catalog_conversations", return_value=conversations), patch.object(
+            reads.CommunityBridgeChannel.objects, "filter"
+        ) as shared, patch.object(reads.time, "time", return_value=self.now.timestamp()):
+            shared.return_value.exclude.return_value.order_by.return_value = [public]
+            yield
+
+    def test_polling_ignores_old_unknown_and_other_device_rooms_but_prewarms_recent(self):
+        recent = self.conversation("DRECENT", age=1)
+        self.grant.connection.provider_metadata[CATALOG_KEY]["DRECENT"][
+            "latest_message_ts"
+        ] = recent.latest_synced_ts
+        recent.latest_synced_ts = ""
+        old = self.conversation("DOLD", age=60)
+        unknown = self.conversation("DUNKNOWN")
+        other = self.conversation("DOTHER", age=1)
+        other.participant_buzz_pubkeys = ["2" * 64]
+        group = self.conversation("GRECENT", age=2, kind="mpim")
+        private = self.conversation("CPRIVATE", age=3, kind="private_channel")
+        with self.source_catalog([old, unknown, other, recent, group, private]):
+            targets = reads._targets(self.grant, self.key)
+        self.assertEqual([t.channel_id for t in targets], ["public", "DRECENT", "GRECENT", "CPRIVATE"])
+        self.assertIsNone(recent.history_backfilled_at)
+
+    def test_polling_honors_seven_thirty_and_explicit_all_history_windows(self):
+        conversation = self.conversation("DRECENT", age=10)
+        with self.source_catalog([conversation]):
+            self.grant.history_days = 7
+            self.assertEqual([t.channel_id for t in reads._targets(self.grant, self.key)], ["public"])
+            self.grant.history_days = 30
+            self.assertEqual(len(reads._targets(self.grant, self.key)), 2)
+            conversation.latest_synced_ts = ""
+            self.grant.history_days = 0
+            self.assertEqual(len(reads._targets(self.grant, self.key)), 1)
+            self.grant.consent_version = ALL_HISTORY_CONSENT
+            self.assertEqual(len(reads._targets(self.grant, self.key)), 2)
+
+    def test_empty_dm_requires_current_explicit_open_and_cannot_override_old_activity(self):
+        empty = self.conversation("DEMPTY", opened=True)
+        old = self.conversation("DOLD", age=60, opened=True)
+        group = self.conversation("GEMPTY", kind="mpim", opened=True)
+        with self.source_catalog([empty, old, group]):
+            self.assertEqual([t.channel_id for t in reads._targets(self.grant, self.key)], ["public", "DEMPTY"])
+            self.grant.consented_at += timedelta(seconds=1)
+            self.assertEqual([t.channel_id for t in reads._targets(self.grant, self.key)], ["public"])
+
+    def test_mark_read_accepts_new_displayed_message_before_catalog_activity_refresh(self):
+        conversation = self.conversation("DOLD", age=60)
+        source_ts = f"{int(self.now.timestamp())}.000001"
+        with self.source_catalog([conversation]), patch.object(
+            reads, "active_grant_for_user", return_value=self.grant
+        ), patch.object(reads, "_assert_grant_connection_authorized"), patch.object(
+            reads, "_capture_slack_grant_api_authority", return_value=SlackReadStateTests().authority()
+        ), patch.object(reads.transaction, "atomic", side_effect=nullcontext), patch.object(
+            reads, "_lock_slack_grant_api_authority"
+        ), patch.object(reads.cache, "delete"), patch.object(
+            reads, "_call_slack_with_grant_authority",
+            return_value={"channel": {
+                "id": "DOLD", "last_read": f"{int(self.now.timestamp())-1}.000001"
+            }},
+        ) as call:
+            result = reads.mark_read(
+                object(), public_key=self.key, channel_id="DOLD", source_ts=source_ts
+            )
+        self.assertTrue(result["synced"])
+        self.assertEqual([c.args[1] for c in call.call_args_list], ["conversations_info", "conversations_mark"])
+
+
 class PrivateUnreadHistoryTests(SimpleTestCase):
+    def test_never_read_public_channel_omits_zero_oldest(self):
+        target = reads.ReadTarget("public", "C123", "public_channel")
+        with patch.object(
+            reads, "_call_slack_with_grant_authority",
+            return_value={"messages": [], "has_more": False},
+        ) as call:
+            reads._unread_messages(object(), target, "0.000000")
+        self.assertNotIn("oldest", call.call_args.kwargs)
+        self.assertEqual(call.call_args.kwargs["limit"], 100)
+        self.assertEqual(call.call_args.kwargs["required_scopes"], {"channels:history"})
+
     def test_erased_queue_bodies_cannot_hide_source_mentions(self):
         target = reads.ReadTarget(
             "mirror",

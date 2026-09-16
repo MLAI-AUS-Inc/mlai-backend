@@ -206,6 +206,8 @@ class SlackAllHistoryTests(SimpleTestCase):
         delivery = SimpleNamespace(
             conversation=self.conversation(),
             source_platform="slack",
+            source_message_id="1.000001",
+            operation="create",
             metadata={"backfill": True},
         )
         with patch.object(mirror, "_delivery_created_at", return_value=1):

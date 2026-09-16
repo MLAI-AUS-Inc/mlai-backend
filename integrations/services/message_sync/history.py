@@ -10,6 +10,7 @@ from integrations.models import BridgeSyncState, CommunityBridgeChannel, SlackDm
 from integrations.services.community_bridge.slack import SlackBridgeClient
 from integrations.services.community_bridge.store import ingest_slack_event
 from .coverage import record_page
+from .history_policy import history_page_limit
 from .scheduler import locked_job, schedule_job, finish_job
 
 
@@ -42,6 +43,10 @@ def seed_states(limit=100):
             state = ensure_state(owner)
             schedule_job(state, "head")
             schedule_job(state, "archive")
+    # Durable mode replaces the legacy history loop, including its recovery
+    # scheduler. Keep source recovery alive without depending on a user login.
+    from .recovery import schedule_private_recoveries
+    schedule_private_recoveries(limit=min(5, max(1, limit)))
 
 
 def timestamp(value):
@@ -85,8 +90,12 @@ def public_page(lease, state):
         checkpoint.setdefault("oldest", f"{max(0, int(time.time()) - 86400)}.000000")
     else:
         checkpoint.setdefault("oldest", "0.000000")
-    kwargs = dict(channel=channel.slack_channel_id, limit=15, inclusive=False,
-                  oldest=checkpoint["oldest"], latest=checkpoint.get("latest", checkpoint["upper_bound"]))
+    kwargs = dict(channel=channel.slack_channel_id, limit=history_page_limit(), inclusive=False,
+                  latest=checkpoint.get("latest", checkpoint["upper_bound"]))
+    # Slack rejects an explicit decimal-zero oldest timestamp. Its documented
+    # unbounded request omits oldest; the durable range retains its zero marker.
+    if timestamp(checkpoint["oldest"]) != (0, 0):
+        kwargs["oldest"] = checkpoint["oldest"]
     if checkpoint.get("cursor"):
         kwargs["cursor"] = checkpoint["cursor"]
     client = SlackBridgeClient.get_client()

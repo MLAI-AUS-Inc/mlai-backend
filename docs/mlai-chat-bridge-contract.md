@@ -230,8 +230,9 @@ reaches an older relay returns a retryable upstream failure until the relay is
 updated.
 Backfill status is complete only after every queued history delivery completes;
 transient dead rows are safely repopulated from Slack, while a permanently
-rejected adapter delivery stays fenced until explicit backfill or renewed
-consent. New API callers that omit a history choice default to 30 days.
+rejected adapter delivery stays fenced until explicit backfill, renewed consent,
+or the narrowly verified legacy reaction compatibility recovery documented below.
+New API callers that omit a history choice default to 30 days.
 Members can explicitly choose 7 days, 30 days, or **all available history**
 (`history_days: 0`). Zero is honored only with the new
 `slack-chat-v5-all-available-history` consent; legacy zero-valued grants remain
@@ -633,6 +634,13 @@ uses the requesting member's Slack user token and existing consent/device fences
 it never substitutes a bot's read cursor. Public mappings also require source
 membership, and private mappings remain restricted to the provisioned device.
 
+Private cursor sweeps exclude old or unknown directory entries outside the
+selected 7/30-day window, except current explicitly opened empty IMs. Recent
+pending imports remain eligible for read-state prewarming. Shared public targets
+are unchanged. Explicit mark-read operations retain the full authorized target
+set and source/device/consent checks, so a new displayed message can be acknowledged
+before discovery updates its conversation activity.
+
 Snapshots record `fetched_at` before the source read request starts, so a slow
 read cannot overwrite a newer acknowledgement. Join, leave, topic and other
 control messages never become a readable latest-message frontier.
@@ -756,3 +764,139 @@ MLAI's public bot (`A0BDH1ZG76X`) and owner OAuth app (`A0B0NDG6VL0`) are separa
 Deploy callback verification with `MESSAGE_SYNC_ENABLED=false` before verifying a newly configured Slack event URL. The private app's event subscriptions were disabled during the 14 September inspection and must be enabled for live user events after URL verification. Existing users' token scopes and explicit mirror consent remain authoritative; adding a subscription does not authorize additional private access.
 
 The Docker worker health probe runs `message_sync_status --check --local-worker`, checking fresh inbox, history, public-delivery and private-delivery heartbeats from the current container. Enabled deployments wait for these heartbeats and fail if a previous container is the only worker reporting. Status output contains queue ages, expired leases, source coverage classifications and shared provider cooldowns without message bodies or credentials. History and live delivery run in independent bounded lanes, and source-limited scans report unknown absence instead of claiming empty or deleting records.
+
+### Selected-window publication and retired registrations (September 2026)
+
+Owner Slack import honours the selected 7-day or 30-day window using the original
+Slack message timestamp. A recent edit or a delayed callback does not turn an old
+message into a newly eligible message. Recent replies may be shown without an
+out-of-window parent body. Deletions still remove content previously imported.
+Explicit all-history consent remains separate; legacy zero-valued grants remain
+bounded. Provider pagination is rechecked before persistence, including after
+restarts and changes to the consent window. Source-limited responses preserve
+unknown absence: they cannot infer deletions or certify a first complete import.
+
+`channel_catalog` now includes `ready_for_display` and `history_oldest_ts` for
+each device-authorized mirror. The latter is a numeric Unix-seconds string, or an
+empty string for explicitly authorized all-history. `last_message_at` is source
+activity, never relay arrival time. Initial publication requires a completed
+selected-window scan, successful delivery of its relevant backfill, an active
+current grant and a live conversation with activity inside the selected window.
+An explicit open-DM action can qualify an empty conversation after its completed
+empty scan, using an intent bound to the exact consent, OAuth generation and
+owner device. This does not make a background-discovered empty conversation or
+a conversation with actual old activity eligible. Progress counts use the same
+durable scan, consent, source-limit and delivery prerequisites.
+Clients hide unready imports while preserving native chats. They also filter
+cached Slack bodies by the same source cutoff and use full Slack timestamps to
+order messages sharing a second.
+
+Once an import is published, a presentation cache bound to the owner, consent,
+room, participant hash and selected history window preserves it during ordinary
+background refreshes. A new consent or membership boundary invalidates that
+qualification. The source activity/window and active grant are checked on every
+response. Cache loss fails closed until the import qualifies again; it does not
+make the cache an authorization source.
+
+ID-only `ready_for_display: false` catalogue entries fence older registration
+UUIDs for the verified owner, including after pause or disconnect and across old
+Slack connections. These contain no historical names, participants or
+bodies and confer no relay access. Clients must retain these entries as hidden
+IDs, rather than counting old relay memberships as native group chats. Group/DM
+classification uses Slack's conversation type and people, not device or shadow
+identity counts. Missing Slack read snapshots mean unknown unread state; imports
+must not fabricate unread badges while those snapshots are loading. No wholesale
+Slack mark-read operation is performed by import.
+
+Confirmed quiet conversations skip relay reprovisioning and receive a bounded
+background-history cooldown; new callbacks remain independently active. Internal
+and Marketplace Slack apps use 200-item history pages, while restricted apps
+retain 15-item pages and their existing shared request budget. Larger pages do
+not raise the number of allowed requests. Unbounded history omits `oldest`
+instead of sending a zero timestamp.
+
+Shared public channel mappings have their own community-wide archive policy and
+no owner grant. The selected private-import window applies to every grant-backed
+mirror, including private channels; it does not change shared public retention.
+
+### Current-room archive proof
+
+First publication requires archive `import_contract_version=2`, the current
+participant hash and channel ID, and complete unrestricted source coverage.
+The contract version is recorded when the archive starts. Finishing a resumed
+pre-version cursor does not certify pages read under older code. The completed
+old scan is followed by a fresh selected-window scan; active leases, partial
+checkpoints and provider backoff are preserved.
+
+The fair recovery turn also upgrades known recent conversations missing that
+proof, at most one conversation per owner per round. Old and unknown quiet
+conversations are not swept. An explicit compose action can refresh an old empty
+DM that lacks proof, while preserving any active scan. A source-limited current-version attempt stays
+unqualified without causing an immediate rescan loop. The presentation latch
+uses a versioned namespace and retains an already qualified view only within
+its exact existing owner, consent, device and participant scope.
+
+### Bounded source recovery for failed imports
+
+The durable worker's existing state-seeding tick schedules fresh source recovery
+for erased terminal backfill rows. Each round considers at most five owners and
+one conversation per owner, with a durable owner turn so a busy or blocked owner
+cannot monopolize the queue. Each conversation marks at most 200 rows. Current
+grant, scope, consent and registration checks fence the operation. Active leases,
+partial history states and between-page checkpoints are preserved; an incomplete
+scan finishes before a new recovery begins. No OAuth refresh or message body I/O
+runs in this scheduling step.
+
+Scheduling keeps terminal rows terminal and erases any retained old payload. It
+marks the selected rows for a fresh scan of the current consent window. Only
+source observations can repopulate their bodies through the normal guarded
+history writer. After a complete unrestricted scan, remaining absent rows become
+superseded tombstones; a source-limited scan leaves them unqualified. Already
+scheduled or superseded rows do not continually restart recovery. Rows that have
+aged outside consent are recorded as excluded without a provider request.
+
+One explicit compatibility exception addresses private `reaction_add` failures
+from the retired seven-emoji adapter allowlist. The successful production rollout
+of [chat PR #145](https://github.com/MLAI-AUS-Inc/mlai-chat/actions/runs/34502746861)
+completed on 10 September 2026 at 16:52:06 UTC. Recovery requires an exact adapter
+HTTP 400 failure before that bound, a standard Unicode reaction accepted by the
+current pinned emoji data but rejected by the old allowlist, an in-window source
+target, the current participant boundary and a verified registered owner device.
+An existing legacy `history_recovery_scheduled` flag can acquire this audited
+exception once; staged exceptions remain excluded from repeated scheduling.
+
+The exception preserves the original failure time and fixed error code. The
+reaction remains DEAD, permanently fenced and body-free while a fresh archive
+records its source metadata. Only completion of that exact unrestricted archive
+can reconstruct and release the reaction, or supersede it after qualified
+absence. Other scan epochs, source-limited pages, revoked devices, later HTTP 400
+errors and all nonmatching permanent failures remain fenced.
+
+A separate diagnosed exception handles a permanently rejected reply whose
+completed parent mapping belongs to a retired participant boundary. Target and
+outbound-echo lookups require the current boundary; observing an old completed
+message in Slack rebuilds its mapping without relabeling the old destination.
+Before that replacement, affected failed children retain a content-free audit
+of the old parent mapping. Only the exact HTTP 400 / stale-parent condition,
+current owner device, registration, consent and selected source window authorize
+recovery; ordinary create failures remain fenced. Previously live failures are
+included in this narrowly diagnosed repair.
+
+The old failed body is erased first. A new archive may stage a freshly fetched
+reply while it remains DEAD and permanently fenced. An unrestricted complete
+scan qualifies the reply; normal dependency handling waits for the current
+parent and only flattens when that parent cannot progress. Limited coverage
+erases staging. A source-body hash prevents retention cleanup from releasing an
+empty replacement; a later fresh source observation can recover it. Scalar and
+batch delivery keep the existing backend delivery ID: the adapter rebuilds the
+signed event with its current channel/audience and deduplicates by event ID, so
+a new room cannot reuse an old accepted receipt. Older outbound rows without any
+recorded boundary are not relabeled: fresh Slack import may duplicate an old
+native root in the same room, because its original destination cannot be proven
+from the retained metadata alone.
+
+This path needs no database migration or manual dead-row requeue. Recovery waits
+for the existing provider budgets and fair scheduling; a cooldown expiry is not
+an import-completion deadline. `integrations.tests_message_sync_recovery` runs in
+the durable PostgreSQL CI gate, alongside
+`integrations.tests_slack_private_target_boundaries`.

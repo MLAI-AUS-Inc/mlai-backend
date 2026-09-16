@@ -214,7 +214,7 @@ class PrivateSlackMentionTests(SimpleTestCase):
         ), patch.object(
             mirror, "_upsert_history_delivery", return_value=original
         ) as upsert:
-            rows.select_for_update.return_value.filter.return_value.filter.return_value.order_by.return_value.first.return_value = (
+            rows.filter.return_value.select_for_update.return_value.filter.return_value.filter.return_value.order_by.return_value.first.return_value = (
                 None
             )
             mirror._enqueue_history_message(
