@@ -31,7 +31,9 @@ from integrations.services.slack_dm_mirror import (
     active_grant_for_user,
     _grant_history_days,
     SlackDmMirrorError,
+    SlackDmMirrorRateLimited,
 )
+from integrations.services.message_sync.scheduler import BudgetDeferred
 
 
 @dataclass
@@ -289,6 +291,7 @@ def read_state_page(user, *, public_key, cursor=0, channel_ids=None):
     deadline = time.monotonic() + 8
     calls = 0
     index = offset
+    retry_after = 0
     while index < len(targets) and len(results) < 50:
         target = targets[index]
         key = _cache_key(authority, target)
@@ -312,6 +315,11 @@ def read_state_page(user, *, public_key, cursor=0, channel_ids=None):
                     required_scopes={target.read_scope},
                     channel=target.slack_id,
                 )
+            except (BudgetDeferred, SlackDmMirrorRateLimited) as exc:
+                # A provider pause is a continuation, not a failed page. Keep
+                # earlier results and retry this exact target on the next poll.
+                retry_after = getattr(exc, "retry_after", 60)
+                break
             except SlackApiError as exc:
                 if exc.response.get("error") not in {
                     "channel_not_found",
@@ -330,11 +338,17 @@ def read_state_page(user, *, public_key, cursor=0, channel_ids=None):
             ):
                 cached = {"available": False}
             else:
-                messages, count_source, partial = _unread_messages(
-                    authority,
-                    target,
-                    details.get("last_read", "0"),
-                )
+                try:
+                    messages, count_source, partial = _unread_messages(
+                        authority,
+                        target,
+                        details.get("last_read", "0"),
+                    )
+                except (BudgetDeferred, SlackDmMirrorRateLimited) as exc:
+                    # A group's count needs both info and history; do not cache
+                    # a guessed zero or advance past a half-fetched snapshot.
+                    retry_after = getattr(exc, "retry_after", 60)
+                    break
                 snapshot = read_state_snapshot(
                     details,
                     kind=target.kind,
@@ -371,7 +385,7 @@ def read_state_page(user, *, public_key, cursor=0, channel_ids=None):
     return {
         "channels": {**bootstrap, **results},
         "next_cursor": str(index) if index < len(targets) else None,
-        "retry_after_seconds": 10 if index < len(targets) else 60,
+        "retry_after_seconds": max(retry_after, 10 if index < len(targets) else 60),
     }
 
 

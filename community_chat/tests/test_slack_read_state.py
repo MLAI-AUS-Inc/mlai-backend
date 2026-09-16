@@ -371,16 +371,17 @@ class PrivateUnreadHistoryTests(SimpleTestCase):
 
 
 class ReadStatePageTests(SimpleTestCase):
-    def page(self, requested=None, on_request=lambda: None):
+    def page(self, requested=None, on_request=lambda: None, *, cursor=0, bootstrap=None, kind="im"):
         authority = SlackReadStateTests().authority()
         grant = SimpleNamespace(slack_user_id="UOWNER")
-        targets = [reads.ReadTarget(f"mirror-{i}", f"D{i}", "im") for i in range(8)]
+        targets = [reads.ReadTarget(f"mirror-{i}", f"D{i}", kind) for i in range(8)]
 
         def response(*args, **kwargs):
             on_request()
             return {
                 "channel": {
                     "id": kwargs["channel"],
+                    "is_member": True,
                     "last_read": "100.000001",
                     "latest": {"ts": "101.000001"},
                     "unread_count_display": 1,
@@ -400,16 +401,71 @@ class ReadStatePageTests(SimpleTestCase):
         ), patch.object(
             reads.cache, "get", return_value=None
         ), patch.object(
-            reads.cache, "get_many", return_value={}
+            reads.cache, "get_many", return_value=bootstrap or {}
         ), patch.object(
             reads.cache, "set"
         ), patch.object(
             reads, "_call_slack_with_grant_authority", side_effect=response
         ) as call:
             result = reads.read_state_page(
-                object(), public_key="key", channel_ids=requested
+                object(), public_key="key", channel_ids=requested, cursor=cursor
             )
             return result, call.call_args_list
+
+    def test_budget_pause_returns_completed_counts_and_resumes_without_starvation(self):
+        # A fast source response consumes the only currently admitted slot.
+        # Every poll must keep that result and move to the next conversation.
+        cursor = "0"
+        received = {}
+        for index in range(8):
+            attempts = []
+            def one_admitted_call():
+                attempts.append(True)
+                if len(attempts) > 1:
+                    raise reads.BudgetDeferred(3)
+            result, calls = self.page(on_request=one_admitted_call, cursor=cursor)
+            received.update(result["channels"])
+            self.assertEqual(calls[0].kwargs["channel"], f"D{index}")
+            self.assertEqual(result["next_cursor"], str(index+1) if index < 7 else None)
+            cursor = result["next_cursor"]
+        self.assertEqual(len(received), 8)
+        self.assertTrue(all(value["unread_count"] == 1 for value in received.values()))
+
+    def test_first_call_cooldown_preserves_cursor_and_retry_after(self):
+        for error in (reads.BudgetDeferred(127), reads.SlackDmMirrorRateLimited("pause")):
+            with self.subTest(error=type(error).__name__):
+                def paused():
+                    raise error
+                result, calls = self.page(on_request=paused, cursor="3")
+                self.assertEqual(result["channels"], {})
+                self.assertEqual(result["next_cursor"], "3")
+                self.assertEqual(result["retry_after_seconds"], getattr(error, "retry_after", 60))
+                self.assertEqual(len(calls), 1)
+
+    def test_history_budget_pause_does_not_publish_an_incomplete_read_snapshot(self):
+        with patch.object(reads, "_unread_messages", side_effect=reads.BudgetDeferred(65)):
+            result, calls = self.page(cursor="2", kind="mpim")
+        self.assertEqual(result["channels"], {})
+        self.assertEqual(result["next_cursor"], "2")
+        self.assertEqual(result["retry_after_seconds"], 65)
+        self.assertEqual(len(calls), 1)
+
+    def test_first_call_pause_still_returns_previously_cached_badges(self):
+        target = reads.ReadTarget("mirror-7", "D7", "im")
+        cached = {"available": True, "is_unread": True, "unread_count": 3,
+                  "last_read": "100.000001", "latest_ts": "103.000001", "fetched_at": 1000}
+        key = reads._cache_key(SlackReadStateTests().authority(), target)
+        def paused():
+            raise reads.BudgetDeferred(17)
+        result, _ = self.page(on_request=paused, bootstrap={key: cached})
+        self.assertEqual(result["channels"], {"mirror-7": cached})
+        self.assertEqual(result["next_cursor"], "0")
+
+    def test_authorization_failure_still_rejects_the_page(self):
+        def revoked():
+            raise SlackDmMirrorAuthorizationError("revoked")
+        with self.assertRaises(SlackDmMirrorAuthorizationError):
+            self.page(on_request=revoked)
 
     def test_slow_read_keeps_request_start_time_so_it_cannot_undo_a_newer_write(self):
         clock = [1000]
