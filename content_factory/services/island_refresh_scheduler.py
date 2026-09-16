@@ -208,6 +208,9 @@ def run_island_refresh_scheduler(*, now=None) -> dict:
     results: list = []
     for config in _eligible_configs():
         organization = config.organization
+        from integrations.services.daily_research_policy import pause_if_unanswered
+        if pause_if_unanswered(organization, now=now):
+            continue
         local_now = now.astimezone(_zone(config.default_timezone))
         local_date = local_now.date()
         if local_now.hour < local_hour:

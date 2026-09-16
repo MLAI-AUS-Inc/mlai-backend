@@ -9,6 +9,7 @@ subsystem-specific contracts and runbooks.
 - [Editorial and onboarding contract](content-factory-editorial-contract.md) — approved audience/offer persistence and drafting during website setup
 
 - [Content islands](content-islands.md) — paid topic research, measured island suggestions and scoped article ideas
+- [Daily article recommendations](daily-research.md) — fresh daily topics, one-use founder preferences and pausing after three unanswered days
 
 ## Community chat APIs
 

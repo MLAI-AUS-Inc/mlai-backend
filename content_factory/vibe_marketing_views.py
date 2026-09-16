@@ -14039,6 +14039,8 @@ class VibeMarketingSettingsView(APIView):
                     config=config,
                 )
             else:
+                from integrations.services.daily_research_policy import record_manual_pause
+                record_manual_pause(organization)
                 ResearchAutomation.objects.filter(
                     organization=organization,
                     status=ResearchAutomationStatus.ACTIVE,
@@ -15169,6 +15171,9 @@ class VibeMarketingDiscoveryView(APIView):
             payload=payload,
             billing_refund_context=billing_refund_context,
         )
+        if payload.get("custom_topic_keyword") and run.status not in {"failed", "blocked", "cancelled"}:
+            from integrations.services.daily_research_policy import record_engagement
+            record_engagement(context.organization, resume=True)
         response_payload = _run_start_payload(run)
         response_status = status.HTTP_503_SERVICE_UNAVAILABLE if run.status == ContentFactoryRunStatus.BLOCKED else status.HTTP_202_ACCEPTED
         return Response(response_payload, status=response_status)
