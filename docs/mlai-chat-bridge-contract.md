@@ -661,6 +661,12 @@ uses the requesting member's Slack user token and existing consent/device fences
 it never substitutes a bot's read cursor. Public mappings also require source
 membership, and private mappings remain restricted to the provisioned device.
 
+A shared Slack budget deferral or cooldown returns HTTP 200 with completed
+snapshots and `next_cursor` pointing at the first unfinished target. The response
+retains cached bootstrap badges and includes the retry delay. If a group's history
+lookup pauses after its info lookup, that group remains unfinished; no empty or
+zero-count snapshot is fabricated. Authorization failures still reject the read.
+
 Private cursor sweeps exclude old or unknown directory entries outside the
 selected 7/30-day window, except current explicitly opened empty IMs. Recent
 pending imports remain eligible for read-state prewarming. Shared public targets
@@ -683,6 +689,8 @@ returns an unknown numeric count rather than claiming a complete total.
 
 Cached snapshots survive for 24 hours and are revalidated on refresh; visible
 rows refresh after 30 seconds, with bounded background pages for other rows.
+These pages are currently driven by a foreground client; the message-import
+worker does not independently refresh unread snapshots while every app is closed.
 These are polled snapshots, not Slack's first-party real-time unread feed. Custom
 Slack notification preferences and subteam notification counts are not exposed
 by this API, so complete first-party badge parity cannot be guaranteed.
