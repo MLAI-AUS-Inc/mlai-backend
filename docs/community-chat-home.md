@@ -144,7 +144,18 @@ must never be used as fallback people for a known Slack mirror. No schema change
 
 ## Upcoming event artwork
 
-`GET upcoming-events/?limit=5` includes `cover_url` on each public event.
+`GET upcoming-events/` returns every upcoming public event on the MLAI calendar,
+including approved listings managed by other hosts and external event platforms.
+The source is `/v1/calendars/events/list` with repeated `access=manage&access=view`
+and `platforms=luma&platforms=external` parameters. Private, members-only and
+unknown-visibility events remain excluded. Pagination is exhausted, duplicate IDs
+are removed, and cards are ordered by start time. Invalid/repeated pagination or
+more than ten source pages returns an upstream error instead of caching a partial
+calendar as complete. The shared cache stores the complete projection.
+
+An explicit `?limit=5` still returns a preview (maximum ten), for compatibility
+with older clients. Updated clients omit the limit. Each public event includes
+`cover_url`.
 It is Luma's public cover image hosted at `https://images.lumacdn.com/`, or
 an empty string when absent or invalid. Only HTTPS URLs without embedded
 credentials or nonstandard ports are accepted. Clients show the botanical
@@ -154,6 +165,7 @@ private event settings or attendee data. The cache key is versioned to avoid
 serving the older projection after deployment; no migration is required.
 
 Source: [Luma cover image field](https://docs.luma.com/reference/post_v1-events-create).
+Calendar scope: [Luma List Events](https://docs.luma.com/reference/get_v1-calendars-events-list).
 
 ## Roo Points member guide refresh (September 2026)
 

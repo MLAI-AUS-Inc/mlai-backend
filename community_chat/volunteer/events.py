@@ -11,16 +11,16 @@ from integrations.services.luma import (
 
 
 def public_event(event_id):
-    """Find an upcoming public event in the bounded, cached community calendar."""
+    """Find an upcoming public event in the complete cached community calendar."""
     if not event_id:
         return None
-    key = "community-chat:volunteer-public-events:v1"
+    key = "community-chat:volunteer-public-events:v2"
     events = cache.get(key)
     if events is None:
         try:
             events = LumaAttendeeReportService(
                 timeout=settings.LUMA_API_TIMEOUT_SECONDS,
-            ).list_upcoming_events(limit=10)
+            ).list_upcoming_events()
         except (LumaAPIError, LumaConfigurationError):
             events = []
         cache.set(key, events, timeout=60)
