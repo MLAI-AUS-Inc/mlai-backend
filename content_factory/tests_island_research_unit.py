@@ -100,10 +100,17 @@ class IslandResearchTests(unittest.TestCase):
         self.queue.assert_not_called()
 
     def test_adoption_uses_stored_proposal_and_checks_organization(self):
-        proposal = {"id": "proposal-one", "name": "Measured theme", "keywords": [1, 2, 3], "centroid_embedding": [1, 0]}
+        proposal = {"id": "proposal-one", "name": "Measured theme",
+                    "keywords": [{"keyword": "ai consulting", "volume": 100, "difficulty": 20}], "centroid_embedding": [1, 0]}
         run = SimpleNamespace(status="completed", run_request={"island_research_brief": BRIEF},
             result={"island_research": True, "suggested_islands": [proposal]})
         self.assertIs(proposal_for_adoption(run, "proposal-one"), proposal)
+        for bad in ([], [1], [{"keyword": "guess", "volume": 0, "difficulty": 20}],
+                    [{"keyword": "guess", "volume": 100, "difficulty": None}],
+                    [{"keyword": "guess", "volume": float("inf"), "difficulty": 20}]):
+            with self.subTest(evidence=bad), self.assertRaises(ValueError):
+                proposal_for_adoption(SimpleNamespace(status="completed", run_request=run.run_request,
+                    result={"island_research": True, "suggested_islands": [{**proposal, "keywords": bad}]}), "proposal-one")
         for invalid in ["made-up", None, {"id": "proposal-one"}]:
             with self.assertRaises(ValueError): proposal_for_adoption(run, invalid)
         run.status = "queued"

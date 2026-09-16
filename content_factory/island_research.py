@@ -1,6 +1,7 @@
 """Brief-led island research: validated input, payment recovery and adoption."""
 import hashlib
 import json
+import math
 
 
 def validate_research_brief(data):
@@ -71,7 +72,15 @@ def proposal_for_adoption(run, proposal_id):
         raise ValueError("Wait for island research to finish before adding a result.")
     proposal = next((item for item in result.get("suggested_islands", [])
                      if isinstance(item, dict) and item.get("id") == proposal_id), None)
-    if not proposal or len(proposal.get("keywords") or []) < 3 or not proposal.get("centroid_embedding"):
+    evidence = proposal.get("keywords") if proposal else None
+    if not isinstance(evidence, list) or not evidence or not proposal.get("centroid_embedding"):
+        raise ValueError("Choose one of this research run’s measured islands.")
+    # A small measured starting point is useful too. Keep genuine evidence as
+    # the gate, rather than rejecting every cluster with fewer than 3 queries.
+    if any(not isinstance(row, dict) or not isinstance(row.get("keyword"), str) or not row["keyword"].strip()
+           or type(row.get("volume")) not in (int, float) or not math.isfinite(row["volume"]) or row["volume"] <= 0
+           or type(row.get("difficulty")) not in (int, float) or not 0 <= row["difficulty"] <= 100
+           for row in evidence):
         raise ValueError("Choose one of this research run’s measured islands.")
     return proposal
 
