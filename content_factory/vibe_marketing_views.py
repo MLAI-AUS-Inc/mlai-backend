@@ -14039,6 +14039,8 @@ class VibeMarketingSettingsView(APIView):
                     config=config,
                 )
             else:
+                from integrations.services.daily_research_policy import record_manual_pause
+                record_manual_pause(organization)
                 ResearchAutomation.objects.filter(
                     organization=organization,
                     status=ResearchAutomationStatus.ACTIVE,

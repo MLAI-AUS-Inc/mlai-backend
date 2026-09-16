@@ -7708,6 +7708,9 @@ class SEOKeywordResearchFeedbackView(APIView):
                 keyword.save(update_fields=['times_rejected', 'last_rejected_at', 'cooldown_until'])
                 rejected_count += 1
 
+        if selected_keyword:
+            from integrations.services.daily_research_policy import record_engagement
+            record_engagement(org, resume=True)
         return Response({
             'shown_updated': shown_count,
             'selected_updated': selected_count,

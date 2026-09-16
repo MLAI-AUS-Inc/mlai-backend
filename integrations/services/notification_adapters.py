@@ -1169,6 +1169,14 @@ def send_topic_selection(data: dict[str, Any]) -> list[NotificationDelivery]:
     run = resolve_automation_run(data.get("notification_context"))
     if not run:
         return []
+    from .daily_research_policy import pause_if_unanswered
+    if pause_if_unanswered(run.automation.organization) or run.automation.status != ResearchAutomationStatus.ACTIVE:
+        return []
+    # A callback replay must not replace button indices or reset an approved run.
+    if run.selected_topic or run.deliveries.filter(event_type="topic_selection", status="sent").exists():
+        data = dict(run.callback_payload or data)
+        if run.selected_topic:
+            return []
     job_id = _callback_job_id(data)
     run.callback_payload = data
     if job_id and not run.content_factory_run_id:
@@ -1183,7 +1191,9 @@ def send_topic_selection(data: dict[str, Any]) -> list[NotificationDelivery]:
     return _fan_out_event(
         run=run,
         event_type="topic_selection",
-        request_payload={"event_type": "topic_selection", "job_id": job_id, "options": _topic_options(data)},
+        request_payload={"event_type": "topic_selection", "job_id": job_id, "options": _topic_options(data),
+                         "daily_preference_ids": [key for key in (data.get("daily_research_selection") or {}).get("preference_ids", [])
+                            if key in {p.get("id") for p in (run.request_payload or {}).get("daily_topic_policy", {}).get("preferences", [])}]},
         build_kwargs=lambda channel: {
             "text": _plain_topic_message(
                 run,
@@ -1411,6 +1421,8 @@ def approve_topic_for_run(
             "updated_at",
         ]
     )
+    from .daily_research_policy import record_engagement
+    record_engagement(run.automation.organization, resume=True)
     return result
 
 
@@ -1613,6 +1625,10 @@ def _handle_whatsapp_inbound_message(message: dict[str, Any]) -> dict[str, int]:
     if not active_channels:
         # Unknown senders get no reply: auto-responding would be a spam vector.
         return {}
+
+    if len({channel.organization_id for channel in active_channels}) == 1:
+        from .daily_research_policy import record_engagement
+        record_engagement(active_channels[0].organization, resume=True)
 
     if not re.fullmatch(r"[1-4]", text):
         send_whatsapp_text(sender, "Reply 1-3 to pick a topic when one is pending, or STOP to opt out.")

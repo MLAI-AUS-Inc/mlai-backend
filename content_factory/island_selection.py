@@ -109,6 +109,12 @@ def adopt_selection(organization, run, ids):
         state.update(version=1, selected_ids=sorted(added | {p["id"] for p in proposals}),
                      groups=groups, managed_slugs=sorted(managed), managed_proposal_ids=sorted(managed_ids), revision=state.get("revision", 0) + int(has_new))
         if has_new:
+            from django.utils import timezone
+            events = list(state.get("daily_priority_events", []))
+            events.append({"id": f"island-selection:{run.run_id}:{state['revision']}",
+                           "created_at": timezone.now().isoformat(),
+                           "keywords": list(dict.fromkeys(k["keyword"] for p in proposals if p["id"] not in added for k in p["keywords"]))[:100]})
+            state["daily_priority_events"] = events[-30:]
             state.pop("pending", None)
             run.result = {**run.result, STATE_KEY: state}
             run.save(update_fields=["result", "updated_at"])

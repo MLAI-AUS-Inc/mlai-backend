@@ -51,6 +51,8 @@ def record_topic_feedback(
 ):
     normalized = normalize_topic_feedback_keyword(keyword)
     cleaned_feedback_type = (feedback_type or "declined").strip() or "declined"
+    from integrations.services.daily_research_policy import record_engagement
+    record_engagement(organization, resume=True)
     defaults = {
         "keyword": str(keyword or "").strip(),
         "reason_code": (reason_code or "not_appropriate").strip() or "not_appropriate",

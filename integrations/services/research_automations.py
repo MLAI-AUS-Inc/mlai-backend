@@ -148,6 +148,9 @@ def ensure_due_automation_runs(*, now: Optional[datetime] = None, limit: int = S
         .order_by("created_at")[: max(1, limit)]
     )
     for automation in automations:
+        from .daily_research_policy import pause_if_unanswered
+        if pause_if_unanswered(automation.organization, now=current):
+            continue
         for slot in due_slots_for_automation(automation, now=current):
             key = automation_run_idempotency_key(
                 automation_id=str(automation.id),
@@ -193,6 +196,9 @@ def _discovery_payload_for_run(run: AutomationRun) -> dict[str, Any]:
         # when unset. Must match the WhatsApp topic template's title slots.
         "requested_topic_count": 3,
     }
+    from .daily_research_policy import daily_topic_policy
+    payload["daily_topic_policy"] = daily_topic_policy(run)
+    payload["client_request_id"] = run.idempotency_key
     actor_slack_id = automation_billing_actor_slack_id(run.automation)
     if actor_slack_id:
         # Roo-points billing actor (wallet owner). Distinct from the Slack
@@ -224,7 +230,12 @@ def _discovery_payload_for_run(run: AutomationRun) -> dict[str, Any]:
 
 
 def dispatch_automation_run(run_id: str) -> dict[str, Any]:
+    from .daily_research_policy import pause_if_unanswered
+    candidate = AutomationRun.objects.select_related("automation__organization").get(id=run_id)
+    if candidate.slot_index < MANUAL_SLOT_BASE and pause_if_unanswered(candidate.automation.organization):
+        return {"status": "skipped", "reason": "three_unanswered_days", "automation_run_id": str(candidate.id)}
     with transaction.atomic():
+        Organization.objects.select_for_update().get(pk=candidate.automation.organization_id)
         # of=("self",) locks only the AutomationRun row. The nullable
         # select_related hops (automation.user, notification_channel.user)
         # render as LEFT OUTER JOINs, and Postgres rejects FOR UPDATE on the
@@ -243,11 +254,16 @@ def dispatch_automation_run(run_id: str) -> dict[str, Any]:
         )
         if run.status != AutomationRunStatus.SCHEDULED:
             return {"status": "skipped", "reason": "run_not_scheduled", "automation_run_id": str(run.id)}
+        if run.automation.status != ResearchAutomationStatus.ACTIVE:
+            return {"status": "skipped", "reason": "automation_paused", "automation_run_id": str(run.id)}
+        if AutomationRun.objects.filter(automation__organization=run.automation.organization, status=AutomationRunStatus.QUEUED).exclude(pk=run.pk).exists():
+            return {"status": "skipped", "reason": "research_already_running", "automation_run_id": str(run.id)}
         run.status = AutomationRunStatus.QUEUED
         run.last_error = ""
         run.save(update_fields=["status", "last_error", "updated_at"])
 
     payload = _discovery_payload_for_run(run)
+    AutomationRun.objects.filter(pk=run.id).update(request_payload=payload)
     domain = payload.get("domain") or ""
     # Browsing topics is free; the Roo-points charge is deferred to topic
     # approval (confirm_topic -> _charge_deferred_discovery_job_if_needed).
@@ -322,7 +338,6 @@ def dispatch_automation_run(run_id: str) -> dict[str, Any]:
                 billing_status=CONTENT_FACTORY_BILLING_STATUS_DEFERRED,
             )
         AutomationRun.objects.filter(pk=run.id).update(
-            status=AutomationRunStatus.QUEUED,
             content_factory_run_id=content_factory_run_id,
             request_payload=payload,
             last_error="",
@@ -398,6 +413,8 @@ def start_manual_automation_run(
     ).exists()
     if not has_target:
         return {"status": "no_delivery_channels"}
+    from .daily_research_policy import record_engagement
+    record_engagement(organization, now=current)
 
     timezone_name = _coerce_timezone(automation.timezone)
     local_date = current.astimezone(ZoneInfo(timezone_name)).date()
@@ -566,4 +583,7 @@ def create_or_update_research_automation(
             "status": ResearchAutomationStatus.ACTIVE,
         },
     )
+    from .daily_research_policy import record_engagement
+    record_engagement(organization, resume=True)
+    automation.refresh_from_db()
     return automation
