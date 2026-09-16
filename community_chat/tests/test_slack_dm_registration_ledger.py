@@ -391,6 +391,7 @@ class SlackDmRegistrationLedgerTests(APITestCase):
             )
 
         slack_dm_mirror._last_grant_discovery_scan = 0.0
+        slack_dm_mirror._last_registration_cleanup_scan = 0.0
         with patch.object(
             slack_dm_mirror,
             "_reconcile_registration_cleanup",

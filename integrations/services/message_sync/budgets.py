@@ -53,7 +53,7 @@ def admit_request(*, app_id, workspace_id, method, interval_seconds):
         row_id, admitted, cooldown = row
         available = max(admitted, cooldown or now)
         if available > now:
-            raise BudgetDeferred((available - now).total_seconds())
+            raise BudgetDeferred((available - now).total_seconds(), before_request_method=method)
         cursor.execute("""
             UPDATE bridge_api_budget SET next_admitted_at = %s, updated_at = %s WHERE id = %s
         """, [now + timedelta(seconds=interval_seconds), now, row_id])
