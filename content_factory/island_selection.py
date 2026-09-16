@@ -146,7 +146,7 @@ def dynamic_scopes(organization):
         original = {k["keyword"].strip().lower() for p in selections for k in p["keywords"]}
         original.update(m.keyword.keyword_normalized for island in islands for m in island.memberships.all())
         rows = list(ResearchedKeyword.objects.filter(organization=organization, keyword_normalized__in=original).values(
-            "keyword", "keyword_normalized", "volume", "difficulty", "opportunity_index", "ai_search_volume", "status", "tier"))
+            "keyword", "keyword_normalized", "volume", "difficulty", "opportunity_index", "ai_search_volume", "status", "tier", "intent"))
         scopes.append({"run_id": run.run_id, "revision": state.get("revision", 0),
             "brief": run.run_request["island_research_brief"], "keywords": rows,
             "seeds": [{"id": p["id"], "name": p["name"], "centroid": p["centroid_embedding"],
