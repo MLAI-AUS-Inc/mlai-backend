@@ -160,6 +160,8 @@ class PersistArticleMemoryStatusTest(TestCase):
             "run-revision",
             {"delivery_package": {"title": "My Article", "slug": "my-article", "target_keyword": "my keyword"}},
         )
+        run_revision.run_request = {"revision_source_run_id": run_with_pr.run_id}
+        run_revision.save(update_fields=["run_request"])
         article = _persist_article_memory_from_run(organization=self.organization, run=run_revision)
         self.assertEqual(article.publish_status, ArticlePublishStatus.LIVE)
         self.assertEqual(article.pr_url, "https://github.com/MLAI-AUS-Inc/mlai-au/pull/990")
@@ -660,8 +662,8 @@ class WrittenTopicCollapseTest(TestCase):
         fields.update(overrides)
         return WrittenArticle.objects.create(**fields)
 
-    def test_live_row_wins_over_newer_stale_pr_open(self):
-        # The live row must win even though the stale duplicate was created later.
+    def test_shared_keyword_keeps_distinct_live_and_pending_articles(self):
+        # A shared keyword is not proof that two stable article IDs are duplicates.
         self._article("meetup-and", "ai meetup sydney", publish_status=ArticlePublishStatus.LIVE)
         self._article(
             "meetup-or",
@@ -670,9 +672,8 @@ class WrittenTopicCollapseTest(TestCase):
             pr_url="https://github.com/o/r/pull/1",
         )
         topics = _recent_written_topics(self.organization)
-        self.assertEqual(len(topics), 1)
-        self.assertEqual(topics[0]["slug"], "meetup-and")
-        self.assertEqual(topics[0]["bucket"], "published")
+        self.assertEqual({topic["slug"] for topic in topics}, {"meetup-and", "meetup-or"})
+        self.assertEqual(next(t for t in topics if t["slug"] == "meetup-and")["bucket"], "published")
 
     def test_distinct_topics_are_both_kept(self):
         self._article("a", "keyword a", publish_status=ArticlePublishStatus.LIVE)
@@ -680,9 +681,8 @@ class WrittenTopicCollapseTest(TestCase):
         slugs = {topic["slug"] for topic in _recent_written_topics(self.organization)}
         self.assertEqual(slugs, {"a", "b"})
 
-    def test_same_topic_both_in_flight_collapses_to_most_recent(self):
+    def test_shared_keyword_keeps_distinct_drafts(self):
         self._article("draft-old", "same topic", publish_status=ArticlePublishStatus.WRITTEN)
         self._article("draft-new", "same topic", publish_status=ArticlePublishStatus.PR_OPEN)
         topics = _recent_written_topics(self.organization)
-        self.assertEqual(len(topics), 1)
-        self.assertEqual(topics[0]["slug"], "draft-new")
+        self.assertEqual([t["slug"] for t in topics], ["draft-new", "draft-old"])

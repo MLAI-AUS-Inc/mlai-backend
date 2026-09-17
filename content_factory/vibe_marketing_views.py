@@ -20,7 +20,7 @@ from bs4 import BeautifulSoup
 from django.conf import settings
 from django.core.cache import cache
 from django.core.exceptions import ValidationError as DjangoValidationError
-from django.db import OperationalError, connection, transaction
+from django.db import DatabaseError, OperationalError, connection, transaction
 from django.db.models import Count, Max, Prefetch
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
@@ -58,6 +58,7 @@ from content_factory.authors import (
 )
 from content_factory.contract import CONTENT_FACTORY_REQUEST_SOURCE
 from content_factory.dispatch_binding import bind_dispatch_token_run, run_is_dispatch_token_keyed
+from content_factory.editorial_catalog import article_brief_for_catalog
 from content_factory.google_baseline import collect_verified_google_metrics, google_baseline_connection_status
 from content_factory.run_state import ARTICLE_WORKFLOWS, active_retry_signal, clear_obsolete_active_run_blockers
 from content_analytics.services.config import (
@@ -582,6 +583,55 @@ def _get_config(organization):
     return config
 
 
+def _refresh_article_editorial_payload(*, organization, payload):
+    """Revalidate at an effect boundary; an outage is not an empty catalogue.
+
+    This is a fresh read, not a lease across a later billing or HTTP operation.
+    The receiving worker must still validate current policy at its boundaries.
+    """
+    try:
+        config = OrganizationContentConfig.objects.filter(organization=organization).only("pillar_strategy").first()
+        if config is None:
+            return Response(
+                {"detail": "Article policy is unavailable. Reload before trying again.", "field": "editorialBrief", "code": "editorial_catalog_unavailable"},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        brief = article_brief_for_catalog(config.pillar_strategy, payload)
+    except DatabaseError:
+        return Response(
+            {"detail": "Article policy could not be checked. Reload before trying again.", "field": "editorialBrief", "code": "editorial_catalog_unavailable"},
+            status=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+    except ValueError as exc:
+        return Response(
+            {"detail": f"{exc}. Review the current audience and offer before trying again.", "field": "editorialBrief", "code": "editorial_brief_invalid"},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    if brief is not None:
+        payload.pop("editorialBrief", None)
+        payload["editorial_brief"] = brief
+    return None
+
+
+def _revision_editorial_payload_from_run(*, context, run):
+    """Copy only the source's decision, never generated result or caller prose."""
+    if not _run_belongs_to_context(run, context):
+        return {}, Response({"detail": "Source run not found."}, status=status.HTTP_404_NOT_FOUND)
+    request = run.run_request
+    if not isinstance(request, dict):
+        return {}, Response({"detail": "Source run request requires repair."}, status=status.HTTP_409_CONFLICT)
+    domain = context.organization.domain
+    if any(value and normalize_company_domain(value) != normalize_company_domain(domain)
+           for value in (run.domain, request.get("domain"))):
+        return {}, Response({"detail": "Source run organization has changed. Reload before revising."}, status=status.HTTP_409_CONFLICT)
+    payload = {"domain": domain}
+    for key in ("editorial_brief", "editorialBrief"):
+        if key in request:
+            payload[key] = copy.deepcopy(request[key])
+    error = _refresh_article_editorial_payload(organization=context.organization, payload=payload)
+    return payload, error
+
+
 def _roo_points_balance_for_user(user) -> int:
     from roo.services import PointsService
 
@@ -634,6 +684,9 @@ def _mark_roo_points_gate_authorized(payload: dict, *, domain: str, action: str,
 
 
 def _charge_roo_points_for_article(request, *, context, payload: dict):
+    editorial_error = _refresh_article_editorial_payload(organization=context.organization, payload=payload)
+    if editorial_error is not None:
+        return None, None, None, editorial_error
     domain = context.organization.domain
     client_request_id = str(
         payload.get("client_request_id")
@@ -2324,6 +2377,11 @@ def _serialize_written_article(article, *, publish_attempt=None):
         "title": article.title,
         "slug": article.slug,
         "keyword": article.primary_keyword,
+        "audienceId": getattr(article, "audience_id", ""),
+        "offerId": getattr(article, "offer_id", ""),
+        "editorialSnapshot": getattr(article, "editorial_snapshot", None),
+        "originalEditorialSnapshot": getattr(article, "original_editorial_snapshot", None),
+        "editorialProvenanceStatus": getattr(article, "editorial_provenance_status", "unknown"),
         "articleUrl": article.article_url or "",
         "prUrl": article.pr_url or "",
         "prNumber": article.pr_number,
@@ -2652,19 +2710,15 @@ def _written_article_rank(article):
 
 
 def _collapse_written_articles_by_topic(articles):
-    """Keep one row per topic so a topic never appears in BOTH the Publishing and
-    recent lists.
+    """Deduplicate stable article identities without collapsing shared keywords.
 
-    A slug change on a revision creates a second WrittenArticle for the same
-    topic (same researched keyword), leaving a stale duplicate — e.g. an orphaned
-    "PR open" row alongside the live one. Collapse to the canonical row per topic
-    (most-advanced bucket, then most recent). `articles` arrives newest-first;
-    topic order follows first appearance.
+    Separate reader tasks can produce separate articles for the same keyword.
+    A slug-changing revision retains its article/analytics identity.
     """
     best_by_topic = {}
     order = []
     for article in articles:
-        key = _normalize_keyword_memory(article.primary_keyword) or f"id:{article.id}"
+        key = str(getattr(article, "analytics_id", None) or article.id)
         current = best_by_topic.get(key)
         if current is None:
             best_by_topic[key] = article
@@ -2767,8 +2821,11 @@ def _article_publish_attempts(articles):
 
 
 def _written_article_identity_keys(organization):
-    keys = {"slugs": set(), "keywords": set()}
-    for article in WrittenArticle.objects.filter(organization=organization).only("slug", "primary_keyword", "title")[:500]:
+    keys = {"slugs": set(), "keywords": set(), "analytics_ids": set(), "run_ids": set()}
+    for article in WrittenArticle.objects.filter(organization=organization).only("slug", "primary_keyword", "title", "analytics_id", "source_run_id")[:500]:
+        keys["analytics_ids"].add(str(article.analytics_id))
+        if article.source_run_id:
+            keys["run_ids"].add(article.source_run_id)
         slug = slugify(str(article.slug or article.title or ""))
         keyword = _normalize_keyword_memory(article.primary_keyword)
         title_slug = slugify(str(article.title or ""))
@@ -2812,6 +2869,10 @@ def _article_draft_title_keyword(run):
 
 
 def _article_draft_matches_written(run, written_keys):
+    request = _run_mapping(run.run_request)
+    if request.get("editorial_brief") or request.get("editorialBrief"):
+        analytics_id = str(request.get("analytics_article_id") or request.get("analyticsArticleId") or "")
+        return run.run_id in written_keys.get("run_ids", set()) or bool(analytics_id and analytics_id in written_keys.get("analytics_ids", set()))
     title, keyword = _article_draft_title_keyword(run)
     package = _content_package_from_run(run) or {}
     slugs = written_keys.get("slugs") or set()
@@ -3408,69 +3469,16 @@ def _persist_article_memory_from_run(*, organization, run):
     ).strip()
     if canonical_path and not canonical_path.startswith("/"):
         canonical_path = f"/{canonical_path}"
-    article, created = WrittenArticle.objects.get_or_create(
-        organization=organization,
-        slug=slug,
-        defaults={
-            "title": title,
-            "category": str(result.get("category") or "featured"),
-            "article_url": article_url,
-            "pr_url": pr_url,
-            "pr_number": pr_number,
-            "content_path": content_path,
-            "primary_keyword": primary_keyword,
-            # When the article was packaged — NOT proof it reached the site;
-            # publish_status tracks the real lifecycle.
-            "published_at": timezone.now(),
-            "publish_status": derived_status,
-            "source_run_id": "" if _is_publish_child_run(run) else run.run_id,
-            **({"analytics_id": analytics_id} if analytics_id else {}),
-            "canonical_url": canonical_url,
-            "canonical_path": canonical_path,
-        },
+    from .article_editorial import upsert_written_article
+    article, created = upsert_written_article(
+        organization=organization, slug=slug, source_run_id=run.run_id,
+        analytics_id=analytics_id,
+        defaults={"title": title, "category": str(result.get("category") or "featured"),
+                  "article_url": article_url, "pr_url": pr_url, "pr_number": pr_number,
+                  "content_path": content_path, "primary_keyword": primary_keyword,
+                  "published_at": timezone.now(), "publish_status": derived_status,
+                  "canonical_url": canonical_url, "canonical_path": canonical_path},
     )
-    if not created:
-        update_fields = set()
-        category = str(result.get("category") or "").strip()
-        for field, value in (
-            ("title", title),
-            ("category", category),
-            ("article_url", article_url),
-            ("pr_url", pr_url),
-            ("content_path", content_path),
-            ("primary_keyword", primary_keyword),
-            ("canonical_url", canonical_url),
-            ("canonical_path", canonical_path),
-        ):
-            # Only overwrite with real values so a later evidence-less run
-            # (e.g. a revision) can't wipe URLs we already captured.
-            if value and getattr(article, field) != value:
-                setattr(article, field, value)
-                update_fields.add(field)
-        if analytics_id and article.analytics_id != analytics_id:
-            # The first persisted identity owns every historical aggregate for
-            # this article. A later retry/revision with the same slug must not
-            # silently re-key it; scaffold reconciliation can restore the
-            # existing id into the generated registry if an upstream run ever
-            # supplies a different value.
-            logger.warning(
-                "article_analytics_id_mismatch_preserved run_id=%s article_id=%s incoming=%s existing=%s",
-                run.run_id,
-                article.pk,
-                analytics_id,
-                article.analytics_id,
-            )
-        if not article.published_at:
-            article.published_at = timezone.now()
-            update_fields.add("published_at")
-        # Keep the Edit link pointed at the latest writing/revision run; a
-        # publish child's run page is not the review surface.
-        if not _is_publish_child_run(run) and article.source_run_id != run.run_id:
-            article.source_run_id = run.run_id
-            update_fields.add("source_run_id")
-        update_fields.update(advance_publish_status(article, derived_status, pr_number=pr_number))
-        if update_fields:
-            article.save(update_fields=sorted(update_fields))
     keyword, _keyword_created = ResearchedKeyword.objects.get_or_create(
         organization=organization,
         keyword_normalized=_normalize_keyword_memory(primary_keyword),
@@ -3533,6 +3541,8 @@ def _apply_publish_child_evidence_to_article_inner(organization, source_run, chi
         return None
     article = WrittenArticle.objects.filter(organization=organization, slug=slug).first()
     if article is None:
+        return None
+    if article.source_run_id and source_run and article.source_run_id != source_run.run_id:
         return None
     update_fields = set()
     if pr_url and article.pr_url != pr_url:
@@ -6858,6 +6868,9 @@ def _supersede_stale_scan_runs(*, context, request_user):
 
 def _restart_article_payload_from_run(*, run, context, config, actor_id):
     run_request = _run_mapping(run.run_request)
+    # The stored reader decision is authoritative. Do not invent one from a
+    # generated result/package or silently drop it during a replacement start.
+    editorial_brief = article_brief_for_catalog(config.pillar_strategy, run_request)
     result = _run_mapping(run.result)
     package = _content_package_from_run(run) or {}
     title, keyword = _article_draft_title_keyword(run)
@@ -6926,6 +6939,8 @@ def _restart_article_payload_from_run(*, run, context, config, actor_id):
             or uuid.uuid4()
         ),
     }
+    if editorial_brief is not None:
+        payload["editorial_brief"] = editorial_brief
     payload["analytics_config"] = analytics_config_for_content_factory(
         context.organization,
         analytics_article_id=payload["analytics_article_id"],
@@ -6955,7 +6970,13 @@ def _restart_article_run(*, run, context):
 
     config = _get_config(context.organization)
     actor_id = founder_actor_id_for_user(context.profile.user)
-    payload = _restart_article_payload_from_run(run=run, context=context, config=config, actor_id=actor_id)
+    try:
+        payload = _restart_article_payload_from_run(run=run, context=context, config=config, actor_id=actor_id)
+    except ValueError as exc:
+        return None, Response(
+            {"detail": f"{exc}. Review the current audience and offer before restarting this article.", "field": "editorialBrief", "code": "editorial_brief_invalid"},
+            status=status.HTTP_409_CONFLICT,
+        )
     if not payload:
         return None, Response(
             {"detail": "This draft does not have enough stored request data to restart automatically."},
@@ -6975,6 +6996,9 @@ def _restart_article_run(*, run, context):
             status=status.HTTP_409_CONFLICT,
         )
 
+    editorial_error = _refresh_article_editorial_payload(organization=context.organization, payload=payload)
+    if editorial_error is not None:
+        return None, editorial_error
     billing_error = _reuse_roo_points_authorization_for_article_job(
         run=run,
         payload=payload,
@@ -7386,6 +7410,7 @@ PUBLISH_MERGE_EVIDENCE_RESULT_KEYS = (
 )
 DJANGO_OWNED_ARTICLE_RESULT_KEYS = (
     *PUBLISH_MERGE_EVIDENCE_RESULT_KEYS,
+    "article_admission_notice",
     "article_system_review_comments",
     "daily_automation_channel_warning",
     "latest_article_system_revision_response",
@@ -7512,15 +7537,16 @@ def _article_draft_keyword_by_root(runs, source_map):
 
 
 def _article_draft_job_key(run, source_map, keyword_by_root):
-    """Stable identity for the topic-level job a run belongs to.
+    """Use article/lineage identity for targeted work; retain legacy topic grouping."""
+    request = _run_mapping(run.run_request)
+    brief = request.get("editorial_brief") or request.get("editorialBrief")
+    if isinstance(brief, dict):
+        analytics_id = request.get("analytics_article_id") or request.get("analyticsArticleId")
+        if analytics_id:
+            return "article:" + str(analytics_id)
+        return "editorial-root:" + _resolve_article_root_run_id(run.run_id, source_map)
 
-    Every edit / failed publish / restart / independent regeneration of the same
-    topic shares this key, so the dashboard collapses them into one card and
-    deleting it cancels them all. Prefers the normalized keyword (the topic
-    identity, matching the ResearchedKeyword unique key); falls back to the
-    lineage root only when no run in the lineage has any keyword/title at all (so
-    such runs stay isolated, as they did under pure lineage dedup).
-    """
+
     root = _resolve_article_root_run_id(run.run_id, source_map)
     _, keyword = _article_draft_title_keyword(run)
     normalized = _normalize_keyword_memory(keyword) or keyword_by_root.get(root, "")
@@ -9835,6 +9861,7 @@ def _workflow_progress(*, context=None, run=None, latest_runs=None, checks=None,
 
 
 COMPACT_RUN_RESULT_KEYS = {
+    "article_admission_notice",
     "article_surface_hint",
     "articleSurfaceHint",
     "article_surface_hint_status",
@@ -9955,6 +9982,7 @@ COMPACT_AUTOFILL_RESULT_KEYS = {
     "linkedinProfile",
     "partial",
     "profileFields",
+    "editorialSuggestions",
     "researchDepth",
     "researchQuality",
     "researchSummary",
@@ -10340,9 +10368,16 @@ def _serialize_run(run, *, context=None, latest_runs=None, checks=None, mode="fu
     )
     scan_progress, scan_progress_snake = _scan_progress_payloads(run)
     content_island = _run_content_island_payload(run)
+    saved_request = _run_mapping(getattr(run, "run_request", {}))
+    saved_brief = saved_request.get("editorial_brief") or saved_request.get("editorialBrief")
+    editorial_snapshot = ({"schema_version": 1, "writing_run_id": run.run_id,
+        "recorded_at": run.created_at.isoformat(), "brief": saved_brief,
+        "admission": saved_request.get("editorial_admission"),
+        "provenance_status": "recorded" if saved_request.get("editorial_admission") else "partial"} if saved_brief else None)
     if compact:
         return {
             "runId": run.run_id,
+            "editorialSnapshot": editorial_snapshot,
             "workflow": run.workflow,
             "domain": run.domain,
             "githubRepo": run.github_repo,
@@ -10391,6 +10426,7 @@ def _serialize_run(run, *, context=None, latest_runs=None, checks=None, mode="fu
     component_manifest = _component_manifest_from_run(run)
     return {
         "runId": run.run_id,
+            "editorialSnapshot": editorial_snapshot,
         "workflow": run.workflow,
         "domain": run.domain,
         "githubRepo": run.github_repo,
@@ -11219,26 +11255,6 @@ def _content_factory_diagnostics(config, **extra):
     }
     diagnostics.update({key: value for key, value in extra.items() if value is not None})
     return diagnostics
-
-
-def _normalize_remote_run_status(value):
-    normalized = str(value or "").strip().lower()
-    mapping = {
-        "processing": ContentFactoryRunStatus.RUNNING,
-        "in_progress": ContentFactoryRunStatus.RUNNING,
-        "blocked_verification": ContentFactoryRunStatus.BLOCKED,
-        "precondition_failed": ContentFactoryRunStatus.BLOCKED,
-        "preview_failed": ContentFactoryRunStatus.BLOCKED,
-        "fallback_ready": ContentFactoryRunStatus.BLOCKED,
-        "setup_pr_created": ContentFactoryRunStatus.COMPLETED,
-        "pr_created": ContentFactoryRunStatus.COMPLETED,
-        "merged": ContentFactoryRunStatus.COMPLETED,
-        "merged_verifying": ContentFactoryRunStatus.COMPLETED,
-        "error": ContentFactoryRunStatus.FAILED,
-    }
-    normalized = mapping.get(normalized, normalized)
-    allowed = {choice[0] for choice in ContentFactoryRunStatus.choices}
-    return normalized if normalized in allowed else ContentFactoryRunStatus.QUEUED
 
 
 def _normalize_remote_step_status(value):
@@ -12630,9 +12646,16 @@ def _queue_content_factory_run(*, endpoint, workflow, context, config, payload, 
         response = None
         request_exception = None
         recovered_by_key = None
+        editorial_rejection = None
+        post_attempted = False
         max_attempts = CONTENT_FACTORY_DISPATCH_MAX_POST_ATTEMPTS if keyed_dispatch else 1
         for attempt in range(1, max_attempts + 1):
+            if endpoint == "article":
+                editorial_rejection = _refresh_article_editorial_payload(organization=context.organization, payload=payload)
+                if editorial_rejection is not None:
+                    break
             try:
+                post_attempted = True
                 response = http_client.post(url, json=payload, headers=_content_factory_headers(), timeout=(3, 10))
                 request_exception = None
             except http_client.RequestException as exc:
@@ -12661,7 +12684,30 @@ def _queue_content_factory_run(*, endpoint, workflow, context, config, payload, 
                 recovered_by_key = lookup_payload
                 break
 
-        if recovered_by_key is not None:
+        if editorial_rejection is not None and not post_attempted and billing_refund_context and keyed_dispatch:
+            # A caller may repeat a previously charged idempotency key. No POST
+            # in *this* call does not prove that key has never reached a worker.
+            outcome, lookup_payload = _lookup_content_factory_dispatch_by_key(remote_config, dispatch_key)
+            if outcome == "dispatched":
+                recovered_by_key = lookup_payload
+            else:
+                # Even an immediate absent lookup can race an earlier in-flight
+                # call. Retain the established grace/lookup refund discipline.
+                dispatch_unresolved = True
+
+        if editorial_rejection is not None and recovered_by_key is None:
+            remote_data = _blocked_worker_payload(
+                workflow=workflow,
+                detail=str(editorial_rejection.data["detail"]),
+                status_code=editorial_rejection.status_code,
+                response_payload=editorial_rejection.data,
+                retryable=False,
+            )
+            # Policy may change after a lost response/5xx. Stop new POSTs, but
+            # keep the original key/outcome pending: that request may have been
+            # accepted. Existing lookup/grace handling decides any later refund.
+            dispatch_unresolved = dispatch_unresolved or post_attempted
+        elif recovered_by_key is not None:
             remote_run_id = str(recovered_by_key.get("run_id") or "").strip()
             remote_data = {
                 "run_id": remote_run_id,
@@ -12669,6 +12715,9 @@ def _queue_content_factory_run(*, endpoint, workflow, context, config, payload, 
                 "client_request_id": dispatch_key,
                 "dispatch_recovered_by_key": True,
             }
+            if editorial_rejection is not None:
+                # Acknowledging an existing run is not new generation approval.
+                remote_data["diagnostics"] = {"editorial_policy_recheck": dict(editorial_rejection.data)}
             logger.warning(
                 "content_factory_dispatch_recovered_via_key workflow=%s endpoint=%s run_id=%s client_request_id=%s",
                 workflow,
@@ -12939,7 +12988,7 @@ def _content_factory_action_transport_pending(remote_data):
     return isinstance(remote_data, dict) and bool(remote_data.get("content_factory_transport_error"))
 
 
-def _call_content_factory_component_revision(*, run_id, payload):
+def _call_content_factory_component_revision(*, organization, run_id, payload):
     remote_config = _content_factory_remote_config()
     if not remote_config["enabled"]:
         technical_error = _content_factory_unavailable_message(remote_config)
@@ -12951,6 +13000,9 @@ def _call_content_factory_component_revision(*, run_id, payload):
             retryable=True,
         )
 
+    editorial_error = _refresh_article_editorial_payload(organization=organization, payload=payload)
+    if editorial_error is not None:
+        return editorial_error  # No POST; retain any submitted batch for explicit retry.
     try:
         response = http_client.post(
             f"{remote_config['base_url']}/api/runs/{run_id}/component-revisions",
@@ -12974,6 +13026,11 @@ def _call_content_factory_component_revision(*, run_id, payload):
     except Exception:
         response_payload = {}
     detail = response_payload.get("detail") or response_payload.get("error") or response.text
+    if (response.status_code in {409, 503} and isinstance(detail, dict)
+            and (str(detail.get("code") or "").startswith("editorial_")
+                 or detail.get("code") == "saved_editorial_policy_invalid")):
+        return Response({"detail": str(detail.get("message") or "Review the article's current audience and offer."),
+                         "code": detail["code"], "field": "editorialBrief"}, status=response.status_code)
     return {
         "error": str(detail or f"Content Factory returned {response.status_code}."),
         "errors": [str(detail or f"Content Factory returned {response.status_code}.")],
@@ -13740,7 +13797,7 @@ class VibeMarketingLearnedRuleDetailView(APIView):
 
 def _written_article_identity_keys_for_article(article):
     """Identity keys for ONE article, mirroring _written_article_identity_keys."""
-    keys = {"slugs": set(), "keywords": set()}
+    keys = {"slugs": set(), "keywords": set(), "analytics_ids": {str(getattr(article, "analytics_id", ""))}, "run_ids": {article.source_run_id} if article.source_run_id else set()}
     slug = slugify(str(article.slug or article.title or ""))
     title_slug = slugify(str(article.title or ""))
     keyword = _normalize_keyword_memory(article.primary_keyword)
@@ -14210,6 +14267,7 @@ class VibeMarketingAutofillView(APIView):
             "abn": company.abn,
             "existing_fields": existing_fields,
             "startup_profile": startup_profile,
+            "editorial_catalog_version": ((config.pillar_strategy or {}).get("editorial_catalog") or {}).get("version", 0),
             "research_depth": "deep",
             "strict_deep_research": True,
             "min_direct_competitors": 3,
@@ -15071,6 +15129,11 @@ class VibeMarketingDiscoveryView(APIView):
         if error_response:
             return error_response
         config = _get_config(context.organization)
+        from .editorial_catalog import discovery_audience_context, CatalogConflict
+        try:
+            research_audience = discovery_audience_context(config.pillar_strategy, request.data)
+        except (ValueError, CatalogConflict) as exc:
+            return Response({"detail": str(exc)}, status=409)
         # Topic research has no dependency on a merged repository scaffold.
         payload = {
             "domain": context.organization.domain,
@@ -15163,6 +15226,8 @@ class VibeMarketingDiscoveryView(APIView):
                         "requested_topic_count": max(1, min(custom_topic_count, 8)),
                     }
                 )
+        if research_audience:
+            payload["research_audience"] = research_audience
         run = _queue_content_factory_run(
             endpoint="discovery",
             workflow="auto_discovery",
@@ -15448,7 +15513,15 @@ class VibeMarketingArticleView(APIView):
             keyword=target_keyword or topic,
             title=selected_title or custom_title or topic,
         )
-        if coverage_match:
+        distinct_custom_task = False
+        if coverage_match and custom_title and not selected_candidate and coverage_match.article:
+            from .article_editorial import custom_article_has_distinct_task
+            try:
+                reviewed_brief = article_brief_for_catalog(config.pillar_strategy, request.data)
+                distinct_custom_task = custom_article_has_distinct_task(context.organization, coverage_match.article, reviewed_brief, custom_title)
+            except ValueError:
+                pass  # The normal admission validation supplies the actionable error.
+        if coverage_match and not distinct_custom_task:
             written_article = coverage_match.article
             return Response(
                 {
@@ -15558,18 +15631,14 @@ class VibeMarketingArticleView(APIView):
             "request_source": CONTENT_FACTORY_REQUEST_SOURCE,
             "analytics_article_id": str(uuid.uuid4()),
         }
-        # Resolve approved catalog versions before charging or dispatching.
-        from content_factory.editorial_catalog import catalog_payload
-        from content_factory.editorial_contract import ArticleEditorialBrief, AudienceOption, normalize_cta_options, resolve_editorial_brief
-        catalog = catalog_payload(config.pillar_strategy)
-        editorial_brief = _request_value(request.data, "editorial_brief", "editorialBrief", default=None)
-        if catalog["audience_options"] or catalog["cta_options"] or editorial_brief:
-            try:
-                brief = ArticleEditorialBrief.model_validate(editorial_brief)
-                resolve_editorial_brief(brief, [AudienceOption.model_validate(a) for a in catalog["audience_options"]], normalize_cta_options(catalog["cta_options"]))
-            except ValueError as exc:
-                return Response({"detail": str(exc), "field": "editorialBrief"}, status=status.HTTP_400_BAD_REQUEST)
-            payload["editorial_brief"] = brief.model_dump(mode="json")
+        # Resolve the explicit decision without dropping null/conflicting aliases
+        # or treating an empty configured catalogue as legacy permission.
+        try:
+            editorial_brief = article_brief_for_catalog(config.pillar_strategy, request.data)
+        except ValueError as exc:
+            return Response({"detail": str(exc), "field": "editorialBrief"}, status=status.HTTP_400_BAD_REQUEST)
+        if editorial_brief is not None:
+            payload["editorial_brief"] = editorial_brief
         payload["analytics_config"] = analytics_config_for_content_factory(
             context.organization,
             analytics_article_id=payload["analytics_article_id"],
@@ -16192,7 +16261,9 @@ class VibeMarketingRunCommentsSubmitView(VibeMarketingRunCommentsMixin, APIView)
                 or ""
             ).strip()
             if source_run_id and run.status == ContentFactoryRunStatus.FAILED:
-                source_run = ContentFactoryRun.objects.filter(run_id=source_run_id).first() or run
+                source_run = ContentFactoryRun.objects.filter(run_id=source_run_id).first()
+                if not source_run or not _run_belongs_to_context(source_run, context):
+                    return Response({"detail": "Source run not found."}, status=status.HTTP_404_NOT_FOUND)
                 draft_comments = list(
                     VibeMarketingComponentComment.objects.filter(
                         run=source_run,
@@ -16201,7 +16272,16 @@ class VibeMarketingRunCommentsSubmitView(VibeMarketingRunCommentsMixin, APIView)
                     .order_by("created_at", "id")
                 )
                 draft_comments = [comment for comment in draft_comments if str(comment.body or "").strip()]
-        billing_payload = {}
+        billing_payload, editorial_error = _revision_editorial_payload_from_run(context=context, run=source_run)
+        if editorial_error is not None:
+            return editorial_error
+        if source_run is not run and any(key in run_request for key in ("editorial_brief", "editorialBrief")):
+            failed_payload, editorial_error = _revision_editorial_payload_from_run(context=context, run=run)
+            if editorial_error is not None:
+                return editorial_error
+            if failed_payload.get("editorial_brief") != billing_payload.get("editorial_brief"):
+                return Response({"detail": "Failed revision and source editorial briefs disagree. Reload and review the source.",
+                                 "code": "editorial_revision_source_conflict"}, status=status.HTTP_409_CONFLICT)
         billing_error = _reuse_roo_points_authorization_for_article_job(
             run=source_run,
             payload=billing_payload,
@@ -16210,6 +16290,9 @@ class VibeMarketingRunCommentsSubmitView(VibeMarketingRunCommentsMixin, APIView)
         )
         if billing_error is not None:
             return billing_error
+        editorial_error = _refresh_article_editorial_payload(organization=context.organization, payload=billing_payload)
+        if editorial_error is not None:
+            return editorial_error
         retry_existing_batch = False
         if draft_comments:
             batch_id = str(uuid.uuid4())
@@ -16255,7 +16338,21 @@ class VibeMarketingRunCommentsSubmitView(VibeMarketingRunCommentsMixin, APIView)
             "request_source": "founder_tools_component_feedback",
         }
         remote_payload.update(billing_payload)
-        remote_data = _call_content_factory_component_revision(run_id=source_run.run_id, payload=remote_payload)
+        remote_data = _call_content_factory_component_revision(
+            organization=context.organization, run_id=source_run.run_id, payload=remote_payload,
+        )
+        if isinstance(remote_data, Response):
+            # The batch may already exist, or an earlier uncertain request may
+            # have reached the worker. Preserve its key and expose the blocked
+            # state without marking it running, undoing comments or refunding.
+            result = dict(source_run.result or {})
+            result["component_feedback_latest_batch"] = {
+                "id": batch_id, "sourceRunId": source_run.run_id, "status": "submitted",
+                "error": remote_data.data.get("detail"), "policyBlocked": True,
+            }
+            source_run.result = result
+            source_run.save(update_fields=["result", "updated_at"])
+            return remote_data
         new_run_id = str(remote_data.get("run_id") or remote_data.get("runId") or "").strip()
         if remote_data.get("error") and not new_run_id:
             result = source_run.result or {}
@@ -17310,3 +17407,23 @@ class VibeMarketingDailyReplayView(APIView):
             remote_data={"status": ContentFactoryRunStatus.QUEUED, "message": "Daily replay queued"},
         )
         return Response({"run_id": run.run_id, "runId": run.run_id, "status": run.status}, status=status.HTTP_202_ACCEPTED)
+
+
+def _normalize_remote_run_status(value):
+    normalized = str(value or "").strip().lower()
+    mapping = {
+        "processing": ContentFactoryRunStatus.RUNNING,
+        "in_progress": ContentFactoryRunStatus.RUNNING,
+        "blocked_verification": ContentFactoryRunStatus.BLOCKED,
+        "precondition_failed": ContentFactoryRunStatus.BLOCKED,
+        "preview_failed": ContentFactoryRunStatus.BLOCKED,
+        "fallback_ready": ContentFactoryRunStatus.BLOCKED,
+        "setup_pr_created": ContentFactoryRunStatus.COMPLETED,
+        "pr_created": ContentFactoryRunStatus.COMPLETED,
+        "merged": ContentFactoryRunStatus.COMPLETED,
+        "merged_verifying": ContentFactoryRunStatus.COMPLETED,
+        "error": ContentFactoryRunStatus.FAILED,
+    }
+    normalized = mapping.get(normalized, normalized)
+    allowed = {choice[0] for choice in ContentFactoryRunStatus.choices}
+    return normalized if normalized in allowed else ContentFactoryRunStatus.QUEUED
