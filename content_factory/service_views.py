@@ -37,7 +37,9 @@ from content_factory.article_setup_reset import (
     clear_cancelled_article_setup_config,
 )
 from content_factory.authors import normalize_authors, org_config_author_payload
-from content_factory.editorial_catalog import catalog_payload, merge_strategy, update_catalog
+from content_factory.editorial_catalog import EDIT_FIELDS, catalog_payload, merge_strategy
+from content_factory.editorial_run_state import EditorialRunConflict, merge_editorial_run_snapshot
+from content_factory.editorial_views import service_catalog_update
 from content_factory.auth import content_factory_github_connection_state
 from content_factory.delivery import (
     build_content_factory_preview_url,
@@ -540,7 +542,13 @@ class ContentFactoryOrgConfigView(APIView):
             )
         
         normalized_domain = self._normalize_domain(domain)
-        
+
+        # Policy writes cannot partially update organisation metadata or create
+        # an organisation before approval/version validation. Keep this path
+        # behind the view's existing HasRooApiKey permission.
+        if any(field in data for field in EDIT_FIELDS):
+            return service_catalog_update(normalized_domain, data)
+
         # Get or create organization
         org, org_created = Organization.objects.get_or_create(
             domain=normalized_domain,
@@ -770,11 +778,6 @@ class ContentFactoryOrgConfigView(APIView):
             current_strategy = current_config.pillar_strategy if current_config else {}
             if 'pillar_strategy' in defaults:
                 defaults['pillar_strategy'] = merge_strategy(current_strategy, defaults['pillar_strategy'])
-            if 'audience_options' in data or 'cta_options' in data:
-                try:
-                    defaults['pillar_strategy'] = update_catalog(defaults.get('pillar_strategy', current_strategy), data)
-                except ValueError as exc:
-                    return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
             config, config_created = OrganizationContentConfig.objects.update_or_create(
                 organization=org, defaults=defaults,
             )
@@ -2404,6 +2407,34 @@ def _release_callback_event(event_id: str) -> None:
         logger.warning("Failed to release callback event_id=%s after processing failure: %s", event_id, exc)
 
 
+def _record_article_admission_attention(data):
+    """Record an attempt, not a terminal failure or a replacement run identity."""
+    from content_factory.article_admission_notice import notice_for_run, is_older_notice
+
+    run_id = data.get("run_id")
+    if not isinstance(run_id, str) or not run_id or len(run_id) > 200:
+        return Response({"error": "article_admission_notice_invalid"}, status=status.HTTP_400_BAD_REQUEST)
+    with transaction.atomic():
+        run = ContentFactoryRun.objects.select_for_update().filter(run_id=run_id).first()
+        if run is None:
+            # A callback may precede the local row. Keep it in the sender's
+            # outbox, without binding a key, creating a phantom run or refunding.
+            return Response({"error": "article_admission_run_not_found", "run_id": run_id}, status=status.HTTP_409_CONFLICT)
+        try:
+            notice = notice_for_run({"run_id": run.run_id, "workflow": run.workflow,
+                                     "domain": run.domain, "github_repo": run.github_repo,
+                                     "run_request": run.run_request}, data, _callback_event_emitted_at(data))
+        except ValueError:
+            return Response({"error": "article_admission_notice_conflict", "run_id": run_id}, status=status.HTTP_409_CONFLICT)
+        result = dict(run.result or {})
+        if not is_older_notice(result.get("article_admission_notice"), notice):
+            result["article_admission_notice"] = notice
+            run.result = result
+            run.save(update_fields=["result"])
+    # No run/step/job status, event watermark, billing or scheduled retry changes.
+    return Response({"status": "received", "run_id": run_id, "message": "Article-start observation recorded; run state unchanged"}, status=status.HTTP_200_OK)
+
+
 def _sync_generation_callback_to_run(*, data: dict, run_status: str, step_status: str) -> Optional[ContentFactoryRun]:
     run_id = str(data.get("run_id") or data.get("job_id") or "").strip()
     if not run_id:
@@ -3816,6 +3847,7 @@ class ContentFactoryCallbackView(APIView):
     - discovery_progress: Non-terminal discovery milestone update
     - article_progress: Non-terminal article milestone update
     - generation_blocked: Non-terminal capacity or verifier block update
+    - article_admission_attention: Non-terminal article-start observation, no refund/retry decision
     - generation_pr_opened: Draft PR opened as the terminal reviewable outcome
     - article_complete: Article generated and published successfully
     - publish_bundle_ready: Delivery bundle packaged and ready
@@ -3956,6 +3988,8 @@ class ContentFactoryCallbackView(APIView):
             return self._handle_website_baseline_complete(data)
         elif event_type == 'generation_failed':
             return self._handle_generation_failed(data)
+        elif event_type == 'article_admission_attention':
+            return _record_article_admission_attention(data)
         elif event_type == 'generation_blocked':
             return self._handle_generation_blocked(data)
         elif event_type == 'generation_pr_opened':
@@ -8413,6 +8447,9 @@ class SEOWrittenArticleCreateView(APIView):
             offset = 0
 
         qs = WrittenArticle.objects.filter(organization=org).order_by('-created_at')
+        for field in ('audience_id', 'offer_id'):
+            if request.query_params.get(field):
+                qs = qs.filter(**{field: request.query_params[field]})
         total_count = qs.count()
         serializer = WrittenArticleSerializer(qs[offset:offset + limit], many=True)
         return Response({
@@ -8444,7 +8481,7 @@ class SEOWrittenArticleCreateView(APIView):
         if job_id:
             from content_factory.models import ContentFactoryJob
             try:
-                job = ContentFactoryJob.objects.get(job_id=job_id)
+                job = ContentFactoryJob.objects.get(job_id=job_id, domain=org.domain)
             except ContentFactoryJob.DoesNotExist:
                 pass
 
@@ -8458,27 +8495,18 @@ class SEOWrittenArticleCreateView(APIView):
             'canonical_path': serializer.validated_data.get('canonical_path', ''),
             'job': job,
             'published_at': timezone.now(),
+            'publish_status': ArticlePublishStatus.PR_OPEN if serializer.validated_data.get('pr_url') else ArticlePublishStatus.WRITTEN,
         }
-        incoming_analytics_id = serializer.validated_data.get('analytics_id')
-        # analytics_id is create-only. Replayed callbacks may refresh article
-        # metadata, but a later run must never replace the stable identity that
-        # already owns historical aggregates.
-        with transaction.atomic():
-            article, created = WrittenArticle.objects.update_or_create(
-                organization=org,
-                slug=serializer.validated_data['slug'],
-                defaults=defaults,
+        from .article_editorial import upsert_written_article, ArticleEditorialConflict
+        try:
+            article, created = upsert_written_article(
+                organization=org, slug=serializer.validated_data['slug'], defaults=defaults,
+                source_run_id=serializer.validated_data.get('source_run_id'),
+                analytics_id=serializer.validated_data.get('analytics_id'),
+                incoming_admission=serializer.validated_data.get('editorial_admission'),
             )
-            if created and incoming_analytics_id and article.analytics_id != incoming_analytics_id:
-                article.analytics_id = incoming_analytics_id
-                article.save(update_fields=['analytics_id'])
-
-        # A PR URL only proves a PR exists; merge/live state is confirmed later
-        # by the publish-status refresh. Never downgrade an existing status.
-        desired_status = ArticlePublishStatus.PR_OPEN if defaults.get('pr_url') else ArticlePublishStatus.WRITTEN
-        status_fields = advance_publish_status(article, desired_status)
-        if status_fields:
-            article.save(update_fields=sorted(set(status_fields)))
+        except ArticleEditorialConflict as exc:
+            return Response({'error': 'article_editorial_conflict', 'detail': str(exc)}, status=409)
 
         # Update keyword status to written if it exists
         keyword_normalized = primary_keyword.lower().strip()
@@ -8687,6 +8715,7 @@ _DJANGO_OWNED_RUN_RESULT_KEYS = frozenset(
         "island_research_refunded",
         "island_research_selection",
         "refunded_points",
+        "article_admission_notice",
         "article_system_review_comments",
         "daily_automation_channel_warning",
         "latest_article_system_revision_response",
@@ -8810,11 +8839,34 @@ def _sync_content_factory_run_snapshot(*, run_id: str, data: dict, step_states: 
     data = sanitize_json_for_postgres(data if isinstance(data, dict) else {})
     step_states = sanitize_json_for_postgres(step_states if isinstance(step_states, dict) else {})
     with transaction.atomic():
-        existing_run = (
+        locked_runs = (
             ContentFactoryRun.objects.select_for_update()
             .prefetch_related("steps", "steps__attempt_history")
-            .filter(run_id=run_id)
-            .first()
+        )
+        existing_run = locked_runs.filter(run_id=run_id).first()
+        created = False
+        if existing_run is None:
+            # A missing-row lock does not reserve a run id. Validate before
+            # insertion, then merge again with the row returned by get_or_create
+            # in case another callback created it first. The locking queryset
+            # also locks that existing/race-winning row before reconciliation.
+            data = merge_editorial_run_snapshot(None, data)
+            existing_run, created = locked_runs.get_or_create(
+                run_id=run_id,
+                defaults={
+                    "workflow": data["workflow"], "domain": data.get("domain") or "",
+                    "status": data["status"], "run_request": data.get("run_request") or {},
+                },
+            )
+        # Worker observations may omit request fields. The known reader/offer
+        # decision is immutable history, not a field a sparse callback can clear.
+        data = merge_editorial_run_snapshot(
+            {
+                "workflow": existing_run.workflow,
+                "domain": existing_run.domain,
+                "run_request": existing_run.run_request,
+            } if existing_run is not None else None,
+            data,
         )
         active_snapshot = str(data.get("status") or "").strip().lower() in DURABLE_ACTIVE_RUN_STATUSES
         if active_snapshot:
@@ -8841,13 +8893,13 @@ def _sync_content_factory_run_snapshot(*, run_id: str, data: dict, step_states: 
                 active_status=data["status"],
                 current_step=data.get("current_step") or "",
             )
-        if existing_run is not None and _content_factory_run_snapshot_unchanged(existing_run, data=data, step_states=step_states):
+        if not created and _content_factory_run_snapshot_unchanged(existing_run, data=data, step_states=step_states):
             existing_run._content_factory_sync_unchanged = True
             from .island_research import refund_empty_or_failed_research
             refund_empty_or_failed_research(existing_run)
             return existing_run, False
 
-        run, created = ContentFactoryRun.objects.update_or_create(
+        run, _ = ContentFactoryRun.objects.update_or_create(
             run_id=run_id,
             defaults={
                 "workflow": data["workflow"],
@@ -9000,6 +9052,11 @@ class ContentFactoryRunView(APIView):
                     step_states=step_states,
                 )
                 break
+            except EditorialRunConflict as exc:
+                return Response(
+                    {"error": "editorial_run_conflict", "detail": str(exc), "run_id": run_id},
+                    status=status.HTTP_409_CONFLICT,
+                )
             except OperationalError as exc:
                 if not _is_retryable_sqlite_lock(exc) or attempt_number == max_attempts:
                     raise

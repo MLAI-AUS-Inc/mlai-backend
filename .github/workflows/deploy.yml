@@ -60,6 +60,17 @@ jobs:
         python -m pip install --upgrade pip
         pip install -r requirements.txt -r requirements-engine.txt
 
+    - name: Run no-database editorial contract checks
+      run: |
+        python -m unittest \
+          content_factory.tests_customer_profile_flow_unit \
+          content_factory.tests_editorial_catalog_unit \
+          content_factory.tests_editorial_catalog_api_unit \
+          content_factory.tests_editorial_dispatch_unit \
+          content_factory.tests_editorial_snapshot_unit \
+          content_factory.tests_editorial_revision_unit \
+          content_factory.tests_article_admission_notice_unit
+
     - name: Check migrations are committed
       run: python manage.py makemigrations --check --dry-run
 
@@ -451,6 +462,9 @@ jobs:
           core.tests_slack_founder_links.SlackFounderActorOrphanedPrincipalGuardTests \
           core.tests_slack_founder_links.SlackFounderActorDeletedBeforeHistoryGuardTests \
           org_memory.tests.test_migrations \
+          content_factory.tests_customer_profile_persistence \
+          content_factory.tests_article_publish_status \
+          content_factory.tests_written_article_discard \
           --verbosity 2
 
   deploy:
