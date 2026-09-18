@@ -696,10 +696,29 @@ stores only cursor/count metadata. Thread-only replies and the owner's own
 messages do not create ordinary channel unreads. A truncated/consent-limited page
 returns an unknown numeric count rather than claiming a complete total.
 
-Cached snapshots survive for 24 hours and are revalidated on refresh; visible
-rows refresh after 30 seconds, with bounded background pages for other rows.
-These pages are currently driven by a foreground client; the message-import
-worker does not independently refresh unread snapshots while every app is closed.
+With `MESSAGE_SYNC_ENABLED`, the independent `read_state` worker lane refreshes
+snapshots while all clients are closed. It rotates workspaces and owners under
+durable 120-second leases in the existing connector cursor, then resumes each
+account by stable Slack conversation ID. Only active consent and currently
+verified/provisioned devices qualify; old/out-of-window conversations do not
+consume the sweep. A budget pause retains the target and provider Retry-After;
+a source error advances past that target so it cannot stall the whole account.
+Group info/history pauses retain only allowlisted cursor metadata for 30 seconds,
+never message text. Expired worker claims and changed consent reject provider
+calls and cache writes.
+
+The client endpoint reads the shared account cache only and returns all known
+snapshots in one response (`next_cursor: null`, `retry_after_seconds: 10`). Opening
+multiple clients therefore does not multiply Slack requests. Missing snapshots
+remain unknown. Cache retention is 24 hours; the worker rechecks snapshots after
+60 seconds, with actual freshness dependent on directory size and shared API
+capacity. Visible rows use the same source snapshot as every other device.
+Deployments with message sync disabled retain the legacy foreground pagination.
+
+`conversations.info` and `users.conversations` use Slack's documented Tier 3
+allowance (one admission per 1.2 seconds), shared by app/workspace/method. Other
+method allowances and provider cooldown enforcement are unchanged. The worker
+health check now requires a fresh `read_state` heartbeat too.
 These are polled snapshots, not Slack's first-party real-time unread feed. Custom
 Slack notification preferences and subteam notification counts are not exposed
 by this API, so complete first-party badge parity cannot be guaranteed.
@@ -807,7 +826,7 @@ MLAI's public bot (`A0BDH1ZG76X`) and owner OAuth app (`A0B0NDG6VL0`) are separa
 
 Deploy callback verification with `MESSAGE_SYNC_ENABLED=false` before verifying a newly configured Slack event URL. The private app's event subscriptions were disabled during the 14 September inspection and must be enabled for live user events after URL verification. Existing users' token scopes and explicit mirror consent remain authoritative; adding a subscription does not authorize additional private access.
 
-The Docker worker health probe runs `message_sync_status --check --local-worker`, checking fresh inbox, history, public-delivery and private-delivery heartbeats from the current container. Enabled deployments wait for these heartbeats and fail if a previous container is the only worker reporting. Status output contains queue ages, expired leases, source coverage classifications and shared provider cooldowns without message bodies or credentials. History and live delivery run in independent bounded lanes, and source-limited scans report unknown absence instead of claiming empty or deleting records.
+The Docker worker health probe runs `message_sync_status --check --local-worker`, checking fresh inbox, history, public-delivery, private-delivery and read-state heartbeats from the current container. Enabled deployments wait for these heartbeats and fail if a previous container is the only worker reporting. Status output contains queue ages, expired leases, source coverage classifications and shared provider cooldowns without message bodies or credentials. History and live delivery run in independent bounded lanes, and source-limited scans report unknown absence instead of claiming empty or deleting records.
 
 ### Selected-window publication and retired registrations (September 2026)
 

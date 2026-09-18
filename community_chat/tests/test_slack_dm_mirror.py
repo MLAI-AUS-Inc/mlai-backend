@@ -2516,9 +2516,12 @@ class SlackDmMirrorOwnerTests(APITestCase):
     @patch("integrations.services.slack_dm_mirror.WebClient")
     def test_thread_page_cannot_finish_before_older_main_pages(self, web_client):
         _, conversation = self._live_conversation()
-        root_ts = "1787900800.000100"
-        reply_ts = "1787900801.000100"
-        older_ts = "1787000000.000100"
+        # Keep every fixture within this test's consent window as dates advance.
+        # Fixed August timestamps eventually tested expiration, not pagination.
+        root = int(timezone.now().timestamp()) - 86400
+        root_ts = f"{root}.000100"
+        reply_ts = f"{root + 1}.000100"
+        older_ts = f"{root - 10 * 86400}.000100"
         web_client.return_value.conversations_history.side_effect = [
             {
                 "messages": [

@@ -128,6 +128,7 @@ class SlackReadStateTests(SimpleTestCase):
             oauth_generation=5,
             workspace_id="TWORK",
             slack_user_id="UOWNER",
+            scopes=("im:read", "mpim:read", "groups:read", "channels:read"),
         )
         fields.update(changes)
         return SimpleNamespace(**fields)
@@ -522,3 +523,63 @@ class SlackReadPermissionUpgradeTests(SimpleTestCase):
         authorize.assert_called_once()
         self.assertEqual(authorize.call_args.kwargs["history_days"], 0)
         activate.assert_not_called()
+
+
+class BackgroundReadCacheTests(SimpleTestCase):
+    page = ReadStatePageTests.page
+
+    def test_enabled_worker_makes_client_reads_cache_only_and_returns_all_known_badges(self):
+        from django.test import override_settings
+        target = reads.ReadTarget('mirror-7', 'D7', 'im')
+        key = reads._cache_key(SlackReadStateTests().authority(), target)
+        value = {'available': True, 'is_unread': True, 'unread_count': 4, 'fetched_at': 1000}
+        with override_settings(MESSAGE_SYNC_ENABLED=True):
+            result, calls = self.page(cursor=3, bootstrap={key: value})
+        self.assertEqual(calls, [])
+        self.assertEqual(result['channels'], {'mirror-7': value})
+        self.assertIsNone(result['next_cursor'])
+        self.assertEqual(result['retry_after_seconds'], 10)
+
+    def test_metadata_checkpoint_resumes_history_without_repeating_info_or_retaining_text(self):
+        authority = SlackReadStateTests().authority()
+        grant = SimpleNamespace(slack_user_id='UOWNER')
+        target = reads.ReadTarget('room', 'G1', 'mpim')
+        stored = {}
+        details = {'id': 'G1', 'is_member': True, 'last_read': '100.000001',
+                   'topic': {'value': 'private topic'},
+                   'latest': {'ts': '102.000001', 'text': 'private content'}}
+        with patch.object(reads.transaction, 'atomic', side_effect=nullcontext), patch.object(
+            reads, '_lock_slack_grant_api_authority'
+        ), patch.object(reads.cache, 'get', side_effect=lambda key: stored.get(key)), patch.object(
+            reads.cache, 'set', side_effect=lambda key, value, **kwargs: stored.__setitem__(key, value)
+        ), patch.object(reads.cache, 'delete', side_effect=lambda key: stored.pop(key, None)), patch.object(
+            reads, '_call_slack_with_grant_authority', return_value={'channel': details}
+        ) as info, patch.object(reads, '_unread_messages', side_effect=[
+            reads.BudgetDeferred(3), ([{'ts': '102.000001', 'user': 'UOTHER'}], 'slack_history', False)
+        ]):
+            with self.assertRaises(reads.BudgetDeferred):
+                reads.refresh_target(grant, authority, target)
+            self.assertNotIn('private', str(stored))
+            self.assertNotIn(reads._cache_key(authority, target), stored)
+            result = reads.refresh_target(grant, authority, target)
+        self.assertEqual(info.call_count, 1)
+        self.assertTrue(result['is_unread'])
+        self.assertEqual(result['unread_count'], 1)
+        self.assertNotIn(reads._pending_key(authority, target), stored)
+
+    def test_confirmed_read_overtaking_a_source_lookup_cannot_restore_a_stale_badge(self):
+        authority = SlackReadStateTests().authority()
+        grant = SimpleNamespace(slack_user_id='UOWNER')
+        target = reads.ReadTarget('room', 'D1', 'im')
+        stored = {}
+        def response(*args, **kwargs):
+            stored[reads._cache_key(authority, target) + ':receipt'] = 'new-confirmation'
+            return {'channel': {'id': 'D1', 'last_read': '100.000001', 'unread_count_display': 3}}
+        with patch.object(reads.transaction, 'atomic', side_effect=nullcontext), patch.object(
+            reads, '_lock_slack_grant_api_authority'
+        ), patch.object(reads.cache, 'get', side_effect=lambda key: stored.get(key)), patch.object(
+            reads.cache, 'set'
+        ) as publish, patch.object(reads, '_call_slack_with_grant_authority', side_effect=response):
+            with self.assertRaises(reads.BudgetDeferred):
+                reads.refresh_target(grant, authority, target)
+        publish.assert_not_called()

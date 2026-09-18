@@ -53,6 +53,7 @@ from integrations.services.message_sync.delivery import delivery_context, supers
 from integrations.services.message_sync.runner import process_history_once
 from integrations.services.message_sync.history import seed_states
 from integrations.services.message_sync.discovery import discovery_poll_seconds
+from integrations.services.message_sync.read_state import refresh_read_state_once
 
 logger = logging.getLogger(__name__)
 WORKER_ID = f"{socket.gethostname()}:{os.getpid()}"[:100]
@@ -75,6 +76,8 @@ class CommunityBridgeDiscordClient(discord.Client):
         super().__init__(intents=intents, max_messages=5000)
         self._sync_heartbeat_at = 0.0
         self._sync_completed_count = 0
+        self._read_state_heartbeat_at = 0.0
+        self._read_state_completed_count = 0
         self._history_seed_at = 0.0
         self._history_heartbeat_at = 0.0
         self._history_completed_count = 0
@@ -95,6 +98,7 @@ class CommunityBridgeDiscordClient(discord.Client):
             self.slack_dm_history_loop.start()
             self.slack_dm_delivery_loop.start()
             self.sync_inbox_loop.start()
+            self.slack_read_state_loop.start()
             self._slack_dm_maintenance_started = True
 
     async def on_ready(self) -> None:
@@ -103,7 +107,7 @@ class CommunityBridgeDiscordClient(discord.Client):
     async def close(self) -> None:
         """Stop every maintenance lane before releasing the Discord connection."""
         for loop in (self.delivery_loop, self.slack_dm_delivery_loop,
-                     self.slack_dm_discovery_loop, self.slack_dm_history_loop, self.sync_inbox_loop):
+                     self.slack_dm_discovery_loop, self.slack_dm_history_loop, self.sync_inbox_loop, self.slack_read_state_loop):
             loop.cancel()
         await super().close()
 
@@ -246,6 +250,24 @@ class CommunityBridgeDiscordClient(discord.Client):
                 self._sync_heartbeat_at = time.monotonic()
         except Exception as exc:
             logger.warning("message_sync_inbox_tick_failed error_code=%s", type(exc).__name__)
+            await asyncio.sleep(5)
+
+    @tasks.loop(seconds=1.0)
+    async def slack_read_state_loop(self) -> None:
+        await self.process_read_state_once()
+
+    async def process_read_state_once(self) -> None:
+        """Keep the shared unread cache warm independently of all client sessions."""
+        if not message_sync_enabled():
+            return
+        try:
+            self._read_state_completed_count += await asyncio.to_thread(refresh_read_state_once)
+            if time.monotonic() - self._read_state_heartbeat_at >= 10:
+                await asyncio.to_thread(heartbeat, WORKER_ID, "read_state", completed=self._read_state_completed_count)
+                self._read_state_completed_count = 0
+                self._read_state_heartbeat_at = time.monotonic()
+        except Exception as exc:
+            logger.warning("message_sync_read_state_tick_failed error_code=%s", type(exc).__name__)
             await asyncio.sleep(5)
 
     async def process_pending_deliveries_once(self, limit: int = 10) -> None:
@@ -919,8 +941,14 @@ async def _run_headless_delivery_worker(client: CommunityBridgeDiscordClient) ->
             await client.process_sync_inbox_once()
             await asyncio.sleep(0.1)
 
+    async def read_state_loop():
+        while True:
+            await client.process_read_state_once()
+            await asyncio.sleep(1.0)
+
     async with asyncio.TaskGroup() as group:
         group.create_task(inbox_loop())
+        group.create_task(read_state_loop())
         group.create_task(_run_discovery_loop())
         group.create_task(history_loop())
         group.create_task(delivery_loop())

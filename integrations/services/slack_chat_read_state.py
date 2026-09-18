@@ -6,7 +6,9 @@ from decimal import Decimal, InvalidOperation
 import hashlib
 import re
 import time
+import uuid
 
+from django.conf import settings
 from django.core.cache import cache
 from django.db import transaction
 from rest_framework.exceptions import ValidationError
@@ -149,6 +151,13 @@ def _targets(grant, public_key, *, recent_only=True):
     key = str(public_key or "").strip().lower()
     if not re.fullmatch(r"[0-9a-f]{64}", key):
         raise ValidationError({"device": "Use a verified MLAI Chat device."})
+    return _targets_for_keys(grant, {key}, recent_only=recent_only)
+
+
+def _targets_for_keys(grant, keys, *, recent_only=True):
+    """Internal account sweep over currently verified, provisioned devices."""
+    if not keys:
+        return []
     targets = []
     days = _grant_history_days(grant) if recent_only else 0
     oldest = int(time.time() - days * 86400) if days else None
@@ -159,7 +168,7 @@ def _targets(grant, public_key, *, recent_only=True):
     )
     for conversation in conversations:
         kind = conversation_kind(conversation)
-        if key not in (conversation.participant_buzz_pubkeys or []):
+        if not keys.intersection(conversation.participant_buzz_pubkeys or []):
             continue
         if kind == "private_channel" and not private_channels_enabled(grant):
             continue
@@ -168,8 +177,9 @@ def _targets(grant, public_key, *, recent_only=True):
             # historical directory or waiting for their delivery queue to drain.
             activity = conversation_activity_at(conversation)
             if activity is None:
-                if (kind != "im" or conversation_metadata(conversation).get(OWNER_OPENED_KEY)
-                        != owner_open_intent(grant, key)):
+                if (kind != "im" or not any(
+                        conversation_metadata(conversation).get(OWNER_OPENED_KEY) == owner_open_intent(grant, key)
+                        for key in keys)):
                     continue
             elif datetime.fromisoformat(activity).timestamp() < oldest:
                 continue
@@ -255,6 +265,77 @@ def _unread_messages(authority, target, last_read):
     )
 
 
+def _pending_key(authority, target):
+    return _cache_key(authority, target) + ":pending-info"
+
+
+def refresh_target(grant, authority, target):
+    """Fetch one source snapshot; persist no message content or guessed zeroes.
+
+    A metadata-only checkpoint lets a group finish its history lookup after a
+    budget pause without repeatedly spending the conversations.info allowance.
+    """
+    key = _cache_key(authority, target)
+    pending_key = _pending_key(authority, target)
+    with transaction.atomic():
+        _lock_slack_grant_api_authority(authority, required_scopes={target.read_scope})
+        pending = cache.get(pending_key)
+        receipt = cache.get(key + ":receipt")
+    observed_at = time.time()
+    if pending and observed_at - pending["fetched_at"] < 30:
+        details, observed_at = pending["details"], pending["fetched_at"]
+    else:
+        try:
+            response = _call_slack_with_grant_authority(
+                authority, "conversations_info", required_scopes={target.read_scope},
+                channel=target.slack_id,
+            )
+        except SlackApiError as exc:
+            if exc.response.get("error") not in {"channel_not_found", "not_in_channel"}:
+                raise
+            response = {"channel": {"id": target.slack_id, "is_member": False}}
+        details = response.get("channel") or {}
+    if details.get("id") != target.slack_id:
+        raise SlackDmMirrorError("Slack returned a different conversation.")
+    if _is_external_shared_conversation(details) or (
+        target.kind in {"public_channel", "private_channel", "mpim"}
+        and details.get("is_member") is not True
+    ) or details.get("is_member") is False:
+        cached = {"available": False}
+    else:
+        try:
+            messages, count_source, partial = _unread_messages(authority, target, details.get("last_read", "0"))
+        except (BudgetDeferred, SlackDmMirrorRateLimited):
+            # The allowlist excludes text, profiles, topic and private URLs.
+            safe = {name: details[name] for name in ("id", "is_member", "last_read", "unread_count_display") if name in details}
+            latest = details.get("latest") or {}
+            safe["latest"] = {name: latest[name] for name in ("ts", "hidden", "subtype") if name in latest}
+            with transaction.atomic():
+                _lock_slack_grant_api_authority(authority, required_scopes={target.read_scope})
+                if cache.get(key + ":receipt") == receipt:
+                    cache.set(pending_key, {"details": safe, "fetched_at": observed_at}, timeout=30)
+            raise
+        snapshot = read_state_snapshot(details, kind=target.kind, owner_id=grant.slack_user_id, messages=messages)
+        if snapshot is not None:
+            snapshot["fetched_at"] = observed_at
+            if snapshot["count_source"] != "slack":
+                snapshot["count_source"] = count_source
+                if partial:
+                    snapshot["unread_count"] = None
+                    if not snapshot["is_unread"]:
+                        snapshot = None
+        cached = {"available": snapshot is not None, **(snapshot or {})}
+    cached.setdefault("fetched_at", observed_at)
+    with transaction.atomic():
+        _lock_slack_grant_api_authority(authority, required_scopes={target.read_scope})
+        if cache.get(key + ":receipt") != receipt:
+            # A confirmed read overtook this source request; retry a fresh read.
+            raise BudgetDeferred(1)
+        cache.set(key, cached, timeout=24 * 60 * 60)
+        cache.delete(pending_key)
+    return cached
+
+
 def read_state_page(user, *, public_key, cursor=0, channel_ids=None):
     """Refresh a bounded page, preserving unknown state and Slack rate limits."""
     try:
@@ -275,6 +356,17 @@ def read_state_page(user, *, public_key, cursor=0, channel_ids=None):
         targets = [target for target in targets if target.channel_id in requested]
         offset = 0
     authority = _capture_slack_grant_api_authority(grant)
+    if getattr(settings, "MESSAGE_SYNC_ENABLED", False):
+        targets = [t for t in targets if t.read_scope in authority.scopes]
+        with transaction.atomic():
+            _lock_slack_grant_api_authority(authority, required_scopes={"im:read"})
+            stored = cache.get_many([_cache_key(authority, t) for t in targets])
+        return {
+            "channels": {t.channel_id: stored[_cache_key(authority, t)] for t in targets
+                         if _cache_key(authority, t) in stored},
+            "next_cursor": None,
+            "retry_after_seconds": 10,
+        }
     # A cold app launch receives all previously checked cursors immediately;
     # refreshing a large Slack directory must not hide already known unreads.
     bootstrap = {}
@@ -307,77 +399,11 @@ def read_state_page(user, *, public_key, cursor=0, channel_ids=None):
             if calls >= 4 or time.monotonic() >= deadline:
                 break
             calls += 1
-            observed_at = time.time()
             try:
-                response = _call_slack_with_grant_authority(
-                    authority,
-                    "conversations_info",
-                    required_scopes={target.read_scope},
-                    channel=target.slack_id,
-                )
+                cached = refresh_target(grant, authority, target)
             except (BudgetDeferred, SlackDmMirrorRateLimited) as exc:
-                # A provider pause is a continuation, not a failed page. Keep
-                # earlier results and retry this exact target on the next poll.
                 retry_after = getattr(exc, "retry_after", 60)
                 break
-            except SlackApiError as exc:
-                if exc.response.get("error") not in {
-                    "channel_not_found",
-                    "not_in_channel",
-                }:
-                    raise
-                results[target.channel_id] = {"available": False}
-                index += 1
-                continue
-            details = response.get("channel") or {}
-            if details.get("id") != target.slack_id:
-                raise SlackDmMirrorError("Slack returned a different conversation.")
-            if _is_external_shared_conversation(details) or (
-                target.kind in {"public_channel", "private_channel", "mpim"}
-                and details.get("is_member") is not True
-            ):
-                cached = {"available": False}
-            else:
-                try:
-                    messages, count_source, partial = _unread_messages(
-                        authority,
-                        target,
-                        details.get("last_read", "0"),
-                    )
-                except (BudgetDeferred, SlackDmMirrorRateLimited) as exc:
-                    # A group's count needs both info and history; do not cache
-                    # a guessed zero or advance past a half-fetched snapshot.
-                    retry_after = getattr(exc, "retry_after", 60)
-                    break
-                snapshot = read_state_snapshot(
-                    details,
-                    kind=target.kind,
-                    owner_id=grant.slack_user_id,
-                    messages=messages,
-                )
-                if snapshot is not None:
-                    snapshot["fetched_at"] = observed_at
-                if snapshot is not None and snapshot["count_source"] != "slack":
-                    snapshot["count_source"] = count_source
-                    if partial:
-                        snapshot["unread_count"] = None
-                        if not snapshot["is_unread"]:
-                            snapshot = None
-                if (
-                    snapshot is not None
-                    and not snapshot["is_unread"]
-                    and snapshot["count_source"] == "imported_messages"
-                    and target.conversation is not None
-                    and target.conversation.history_backfilled_at is None
-                ):
-                    snapshot = None
-                cached = {"available": snapshot is not None, **(snapshot or {})}
-            with transaction.atomic():
-                _lock_slack_grant_api_authority(
-                    authority, required_scopes={target.read_scope}
-                )
-                cached.setdefault("fetched_at", time.time())
-                cache.set(key, cached, timeout=24 * 60 * 60)
         results[target.channel_id] = cached
         index += 1
     with transaction.atomic():
@@ -442,7 +468,9 @@ def mark_read(user, *, public_key, channel_id, source_ts):
                 channel=target.slack_id,
                 ts=str(source_ts),
             )
+        cache.set(_cache_key(authority, target) + ":receipt", uuid.uuid4().hex, timeout=86400)
         cache.delete(_cache_key(authority, target))
+        cache.delete(_pending_key(authority, target))
     return {
         "synced": True,
         "last_read": format(max(previous, stamp), "f"),

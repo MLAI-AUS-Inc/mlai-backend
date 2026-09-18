@@ -549,6 +549,8 @@ def _lock_slack_grant_api_authority(
         )
     from integrations.services.message_sync.discovery import guard_discovery
     guard_discovery(grant, connection)
+    from integrations.services.message_sync.read_state import guard_read_state
+    guard_read_state(grant, connection)
     return grant, connection
 
 

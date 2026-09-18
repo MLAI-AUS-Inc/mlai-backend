@@ -33,7 +33,7 @@ class Command(BaseCommand):
         if options['local_worker']:
             workers = workers.filter(worker_id__startswith=socket.gethostname() + ':')
         lane_times = dict(workers.values('lane').annotate(latest=Max('heartbeat_at')).values_list('lane', 'latest'))
-        stale = [lane for lane in ('inbox', 'history', 'public_delivery', 'private_delivery')
+        stale = [lane for lane in ('inbox', 'history', 'public_delivery', 'private_delivery', 'read_state')
                  if lane not in lane_times or lane_times[lane] < now - timedelta(seconds=options['max_heartbeat_age'])]
         if options['check']:
             self.stdout.write(json.dumps({'enabled': enabled, 'stale_lanes': stale}))
