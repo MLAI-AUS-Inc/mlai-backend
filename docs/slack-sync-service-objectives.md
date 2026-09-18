@@ -45,6 +45,13 @@ flowchart LR
   or revoked; the explicit authorized target set controls removal.
 - Existing owner-private delivery and membership fences remain in force.
   No token, message body or profile is stored in read-intent checkpoints.
+- Device recovery prioritizes known, recently active conversations whose old
+  room was fenced. Each fair discovery turn can restore one such conversation
+  before continuing the historical directory cursor. Recovery rechecks Slack
+  access and membership and uses only currently verified devices. It preserves
+  the account/source read snapshot across room replacement, but publication
+  still waits for the replacement room's bounded history coverage. A failed
+  room cannot block recovery of all other recent rooms.
 
 ## Timing objectives and capacity
 
