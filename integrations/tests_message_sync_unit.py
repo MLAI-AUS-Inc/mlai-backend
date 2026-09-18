@@ -185,4 +185,7 @@ class SlackMetadataBudgetTests(TestCase):
             self.assertEqual(provider_interval('users.conversations'), 1.2)
             self.assertEqual(provider_interval('conversations.history'), 60)
             self.assertEqual(provider_interval('conversations.replies'), 60)
-            self.assertEqual(provider_interval('conversations.members'), 3)
+            self.assertEqual(provider_interval('conversations.members'), 0.6)
+            self.assertEqual(provider_interval('users.info'), 0.6)
+            self.assertEqual(provider_interval('conversations.mark'), 1.2)
+            self.assertEqual(provider_interval('users.list'), 3)

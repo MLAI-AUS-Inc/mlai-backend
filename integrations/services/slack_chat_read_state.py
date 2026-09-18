@@ -364,6 +364,8 @@ def read_state_page(user, *, public_key, cursor=0, channel_ids=None):
         return {
             "channels": {t.channel_id: stored[_cache_key(authority, t)] for t in targets
                          if _cache_key(authority, t) in stored},
+            "authorized_channel_ids": [t.channel_id for t in targets],
+            "snapshot_complete": len(stored) == len(targets),
             "next_cursor": None,
             "retry_after_seconds": 10,
         }
@@ -410,6 +412,7 @@ def read_state_page(user, *, public_key, cursor=0, channel_ids=None):
         _lock_slack_grant_api_authority(authority, required_scopes={"im:read"})
     return {
         "channels": {**bootstrap, **results},
+        "authorized_channel_ids": [t.channel_id for t in targets],
         "next_cursor": str(index) if index < len(targets) else None,
         "retry_after_seconds": max(retry_after, 10 if index < len(targets) else 60),
     }
@@ -442,10 +445,36 @@ def mark_read(user, *, public_key, channel_id, source_ts):
         return {"synced": False, "needs_reauthorization": True}
     authority = _capture_slack_grant_api_authority(grant)
     required = {scope, target.read_scope}
+    device_binding = None
+    if getattr(settings, "MESSAGE_SYNC_ENABLED", False):
+        from .message_sync.receipts import enqueue_read, complete_read
+        device_binding = enqueue_read(authority, target, public_key=public_key, source_ts=str(source_ts))
+    try:
+        result = apply_read(authority, target, source_ts=str(source_ts), required=required, public_key=public_key, device_binding=device_binding)
+    except (BudgetDeferred, SlackDmMirrorRateLimited) as exc:
+        if not getattr(settings, "MESSAGE_SYNC_ENABLED", False):
+            raise
+        return {"synced": False, "pending": True,
+                "retry_after_seconds": getattr(exc, "retry_after", 60)}
+    if getattr(settings, "MESSAGE_SYNC_ENABLED", False) and result.get("synced"):
+        complete_read(authority, target, source_ts=result["last_read"])
+    return result
+
+
+def apply_read(authority, target, *, source_ts, required, public_key=None, device_binding=None):
+    """Confirm a source read and immediately share the same result with peers."""
+    stamp = _timestamp(source_ts)
     # Serialize competing device reads and the read-before-write check with the
     # same owner consent lock used by the bridge. Never move a cursor backwards.
     with transaction.atomic():
         _lock_slack_grant_api_authority(authority, required_scopes=required)
+        if public_key is not None:
+            from .slack_dm_mirror import _locked_active_verified_device
+            device = _locked_active_verified_device(authority.user_id, public_key)
+            if device is None or (device_binding is not None and device_binding != {
+                "device_id": str(device.pk), "verified_at": str(device.verified_at),
+            }):
+                raise SlackDmMirrorError("The requesting device is no longer verified.")
         response = _call_slack_with_grant_authority(
             authority,
             "conversations_info",
@@ -455,6 +484,8 @@ def mark_read(user, *, public_key, channel_id, source_ts):
         details = response.get("channel") or {}
         if details.get("id") != target.slack_id or _is_external_shared_conversation(
             details
+        ) or details.get("is_member") is False or (
+            target.kind != "im" and details.get("is_member") is not True
         ):
             raise SlackDmMirrorError("Slack conversation is not available.")
         previous = _timestamp(details.get("last_read"))
@@ -468,11 +499,43 @@ def mark_read(user, *, public_key, channel_id, source_ts):
                 channel=target.slack_id,
                 ts=str(source_ts),
             )
-        cache.set(_cache_key(authority, target) + ":receipt", uuid.uuid4().hex, timeout=86400)
-        cache.delete(_cache_key(authority, target))
+        confirmed_at = time.time()
+        confirmed = max(previous, stamp)
+        key = _cache_key(authority, target)
+        cached = cache.get(key) or {}
+        source_latest = details.get("latest") or {}
+        latest_visible = not source_latest.get("hidden") and str(source_latest.get("subtype") or "") in {"", "bot_message", "file_share", "me_message", "thread_broadcast"}
+        if source_latest.get("thread_ts") not in (None, "", source_latest.get("ts")) and not (
+            source_latest.get("broadcast") or source_latest.get("reply_broadcast")
+            or source_latest.get("subtype") == "thread_broadcast"
+        ):
+            latest_visible = False
+        source_latest_ts = (_timestamp(source_latest.get("ts")) if latest_visible else None) or Decimal(0)
+        latest = max(source_latest_ts,
+                     _timestamp(cached.get("latest_ts")) or Decimal(0))
+        # Confirmation advances a frontier; it does not prove a partial read
+        # cleared every unread. Unknown remainders never become invented zeroes.
+        proven_clear = bool(source_latest_ts and confirmed >= latest) or (
+            target.kind == "im" and details.get("unread_count_display") == 0
+        )
+        proven_unread = not proven_clear and bool(source_latest_ts > confirmed and source_latest.get("user")
+                             and source_latest["user"] != authority.slack_user_id)
+        snapshot = {"available": proven_clear or proven_unread, "last_read": format(confirmed, "f"),
+                    "latest_ts": format(max(latest, confirmed), "f"),
+                    "is_unread": proven_unread,
+                    "unread_count": 0 if proven_clear else None,
+                    "count_source": "confirmed_read", "fetched_at": confirmed_at,
+                    "confirmed_at": confirmed_at, "refresh_required": True}
+        if stamp <= previous:
+            source_snapshot = read_state_snapshot(details, kind=target.kind, messages=[], owner_id=authority.slack_user_id)
+            if target.kind == "im" and source_snapshot is not None:
+                snapshot.update(source_snapshot, available=True, confirmed_at=confirmed_at)
+        cache.set(key + ":receipt", uuid.uuid4().hex, timeout=86400)
+        cache.set(key, snapshot, timeout=86400)
         cache.delete(_pending_key(authority, target))
     return {
         "synced": True,
-        "last_read": format(max(previous, stamp), "f"),
-        "confirmed_at": time.time(),
+        "last_read": format(confirmed, "f"),
+        "confirmed_at": confirmed_at,
+        "channels": {target.channel_id: snapshot},
     }

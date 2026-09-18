@@ -159,6 +159,8 @@ class SlackReadStateTests(SimpleTestCase):
             reads.transaction, "atomic", side_effect=nullcontext
         ), patch.object(
             reads, "_lock_slack_grant_api_authority"
+        ), patch(
+            "integrations.services.slack_dm_mirror._locked_active_verified_device", return_value=object()
         ), patch.object(
             reads.cache, "delete"
         ), patch.object(
@@ -299,7 +301,7 @@ class PrivateReadTargetTests(SimpleTestCase):
             reads, "_capture_slack_grant_api_authority", return_value=SlackReadStateTests().authority()
         ), patch.object(reads.transaction, "atomic", side_effect=nullcontext), patch.object(
             reads, "_lock_slack_grant_api_authority"
-        ), patch.object(reads.cache, "delete"), patch.object(
+        ), patch("integrations.services.slack_dm_mirror._locked_active_verified_device", return_value=object()), patch.object(reads.cache, "delete"), patch.object(
             reads, "_call_slack_with_grant_authority",
             return_value={"channel": {
                 "id": "DOLD", "last_read": f"{int(self.now.timestamp())-1}.000001"

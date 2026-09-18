@@ -124,7 +124,7 @@ def finish_read_state(lease, *, after, delay=1, error="", return_turn=False):
 
 
 def refresh_read_state_once():
-    """Refresh at most one account conversation, never marking it as read."""
+    """Confirm one explicit queued read, or refresh one account conversation."""
     from integrations.services import slack_chat_read_state as reads
     if not enabled():
         return 0
@@ -138,15 +138,21 @@ def refresh_read_state_once():
             grant = SlackDmMirrorGrant.objects.select_related("connection").get(pk=lease.grant_id)
             reads._assert_grant_connection_authorized(grant)
             keys = set(CommunityChatDevice.objects.filter(user_id=grant.user_id, status="verified", revoked_at__isnull=True).values_list("public_key", flat=True))
-            targets = sorted(reads._targets_for_keys(grant, keys), key=lambda t: t.slack_id)
             authority = reads._capture_slack_grant_api_authority(grant)
+            from .receipts import flush_read_once
+            confirmed = flush_read_once(grant, authority, keys)
+            if confirmed is not None:
+                return confirmed
+            targets = sorted((t for t in reads._targets_for_keys(grant, keys)
+                              if t.read_scope in authority.scopes), key=lambda t: t.slack_id)
             with transaction.atomic():
                 reads._lock_slack_grant_api_authority(authority, required_scopes={"im:read"})
                 snapshots = cache.get_many([reads._cache_key(authority, t) for t in targets])
             # Source IDs are stable across discovery reorderings and devices.
             ordered = [t for t in targets if t.slack_id > after] + [t for t in targets if t.slack_id <= after]
             now = timezone.now().timestamp()
-            target = next((t for t in ordered if now - (snapshots.get(reads._cache_key(authority, t)) or {}).get("fetched_at", 0) >= 60), None)
+            urgent = [t for t in ordered if (snapshots.get(reads._cache_key(authority, t)) or {}).get("refresh_required")]
+            target = next(iter(urgent), None) or next((t for t in ordered if now - (snapshots.get(reads._cache_key(authority, t)) or {}).get("fetched_at", 0) >= 60), None)
             if target is None:
                 delay = 10 if targets else 60
                 return 0
@@ -162,6 +168,13 @@ def refresh_read_state_once():
     except Exception as exc:
         # One broken conversation cannot prevent the rest of an owner's sweep.
         after = target.slack_id if target else after
+        if target is not None:
+            with transaction.atomic():
+                reads._lock_slack_grant_api_authority(authority, required_scopes={target.read_scope})
+                key = reads._cache_key(authority, target)
+                value = cache.get(key)
+                if value and value.get("refresh_required"):
+                    cache.set(key, {**value, "refresh_required": False}, timeout=86400)
         error, delay = type(exc).__name__, 30
         return 0
     finally:
