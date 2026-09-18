@@ -383,6 +383,7 @@ jobs:
           integrations.tests_message_sync_scheduler \
           integrations.tests_message_sync_discovery \
           integrations.tests_message_sync_discovery_worker \
+          integrations.tests_message_sync_read_state \
           integrations.tests_slack_discovery_progress \
           integrations.tests_slack_discovery_progress_authority \
           integrations.tests_message_sync_history \

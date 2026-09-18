@@ -150,7 +150,7 @@ class MessageSyncHealthTests(TestCase):
         with override_settings(MESSAGE_SYNC_ENABLED=True):
             with self.assertRaises(CommandError):
                 call_command('message_sync_status', check=True, stdout=StringIO())
-            for lane in ('inbox', 'history', 'public_delivery', 'private_delivery'):
+            for lane in ('inbox', 'history', 'public_delivery', 'private_delivery', 'read_state'):
                 BridgeWorkerHeartbeat.objects.create(worker_id='synthetic-worker', lane=lane)
             call_command('message_sync_status', check=True, stdout=StringIO())
             with self.assertRaises(CommandError):

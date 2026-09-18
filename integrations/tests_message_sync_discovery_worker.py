@@ -43,6 +43,7 @@ class DiscoveryWorkerCadenceTests(IsolatedAsyncioTestCase):
                     slack_dm_history_loop=Mock(),
                     slack_dm_delivery_loop=Mock(),
                     sync_inbox_loop=Mock(),
+                    slack_read_state_loop=Mock(),
                 )
                 with patch.object(worker.asyncio, "to_thread", new=AsyncMock()):
                     await worker.CommunityBridgeDiscordClient.setup_hook(client)

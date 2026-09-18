@@ -13,6 +13,8 @@ from .coverage import record_page
 from .history_policy import history_page_limit
 from .scheduler import locked_job, schedule_job, finish_job
 
+PUBLIC_HISTORY_DAYS = 30
+
 
 def ensure_state(owner):
     """Resolve metadata by exact public mapping or owner-private conversation."""
@@ -57,6 +59,14 @@ def timestamp(value):
     return int(parts[0]), int(parts[1])
 
 
+def page_messages(response):
+    """Validate source pagination evidence before filtering by the import window."""
+    messages = response.get("messages")
+    if not isinstance(messages, list) or any(not isinstance(row, dict) or not row.get("ts") for row in messages):
+        raise ValueError("invalid_history_page")
+    return messages
+
+
 def next_checkpoint(checkpoint, response, *, thread=False):
     """Advance only from source pagination evidence, never from rendered rows."""
     cursor = str((response.get("response_metadata") or {}).get("next_cursor") or "")
@@ -86,10 +96,15 @@ def public_page(lease, state):
     # Each sweep fixes its upper bound so an active channel cannot keep a scan
     # perpetually open. New arrivals are covered by callbacks and the next head.
     checkpoint.setdefault("upper_bound", f"{int(time.time())}.999999")
-    if lease.kind == "head":
-        checkpoint.setdefault("oldest", f"{max(0, int(time.time()) - 86400)}.000000")
-    else:
-        checkpoint.setdefault("oldest", "0.000000")
+    upper_seconds = timestamp(checkpoint["upper_bound"])[0]
+    scan_floor = max(0, upper_seconds - (86400 if lease.kind == "head" else PUBLIC_HISTORY_DAYS * 86400))
+    checkpoint.setdefault("oldest", f"{scan_floor}.000000")
+    if timestamp(checkpoint["oldest"])[0] < scan_floor:
+        # Old deployments saved unbounded public archive cursors. Restart that
+        # query with the supported window instead of following it into years of
+        # history. An already bounded cursor remains stable as time passes.
+        checkpoint = {"upper_bound": checkpoint["upper_bound"], "oldest": f"{scan_floor}.000000"}
+    floor = max(timestamp(checkpoint["oldest"])[0], int(time.time()) - PUBLIC_HISTORY_DAYS * 86400)
     kwargs = dict(channel=channel.slack_channel_id, limit=history_page_limit(), inclusive=False,
                   latest=checkpoint.get("latest", checkpoint["upper_bound"]))
     # Slack rejects an explicit decimal-zero oldest timestamp. Its documented
@@ -107,7 +122,15 @@ def public_page(lease, state):
         response = client.conversations_history(**kwargs)
     if not response.get("ok"):
         raise RuntimeError("slack_history_response_failed")
+    messages = page_messages(response)
     updated, complete = next_checkpoint(checkpoint, response, thread=lease.kind == "thread")
+    if lease.kind != "thread" and any(
+        isinstance(message, dict) and message.get("ts") and timestamp(message["ts"])[0] < floor
+        for message in messages
+    ):
+        # Main history is newest-first. Replies are oldest-first, so an old
+        # root in a reply page must never stop pagination to its recent replies.
+        complete = True
     with transaction.atomic():
         current, _ = locked_job(lease)
         # Mapping identity changes are not permission to finish an old scan
@@ -118,14 +141,33 @@ def public_page(lease, state):
                 or mapped.destination_channel_id != channel.destination_channel_id
                 or mapped.destination_workspace_id != channel.destination_workspace_id):
             raise RuntimeError("sync_mapping_changed")
-        messages = [item for item in response.get("messages") or [] if isinstance(item, dict) and item.get("ts")]
+        floor = max(floor, int(time.time()) - PUBLIC_HISTORY_DAYS * 86400)
+        observed = []
         for message in sorted(messages, key=lambda item: timestamp(item["ts"])):
             if not isinstance(message, dict) or not message.get("ts"):
                 continue
             ts = str(message["ts"])
-            event = {**message, "type": "message", "channel": channel.slack_channel_id, "channel_type": "channel"}
+            root = str(message.get("thread_ts") or (lease.source_object_key if lease.kind == "thread" else ts))
+            latest_reply = str(message.get("latest_reply") or "")
+            if timestamp(ts)[0] < floor:
+                if latest_reply and timestamp(latest_reply)[0] >= floor:
+                    # The source root is only a locator. Its body stays outside
+                    # the import, while an explicitly recent reply is eligible.
+                    schedule_job(current, "thread", source_object_key=root)
+                continue
+            if timestamp(ts) > timestamp(checkpoint["upper_bound"]):
+                continue
+            message = dict(message)
+            observed.append(message)
             if lease.kind == "thread" and ts != lease.source_object_key:
-                event["thread_ts"] = lease.source_object_key
+                message["thread_ts"] = lease.source_object_key
+            parent = str(message.get("thread_ts") or "")
+            if parent and parent != ts and timestamp(parent)[0] < int(time.time()) - PUBLIC_HISTORY_DAYS * 86400:
+                # Deliver the recent reply without waiting for an intentionally
+                # excluded parent. This is the same standalone presentation as
+                # bounded private imports.
+                message["thread_ts"] = ""
+            event = {**message, "type": "message", "channel": channel.slack_channel_id, "channel_type": "channel"}
             from .public_repair import repair_observed_message
             repair_observed_message(mapped, event, read_started_at=read_started_at)
             digest = hashlib.sha256(json.dumps(
@@ -141,9 +183,12 @@ def public_page(lease, state):
                     "type": "message", "subtype": "message_changed", "channel": channel.slack_channel_id,
                     "channel_type": "channel", "event_ts": revision, "message": message,
                 }})
-            root = str(message.get("thread_ts") or ts)
             if message.get("reply_count") or message.get("latest_reply") or root != ts:
                 schedule_job(current, "thread", source_object_key=root)
-        updated = record_page(current, lease.kind, updated, response, complete=complete)
+        updated = record_page(current, lease.kind, updated,
+                              {"messages": observed, "is_limited": response.get("is_limited")}, complete=complete)
+        delay = {"head": 60, "thread": 3600, "archive": 86400}[lease.kind]
+        if lease.kind == "thread" and timestamp(lease.source_object_key)[0] < floor and not updated["observed_messages"]:
+            delay = 86400
         finish_job(lease, checkpoint={} if complete else updated,
-                   delay_seconds=({"head": 60, "thread": 3600, "archive": 86400}[lease.kind]) if complete else 0, complete=complete)
+                   delay_seconds=delay if complete else 0, complete=complete)

@@ -11,8 +11,9 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from django.db import transaction
-from django.db.models import Case, Exists, F, Max, OuterRef, Q, Subquery, Value, When
+from django.db import connection, transaction
+from django.db.models import BigIntegerField, Case, Exists, F, Max, OuterRef, Q, Subquery, Value, When
+from django.db.models.functions import Coalesce
 from django.utils import timezone
 
 from integrations.models import BridgeSyncJob, BridgeSyncState, BridgeWorkerHeartbeat
@@ -100,7 +101,7 @@ def eligible_states():
 
 
 def claim_job(*, kinds=None, lease_seconds=120):
-    """Claim one bounded page, rotating workspaces then conversations.
+    """Claim one bounded page, rotating workspaces, owners, then conversations.
 
     Lock the state as well as the job: two processes cannot run different job
     kinds concurrently against the same conversation or overwrite its cursor.
@@ -123,16 +124,32 @@ def claim_job(*, kinds=None, lease_seconds=120):
     ).values("state__workspace_id").annotate(served=Max("last_served_at")).order_by(
         F("served").asc(nulls_first=True), "state__workspace_id",
     ).values_list("state__workspace_id", flat=True))
-    candidates = candidates.annotate(history_turn=Subquery(
+    # One large account must not dominate smaller accounts in the same Slack
+    # workspace. Public shared channels collectively receive one owner turn.
+    candidates = candidates.annotate(owner_key=Coalesce("private_conversation__grant_id", Value(-1), output_field=BigIntegerField())).annotate(
+        owner_turn=Subquery(BridgeSyncJob.objects.annotate(
+            owner_key=Coalesce("state__private_conversation__grant_id", Value(-1), output_field=BigIntegerField()),
+        ).filter(state__workspace_id=OuterRef("workspace_id"), owner_key=OuterRef("owner_key")).order_by(
+            F("last_served_at").desc(nulls_last=True),
+        ).values("last_served_at")[:1]),
+        history_turn=Subquery(
         BridgeSyncJob.objects.filter(state_id=OuterRef("pk")).order_by(
             F("last_served_at").desc(nulls_last=True),
         ).values("last_served_at")[:1],
     ))
     for workspace_id in workspaces:
         with transaction.atomic():
+            if connection.vendor == "postgresql":
+                # Serialize the short claim decision, not source I/O. Without
+                # this, simultaneous workers can all observe the same owner's
+                # previous turn and claim different rooms from that owner.
+                with connection.cursor() as cursor:
+                    cursor.execute("SELECT pg_try_advisory_xact_lock(hashtextextended(%s, 0))", [f"message-sync-history:{workspace_id}"])
+                    if not cursor.fetchone()[0]:
+                        continue
             state = candidates.filter(workspace_id=workspace_id).select_for_update(
                 skip_locked=True, of=("self",),
-            ).order_by(F("history_turn").asc(nulls_first=True), "id").first()
+            ).order_by(F("owner_turn").asc(nulls_first=True), F("history_turn").asc(nulls_first=True), "id").first()
             if state is None:
                 continue
             # Rotate head/archive/thread lanes before individual thread roots.
@@ -149,9 +166,13 @@ def claim_job(*, kinds=None, lease_seconds=120):
                 continue
             previous_job_turn = job.last_served_at
             token = uuid.uuid4()
+            # A caller may start before another worker but acquire the claim
+            # lock afterwards. Record service order inside the serialized
+            # decision so owner turns and lease lifetimes cannot run backwards.
+            claimed_at = timezone.now()
             job.lease_token = token
-            job.lease_expires_at = now + timedelta(seconds=max(1, lease_seconds))
-            job.last_served_at = now
+            job.lease_expires_at = claimed_at + timedelta(seconds=max(1, lease_seconds))
+            job.last_served_at = claimed_at
             job.attempts += 1
             job.save(update_fields=["lease_token", "lease_expires_at", "last_served_at", "attempts"])
             return JobLease(job.pk, state.pk, token, state.authority_generation,
