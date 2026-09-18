@@ -51,7 +51,9 @@ flowchart LR
   access and membership and uses only currently verified devices. It preserves
   the account/source read snapshot across room replacement, but publication
   still waits for the replacement room's bounded history coverage. A failed
-  room cannot block recovery of all other recent rooms.
+  room cannot block recovery of all other recent rooms. Failed recent rooms
+  retry after a durable two-minute cooldown, including ambiguous relay
+  registration timeouts, through the same membership and registration fences.
 
 ## Timing objectives and capacity
 

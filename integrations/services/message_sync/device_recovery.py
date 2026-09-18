@@ -5,8 +5,12 @@ inventory survives that fence, so recovery must not wait for users.conversations
 to rediscover thousands of old rooms. Every repair still obtains fresh Slack
 membership and runs the existing registration/consent authority checks.
 """
+from datetime import timedelta
+
 from slack_sdk.errors import SlackApiError
 from django.db import transaction
+from django.db.models import Q
+from django.utils import timezone
 
 from integrations.models import SlackDmMirrorConversation
 from integrations.services.slack_chat_catalog import (
@@ -15,6 +19,8 @@ from integrations.services.slack_chat_catalog import (
 from integrations.services.slack_discovery_progress import conversation_progress
 from .private_coverage import recent_conversations
 from .scheduler import BudgetDeferred, LeaseLost
+
+RECOVERY_RETRY_SECONDS = 120
 
 
 def recover_recent_conversation(grant, authority, *, profile_cache, cycle_started_at):
@@ -27,7 +33,11 @@ def recover_recent_conversation(grant, authority, *, profile_cache, cycle_starte
     from integrations.services import slack_dm_mirror as dm
 
     candidates = recent_conversations(SlackDmMirrorConversation.objects.filter(
-        grant=grant, status="provisioning", mlai_channel_id__isnull=True,
+        grant=grant, mlai_channel_id__isnull=True,
+    ).filter(
+        Q(status="provisioning") | Q(
+            status="error", updated_at__lte=timezone.now() - timedelta(seconds=RECOVERY_RETRY_SECONDS),
+        ),
     )).order_by("-coverage_activity", "id")
     for candidate in candidates:
         candidate.grant = grant
@@ -48,13 +58,16 @@ def recover_recent_conversation(grant, authority, *, profile_cache, cycle_starte
                              dm.SlackDmMirrorRateLimited))
                 or dm._is_slack_auth_error(exc) or dm._slack_retry_after_seconds(exc)):
             raise
-        # A malformed/inaccessible room must not block every later recent room.
-        # The ordinary directory reconciliation can retry it with fresh data.
+        # A malformed room or timed-out registration must not block later
+        # rooms, nor wait for a historical directory pass to be retried. Refresh
+        # the durable cooldown even if the registration ledger already marked
+        # the attempt errored. Its existing ambiguous-attempt cleanup still
+        # fences every retry before provisioning.
         with transaction.atomic():
             dm._lock_slack_grant_api_authority(authority, required_scopes=dm.DIRECT_DM_SCOPES)
             SlackDmMirrorConversation.objects.filter(
-                pk=candidate.pk, status="provisioning", mlai_channel_id__isnull=True,
-            ).update(status="error", last_error=f"Device recovery: {type(exc).__name__}")
+                pk=candidate.pk, status__in=["provisioning", "error"], mlai_channel_id__isnull=True,
+            ).update(status="error", last_error=f"Device recovery: {type(exc).__name__}", updated_at=timezone.now())
     return True
 
 
