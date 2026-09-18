@@ -166,9 +166,13 @@ def claim_job(*, kinds=None, lease_seconds=120):
                 continue
             previous_job_turn = job.last_served_at
             token = uuid.uuid4()
+            # A caller may start before another worker but acquire the claim
+            # lock afterwards. Record service order inside the serialized
+            # decision so owner turns and lease lifetimes cannot run backwards.
+            claimed_at = timezone.now()
             job.lease_token = token
-            job.lease_expires_at = now + timedelta(seconds=max(1, lease_seconds))
-            job.last_served_at = now
+            job.lease_expires_at = claimed_at + timedelta(seconds=max(1, lease_seconds))
+            job.last_served_at = claimed_at
             job.attempts += 1
             job.save(update_fields=["lease_token", "lease_expires_at", "last_served_at", "attempts"])
             return JobLease(job.pk, state.pk, token, state.authority_generation,

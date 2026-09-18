@@ -92,13 +92,14 @@ def claim_read_state():
                 grant, connection = _lock(lease, skip_locked=True)
                 if connection is None:
                     continue
+                claimed_at = timezone.now().timestamp()
                 previous = (connection.sync_cursor or {}).get(KEY) or {}
-                if max(float(previous.get("due") or 0), float(previous.get("expires") or 0)) > clock:
+                if max(float(previous.get("due") or 0), float(previous.get("expires") or 0)) > claimed_at:
                     continue
                 lease = ReadStateLease(grant_id, connection_id, user_id, lease.token, previous.get("served"), previous.get("after", ""))
                 connection.sync_cursor = {**(connection.sync_cursor or {}), KEY: {
-                    **previous, "token": lease.token, "expires": clock + 120,
-                    "served": clock, "due": clock,
+                    **previous, "token": lease.token, "expires": claimed_at + 120,
+                    "served": claimed_at, "due": claimed_at,
                 }}
                 connection.save(update_fields=["sync_cursor", "updated_at"])
                 return lease

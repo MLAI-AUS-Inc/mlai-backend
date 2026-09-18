@@ -45,6 +45,24 @@ class BackgroundReadStateTests(SlackDmIoAuthorityFixture, TransactionTestCase):
         self.assertEqual(seen[:4], [self.grant.pk, quiet.pk, busy[0].pk, quiet.pk])
         self.assertEqual(set(seen), {self.grant.pk, quiet.pk, *(g.pk for g in busy)})
 
+    def test_read_state_lease_starts_after_owner_lock(self):
+        from datetime import timedelta
+        started = timezone.now()
+        claimed_at = started + timedelta(seconds=45)
+        lock = sync._lock
+        with patch.object(sync.timezone, 'now', return_value=started) as clock:
+            def delayed_lock(*args, **kwargs):
+                result = lock(*args, **kwargs)
+                clock.return_value = claimed_at
+                return result
+            with patch.object(sync, '_lock', side_effect=delayed_lock):
+                lease = sync.claim_read_state()
+        self.assertIsNotNone(lease)
+        self.connection.refresh_from_db()
+        value = self.connection.sync_cursor[sync.KEY]
+        self.assertEqual(value['served'], claimed_at.timestamp())
+        self.assertEqual(value['expires'], claimed_at.timestamp() + 120)
+
     def test_expired_or_revoked_worker_cannot_make_source_call(self):
         lease = sync.claim_read_state()
         self.assertIsNone(sync.claim_read_state())
@@ -341,6 +359,24 @@ class BackgroundReadStateTests(SlackDmIoAuthorityFixture, TransactionTestCase):
             observed.append(owners[lease.state_id])
             finish_job(lease, checkpoint={}, delay_seconds=0, complete=True)
         self.assertEqual(observed, [self.grant.pk, small.pk, self.grant.pk, small.pk])
+
+    def test_history_claim_records_service_time_after_arbitration(self):
+        from datetime import timedelta
+        from integrations.models import SlackDmMirrorConversation, BridgeSyncJob
+        from integrations.services.message_sync.history import ensure_state
+        from integrations.services.message_sync.scheduler import claim_job
+        conversation = SlackDmMirrorConversation.objects.create(
+            grant=self.grant, slack_workspace_id='TIOAUTH', slack_conversation_id='DCLAIMCLOCK',
+            participant_hash='c' * 64, status='live',
+        )
+        ensure_state(conversation)
+        started = timezone.now()
+        claimed_at = started + timedelta(seconds=45)
+        with patch('integrations.services.message_sync.scheduler.timezone.now', side_effect=[started, claimed_at]):
+            lease = claim_job(kinds=['head'], lease_seconds=120)
+        job = BridgeSyncJob.objects.get(pk=lease.job_id)
+        self.assertEqual(job.last_served_at, claimed_at)
+        self.assertEqual(job.lease_expires_at, claimed_at + timedelta(seconds=120))
 
     @skipUnlessDBFeature('has_select_for_update')
     def test_parallel_history_claims_preserve_owner_turns(self):
