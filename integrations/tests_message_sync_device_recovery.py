@@ -1,5 +1,6 @@
 """A replacement device recovers recent rooms without restarting discovery."""
 import uuid
+from datetime import timedelta
 from unittest.mock import patch
 
 from django.test import TransactionTestCase, override_settings
@@ -13,6 +14,8 @@ from integrations.services.message_sync.device_recovery import recover_recent_co
 from integrations.services.message_sync.scheduler import BudgetDeferred
 from integrations.services.slack_chat_catalog import CATALOG_KEY
 from integrations.services import slack_chat_read_state as reads
+from integrations.services.community_bridge.buzz import BuzzBridgeError
+from integrations.services.slack_dm_registration_ledger import registration_rows_for_grant, registration_state
 
 
 @override_settings(MESSAGE_SYNC_ENABLED=True, SLACK_DM_MIRROR_SHADOW_SECRET="synthetic-device-recovery")
@@ -178,3 +181,54 @@ class DeviceRecoveryTests(SlackDmIoAuthorityFixture, TransactionTestCase):
         self.conversation.refresh_from_db()
         self.assertEqual(self.conversation.status, "error")
         self.assertFalse(self.recover())
+
+    def test_ambiguous_registration_timeout_retries_after_durable_cooldown(self):
+        with (patch.object(dm, "_call_slack_with_grant_authority", side_effect=self.source),
+              patch.object(dm.BuzzBridgeClient, "provision_private_conversation", side_effect=BuzzBridgeError("timeout"))):
+            self.assertTrue(self.recover())
+        self.conversation.refresh_from_db()
+        self.assertEqual(self.conversation.status, "error")
+        with patch.object(dm, "_call_slack_with_grant_authority") as source:
+            self.assertFalse(self.recover())
+        source.assert_not_called()
+        SlackDmMirrorConversation.objects.filter(pk=self.conversation.pk).update(
+            updated_at=timezone.now() - timedelta(minutes=3),
+        )
+        with (patch.object(dm, "_call_slack_with_grant_authority", side_effect=self.source),
+              patch.object(dm.BuzzBridgeClient, "unregister_private_conversation"),
+              patch.object(dm.BuzzBridgeClient, "provision_private_conversation", return_value={"channel_id": self.room_id})):
+            self.assertTrue(self.recover())
+        self.conversation.refresh_from_db()
+        self.assertEqual(self.conversation.status, "live")
+        states = [registration_state(row) for row in registration_rows_for_grant(self.grant.pk)]
+        self.assertEqual(states.count("active"), 1)
+        self.assertNotIn("ambiguous", states)
+
+    def test_repeated_failure_resets_cooldown_and_allows_other_room(self):
+        self.conversation.status = "error"
+        self.conversation.save()
+        SlackDmMirrorConversation.objects.filter(pk=self.conversation.pk).update(
+            updated_at=timezone.now() - timedelta(minutes=3),
+        )
+        with patch.object(dm, "_call_slack_with_grant_authority", return_value={"channel": {"id": "DWRONG"}}):
+            self.assertTrue(self.recover())
+        self.conversation.refresh_from_db()
+        self.assertGreater(self.conversation.updated_at, timezone.now() - timedelta(seconds=10))
+        other = SlackDmMirrorConversation.objects.create(
+            grant=self.grant, slack_workspace_id="TIOAUTH", slack_conversation_id="DOTHERRECENT",
+            status="provisioning", participant_slack_ids=["UOWNER", "UOTHER"],
+        )
+        self.catalog(other, days=2)
+        with (patch.object(dm, "_call_slack_with_grant_authority", side_effect=self.source) as source,
+              patch.object(dm.BuzzBridgeClient, "provision_private_conversation", return_value={"channel_id": self.room_id})):
+            self.assertTrue(self.recover())
+        self.assertEqual(source.call_args_list[0].kwargs["channel"], "DOTHERRECENT")
+
+    def test_errored_rooms_outside_window_are_not_retried(self):
+        self.catalog(self.conversation, days=31)
+        SlackDmMirrorConversation.objects.filter(pk=self.conversation.pk).update(
+            status="error", updated_at=timezone.now() - timedelta(minutes=3),
+        )
+        with patch.object(dm, "_call_slack_with_grant_authority") as source:
+            self.assertFalse(self.recover())
+        source.assert_not_called()
