@@ -14,6 +14,12 @@ from integrations.services.message_sync.scheduler import claim_job, schedule_job
 
 
 class PublicHistoryTests(TransactionTestCase):
+    def setUp(self):
+        self.now = int(timezone.now().timestamp())
+        clock = patch("integrations.services.message_sync.history.time.time", return_value=self.now)
+        clock.start()
+        self.addCleanup(clock.stop)
+
     def state(self, channel):
         return ensure_state(CommunityBridgeChannel.objects.create(
             slack_workspace_id="T1", slack_channel_id=channel, destination_platform="buzz",
@@ -25,9 +31,9 @@ class PublicHistoryTests(TransactionTestCase):
         job = schedule_job(state, "archive")
         client = MagicMock()
         client.conversations_history.side_effect = [
-            {"ok": True, "messages": [{"ts": "1700000001.000001", "user": "U1", "text": "newer", "reply_count": 1}],
+            {"ok": True, "messages": [{"ts": f"{self.now - 60}.000001", "user": "U1", "text": "newer", "reply_count": 1}],
              "response_metadata": {"next_cursor": "page2"}},
-            {"ok": True, "messages": [{"ts": "1700000000.000001", "user": "U1", "text": "older"}]},
+            {"ok": True, "messages": [{"ts": f"{self.now - 61}.000001", "user": "U1", "text": "older"}]},
         ]
         with patch('integrations.services.message_sync.history.SlackBridgeClient.get_client', return_value=client):
             public_page(claim_job(kinds=["archive"]), state)
@@ -39,16 +45,16 @@ class PublicHistoryTests(TransactionTestCase):
         self.assertEqual(state.verified_ranges["archive"]["classification"], "accessible_range")
         self.assertEqual(client.conversations_history.call_args.kwargs["cursor"], "page2")
         self.assertEqual(CommunityBridgeDelivery.objects.count(), 2)
-        self.assertTrue(BridgeSyncJob.objects.filter(state=state, kind="thread", source_object_key="1700000001.000001").exists())
+        self.assertTrue(BridgeSyncJob.objects.filter(state=state, kind="thread", source_object_key=f"{self.now - 60}.000001").exists())
         self.assertIsNotNone(BridgeSyncJob.objects.get(pk=job.pk).completed_at)
 
     @override_settings(MESSAGE_SYNC_SLACK_DISTRIBUTION="internal")
-    def test_archive_omits_zero_oldest_and_reads_a_full_internal_page(self):
+    def test_archive_bounds_thirty_days_and_reads_a_full_internal_page(self):
         state = self.state("C1")
         client = MagicMock()
 
         def slack_history(**kwargs):
-            self.assertNotIn("oldest", kwargs)
+            self.assertEqual(kwargs["oldest"], f"{self.now - 30 * 86400}.000000")
             self.assertEqual(kwargs["limit"], 200)
             return {"ok": True, "messages": []}
 
@@ -56,7 +62,7 @@ class PublicHistoryTests(TransactionTestCase):
         with patch('integrations.services.message_sync.history.SlackBridgeClient.get_client', return_value=client):
             public_page(claim_job(kinds=["archive"]), state)
         state.refresh_from_db()
-        self.assertEqual(state.verified_ranges["archive"]["oldest"], "0.000000")
+        self.assertEqual(state.verified_ranges["archive"]["oldest"], f"{self.now - 30 * 86400}.000000")
 
     @override_settings(MESSAGE_SYNC_SLACK_DISTRIBUTION="restricted")
     def test_restricted_public_history_keeps_fifteen_message_limit(self):
@@ -67,6 +73,88 @@ class PublicHistoryTests(TransactionTestCase):
             public_page(claim_job(kinds=["head"]), state)
         self.assertEqual(client.conversations_history.call_args.kwargs["limit"], 15)
         self.assertGreater(int(client.conversations_history.call_args.kwargs["oldest"].split(".")[0]), 0)
+
+    def test_legacy_public_archive_cursor_restarts_at_thirty_days(self):
+        state = self.state("C1")
+        job = schedule_job(state, "archive")
+        job.checkpoint = {"oldest": "0.000000", "upper_bound": f"{self.now}.999999",
+                          "cursor": "years-old-page", "latest": "1700000000.000001"}
+        job.save()
+        client = MagicMock()
+        client.conversations_history.return_value = {"ok": True, "messages": []}
+        with patch('integrations.services.message_sync.history.SlackBridgeClient.get_client', return_value=client):
+            public_page(claim_job(kinds=["archive"]), state)
+        request = client.conversations_history.call_args.kwargs
+        self.assertNotIn("cursor", request)
+        self.assertEqual(request["oldest"], f"{self.now - 30 * 86400}.000000")
+        self.assertEqual(request["latest"], f"{self.now}.999999")
+
+    def test_public_archive_stops_at_floor_and_keeps_recent_reply_locator(self):
+        state = self.state("C1")
+        old = f"{self.now - 60 * 86400}.000001"
+        recent = f"{self.now - 60}.000001"
+        client = MagicMock()
+        client.conversations_history.return_value = {
+            "ok": True, "has_more": True, "response_metadata": {"next_cursor": "ancient-page"},
+            "messages": [{"ts": recent, "user": "U1", "text": "recent"},
+                         {"ts": old, "user": "U1", "text": "excluded root", "latest_reply": recent}],
+        }
+        with patch('integrations.services.message_sync.history.SlackBridgeClient.get_client', return_value=client):
+            public_page(claim_job(kinds=["archive"]), state)
+        self.assertFalse(CommunityBridgeDelivery.objects.filter(source_message_id=old).exists())
+        self.assertTrue(CommunityBridgeDelivery.objects.filter(source_message_id=recent).exists())
+        self.assertTrue(BridgeSyncJob.objects.filter(state=state, kind="thread", source_object_key=old).exists())
+        self.assertEqual(state.jobs.get(kind="archive").checkpoint, {})
+        self.assertIsNotNone(state.jobs.get(kind="archive").completed_at)
+
+    def test_public_old_root_does_not_stop_ascending_recent_reply_pages(self):
+        state = self.state("C1")
+        root = f"{self.now - 60 * 86400}.000001"
+        reply = f"{self.now - 60}.000001"
+        schedule_job(state, "thread", source_object_key=root)
+        client = MagicMock()
+        client.conversations_replies.side_effect = [
+            {"ok": True, "messages": [{"ts": root, "user": "U1", "text": "outside window"}],
+             "has_more": True, "response_metadata": {"next_cursor": "recent-replies"}},
+            {"ok": True, "messages": [{"ts": reply, "user": "U1", "text": "recent reply"}]},
+        ]
+        with patch('integrations.services.message_sync.history.SlackBridgeClient.get_client', return_value=client):
+            public_page(claim_job(kinds=["thread"]), state)
+            self.assertEqual(CommunityBridgeDelivery.objects.count(), 0)
+            public_page(claim_job(kinds=["thread"]), state)
+        self.assertEqual(client.conversations_replies.call_args.kwargs["cursor"], "recent-replies")
+        row = CommunityBridgeDelivery.objects.get(source_message_id=reply)
+        self.assertEqual(row.source_parent_message_id, "")
+        self.assertEqual(row.payload["text"], "recent reply")
+        self.assertFalse(CommunityBridgeDelivery.objects.filter(source_message_id=root).exists())
+
+    def test_public_head_preserves_parent_inside_thirty_days(self):
+        state = self.state("C1")
+        root = f"{self.now - 2 * 86400}.000001"
+        reply = f"{self.now - 60}.000001"
+        client = MagicMock()
+        client.conversations_history.return_value = {"ok": True, "messages": [
+            {"ts": reply, "thread_ts": root, "user": "U1", "text": "recent reply"},
+        ]}
+        with patch('integrations.services.message_sync.history.SlackBridgeClient.get_client', return_value=client):
+            public_page(claim_job(kinds=["head"]), state)
+        self.assertEqual(CommunityBridgeDelivery.objects.get(source_message_id=reply).source_parent_message_id, root)
+
+    def test_quiet_old_public_thread_waits_a_day_and_records_empty_window(self):
+        state = self.state("C1")
+        root = f"{self.now - 60 * 86400}.000001"
+        job = schedule_job(state, "thread", source_object_key=root)
+        client = MagicMock()
+        client.conversations_replies.return_value = {"ok": True, "messages": [
+            {"ts": root, "user": "U1", "text": "outside window"},
+        ]}
+        with patch('integrations.services.message_sync.history.SlackBridgeClient.get_client', return_value=client):
+            public_page(claim_job(kinds=["thread"]), state)
+        state.refresh_from_db()
+        job.refresh_from_db()
+        self.assertEqual(state.verified_ranges["thread"]["classification"], "empty_accessible_range")
+        self.assertGreater(job.due_at.timestamp(), self.now + 23 * 3600)
+        self.assertEqual(CommunityBridgeDelivery.objects.count(), 0)
 
     def test_source_limited_empty_scan_does_not_claim_an_empty_conversation(self):
         state = self.state("C1")
@@ -98,8 +186,8 @@ class PublicHistoryTests(TransactionTestCase):
         lease = claim_job()
         client = MagicMock()
         client.conversations_history.return_value = {"ok": True, "messages": [
-            {"ts": "1700000000.000001", "user": "U1", "text": "one"},
-            {"ts": "1700000001.000001", "user": "U1", "text": "two"},
+            {"ts": f"{self.now - 61}.000001", "user": "U1", "text": "one"},
+            {"ts": f"{self.now - 60}.000001", "user": "U1", "text": "two"},
         ]}
         from integrations.services.community_bridge.store import ingest_slack_event
         def fail_second(payload):
@@ -121,7 +209,7 @@ class PublicHistoryTests(TransactionTestCase):
             with self.subTest(history_first=history_first):
                 channel_id = "CHISTORY" if history_first else "CLIVE"
                 state = self.state(channel_id)
-                message = {"ts": "1700000000.000001", "user": "U1", "text": "fixture"}
+                message = {"ts": f"{self.now - 61}.000001", "user": "U1", "text": "fixture"}
                 payload = {"team_id": "T1", "event_id": f"live:{channel_id}", "event": {
                     **message, "type": "message", "channel": channel_id, "channel_type": "channel",
                 }}
@@ -139,6 +227,89 @@ class PublicHistoryTests(TransactionTestCase):
 
 
 class PrivateHeadTests(SlackDmIoAuthorityFixture, TransactionTestCase):
+    def test_quiet_old_private_thread_waits_a_day_and_records_empty_window(self):
+        state = ensure_state(self.conversation)
+        now = int(timezone.now().timestamp())
+        root = f"{now - 60 * 86400}.000001"
+        job = schedule_job(state, "thread", source_object_key=root)
+        response = {"ok": True, "messages": [
+            {"ts": root, "user": "UOTHER", "text": "outside consent"},
+        ]}
+        with patch('integrations.services.slack_dm_mirror._call_slack_with_grant_authority', return_value=response):
+            private_page(claim_job(kinds=["thread"]), state)
+        state.refresh_from_db()
+        job.refresh_from_db()
+        self.assertEqual(state.verified_ranges["thread"]["classification"], "empty_accessible_range")
+        self.assertGreater(job.due_at.timestamp(), now + 23 * 3600)
+        self.assertFalse(self.conversation.deliveries.filter(source_message_id=root).exists())
+
+    @override_settings(MESSAGE_SYNC_ENABLED=True)
+    def test_initial_archive_and_standalone_thread_do_not_fetch_same_replies(self):
+        from integrations.services import slack_dm_mirror as dm
+        state = ensure_state(self.conversation)
+        parent = f"{int(timezone.now().timestamp()) - 60}.000001"
+        authority = dm._capture_slack_grant_api_authority(self.grant)
+        scopes = dm._history_required_scopes(self.conversation.slack_conversation_id)
+        scan, *_ = dm._prepare_history_scan_page(self.conversation.pk, self.grant.pk, authority, scopes)
+        # A recent-head observation can create this job before the archive sees
+        # the same parent. The archive's legacy cursor then owns initial replies.
+        job = schedule_job(state, "thread", source_object_key=parent)
+        dm._ensure_thread_state(self.conversation, parent, scan_epoch=scan.epoch)
+        with patch.object(dm, '_call_slack_with_grant_authority') as api:
+            private_page(claim_job(kinds=["thread"]), state)
+        api.assert_not_called()
+        job.refresh_from_db()
+        self.assertGreater(job.due_at, timezone.now())
+        self.assertIsNotNone(dm._next_incomplete_thread_state(self.conversation, scan_epoch=scan.epoch))
+
+    @override_settings(MESSAGE_SYNC_ENABLED=True)
+    def test_new_archive_thread_schedules_later_repair(self):
+        from integrations.services import slack_dm_mirror as dm
+        parent = f"{int(timezone.now().timestamp()) - 60}.000001"
+        dm._ensure_thread_state(self.conversation, parent, scan_epoch="bootstrap")
+        job = BridgeSyncJob.objects.get(state__private_conversation=self.conversation,
+                                       kind="thread", source_object_key=parent)
+        self.assertGreater(job.due_at, timezone.now())
+        self.assertIsNone(claim_job(kinds=["thread"]))
+
+    def test_durable_deep_reconciliation_runs_daily_without_changing_legacy_cadence(self):
+        from datetime import timedelta
+        from integrations.services import slack_dm_mirror as dm
+        for enabled, age_hours, expected in [(True, 2, False), (True, 25, True), (False, 2, True)]:
+            with self.subTest(enabled=enabled, age_hours=age_hours), override_settings(MESSAGE_SYNC_ENABLED=enabled):
+                self.conversation.history_backfilled_at = timezone.now() - timedelta(hours=age_hours)
+                authority = dm._capture_slack_grant_api_authority(self.grant)
+                with patch.object(dm, '_conversation_participant_ids', return_value=['UOWNER', 'UOTHER']), \
+                        patch.object(dm, '_store_conversation_membership_intent', return_value=(self.conversation, False)), \
+                        patch.object(dm, '_preload_slack_profiles'), \
+                        patch.object(dm, '_slack_profile', return_value={}), \
+                        patch.object(dm, '_store_conversation_profiles', return_value=self.conversation), \
+                        patch.object(dm, '_provision_owner_conversation') as provision:
+                    dm._discover_conversation(self.grant, authority,
+                        {'id': self.conversation.slack_conversation_id, 'is_im': True, 'user': 'UOTHER'},
+                        profile_cache={}, force_backfill=False, reset_history=False,
+                        activity_seconds=int(timezone.now().timestamp()))
+                self.assertEqual(provision.call_args.kwargs['force_backfill'], expected)
+
+    def test_durable_old_root_keeps_recent_replies_without_importing_parent(self):
+        state = ensure_state(self.conversation)
+        now = int(timezone.now().timestamp())
+        parent = f"{now - 60 * 86400}.000001"
+        reply = f"{now - 60}.000001"
+        schedule_job(state, "thread", source_object_key=parent)
+        response = {"ok": True, "messages": [
+            {"ts": parent, "user": "UOTHER", "text": "outside consent"},
+            {"ts": reply, "user": "UOTHER", "text": "eligible reply"},
+        ]}
+        with patch('integrations.services.slack_dm_mirror._call_slack_with_grant_authority', return_value=response) as api:
+            private_page(claim_job(kinds=["thread"]), state)
+        self.assertEqual(api.call_args.kwargs["ts"], parent)
+        self.assertGreaterEqual(int(api.call_args.kwargs["oldest"].split(".")[0]), now - 30 * 86400)
+        self.assertFalse(self.conversation.deliveries.filter(source_message_id=parent).exists())
+        row = self.conversation.deliveries.get(source_message_id=reply)
+        self.assertEqual(row.metadata["thread_ts"], "")
+        self.assertEqual(row.metadata["original_thread_ts"], parent)
+
     def test_recent_head_imports_while_archive_is_incomplete(self):
         state = ensure_state(self.conversation)
         schedule_job(state, "head")
@@ -240,7 +411,7 @@ class PrivateHeadTests(SlackDmIoAuthorityFixture, TransactionTestCase):
         self.assertNotIn("cursor", api.call_args.kwargs)
         self.assertGreaterEqual(int(api.call_args.kwargs["oldest"].split(".")[0]), now - 7 * 86400)
 
-    def test_legacy_zero_consent_cannot_read_old_thread(self):
+    def test_legacy_zero_consent_bounds_reply_query_even_for_old_root(self):
         self.grant.history_days = 0
         self.grant.save()
         state = ensure_state(self.conversation)
@@ -249,7 +420,9 @@ class PrivateHeadTests(SlackDmIoAuthorityFixture, TransactionTestCase):
         with patch('integrations.services.slack_dm_mirror._call_slack_with_grant_authority',
                    return_value={"ok": True, "messages": []}) as api:
             private_page(claim_job(kinds=["thread"]), state)
-        api.assert_not_called()
+        self.assertEqual(api.call_args.args[1], "conversations_replies")
+        self.assertGreaterEqual(int(api.call_args.kwargs["oldest"].split(".")[0]),
+                                int(timezone.now().timestamp()) - 30 * 86400 - 1)
 
     def test_explicit_all_history_thread_omits_zero_oldest(self):
         from integrations.services import slack_dm_mirror as dm
@@ -264,7 +437,7 @@ class PrivateHeadTests(SlackDmIoAuthorityFixture, TransactionTestCase):
             private_page(claim_job(kinds=["thread"]), state)
         self.assertNotIn("oldest", api.call_args.kwargs)
 
-    def test_thread_root_aged_out_since_checkpoint_needs_no_provider_call(self):
+    def test_thread_root_aged_out_still_resumes_recent_reply_cursor(self):
         self.grant.history_days = 7
         self.grant.save()
         state = ensure_state(self.conversation)
@@ -277,7 +450,8 @@ class PrivateHeadTests(SlackDmIoAuthorityFixture, TransactionTestCase):
         with patch('integrations.services.slack_dm_mirror._call_slack_with_grant_authority',
                    return_value={"ok": True, "messages": []}) as api:
             private_page(claim_job(kinds=["thread"]), state)
-        api.assert_not_called()
+        self.assertEqual(api.call_args.kwargs["cursor"], "old-page")
+        self.assertEqual(api.call_args.kwargs["ts"], root)
 
 
     def test_archive_stops_at_consent_cutoff_despite_provider_has_more(self):

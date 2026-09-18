@@ -155,6 +155,7 @@ _history_expiration_cursor = 0
 _history_expiration_scan_available_at = 0.0
 GRANT_DISCOVERY_INTERVAL_SECONDS = 300
 HISTORY_RECONCILIATION_INTERVAL_SECONDS = 3600
+DURABLE_HISTORY_RECONCILIATION_INTERVAL_SECONDS = 86400
 HISTORY_EXPIRATION_SCAN_INTERVAL_SECONDS = 60
 MAX_HISTORY_DAYS = 30
 HISTORY_PAGE_LIMIT = 200
@@ -3020,7 +3021,10 @@ def _discover_conversation(
     periodic_reconciliation_due = bool(
         conversation.history_backfilled_at is not None
         and conversation.history_backfilled_at
-        <= timezone.now() - timedelta(seconds=HISTORY_RECONCILIATION_INTERVAL_SECONDS)
+        <= timezone.now() - timedelta(seconds=(
+            DURABLE_HISTORY_RECONCILIATION_INTERVAL_SECONDS if getattr(settings, "MESSAGE_SYNC_ENABLED", False)
+            else HISTORY_RECONCILIATION_INTERVAL_SECONDS
+        ))
     )
     _provision_owner_conversation(
         conversation,
@@ -6668,7 +6672,10 @@ def _ensure_thread_state(
     if getattr(settings, "MESSAGE_SYNC_ENABLED", False):
         from integrations.services.message_sync.history import ensure_state
         from integrations.services.message_sync.scheduler import schedule_job
-        schedule_job(ensure_state(conversation), "thread", source_object_key=parent_message_id)
+        # This archive scan already owns a durable reply cursor. Its standalone
+        # repair job starts later, so bootstrap does not fetch every thread twice.
+        schedule_job(ensure_state(conversation), "thread", source_object_key=parent_message_id,
+                     due_at=timezone.now() + timedelta(seconds=HISTORY_RECONCILIATION_INTERVAL_SECONDS))
     return _ensure_history_state(
         conversation,
         source_message_id=f"{HISTORY_STATE_PREFIX}thread:{parent_message_id}",
