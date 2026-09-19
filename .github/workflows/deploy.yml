@@ -250,6 +250,8 @@ jobs:
           integrations.tests_github_installation_reconciliation \
           integrations.tests_github_app_probe \
           integrations.tests_connectors \
+          vibe_raising.tests_progress_contract \
+          vibe_raising.tests_progress_api \
           integrations.tests_slack_connector_authority \
           integrations.tests_startup_updates.StartupUpdateSlackBackfillViewTest \
           vibe_raising.tests.VibeRaisingApiTests.test_startup_update_run_maps_create_authority_error_to_connector_auth_response \
