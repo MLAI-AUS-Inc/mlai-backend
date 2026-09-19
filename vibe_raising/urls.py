@@ -36,8 +36,12 @@ from .admin_views import (
 from .views import VibeRaisingBusinessHealthView
 
 from .cover_views import UpdateCoverUploadView, UpdateCoverGenerateView, UpdateCoverStatusView
+from .progress_views import ProgressView, ProgressCustomMetricView, ProgressGoogleAnalyticsView
 
 urlpatterns = [
+    path("progress/", ProgressView.as_view(), name="startup-progress"),
+    path("progress/custom-metrics/", ProgressCustomMetricView.as_view(), name="startup-progress-custom"),
+    path("progress/google-analytics/", ProgressGoogleAnalyticsView.as_view(), name="startup-progress-ga"),
     path("updates/covers/upload/", UpdateCoverUploadView.as_view()),
     path("updates/covers/generate/", UpdateCoverGenerateView.as_view()),
     path("updates/covers/status/", UpdateCoverStatusView.as_view()),

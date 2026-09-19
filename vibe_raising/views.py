@@ -988,12 +988,17 @@ def _build_manual_structured_memo(payload):
 
 
 def _serialize_monthly_update(draft, structured_memo=None, *, published=False):
+    from .progress import public_chart_payload
     from startup_updates.revisions import frozen_memo, revision_payload
     revision = draft.published_revision if published and draft.published_revision_id else draft.current_revision
     if revision:
         structured_memo = frozen_memo(draft, published=published and bool(draft.published_revision_id))
     if structured_memo is None:
         structured_memo = _structured_memo_with_xero_metrics(draft)
+    if published and isinstance(structured_memo.get("progress_charts"), list):
+        # Disclosure is explicit. Narrative is reviewed separately by the founder.
+        structured_memo = {**structured_memo, "metrics": {}, "kpi_snapshot": [], "metric_suggestions": [],
+            "metric_history": {}, "financial_snapshot": None, "concise_analysis": None}
     video_metadata = _structured_memo_video_metadata(structured_memo)
     published_at = getattr(draft, "published_at", None)
     if revision and revision.pk != draft.published_revision_id:
@@ -1037,6 +1042,7 @@ def _serialize_monthly_update(draft, structured_memo=None, *, published=False):
         "reportingPeriod": (structured_memo or {}).get("reporting_period"),
         "evidenceWarnings": (structured_memo or {}).get("evidence_warnings", []),
         "metricHistory": (structured_memo or {}).get("metric_history", {}),
+        "progressCharts": public_chart_payload(structured_memo.get("progress_charts")),
         "financialSnapshot": _structured_memo_financial_snapshot(structured_memo),
         "conciseAnalysis": _structured_memo_concise_analysis(structured_memo),
         "presentationMode": _structured_memo_text(structured_memo, "presentation_mode", "presentationMode"),
@@ -2657,6 +2663,8 @@ class VibeRaisingMonthlyUpdateView(APIView):
             from rest_framework.exceptions import ValidationError
             raise ValidationError({"detail": str(exc)}) from exc
         memo = _build_manual_structured_memo(structured_payload)
+        if "chartSelections" in serializer.validated_data:
+            memo["_progress_chart_specs"] = serializer.validated_data["chartSelections"]
         if is_creation_request and not draft.current_revision_id:
             memo["_creation_request_hash"] = creation_request_hash
         if draft.current_revision_id:
