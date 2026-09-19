@@ -104,6 +104,83 @@ class PrivateReplyRecoveryTests(SlackDmIoAuthorityFixture, TransactionTestCase):
         )
 
     @transaction.atomic
+    def test_unrepresented_slackbot_parent_does_not_hold_human_reply(self):
+        self.parent.source_author_id = 'USLACKBOT'
+        self.parent.status = 'processing'
+        self.parent.encrypted_text = 'unsupported system parent'
+        self.parent.metadata = {'participant_hash': self.conversation.participant_hash, 'backfill': True}
+        self.parent.save()
+        self.child.status = 'processing'
+        self.child.encrypted_text = 'authorized human reply'
+        self.child.metadata = {'participant_hash': self.conversation.participant_hash,
+                               'backfill': True, 'thread_ts': self.parent.source_message_id}
+        self.child.save()
+        self.assertFalse(dm._private_delivery_batch_eligible(self.parent))
+        original_audience = list(self.conversation.participant_buzz_pubkeys)
+        with patch.object(dm.BuzzBridgeClient, 'deliver_private', return_value={'message_id': 'c'*64}) as deliver:
+            dm._deliver_to_mlai(self.parent)
+            deliver.assert_not_called()
+            dm._deliver_to_mlai(self.child)
+        self.parent.refresh_from_db()
+        self.child.refresh_from_db()
+        self.conversation.refresh_from_db()
+        self.assertEqual(self.parent.status, 'completed')
+        self.assertEqual(self.parent.encrypted_text, '')
+        self.assertTrue(self.parent.metadata['dependency_superseded'])
+        self.assertEqual(self.child.status, 'completed')
+        self.assertTrue(self.child.metadata['thread_parent_unavailable'])
+        self.assertEqual(deliver.call_args.kwargs['text'], 'authorized human reply')
+        self.assertFalse(deliver.call_args.kwargs['parent_message_id'])
+        self.assertEqual(self.conversation.participant_buzz_pubkeys, original_audience)
+
+    @transaction.atomic
+    def test_unrepresented_slackbot_edit_is_superseded_without_delivery(self):
+        self.parent.operation = 'edit'
+        self.parent.source_author_id = 'USLACKBOT'
+        self.parent.status = 'processing'
+        self.parent.metadata = {'participant_hash': self.conversation.participant_hash, 'backfill': True}
+        self.parent.save()
+        with patch.object(dm.BuzzBridgeClient, 'deliver_private') as deliver:
+            dm._deliver_to_mlai(self.parent)
+        self.parent.refresh_from_db()
+        self.assertEqual(self.parent.status, 'completed')
+        deliver.assert_not_called()
+
+    @transaction.atomic
+    def test_unknown_human_author_is_not_silently_superseded(self):
+        self.parent.source_author_id = 'UNOTREGISTERED'
+        self.parent.status = 'processing'
+        self.parent.metadata = {'participant_hash': self.conversation.participant_hash, 'backfill': True}
+        self.parent.save()
+        with self.assertRaisesMessage(dm.SlackDmMirrorError, 'Slack author is not part'):
+            dm._deliver_to_mlai(self.parent)
+        self.parent.refresh_from_db()
+        self.assertEqual(self.parent.status, 'processing')
+
+    @transaction.atomic
+    def test_registered_group_import_identity_still_preserves_slackbot(self):
+        from integrations.services.slack_chat_catalog import ALL_HISTORY_CONSENT
+        self.grant.consent_version = ALL_HISTORY_CONSENT
+        self.grant.save()
+        self.conversation.slack_conversation_id = 'GIOAUTH'
+        import_key = dm._shadow_pubkey(self.conversation, 'private-channel-import')
+        self.conversation.save()
+        self.parent.source_author_id = 'USLACKBOT'
+        self.parent.status = 'processing'
+        self.parent.encrypted_text = 'supported system context'
+        self.parent.metadata = {'participant_hash': self.conversation.participant_hash, 'backfill': True}
+        self.parent.save()
+        with self.assertRaisesMessage(dm.SlackDmMirrorError, 'Slack author is not part'):
+            dm._deliver_to_mlai(self.parent)
+        self.conversation.participant_buzz_pubkeys.append(import_key)
+        self.conversation.save()
+        with patch.object(dm.BuzzBridgeClient, 'deliver_private', return_value={'message_id': 'd'*64}) as deliver:
+            dm._deliver_to_mlai(self.parent)
+        self.parent.refresh_from_db()
+        self.assertNotIn('dependency_superseded', self.parent.metadata)
+        self.assertEqual(deliver.call_args.kwargs['linked_pubkey'], import_key)
+
+    @transaction.atomic
     def observe(self, epoch='fresh-archive', *, parent=True, child=True):
         dm._ensure_history_state(self.conversation, source_message_id=dm.HISTORY_MAIN_STATE_ID,
                                 metadata={'scan_epoch':epoch, 'complete':True, 'history_scan_state':'main'})
