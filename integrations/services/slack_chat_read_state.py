@@ -142,6 +142,11 @@ def read_state_snapshot(details, *, kind, messages, owner_id):
         "latest_ts": format(latest_stamp, "f"),
         "is_unread": is_unread,
         "unread_count": count,
+        # Keep personal mentions separate from @here/@channel badge counts.
+        "has_personal_mention": any(
+            re.search(r"<@" + re.escape(owner_id) + r"(?:\|[^>]+)?>", str(m.get("text") or ""))
+            for m in unread
+        ),
         "count_source": source,
         "fetched_at": time.time(),
     }
@@ -325,6 +330,8 @@ def refresh_target(grant, authority, target):
                 snapshot["count_source"] = count_source
                 if partial:
                     snapshot["unread_count"] = None
+                    if not snapshot["has_personal_mention"]:
+                        snapshot["has_personal_mention"] = None
                     if not snapshot["is_unread"]:
                         snapshot = None
         cached = {"available": snapshot is not None, **(snapshot or {})}
@@ -541,6 +548,7 @@ def apply_read(authority, target, *, source_ts, required, public_key=None, devic
                     "latest_ts": format(max(latest, confirmed), "f"),
                     "is_unread": proven_unread,
                     "unread_count": 0 if proven_clear else None,
+                    "has_personal_mention": False if proven_clear else None,
                     "count_source": "confirmed_read", "fetched_at": confirmed_at,
                     "confirmed_at": confirmed_at, "refresh_required": True}
         if stamp <= previous:
