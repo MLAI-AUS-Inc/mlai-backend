@@ -36,3 +36,15 @@ Run `python scripts/test_my_startup.py` with Python 3.11 and the backend depende
 Eight real-record ownership tests in `founder_tools/my_startup/test_database.py` passed on 19 September 2026 after explicit approval of the 346 existing migrations listed in `docs/my-startup-test-migrations.md`. The run checked that the available and applied migration sets exactly matched that inventory, used a fresh temporary SQLite database, disabled dotenv loading and external network access, and removed the database after testing. Django system checks reported no issues. The tests cover company reuse and isolation, explicit domainless startup selection, preview scope, purchases, connector ownership and research handoff.
 
 The disposable SQLite ownership gate is complete. It does not establish deployed PostgreSQL behavior or real provider execution. Future migration execution still requires the approval specified in `AGENTS.md`; the isolated contract suite does not authorize it. The cross-repository staging checklist and frontend verification record live in mlai-chat's `docs/mlai/my-startup.md`.
+
+On 20 September 2026 the user approved all 347 current migrations in disposable
+SQLite/PostgreSQL test databases, including the upstream
+`startup_updates.0024_startupprofile_progress_configuration`. A repeat local run
+passed 69 tests: the complete Slack founder-link API class (including enabled
+Chat link issuance) and the eight My startup ownership tests. It verified the
+exact applied inventory, recorded zero external network attempts and destroyed
+the database. The 20 isolated contracts and seven deployment runtime/configuration
+tests also passed. The first full CI run exposed a missing `settings` import in
+Roo link issuance; that import is fixed and the new destination regression
+exercises the real API. Production already has migration 0024; this feature
+still introduces no migration.

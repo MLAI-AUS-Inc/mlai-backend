@@ -1675,6 +1675,25 @@ class SlackFounderLinkApiTests(APITestCase):
             timezone.now() + timedelta(minutes=31),
         )
 
+    @override_settings(
+        ROO_FOUNDER_LINK_CHAT_ENABLED=True,
+        COMMUNITY_CHAT_FRONTEND_URL="https://chat.mlai.test/",
+    )
+    def test_start_uses_chat_destination_when_enabled(self):
+        response = self._start()
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        destination = urlparse(response.data["link_url"])
+        self.assertEqual(destination.scheme, "https")
+        self.assertEqual(destination.netloc, "chat.mlai.test")
+        self.assertEqual(destination.path, "/my-startup/link-roo")
+        token = self._token_from_response(response)
+        self.assertEqual(
+            SlackFounderLinkRequest.objects.get().token_digest,
+            digest_link_token(token),
+        )
+        self.assertEqual(response["Cache-Control"], "no-store")
+
     def test_new_start_invalidates_previous_unused_token(self):
         first = self._start()
         first_token = self._token_from_response(first)

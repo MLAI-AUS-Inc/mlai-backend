@@ -1,6 +1,7 @@
 import logging
 import re
 from urllib.parse import parse_qsl, unquote, urlencode, urlparse, urlsplit
+from django.conf import settings
 from django.contrib.auth import get_user_model, login as auth_login, logout as auth_logout
 from django.db import transaction
 from django.urls import reverse
