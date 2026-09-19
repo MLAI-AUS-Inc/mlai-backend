@@ -10,6 +10,24 @@ class CommunityChatScopedThrottle(ScopedRateThrottle):
     scope_attr = "community_chat_throttle_scope"
 
 
+class SlackSnapshotDeviceThrottle(CommunityChatScopedThrottle):
+    """Bound snapshot polling per authenticated device, independently of writes."""
+
+    def get_cache_key(self, request, view):
+        key = super().get_cache_key(request, view)
+        device = getattr(request, "community_chat_public_key", None)
+        if key and device:
+            # Authentication supplies this binding; query/body values never do.
+            return f"{key}:device:{hashlib.sha256(str(device).encode()).hexdigest()}"
+        return key
+
+
+class SlackSnapshotAccountThrottle(CommunityChatScopedThrottle):
+    """Cap aggregate polling even when an account has many verified devices."""
+
+    scope_attr = "slack_snapshot_account_throttle_scope"
+
+
 def client_ip(request):
     forwarded = str(request.META.get("HTTP_X_FORWARDED_FOR") or "").split(",", 1)[0].strip()
     return forwarded or str(request.META.get("REMOTE_ADDR") or "unknown")

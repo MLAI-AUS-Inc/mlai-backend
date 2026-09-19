@@ -48,13 +48,16 @@ def select_target(ordered, snapshots, cache_key, cursor, *, now, turn):
         return now - snapshot(target).get("fetched_at", 0)
     def hinted(target):
         return (hints.get(target.slack_id) or {}).get("until", 0) > now
-    urgent = [t for t in eligible if
+    foreground = [t for t in eligible if
               (hinted(t) and age(t) >= 15)
-              or (snapshot(t).get("refresh_required") and age(t) >= 1)
-              or (snapshot(t).get("is_unread") and age(t) >= 60)]
+              or (snapshot(t).get("refresh_required") and age(t) >= 1)]
+    unread = [t for t in eligible if snapshot(t).get("is_unread") and age(t) >= 60]
     background = [t for t in eligible if age(t) >= 60]
     # Stable sorting preserves the source-ID continuation for equal ages.
-    candidates = background if turn % 4 == 3 and background else urgent or background
+    # An older unseen unread must not consume every priority turn until an
+    # explicit visible hint expires. Oldest-first still applies within each
+    # tier and to the reserved background turn.
+    candidates = background if turn % 4 == 3 and background else foreground or unread or background
     return max(candidates, key=age, default=None)
 
 

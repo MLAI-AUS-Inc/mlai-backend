@@ -93,7 +93,14 @@ def _authorized_conversation(user, channel_id, public_key, *, lock=False):
 
 def _refresh_status(conversation):
     rows = (
-        conversation.deliveries.filter(source_platform=CommunityBridgePlatform.SLACK)
+        conversation.deliveries.filter(
+            source_platform=CommunityBridgePlatform.SLACK,
+            metadata__participant_hash=conversation.participant_hash,
+        )
+        # Resetting an old room leaves content-free idempotency tombstones.
+        # They are not failures of the replacement room, even if a subsequent
+        # device transition rebinds their audience metadata.
+        .exclude(status="dead", last_error="Private conversation participants changed")
         .exclude(source_message_id__startswith="history-state:")
         .exclude(source_message_id__startswith="registration-state:")
         .filter(
