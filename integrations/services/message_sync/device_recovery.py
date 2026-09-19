@@ -32,9 +32,11 @@ def recover_recent_conversation(grant, authority, *, profile_cache, cycle_starte
     """
     from integrations.services import slack_dm_mirror as dm
 
-    candidates = recent_conversations(SlackDmMirrorConversation.objects.filter(
-        grant=grant, mlai_channel_id__isnull=True,
-    ).filter(
+    from .device_audience import enabled as stable_private_rooms
+    candidate_scope = SlackDmMirrorConversation.objects.filter(grant=grant)
+    if not stable_private_rooms():
+        candidate_scope = candidate_scope.filter(mlai_channel_id__isnull=True)
+    candidates = recent_conversations(candidate_scope.filter(
         Q(status="provisioning") | Q(
             status="error", updated_at__lte=timezone.now() - timedelta(seconds=RECOVERY_RETRY_SECONDS),
         ),
@@ -65,9 +67,8 @@ def recover_recent_conversation(grant, authority, *, profile_cache, cycle_starte
         # fences every retry before provisioning.
         with transaction.atomic():
             dm._lock_slack_grant_api_authority(authority, required_scopes=dm.DIRECT_DM_SCOPES)
-            SlackDmMirrorConversation.objects.filter(
-                pk=candidate.pk, status__in=["provisioning", "error"], mlai_channel_id__isnull=True,
-            ).update(status="error", last_error=f"Device recovery: {type(exc).__name__}", updated_at=timezone.now())
+            candidate_scope.filter(pk=candidate.pk, status__in=["provisioning", "error"]).update(
+                status="error", last_error=f"Device recovery: {type(exc).__name__}", updated_at=timezone.now())
     return True
 
 

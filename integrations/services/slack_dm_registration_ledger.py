@@ -530,6 +530,7 @@ def registration_request(row: SlackDmMirrorDelivery) -> dict[str, Any]:
             for value in metadata.get("callback_author_pubkeys") or []
         ],
         "conversation_name": str(metadata.get("conversation_name") or ""),
+        **({"private_audience": metadata["private_audience"]} if metadata.get("private_audience") else {}),
     }
 
 
@@ -800,6 +801,7 @@ def _execute_registration_cleanup(claim: dict[str, Any]) -> str:
                     request["participant_pubkeys"],
                     callback_author_pubkeys=request["callback_author_pubkeys"],
                     conversation_name=request["conversation_name"],
+                    **({"private_audience": request["private_audience"]} if request.get("private_audience") else {}),
                 )
                 channel_id = str(provisioned["channel_id"])
             disposition, authority = _registration_cleanup_disposition_locked(
@@ -881,6 +883,7 @@ def _execute_registration_cleanup(claim: dict[str, Any]) -> str:
                     authority_request["participant_pubkeys"],
                     callback_author_pubkeys=callback_author_pubkeys,
                     conversation_name=authority_request["conversation_name"],
+                    **({"private_audience": authority_request["private_audience"]} if authority_request.get("private_audience") else {}),
                 )
                 restored_channel_id = str(provisioned["channel_id"])
                 if restored_channel_id != channel_id:
@@ -1065,6 +1068,9 @@ def finalize_registration_attempt(attempt_id: int, *, channel_id: str) -> bool:
                     "updated_at",
                 )
             )
+            if (attempt.metadata or {}).get("private_audience", {}).get("channel_id") == channel_id:
+                from .message_sync.device_audience import rebind_history
+                rebind_history(conversation, attempt)
             for row in rows:
                 if row.pk == attempt.pk:
                     continue

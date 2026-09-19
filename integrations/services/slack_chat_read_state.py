@@ -327,11 +327,12 @@ def refresh_target(grant, authority, target):
         cached = {"available": snapshot is not None, **(snapshot or {})}
     cached.setdefault("fetched_at", observed_at)
     with transaction.atomic():
-        _lock_slack_grant_api_authority(authority, required_scopes={target.read_scope})
+        _, connection = _lock_slack_grant_api_authority(authority, required_scopes={target.read_scope})
         if cache.get(key + ":receipt") != receipt:
             # A confirmed read overtook this source request; retry a fresh read.
             raise BudgetDeferred(1)
-        cache.set(key, cached, timeout=24 * 60 * 60)
+        from .message_sync.read_snapshots import publish_snapshot
+        cached = publish_snapshot(connection, key, cached)
         cache.delete(pending_key)
     return cached
 
@@ -358,10 +359,23 @@ def read_state_page(user, *, public_key, cursor=0, channel_ids=None):
     authority = _capture_slack_grant_api_authority(grant)
     if getattr(settings, "MESSAGE_SYNC_ENABLED", False):
         targets = [t for t in targets if t.read_scope in authority.scopes]
+        if channel_ids is not None and targets:
+            from .message_sync.read_priority import enqueue_refresh
+            enqueue_refresh(authority, targets)
         with transaction.atomic():
-            _lock_slack_grant_api_authority(authority, required_scopes={"im:read"})
+            locked_grant, connection = _lock_slack_grant_api_authority(authority, required_scopes={"im:read"})
+            targets = [t for t in _targets(locked_grant, public_key) if t.read_scope in authority.scopes
+                       and (channel_ids is None or t.channel_id in requested)]
             stored = cache.get_many([_cache_key(authority, t) for t in targets])
+            # This orders complete directory responses independently of each
+            # conversation's source observation/confirmation revision.
+            connection_cursor = dict(connection.sync_cursor or {})
+            directory_revision = max(int(connection_cursor.get("read_directory_revision") or 0), time.time_ns() // 1000) + 1
+            connection_cursor["read_directory_revision"] = directory_revision
+            connection.sync_cursor = connection_cursor
+            connection.save(update_fields=["sync_cursor", "updated_at"])
         return {
+            "directory_revision": directory_revision,
             "channels": {t.channel_id: stored[_cache_key(authority, t)] for t in targets
                          if _cache_key(authority, t) in stored},
             "authorized_channel_ids": [t.channel_id for t in targets],
@@ -531,7 +545,11 @@ def apply_read(authority, target, *, source_ts, required, public_key=None, devic
             if target.kind == "im" and source_snapshot is not None:
                 snapshot.update(source_snapshot, available=True, confirmed_at=confirmed_at)
         cache.set(key + ":receipt", uuid.uuid4().hex, timeout=86400)
-        cache.set(key, snapshot, timeout=86400)
+        from .message_sync.read_snapshots import publish_snapshot
+        # Refresh the locked connection; the provider call may have advanced
+        # its JSON checkpoints since apply_read captured the authority.
+        _, connection = _lock_slack_grant_api_authority(authority, required_scopes=required)
+        snapshot = publish_snapshot(connection, key, snapshot)
         cache.delete(_pending_key(authority, target))
     return {
         "synced": True,

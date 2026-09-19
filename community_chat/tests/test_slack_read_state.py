@@ -18,6 +18,11 @@ from integrations.services.slack_chat_catalog import (
 from integrations.services.slack_dm_mirror import SlackDmMirrorAuthorizationError
 
 
+def snapshot_connection():
+    """In-memory connection for database-free tests of versioned snapshots."""
+    return SimpleNamespace(sync_cursor={}, save=MagicMock())
+
+
 class SlackReadStateTests(SimpleTestCase):
     def test_latest_join_does_not_leave_an_unreachable_unread_frontier(self):
         result = reads.read_state_snapshot(
@@ -158,7 +163,7 @@ class SlackReadStateTests(SimpleTestCase):
         ), patch.object(
             reads.transaction, "atomic", side_effect=nullcontext
         ), patch.object(
-            reads, "_lock_slack_grant_api_authority"
+            reads, "_lock_slack_grant_api_authority", return_value=(grant, snapshot_connection())
         ), patch(
             "integrations.services.slack_dm_mirror._locked_active_verified_device", return_value=object()
         ), patch.object(
@@ -300,7 +305,7 @@ class PrivateReadTargetTests(SimpleTestCase):
         ), patch.object(reads, "_assert_grant_connection_authorized"), patch.object(
             reads, "_capture_slack_grant_api_authority", return_value=SlackReadStateTests().authority()
         ), patch.object(reads.transaction, "atomic", side_effect=nullcontext), patch.object(
-            reads, "_lock_slack_grant_api_authority"
+            reads, "_lock_slack_grant_api_authority", return_value=(self.grant, snapshot_connection())
         ), patch("integrations.services.slack_dm_mirror._locked_active_verified_device", return_value=object()), patch.object(reads.cache, "delete"), patch.object(
             reads, "_call_slack_with_grant_authority",
             return_value={"channel": {
@@ -400,7 +405,7 @@ class ReadStatePageTests(SimpleTestCase):
         ), patch.object(
             reads.transaction, "atomic", side_effect=nullcontext
         ), patch.object(
-            reads, "_lock_slack_grant_api_authority"
+            reads, "_lock_slack_grant_api_authority", return_value=(grant, snapshot_connection())
         ), patch.object(
             reads.cache, "get", return_value=None
         ), patch.object(
@@ -551,7 +556,7 @@ class BackgroundReadCacheTests(SimpleTestCase):
                    'topic': {'value': 'private topic'},
                    'latest': {'ts': '102.000001', 'text': 'private content'}}
         with patch.object(reads.transaction, 'atomic', side_effect=nullcontext), patch.object(
-            reads, '_lock_slack_grant_api_authority'
+            reads, '_lock_slack_grant_api_authority', return_value=(grant, snapshot_connection())
         ), patch.object(reads.cache, 'get', side_effect=lambda key: stored.get(key)), patch.object(
             reads.cache, 'set', side_effect=lambda key, value, **kwargs: stored.__setitem__(key, value)
         ), patch.object(reads.cache, 'delete', side_effect=lambda key: stored.pop(key, None)), patch.object(
@@ -578,7 +583,7 @@ class BackgroundReadCacheTests(SimpleTestCase):
             stored[reads._cache_key(authority, target) + ':receipt'] = 'new-confirmation'
             return {'channel': {'id': 'D1', 'last_read': '100.000001', 'unread_count_display': 3}}
         with patch.object(reads.transaction, 'atomic', side_effect=nullcontext), patch.object(
-            reads, '_lock_slack_grant_api_authority'
+            reads, '_lock_slack_grant_api_authority', return_value=(grant, snapshot_connection())
         ), patch.object(reads.cache, 'get', side_effect=lambda key: stored.get(key)), patch.object(
             reads.cache, 'set'
         ) as publish, patch.object(reads, '_call_slack_with_grant_authority', side_effect=response):

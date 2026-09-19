@@ -29,6 +29,7 @@ class ReadStateLease:
     token: str
     previous_served: float | None
     after: str
+    turn: int = 0
 
 
 @contextmanager
@@ -96,7 +97,7 @@ def claim_read_state():
                 previous = (connection.sync_cursor or {}).get(KEY) or {}
                 if max(float(previous.get("due") or 0), float(previous.get("expires") or 0)) > claimed_at:
                     continue
-                lease = ReadStateLease(grant_id, connection_id, user_id, lease.token, previous.get("served"), previous.get("after", ""))
+                lease = ReadStateLease(grant_id, connection_id, user_id, lease.token, previous.get("served"), previous.get("after", ""), int(previous.get("turn") or 0))
                 connection.sync_cursor = {**(connection.sync_cursor or {}), KEY: {
                     **previous, "token": lease.token, "expires": claimed_at + 120,
                     "served": claimed_at, "due": claimed_at,
@@ -106,7 +107,7 @@ def claim_read_state():
     return None
 
 
-def finish_read_state(lease, *, after, delay=1, error="", return_turn=False):
+def finish_read_state(lease, *, after, delay=1, error="", return_turn=False, failed_source="", retry_seconds=60):
     """Release this lease without altering discovery or import checkpoints."""
     with transaction.atomic(), read_state_context(lease):
         grant, connection = _lock(lease)
@@ -114,6 +115,11 @@ def finish_read_state(lease, *, after, delay=1, error="", return_turn=False):
             return
         guard_read_state(grant, connection)
         value = dict((connection.sync_cursor or {}).get(KEY) or {})
+        now = timezone.now().timestamp()
+        retries = {key: due for key, due in (value.get("retries") or {}).items() if due > now}
+        if failed_source:
+            retries[failed_source] = now + max(1, retry_seconds)
+        value.update(retries=retries, turn=lease.turn + (0 if return_turn else 1))
         value.update(token="", expires=0, after=after, due=timezone.now().timestamp() + max(1, delay), error=error[:100])
         if return_turn:
             if lease.previous_served is None:
@@ -132,7 +138,8 @@ def refresh_read_state_once():
     lease = claim_read_state()
     if lease is None:
         return 0
-    after, delay, error, return_turn = lease.after, 1, "", False
+    after, delay, error, return_turn, failed_source = lease.after, 1, "", False, ""
+    retry_seconds = 60
     target = None
     try:
         with read_state_context(lease):
@@ -140,20 +147,25 @@ def refresh_read_state_once():
             reads._assert_grant_connection_authorized(grant)
             keys = set(CommunityChatDevice.objects.filter(user_id=grant.user_id, status="verified", revoked_at__isnull=True).values_list("public_key", flat=True))
             authority = reads._capture_slack_grant_api_authority(grant)
+            from .read_snapshots import flush_notification
+            flush_notification(authority)
             from .receipts import flush_read_once
-            confirmed = flush_read_once(grant, authority, keys)
+            # A sustained stream of explicit reads must still leave refresh
+            # capacity for other conversations belonging to this account.
+            confirmed = flush_read_once(grant, authority, keys) if lease.turn % 4 != 3 else None
             if confirmed is not None:
                 return confirmed
             targets = sorted((t for t in reads._targets_for_keys(grant, keys)
                               if t.read_scope in authority.scopes), key=lambda t: t.slack_id)
             with transaction.atomic():
-                reads._lock_slack_grant_api_authority(authority, required_scopes={"im:read"})
+                _, connection = reads._lock_slack_grant_api_authority(authority, required_scopes={"im:read"})
                 snapshots = cache.get_many([reads._cache_key(authority, t) for t in targets])
             # Source IDs are stable across discovery reorderings and devices.
             ordered = [t for t in targets if t.slack_id > after] + [t for t in targets if t.slack_id <= after]
             now = timezone.now().timestamp()
-            urgent = [t for t in ordered if (snapshots.get(reads._cache_key(authority, t)) or {}).get("refresh_required")]
-            target = next(iter(urgent), None) or next((t for t in ordered if now - (snapshots.get(reads._cache_key(authority, t)) or {}).get("fetched_at", 0) >= 60), None)
+            from .read_priority import select_target
+            target = select_target(ordered, snapshots, lambda t: reads._cache_key(authority, t),
+                                   connection.sync_cursor, now=now, turn=lease.turn)
             if target is None:
                 delay = 10 if targets else 60
                 return 0
@@ -165,6 +177,12 @@ def refresh_read_state_once():
     except (BudgetDeferred, reads.SlackDmMirrorRateLimited) as exc:
         error, delay = type(exc).__name__, getattr(exc, "retry_after", 60)
         return_turn = getattr(exc, "before_request_method", "") == "conversations.info"
+        if target is not None and getattr(exc, "before_request_method", "") in {"conversations.history", "conversations.replies"}:
+            # A secondary history quota must not hold this owner's independent
+            # DM info snapshots hostage. Retain the metadata checkpoint and
+            # pause only this target while other methods continue to progress.
+            failed_source, retry_seconds = target.slack_id, max(15, delay)
+            delay = 1
         return 0
     except Exception as exc:
         # One broken conversation cannot prevent the rest of an owner's sweep.
@@ -176,10 +194,12 @@ def refresh_read_state_once():
                 value = cache.get(key)
                 if value and value.get("refresh_required"):
                     cache.set(key, {**value, "refresh_required": False}, timeout=86400)
-        error, delay = type(exc).__name__, 30
+        error, delay = type(exc).__name__, 1
+        failed_source = target.slack_id if target else ""
         return 0
     finally:
         try:
-            finish_read_state(lease, after=after, delay=delay, error=error, return_turn=return_turn)
+            finish_read_state(lease, after=after, delay=delay, error=error, return_turn=return_turn,
+                              failed_source=failed_source, retry_seconds=retry_seconds)
         except LeaseLost:
             pass
