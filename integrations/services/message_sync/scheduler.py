@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from django.db import connection, transaction
-from django.db.models import BigIntegerField, Case, Exists, F, Max, OuterRef, Q, Subquery, Value, When
+from django.db.models import BigIntegerField, Case, Exists, F, Max, Min, OuterRef, Q, Subquery, Value, When
 from django.db.models.functions import Coalesce
 from django.utils import timezone
 
@@ -124,20 +124,16 @@ def claim_job(*, kinds=None, lease_seconds=120, prefer_import=False):
     ).values("state__workspace_id").annotate(served=Max("last_served_at")).order_by(
         F("served").asc(nulls_first=True), "state__workspace_id",
     ).values_list("state__workspace_id", flat=True))
-    # One large account must not dominate smaller accounts in the same Slack
-    # workspace. Public shared channels collectively receive one owner turn.
-    candidates = candidates.annotate(owner_key=Coalesce("private_conversation__grant_id", Value(-1), output_field=BigIntegerField())).annotate(
-        owner_turn=Subquery(BridgeSyncJob.objects.annotate(
-            owner_key=Coalesce("state__private_conversation__grant_id", Value(-1), output_field=BigIntegerField()),
-        ).filter(state__workspace_id=OuterRef("workspace_id"), owner_key=OuterRef("owner_key")).order_by(
+    # Compute each owner's service turn once, rather than running the same
+    # all-owner job scan for every candidate conversation. Conversation turns
+    # remain small, state-indexed lookups inside the chosen owner's queue.
+    candidates = candidates.annotate(
+        owner_key=Coalesce("private_conversation__grant_id", Value(-1), output_field=BigIntegerField()),
+        history_turn=Subquery(BridgeSyncJob.objects.filter(state_id=OuterRef("pk")).order_by(
             F("last_served_at").desc(nulls_last=True),
         ).values("last_served_at")[:1]),
-        history_turn=Subquery(
-        BridgeSyncJob.objects.filter(state_id=OuterRef("pk")).order_by(
-            F("last_served_at").desc(nulls_last=True),
-        ).values("last_served_at")[:1],
-    ))
-    state_order = [F("owner_turn").asc(nulls_first=True)]
+    )
+    state_order = []
     if prefer_import:
         from integrations.models import SlackDmMirrorConversation
         from .private_coverage import recent_conversations
@@ -162,9 +158,7 @@ def claim_job(*, kinds=None, lease_seconds=120, prefer_import=False):
                     cursor.execute("SELECT pg_try_advisory_xact_lock(hashtextextended(%s, 0))", [f"message-sync-history:{workspace_id}"])
                     if not cursor.fetchone()[0]:
                         continue
-            state = candidates.filter(workspace_id=workspace_id).select_for_update(
-                skip_locked=True, of=("self",),
-            ).order_by(*state_order).first()
+            state = _claim_owner_state(candidates, workspace_id, state_order)
             if state is None:
                 continue
             # Rotate head/archive/thread lanes before individual thread roots.
@@ -194,6 +188,25 @@ def claim_job(*, kinds=None, lease_seconds=120, prefer_import=False):
             job.save(update_fields=["lease_token", "lease_expires_at", "last_served_at", "attempts"])
             return JobLease(job.pk, state.pk, token, state.authority_generation,
                             job.kind, job.source_object_key, dict(job.checkpoint), previous_job_turn)
+    return None
+
+
+def _claim_owner_state(candidates, workspace_id, state_order):
+    """Select an owner once under the workspace claim lock, then one room."""
+    candidates = candidates.filter(workspace_id=workspace_id)
+    owners = BridgeSyncJob.objects.filter(state__workspace_id=workspace_id).annotate(
+        owner_key=Coalesce("state__private_conversation__grant_id", Value(-1), output_field=BigIntegerField()),
+    ).filter(owner_key__in=candidates.values("owner_key")).values("owner_key").annotate(
+        served=Max("last_served_at"), first_state=Min("state_id"),
+    ).order_by(F("served").asc(nulls_first=True), "first_state", "owner_key")
+    # Include ALL jobs belonging to eligible owners, including future-due jobs:
+    # completing a page or exhausting a conversation must not refund its turn.
+    for owner in list(owners):
+        state = candidates.filter(owner_key=owner["owner_key"]).select_for_update(
+            skip_locked=True, of=("self",),
+        ).order_by(*state_order).first()
+        if state is not None:
+            return state
     return None
 
 

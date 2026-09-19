@@ -37,6 +37,9 @@ flowchart LR
   and first public archives **within** the selected owner's turn. Two slots
   preserve ordinary least-recently-served repair rotation. Current conversation
   leases still exclude simultaneous head/archive/thread writes to one room.
+  Owner turns are aggregated once per claim, then the worker selects a room
+  within that owner. Large inventories must not repeat a full owner-job scan
+  for every candidate room. Future-due jobs retain their owner's service turn.
 - Two independent read-state slots use their own bounded thread pool, so
   history executor saturation cannot delay read receipts or unread refreshes.
   Receipt confirmation remains first in each owner's read-state turn. Shared

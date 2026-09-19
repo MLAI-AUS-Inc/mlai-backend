@@ -8,13 +8,17 @@ from unittest import IsolatedAsyncioTestCase
 from unittest.mock import MagicMock, patch
 
 from django.core.cache import cache
+from django.contrib.auth import get_user_model
 from django.core.management import call_command
 from django.test import SimpleTestCase, TransactionTestCase, override_settings
 from django.utils import timezone
 from slack_sdk.errors import SlackApiError
 
 from community_chat.tests.test_slack_dm_io_authority import SlackDmIoAuthorityFixture
-from integrations.models import BridgeApiBudget, BridgeSyncJob, CommunityBridgeChannel, SlackDmMirrorConversation
+from integrations.models import (
+    BridgeApiBudget, BridgeSyncJob, CommunityBridgeChannel, ExternalServiceConnection,
+    SlackDmMirrorConversation, SlackDmMirrorGrant,
+)
 from integrations.services.message_sync import execution, telemetry
 from integrations.services.message_sync.history import ensure_state
 from integrations.services.message_sync.scheduler import BudgetDeferred, claim_job, finish_job
@@ -220,6 +224,34 @@ class InitialImportPriorityTests(SlackDmIoAuthorityFixture, TransactionTestCase)
         self.recent.latest_synced_ts = f'{int((timezone.now()-timedelta(days=8)).timestamp())}.000001'
         self.recent.save(update_fields=['latest_synced_ts'])
         self.assertEqual(claim_job(prefer_import=True).state_id, self.old.pk)
+
+    def test_large_owner_cannot_refund_its_turn_by_finishing_one_of_many_rooms(self):
+        for index in range(30):
+            room = SlackDmMirrorConversation.objects.create(
+                grant=self.grant, slack_workspace_id=self.grant.slack_workspace_id,
+                slack_conversation_id=f'DLARGE{index}', status='live',
+                latest_synced_ts=f'{int(timezone.now().timestamp())}.000001',
+            )
+            ensure_state(room)
+        user = get_user_model().objects.create_user(email='small-import@example.invalid')
+        connection = ExternalServiceConnection.objects.create(user=user, provider='slack', access_token='synthetic')
+        grant = SlackDmMirrorGrant.objects.create(
+            user=user, connection=connection, slack_workspace_id=self.grant.slack_workspace_id,
+            slack_user_id='USMALL', consented_at=timezone.now(),
+        )
+        small = ensure_state(SlackDmMirrorConversation.objects.create(
+            grant=grant, slack_workspace_id=grant.slack_workspace_id, slack_conversation_id='DSMALL', status='live',
+        ))
+        BridgeSyncJob.objects.update(last_served_at=None)
+        first = claim_job(prefer_import=True)
+        self.assertNotEqual(first.state_id, small.pk)
+        # Only a future-due job now records the large owner's latest turn.
+        finish_job(first, checkpoint={}, delay_seconds=3600, complete=True)
+        second = claim_job(prefer_import=True)
+        self.assertEqual(second.state_id, small.pk)
+        finish_job(second, checkpoint={}, delay_seconds=3600, complete=True)
+        third = claim_job(prefer_import=True)
+        self.assertNotEqual(third.state_id, small.pk)
 
     def test_command_reports_observed_scope_counters_without_source_identifiers(self):
         BridgeApiBudget.objects.create(app_id='ATEST', workspace_id='TSECRET', method='conversations.history', next_admitted_at=timezone.now())
