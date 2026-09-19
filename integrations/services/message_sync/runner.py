@@ -30,12 +30,12 @@ def fence_current_page():
         locked_job(lease)
 
 
-def process_history_once(*, seed=True):
+def process_history_once(*, seed=True, prefer_import=False):
     if not enabled():
         return 0
     if seed:
         seed_states()
-    lease = claim_job(kinds=["head", "archive", "thread"])
+    lease = claim_job(kinds=["head", "archive", "thread"], prefer_import=prefer_import)
     if lease is None:
         return 0
     try:
@@ -55,5 +55,6 @@ def process_history_once(*, seed=True):
             fail_job(lease, error_code=failure_code(exc), retry_after=exc.retry_after if isinstance(exc, BudgetDeferred) else None)
         except LeaseLost:
             pass
-        logger.warning("message_sync_page_failed job_id=%s error_code=%s", lease.job_id, failure_code(exc))
+        if not isinstance(exc, BudgetDeferred):
+            logger.warning("message_sync_page_failed job_id=%s error_code=%s", lease.job_id, failure_code(exc))
         return 0

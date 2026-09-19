@@ -1,9 +1,11 @@
 """Apply one app/workspace/method budget to public and owner-token Slack calls."""
+import time
 from django.conf import settings
 from slack_sdk.errors import SlackApiError
 
 from .budgets import admit_request, record_cooldown
 from .scheduler import BudgetDeferred
+from . import telemetry
 
 
 def provider_interval(method):
@@ -32,20 +34,38 @@ def budgeted_client(client, *, workspace_id, app_id=None):
 
     def api_call(api_method, **kwargs):
         scope = dict(app_id=app_id, workspace_id=workspace_id, method=api_method)
-        admit_request(**scope, interval_seconds=provider_interval(api_method))
+        metric_scope = telemetry.scope_key(app_id, workspace_id, api_method) if api_method in telemetry.METHODS else None
+        def record(counter, amount=1):
+            if metric_scope:
+                telemetry.record(metric_scope, counter, amount)
+        try:
+            admit_request(**scope, interval_seconds=provider_interval(api_method))
+        except BudgetDeferred:
+            record("deferred")
+            raise
+        record("admitted")
+        started = time.monotonic()
         try:
             return original(api_method, **kwargs)
         except SlackApiError as exc:
             headers = getattr(exc.response, "headers", {}) or {}
             raw = headers.get("Retry-After") or headers.get("retry-after")
             if getattr(exc.response, "status_code", None) == 429 or exc.response.get("error") == "ratelimited":
+                record("rate_limited")
                 try:
                     seconds = max(1, int(raw or 60))
                 except (TypeError, ValueError):
                     seconds = 60
                 record_cooldown(**scope, retry_after=seconds)
                 raise BudgetDeferred(seconds) from exc
+            record("failed")
             raise
+        except Exception:
+            record("failed")
+            raise
+        finally:
+            record("finished")
+            record("request_ms", round((time.monotonic() - started) * 1000))
 
     client.api_call = api_call
     # Retries run through the durable worker, not SDK sleeps under consent locks.

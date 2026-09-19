@@ -1,8 +1,8 @@
 """Database-owned leases and budgets shared by every worker process.
 
-A claim is one page in one conversation. Priority hints never outrank the
-least-recently-served conversation, so foreground activity cannot starve an
-unopened conversation. Checkpoints contain cursors and boundaries only.
+A claim is one page in one conversation. Import priority never outranks owner
+fairness; ordinary slots retain least-recently-served conversation rotation.
+Checkpoints contain cursors and boundaries only.
 """
 
 import math
@@ -100,7 +100,7 @@ def eligible_states():
     ).exclude(status__in=["paused", "revoked"])
 
 
-def claim_job(*, kinds=None, lease_seconds=120):
+def claim_job(*, kinds=None, lease_seconds=120, prefer_import=False):
     """Claim one bounded page, rotating workspaces, owners, then conversations.
 
     Lock the state as well as the job: two processes cannot run different job
@@ -137,6 +137,21 @@ def claim_job(*, kinds=None, lease_seconds=120):
             F("last_served_at").desc(nulls_last=True),
         ).values("last_served_at")[:1],
     ))
+    state_order = [F("owner_turn").asc(nulls_first=True)]
+    if prefer_import:
+        from integrations.models import SlackDmMirrorConversation
+        from .private_coverage import recent_conversations
+        pending_private = recent_conversations(SlackDmMirrorConversation.objects.filter(
+            pk=OuterRef("private_conversation_id"), history_backfilled_at__isnull=True,
+        ))
+        pending_public = due.filter(state_id=OuterRef("pk"), kind="archive", completed_at__isnull=True,
+                                    state__public_channel__isnull=False)
+        candidates = candidates.annotate(import_priority=Case(
+            When(Exists(pending_private), then=Value(0)),
+            When(Exists(pending_public), then=Value(0)), default=Value(1),
+        ))
+        state_order.append("import_priority")
+    state_order.extend([F("history_turn").asc(nulls_first=True), "id"])
     for workspace_id in workspaces:
         with transaction.atomic():
             if connection.vendor == "postgresql":
@@ -149,7 +164,7 @@ def claim_job(*, kinds=None, lease_seconds=120):
                         continue
             state = candidates.filter(workspace_id=workspace_id).select_for_update(
                 skip_locked=True, of=("self",),
-            ).order_by(F("owner_turn").asc(nulls_first=True), F("history_turn").asc(nulls_first=True), "id").first()
+            ).order_by(*state_order).first()
             if state is None:
                 continue
             # Rotate head/archive/thread lanes before individual thread roots.
@@ -157,6 +172,8 @@ def claim_job(*, kinds=None, lease_seconds=120):
             lane = BridgeSyncJob.objects.filter(state=state, kind__in=due.filter(state=state).values("kind")).values("kind").annotate(
                 served=Max("last_served_at"),
             ).order_by(F("served").asc(nulls_first=True), Case(When(kind="head", then=Value(0)), When(kind="archive", then=Value(1)), default=Value(2)), "kind").first()
+            if prefer_import and state.import_priority == 0 and due.filter(state=state, kind="archive").exists():
+                lane = {"kind": "archive"}
             if lane is None:
                 continue
             job = due.filter(state=state, kind=lane["kind"]).select_for_update(skip_locked=True).order_by(

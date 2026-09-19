@@ -54,6 +54,7 @@ from integrations.services.message_sync.runner import process_history_once
 from integrations.services.message_sync.history import seed_states
 from integrations.services.message_sync.discovery import discovery_poll_seconds
 from integrations.services.message_sync.read_state import refresh_read_state_once
+from integrations.services.message_sync.execution import run_lane
 
 logger = logging.getLogger(__name__)
 WORKER_ID = f"{socket.gethostname()}:{os.getpid()}"[:100]
@@ -209,7 +210,10 @@ class CommunityBridgeDiscordClient(discord.Client):
     async def slack_dm_history_loop(self) -> None:
         # Stay within Slack's documented history baseline while Retry-After
         # responses can pause this independently from delivery retries.
-        await self.process_sync_history_once()
+        if message_sync_enabled():
+            await _run_history_workers()
+        else:
+            await self.process_sync_history_once()
 
     async def process_sync_history_once(self) -> None:
         if not message_sync_enabled():
@@ -254,7 +258,8 @@ class CommunityBridgeDiscordClient(discord.Client):
 
     @tasks.loop(seconds=1.0)
     async def slack_read_state_loop(self) -> None:
-        await self.process_read_state_once()
+        if message_sync_enabled():
+            await _run_read_state_workers()
 
     async def process_read_state_once(self) -> None:
         """Keep the shared unread cache warm independently of all client sessions."""
@@ -922,6 +927,9 @@ async def _run_headless_delivery_worker(client: CommunityBridgeDiscordClient) ->
     )
     logger.info("community_bridge_headless_worker_ready target=mlai_chat")
     async def history_loop():
+        if message_sync_enabled():
+            await _run_history_workers()
+            return
         while True:
             await client.process_sync_history_once()
             await asyncio.sleep(1.0 if message_sync_enabled() else HISTORY_REQUEST_INTERVAL_SECONDS)
@@ -942,6 +950,9 @@ async def _run_headless_delivery_worker(client: CommunityBridgeDiscordClient) ->
             await asyncio.sleep(0.1)
 
     async def read_state_loop():
+        if message_sync_enabled():
+            await _run_read_state_workers()
+            return
         while True:
             await client.process_read_state_once()
             await asyncio.sleep(1.0)
@@ -953,6 +964,19 @@ async def _run_headless_delivery_worker(client: CommunityBridgeDiscordClient) ->
         group.create_task(history_loop())
         group.create_task(delivery_loop())
         group.create_task(private_delivery_loop())
+
+
+async def _run_history_workers():
+    """Reserve half the slots for initial imports; half retain ordinary fairness."""
+    await run_lane(
+        lambda slot: process_history_once(seed=False, prefer_import=slot % 2 == 0),
+        worker_id=WORKER_ID, lane="history", slots=4, seed=seed_states,
+    )
+
+
+async def _run_read_state_workers():
+    """Keep read receipts and unread sweeps independent of history executor load."""
+    await run_lane(lambda _: refresh_read_state_once(), worker_id=WORKER_ID, lane="read_state", slots=2)
 
 
 async def _run_discovery_loop() -> None:

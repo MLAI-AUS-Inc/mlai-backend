@@ -11,6 +11,9 @@ from integrations.models import (
     BridgeApiBudget, BridgeSyncInbox, BridgeSyncJob, BridgeSyncState,
     BridgeWorkerHeartbeat, CommunityBridgeDelivery, SlackDmMirrorDelivery,
 )
+from integrations.services.message_sync import telemetry
+from integrations.services.message_sync.scheduler import eligible_states
+from integrations.services.message_sync.slack_client import provider_interval
 
 
 class Command(BaseCommand):
@@ -20,11 +23,15 @@ class Command(BaseCommand):
         parser.add_argument('--check', action='store_true', help='Fail if an enabled worker lane is stale or absent.')
         parser.add_argument('--local-worker', action='store_true', help='Check only this container, not a previous deployment.')
         parser.add_argument('--max-heartbeat-age', type=int, default=180)
+        parser.add_argument('--window-minutes', type=int, default=5,
+                            help='Completed minute buckets for provider throughput (1–15).')
 
     def handle(self, *args, **options):
         enabled = bool(getattr(settings, 'MESSAGE_SYNC_ENABLED', False))
         if options['max_heartbeat_age'] < 1:
             raise CommandError('--max-heartbeat-age must be positive')
+        if not 1 <= options['window_minutes'] <= 15:
+            raise CommandError('--window-minutes must be between 1 and 15')
         if options['check'] and not enabled:
             self.stdout.write(json.dumps({'enabled': False}))
             return
@@ -52,9 +59,28 @@ class Command(BaseCommand):
             }
 
         inbox = BridgeSyncInbox.objects.exclude(status='completed')
-        due = BridgeSyncJob.objects.filter(due_at__lte=now)
+        due = BridgeSyncJob.objects.filter(due_at__lte=now, state__in=eligible_states())
+        budgets = list(BridgeApiBudget.objects.filter(method__in=telemetry.METHODS))
+        scopes = {telemetry.scope_key(b.app_id, b.workspace_id, b.method): b for b in budgets}
+        try:
+            throughput = telemetry.snapshot(scopes, minutes=options['window_minutes'])
+            rows = []
+            for scope, counters in throughput.pop('scopes').items():
+                if counters is None:
+                    continue
+                budget = scopes[scope]
+                allowance = 60 / provider_interval(budget.method)
+                rows.append({'scope': scope, 'method': budget.method, **counters,
+                             'requests_per_minute': round(counters['admitted'] / options['window_minutes'], 2),
+                             'configured_requests_per_minute': allowance,
+                             'configured_budget_used_percent': round(100 * counters['admitted'] / (options['window_minutes'] * allowance), 1),
+                             'mean_request_ms': round(counters['request_ms'] / counters['finished']) if counters['finished'] else None})
+            throughput.update(available=True, measured_scopes=rows)
+        except Exception:
+            throughput = {'available': False}
         result = {
             'enabled': enabled, 'checked_at': now.isoformat(), 'stale_lanes': stale,
+            'provider_throughput': throughput,
             'inbox_pending': inbox.count(),
             'oldest_inbox_age_seconds': age(inbox.aggregate(value=Min('received_at'))['value']),
             'inbox_retrying': inbox.exclude(last_error_code='').count(),
