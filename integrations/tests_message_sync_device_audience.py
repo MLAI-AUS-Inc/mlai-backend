@@ -2,12 +2,14 @@
 from unittest.mock import patch
 
 from django.db import transaction
+from django.db.models import Exists
 from django.test import TransactionTestCase, override_settings
 from django.utils import timezone
 
 from community_chat.models import CommunityChatDevice
 from community_chat.tests.test_slack_dm_io_authority import SlackDmIoAuthorityFixture
-from integrations.models import SlackDmMirrorDelivery
+from integrations.models import BridgeSyncState, SlackDmMirrorConversation, SlackDmMirrorDelivery
+from integrations.services.message_sync.private_coverage import current_coverage_rows
 from integrations.services import slack_dm_mirror as dm
 from integrations.services.slack_dm_registration_ledger import finalize_registration_attempt
 from integrations.services.community_bridge.buzz import BuzzBridgeClient, BuzzBridgeError
@@ -73,6 +75,61 @@ class StableDeviceAudienceTests(SlackDmIoAuthorityFixture, TransactionTestCase):
         self.ambiguous.refresh_from_db()
         self.assertEqual(self.conversation.status, "provisioning")
         self.assertEqual(self.ambiguous.status, "pending")
+
+    def coverage(self, **overrides):
+        proof = {"import_contract_version": 2, "channel_id": self.room,
+                 "participant_hash": self.conversation.participant_hash,
+                 "classification": "accessible_range", "oldest": "1697408000.000001",
+                 "latest": "1700000000.000001", "checked_at": timezone.now().isoformat(),
+                 **overrides}
+        return BridgeSyncState.objects.create(
+            private_conversation=self.conversation, workspace_id="TIOAUTH", source_channel_id="DIOAUTH",
+            verified_ranges={"archive": proof}, status="current",
+        )
+
+    def finish(self, request):
+        with patch.object(BuzzBridgeClient, "private_delivery_receipts", return_value={}):
+            self.assertTrue(finalize_registration_attempt(request["attempt_id"], channel_id=self.room))
+
+    def test_device_transition_retains_current_coverage_without_claiming_new_history(self):
+        state = self.coverage()
+        before = dict(state.verified_ranges["archive"])
+        request, _ = self.prepare()
+        self.finish(request)
+        state.refresh_from_db()
+        self.assertEqual(state.verified_ranges["archive"], {**before, "participant_hash": self.conversation.participant_hash})
+        self.assertTrue(SlackDmMirrorConversation.objects.filter(pk=self.conversation.pk).filter(Exists(current_coverage_rows())).exists())
+
+    def test_retry_recovers_frozen_coverage_after_preparation_changed_audience(self):
+        state = self.coverage()
+        original = dict(state.verified_ranges["archive"])
+        first, _ = self.prepare()
+        second, _ = self.prepare()
+        self.assertNotEqual(first["attempt_id"], second["attempt_id"])
+        self.assertEqual(second["private_audience"]["coverage_proof"], original)
+        self.finish(second)
+        state.refresh_from_db()
+        self.assertEqual(state.verified_ranges["archive"]["participant_hash"], self.conversation.participant_hash)
+
+    def test_unrelated_coverage_is_not_promoted_by_device_change(self):
+        state = self.coverage(participant_hash="unrelated-audience")
+        before = dict(state.verified_ranges)
+        request, _ = self.prepare()
+        self.assertNotIn("coverage_proof", request["private_audience"])
+        self.finish(request)
+        state.refresh_from_db()
+        self.assertEqual(state.verified_ranges, before)
+        self.assertFalse(SlackDmMirrorConversation.objects.filter(pk=self.conversation.pk).filter(Exists(current_coverage_rows())).exists())
+
+    def test_coverage_replaced_during_relay_io_is_not_overwritten(self):
+        state = self.coverage()
+        request, _ = self.prepare()
+        replacement = {"archive": {"classification": "source_limited", "checked_at": "new-proof"}}
+        state.verified_ranges = replacement
+        state.save(update_fields=["verified_ranges"])
+        self.finish(request)
+        state.refresh_from_db()
+        self.assertEqual(state.verified_ranges, replacement)
 
     def test_explicit_history_reset_does_not_use_device_only_transition(self):
         request, _ = self.prepare(reset=True)

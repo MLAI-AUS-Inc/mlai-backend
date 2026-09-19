@@ -4858,8 +4858,9 @@ def _prepare_owner_conversation_locked(
         or conversation.status != SlackDmMirrorConversationStatus.LIVE
         or not conversation.mlai_channel_id
     )
-    from .message_sync.device_audience import enabled as stable_private_rooms
+    from .message_sync.device_audience import enabled as stable_private_rooms, coverage_for_transition
     preserve_room = bool(stable_private_rooms() and conversation.mlai_channel_id and not reset_history)
+    coverage_proof = coverage_for_transition(conversation) if preserve_room and needs_provision else None
     if (participant_set_changed and not preserve_room) or reset_history:
         _mark_conversation_history_due(
             conversation,
@@ -4922,6 +4923,8 @@ def _prepare_owner_conversation_locked(
     private_audience = None
     if preserve_room:
         private_audience = {"channel_id": str(conversation.mlai_channel_id), "generation": str(uuid.uuid4())}
+        if coverage_proof:
+            private_audience["coverage_proof"] = coverage_proof
         attempt.metadata = {**attempt.metadata, "private_audience": private_audience}
         attempt.save(update_fields=["metadata", "updated_at"])
     return (
