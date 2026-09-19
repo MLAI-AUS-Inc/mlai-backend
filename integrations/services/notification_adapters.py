@@ -706,8 +706,9 @@ def _founder_tools_run_url(run_id: str, *, expanded_review: bool = False) -> str
         return ""
     url = f"{base_url}/founder-tools/marketing/runs/{run_id}"
     if expanded_review:
-        return f"{url}?{urlencode({'articleStep': 'review', 'reviewMode': 'expanded'})}"
-    return url
+        url = f"{url}?{urlencode({'articleStep': 'review', 'reviewMode': 'expanded'})}"
+    from founder_tools.my_startup.links import marketing_delivery_url
+    return marketing_delivery_url(url)
 
 
 def _content_ready_text(run: AutomationRun, data: dict[str, Any]) -> str:

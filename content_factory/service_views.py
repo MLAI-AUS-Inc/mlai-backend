@@ -22,6 +22,8 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from founder_tools.my_startup.links import marketing_delivery_url
+
 from content_factory.article_system import (
     article_system_ready,
     best_registry_driven_publish_target,
@@ -1852,7 +1854,7 @@ class ResearchAutomationActionView(APIView):
             if job_id and frontend_base:
                 query = urlencode({"automationAction": "started"})
                 return HttpResponseRedirect(
-                    f"{frontend_base}/founder-tools/marketing/runs/{job_id}?{query}"
+                    marketing_delivery_url(f"{frontend_base}/founder-tools/marketing/runs/{job_id}?{query}")
                 )
             return render(
                 request,
@@ -1894,7 +1896,7 @@ class NotificationChannelEmailVerifyView(APIView):
         if not frontend_base:
             frontend_base = "http://localhost:5173" if getattr(settings, "DEBUG", False) else "https://mlai.au"
         return HttpResponseRedirect(
-            f"{frontend_base}/founder-tools/marketing/settings?emailChannel={result}"
+            marketing_delivery_url(f"{frontend_base}/founder-tools/marketing/settings?emailChannel={result}")
         )
 
 

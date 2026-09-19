@@ -2155,3 +2155,9 @@ COMMUNITY_CHAT_ROO_SLACK_USER_ID = os.getenv("COMMUNITY_CHAT_ROO_SLACK_USER_ID",
 # Optional startup-update editorial covers; all generation runs server-side.
 STARTUP_UPDATE_COVER_IMAGE_MODEL = os.getenv("STARTUP_UPDATE_COVER_IMAGE_MODEL", "gpt-image-2.5-flare")
 STARTUP_UPDATE_COVER_PROMPT_MODEL = os.getenv("STARTUP_UPDATE_COVER_PROMPT_MODEL", "gpt-6-astra")
+
+# Enable after Chat startup routes and Roo link-origin configuration are deployed.
+ROO_FOUNDER_LINK_CHAT_ENABLED = _env_is_true("ROO_FOUNDER_LINK_CHAT_ENABLED", False)
+
+# Enable only after the Chat frontend/API pilot passes. No data is moved.
+MY_STARTUP_DELIVERY_LINKS_ENABLED = os.environ.get("MY_STARTUP_DELIVERY_LINKS_ENABLED", "false").lower() == "true"
