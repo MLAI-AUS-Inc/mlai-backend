@@ -14,6 +14,34 @@ DEPLOY_SCRIPT = (Path(__file__).resolve().parents[1] / "deploy.sh").read_text()
 
 
 class DeploymentRuntimeChecksTests(unittest.TestCase):
+    def test_container_probes_do_not_consume_remaining_ssh_script(self):
+        release_probe = next(
+            line for line in DEPLOY_SCRIPT.splitlines()
+            if line.strip().startswith("running_release=")
+        )
+        sync_probe = next(
+            line for line in DEPLOY_SCRIPT.splitlines()
+            if "if docker compose exec -T bridge-worker" in line
+        )
+        for probe in (release_probe, sync_probe + "\n:; fi"):
+            with self.subTest(probe=probe):
+                # SSH feeds bash via stdin. Simulate Docker attaching to that
+                # stream: later deployment checks must still be executed.
+                script = "\n".join([
+                    "set -euo pipefail",
+                    "docker() { cat >/dev/null; }",
+                    probe.replace("\\$", "$"),
+                    "echo subsequent-health-check-executed",
+                ])
+                result = subprocess.run(
+                    ["bash"], input=script, text=True, capture_output=True,
+                    timeout=5,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(
+                    result.stdout.strip(), "subsequent-health-check-executed"
+                )
+
     def test_recovery_preserves_failure_and_stops_deployment(self):
         # Use the actual trap after the outer SSH heredoc removes its escapes.
         trap = re.search(r"^    trap .* ERR$", DEPLOY_SCRIPT, re.MULTILINE)
