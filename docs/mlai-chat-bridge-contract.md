@@ -54,6 +54,18 @@ deliberately retain no message content.
 
 ## Delivery guarantees
 
+Slack progress and read snapshots use a separate polling budget: 120 requests
+per minute per authenticated device, plus a 600-per-minute account ceiling.
+Legacy account sessions without a verified device binding share the device
+budget within their account. Mark-read acknowledgements have an independent
+60-per-minute account budget, so background polling cannot block a user's read
+action. These API budgets do not change Slack provider admission or fairness.
+
+Per-conversation refresh status counts only deliveries for the current audience.
+Cancelled deliveries retained as tombstones after an old room was replaced do
+not keep its replacement in an error state. Current-room failures remain visible;
+this status check neither replays cancelled deliveries nor changes source reads.
+
 - `(source platform, receipt key)` is the ingestion idempotency boundary.
 - Public Slack-to-Buzz creates also deduplicate by mapped destination and Slack
   channel/message identity. Live callbacks and history scans hold the same

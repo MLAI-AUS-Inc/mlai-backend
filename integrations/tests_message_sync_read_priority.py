@@ -15,10 +15,21 @@ class SelectionTests(SimpleTestCase):
         quiet = reads.ReadTarget('quiet', 'D3', 'im')
         values = {'D1': {'fetched_at': 900}, 'D2': {'is_unread': True, 'fetched_at': 800}, 'D3': {'fetched_at': 100}}
         cursor = {priority.KEY: {'D1': {'until': 1100}}}
-        for turn, expected in ((0, unread), (1, unread), (2, unread), (3, quiet)):
+        for turn, expected in ((0, hot), (1, hot), (2, hot), (3, quiet)):
             chosen = priority.select_target([hot, unread, quiet], values, lambda t: t.slack_id,
                                             cursor, now=1000, turn=turn)
             self.assertEqual(chosen, expected)
+
+    def test_fresh_or_expired_visible_hint_yields_to_known_unread(self):
+        hot = reads.ReadTarget('hot', 'D1', 'im')
+        unread = reads.ReadTarget('unread', 'D2', 'im')
+        values = {'D1': {'fetched_at': 990}, 'D2': {'is_unread': True, 'fetched_at': 800}}
+        cursor = {priority.KEY: {'D1': {'until': 1100}}}
+        self.assertEqual(priority.select_target([hot, unread], values, lambda t: t.slack_id,
+                         cursor, now=1000, turn=0), unread)
+        values['D1']['fetched_at'] = 700
+        self.assertEqual(priority.select_target([hot, unread], values, lambda t: t.slack_id,
+                         cursor, now=1101, turn=0), unread)
 
     def test_failing_room_cools_down_without_blocking_another_room(self):
         targets = [reads.ReadTarget('room1', 'D1', 'im'), reads.ReadTarget('room2', 'D2', 'im')]
