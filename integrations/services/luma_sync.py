@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import calendar
 from collections import defaultdict
 from datetime import date, datetime
 from decimal import Decimal
@@ -103,6 +104,7 @@ def sync_luma_connection(connection: ExternalServiceConnection) -> dict[str, Any
         )
         metrics = publish_luma_event_metrics(
             organization=organization,
+            connection_id=connection.pk,
             events=events,
             selected_metrics=metric_keys,
             observed_at=synced_at,
@@ -196,6 +198,7 @@ def publish_luma_event_metrics(
     selected_metrics: Optional[list[str]] = None,
     observed_at: Optional[datetime] = None,
     timezone_name: str = MELBOURNE_TIMEZONE,
+    connection_id: int | None = None,
 ) -> list[StartupMetricObservation]:
     """Aggregate Luma events by month and upsert the selected metric observations.
 
@@ -211,7 +214,7 @@ def publish_luma_event_metrics(
     tz = ZoneInfo(timezone_name)
 
     buckets: dict[date, dict[str, Any]] = defaultdict(
-        lambda: {"events": 0, "registrations": 0, "checked_in": 0, "event_ids": [], "event_names": []}
+        lambda: {"events": 0, "registrations": 0, "checked_in": 0, "registrations_known": True, "check_ins_known": True, "check_in_coverage": True, "event_ids": [], "event_names": []}
     )
     for item in events:
         start_at = item.get("start_at")
@@ -221,6 +224,9 @@ def publish_luma_event_metrics(
         month = date(local_start.year, local_start.month, 1)
         bucket = buckets[month]
         bucket["events"] += 1
+        bucket["registrations_known"] &= item.get("registration_count") is not None
+        bucket["check_ins_known"] &= item.get("checked_in_count") is not None
+        bucket["check_in_coverage"] &= bool(item.get("check_in_tracking_used") or (item.get("checked_in_count") or 0) > 0)
         bucket["registrations"] += int(item.get("registration_count") or 0)
         bucket["checked_in"] += int(item.get("checked_in_count") or 0)
         event = item.get("event") or {}
@@ -241,14 +247,14 @@ def publish_luma_event_metrics(
         if registrations > 0:
             rate = (Decimal(checked_in) / Decimal(registrations) * Decimal(100)).quantize(Decimal("0.1"))
         else:
-            rate = Decimal("0.0")
+            rate = None
 
         # (value_number, value_text, unit) per metric key.
-        computed: dict[str, tuple[Decimal, str, str]] = {
+        computed: dict[str, tuple[Decimal | None, str, str]] = {
             EVENTS_RUN_METRIC_KEY: (Decimal(event_count), str(event_count), ""),
-            EVENT_REGISTRATIONS_METRIC_KEY: (Decimal(registrations), str(registrations), ""),
-            EVENT_ATTENDEES_METRIC_KEY: (Decimal(checked_in), str(checked_in), ""),
-            EVENT_CHECK_IN_RATE_METRIC_KEY: (rate, f"{rate}%", "%"),
+            EVENT_REGISTRATIONS_METRIC_KEY: (Decimal(registrations) if values["registrations_known"] else None, str(registrations) if values["registrations_known"] else "Unknown", ""),
+            EVENT_ATTENDEES_METRIC_KEY: (Decimal(checked_in) if values["check_ins_known"] and values["check_in_coverage"] else None, str(checked_in) if values["check_ins_known"] and values["check_in_coverage"] else "Unknown", ""),
+            EVENT_CHECK_IN_RATE_METRIC_KEY: (rate if values["registrations_known"] and values["check_ins_known"] and values["check_in_coverage"] else None, f"{rate}%" if rate is not None and values["registrations_known"] and values["check_ins_known"] and values["check_in_coverage"] else "Unknown", "%"),
         }
 
         for metric_key in metric_keys:
@@ -269,8 +275,13 @@ def publish_luma_event_metrics(
                     "source_record_ids": event_ids,
                     "source_metadata": {
                         "calculation_basis": "luma_events",
+                        "connection_id": connection_id,
                         "event_count": event_count,
                         "event_names": values["event_names"],
+                        "check_in_coverage": values["check_in_coverage"],
+                        "timezone": timezone_name,
+                        "period_start": month.isoformat(),
+                        "period_end": min(date(month.year, month.month, calendar.monthrange(month.year, month.month)[1]), observed_at.astimezone(tz).date()).isoformat(),
                     },
                     "summary": _metric_summary(metric_key, value_text, event_count, month),
                 },

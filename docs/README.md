@@ -87,3 +87,5 @@ Files under `plans/` are proposals or implementation history unless explicitly
 identified as current by a maintained architecture document.
 
 - [Monthly update evidence and revision contract](monthly-update-evidence-contract.md)
+
+- [Startup Progress dashboard and chart disclosure](startup-progress.md)

@@ -30,6 +30,9 @@ from django.core.exceptions import ImproperlyConfigured
 from django.db.backends.signals import connection_created
 load_dotenv()
 
+# Roll out the private Progress dashboard independently of existing updates.
+STARTUP_PROGRESS_ENABLED = os.getenv("STARTUP_PROGRESS_ENABLED", "0").lower() in {"1", "true"}
+
 
 def _env_is_true(name: str, default: bool) -> bool:
     raw = os.getenv(name)

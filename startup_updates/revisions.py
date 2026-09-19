@@ -80,7 +80,7 @@ def capture_snapshot(organization, month, *, run=None, manual_metrics=None, base
             "value": str(observation.value_number) if observation and observation.value_number is not None else None,
             "display_value": (observation.value_text or (f"{observation.unit} {observation.value_number}".strip() if observation.value_number is not None else None)) if observation else None,
             "unit": observation.unit if observation else "",
-            "quality": ("partial" if observation.source_provider == "financial" else "source_reported" if observation.source_provider in {"xero", "stripe", "google_analytics"} else "model_extracted") if observation and observation.value_number is not None else "unknown",
+            "quality": ("partial" if observation.source_provider == "financial" else "founder_asserted" if observation.source_provider == "founder_progress" else "source_reported" if observation.source_provider in {"xero", "stripe", "google_analytics", "luma"} else "model_extracted") if observation and observation.value_number is not None else "unknown",
             "observation_id": observation.id if observation else None,
             "observed_at": observation.observed_at.isoformat() if observation and observation.observed_at else None,
             "source_provider": observation.source_provider if observation else None,
@@ -263,6 +263,10 @@ def save_revision(draft, memo, *, snapshot, audience="private", expected_revisio
         memo = inherit_cover(copy.deepcopy(memo), current.structured_memo if current else (draft.structured_memo or {}), draft.organization_id)
     except ValueError as exc:
         raise ValidationError(str(exc)) from exc
+    from vibe_raising.progress import charts_for_revision
+    progress_charts = charts_for_revision(draft, memo, current)
+    if progress_charts is not None:
+        memo["progress_charts"] = progress_charts
     try:
         memo = render_metric_claims(memo, snapshot.payload["metrics"])
     except ValueError as exc:
