@@ -378,6 +378,7 @@ jobs:
       run: |
         python manage.py test \
           integrations.tests_message_sync_unit \
+          integrations.tests_message_sync_throughput \
           integrations.tests_message_sync_configuration \
           integrations.tests_message_sync_transactions \
           integrations.tests_message_sync_scheduler \
@@ -388,6 +389,7 @@ jobs:
           integrations.tests_slack_discovery_progress_authority \
           integrations.tests_message_sync_history \
           integrations.tests_message_sync_recovery \
+          integrations.tests_message_sync_device_recovery \
           integrations.tests_slack_private_target_boundaries \
           integrations.tests_slack_import_readiness \
           integrations.tests_message_sync_public_repair \

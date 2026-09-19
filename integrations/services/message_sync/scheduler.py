@@ -1,8 +1,8 @@
 """Database-owned leases and budgets shared by every worker process.
 
-A claim is one page in one conversation. Priority hints never outrank the
-least-recently-served conversation, so foreground activity cannot starve an
-unopened conversation. Checkpoints contain cursors and boundaries only.
+A claim is one page in one conversation. Import priority never outranks owner
+fairness; ordinary slots retain least-recently-served conversation rotation.
+Checkpoints contain cursors and boundaries only.
 """
 
 import math
@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from django.db import connection, transaction
-from django.db.models import BigIntegerField, Case, Exists, F, Max, OuterRef, Q, Subquery, Value, When
+from django.db.models import BigIntegerField, Case, Exists, F, Max, Min, OuterRef, Q, Subquery, Value, When
 from django.db.models.functions import Coalesce
 from django.utils import timezone
 
@@ -100,7 +100,7 @@ def eligible_states():
     ).exclude(status__in=["paused", "revoked"])
 
 
-def claim_job(*, kinds=None, lease_seconds=120):
+def claim_job(*, kinds=None, lease_seconds=120, prefer_import=False):
     """Claim one bounded page, rotating workspaces, owners, then conversations.
 
     Lock the state as well as the job: two processes cannot run different job
@@ -124,19 +124,30 @@ def claim_job(*, kinds=None, lease_seconds=120):
     ).values("state__workspace_id").annotate(served=Max("last_served_at")).order_by(
         F("served").asc(nulls_first=True), "state__workspace_id",
     ).values_list("state__workspace_id", flat=True))
-    # One large account must not dominate smaller accounts in the same Slack
-    # workspace. Public shared channels collectively receive one owner turn.
-    candidates = candidates.annotate(owner_key=Coalesce("private_conversation__grant_id", Value(-1), output_field=BigIntegerField())).annotate(
-        owner_turn=Subquery(BridgeSyncJob.objects.annotate(
-            owner_key=Coalesce("state__private_conversation__grant_id", Value(-1), output_field=BigIntegerField()),
-        ).filter(state__workspace_id=OuterRef("workspace_id"), owner_key=OuterRef("owner_key")).order_by(
+    # Compute each owner's service turn once, rather than running the same
+    # all-owner job scan for every candidate conversation. Conversation turns
+    # remain small, state-indexed lookups inside the chosen owner's queue.
+    candidates = candidates.annotate(
+        owner_key=Coalesce("private_conversation__grant_id", Value(-1), output_field=BigIntegerField()),
+        history_turn=Subquery(BridgeSyncJob.objects.filter(state_id=OuterRef("pk")).order_by(
             F("last_served_at").desc(nulls_last=True),
         ).values("last_served_at")[:1]),
-        history_turn=Subquery(
-        BridgeSyncJob.objects.filter(state_id=OuterRef("pk")).order_by(
-            F("last_served_at").desc(nulls_last=True),
-        ).values("last_served_at")[:1],
-    ))
+    )
+    state_order = []
+    if prefer_import:
+        from integrations.models import SlackDmMirrorConversation
+        from .private_coverage import recent_conversations
+        pending_private = recent_conversations(SlackDmMirrorConversation.objects.filter(
+            pk=OuterRef("private_conversation_id"), history_backfilled_at__isnull=True,
+        ))
+        pending_public = due.filter(state_id=OuterRef("pk"), kind="archive", completed_at__isnull=True,
+                                    state__public_channel__isnull=False)
+        candidates = candidates.annotate(import_priority=Case(
+            When(Exists(pending_private), then=Value(0)),
+            When(Exists(pending_public), then=Value(0)), default=Value(1),
+        ))
+        state_order.append("import_priority")
+    state_order.extend([F("history_turn").asc(nulls_first=True), "id"])
     for workspace_id in workspaces:
         with transaction.atomic():
             if connection.vendor == "postgresql":
@@ -147,9 +158,7 @@ def claim_job(*, kinds=None, lease_seconds=120):
                     cursor.execute("SELECT pg_try_advisory_xact_lock(hashtextextended(%s, 0))", [f"message-sync-history:{workspace_id}"])
                     if not cursor.fetchone()[0]:
                         continue
-            state = candidates.filter(workspace_id=workspace_id).select_for_update(
-                skip_locked=True, of=("self",),
-            ).order_by(F("owner_turn").asc(nulls_first=True), F("history_turn").asc(nulls_first=True), "id").first()
+            state = _claim_owner_state(candidates, workspace_id, state_order)
             if state is None:
                 continue
             # Rotate head/archive/thread lanes before individual thread roots.
@@ -157,6 +166,8 @@ def claim_job(*, kinds=None, lease_seconds=120):
             lane = BridgeSyncJob.objects.filter(state=state, kind__in=due.filter(state=state).values("kind")).values("kind").annotate(
                 served=Max("last_served_at"),
             ).order_by(F("served").asc(nulls_first=True), Case(When(kind="head", then=Value(0)), When(kind="archive", then=Value(1)), default=Value(2)), "kind").first()
+            if prefer_import and state.import_priority == 0 and due.filter(state=state, kind="archive").exists():
+                lane = {"kind": "archive"}
             if lane is None:
                 continue
             job = due.filter(state=state, kind=lane["kind"]).select_for_update(skip_locked=True).order_by(
@@ -177,6 +188,25 @@ def claim_job(*, kinds=None, lease_seconds=120):
             job.save(update_fields=["lease_token", "lease_expires_at", "last_served_at", "attempts"])
             return JobLease(job.pk, state.pk, token, state.authority_generation,
                             job.kind, job.source_object_key, dict(job.checkpoint), previous_job_turn)
+    return None
+
+
+def _claim_owner_state(candidates, workspace_id, state_order):
+    """Select an owner once under the workspace claim lock, then one room."""
+    candidates = candidates.filter(workspace_id=workspace_id)
+    owners = BridgeSyncJob.objects.filter(state__workspace_id=workspace_id).annotate(
+        owner_key=Coalesce("state__private_conversation__grant_id", Value(-1), output_field=BigIntegerField()),
+    ).filter(owner_key__in=candidates.values("owner_key")).values("owner_key").annotate(
+        served=Max("last_served_at"), first_state=Min("state_id"),
+    ).order_by(F("served").asc(nulls_first=True), "first_state", "owner_key")
+    # Include ALL jobs belonging to eligible owners, including future-due jobs:
+    # completing a page or exhausting a conversation must not refund its turn.
+    for owner in list(owners):
+        state = candidates.filter(owner_key=owner["owner_key"]).select_for_update(
+            skip_locked=True, of=("self",),
+        ).order_by(*state_order).first()
+        if state is not None:
+            return state
     return None
 
 

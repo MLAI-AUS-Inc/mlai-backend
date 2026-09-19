@@ -2646,6 +2646,14 @@ def discover_conversations(
         for slack_user_id, profile in stored_profiles.items():
             if isinstance(profile, dict):
                 profile_cache.setdefault(str(slack_user_id), profile)
+    if getattr(settings, "MESSAGE_SYNC_ENABLED", False):
+        from integrations.services.message_sync.device_recovery import recover_recent_conversation
+
+        if recover_recent_conversation(
+            grant, authority, profile_cache=profile_cache,
+            cycle_started_at=discovery_started_at,
+        ):
+            return 1
     staged_channel_ids = _staged_slack_channel_ids(grant.connection)
     history_days = _grant_history_days(grant)
     activity_cutoff = int(time.time()) - history_days * 86_400 if history_days else 0

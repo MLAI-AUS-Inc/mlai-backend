@@ -155,9 +155,10 @@ def discover_once(interval_seconds):
         # Local admission pacing is not a provider failure. Keep the exact
         # shared-budget delay instead of adding thirty seconds to every page.
         error, delay = type(exc).__name__, exc.retry_after
-        # Every discovery turn starts with one users.conversations request.
-        # Nested deferrals and actual provider 429s still consume their turn.
-        return_turn = exc.before_request_method == "users.conversations"
+        # Initial directory or device-recovery admission can return an unused
+        # turn. Nested deferrals and actual provider 429s consume their turn.
+        return_turn = (exc.before_request_method == "users.conversations"
+                       or getattr(exc, "discovery_admission_deferred", False))
     except Exception as exc:
         error = type(exc).__name__
         delay = max(30, dm._slack_retry_after_seconds(exc))

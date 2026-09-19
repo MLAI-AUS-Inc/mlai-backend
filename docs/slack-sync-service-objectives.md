@@ -31,6 +31,19 @@ flowchart LR
 - History work rotates workspaces, then owners, then conversations and lanes.
   Shared public channels form one owner group. A large account cannot receive a
   separate owner turn for each of its conversations.
+- Four independent history execution slots replace batch barriers: a slow
+  page cannot stop a free slot from claiming another conversation. Two slots
+  prefer unfinished, known-recent private imports (within the selected window)
+  and first public archives **within** the selected owner's turn. Two slots
+  preserve ordinary least-recently-served repair rotation. Current conversation
+  leases still exclude simultaneous head/archive/thread writes to one room.
+  Owner turns are aggregated once per claim, then the worker selects a room
+  within that owner. Large inventories must not repeat a full owner-job scan
+  for every candidate room. Future-due jobs retain their owner's service turn.
+- Two independent read-state slots use their own bounded thread pool, so
+  history executor saturation cannot delay read receipts or unread refreshes.
+  Receipt confirmation remains first in each owner's read-state turn. Shared
+  provider admission and `Retry-After` apply across all slots and instances.
 - Source unread snapshots are collected while clients are closed. Client polls
   read the same owner/consent/OAuth scoped cache; they do not independently fetch
   Slack or add unread counts from their partially received message timelines.
@@ -45,6 +58,15 @@ flowchart LR
   or revoked; the explicit authorized target set controls removal.
 - Existing owner-private delivery and membership fences remain in force.
   No token, message body or profile is stored in read-intent checkpoints.
+- Device recovery prioritizes known, recently active conversations whose old
+  room was fenced. Each fair discovery turn can restore one such conversation
+  before continuing the historical directory cursor. Recovery rechecks Slack
+  access and membership and uses only currently verified devices. It preserves
+  the account/source read snapshot across room replacement, but publication
+  still waits for the replacement room's bounded history coverage. A failed
+  room cannot block recovery of all other recent rooms. Failed recent rooms
+  retry after a durable two-minute cooldown, including ambiguous relay
+  registration timeouts, through the same membership and registration fences.
 
 ## Timing objectives and capacity
 
@@ -72,6 +94,30 @@ required calls divided by its admitted calls/minute; do not add independent
 method quotas together as if they were serial. Add measured queue competition,
 provider backoff and relay delivery time. Do not show a completion percentage or
 ETA while conversation discovery or thread pagination is still unbounded/unknown.
+
+### Measuring capacity before adding instances
+
+Run `python manage.py message_sync_status --window-minutes 5` in the deployed
+worker. `provider_throughput` reports completed minute buckets per opaque
+app/workspace/method scope: admitted requests, local admission deferrals, actual
+provider 429s, failed requests, mean request latency and use of our configured
+budget. Counters expire after 20 minutes, contain no source IDs, tokens or
+message content, and cannot affect synchronization if telemetry fails. An absent
+scope means no recorded samples, not proof of zero demand. Allow a complete
+measurement window after rollout; compare equivalent backlog and owner load.
+
+`due_jobs` includes only currently eligible conversations and reports oldest due
+times. Use it with provider throughput and delivery backlog: low admission with
+old eligible work suggests local scheduling/processing constraints; sustained
+budget use or provider cooldowns suggests a Slack quota constraint. Empty queues
+with low utilization are normal. One app/workspace cannot multiply its quota by
+adding worker instances or IP addresses. Avoid a completion-time claim based only
+on requests/minute: record verified window coverage and publication completion.
+
+The headless and Discord entrypoints use the same execution pools. Each slot
+submits at most one call, uses a bounded polling delay, and closes obsolete DB
+connections between calls. Shutdown stops new claims; existing lease and consent
+fences still protect any synchronous request finishing after cancellation.
 
 MLAI-origin read confirmation is attempted immediately and retried durably when
 limited. Other foreground MLAI clients converge through their next shared-cache
