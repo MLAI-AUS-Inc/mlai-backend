@@ -24,6 +24,27 @@ def snapshot_connection():
 
 
 class SlackReadStateTests(SimpleTestCase):
+    def test_personal_mentions_exclude_broadcasts_other_people_and_read_posts(self):
+        details = {"last_read": "100.000001"}
+
+        def snapshot(messages):
+            return reads.read_state_snapshot(
+                details, kind="private_channel", messages=messages, owner_id="UOWNER",
+            )
+
+        ordinary = [
+            {"ts": "101.000001", "user": "UOTHER", "text": "<!channel> <!here> <@UOTHER>"},
+            {"ts": "100.000001", "user": "UOTHER", "text": "<@UOWNER> already read"},
+            {"ts": "102.000001", "user": "UOWNER", "text": "<@UOWNER> self"},
+        ]
+        result = snapshot(ordinary)
+        self.assertTrue(result["is_unread"])
+        self.assertFalse(result["has_personal_mention"])
+        self.assertEqual(result["unread_count"], 1)
+        for text in ("Hello <@UOWNER>", "Hello <@UOWNER|Sam>"):
+            message = {"ts": "103.000001", "user": "UOTHER", "text": text}
+            self.assertTrue(snapshot(ordinary + [message])["has_personal_mention"])
+
     def test_latest_join_does_not_leave_an_unreachable_unread_frontier(self):
         result = reads.read_state_snapshot(
             {"last_read": "100.000001", "latest": {"ts": "103.000001", "subtype": "channel_join"}},
@@ -459,6 +480,17 @@ class ReadStatePageTests(SimpleTestCase):
         self.assertEqual(result["next_cursor"], "2")
         self.assertEqual(result["retry_after_seconds"], 65)
         self.assertEqual(len(calls), 1)
+
+    def test_partial_history_keeps_personal_mentions_unknown_unless_observed(self):
+        for text, expected in (("<!channel> broadcast", None), ("<@UOWNER> personal", True)):
+            with self.subTest(text=text), patch.object(
+                reads, "_unread_messages",
+                return_value=([{"ts": "101.000001", "user": "UOTHER", "text": text}], "history", True),
+            ):
+                result, _ = self.page(["mirror-0"], kind="private_channel")
+            snapshot = result["channels"]["mirror-0"]
+            self.assertIs(snapshot["has_personal_mention"], expected)
+            self.assertIsNone(snapshot["unread_count"])
 
     def test_first_call_pause_still_returns_previously_cached_badges(self):
         target = reads.ReadTarget("mirror-7", "D7", "im")

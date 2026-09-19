@@ -4,7 +4,7 @@ import time
 from django.db import transaction
 
 KEY = "message_sync_read_snapshot_v1"
-FIELDS = ("available", "last_read", "latest_ts", "is_unread", "unread_count")
+FIELDS = ("available", "last_read", "latest_ts", "is_unread", "unread_count", "has_personal_mention")
 
 
 def publish_snapshot(connection, cache_key, snapshot):

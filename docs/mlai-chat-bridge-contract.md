@@ -1069,3 +1069,23 @@ identities. Human replies can then use the existing unavailable-parent fallback
 instead of retrying forever. Unknown human authors retain their failure fence;
 group history with an already registered import identity continues to preserve
 bot and departed-member attribution.
+
+
+### Focused Unreads section (September 2026)
+
+Read snapshots expose `has_personal_mention` separately from the existing numeric
+badge. It is true only for an unread source post containing the owner's exact
+Slack mention entity (`<@USER>` or `<@USER|label>`). Broadcasts such as `@here`,
+`@channel`, self posts and already-read posts do not qualify. A truncated page
+with no observed personal mention returns null, not a claim that none exists.
+A confirmed read covering the latest message clears this flag; a partial read
+leaves it unknown pending reconciliation. The flag participates in snapshot
+invalidation, so it reaches all devices through the existing owner-scoped feed.
+Clients collect unread IMs/MPIMs and personally mentioned channels into Unreads;
+ordinary channel activity stays in the regular channel sections.
+
+A client may project a pending read over its retained source snapshot for
+immediate feedback. It must retain and retry the intent, never hide messages
+newer than the requested source timestamp, restore source state on rejection,
+and accept a later deliberate Slack mark-unread after confirmation. This
+presentation projection does not alter the authoritative server snapshot.
