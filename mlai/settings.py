@@ -1174,6 +1174,10 @@ VALLEY_HARNESS_URL = os.getenv('VALLEY_HARNESS_URL', '')
 VALLEY_HARNESS_API_KEY = os.getenv('VALLEY_HARNESS_API_KEY', '')
 # Enable after integrations.0047 and the new worker are deployed together.
 MESSAGE_SYNC_ENABLED = os.getenv('MESSAGE_SYNC_ENABLED', 'false').lower() == 'true'
+# Deploy relay 0031 and its adapter audience command before enabling this backend.
+MESSAGE_SYNC_STABLE_PRIVATE_ROOMS = os.getenv(
+    'MESSAGE_SYNC_STABLE_PRIVATE_ROOMS', str(MESSAGE_SYNC_ENABLED)
+).lower() == 'true'
 MESSAGE_SYNC_SLACK_APP_ID = os.getenv('MESSAGE_SYNC_SLACK_APP_ID', '')
 MESSAGE_SYNC_SLACK_APP_TOKEN = os.getenv('MESSAGE_SYNC_SLACK_APP_TOKEN', '')
 MESSAGE_SYNC_SLACK_USER_APP_ID = os.getenv('MESSAGE_SYNC_SLACK_USER_APP_ID', '')

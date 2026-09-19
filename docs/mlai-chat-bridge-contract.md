@@ -729,6 +729,66 @@ by this API, so complete first-party badge parity cannot be guaranteed.
 See [Slack conversations.info](https://docs.slack.dev/reference/methods/conversations.info/)
 and [Slack's RTM availability](https://docs.slack.dev/tools/node-slack-sdk/rtm-api/).
 
+### Read freshness and device continuity
+
+Visible-chat requests enqueue bounded metadata-only hints for the background
+worker; they do not call Slack. New authorized Slack message activity and known
+unreads receive priority. Three priority turns alternate with one oldest-first
+background turn; the existing owner/workspace fairness and shared method budget
+still govern admission. A failed target has its own 60-second retry fence and
+does not pause an entire account. A secondary history/replies quota deferral
+pauses only that conversation for at least 15 seconds and its reported delay;
+independent DM info requests can continue. Visible hints expire after 90 seconds, activity
+hints after five minutes, and each account retains at most 256 hints.
+
+Every source observation and confirmed write has a monotonically increasing
+`revision`. Full directory responses have a separate `directory_revision` under
+the same authority lock. Clients reject older responses, including stale unknown
+states and stale directories that could restore removed targets. A coalesced
+notification outbox uses connection JSON and sends bridge-signed ephemeral kind
+20003 to current device keys through `POST /v1/read-state-notifications`. It
+contains only recipients and revision. Clients refetch the authenticated backend
+snapshot on that hint or reconnect, with foreground polling retained as recovery.
+Notification failure retries without blocking source reads or confirmations.
+
+`MESSAGE_SYNC_STABLE_PRIVATE_ROOMS` requires the relay's additive migration 0031
+and adapter audience protocol to be deployed first. Its default follows
+`MESSAGE_SYNC_ENABLED` when unset; explicitly set false for a staged rollout.
+With it enabled, device replacement retains the private room UUID, imported event
+IDs and source checkpoints. A bridge-only kind 41014 command compares the exact
+current audience and generation before replacing membership. Adapter retirement
+rotates the durable relay generation; a late timed-out request cannot reverse it,
+even if the device set later returns to its old values. Adapter delivery/callback
+leases drain before the transition, and registry persistence fails closed.
+
+Backend registration, consent and verified-device locks still fence each update.
+Before promoting a reused room, ambiguous create/reaction deliveries are reconciled
+by their stable bridge delivery ID. Found receipts retain the original event ID
+and are not sent again with new device tags. Normal human DM membership remains
+immutable. Explicit import-window resets and revoked Slack consent retain their
+existing reset/erasure behavior. No new Django migration is required.
+
+The 1–2 hour import target must be evaluated against conversation count, message
+pages, thread pages, simultaneous owners, observed request rates and Slack's
+distribution tier. Thirty days alone is not a size limit. Initial discovery can
+need a provider probe for every historical conversation that lacks an activity
+timestamp. At 50 requests/minute, 6,433 such probes alone have a lower bound of
+about 129 minutes before other users, history pages, retries or throttling.
+Extra workers or IP addresses do not increase the shared Slack allowance. Use
+the metadata-only capacity tool and production telemetry to report an honest
+bound; never present a synthetic replay as a measured fresh-account Slack import.
+
+For example, model four owners sharing one app/workspace, each needing 20
+directory pages, 500 info probes, 500 history pages and 100 reply pages:
+
+```sh
+python manage.py message_sync_capacity --owners 4 --directory-pages 20 \
+  --info-probes 500 --history-pages 500 --reply-pages 100 --import-share 0.5
+```
+
+This command performs no provider or database requests. Supply measured workload
+counts; its output labels the quota floor separately from an import ETA.
+
 `PATCH slack/` with `{action: "mark_read", channel_id, source_ts}` advances the
 owner's Slack cursor through a displayed source message. Successful responses
 include `synced`, `last_read`, the server's `confirmed_at` timestamp and the same
@@ -736,8 +796,8 @@ include `synced`, `last_read`, the server's `confirmed_at` timestamp and the sam
 unread retains an indicator with an unknown numeric remainder. An ambiguous head
 (including the owner's own post or an ordinary thread reply) returns unavailable
 state and requests a fresh source check; clients retain their prior snapshot
-instead of inventing zero. Clients compare `max(fetched_at, confirmed_at)` when
-merging responses.
+instead of inventing zero. Clients compare snapshot revisions when merging
+responses, falling back to `max(fetched_at, confirmed_at)` for older servers.
 Confirmed acknowledgements reject snapshots fetched before confirmation;
 a subsequent source cursor regression can represent an explicit Slack mark-unread.
 With durable sync enabled, an authenticated read intent is saved to the existing

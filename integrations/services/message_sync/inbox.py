@@ -86,6 +86,8 @@ def process_inbox_once():
             from integrations.services.community_bridge.store import ingest_slack_event
             from integrations.services.slack_dm_mirror import ingest_slack_dm_event
             ingest_slack_dm_event(payload) or ingest_slack_event(payload)
+            from .read_priority import invalidate_event
+            invalidate_event(payload)
             if row.lease_expires_at <= timezone.now():
                 raise LeaseLost("inbox_lease_expired")
             row.status = "completed"

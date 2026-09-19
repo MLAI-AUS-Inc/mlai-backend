@@ -130,12 +130,33 @@ class BuzzBridgeClient:
         }
 
     @classmethod
+    def private_delivery_receipts(cls, channel_id: str, delivery_ids: list[str]) -> dict:
+        """Recover bridge receipts without reading or copying message bodies."""
+        channel = str(uuid.UUID(str(channel_id)))
+        result = cls._post_adapter("v1/private-audience", {
+            "audience": {"action": "inspect", "channel_id": channel,
+                         "delivery_ids": delivery_ids},
+            "callback_author_pubkeys": [],
+        })
+        receipts = result.get("deliveries")
+        if result.get("channel_id") != channel or not isinstance(receipts, dict):
+            raise BuzzBridgeError("Invalid private delivery receipts")
+        for key, receipt in receipts.items():
+            if key not in delivery_ids or not isinstance(receipt, dict) or not EVENT_ID_RE.fullmatch(str(receipt.get("message_id") or "")):
+                raise BuzzBridgeError("Invalid private delivery receipt")
+            parent = str(receipt.get("parent_message_id") or "")
+            if parent and not EVENT_ID_RE.fullmatch(parent):
+                raise BuzzBridgeError("Invalid private parent receipt")
+        return receipts
+
+    @classmethod
     def provision_private_conversation(
         cls,
         participant_pubkeys: list[str],
         *,
         callback_author_pubkeys: list[str],
         conversation_name: str = "",
+        private_audience: dict | None = None,
     ) -> dict:
         """Idempotently provision an exact-participant private MLAI DM."""
         pubkeys = sorted({str(value or "").strip().lower() for value in participant_pubkeys})
@@ -158,6 +179,27 @@ class BuzzBridgeClient:
         name = str(conversation_name or "").strip()
         if len(name) > 255 or any(character.isprintable() is False for character in name):
             raise BuzzBridgePermanentError("Private conversation name is invalid")
+        if private_audience is not None:
+            channel = str(uuid.UUID(private_audience["channel_id"]))
+            generation = str(uuid.UUID(private_audience["generation"]))
+            current = cls._post_adapter("v1/private-audience", {
+                "audience": {"action": "inspect", "channel_id": channel},
+                "callback_author_pubkeys": [],
+            })
+            if current.get("channel_id") != channel:
+                raise BuzzBridgeError("MLAI Chat adapter returned the wrong private audience")
+            result = cls._post_adapter("v1/private-audience", {
+                "audience": {"action": "update", "channel_id": channel,
+                             "previous_pubkeys": current.get("participant_pubkeys"),
+                             "participant_pubkeys": pubkeys,
+                             "expected_generation": current.get("generation"),
+                             "generation": generation},
+                "callback_author_pubkeys": callback_pubkeys,
+            })
+            if result.get("channel_id") != channel or result.get("generation") != generation:
+                raise BuzzBridgeError("MLAI Chat adapter returned the wrong audience generation")
+            return {"channel_id": channel, "participant_pubkeys": pubkeys,
+                    "callback_author_pubkeys": callback_pubkeys}
         result = cls._post_adapter(
             "v1/private-conversations",
             {
@@ -187,6 +229,18 @@ class BuzzBridgeClient:
             "participant_pubkeys": returned,
             "callback_author_pubkeys": returned_callback_pubkeys,
         }
+
+    @classmethod
+    def notify_read_state(cls, public_keys: list[str], *, revision: int) -> None:
+        """Notify verified devices to fetch their authoritative read snapshot."""
+        keys = sorted(set(public_keys))
+        if not 1 <= len(keys) <= 8 or any(not EVENT_ID_RE.fullmatch(key) for key in keys):
+            raise BuzzBridgePermanentError("Read notifications require 1-8 valid public keys")
+        result = cls._post_adapter("v1/read-state-notifications", {
+            "public_keys": keys, "revision": revision,
+        })
+        if result.get("accepted") is not True:
+            raise BuzzBridgeError("MLAI Chat adapter did not accept the read notification")
 
     @classmethod
     def unregister_private_conversation(cls, channel_id: str) -> None:

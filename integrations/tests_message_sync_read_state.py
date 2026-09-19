@@ -152,7 +152,8 @@ class BackgroundReadStateTests(SlackDmIoAuthorityFixture, TransactionTestCase):
             CommunityChatDevice.objects.create(user=self.user, public_key='3'*64, status='verified', verified_at=timezone.now())
             mobile = reads.read_state_page(self.user, public_key='3'*64)
         self.assertEqual(source.call_count, 1)
-        self.assertEqual(web, mobile)
+        self.assertEqual(web['channels'], mobile['channels'])
+        self.assertEqual(web['authorized_channel_ids'], mobile['authorized_channel_ids'])
         self.assertEqual(web['channels']['room']['unread_count'], 3)
 
     def test_source_response_after_lease_expiry_is_not_published(self):
@@ -190,7 +191,8 @@ class BackgroundReadStateTests(SlackDmIoAuthorityFixture, TransactionTestCase):
             web = reads.read_state_page(self.user, public_key=self.owner_key)
             ios = reads.read_state_page(self.user, public_key=self.owner_key)
         self.assertEqual([c.args[1] for c in source.call_args_list], ['conversations_info', 'conversations_mark'])
-        self.assertEqual(web, ios)
+        self.assertEqual(web['channels'], ios['channels'])
+        self.assertEqual(web['authorized_channel_ids'], ios['authorized_channel_ids'])
         self.assertFalse(web['channels']['room']['is_unread'])
         self.assertEqual(web['channels']['room']['last_read'], '102.000001')
         self.connection.refresh_from_db()
