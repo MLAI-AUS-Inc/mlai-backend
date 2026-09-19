@@ -101,6 +101,14 @@ def private_page(lease, state):
             if not (current_floor, 0) <= timestamp(message["ts"]) <= timestamp(checkpoint["upper_bound"]):
                 continue
             message = dict(dm._normalize_history_author(current, message))
+            author_id = str(message.get("user") or "").strip()
+            # Match archive admission. In particular, Slackbot can appear in
+            # an IM's history without being a representable room participant.
+            if not author_id or (
+                author_id not in (current.participant_slack_ids or [])
+                and not dm._all_history_group_import(current)
+            ):
+                continue
             observed.append(message)
             if lease.kind == "thread":
                 message["thread_ts"] = str(message.get("thread_ts") or lease.source_object_key)

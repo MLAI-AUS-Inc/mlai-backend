@@ -4271,6 +4271,9 @@ def _private_delivery_batch_eligible(delivery: SlackDmMirrorDelivery) -> bool:
     return bool(
         delivery.source_platform == CommunityBridgePlatform.SLACK
         and delivery.operation == CommunityBridgeDeliveryType.CREATE
+        # Legacy queued Slackbot rows may need individual supersession rather
+        # than poisoning a batch of otherwise deliverable human messages.
+        and delivery.source_author_id != "USLACKBOT"
         and (not thread_ts or thread_ts == delivery.source_message_id)
     )
 
@@ -4704,6 +4707,7 @@ def _provision_owner_conversation(
                     provision_request["participant_pubkeys"],
                     callback_author_pubkeys=callback_author_pubkeys,
                     conversation_name=provision_request["conversation_name"],
+                    **({"private_audience": provision_request["private_audience"]} if provision_request.get("private_audience") else {}),
                 )
             except Exception as exc:
                 _record_ambiguous_registration_attempt(
@@ -4857,7 +4861,10 @@ def _prepare_owner_conversation_locked(
         or conversation.status != SlackDmMirrorConversationStatus.LIVE
         or not conversation.mlai_channel_id
     )
-    if participant_set_changed or reset_history:
+    from .message_sync.device_audience import enabled as stable_private_rooms, coverage_for_transition
+    preserve_room = bool(stable_private_rooms() and conversation.mlai_channel_id and not reset_history)
+    coverage_proof = coverage_for_transition(conversation) if preserve_room and needs_provision else None
+    if (participant_set_changed and not preserve_room) or reset_history:
         _mark_conversation_history_due(
             conversation,
             reason="Private conversation participants changed",
@@ -4914,13 +4921,22 @@ def _prepare_owner_conversation_locked(
         participant_hash=participant_hash,
         conversation_name_value=conversation_name,
         provision_attempt=True,
+        channel_id=str(conversation.mlai_channel_id) if preserve_room else "",
     )
+    private_audience = None
+    if preserve_room:
+        private_audience = {"channel_id": str(conversation.mlai_channel_id), "generation": str(uuid.uuid4())}
+        if coverage_proof:
+            private_audience["coverage_proof"] = coverage_proof
+        attempt.metadata = {**attempt.metadata, "private_audience": private_audience}
+        attempt.save(update_fields=["metadata", "updated_at"])
     return (
         {
             "attempt_id": attempt.pk,
             "participant_pubkeys": pubkeys,
             "callback_author_pubkeys": owner_device_pubkeys,
             "conversation_name": conversation_name,
+            **({"private_audience": private_audience} if private_audience else {}),
         },
         None,
     )
@@ -7831,6 +7847,20 @@ def _deliver_to_mlai(delivery: SlackDmMirrorDelivery) -> None:
         )
     linked_pubkey = _history_delivery_author_pubkey(delivery)
     if not linked_pubkey:
+        if (
+            delivery.source_platform == CommunityBridgePlatform.SLACK
+            and delivery.source_author_id == "USLACKBOT"
+            and (delivery.metadata or {}).get("backfill")
+            and conversation_kind(conversation) == "im"
+        ):
+            # Old head/thread scans admitted this system author even though
+            # archive scans exclude it from owner IMs. Stop retrying a parent
+            # that cannot be delivered so authorized human replies can use the
+            # existing unavailable-parent fallback. Never add a new recipient.
+            _complete_superseded_dependency_locked(
+                delivery, reason="Slackbot is not represented in this owner mirror."
+            )
+            return
         raise SlackDmMirrorError("Slack author is not part of this owner mirror.")
     profile = (
         (conversation.participant_profiles or {}).get(delivery.source_author_id)
@@ -8277,7 +8307,9 @@ def ensure_owner_identity(
             for field, value in values.items():
                 setattr(link, field, value)
             link.save(update_fields=(*values.keys(), "updated_at"))
-        conversation_ids = [conversation.pk for conversation in conversations]
+        from .message_sync.device_audience import enabled as stable_private_rooms
+        preserved_ids = {conversation.pk for conversation in conversations if stable_private_rooms() and conversation.mlai_channel_id}
+        conversation_ids = [conversation.pk for conversation in conversations if conversation.pk not in preserved_ids]
         for conversation in conversations:
             conversation.grant = locked_grant
             _prepare_conversation_registration_cleanup_locked(
@@ -8287,10 +8319,11 @@ def ensure_owner_identity(
             )
         _clear_history_scan_states(conversation_ids)
         for conversation in conversations:
-            conversation.history_backfilled_at = None
-            conversation.oldest_synced_ts = ""
-            conversation.latest_synced_ts = ""
-            conversation.mlai_channel_id = None
+            if conversation.pk not in preserved_ids:
+                conversation.history_backfilled_at = None
+                conversation.oldest_synced_ts = ""
+                conversation.latest_synced_ts = ""
+                conversation.mlai_channel_id = None
             conversation.last_error = ""
             if conversation.status != SlackDmMirrorConversationStatus.PAUSED:
                 conversation.status = SlackDmMirrorConversationStatus.PROVISIONING
