@@ -1059,3 +1059,13 @@ for the existing provider budgets and fair scheduling; a cooldown expiry is not
 an import-completion deadline. `integrations.tests_message_sync_recovery` runs in
 the durable PostgreSQL CI gate, alongside
 `integrations.tests_slack_private_target_boundaries`.
+
+Head and thread repair use the same author admission rules as archive import.
+An owner IM does not admit an unrepresented Slackbot author merely because a
+history response contains it. Previously queued backfill operations for that
+exact system author become content-free superseded records when no registered
+source identity can represent them. They do not add recipients or shadow
+identities. Human replies can then use the existing unavailable-parent fallback
+instead of retrying forever. Unknown human authors retain their failure fence;
+group history with an already registered import identity continues to preserve
+bot and departed-member attribution.

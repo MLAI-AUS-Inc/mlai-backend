@@ -4271,6 +4271,9 @@ def _private_delivery_batch_eligible(delivery: SlackDmMirrorDelivery) -> bool:
     return bool(
         delivery.source_platform == CommunityBridgePlatform.SLACK
         and delivery.operation == CommunityBridgeDeliveryType.CREATE
+        # Legacy queued Slackbot rows may need individual supersession rather
+        # than poisoning a batch of otherwise deliverable human messages.
+        and delivery.source_author_id != "USLACKBOT"
         and (not thread_ts or thread_ts == delivery.source_message_id)
     )
 
@@ -7844,6 +7847,20 @@ def _deliver_to_mlai(delivery: SlackDmMirrorDelivery) -> None:
         )
     linked_pubkey = _history_delivery_author_pubkey(delivery)
     if not linked_pubkey:
+        if (
+            delivery.source_platform == CommunityBridgePlatform.SLACK
+            and delivery.source_author_id == "USLACKBOT"
+            and (delivery.metadata or {}).get("backfill")
+            and conversation_kind(conversation) == "im"
+        ):
+            # Old head/thread scans admitted this system author even though
+            # archive scans exclude it from owner IMs. Stop retrying a parent
+            # that cannot be delivered so authorized human replies can use the
+            # existing unavailable-parent fallback. Never add a new recipient.
+            _complete_superseded_dependency_locked(
+                delivery, reason="Slackbot is not represented in this owner mirror."
+            )
+            return
         raise SlackDmMirrorError("Slack author is not part of this owner mirror.")
     profile = (
         (conversation.participant_profiles or {}).get(delivery.source_author_id)

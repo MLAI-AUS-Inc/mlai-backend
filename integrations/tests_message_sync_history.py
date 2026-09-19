@@ -227,6 +227,39 @@ class PublicHistoryTests(TransactionTestCase):
 
 
 class PrivateHeadTests(SlackDmIoAuthorityFixture, TransactionTestCase):
+    def test_group_head_keeps_historical_bot_attribution(self):
+        from integrations.services.slack_chat_catalog import ALL_HISTORY_CONSENT
+        self.grant.consent_version = ALL_HISTORY_CONSENT
+        self.grant.save()
+        self.conversation.slack_conversation_id = "GIOAUTH"
+        self.conversation.save()
+        state = ensure_state(self.conversation)
+        schedule_job(state, "head")
+        source_ts = f"{int(timezone.now().timestamp()) - 60}.000001"
+        response = {"ok": True, "messages": [
+            {"ts": source_ts, "user": "USLACKBOT", "text": "system context"},
+        ]}
+        with patch('integrations.services.slack_dm_mirror._call_slack_with_grant_authority', return_value=response):
+            private_page(claim_job(kinds=["head"]), state)
+        row = self.conversation.deliveries.get(source_message_id=source_ts)
+        self.assertEqual(row.source_author_id, "USLACKBOT")
+        self.assertEqual(row.metadata["history_author"]["display_name"], "USLACKBOT")
+
+    def test_head_skips_authors_that_archive_cannot_represent(self):
+        state = ensure_state(self.conversation)
+        schedule_job(state, "head")
+        now = int(timezone.now().timestamp())
+        messages = [
+            {"ts": f"{now - 60}.000001", "user": "USLACKBOT", "text": "system parent"},
+            {"ts": f"{now - 59}.000001", "user": "UNOTMEMBER", "text": "unrepresented"},
+            {"ts": f"{now - 58}.000001", "user": "UOTHER", "text": "authorized reply"},
+        ]
+        with patch('integrations.services.slack_dm_mirror._call_slack_with_grant_authority',
+                   return_value={"ok": True, "messages": messages}):
+            private_page(claim_job(kinds=["head"]), state)
+        rows = self.conversation.deliveries.filter(source_message_id__in=[m["ts"] for m in messages])
+        self.assertEqual(list(rows.values_list("source_author_id", flat=True)), ["UOTHER"])
+
     def test_quiet_old_private_thread_waits_a_day_and_records_empty_window(self):
         state = ensure_state(self.conversation)
         now = int(timezone.now().timestamp())
