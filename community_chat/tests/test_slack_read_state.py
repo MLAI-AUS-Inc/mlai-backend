@@ -451,8 +451,10 @@ class ReadStatePageTests(SimpleTestCase):
                 self.assertEqual(len(calls), 1)
 
     def test_history_budget_pause_does_not_publish_an_incomplete_read_snapshot(self):
-        with patch.object(reads, "_unread_messages", side_effect=reads.BudgetDeferred(65)):
+        deferral = reads.BudgetDeferred(65)
+        with patch.object(reads, "_unread_messages", side_effect=deferral):
             result, calls = self.page(cursor="2", kind="mpim")
+        self.assertEqual(deferral.read_state_method, "conversations.history")
         self.assertEqual(result["channels"], {})
         self.assertEqual(result["next_cursor"], "2")
         self.assertEqual(result["retry_after_seconds"], 65)

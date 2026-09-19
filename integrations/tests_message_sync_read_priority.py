@@ -68,7 +68,11 @@ class SnapshotTests(SlackDmIoAuthorityFixture, TransactionTestCase):
             calls.append(target.slack_id)
             if target.slack_id == 'G1':
                 from integrations.services.message_sync.scheduler import BudgetDeferred
-                raise BudgetDeferred(30, before_request_method='conversations.history')
+                # An actual provider 429 carries the stage from refresh_target
+                # but is not a pre-request admission deferral.
+                error = BudgetDeferred(30)
+                error.read_state_method = 'conversations.history'
+                raise error
             return {'available': True}
         with patch.object(reads, '_targets_for_keys', return_value=[dm, group]), patch.object(reads, 'refresh_target', side_effect=refresh):
             self.assertEqual(read_state.refresh_read_state_once(), 0)

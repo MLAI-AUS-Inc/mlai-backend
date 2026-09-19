@@ -305,7 +305,10 @@ def refresh_target(grant, authority, target):
     else:
         try:
             messages, count_source, partial = _unread_messages(authority, target, details.get("last_read", "0"))
-        except (BudgetDeferred, SlackDmMirrorRateLimited):
+        except (BudgetDeferred, SlackDmMirrorRateLimited) as exc:
+            # Preserve the secondary stage even for an actual Slack 429,
+            # which differs from a local admission deferral before a request.
+            exc.read_state_method = "conversations.history"
             # The allowlist excludes text, profiles, topic and private URLs.
             safe = {name: details[name] for name in ("id", "is_member", "last_read", "unread_count_display") if name in details}
             latest = details.get("latest") or {}

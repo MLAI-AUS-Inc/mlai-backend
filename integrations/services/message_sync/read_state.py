@@ -177,7 +177,8 @@ def refresh_read_state_once():
     except (BudgetDeferred, reads.SlackDmMirrorRateLimited) as exc:
         error, delay = type(exc).__name__, getattr(exc, "retry_after", 60)
         return_turn = getattr(exc, "before_request_method", "") == "conversations.info"
-        if target is not None and getattr(exc, "before_request_method", "") in {"conversations.history", "conversations.replies"}:
+        method = getattr(exc, "read_state_method", "") or getattr(exc, "before_request_method", "")
+        if target is not None and method in {"conversations.history", "conversations.replies"}:
             # A secondary history quota must not hold this owner's independent
             # DM info snapshots hostage. Retain the metadata checkpoint and
             # pause only this target while other methods continue to progress.
