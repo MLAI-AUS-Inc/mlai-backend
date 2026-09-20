@@ -15,6 +15,52 @@ from .volunteer.models import (  # noqa: F401 -- Django model discovery
 )
 
 
+class AccountDeletionRequest(models.Model):
+    """Durable, account-scoped deletion request; never a claim of completed cleanup."""
+
+    class Scope(models.TextChoices):
+        ACCOUNT = "shared_mlai_account", "Shared MLAI account"
+        CHAT = "chat_data", "Chat data"
+
+    class Status(models.TextChoices):
+        REQUESTED = "requested", "Requested"
+        PROCESSING = "processing", "Processing"
+        COMPLETED = "completed", "Completed"
+        NEEDS_ATTENTION = "needs_attention", "Needs attention"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, on_delete=models.SET_NULL)
+    scope = models.CharField(max_length=24, choices=Scope.choices)
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.REQUESTED)
+    requested_at = models.DateTimeField(auto_now_add=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    policy_version = models.CharField(max_length=80)
+    outcome_summary = models.CharField(max_length=500, blank=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(
+            fields=("user", "scope"),
+            condition=~Q(status="completed"),
+            name="chat_one_open_deletion_scope",
+        )]
+        indexes = [models.Index(fields=("status", "requested_at"), name="chat_deletion_queue_idx")]
+
+
+class AiConsentRecord(models.Model):
+    """Versioned consent without storing prompts, attachments or credentials."""
+
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
+    purpose = models.CharField(max_length=32, default="roo_chat")
+    disclosure_version = models.CharField(max_length=80)
+    provider_digest = models.CharField(max_length=64)
+    granted_at = models.DateTimeField(null=True, blank=True)
+    withdrawn_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=("user", "purpose"), name="chat_ai_consent_purpose")]
+
+
 class Moderator(models.Model):
     """Chat-only appointment: channel creation and channel-wide announcements.
 

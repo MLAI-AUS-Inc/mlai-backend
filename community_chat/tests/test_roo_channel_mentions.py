@@ -7,6 +7,7 @@ from django.test import SimpleTestCase, TestCase, override_settings
 from django.utils import timezone
 
 from community_chat.tests import test_slack_dm_mirror as fixtures
+from community_chat.tests.privacy_fixtures import PROVIDERS, grant_test_ai_consent
 from integrations.models import CommunityBridgeDeliveryStatus, CommunityBridgePlatform
 from integrations.services import slack_dm_mirror as mirror
 from integrations.services.slack_channel_mentions import (
@@ -21,6 +22,8 @@ from integrations.services.slack_chat_catalog import (
 )
 
 SETTINGS = dict(
+    COMMUNITY_CHAT_AI_PROVIDERS=PROVIDERS,
+    COMMUNITY_CHAT_AI_DISCLOSURE_VERSION="test-v1",
     COMMUNITY_CHAT_RELAY_URL="wss://chat.mlai.au",
     COMMUNITY_CHAT_ROO_SLACK_WORKSPACE_ID="TMLAI",
     COMMUNITY_CHAT_ROO_SLACK_USER_ID="UROO",
@@ -214,6 +217,7 @@ class RooChannelMentionTests(SimpleTestCase):
 class RooChannelDeliveryTests(TestCase):
     def setUp(self):
         fixtures.SlackDmMirrorOwnerTests.setUp(self)
+        grant_test_ai_consent(self.first)
         self.grant, self.conversation = (
             fixtures.SlackDmMirrorOwnerTests._live_conversation(
                 self,

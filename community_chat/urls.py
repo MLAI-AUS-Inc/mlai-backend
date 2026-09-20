@@ -1,4 +1,5 @@
 from django.urls import include, path
+from .privacy_views import AccountDeletionView, AiConsentView
 from .permission_views import ChatPermissionsView, RelayChatRoleView, ChatModeratorView, ChatMemberRolesView
 
 from .views import (
@@ -42,6 +43,8 @@ from .usage_views import (
 
 
 urlpatterns = [
+    path("account/deletion/", AccountDeletionView.as_view(), name="community_chat_account_deletion"),
+    path("account/ai-consent/", AiConsentView.as_view(), name="community_chat_ai_consent"),
     path("permissions/", ChatPermissionsView.as_view(), name="community_chat_permissions"),
     path("member-roles/", ChatMemberRolesView.as_view(), name="community_chat_member_roles"),
     path("moderators/<str:public_key>/", ChatModeratorView.as_view(), name="community_chat_moderator"),

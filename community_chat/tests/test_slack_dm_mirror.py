@@ -12,6 +12,7 @@ from rest_framework.test import APITestCase
 from slack_sdk.errors import SlackApiError
 
 from community_chat.account_sessions import issue_account_session
+from community_chat.tests.privacy_fixtures import PROVIDERS, grant_test_ai_consent
 from community_chat.models import (
     CommunityChatDevice,
     CommunityChatEmailCodeChallenge,
@@ -825,6 +826,8 @@ class SlackDmMirrorOwnerTests(APITestCase):
         COMMUNITY_CHAT_RELAY_URL="wss://chat.mlai.au",
         COMMUNITY_CHAT_ROO_SLACK_WORKSPACE_ID="TMLAI",
         COMMUNITY_CHAT_ROO_SLACK_USER_ID="UROO",
+        COMMUNITY_CHAT_AI_PROVIDERS=PROVIDERS,
+        COMMUNITY_CHAT_AI_DISCLOSURE_VERSION="test-v1",
     )
     @patch(
         "integrations.services.slack_dm_mirror.BuzzBridgeClient.provision_private_conversation"
@@ -833,6 +836,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
     def test_open_public_roo_dm_reuses_private_mirror_without_sending(
         self, web_client, provision
     ):
+        grant_test_ai_consent(self.first)
         grant = SlackDmMirrorGrant.objects.create(
             user=self.first,
             connection=self.first_connection,

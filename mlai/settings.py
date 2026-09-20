@@ -2154,6 +2154,13 @@ HUMANITIX_API_BASE_URL = os.environ.get(
 
 # Public identity of the deployed MLAI Chat Roo assistant (not a signing key).
 COMMUNITY_CHAT_ROO_PUBLIC_KEY = os.getenv("COMMUNITY_CHAT_ROO_PUBLIC_KEY", "")
+# Public disclosures must name the providers actually used by the deployed Roo.
+# Empty configuration disables consent grants; never substitute guessed names.
+COMMUNITY_CHAT_AI_DISCLOSURE_VERSION = os.getenv("COMMUNITY_CHAT_AI_DISCLOSURE_VERSION", "")
+COMMUNITY_CHAT_AI_PROVIDERS = json.loads(os.getenv("COMMUNITY_CHAT_AI_PROVIDERS", "[]"))
+COMMUNITY_CHAT_AI_CONSENT_REQUIRED = _env_is_true("COMMUNITY_CHAT_AI_CONSENT_REQUIRED", True)
+COMMUNITY_CHAT_DELETION_TIMEFRAME = os.getenv("COMMUNITY_CHAT_DELETION_TIMEFRAME", "")
+COMMUNITY_CHAT_DELETION_CONTACT = os.getenv("COMMUNITY_CHAT_DELETION_CONTACT", "")
 # Public Roo's identity verified in the MLAI Slack workspace. Empty values pause
 # the first-party DM connection; no other bot is enabled by this setting.
 COMMUNITY_CHAT_ROO_SLACK_WORKSPACE_ID = os.getenv("COMMUNITY_CHAT_ROO_SLACK_WORKSPACE_ID", "T05N9C1QSJC")
