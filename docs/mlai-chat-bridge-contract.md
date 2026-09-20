@@ -28,6 +28,14 @@ MLAI Chat is another client surface, not a one-time data migration.
   closed.
 - Mirrored messages are visibly attributed to the source author and platform,
   but are signed/sent by a dedicated MLAI bridge identity.
+- Chat-origin writes into public Slack require current account AI-sharing
+  permission, since that public history can be used as Roo context. Creates,
+  edits and reaction additions recheck consent at dispatch, including retries;
+  deletion and reaction removal remain possible after withdrawal. Missing
+  disclosure or a legacy key-only identity blocks the outbound delivery under
+  the normal retry/dead-letter policy. Local Chat delivery is unaffected. See
+  [account privacy controls](community-chat-account-privacy.md) for remaining
+  downstream context and native-agent gates.
 
 ## Canonical event
 

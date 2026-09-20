@@ -62,6 +62,20 @@ not reuse an old consent decision. Legacy key-only identities cannot opt another
 account into AI. The deterministic `coworking/today/` API does not call AI and
 does not require AI consent.
 
+Public Slack delivery of Chat-origin messages, replies, edits, attachments and
+reaction additions also requires current account consent. Public Slack history
+can be used as Roo context without a mention, so this boundary does not infer
+permission from message text or bot membership. The worker resolves the signed
+device to its account, rechecks that identity under the user lock, and holds the
+lock through each external write. Queued retries use the current disclosure and
+permission; unknown/legacy identities and changed recipients fail closed.
+Deletion and reaction removal remain available after withdrawal. Slack-to-Chat
+imports and Discord-origin bridge deliveries are outside this Chat-account gate.
+When provider disclosure is unconfigured, ordinary Chat messages remain in Chat
+but their public Slack delivery is blocked by the existing retry/dead-letter
+policy. Operators must disclose this sharing scope before enabling grants; do
+not disable consent enforcement to make the outbox drain.
+
 ## Gates before release
 
 This is **not a complete account-erasure or universal AI-consent implementation**.
@@ -70,10 +84,11 @@ This is **not a complete account-erasure or universal AI-consent implementation*
    relay messages/media, devices, sessions, bootstrap proofs, Slack OAuth grants,
    other MLAI services, logs and backups. Failed external cleanup must remain
    pending; completion must leave only a non-identifying receipt.
-2. Apply consent enforcement to generic/public community bridge, native relay
-   agents and other AI entry points, plus downstream Roo context and retrieval.
-   Private Slack and legacy coworking gating do not cover those routes or previously
-   imported context. Coordinate with the actual Roo deployment before enabling it.
+2. Apply consent enforcement to native relay agents and other AI entry points,
+   plus downstream Roo context and retrieval. Public/private Slack and legacy
+   coworking gating do not retract previously imported context or establish
+   permission for other authors' data. Coordinate with the actual Roo deployment
+   before enabling it. Discord-origin content needs its own identity/consent model.
 3. Confirm provider recipients and deletion ownership/timeframe. Update the public
    policy and App Store privacy labels from those facts.
 4. Validate locking/concurrency on PostgreSQL and test the coordinated release on a
