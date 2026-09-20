@@ -64,7 +64,7 @@ class ProgressApiTests(TestCase):
         draft=MonthlyUpdateDraft.objects.create(organization=self.org,month=date(2026,9,1),update_date=date(2026,9,18))
         payload={"metrics":[{"key":"revenue","label":"Hidden income","value":"99999","display_value":"AUD 99999","unit":"AUD","quality":"source_reported"}],"events":[],"charts":{"performance":[]}}
         snapshot=MonthlyEvidenceSnapshot.objects.create(organization=self.org,month=draft.month,payload=payload,content_hash=content_hash(payload))
-        first=save_revision(draft,{"highlights":["We shipped."],"_progress_chart_specs":[spec],"progress_charts":[{"value":999}]},snapshot=snapshot)
+        first=save_revision(draft,{"highlights":["We shipped."],"_progress_chart_specs":[spec],"progress_charts":[{"value":999}]},snapshot=snapshot,validation={"groundedness_status":"founder_asserted"})
         approved=approve_and_publish(draft,actor=self.user,revision_id=first.pk,revision_hash=first.content_hash,audience_visibility=["just_me"])
         StartupMetricObservation.objects.filter(organization=self.org,metric_key=item["metricKey"]).update(value_number=Decimal(900))
         draft.refresh_from_db()

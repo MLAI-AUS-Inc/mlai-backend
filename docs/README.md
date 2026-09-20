@@ -91,3 +91,5 @@ identified as current by a maintained architecture document.
 - [Monthly update evidence and revision contract](monthly-update-evidence-contract.md)
 
 - [Startup Progress dashboard and chart disclosure](startup-progress.md)
+
+- [Chat startup updates](community-chat-startup-updates.md): founder setup, draft, review, approval and community API.
