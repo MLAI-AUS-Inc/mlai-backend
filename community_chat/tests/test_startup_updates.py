@@ -4,6 +4,7 @@ from types import SimpleNamespace as Obj
 from unittest.mock import MagicMock, patch
 
 from django.core import signing
+from django.contrib.auth import get_user_model
 from django.core.cache import cache
 from django.http import Http404
 from django.test import SimpleTestCase, override_settings
@@ -37,6 +38,17 @@ class StartupFacadeTests(SimpleTestCase):
             self.assertEqual(cls.authentication_classes, (CommunityChatAccountAuthentication,))
         response = views.BootstrapView.as_view(throttle_classes=())(self.factory.get('/'))
         self.assertEqual(response.status_code, 401)
+
+    def test_bootstrap_returns_real_users_chat_profile_identifier(self):
+        self.user = get_user_model()(email='startup-bootstrap@example.invalid')
+        profile = Obj()
+        with patch.object(views, 'get_or_create_founder_profile', return_value=profile), \
+             patch.object(views, 'FounderProfileSerializer', return_value=Obj(data={'companies': []})):
+            response = self.request(views.BootstrapView)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['accountId'], str(self.user.community_chat_profile_id))
+        self.assertEqual(response.data['profile'], {'companies': []})
+        self.assertEqual(response['Cache-Control'], 'private, no-store')
 
     @override_settings(COMMUNITY_CHAT_STARTUP_UPDATES_ENABLED=False)
     def test_disabled_returns_no_private_data(self):
