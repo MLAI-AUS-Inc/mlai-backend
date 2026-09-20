@@ -50,6 +50,8 @@ This increment adds no model changes or migration files. It depends on the alrea
 
 Deploy compatible Django/Valley versions, update Chat's browser CSP to permit signed uploads to `https://storage.googleapis.com`, verify `COMMUNITY_CHAT_FRONTEND_URL` and allowed origins, and then enable the flag. Native source connection opens the system browser and returns to the web `/pulse` page; native users return to the app and source status refreshes. There is no new native deep-link callback. Existing providers requiring resource selection (for example Analytics properties) must already be configured; this increment does not add provider resource pickers.
 
+The deployment's storage-CORS setup includes `https://chat.mlai.au`, `tauri://localhost` and `http://tauri.localhost` alongside the existing website origins. Keep these origins in the default policy because `deploy_postmigrate` reapplies it on every release. Signed uploads still require their scoped, expiring URLs; this does not make the bucket public.
+
 Rollback by disabling the flag. Saved startups, drafts and approvals remain in Django. Switching off the flag disables access; it does not undo publications or delete source data.
 
 ## Validation and rollout acceptance
