@@ -54,6 +54,14 @@ fails closed. Deletes remain possible after withdrawal. The dispatch holds the
 same user-first lock as consent changes, so a withdrawal serializes with in-flight
 outbound I/O. Already-sent Slack data cannot be recalled by withdrawing consent.
 
+The legacy coworking chat command also requires an account-backed identity and
+current consent. The worker resolves the signed device again under the account
+lock before posting the Roo-visible Slack root and before each direct Roo call.
+Withdrawal between those sends blocks the second send; checkpointed retries do
+not reuse an old consent decision. Legacy key-only identities cannot opt another
+account into AI. The deterministic `coworking/today/` API does not call AI and
+does not require AI consent.
+
 ## Gates before release
 
 This is **not a complete account-erasure or universal AI-consent implementation**.
@@ -63,8 +71,8 @@ This is **not a complete account-erasure or universal AI-consent implementation*
    other MLAI services, logs and backups. Failed external cleanup must remain
    pending; completion must leave only a non-identifying receipt.
 2. Apply consent enforcement to generic/public community bridge, native relay
-   agents, coworking and other AI entry points, plus downstream Roo context and
-   retrieval. Private Slack gating alone does not cover those routes or previously
+   agents and other AI entry points, plus downstream Roo context and retrieval.
+   Private Slack and legacy coworking gating do not cover those routes or previously
    imported context. Coordinate with the actual Roo deployment before enabling it.
 3. Confirm provider recipients and deletion ownership/timeframe. Update the public
    policy and App Store privacy labels from those facts.
