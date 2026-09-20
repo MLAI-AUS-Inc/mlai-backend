@@ -127,7 +127,7 @@ status before attempting another completion.
 requires the dedicated Roo service key (`HasStrictRooApiKey`) and the existing
 full Points Admin policy: active admin, committee, or portfolio lead, plus
 configured bootstrap admins. Partner/report-only access does not grant access.
-Roo supplies the actor from a signed Slack command, not user-entered arguments.
+Roo supplies the actor from a signed Slack mention event, not user-entered arguments.
 
 The strict `YYYY-MM-DD` date is required. A successful response is:
 
@@ -142,6 +142,6 @@ return count zero and an empty list. Success responses use `Cache-Control:
 private, no-store`. Invalid input returns 400 and non-admin actors return 403;
 invalid service credentials are rejected by the existing permission layer.
 
-This read-only endpoint supports `/coworking-today [YYYY-MM-DD]` in Roo and is
+This read-only endpoint supports `@Roo coworking-today [YYYY-MM-DD]` in Roo and is
 independent of the existing `/coworking/report/` endpoint. It reports bookings,
 not physical arrival or presence. No schema change is required.
