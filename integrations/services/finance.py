@@ -227,6 +227,7 @@ def publish_financial_metric_observations(*, organization: Organization, run: Op
         organization=organization, provider=ExternalServiceProvider.STRIPE,
         record_type=STRIPE_RECORD_INVOICE, status="paid",
     ).exclude(connection__status=ExternalServiceConnectionStatus.DISCONNECTED)
+    scope_connection_ids = sorted(set(records.values_list("connection_id", flat=True)))
     buckets = {}
     for record in records:
         paid_at = _timestamp((record.raw_payload or {}).get("status_transitions", {}).get("paid_at"))
@@ -258,7 +259,7 @@ def publish_financial_metric_observations(*, organization: Organization, run: Op
         metric.value_text = "" if values["unknown"] else _format_money(values["amount"], currency)
         metric.observed_at = timezone.now()
         metric.source_record_ids = values["ids"]
-        metric.source_metadata = {"definition_version": 2, "basis": "paid_stripe_invoice_sales_excluding_tax", "currency": currency, "coverage": "paid_invoices_only", "needs_confirmation": values["unknown"], "limitations": ["Excludes non-invoice payments and refunds issued without credit notes; not whole-business accounting revenue."]}
+        metric.source_metadata = {"connection_ids": scope_connection_ids, "timezone": profile.reporting_timezone, "period_start": month.isoformat(), "definition_version": 2, "basis": "paid_stripe_invoice_sales_excluding_tax", "currency": currency, "coverage": "paid_invoices_only", "needs_confirmation": values["unknown"], "limitations": ["Excludes non-invoice payments and refunds issued without credit notes; not whole-business accounting revenue."]}
         metric.summary = "Revenue from paid Stripe invoices excluding tax. Credit adjustments or incomplete totals require confirmation; processor coverage is not reconciled company accounts."
         metric.save()
         metrics.append(metric)

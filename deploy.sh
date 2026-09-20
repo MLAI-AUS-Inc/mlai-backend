@@ -18,6 +18,13 @@ COMMUNITY_BRIDGE_PRODUCTION_ENABLED="${COMMUNITY_BRIDGE_PRODUCTION_ENABLED:-fals
 ORG_MEMORY_PRODUCTION_DEPLOY_ENABLED="${ORG_MEMORY_PRODUCTION_DEPLOY_ENABLED:-false}"
 ORG_MEMORY_PRODUCTION_PUBLIC_CHANNEL_ADMIN_SCOPE_APPROVED="${ORG_MEMORY_PRODUCTION_PUBLIC_CHANNEL_ADMIN_SCOPE_APPROVED:-false}"
 LINEAR_CHANNEL_ISSUE_MAX_COMMENTS="${LINEAR_CHANNEL_ISSUE_MAX_COMMENTS:-250}"
+MESSAGE_SYNC_ENABLED="${MESSAGE_SYNC_ENABLED:-false}"
+case "$MESSAGE_SYNC_ENABLED" in
+    true|TRUE|True) MESSAGE_SYNC_ENABLED=true ;;
+    false|FALSE|False) MESSAGE_SYNC_ENABLED=false ;;
+    *) echo "MESSAGE_SYNC_ENABLED must be true or false." >&2; exit 1 ;;
+esac
+export MESSAGE_SYNC_ENABLED
 
 case "$MEETING_ROOM_BOOKING_ENABLED" in
     true|TRUE|True|1|yes|YES|Yes|on|ON|On) MEETING_ROOM_BOOKING_ENABLED=true ;;
@@ -229,6 +236,7 @@ if [ "$VICTOR_AI_ROO_SIGNING_SECRET" = "$ROO_SIM_PATIENT_KEY" ]; then
     exit 1
 fi
 python3 scripts/validate_linear_channel_issue_deploy_config.py
+python3 scripts/validate_message_sync_deploy_config.py
 if [ "$ORG_MEMORY_PRODUCTION_DEPLOY_ENABLED" = "true" ]; then
     if [[ ! "${ORG_MEMORY_PILOT_ALLOWLIST_KEY_VERSION:-}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]]; then
         echo "❌ ORG_MEMORY_PILOT_ALLOWLIST_KEY_VERSION must be supplied in the required format."
@@ -318,6 +326,24 @@ install_remote_env_value() {
     printf '%s' "$value" \
         | ssh "$DEPLOY_SSH_TARGET" "$PROJECT_DIR/scripts/upsert_env_value_from_stdin.sh $key"
 }
+
+# The app-level token travels only through SSH stdin. Never reuse an OAuth
+# bot/user token: recipient expansion is a separate Slack authorization surface.
+install_remote_env_value MESSAGE_SYNC_ENABLED "$MESSAGE_SYNC_ENABLED"
+# Install callback verification before activation so Slack can verify its URL.
+if [ -n "${MESSAGE_SYNC_SLACK_USER_APP_ID:-}" ]; then
+    install_remote_env_value MESSAGE_SYNC_SLACK_USER_APP_ID "$MESSAGE_SYNC_SLACK_USER_APP_ID"
+    install_remote_env_secret MESSAGE_SYNC_SLACK_USER_SIGNING_SECRET "$MESSAGE_SYNC_SLACK_USER_SIGNING_SECRET"
+    if [ -n "${MESSAGE_SYNC_SLACK_USER_APP_TOKEN:-}" ]; then
+        install_remote_env_secret MESSAGE_SYNC_SLACK_USER_APP_TOKEN "$MESSAGE_SYNC_SLACK_USER_APP_TOKEN"
+    fi
+fi
+if [ "$MESSAGE_SYNC_ENABLED" = "true" ]; then
+    install_remote_env_secret MESSAGE_SYNC_SLACK_APP_TOKEN "$MESSAGE_SYNC_SLACK_APP_TOKEN"
+    install_remote_env_value MESSAGE_SYNC_SLACK_APP_ID "$MESSAGE_SYNC_SLACK_APP_ID"
+    install_remote_env_value MESSAGE_SYNC_SLACK_BOT_WORKSPACE_ID "$MESSAGE_SYNC_SLACK_BOT_WORKSPACE_ID"
+    install_remote_env_value MESSAGE_SYNC_SLACK_DISTRIBUTION "${MESSAGE_SYNC_SLACK_DISTRIBUTION:-restricted}"
+fi
 
 echo "🔧 Updating Linear channel issue reader configuration..."
 install_remote_env_value LINEAR_MEETING_REQUIRED_TEAM_KEYS "$LINEAR_MEETING_REQUIRED_TEAM_KEYS"
@@ -1401,6 +1427,22 @@ PY
         # Fail through a command so the ERR trap keeps forward-only schemas
         # paired with no writers until an operator completes recovery.
         false
+    fi
+
+    if [ "$MESSAGE_SYNC_ENABLED" = "true" ]; then
+        echo "Verifying durable sync progress in the new bridge worker..."
+        sync_ready=0
+        for attempt in \$(seq 1 18); do
+            if docker compose exec -T bridge-worker python manage.py message_sync_status --check --local-worker </dev/null >/dev/null 2>&1; then
+                sync_ready=1
+                break
+            fi
+            sleep 5
+        done
+        if [ "\$sync_ready" != "1" ]; then
+            echo "New bridge worker has missing or stale sync lanes."
+            false
+        fi
     fi
 
     echo "🩺 Verifying external health release..."

@@ -273,6 +273,12 @@ services:
   bridge-worker:
     build: .
     logging: *default-logging
+    healthcheck:
+      test: ["CMD", "python", "manage.py", "message_sync_status", "--check", "--local-worker"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+      start_period: 120s
     command: sh -c "until python manage.py migrate --check --noinput; do echo 'Waiting for migrations to complete...'; sleep 5; done; python manage.py run_community_bridge"
     environment:
       APP_ENV: ${APP_ENV:-production}

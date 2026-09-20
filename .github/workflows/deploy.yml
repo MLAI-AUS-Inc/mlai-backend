@@ -50,18 +50,35 @@ jobs:
         python-version: "3.11"
 
     - name: Test deployment failure handling and live contract
-      run: python -m unittest tests.test_deploy_runtime_checks -v
+      run: python -m unittest tests.test_deploy_runtime_checks tests.test_message_sync_deploy_config -v
+
+    - name: Check jobs delivery contracts without database access
+      run: python -m unittest tests.test_jobs_delivery_unit -v
 
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
         pip install -r requirements.txt -r requirements-engine.txt
 
+    - name: Run no-database editorial contract checks
+      run: |
+        python -m unittest \
+          content_factory.tests_customer_profile_flow_unit \
+          content_factory.tests_editorial_catalog_unit \
+          content_factory.tests_editorial_catalog_api_unit \
+          content_factory.tests_editorial_dispatch_unit \
+          content_factory.tests_editorial_snapshot_unit \
+          content_factory.tests_editorial_revision_unit \
+          content_factory.tests_article_admission_notice_unit
+
     - name: Check migrations are committed
       run: python manage.py makemigrations --check --dry-run
 
     - name: Run coworking account booking contract checks
       run: python -m unittest community_chat.tests.test_coworking_unit tests.test_article_notification_policy_unit
+
+    - name: Check paid island research contracts without database access
+      run: python -m unittest content_factory.tests_island_research_unit content_factory.tests_custom_islands_unit -q
 
     - name: Scan tracked source for credentials
       run: python scripts/check_secrets.py
@@ -151,9 +168,13 @@ jobs:
     - name: Verify private Slack delivery payloads without database access
       run: python -m unittest integrations.tests_slack_dm_payload_contract integrations.tests_slack_catalog_queries integrations.tests_slack_history_scheduling integrations.tests_slack_recent_activity -v
 
+    - name: Check My startup account contracts without database access
+      run: python scripts/test_my_startup.py
+
     - name: Run targeted Django tests
       run: |
         python manage.py test \
+          founder_tools.my_startup.test_database \
           roo.tests_office_manager_channel \
           roo.tests_api.TaskViewSetTests \
           roo.tests_api.CoworkingViewSetTests \
@@ -178,6 +199,7 @@ jobs:
           tests.test_linear_deployment_wiring \
           tests.test_health_check \
           tests.test_content_factory_org_config \
+          tests.test_island_research_contract \
           tests.test_new_endpoints.EndpointTests \
           tests.test_new_endpoints.ContentFactoryCallbackTests \
           tests.test_content_factory_callback_idempotency \
@@ -195,6 +217,7 @@ jobs:
           community_chat.tests.test_message_references \
           community_chat.tests.test_preview_image_negotiation \
           community_chat.tests.test_slack_read_state \
+          community_chat.tests.test_slack_channel_refresh \
           community_chat.tests.test_token_usage \
           community_chat.tests.test_tokenmaxer_federation \
           community_chat.tests.test_home \
@@ -232,6 +255,8 @@ jobs:
           integrations.tests_github_installation_reconciliation \
           integrations.tests_github_app_probe \
           integrations.tests_connectors \
+          vibe_raising.tests_progress_contract \
+          vibe_raising.tests_progress_api \
           integrations.tests_slack_connector_authority \
           integrations.tests_startup_updates.StartupUpdateSlackBackfillViewTest \
           vibe_raising.tests.VibeRaisingApiTests.test_startup_update_run_maps_create_authority_error_to_connector_auth_response \
@@ -247,6 +272,8 @@ jobs:
           tests.test_teardown_company \
           tests.test_editorial_learning_loop \
           startup_updates.tests_monthly_update_reminders \
+          community_chat.tests.test_startup_updates \
+          community_chat.tests.test_startup_updates_database \
           startup_updates.tests_evidence_contract \
           startup_updates.tests_source_evidence \
           startup_updates.tests_reporting_canaries \
@@ -356,6 +383,30 @@ jobs:
           org_memory.tests.test_drive_processing.DriveProcessingTests.test_unchanged_accessible_version_restores_policy_revoked_chunks \
           --verbosity 2
 
+    - name: Run durable message synchronization PostgreSQL tests
+      run: |
+        python manage.py test \
+          integrations.tests_message_sync_unit \
+          integrations.tests_message_sync_throughput \
+          integrations.tests_message_sync_capacity \
+          integrations.tests_message_sync_configuration \
+          integrations.tests_message_sync_transactions \
+          integrations.tests_message_sync_scheduler \
+          integrations.tests_message_sync_discovery \
+          integrations.tests_message_sync_discovery_worker \
+          integrations.tests_message_sync_read_state \
+          integrations.tests_message_sync_read_priority \
+          integrations.tests_slack_discovery_progress \
+          integrations.tests_slack_discovery_progress_authority \
+          integrations.tests_message_sync_history \
+          integrations.tests_message_sync_recovery \
+          integrations.tests_message_sync_device_recovery \
+          integrations.tests_message_sync_device_audience \
+          integrations.tests_slack_private_target_boundaries \
+          integrations.tests_slack_import_readiness \
+          integrations.tests_message_sync_public_repair \
+          --verbosity 2
+
     - name: Run meeting-room PostgreSQL tests
       run: python manage.py test roo.tests_meeting_rooms --verbosity 2
 
@@ -426,6 +477,9 @@ jobs:
           core.tests_slack_founder_links.SlackFounderActorOrphanedPrincipalGuardTests \
           core.tests_slack_founder_links.SlackFounderActorDeletedBeforeHistoryGuardTests \
           org_memory.tests.test_migrations \
+          content_factory.tests_customer_profile_persistence \
+          content_factory.tests_article_publish_status \
+          content_factory.tests_written_article_discard \
           --verbosity 2
 
   deploy:
@@ -468,6 +522,14 @@ jobs:
         COMMUNITY_CHAT_EMAIL_CODE_DELIVERY_SECRET: ${{ secrets.COMMUNITY_CHAT_EMAIL_CODE_DELIVERY_SECRET }}
         COMMUNITY_CHAT_ADAPTER_TOKEN: ${{ secrets.COMMUNITY_CHAT_ADAPTER_TOKEN }}
         COMMUNITY_CHAT_ADAPTER_URL: ${{ vars.COMMUNITY_CHAT_ADAPTER_URL }}
+        MESSAGE_SYNC_ENABLED: ${{ vars.MESSAGE_SYNC_ENABLED || 'false' }}
+        MESSAGE_SYNC_SLACK_APP_ID: ${{ vars.MESSAGE_SYNC_SLACK_APP_ID }}
+        MESSAGE_SYNC_SLACK_APP_TOKEN: ${{ secrets.MESSAGE_SYNC_SLACK_APP_TOKEN }}
+        MESSAGE_SYNC_SLACK_USER_APP_ID: ${{ vars.MESSAGE_SYNC_SLACK_USER_APP_ID }}
+        MESSAGE_SYNC_SLACK_USER_APP_TOKEN: ${{ secrets.MESSAGE_SYNC_SLACK_USER_APP_TOKEN }}
+        MESSAGE_SYNC_SLACK_USER_SIGNING_SECRET: ${{ secrets.MESSAGE_SYNC_SLACK_USER_SIGNING_SECRET }}
+        MESSAGE_SYNC_SLACK_BOT_WORKSPACE_ID: ${{ vars.SLACK_BRIDGE_WORKSPACE_ID }}
+        MESSAGE_SYNC_SLACK_DISTRIBUTION: ${{ vars.MESSAGE_SYNC_SLACK_DISTRIBUTION || 'restricted' }}
         SLACK_BRIDGE_BOT_TOKEN: ${{ secrets.SLACK_BRIDGE_BOT_TOKEN }}
         SLACK_BRIDGE_SIGNING_SECRET: ${{ secrets.SLACK_BRIDGE_SIGNING_SECRET }}
         SLACK_BRIDGE_BOT_USER_ID: ${{ vars.SLACK_BRIDGE_BOT_USER_ID }}

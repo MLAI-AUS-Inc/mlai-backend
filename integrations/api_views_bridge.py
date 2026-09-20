@@ -6,6 +6,7 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from integrations.services.message_sync.inbox import enabled as message_sync_enabled, enqueue_slack_callback
 from integrations.models import CommunityBridgePlatform
 from integrations.services.community_bridge.buzz import BuzzBridgeClient
 from integrations.services.community_bridge.slack import SlackBridgeClient
@@ -25,18 +26,29 @@ class SlackCommunityBridgeEventView(APIView):
         timestamp = request.META.get("HTTP_X_SLACK_REQUEST_TIMESTAMP", "")
         raw_body = request.body or b""
 
+        if len(raw_body) > 1024 * 1024:
+            return Response({"error": "payload_too_large"}, status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE)
         if not SlackBridgeClient.validate_signature(raw_body, timestamp, signature):
             return Response({"error": "invalid_signature"}, status=status.HTTP_403_FORBIDDEN)
 
         try:
             payload = json.loads(raw_body.decode("utf-8"))
-        except ValueError:
+        except (UnicodeDecodeError, ValueError):
             return Response({"error": "invalid_json"}, status=status.HTTP_400_BAD_REQUEST)
+
+        if not isinstance(payload, dict):
+            return Response({"error": "invalid_payload"}, status=status.HTTP_400_BAD_REQUEST)
 
         if str(payload.get("type") or "").strip() == "url_verification":
             return Response({"challenge": payload.get("challenge", "")}, status=status.HTTP_200_OK)
 
-        result = ingest_slack_dm_event(payload) or ingest_slack_event(payload)
+        if message_sync_enabled():
+            try:
+                result = enqueue_slack_callback(payload)
+            except ValueError as exc:
+                return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        else:
+            result = ingest_slack_dm_event(payload) or ingest_slack_event(payload)
         logger.info(
             "community_bridge_slack_event status=%s receipt_id=%s delivery_ids=%s",
             result.get("status"),

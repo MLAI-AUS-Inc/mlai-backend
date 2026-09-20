@@ -42,7 +42,11 @@ from .authentication import (
     CommunityChatAccountAuthentication,
     CommunityChatBootstrapAuthentication,
 )
-from .throttles import CommunityChatScopedThrottle
+from .throttles import (
+    CommunityChatScopedThrottle,
+    SlackSnapshotAccountThrottle,
+    SlackSnapshotDeviceThrottle,
+)
 
 
 def _import_history_days(data, *, default=30):
@@ -152,6 +156,17 @@ class SlackDmMirrorApiView(APIView):
 
 class SlackDmMirrorView(SlackDmMirrorApiView):
     """Inspect, connect, pause, resume, or disconnect Slack DM mirroring."""
+
+    slack_snapshot_account_throttle_scope = "community_chat_slack_snapshot_account"
+
+    def get_throttles(self):
+        if self.request.method == "GET":
+            self.community_chat_throttle_scope = "community_chat_slack_snapshot_device"
+            return [SlackSnapshotDeviceThrottle(), SlackSnapshotAccountThrottle()]
+        if self.request.method == "PATCH" and self.request.data.get("action") == "mark_read":
+            # Background polling must not consume the user's acknowledgement budget.
+            self.community_chat_throttle_scope = "community_chat_slack_read_receipt"
+        return super().get_throttles()
 
     def get(self, request):
         if request.query_params.get("read_state") == "1":

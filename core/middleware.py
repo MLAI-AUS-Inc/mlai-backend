@@ -73,7 +73,7 @@ class DesktopAuthCorsMiddleware:
         response["Access-Control-Allow-Headers"] = (
             "authorization, content-type, x-request-id"
         )
-        response["Access-Control-Expose-Headers"] = "X-Request-ID"
+        response["Access-Control-Expose-Headers"] = "X-Request-ID, Retry-After"
         response["Access-Control-Max-Age"] = "600"
         patch_vary_headers(response, ("Origin",))
         return response

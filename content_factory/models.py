@@ -1132,6 +1132,16 @@ class WrittenArticle(models.Model):
         related_name='articles'
     )
 
+    # Historical writing decisions. Never resolve labels from today's catalogue.
+    editorial_snapshot = models.JSONField(null=True, blank=True, default=None)
+    original_editorial_snapshot = models.JSONField(null=True, blank=True, default=None)
+    audience_id = models.CharField(max_length=200, blank=True, default="")
+    audience_version = models.PositiveBigIntegerField(null=True, blank=True)
+    offer_id = models.CharField(max_length=100, blank=True, default="")
+    offer_version = models.PositiveBigIntegerField(null=True, blank=True)
+    conversion_intent = models.CharField(max_length=10, null=True, blank=True)
+    editorial_provenance_status = models.CharField(max_length=32, default="unknown")
+
     # run_id of the most recent *writing* run (never a publish child); powers
     # the dashboard "Edit & republish" link back to the run review page.
     source_run_id = models.CharField(max_length=100, blank=True, default="")
@@ -1146,6 +1156,8 @@ class WrittenArticle(models.Model):
         ordering = ['-created_at']
         indexes = [
             models.Index(fields=['organization', 'primary_keyword']),
+            models.Index(fields=['organization', 'audience_id'], name='wa_org_audience_idx'),
+            models.Index(fields=['organization', 'offer_id'], name='wa_org_offer_idx'),
             # Covers build_topic_coverage_memory's filter(organization).order_by('-created_at'),
             # run on every bootstrap/navigation.
             models.Index(fields=['organization', '-created_at'], name='wa_org_created_idx'),

@@ -23,6 +23,9 @@ from integrations.models import (
     SlackDmMirrorGrantStatus,
 )
 from integrations.services.community_bridge.slack import SlackBridgeClient
+from integrations.services.message_sync.configuration import user_app_id
+from integrations.services.message_sync.scheduler import BudgetDeferred
+from integrations.services.message_sync.slack_client import budgeted_client
 
 
 SLACK_FILE_ID_RE = re.compile(r"^F[A-Z0-9]+$")
@@ -43,6 +46,14 @@ class SlackFilePreviewError(ValueError):
     """A public-safe Slack file validation or retrieval failure."""
 
 
+class SlackFilePreviewDeferred(SlackFilePreviewError):
+    """A temporary source delay that clients can retry without reconnecting."""
+
+    def __init__(self, retry_after=1):
+        super().__init__("Slack is preparing this preview. It will retry shortly.")
+        self.retry_after = max(1, int(retry_after))
+
+
 @dataclass(frozen=True)
 class SlackFilePreview:
     file_id: str
@@ -51,18 +62,20 @@ class SlackFilePreview:
     description: str
     site_name: str
     content_type: str
+    has_thumbnail: bool = False
 
     @property
     def is_image(self) -> bool:
-        return self.content_type in ALLOWED_IMAGE_TYPES
+        return self.content_type in ALLOWED_IMAGE_TYPES or self.has_thumbnail
 
-    def as_payload(self) -> dict[str, str]:
+    def as_payload(self) -> dict[str, str | bool]:
         return {
             "href": self.href,
             "title": self.title,
             "description": self.description,
             "site_name": self.site_name,
             "image_url": "",
+            "image_is_thumbnail": self.content_type not in ALLOWED_IMAGE_TYPES,
         }
 
 
@@ -108,15 +121,31 @@ def fetch_slack_file_preview(raw_url: str, *, user=None) -> SlackFilePreview | N
         description=f"{filetype.capitalize()} shared in MLAI Slack",
         site_name="MLAI Slack",
         content_type=content_type,
+        has_thumbnail=bool(_slack_thumbnail_url(file_data)),
     )
+
+
+def _slack_thumbnail_url(file_data):
+    for field in (
+        "thumb_1024",
+        "thumb_960",
+        "thumb_800",
+        "thumb_720",
+        "thumb_pdf",
+        "thumb_480",
+        "thumb_360",
+    ):
+        if file_data.get(field):
+            return str(file_data[field]).strip()
+    return ""
 
 
 def slack_image_download_url(file_data, *, original=False):
     """Use Slack's uncropped display rendition, preserving animated originals."""
     if not original and file_data.get("mimetype") != "image/gif":
-        for field in ("thumb_1024", "thumb_960", "thumb_800", "thumb_720"):
-            if file_data.get(field):
-                return str(file_data[field]).strip()
+        thumbnail = _slack_thumbnail_url(file_data)
+        if thumbnail:
+            return thumbnail
     return str(
         file_data.get("url_private_download") or file_data.get("url_private") or ""
     ).strip()
@@ -133,8 +162,10 @@ def fetch_slack_file_image(
     authorized = _authorized_file(normalized_file_id, user=user)
     file_data = authorized.data
     content_type = str(file_data.get("mimetype") or "").split(";", 1)[0].strip().lower()
-    if content_type not in ALLOWED_IMAGE_TYPES:
-        raise SlackFilePreviewError("The Slack file is not a supported image.")
+    if content_type not in ALLOWED_IMAGE_TYPES and (
+        original or not _slack_thumbnail_url(file_data)
+    ):
+        raise SlackFilePreviewError("The Slack file has no supported image preview.")
 
     cache_key = (
         "community-chat-slack-file-image-v2:"
@@ -184,6 +215,16 @@ def fetch_slack_file_image(
                 raise SlackFilePreviewError("The Slack image was too large to preview.")
             chunks.append(chunk)
     except requests.RequestException as exc:
+        if isinstance(exc, (requests.Timeout, requests.ConnectionError)):
+            raise SlackFilePreviewDeferred(2) from exc
+        response_status = getattr(exc.response, "status_code", None)
+        if response_status == 429 or (
+            response_status is not None and response_status >= 500
+        ):
+            raw_retry = exc.response.headers.get("Retry-After", "2")
+            raise SlackFilePreviewDeferred(
+                int(raw_retry) if str(raw_retry).isdigit() else 2
+            ) from exc
         raise SlackFilePreviewError("The Slack image could not be reached.") from exc
     finally:
         if "response" in locals():
@@ -208,6 +249,9 @@ def _authorized_file(file_id: str, *, user=None) -> _AuthorizedSlackFile:
     if bot_token:
         try:
             file_data = _slack_file_info(file_id)
+        except SlackFilePreviewDeferred:
+            # A shared method budget cannot be bypassed using another token.
+            raise
         except SlackFilePreviewError:
             file_data = None
     if file_data is not None and _file_is_in_mapped_public_channel(file_data):
@@ -273,6 +317,7 @@ def _authorized_private_file(file_id: str, *, user=None) -> _AuthorizedSlackFile
         file_id,
         access_token=token,
         cache_scope=private_cache_scope,
+        workspace_id=grant.slack_workspace_id,
     )
     file_workspace_id = str(
         file_data.get("team_id") or file_data.get("user_team") or ""
@@ -315,6 +360,7 @@ def _slack_file_info(
     *,
     access_token: str = "",
     cache_scope: str = "bot",
+    workspace_id: str = "",
 ) -> dict:
     cache_key = (
         "community-chat-slack-file-info:"
@@ -327,12 +373,30 @@ def _slack_file_info(
         raise SlackFilePreviewError("Slack image previews are not configured.")
     try:
         client = (
-            WebClient(token=access_token, timeout=SLACK_REQUEST_TIMEOUT[1])
+            budgeted_client(
+                WebClient(token=access_token, timeout=SLACK_REQUEST_TIMEOUT[1]),
+                workspace_id=workspace_id,
+                app_id=user_app_id(),
+            )
             if access_token
             else SlackBridgeClient.get_client()
         )
         response = client.files_info(file=file_id)
+    except BudgetDeferred as exc:
+        raise SlackFilePreviewDeferred(exc.retry_after) from exc
     except SlackApiError as exc:
+        if exc.response.get("error") in {
+            "ratelimited",
+            "internal_error",
+            "service_unavailable",
+            "request_timeout",
+        }:
+            raw_retry = (getattr(exc.response, "headers", {}) or {}).get(
+                "Retry-After", "2"
+            )
+            raise SlackFilePreviewDeferred(
+                int(raw_retry) if str(raw_retry).isdigit() else 2
+            ) from exc
         raise SlackFilePreviewError("The Slack file could not be loaded.") from exc
     except Exception as exc:
         raise SlackFilePreviewError("The Slack file could not be loaded.") from exc

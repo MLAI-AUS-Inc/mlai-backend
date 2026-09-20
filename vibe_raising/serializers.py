@@ -222,6 +222,9 @@ class VibeRaisingActiveCompanySerializer(AliasInputSerializer):
 
 
 class VibeRaisingMonthlyUpdateUpsertSerializer(AliasInputSerializer):
+    updateId = serializers.IntegerField(required=False, min_value=1, allow_null=True)
+    creationKey = serializers.UUIDField(required=False, allow_null=True)
+    updateDate = serializers.DateField(required=False, allow_null=True)
     expectedRevision = serializers.IntegerField(required=False, allow_null=True)
     input_aliases = {
         "audienceVisibility": (
@@ -247,6 +250,7 @@ class VibeRaisingMonthlyUpdateUpsertSerializer(AliasInputSerializer):
     }
 
     coverImage = serializers.DictField(required=False, allow_null=True)
+    chartSelections = serializers.ListField(child=serializers.DictField(), max_length=12, required=False)
     month = serializers.CharField()
     year = serializers.IntegerField(min_value=2000, max_value=2100)
     audienceVisibility = AudienceVisibilityField(required=False)
@@ -301,6 +305,8 @@ class VibeRaisingMonthlyUpdateUpsertSerializer(AliasInputSerializer):
 
         attrs["month"] = calendar.month_name[month_number]
         attrs["month_number"] = month_number
+        if attrs.get("creationKey") and not attrs.get("updateDate") and not attrs.get("updateId"):
+            raise serializers.ValidationError({"updateDate": "Choose an update date."})
 
         for field in ("highlights", "challenges", "asks", "learnings", "next30Days"):
             attrs[field] = str(attrs.get(field) or "").strip()
@@ -328,8 +334,8 @@ class VibeRaisingMonthlyUpdateUpsertSerializer(AliasInputSerializer):
             if not metric_key:
                 raise serializers.ValidationError({"metrics": "Metric keys must be short identifiers."})
             normalized_value = _blank_to_none(value)
-            if normalized_value is not None:
-                normalized_metrics[metric_key] = normalized_value
+            # Explicit blanks clear editable metrics; omitted keys retain evidence.
+            normalized_metrics[metric_key] = normalized_value
 
         attrs["metrics"] = normalized_metrics
 

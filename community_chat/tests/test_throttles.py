@@ -1,9 +1,65 @@
 from types import SimpleNamespace
 from unittest.mock import call, patch
 
-from django.test import SimpleTestCase
+from django.core.cache import cache
+from django.test import SimpleTestCase, override_settings
 
 from community_chat.throttles import enforce_bootstrap_limits
+from community_chat.throttles import CommunityChatScopedThrottle
+from community_chat.slack_views import SlackDmMirrorView
+
+
+@override_settings(CACHES={"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}})
+class SlackPollingThrottleTests(SimpleTestCase):
+    def setUp(self):
+        cache.clear()
+        rates = patch.object(CommunityChatScopedThrottle, "THROTTLE_RATES", {
+            "community_chat_slack_snapshot_device": "2/minute",
+            "community_chat_slack_snapshot_account": "5/minute",
+            "community_chat_slack_read_receipt": "2/minute",
+            "community_chat_home": "1/minute",
+        })
+        rates.start()
+        self.addCleanup(rates.stop)
+        self.addCleanup(cache.clear)
+
+    def allowed(self, *, device="a" * 64, user=1, method="GET", action=None):
+        request = SimpleNamespace(
+            method=method, data={"action": action},
+            user=SimpleNamespace(pk=user, is_authenticated=True),
+            community_chat_public_key=device,
+        )
+        view = SlackDmMirrorView()
+        view.request = request
+        decisions = [throttle.allow_request(request, view) for throttle in view.get_throttles()]
+        return all(decisions)
+
+    def test_busy_device_does_not_block_other_devices_or_read_acknowledgements(self):
+        self.assertTrue(self.allowed())
+        self.assertTrue(self.allowed())
+        self.assertFalse(self.allowed())
+        self.assertTrue(self.allowed(device="b" * 64))
+        self.assertTrue(self.allowed(method="PATCH", action="mark_read"))
+        self.assertTrue(self.allowed(method="PATCH", action="mark_read"))
+        self.assertFalse(self.allowed(method="PATCH", action="mark_read"))
+
+    def test_rotating_devices_cannot_bypass_the_account_ceiling(self):
+        for index in range(5):
+            self.assertTrue(self.allowed(device=f"{index:064x}"))
+        self.assertFalse(self.allowed(device="f" * 64))
+        self.assertTrue(self.allowed(device="f" * 64, user=2))
+        self.assertTrue(self.allowed(method="PATCH", action="mark_read"))
+
+    def test_legacy_sessions_share_a_bounded_account_fallback(self):
+        self.assertTrue(self.allowed(device=None))
+        self.assertTrue(self.allowed(device=None))
+        self.assertFalse(self.allowed(device=None))
+
+    def test_connection_controls_retain_their_existing_limit(self):
+        self.assertTrue(self.allowed(method="PATCH", action="pause"))
+        self.assertFalse(self.allowed(method="PATCH", action="resume"))
+        self.assertTrue(self.allowed())
+        self.assertTrue(self.allowed(method="PATCH", action="mark_read"))
 
 
 class CommunityChatBootstrapThrottleTests(SimpleTestCase):

@@ -1,5 +1,14 @@
 # Current Volunteer member experience
 
+The earning catalogue includes `newsletter_article`: **Write an article for the
+MLAI newsletter**. Members can submit funny or interesting articles and earn
+exactly 12 Roo Points per published article. An authorised reviewer confirms
+publication before approving the award through the existing recognition flow;
+submission alone earns no points. Use the article's canonical source ID to
+prevent duplicate awards. Event attendance is not required. `proofread` and
+`test_ai_tutorial` are retired from the catalogue; historical recognition records
+and their policy snapshots remain intact.
+
 The member app has Explore, event opportunity details and My journey. Member recognition-request forms, My contributions, receipts and review queues are no longer exposed. Existing accounting, audit records and administrator awards remain intact; no schema migration or data deletion accompanies this UI change.
 
 Event opportunity DTOs resolve the canonical `event_id` against the existing public Luma calendar. They return Luma’s name, description, event URL and schedule rather than generic volunteering copy. The calendar is bounded to the next ten public events and cached for sixty seconds. If the event is absent or Luma is unavailable, description is empty and clients show an honest unavailable state. Only plain text/Markdown descriptions cross the API boundary; structured internal fields and attendee data do not.

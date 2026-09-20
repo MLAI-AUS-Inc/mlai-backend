@@ -51,10 +51,23 @@ class VibeRaisingCompanyScopingTests(TestCase):
             "learnings": "",
             "next30Days": "",
             "metrics": {},
+            "saveMode": "draft",
         }
         if company_id is not None:
             body["companyId"] = str(company_id)
         return self.client.post(UPDATES_URL, body, format="json")
+
+    def _publish_update(self, update, company_id=None):
+        body = {
+            "revisionId": update["revisionId"],
+            "revisionHash": update["revisionHash"],
+            "audienceVisibility": update["audienceVisibility"],
+        }
+        if company_id is not None:
+            body["companyId"] = str(company_id)
+        return self.client.post(
+            f"{UPDATES_URL}{update['id']}/publish/", body, format="json"
+        )
 
     def _updates(self, company_id=None):
         params = {"company_id": str(company_id)} if company_id is not None else {}
@@ -68,6 +81,13 @@ class VibeRaisingCompanyScopingTests(TestCase):
         response = self._post_update(company_id=self.company_b.id)
         self.assertIn(response.status_code, (200, 201))
 
+        self.assertEqual(self._updates(company_id=self.company_b.id), [])
+        update = response.data["update"]
+        wrong_company = self._publish_update(update, company_id=self.company_a.id)
+        self.assertEqual(wrong_company.status_code, 404)
+        published = self._publish_update(update, company_id=self.company_b.id)
+        self.assertEqual(published.status_code, 200, published.data)
+
         self.assertEqual(self._updates(), [])
         self.assertEqual(len(self._updates(company_id=self.company_b.id)), 1)
 
@@ -78,6 +98,10 @@ class VibeRaisingCompanyScopingTests(TestCase):
     def test_flagless_requests_still_use_the_active_company(self):
         response = self._post_update()
         self.assertIn(response.status_code, (200, 201))
+
+        self.assertEqual(self._updates(), [])
+        published = self._publish_update(response.data["update"])
+        self.assertEqual(published.status_code, 200, published.data)
 
         self.assertEqual(len(self._updates()), 1)
         self.assertEqual(self._updates(company_id=self.company_b.id), [])

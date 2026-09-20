@@ -89,6 +89,7 @@ CONNECTOR_OAUTH_STATE_MAX_AGE_SECONDS = 15 * 60
 SLACK_OAUTH_STATE_GENERATION_KEY = "slack_oauth_generation"
 DEFAULT_CONNECTOR_NEXT_PATH = "/vibe-raising/connect-data"
 ALLOWED_CONNECTOR_NEXT_PREFIXES = (
+    "/pulse?",
     "/vibe-raising/connect-data",
     "/vibe-raising/create-update",
     "/home",
@@ -291,7 +292,11 @@ def normalize_connector_next(next_url: Optional[str]) -> str:
     else:
         candidate = raw_next if raw_next.startswith("/") else f"/{raw_next}"
 
-    if not any(candidate.startswith(prefix) for prefix in ALLOWED_CONNECTOR_NEXT_PREFIXES):
+    candidate_path = urllib.parse.urlsplit(candidate).path
+    startup_path = candidate_path == "/my-startup" or candidate_path.startswith("/my-startup/")
+    if "\\" in candidate or "%" in candidate_path or any(part in {".", ".."} for part in candidate_path.split("/")):
+        return default_next
+    if not startup_path and not any(candidate.startswith(prefix) for prefix in ALLOWED_CONNECTOR_NEXT_PREFIXES):
         return default_next
 
     return f"{target_origin or frontend_base}{candidate}"

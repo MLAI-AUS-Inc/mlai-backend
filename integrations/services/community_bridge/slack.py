@@ -1,12 +1,11 @@
-import hashlib
-import hmac
 import logging
-import time
 from typing import Optional
 
 from django.conf import settings
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
+from integrations.services.message_sync.slack_client import budgeted_client
+from integrations.services.message_sync.scheduler import BudgetDeferred
 
 from integrations.services.community_bridge.formatting import (
     approved_slack_avatar_url,
@@ -29,28 +28,16 @@ class SlackBridgeClient:
     @classmethod
     def get_client(cls) -> WebClient:
         if cls._client is None:
-            cls._client = WebClient(token=getattr(settings, "SLACK_BRIDGE_BOT_TOKEN", ""))
+            cls._client = budgeted_client(
+                WebClient(token=getattr(settings, "SLACK_BRIDGE_BOT_TOKEN", ""), timeout=20),
+                workspace_id=str(getattr(settings, "MESSAGE_SYNC_SLACK_BOT_WORKSPACE_ID", "") or ""),
+            )
         return cls._client
 
     @classmethod
     def validate_signature(cls, body: bytes, timestamp: str, signature: str) -> bool:
-        signing_secret = str(getattr(settings, "SLACK_BRIDGE_SIGNING_SECRET", "") or "").strip()
-        if not signing_secret or not timestamp or not signature:
-            return False
-        try:
-            ts_value = int(str(timestamp).strip())
-        except (TypeError, ValueError):
-            return False
-        if abs(int(time.time()) - ts_value) > 60 * 5:
-            return False
-        request_body = body.decode("utf-8")
-        base_string = f"v0:{ts_value}:{request_body}"
-        computed = "v0=" + hmac.new(
-            signing_secret.encode("utf-8"),
-            base_string.encode("utf-8"),
-            hashlib.sha256,
-        ).hexdigest()
-        return hmac.compare_digest(computed, str(signature).strip())
+        from integrations.services.message_sync.configuration import valid_callback_signature
+        return valid_callback_signature(body, timestamp, signature)
 
     @classmethod
     def get_user_display_name(cls, user_id: str) -> str:
@@ -88,6 +75,8 @@ class SlackBridgeClient:
                 exc.response.get("error"),
             )
             return {"display_name": normalized_user_id, "avatar_url": ""}
+        except BudgetDeferred:
+            raise
         except Exception as exc:
             logger.warning(
                 "community_bridge_slack_user_lookup_failed user_id=%s exc_type=%s exc=%r",
@@ -120,6 +109,8 @@ class SlackBridgeClient:
                 exc.response.get("error"),
             )
             return normalized_channel_id
+        except BudgetDeferred:
+            raise
         except Exception as exc:
             logger.warning(
                 "community_bridge_slack_channel_lookup_failed channel_id=%s exc_type=%s exc=%r",

@@ -77,6 +77,7 @@ cookies.txt
 /*.md
 /docs/*.md
 /docs/**/*.md
+!/docs/content-islands.md
 !/docs/content-factory-editorial-contract.md
 !/docs/mlai-coding-billing-contract.md
 !/docs/coworking-booking.md
@@ -89,6 +90,7 @@ cookies.txt
 !/docs/xero-statement-reconciliation.md
 !/docs/org-memory-review-summaries-digests.md
 !/docs/mlai-chat-bridge-contract.md
+!/docs/message-sync-schema-proposal.md
 !/docs/community-chat-home.md
 !/docs/community-chat-administration.md
 !/docs/volunteer-schema-proposal.md
@@ -225,3 +227,10 @@ medhack_backend/hospital/Eval_Labels.csv
 !/docs/monthly-update-evidence-contract.md
 
 !/docs/update-covers.md
+!/docs/daily-research.md
+
+!/docs/startup-progress.md
+
+!/docs/my-startup-api.md
+
+!/docs/community-chat-startup-updates.md

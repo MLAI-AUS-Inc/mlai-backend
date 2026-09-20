@@ -20,6 +20,7 @@ class MonthlyRevisionTests(TestCase):
 
     def save(self, memo=None, **kwargs):
         self.draft.refresh_from_db()
+        kwargs.setdefault("validation", {"groundedness_status": "founder_asserted"})
         return save_revision(self.draft, memo or {"highlights": ["Revenue was {{metric:revenue}}."]}, snapshot=self.snapshot, **kwargs)
 
     def publish(self, revision, audience=None):
@@ -175,6 +176,15 @@ class FounderEvidenceApiTests(TestCase):
         self.profile.save()
         self.client = APIClient()
         self.client.force_authenticate(self.user)
+        # Financial values now come from a connector, not a founder-editable field.
+        from vibe_raising.views import _ensure_binding_for_company
+        from integrations.tests_connectors import _xero_profit_and_loss_report
+        organization, _, _ = _ensure_binding_for_company(user=self.user, company=self.company)
+        report = _xero_profit_and_loss_report(total_income="100", total_expenses="0", net_profit="100")
+        StartupMetricObservation.objects.create(organization=organization, period_month=date(2026, 3, 1),
+            metric_key="revenue", metric_name="Revenue", value_number=100, value_text="USD 100", unit="USD", source_provider="xero",
+            source_metadata={"source_metric": "xero_profit_and_loss_revenue", "report_payload": report,
+                "report_hash": content_hash(report), "accounting_basis": "accrual", "report_start_date": "2026-03-01", "report_end_date": "2026-03-31"})
 
     def save_update(self, **extra):
         response = self.client.post("/api/v1/vibe-raising/updates/", {"companyId": self.company.pk,
@@ -191,7 +201,7 @@ class FounderEvidenceApiTests(TestCase):
         self.assertEqual(health.data["snapshot_hash"], snapshot.content_hash)
         revenue = next(item for item in health.data["metrics"] if item["key"] == "revenue")
         self.assertEqual(revenue["display_value"], update["metrics"]["revenue"])
-        self.assertEqual(revenue["quality"], "founder_asserted")
+        self.assertEqual(revenue["source_provider"], "xero")
         self.assertEqual(snapshot.payload["charts"]["performance"][-1]["income"], 100)
         changed = self.client.post("/api/v1/vibe-raising/business-health/", {"companyId": self.company.pk,
             "timezone": "Australia/Melbourne", "currency": "AUD", "metricLabel": "Experiments completed",

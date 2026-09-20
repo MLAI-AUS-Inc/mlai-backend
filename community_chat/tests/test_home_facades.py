@@ -145,7 +145,7 @@ class CommunityChatHomeFacadeTests(TestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(
             set(response.data),
-            {"points", "earn_actions", "rewards", "feature_flags", "roo_public_key"},
+            {"points", "earn_actions", "rewards", "feature_flags", "roo_public_key", "roo_slack_user_id"},
         )
         self.assertEqual(
             response.data["points"],
@@ -256,7 +256,20 @@ class CommunityChatHomeFacadeTests(TestCase):
         )
         self.assertEqual(second["Cache-Control"], "private, max-age=60")
         service_class.assert_called_once_with(timeout=2)
-        service.list_upcoming_events.assert_called_once_with(limit=10)
+        service.list_upcoming_events.assert_called_once_with()
+
+    def test_upcoming_events_without_limit_returns_the_complete_cached_calendar(self):
+        events = [{"id": f"evt-{i}", "name": f"Event {i}"} for i in range(12)]
+        with patch("community_chat.views.LumaAttendeeReportService") as service:
+            service.return_value.list_upcoming_events.return_value = events
+            preview = self.client.get(reverse("community_chat_upcoming_events"), {"limit": 5})
+            complete = self.client.get(reverse("community_chat_upcoming_events"))
+        self.assertEqual(preview.status_code, 200)
+        self.assertEqual(len(preview.data["events"]), 5)
+        self.assertEqual(complete.status_code, 200)
+        self.assertEqual([event["id"] for event in complete.data["events"]],
+                         [event["id"] for event in events])
+        service.return_value.list_upcoming_events.assert_called_once_with()
 
     def test_upcoming_events_rejects_invalid_limits_without_calling_luma(self):
         with patch("community_chat.views.LumaAttendeeReportService") as service_class:

@@ -444,6 +444,8 @@ class VibeMarketingResearchAutomationView(APIView):
             enabled = str(enabled_raw).strip().lower() not in {"false", "0", "no", "off", ""}
 
         if not enabled:
+            from integrations.services.daily_research_policy import record_manual_pause
+            record_manual_pause(organization)
             ResearchAutomation.objects.filter(
                 organization=organization, status=ResearchAutomationStatus.ACTIVE
             ).update(status=ResearchAutomationStatus.PAUSED)

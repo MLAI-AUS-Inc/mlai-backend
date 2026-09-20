@@ -1,6 +1,10 @@
 from django.urls import include, path
 
+from .custom_island_views import CustomContentIslandView
+from .island_research_views import ContentIslandResearchView, ContentIslandResearchAdoptView
+
 from .admin_views import VibeMarketingAdminUsageView
+from .editorial_views import EditorialCatalogApprovalView, EditorialCatalogView, EditorialBriefSuggestionView, EditorialArticlesView
 from .notification_channel_views import (
     VibeMarketingNotificationChannelDeliveryView,
     VibeMarketingNotificationChannelDetailView,
@@ -52,6 +56,17 @@ from .vibe_marketing_views import (
 
 
 urlpatterns = [
+    path("islands/research", ContentIslandResearchView.as_view(), name="vibe-marketing-island-research-no-slash"),
+    path("islands/research/", ContentIslandResearchView.as_view(), name="vibe-marketing-island-research"),
+    path("islands/research/<str:run_id>/adopt", ContentIslandResearchAdoptView.as_view(), name="vibe-marketing-island-research-adopt"),
+    path("islands/custom", CustomContentIslandView.as_view(), name="vibe-marketing-custom-island-no-slash"),
+    path("islands/custom/", CustomContentIslandView.as_view(), name="vibe-marketing-custom-island"),
+    path("editorial-catalog/articles/", EditorialArticlesView.as_view(), name="editorial-articles"),
+    path("editorial-catalog/suggest-brief/", EditorialBriefSuggestionView.as_view(), name="editorial-brief-suggestion"),
+    path("editorial-catalog", EditorialCatalogView.as_view(), name="vibe-marketing-editorial-catalog-no-slash"),
+    path("editorial-catalog/", EditorialCatalogView.as_view(), name="vibe-marketing-editorial-catalog"),
+    path("editorial-catalog/approve", EditorialCatalogApprovalView.as_view(), name="vibe-marketing-editorial-catalog-approve-no-slash"),
+    path("editorial-catalog/approve/", EditorialCatalogApprovalView.as_view(), name="vibe-marketing-editorial-catalog-approve"),
     path("admin/usage/", VibeMarketingAdminUsageView.as_view(), name="vibe-marketing-admin-usage"),
     path("analytics/", include("content_analytics.urls")),
     path("bootstrap/", VibeMarketingBootstrapView.as_view(), name="vibe-marketing-bootstrap"),
