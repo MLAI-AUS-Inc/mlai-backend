@@ -13535,13 +13535,9 @@ class VibeMarketingBootstrapView(APIView):
     def get(self, request):
         started_at = time.perf_counter()
         view = "summary" if str(request.query_params.get("view") or "").strip().lower() == "summary" else "full"
-        profile = get_or_create_founder_profile(request.user)
-        company = resolve_active_company(profile)
-        if company is None:
-            return Response(
-                {"detail": "Create or select a founder company first.", "redirect": "/founder-tools/company-setup"},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        _profile, company, error_response = _resolve_profile_company_or_response(request)
+        if error_response is not None:
+            return error_response
         if not normalize_company_domain(company.domain):
             return _timed_vibe_response(
                 _serialize_bootstrap_without_domain(company),

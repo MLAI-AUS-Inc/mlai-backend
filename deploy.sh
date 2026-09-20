@@ -1433,7 +1433,7 @@ PY
         echo "Verifying durable sync progress in the new bridge worker..."
         sync_ready=0
         for attempt in \$(seq 1 18); do
-            if docker compose exec -T bridge-worker python manage.py message_sync_status --check --local-worker >/dev/null 2>&1; then
+            if docker compose exec -T bridge-worker python manage.py message_sync_status --check --local-worker </dev/null >/dev/null 2>&1; then
                 sync_ready=1
                 break
             fi

@@ -168,9 +168,13 @@ jobs:
     - name: Verify private Slack delivery payloads without database access
       run: python -m unittest integrations.tests_slack_dm_payload_contract integrations.tests_slack_catalog_queries integrations.tests_slack_history_scheduling integrations.tests_slack_recent_activity -v
 
+    - name: Check My startup account contracts without database access
+      run: python scripts/test_my_startup.py
+
     - name: Run targeted Django tests
       run: |
         python manage.py test \
+          founder_tools.my_startup.test_database \
           roo.tests_office_manager_channel \
           roo.tests_api.TaskViewSetTests \
           roo.tests_api.CoworkingViewSetTests \

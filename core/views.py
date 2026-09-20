@@ -1,6 +1,7 @@
 import logging
 import re
 from urllib.parse import parse_qsl, unquote, urlencode, urlparse, urlsplit
+from django.conf import settings
 from django.contrib.auth import get_user_model, login as auth_login, logout as auth_logout
 from django.db import transaction
 from django.urls import reverse
@@ -1154,9 +1155,11 @@ class SlackFounderLinkStartView(SlackFounderLinkNoStoreMixin, APIView):
         raw_token = link_start.raw_token
         if link_request is None or raw_token is None:
             raise RuntimeError("Link request creation returned no request token")
-        base_url = _frontend_base_url("founder-tools").rstrip("/")
+        use_chat = getattr(settings, "ROO_FOUNDER_LINK_CHAT_ENABLED", False)
+        base_url = (settings.COMMUNITY_CHAT_FRONTEND_URL if use_chat else _frontend_base_url("founder-tools")).rstrip("/")
+        link_path = "/my-startup/link-roo" if use_chat else "/founder-tools/link-roo"
         link_url = (
-            f"{base_url}/founder-tools/link-roo?"
+            f"{base_url}{link_path}?"
             f"{urlencode({'token': raw_token})}"
         )
         return Response(

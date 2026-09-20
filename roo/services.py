@@ -116,6 +116,9 @@ class PointsPurchaseService:
 
     @staticmethod
     def frontend_checkout_page_url(purchase: PointsPurchase) -> str:
+        if (purchase.purchase_from or {}).get("surface") == "my-startup":
+            frontend_base_url = getattr(settings, "COMMUNITY_CHAT_FRONTEND_URL", "https://chat.mlai.au").rstrip("/")
+            return f"{frontend_base_url}/my-startup/credits/{purchase.id}"
         frontend_base_url = getattr(settings, 'DEFAULT_FRONTEND_URL', 'https://mlai.au').rstrip('/')
         return f"{frontend_base_url}/roo/topup/{purchase.id}"
 
