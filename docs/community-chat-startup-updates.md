@@ -52,18 +52,19 @@ Deploy compatible Django/Valley versions, update Chat's browser CSP to permit si
 
 Rollback by disabling the flag. Saved startups, drafts and approvals remain in Django. Switching off the flag disables access; it does not undo publications or delete source data.
 
-## Validation and remaining gate
+## Validation and rollout acceptance
 
 Checks on the isolated PR branches based on current main:
 
 - 85 database-free backend tests covering the facade, review policy, evidence, source extraction, covers and progress contracts; system and model-drift checks pass.
+- 61 database integration tests pass against the approved current-main inventory, including Chat journeys, exact revision approval, company isolation, independent update identity and reporting evidence.
 - Valley full suite: 140 passed.
 - Chat typecheck and 12 focused model/session tests pass. Five mocked browser journeys and five desktop journeys pass, including stale approval and resumed/cancelled/completed generation.
 - The full Chat `just ci` run passed. Companion PRs: [Chat #188](https://github.com/MLAI-AUS-Inc/mlai-chat/pull/188) and [Valley #55](https://github.com/MLAI-AUS-Inc/valley-backend/pull/55).
 
-The user-approved original 339-migration inventory was applied only to a fresh disposable SQLite test database: all 18 integration/revision tests passed. The database was removed afterward. Current main subsequently added reporting identity/progress and other existing migrations. The final PR inventory contains 347 migrations and is awaiting its own explicit approval; no migration file is created or modified by this feature.
+The user-approved original 339-migration inventory was applied only to a fresh disposable SQLite test database: all 18 integration/revision tests passed. Current main subsequently added reporting identity/progress and other existing migrations. With user approval, the final 347-migration inventory was applied to another fresh disposable SQLite database: all 61 integration tests passed. Both databases were removed afterward. No migration file is created or modified by this feature.
 
-The [current inventory](startup-update-pr-test-migrations-2026-09-20.json) SHA-256 is `171b4df656f530095e9222a352b946577be14657dbacf4b7aa79b48cada069f8`. The [original approved inventory](startup-update-test-migrations-2026-09-20.json) is retained as historical test evidence. After approval, run:
+The [current inventory](startup-update-pr-test-migrations-2026-09-20.json) SHA-256 is `171b4df656f530095e9222a352b946577be14657dbacf4b7aa79b48cada069f8`. The [original approved inventory](startup-update-test-migrations-2026-09-20.json) is retained as historical test evidence. The approved test command was:
 
 ```sh
 .venv/bin/python scripts/test_startup_updates_database.py \
@@ -72,4 +73,4 @@ The [current inventory](startup-update-pr-test-migrations-2026-09-20.json) SHA-2
 
 The runner validates migration file hashes, clears credentials and dotenv loading, blocks network access, and refuses any database outside its new temporary SQLite directory. Its suites cover Chat journeys, canonical revisions, independent update identity, reporting canaries, company scoping and progress-chart evidence.
 
-These mocks and synthetic databases do not prove a live Django/Valley/provider round trip. Live OAuth, signed-storage CORS, production generation timing and runtime configuration require environment acceptance before enabling the flag. Xero's existing pre-generation sync can hold the HTTP request while refreshing stale data; check latency with the intended source before rollout. No deployment is part of these PRs.
+These mocks and synthetic databases do not prove a live Django/Valley/provider round trip. Live OAuth, signed-storage CORS, production generation timing and runtime configuration require environment acceptance before enabling the flag. Xero's existing pre-generation sync can hold the HTTP request while refreshing stale data; check latency with the intended source before rollout. Merging follows the repositories' normal CI/deployment workflows; enabling the feature remains a separate runtime configuration action.
