@@ -90,7 +90,7 @@ def capture_snapshot(organization, month, *, run=None, manual_metrics=None, base
     if base_snapshot is not None:
         metrics = copy.deepcopy(base_snapshot.payload["metrics"])
     for key, value in (manual_metrics or {}).items():
-        if not str(value or "").strip():
+        if value is None or not str(value).strip():
             metrics = [item for item in metrics if item["key"] != key]
             continue
         # Founder assertions are explicit evidence, not silently provider-verified.
@@ -160,7 +160,7 @@ def capture_snapshot(organization, month, *, run=None, manual_metrics=None, base
     from startup_updates.source_evidence import frozen_manual_sources, EXTRACTION_VERSION
     payload["extraction_version"] = EXTRACTION_VERSION
     payload["source_evidence"] = copy.deepcopy((run.result or {}).get("source_evidence", {})) if run else {}
-    payload["manual_sources"] = frozen_manual_sources(organization, run) if run else {"summary": "", "documents": []}
+    payload["manual_sources"] = copy.deepcopy(base_snapshot.payload.get("manual_sources") or {}) if base_snapshot else (frozen_manual_sources(organization, run) if run else {"summary": "", "documents": []})
     external = (run.run_request or {}).get("external_context", {}) if run else {}
     payload["source_coverage"] = {key: {field: copy.deepcopy(value[field]) for field in ("warnings", "index_partial", "needs_review", "pages_indexed") if field in value}
         for key, value in external.items() if isinstance(value, dict)}
@@ -231,7 +231,7 @@ def frozen_memo(draft, *, published=False):
 
 
 @transaction.atomic
-def save_revision(draft, memo, *, snapshot, audience="private", expected_revision=None, require_match=True):
+def save_revision(draft, memo, *, snapshot, audience="private", expected_revision=None, require_match=True, validation=None):
     draft = MonthlyUpdateDraft.objects.select_for_update().get(pk=draft.pk)
     if snapshot.organization_id != draft.organization_id or snapshot.month != draft.month:
         raise ValidationError("The evidence snapshot belongs to a different startup or period.")
@@ -296,12 +296,18 @@ def save_revision(draft, memo, *, snapshot, audience="private", expected_revisio
     digest = content_hash({"memo": memo, "snapshot": snapshot.content_hash, "audience": audience})
     if current and current.content_hash == digest:
         return current
+    if validation is None:
+        validation = (
+            current.validation
+            if current and current.validation.get("groundedness_status") in {"failed", "needs_review", "pending"}
+            else {"groundedness_status": "pending"}
+        )
     revision = MonthlyUpdateRevision.objects.create(
         draft=draft, snapshot=snapshot,
         number=(draft.revisions.aggregate(n=Max("number"))["n"] or 0) + 1,
         audience=audience, content_hash=digest,
         structured_memo=memo, rendered_markdown=rendered,
-        validation=copy.deepcopy(current.validation) if current and current.validation.get("groundedness_status") in {"failed", "needs_review", "pending"} else {},
+        validation=copy.deepcopy(validation),
     )
     # Compatibility fields mirror only the current private working copy.
     draft.current_revision = revision
@@ -324,7 +330,7 @@ def approve_and_publish(draft, *, actor, revision_id, revision_hash, audience_vi
         raise RevisionConflict()
     if audience_visibility != revision.structured_memo.get("_audience_visibility"):
         raise RevisionConflict("Disclosure changed. Save and review a new revision.")
-    if revision.validation.get("groundedness_status") in {"failed", "needs_review", "pending"}:
+    if revision.validation.get("groundedness_status") not in {"passed", "founder_asserted"}:
         raise ValidationError("Resolve the evidence review before publishing.")
     approval, created = MonthlyUpdateApproval.objects.get_or_create(
         revision=revision,

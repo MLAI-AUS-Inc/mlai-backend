@@ -2175,3 +2175,6 @@ ROO_FOUNDER_LINK_CHAT_ENABLED = _env_is_true("ROO_FOUNDER_LINK_CHAT_ENABLED", Fa
 
 # Enable only after the Chat frontend/API pilot passes. No data is moved.
 MY_STARTUP_DELIVERY_LINKS_ENABLED = os.environ.get("MY_STARTUP_DELIVERY_LINKS_ENABLED", "false").lower() == "true"
+
+# Pilot gate for the Chat startup/update workspace.
+COMMUNITY_CHAT_STARTUP_UPDATES_ENABLED = os.environ.get("COMMUNITY_CHAT_STARTUP_UPDATES_ENABLED", "false").lower() == "true"

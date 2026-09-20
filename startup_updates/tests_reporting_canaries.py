@@ -169,7 +169,7 @@ class ReportingCohortCanaries(TestCase):
         self.assertEqual(cached["cached_extraction"]["events"], [])
         snapshot = self.capture(org, run)
         draft = MonthlyUpdateDraft.objects.create(organization=org, month=snapshot.month)
-        revision_a = save_revision(draft, {"highlights": ["Revision A."]}, snapshot=snapshot)
+        revision_a = save_revision(draft, {"highlights": ["Revision A."]}, snapshot=snapshot, validation={"groundedness_status": "founder_asserted"})
         approve_and_publish(draft, actor=self.user, revision_id=revision_a.pk, revision_hash=revision_a.content_hash, audience_visibility=["just_me"])
         revision_b = save_revision(draft, {"highlights": ["Revision B."]}, snapshot=snapshot, expected_revision=revision_a.pk)
         with self.assertRaises(RevisionConflict):
