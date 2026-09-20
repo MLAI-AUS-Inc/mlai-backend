@@ -20,6 +20,7 @@ class MonthlyRevisionTests(TestCase):
 
     def save(self, memo=None, **kwargs):
         self.draft.refresh_from_db()
+        kwargs.setdefault("validation", {"groundedness_status": "founder_asserted"})
         return save_revision(self.draft, memo or {"highlights": ["Revenue was {{metric:revenue}}."]}, snapshot=self.snapshot, **kwargs)
 
     def publish(self, revision, audience=None):

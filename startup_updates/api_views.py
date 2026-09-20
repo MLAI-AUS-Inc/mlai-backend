@@ -4021,7 +4021,7 @@ class StartupUpdateFounderReviewAutoApproveView(APIView):
             include_score = float(item.get("include_score") or 0.0)
             evidence_quality = float(item.get("evidence_quality_score") or 0.0)
             sensitivity_risk = float(item.get("sensitivity_risk_score") or 0.0)
-            if decision == "include" and include_score >= 0.80 and evidence_quality >= 0.35 and sensitivity_risk < 0.80:
+            if decision == "include" and include_score >= 0.80 and evidence_quality >= 0.35 and (sensitivity_risk < 0.80 or "private" in (item.get("target_audiences") or [])):
                 item["founder_status"] = item.get("founder_status") or "auto_approved"
                 counts["approved"] += 1
             elif decision == "maybe":

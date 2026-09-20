@@ -42,6 +42,7 @@ from .usage_views import (
 
 
 urlpatterns = [
+    path("startups/", include("community_chat.startups.urls")),
     path("permissions/", ChatPermissionsView.as_view(), name="community_chat_permissions"),
     path("member-roles/", ChatMemberRolesView.as_view(), name="community_chat_member_roles"),
     path("moderators/<str:public_key>/", ChatModeratorView.as_view(), name="community_chat_moderator"),

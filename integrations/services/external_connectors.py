@@ -89,6 +89,7 @@ CONNECTOR_OAUTH_STATE_MAX_AGE_SECONDS = 15 * 60
 SLACK_OAUTH_STATE_GENERATION_KEY = "slack_oauth_generation"
 DEFAULT_CONNECTOR_NEXT_PATH = "/vibe-raising/connect-data"
 ALLOWED_CONNECTOR_NEXT_PREFIXES = (
+    "/pulse?",
     "/vibe-raising/connect-data",
     "/vibe-raising/create-update",
     "/home",
