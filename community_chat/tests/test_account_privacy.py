@@ -1,11 +1,14 @@
 """Privacy API and dispatch boundaries, using disposable synthetic accounts."""
 
 from datetime import timedelta
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 from django.contrib.auth import get_user_model
-from django.test import TestCase, override_settings
+from django.test import TestCase, TransactionTestCase, override_settings
+from django.db import IntegrityError, transaction, connection, close_old_connections
 from django.urls import reverse
 from django.utils import timezone
 from rest_framework.test import APIClient
@@ -13,7 +16,7 @@ from rest_framework.exceptions import AuthenticationFailed
 
 from community_chat.account_sessions import rotate_account_session
 from community_chat.models import AccountDeletionRequest, AiConsentRecord, CommunityChatAccountSession
-from community_chat.privacy import ai_disclosure, has_ai_consent, set_ai_consent
+from community_chat.privacy import ai_disclosure, has_ai_consent, set_ai_consent, request_account_deletion
 from community_chat.tests.test_account_profiles import credentials_for, ORIGIN
 from integrations.services.slack_dm_mirror import _verify_ai_recipients_before_send, SlackDmMirrorAuthorizationError
 
@@ -115,6 +118,23 @@ class AccountPrivacyTests(TestCase):
         self.assertEqual(self.deletion().status_code, 403)
         self.assertFalse(AccountDeletionRequest.objects.exists())
 
+    def test_database_prevents_two_unfinished_requests_for_the_same_scope(self):
+        self.deletion()
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            AccountDeletionRequest.objects.create(user=self.user, scope="shared_mlai_account", policy_version="2026-09-20")
+        AccountDeletionRequest.objects.filter(user=self.user).update(status="completed", completed_at=timezone.now())
+        self.assertEqual(self.deletion().status_code, 201)
+
+    def test_deleted_account_leaves_only_unlinked_receipt_and_removes_consent(self):
+        user = get_user_model().objects.create_user(email="disposable@example.com")
+        record = AccountDeletionRequest.objects.create(user=user, scope="shared_mlai_account", policy_version="2026-09-20")
+        AiConsentRecord.objects.create(user=user, purpose="roo_chat", disclosure_version="v1", provider_digest="a"*64)
+        user.delete()
+        record.refresh_from_db()
+        self.assertIsNone(record.user_id)
+        self.assertEqual(record.outcome_summary, "")
+        self.assertFalse(AiConsentRecord.objects.filter(purpose="roo_chat").exists())
+
     def test_deletion_requires_confirmation_and_operator_configuration(self):
         self.assertEqual(self.deletion(confirmed=False).status_code, 400)
         self.assertEqual(self.deletion(policy_version="old").status_code, 400)
@@ -165,3 +185,32 @@ class AccountPrivacyTests(TestCase):
         client.conversations_members.return_value = {}
         with self.assertRaises(SlackDmMirrorAuthorizationError):
             _verify_ai_recipients_before_send(self.delivery(), client)
+
+
+@override_settings(COMMUNITY_CHAT_DELETION_TIMEFRAME="Test only", COMMUNITY_CHAT_DELETION_CONTACT="privacy@example.com")
+class AccountPrivacyConcurrencyTests(TransactionTestCase):
+    """Exercise the actual request service with independent PostgreSQL sessions."""
+
+    def test_concurrent_requests_return_the_same_receipt(self):
+        if connection.vendor != "postgresql":
+            self.skipTest("PostgreSQL row locking required")
+        user = get_user_model().objects.create_user(email="concurrent-privacy@example.com")
+        sessions = [credentials_for(user).session for _ in range(2)]
+        barrier = Barrier(2)
+
+        def request(session):
+            close_old_connections()
+            try:
+                barrier.wait(timeout=10)
+                record, created = request_account_deletion(
+                    authenticated_session=session, scope="shared_mlai_account", policy_version="2026-09-20",
+                )
+                return record.pk, created
+            finally:
+                close_old_connections()
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(request, sessions))
+        self.assertEqual(results[0][0], results[1][0])
+        self.assertEqual(sum(created for _, created in results), 1)
+        self.assertEqual(AccountDeletionRequest.objects.count(), 1)
