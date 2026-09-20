@@ -59,7 +59,7 @@ Checks on the isolated PR branches based on current main:
 - 85 database-free backend tests covering the facade, review policy, evidence, source extraction, covers and progress contracts; system and model-drift checks pass.
 - Valley full suite: 140 passed.
 - Chat typecheck and 12 focused model/session tests pass. Five mocked browser journeys and five desktop journeys pass, including stale approval and resumed/cancelled/completed generation.
-- The full Chat `just ci` run is recorded in the companion PR.
+- The full Chat `just ci` run passed. Companion PRs: [Chat #188](https://github.com/MLAI-AUS-Inc/mlai-chat/pull/188) and [Valley #55](https://github.com/MLAI-AUS-Inc/valley-backend/pull/55).
 
 The user-approved original 339-migration inventory was applied only to a fresh disposable SQLite test database: all 18 integration/revision tests passed. The database was removed afterward. Current main subsequently added reporting identity/progress and other existing migrations. The final PR inventory contains 347 migrations and is awaiting its own explicit approval; no migration file is created or modified by this feature.
 
