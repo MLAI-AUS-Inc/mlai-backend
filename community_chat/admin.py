@@ -1,6 +1,8 @@
 from django.contrib import admin
 
 from .models import (
+    AccountDeletionRequest,
+    AiConsentRecord,
     Moderator,
     CommunityChatBootstrapToken,
     CommunityChatAccountSession,
@@ -11,6 +13,36 @@ from .models import (
     CommunityChatEmailCodeDelivery,
     CommunityChatInviteAudit,
 )
+
+
+@admin.register(AccountDeletionRequest)
+class AccountDeletionRequestAdmin(admin.ModelAdmin):
+    """Operational queue; completion must be performed by verified cleanup code."""
+
+    list_display = ("id", "user_id", "scope", "status", "requested_at", "completed_at")
+    list_filter = ("status", "scope")
+    ordering = ("requested_at",)
+    readonly_fields = tuple(field.name for field in AccountDeletionRequest._meta.fields)
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(AiConsentRecord)
+class AiConsentRecordAdmin(admin.ModelAdmin):
+    """Staff can inspect consent but cannot grant it on a member's behalf."""
+
+    list_display = ("user_id", "purpose", "disclosure_version", "granted_at", "withdrawn_at")
+    readonly_fields = tuple(field.name for field in AiConsentRecord._meta.fields)
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
 
 
 @admin.register(Moderator)

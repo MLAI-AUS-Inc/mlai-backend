@@ -937,6 +937,8 @@ def open_slack_dm(
             and slack_user_id == raw_user.get("id")
             and is_public_roo_user(raw_user, workspace_id=grant.slack_workspace_id)
         )
+        if is_roo_dm:
+            _require_roo_ai_consent(grant.user_id)
         if not is_roo_dm and not _is_eligible_slack_user(
             raw_user,
             workspace_id=grant.slack_workspace_id,
@@ -7072,6 +7074,10 @@ def _deliver_private(delivery: SlackDmMirrorDelivery) -> None:
         )
     _refresh_slack_grant_token_if_due(grant_snapshot)
     with transaction.atomic():
+        # Consent withdrawal and deletion requests use user->session locks.
+        # Keep outbound I/O within the same user-first boundary so a queued
+        # message cannot race a completed withdrawal.
+        get_user_model().objects.select_for_update().get(pk=grant_snapshot.user_id)
         grant = (
             SlackDmMirrorGrant.objects.select_for_update(of=("self",))
             .select_related("connection")
@@ -7548,6 +7554,52 @@ def _assert_slack_conversation_writable(
         )
 
 
+def _require_roo_ai_consent(user_id):
+    """Fail closed when Roo sharing is declined, withdrawn or undisclosed."""
+    from community_chat.privacy import has_ai_consent
+
+    if getattr(settings, "COMMUNITY_CHAT_AI_CONSENT_REQUIRED", True) and not has_ai_consent(user_id):
+        raise SlackDmMirrorAuthorizationError(
+            "Review and accept the AI sharing disclosure in Settings before messaging Roo."
+        )
+
+
+def _verify_ai_recipients_before_send(delivery, client):
+    """Gate every write to a Roo-visible conversation, not just tagged mentions."""
+    from community_chat.privacy import has_ai_consent
+    from integrations.services.slack_roo import public_roo_target
+
+    if not getattr(settings, "COMMUNITY_CHAT_AI_CONSENT_REQUIRED", True):
+        return
+    # Deletion must remain possible after consent has been withdrawn.
+    if delivery.operation == CommunityBridgeDeliveryType.DELETE:
+        return
+    grant = delivery.conversation.grant
+    target = public_roo_target()
+    if not target or target[0] != grant.slack_workspace_id or has_ai_consent(grant.user_id):
+        return
+    # Refresh membership instead of trusting a cached participant set: Roo may
+    # have joined since the mirror was created. Threads and media use this same
+    # dispatch boundary. Never send content when membership cannot be verified.
+    cursor = ""
+    seen = set()
+    while True:
+        response = client.conversations_members(
+            channel=delivery.conversation.slack_conversation_id, limit=200, cursor=cursor,
+        )
+        members = response.get("members")
+        if not isinstance(members, list):
+            raise SlackDmMirrorAuthorizationError("Could not verify AI recipients.")
+        if target[1] in members:
+            _require_roo_ai_consent(grant.user_id)
+        cursor = str((response.get("response_metadata") or {}).get("next_cursor") or "")
+        if not cursor:
+            return
+        if cursor in seen:
+            raise SlackDmMirrorError("Slack member pagination made no progress.")
+        seen.add(cursor)
+
+
 def _verify_roo_mentions_before_send(delivery, client):
     """Revalidate a queued mention with Slack while the owner grant is locked."""
     from integrations.services.slack_channel_mentions import validate_roo_channel_access
@@ -7613,6 +7665,7 @@ def _deliver_to_slack(delivery: SlackDmMirrorDelivery) -> None:
         token=grant.connection.access_token,
         timeout=_slack_sdk_timeout_seconds(),
     ), workspace_id=grant.slack_workspace_id, app_id=user_app_id())
+    _verify_ai_recipients_before_send(delivery, client)
     _verify_roo_mentions_before_send(delivery, client)
     client_message_id = ""
     slack_ts = ""

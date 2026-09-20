@@ -13,6 +13,9 @@ subsystem-specific contracts and runbooks.
 
 ## Community chat APIs
 
+- [Account privacy controls](community-chat-account-privacy.md) — versioned AI
+  consent, deletion-request receipts, and the remaining release gates
+
 - [My startup API](my-startup-api.md) — Chat-authenticated Vibe Marketing, preview scoping, account handoff and rollout switches
 
 - [`community-chat-administration.md`](community-chat-administration.md) — account roles and Moderator appointments
