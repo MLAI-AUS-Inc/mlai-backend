@@ -16,7 +16,7 @@ def provider_interval(method):
     # Both directory and metadata methods are documented Tier 3 (50+/min).
     if method in {"conversations.info", "users.conversations", "conversations.mark"}:
         return 1.2
-    if method in {"conversations.members", "users.info"}:
+    if method in {"conversations.members", "users.info", "files.info"}:
         return 0.6  # Tier 4 (100+/min), still shared across every owner/device.
     if method == "apps.event.authorizations.list":
         return 0.1

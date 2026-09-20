@@ -1089,3 +1089,15 @@ immediate feedback. It must retain and retry the intent, never hide messages
 newer than the requested source timestamp, restore source state on rejection,
 and accept a later deliberate Slack mark-unread after confirmation. This
 presentation projection does not alter the authoritative server snapshot.
+
+
+Slack file preview reads preserve temporary scheduler/provider deferrals as HTTP
+503 `preview_pending`, with `Retry-After` and `retry_after_seconds`; they are
+`private, no-store`. Clients retry bounded short waits without asking users to
+reconnect Slack. Permission/unsupported-file failures remain 422. Both bot and
+owner `files.info` reads use the shared app/workspace/method budget (Tier 4,
+0.6 seconds between admissions); actual Slack 429 cooldowns take precedence.
+Metadata and image caches remain authorization-scoped. Slack-provided PDF/video
+thumbnails can use the image proxy; original document/video playback remains in
+Slack when no supported preview is provided. Non-image files without thumbnails
+produce a usable link card, not a metadata exception.

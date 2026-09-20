@@ -99,6 +99,7 @@ from .slack_message_references import (
 )
 from .slack_file_previews import (
     SlackFilePreviewError,
+    SlackFilePreviewDeferred,
     fetch_slack_file_image,
     fetch_slack_file_preview,
 )
@@ -1201,6 +1202,14 @@ class LinkPreviewView(APIView):
         try:
             slack_preview = fetch_slack_file_preview(raw_url, user=request.user)
             preview = slack_preview or fetch_link_preview(raw_url)
+        except SlackFilePreviewDeferred as exc:
+            response = Response(
+                {"error": "preview_pending", "detail": str(exc), "retry_after_seconds": exc.retry_after},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+            response["Retry-After"] = str(exc.retry_after)
+            response["Cache-Control"] = "private, no-store"
+            return response
         except (LinkPreviewError, SlackFilePreviewError) as exc:
             return Response(
                 {"error": "preview_unavailable", "detail": str(exc)},
@@ -1212,7 +1221,7 @@ class LinkPreviewView(APIView):
             payload["image_url"] = request.build_absolute_uri(
                 f"{image_path}?{urlencode({'slack_file': slack_preview.file_id})}"
             )
-        elif preview.image_url:
+        elif not slack_preview and preview.image_url:
             image_path = reverse("community_chat_link_preview_image")
             payload["image_url"] = request.build_absolute_uri(
                 f"{image_path}?{urlencode({'url': preview.image_url})}"
@@ -1262,6 +1271,14 @@ class LinkPreviewImageView(APIView):
                 content_type, body = fetch_preview_image(
                     str(request.query_params.get("url") or "").strip()
                 )
+        except SlackFilePreviewDeferred as exc:
+            response = Response(
+                {"error": "preview_pending", "detail": str(exc), "retry_after_seconds": exc.retry_after},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+            response["Retry-After"] = str(exc.retry_after)
+            response["Cache-Control"] = "private, no-store"
+            return response
         except (LinkPreviewError, SlackFilePreviewError) as exc:
             return Response(
                 {"error": "preview_image_unavailable", "detail": str(exc)},
