@@ -36,6 +36,7 @@ from .services import (
     BoostPostAdmissionService, BoostPostPayloadConflictError, InvalidBoostPostError,
     TaskService, RewardsService,
 )
+from .coworking_snapshot import build_booking_snapshot
 from .coding import roo_decimal_string
 from .office_manager_policy import (
     OFFICE_MANAGER_TEST_CHANNEL_ID,
@@ -1668,7 +1669,7 @@ class CoworkingViewSet(viewsets.ViewSet):
         # This action is also wired through an explicit URL, so enforce its
         # narrower service credential here rather than relying on router-only
         # @action metadata.
-        if self.action == 'book_many':
+        if self.action in {'book_many', 'bookings_for_date'}:
             return [HasStrictRooApiKey()]
         if self.action in {'office_manager_claim', 'office_manager_preflight'}:
             return [HasOfficeManagerRooApiKey()]
@@ -1712,6 +1713,25 @@ class CoworkingViewSet(viewsets.ViewSet):
             })
 
         return Response(results)
+
+    @action(detail=False, methods=['get'], url_path='bookings-for-date')
+    def bookings_for_date(self, request):
+        """Full-admin-only booking list, separate from the report workflow."""
+        actor = (request.query_params.get('slack_user_id') or '').strip()
+        if not actor:
+            return Response({'error': 'slack_user_id is required'}, status=400)
+        if not is_points_admin(actor):
+            return Response({'error': 'Only active Roo Points Admins can view coworking bookings'}, status=403)
+        raw = request.query_params.get('date', '')
+        try:
+            if not re.fullmatch(r'[0-9]{4}-[0-9]{2}-[0-9]{2}', raw):
+                raise ValueError()
+            day = date.fromisoformat(raw)
+        except ValueError:
+            return Response({'error': 'Use YYYY-MM-DD'}, status=400)
+        response = Response(build_booking_snapshot(day))
+        response['Cache-Control'] = 'private, no-store'
+        return response
 
     @action(detail=False, methods=['get'])
     def report(self, request):
