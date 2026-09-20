@@ -3,7 +3,10 @@
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from django.test import SimpleTestCase, override_settings
+from django.test import SimpleTestCase, override_settings, RequestFactory
+from django.http import HttpResponse
+from corsheaders.middleware import CorsMiddleware
+from core.middleware import DesktopAuthCorsMiddleware
 from django.core.cache import cache
 from integrations.services.message_sync.scheduler import BudgetDeferred
 from integrations.services.message_sync.slack_client import provider_interval
@@ -167,3 +170,21 @@ class SlackImageRenditionTests(SimpleTestCase):
                      {"mimetype": "video/mp4", "thumb_720": "https://files.slack.com/video.jpg"}):
             file["url_private"] = "https://files.slack.com/original"
             self.assertNotEqual(slack_image_download_url(file), file["url_private"])
+
+
+class PreviewRetryCorsTests(SimpleTestCase):
+    @override_settings(CORS_ALLOWED_ORIGINS=["https://chat.mlai.au"], CORS_ALLOW_ALL_ORIGINS=False)
+    def test_browser_and_desktop_can_observe_the_provider_retry_deadline(self):
+        def response(_):
+            result = HttpResponse(status=503)
+            result["Retry-After"] = "60"
+            return result
+        middleware = DesktopAuthCorsMiddleware(CorsMiddleware(response))
+        for origin in ("https://chat.mlai.au", "tauri://localhost", "http://tauri.localhost"):
+            request = RequestFactory().get("/api/v1/community-chat/link-preview/image/", HTTP_ORIGIN=origin)
+            result = middleware(request)
+            self.assertIn("Retry-After", result["Access-Control-Expose-Headers"])
+            self.assertEqual(result["Retry-After"], "60")
+            self.assertEqual(result["Access-Control-Allow-Origin"], origin)
+            if origin != "https://chat.mlai.au":
+                self.assertNotIn("Access-Control-Allow-Credentials", result)

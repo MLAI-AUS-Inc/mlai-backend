@@ -340,7 +340,7 @@ for _operations_origin in ('https://ops.mlai.au',):
         CSRF_TRUSTED_ORIGINS.append(_operations_origin)
 CORS_ALLOW_CREDENTIALS = True
 CORS_ALLOW_HEADERS = (*default_headers, "x-request-id")
-CORS_EXPOSE_HEADERS = ["X-Request-ID"]
+CORS_EXPOSE_HEADERS = ["X-Request-ID", "Retry-After"]
 
 # Bound request buffering before application-specific parsers run. Larger
 # uploads use the dedicated streaming/media paths rather than unbounded Django
