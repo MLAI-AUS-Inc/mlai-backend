@@ -70,6 +70,7 @@ from content_factory.progress import (
     upsert_live_progress_card,
 )
 from content_factory.run_state import (
+    execution_version, stale_execution_event, merge_reliability_fields, RELIABILITY_FIELDS,
     ACTIVE_RUN_STATUSES as DURABLE_ACTIVE_RUN_STATUSES,
     ARTICLE_WORKFLOWS,
     active_retry_signal,
@@ -2301,8 +2302,8 @@ def _claim_callback_event(*, event_id: str, event_type: str, job_id: str, emitte
     already fully processed, and CALLBACK_CLAIM_PENDING while another worker
     holds a live (unexpired) claim. The unique constraint makes the insert
     race-safe across workers; the reclaim is a guarded UPDATE so concurrent
-    retries elect exactly one winner. Fails open on storage errors:
-    reprocessing an event is recoverable, silently dropping one is not.
+    retries elect exactly one winner. Defers on storage errors: the durable sender retries before any handler can
+    perform a state change or external effect.
     """
     from content_factory.models import ContentFactoryCallbackEvent
 
@@ -2359,12 +2360,12 @@ def _claim_callback_event(*, event_id: str, event_type: str, job_id: str, emitte
             if _is_retryable_sqlite_lock(exc) and attempt < max_attempts - 1:
                 time.sleep(0.15 * (attempt + 1))
                 continue
-            logger.warning("Failed to record callback event_id=%s; processing without dedupe: %s", event_id, exc)
-            return CALLBACK_CLAIM_CLAIMED
+            logger.warning("Failed to record callback event_id=%s; deferring durable delivery: %s", event_id, exc)
+            return CALLBACK_CLAIM_PENDING
         except Exception as exc:
-            logger.warning("Failed to record callback event_id=%s; processing without dedupe: %s", event_id, exc)
-            return CALLBACK_CLAIM_CLAIMED
-    return CALLBACK_CLAIM_CLAIMED
+            logger.warning("Failed to record callback event_id=%s; deferring durable delivery: %s", event_id, exc)
+            return CALLBACK_CLAIM_PENDING
+    return CALLBACK_CLAIM_PENDING
 
 
 def _mark_callback_event_processed(event_id: str) -> None:
@@ -2424,7 +2425,7 @@ def _sync_generation_callback_to_run(*, data: dict, run_status: str, step_status
     error_code = str(data.get("error_code") or "").strip()
     existing_run = ContentFactoryRun.objects.filter(run_id=run_id).first()
     emitted_at = _callback_event_emitted_at(data)
-    if _callback_event_is_stale(existing_run=existing_run, emitted_at=emitted_at):
+    if not data.get("_execution_version_validated") and _callback_event_is_stale(existing_run=existing_run, emitted_at=emitted_at):
         logger.info(
             "Ignoring stale generation callback for run %s: emitted_at=%s predates last synced event %s",
             run_id,
@@ -2512,7 +2513,7 @@ def _sync_scan_callback_to_run(*, data: dict, approval_required: bool) -> Option
 
     existing_run = ContentFactoryRun.objects.filter(run_id=run_id).first()
     emitted_at = _callback_event_emitted_at(data)
-    if _callback_event_is_stale(existing_run=existing_run, emitted_at=emitted_at):
+    if not data.get("_execution_version_validated") and _callback_event_is_stale(existing_run=existing_run, emitted_at=emitted_at):
         logger.info(
             "Ignoring stale scan callback for run %s: emitted_at=%s predates last synced event %s",
             run_id,
@@ -2893,7 +2894,7 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
 
     existing_run = ContentFactoryRun.objects.filter(run_id=run_id).first()
     emitted_at = _callback_event_emitted_at(data)
-    if _callback_event_is_stale(existing_run=existing_run, emitted_at=emitted_at):
+    if not data.get("_execution_version_validated") and _callback_event_is_stale(existing_run=existing_run, emitted_at=emitted_at):
         logger.info(
             "Ignoring stale article_system_setup callback for run %s: event=%s emitted_at=%s predates last synced event %s",
             run_id,
@@ -3902,7 +3903,7 @@ class ContentFactoryCallbackView(APIView):
                 )
 
         try:
-            response = self._dispatch_callback_event(data, event_type=event_type, job_id=job_id)
+            response = self._dispatch_ordered_callback(data, event_type=event_type, job_id=job_id)
         except Exception as e:
             logger.exception(f"Error processing callback: {e}")
             if event_id:
@@ -3922,6 +3923,33 @@ class ContentFactoryCallbackView(APIView):
                 # retry is reprocessed instead of deduped.
                 _release_callback_event(event_id)
         return response
+
+    def _dispatch_ordered_callback(self, data, *, event_type, job_id):
+        # Order before *any* handler can mutate state, refund or notify. Use the
+        # existing run JSON and row lock; no schema migration is required.
+        run_id = str(data.get("run_id") or job_id)
+        bind_dispatch_token_run(client_request_id=data.get("client_request_id"), remote_run_id=run_id)
+        try:
+            version = execution_version(data)
+        except ValueError as exc:
+            return Response({"error": str(exc)}, status=400)
+        with transaction.atomic():
+            if version is not None:
+                ContentFactoryRun.objects.get_or_create(run_id=run_id, defaults={
+                    "workflow": data.get("workflow") or "direct_generate",
+                    "domain": data.get("domain") or "",
+                    "github_repo": data.get("github_repo") or "",
+                })
+            run = ContentFactoryRun.objects.select_for_update().filter(run_id=run_id).first()
+            if run and stale_execution_event(run.result, data, saved_status=run.status):
+                return Response({"status": "ignored_stale_execution", "run_id": run_id}, status=200)
+            data["_execution_version_validated"] = version is not None
+            response = self._dispatch_callback_event(data, event_type=event_type, job_id=job_id)
+            if 200 <= response.status_code < 300 and run and version is not None:
+                run.refresh_from_db()
+                run.result = merge_reliability_fields(run.result, data)
+                run.save(update_fields=["result", "updated_at"])
+            return response
 
     def _dispatch_callback_event(self, data, *, event_type, job_id):
         if event_type == 'topic_selection':
@@ -8651,6 +8679,7 @@ def _serialize_content_factory_run(run: ContentFactoryRun) -> dict:
         "result": run.result or {},
         "run_request": run.run_request or {},
         "step_states": steps,
+        **{key: run.result[key] for key in RELIABILITY_FIELDS if key in (run.result or {})},
         "created_at": run.created_at.isoformat(),
         "updated_at": run.updated_at.isoformat(),
     }
@@ -8662,6 +8691,7 @@ def _is_retryable_sqlite_lock(exc: Exception) -> bool:
 
 _DJANGO_OWNED_RUN_RESULT_KEYS = frozenset(
     {
+        "release_observations",
         "article_system_review_comments",
         "daily_automation_channel_warning",
         "latest_article_system_revision_response",
@@ -8785,12 +8815,20 @@ def _sync_content_factory_run_snapshot(*, run_id: str, data: dict, step_states: 
     data = sanitize_json_for_postgres(data if isinstance(data, dict) else {})
     step_states = sanitize_json_for_postgres(step_states if isinstance(step_states, dict) else {})
     with transaction.atomic():
+        if execution_version(data) is not None:
+            ContentFactoryRun.objects.get_or_create(run_id=run_id, defaults={
+                "workflow": data["workflow"], "domain": data.get("domain") or "",
+                "github_repo": data.get("github_repo") or "",
+            })
         existing_run = (
             ContentFactoryRun.objects.select_for_update()
             .prefetch_related("steps", "steps__attempt_history")
             .filter(run_id=run_id)
             .first()
         )
+        if existing_run and stale_execution_event(existing_run.result, data, saved_status=existing_run.status):
+            existing_run._content_factory_sync_unchanged = True
+            return existing_run, False
         active_snapshot = str(data.get("status") or "").strip().lower() in DURABLE_ACTIVE_RUN_STATUSES
         if active_snapshot:
             data["error"] = ""
@@ -8816,6 +8854,7 @@ def _sync_content_factory_run_snapshot(*, run_id: str, data: dict, step_states: 
                 active_status=data["status"],
                 current_step=data.get("current_step") or "",
             )
+        data["result"] = merge_reliability_fields(data.get("result"), data)
         if existing_run is not None and _content_factory_run_snapshot_unchanged(existing_run, data=data, step_states=step_states):
             existing_run._content_factory_sync_unchanged = True
             return existing_run, False
@@ -8923,7 +8962,10 @@ class ContentFactoryRunView(APIView):
             }
             and existing_run.workflow in ARTICLE_WORKFLOWS
             and incoming_status in DURABLE_ACTIVE_RUN_STATUSES
-            and active_retry_signal(payload, data.get("result"))
+            and (active_retry_signal(payload, data.get("result")) or (
+                execution_version(data) is not None
+                and data["generation"] > int((existing_run.result or {}).get("generation", -1))
+            ))
         )
 
         if (

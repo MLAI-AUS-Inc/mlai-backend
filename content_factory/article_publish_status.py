@@ -3,7 +3,7 @@
 A completed writing run only means the article was packaged — nothing is on
 the customer's site until a PR merges and the site deploys. This module
 derives the lifecycle status from run evidence and refreshes it against
-GitHub (PR state) and the live site (sitemap membership), so the dashboard
+GitHub (PR state) and the live site (exact saved-content identity), so the dashboard
 can show real state instead of an unconditional "Published".
 
 All network calls are best-effort with short timeouts: the backend runs a
@@ -11,7 +11,11 @@ sync worker, so refresh work is throttled per article and bounded per call.
 """
 
 import logging
+import hashlib
 import re
+import time
+from django.db import transaction
+from django.db.models import F
 from datetime import timedelta
 from urllib.parse import urlsplit
 from xml.etree import ElementTree
@@ -182,18 +186,18 @@ def apply_pull_request_state(article, pr_state, *, now=None):
     return changed
 
 
-def refresh_publish_statuses(organization, config=None, *, limit=6, force=False):
-    """Best-effort refresh of the organization's non-live articles.
+def refresh_publish_statuses(organization, config=None, *, limit=6, force=False, max_seconds=12):
+    """Best-effort refresh of historical publication and current HTTP content.
 
     Bounded work per call: one cached sitemap fetch plus at most `limit`
     GitHub PR lookups. Articles checked within REFRESH_INTERVAL are skipped
     unless force=True. Returns the articles that were (re)checked.
     """
     now = timezone.now()
+    deadline = time.monotonic() + max_seconds
     candidates = list(
         WrittenArticle.objects.filter(organization=organization)
-        .exclude(publish_status=ArticlePublishStatus.LIVE)
-        .order_by("-created_at")[:25]
+        .order_by(F("live_checked_at").asc(nulls_first=True), "created_at")[:25]
     )
     if not force:
         candidates = [
@@ -208,25 +212,108 @@ def refresh_publish_statuses(organization, config=None, *, limit=6, force=False)
     site_urls = _site_article_urls(getattr(organization, "domain", ""))
     refreshed = []
     for article in candidates:
+        if time.monotonic() >= deadline:
+            break
         changed = {"live_checked_at"}
         article.live_checked_at = now
         live_url = _match_live_url(article, site_urls)
-        if live_url:
+        pr_state = _github_pr_state(article.pr_url, config) if article.pr_url else None
+        if pr_state:
+            changed.update(apply_pull_request_state(article, pr_state, now=now))
+        observation = (_observe_live_article(article, live_url, pr_state, now)
+                       if time.monotonic() < deadline else
+                       {"state": "unverified", "reason": "capture_budget_deferred", "checked_at": now.isoformat()})
+        article._live_observation = observation
+        if observation.get("state") == "verified":
             changed.update(advance_publish_status(article, ArticlePublishStatus.LIVE, live_url=live_url))
-        # Poll the PR even when the sitemap already matched: on-main verification
-        # is the authoritative published signal and we want the merge commit on
-        # record. Skipped once on_main_verified_at is set (terminal).
-        if (
-            article.pr_url
-            and not article.on_main_verified_at
-            and article.publish_status in _PR_STATES_WORTH_CHECKING
-        ):
-            pr_state = _github_pr_state(article.pr_url, config)
-            if pr_state:
-                changed.update(apply_pull_request_state(article, pr_state, now=now))
         article.save(update_fields=sorted(changed))
         refreshed.append(article)
     return refreshed
+
+
+def _source_run_for_article(article):
+    from workflow_runs.models import ContentFactoryRun
+    return ContentFactoryRun.objects.filter(run_id=article.source_run_id,
+        organization_id=article.organization_id).first() if article.source_run_id else None
+
+
+def latest_live_observation(article):
+    cached = getattr(article, "_live_observation", None)
+    if cached is not None:
+        return cached
+    run = _source_run_for_article(article)
+    receipts = ((run.result or {}).get("release_observations") or {}) if run else {}
+    receipt = receipts.get(str(article.id)) or {"state": "unverified"}
+    # A republish changes the target PR. An observation for the previous target
+    # remains history and cannot certify this target.
+    if receipt.get("pr_url") != article.pr_url:
+        return {"state": "unverified", "reason": "publication_target_changed"}
+    package = (run.result or {}).get("content_package") or ((run.result or {}).get("result") or {}).get("content_package") or {}
+    current_hash = hashlib.sha256(str(package.get("article_html") or "").encode()).hexdigest()
+    if receipt.get("source_package_sha256") != current_hash:
+        return {"state": "unverified", "reason": "source_package_changed"}
+    return receipt
+
+
+def _observe_live_article(article, live_url, pr_state, now):
+    from .article_live_evidence import compare_live_body, public_article_url, MAX_BYTES, VERSION
+    run = _source_run_for_article(article)
+    receipt = {"version": VERSION, "state": "unverified", "checked_at": now.isoformat(),
+        "source_run_id": article.source_run_id, "pr_url": article.pr_url,
+        "merge_commit_sha": (pr_state or {}).get("merge_commit_sha"), "canonical_url": live_url,
+        "deployment_state": "unverified"}
+    try:
+        if (not run or not live_url or not pr_state or pr_state.get("status") != ArticlePublishStatus.MERGED
+                or not pr_state.get("merge_commit_sha")):
+            raise ValueError("Source bundle, canonical URL and current merged PR evidence are required")
+        package = (run.result or {}).get("content_package") or ((run.result or {}).get("result") or {}).get("content_package") or {}
+        expected = package.get("article_html")
+        if not expected:
+            raise ValueError("The saved article HTML is unavailable")
+        receipt["source_package_sha256"] = hashlib.sha256(expected.encode()).hexdigest()
+        public_article_url(live_url, article.organization.domain)
+        started = time.monotonic()
+        response = http_requests.get(live_url, timeout=(2, 2), allow_redirects=False, stream=True)
+        try:
+            if response.status_code != 200:
+                raise ValueError(f"Live page returned HTTP {response.status_code}")
+            chunks, size = [], 0
+            for chunk in response.iter_content(65536):
+                size += len(chunk)
+                if size > MAX_BYTES or time.monotonic() - started > 4:
+                    raise ValueError("Live capture exceeded its time or size limit")
+                chunks.append(chunk)
+            receipt.update(compare_live_body(expected, b"".join(chunks), canonical_url=live_url))
+            # This is an HTTP content observation. It does not fabricate a
+            # provider deployment-job success or a browser screenshot.
+            if receipt["state"] == "verified":
+                receipt["deployment_state"] = "matching_content_served"
+        finally:
+            response.close()
+    except Exception as exc:
+        receipt["reason"] = str(exc)
+    if run:
+        with transaction.atomic():
+            from workflow_runs.models import ContentFactoryRun
+            run = ContentFactoryRun.objects.select_for_update().get(pk=run.pk)
+            result = dict(run.result or {})
+            records = dict(result.get("release_observations") or {})
+            current_package = result.get("content_package") or (result.get("result") or {}).get("content_package") or {}
+            current_hash = hashlib.sha256(str(current_package.get("article_html") or "").encode()).hexdigest()
+            if receipt.get("state") == "verified" and receipt.get("source_package_sha256") != current_hash:
+                receipt.update(state="unverified", reason="source_package_changed", deployment_state="unverified")
+            prior = records.get(str(article.id))
+            if receipt.get("state") == "verified":
+                receipt["last_verified"] = dict(receipt)
+            elif prior and prior.get("last_verified"):
+                receipt["last_verified"] = prior["last_verified"]
+            if prior:
+                receipt["previous"] = {key: value for key, value in prior.items() if key not in {"previous", "last_verified"}}
+            records[str(article.id)] = receipt
+            result["release_observations"] = records
+            run.result = result
+            run.save(update_fields=["result", "updated_at"])
+    return receipt
 
 
 def _normalized_domain(domain) -> str:
@@ -267,7 +354,7 @@ def _site_article_urls(domain):
 
 
 def _match_live_url(article, site_urls):
-    """An article is live when its slug is the last path segment of a sitemap URL."""
+    """Find a candidate URL; sitemap membership is not evidence of live content."""
     slug = str(article.slug or "").strip().strip("/").split("/")[-1].lower()
     if not slug or not site_urls:
         return None

@@ -69,6 +69,43 @@ class ContentFactoryCallbackGuardTestCase(TestCase):
 
 
 class CallbackEventIdIdempotencyTests(ContentFactoryCallbackGuardTestCase):
+    def test_delayed_failure_is_stopped_before_handler_or_refund(self):
+        run = ContentFactoryRun.objects.create(run_id="recovered-article", workflow="direct_generate",
+            status="running", result={"generation": 2, "state_version": 50})
+        payload = {"event_type": "generation_failed", "event_id": "delayed-failure", "job_id": run.run_id,
+            "status": "failed", "generation": 1, "state_version": 999, "refundable": True,
+            "error": "Old failure", "emitted_at": "2099-01-01T00:00:00Z"}
+        with patch("content_factory.service_views.ContentFactoryCallbackView._handle_generation_failed") as handler:
+            response = self.client.post(CALLBACK_URL, payload, format="json")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "ignored_stale_execution")
+        handler.assert_not_called()
+        run.refresh_from_db()
+        self.assertEqual(run.status, "running")
+        self.assertEqual(run.result["generation"], 2)
+
+    def test_dedupe_storage_failure_defers_before_side_effects(self):
+        from django.db import OperationalError
+        payload = _setup_progress_payload("dedupe-unavailable", step="prepare_branch", event_id="outage")
+        with patch("content_factory.models.ContentFactoryCallbackEvent.objects.get_or_create", side_effect=OperationalError("unavailable")), \
+             patch("content_factory.service_views.ContentFactoryCallbackView._dispatch_callback_event") as handler:
+            response = self.client.post(CALLBACK_URL, payload, format="json")
+        self.assertEqual(response.status_code, 409)
+        handler.assert_not_called()
+
+    def test_new_generation_can_replace_failed_snapshot_without_pending_intent(self):
+        from content_factory.service_views import _sync_content_factory_run_snapshot, _serialize_content_factory_run
+        run = ContentFactoryRun.objects.create(run_id="versioned-snapshot", workflow="direct_generate",
+            status="failed", result={"generation": 1, "state_version": 90})
+        payload = {"workflow": "direct_generate", "status": "running", "generation": 2,
+            "state_version": 1, "failure": {}, "recovery": {"state": "consumed"}}
+        run, _ = _sync_content_factory_run_snapshot(run_id=run.run_id, data=payload, step_states={})
+        self.assertEqual(run.status, "running")
+        self.assertEqual(_serialize_content_factory_run(run)["generation"], 2)
+        old = {**payload, "generation": 1, "state_version": 100, "status": "failed"}
+        run, _ = _sync_content_factory_run_snapshot(run_id=run.run_id, data=old, step_states={})
+        self.assertEqual(run.status, "running")
+
     def test_duplicate_event_id_returns_200_without_reprocessing(self):
         event_id = "f0e1d2c3b4a5968778695a4b3c2d1e0f"
         payload = _setup_progress_payload(
