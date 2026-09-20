@@ -126,7 +126,15 @@ def fetch_slack_file_preview(raw_url: str, *, user=None) -> SlackFilePreview | N
 
 
 def _slack_thumbnail_url(file_data):
-    for field in ("thumb_1024", "thumb_960", "thumb_800", "thumb_720", "thumb_pdf", "thumb_480", "thumb_360"):
+    for field in (
+        "thumb_1024",
+        "thumb_960",
+        "thumb_800",
+        "thumb_720",
+        "thumb_pdf",
+        "thumb_480",
+        "thumb_360",
+    ):
         if file_data.get(field):
             return str(file_data[field]).strip()
     return ""
@@ -154,7 +162,9 @@ def fetch_slack_file_image(
     authorized = _authorized_file(normalized_file_id, user=user)
     file_data = authorized.data
     content_type = str(file_data.get("mimetype") or "").split(";", 1)[0].strip().lower()
-    if content_type not in ALLOWED_IMAGE_TYPES and (original or not _slack_thumbnail_url(file_data)):
+    if content_type not in ALLOWED_IMAGE_TYPES and (
+        original or not _slack_thumbnail_url(file_data)
+    ):
         raise SlackFilePreviewError("The Slack file has no supported image preview.")
 
     cache_key = (
@@ -208,9 +218,13 @@ def fetch_slack_file_image(
         if isinstance(exc, (requests.Timeout, requests.ConnectionError)):
             raise SlackFilePreviewDeferred(2) from exc
         response_status = getattr(exc.response, "status_code", None)
-        if response_status == 429 or (response_status is not None and response_status >= 500):
+        if response_status == 429 or (
+            response_status is not None and response_status >= 500
+        ):
             raw_retry = exc.response.headers.get("Retry-After", "2")
-            raise SlackFilePreviewDeferred(int(raw_retry) if str(raw_retry).isdigit() else 2) from exc
+            raise SlackFilePreviewDeferred(
+                int(raw_retry) if str(raw_retry).isdigit() else 2
+            ) from exc
         raise SlackFilePreviewError("The Slack image could not be reached.") from exc
     finally:
         if "response" in locals():
@@ -371,9 +385,18 @@ def _slack_file_info(
     except BudgetDeferred as exc:
         raise SlackFilePreviewDeferred(exc.retry_after) from exc
     except SlackApiError as exc:
-        if exc.response.get("error") in {"ratelimited", "internal_error", "service_unavailable", "request_timeout"}:
-            raw_retry = (getattr(exc.response, "headers", {}) or {}).get("Retry-After", "2")
-            raise SlackFilePreviewDeferred(int(raw_retry) if str(raw_retry).isdigit() else 2) from exc
+        if exc.response.get("error") in {
+            "ratelimited",
+            "internal_error",
+            "service_unavailable",
+            "request_timeout",
+        }:
+            raw_retry = (getattr(exc.response, "headers", {}) or {}).get(
+                "Retry-After", "2"
+            )
+            raise SlackFilePreviewDeferred(
+                int(raw_retry) if str(raw_retry).isdigit() else 2
+            ) from exc
         raise SlackFilePreviewError("The Slack file could not be loaded.") from exc
     except Exception as exc:
         raise SlackFilePreviewError("The Slack file could not be loaded.") from exc

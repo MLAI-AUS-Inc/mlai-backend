@@ -1101,3 +1101,8 @@ Metadata and image caches remain authorization-scoped. Slack-provided PDF/video
 thumbnails can use the image proxy; original document/video playback remains in
 Slack when no supported preview is provided. Non-image files without thumbnails
 produce a usable link card, not a metadata exception.
+
+Successful Slack-file HTTP responses are also `private, no-store`: clients and
+servers already cache by account/authorization scope, while a browser HTTP cache
+cannot represent a subsequent account's conversation access. Browser and Tauri
+CORS expose `Retry-After` without expanding credentialed origins.

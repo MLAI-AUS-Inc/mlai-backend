@@ -1204,7 +1204,11 @@ class LinkPreviewView(APIView):
             preview = slack_preview or fetch_link_preview(raw_url)
         except SlackFilePreviewDeferred as exc:
             response = Response(
-                {"error": "preview_pending", "detail": str(exc), "retry_after_seconds": exc.retry_after},
+                {
+                    "error": "preview_pending",
+                    "detail": str(exc),
+                    "retry_after_seconds": exc.retry_after,
+                },
                 status=status.HTTP_503_SERVICE_UNAVAILABLE,
             )
             response["Retry-After"] = str(exc.retry_after)
@@ -1227,7 +1231,11 @@ class LinkPreviewView(APIView):
                 f"{image_path}?{urlencode({'url': preview.image_url})}"
             )
         response = Response(payload)
-        response["Cache-Control"] = "private, max-age=3600"
+        # HTTP caches cannot key a user's Slack file rights by conversation.
+        # Account-scoped client/server caches already retain successful reads.
+        response["Cache-Control"] = (
+            "private, no-store" if slack_preview else "private, max-age=3600"
+        )
         return response
 
 
@@ -1273,7 +1281,11 @@ class LinkPreviewImageView(APIView):
                 )
         except SlackFilePreviewDeferred as exc:
             response = Response(
-                {"error": "preview_pending", "detail": str(exc), "retry_after_seconds": exc.retry_after},
+                {
+                    "error": "preview_pending",
+                    "detail": str(exc),
+                    "retry_after_seconds": exc.retry_after,
+                },
                 status=status.HTTP_503_SERVICE_UNAVAILABLE,
             )
             response["Retry-After"] = str(exc.retry_after)
@@ -1285,7 +1297,9 @@ class LinkPreviewImageView(APIView):
                 status=status.HTTP_422_UNPROCESSABLE_ENTITY,
             )
         response = HttpResponse(body, content_type=content_type)
-        response["Cache-Control"] = "private, max-age=21600"
+        response["Cache-Control"] = (
+            "private, no-store" if slack_file_id else "private, max-age=21600"
+        )
         response["Cross-Origin-Resource-Policy"] = "same-site"
         return response
 
