@@ -1,5 +1,6 @@
 """Contract and disclosure checks. These tests never create a database."""
 from datetime import date, timedelta
+import json
 from types import SimpleNamespace as Obj
 from unittest.mock import MagicMock, patch
 
@@ -10,6 +11,7 @@ from django.http import Http404
 from django.test import SimpleTestCase, override_settings
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError
+from rest_framework.response import Response
 from rest_framework.test import APIRequestFactory, force_authenticate
 
 from community_chat.authentication import CommunityChatAccountAuthentication
@@ -49,6 +51,16 @@ class StartupFacadeTests(SimpleTestCase):
         self.assertEqual(response.data['accountId'], str(self.user.community_chat_profile_id))
         self.assertEqual(response.data['profile'], {'companies': []})
         self.assertEqual(response['Cache-Control'], 'private, no-store')
+
+    def test_no_active_generation_renders_a_defined_json_response(self):
+        request = self.factory.get('/', {'company_id': 'owned'})
+        force_authenticate(request, self.user, token=Obj(pk='session'))
+        with patch.object(views, 'get_object_or_404', return_value=Obj()), \
+             patch.object(views.founder.VibeRaisingEmailDraftActiveRunView, 'get', return_value=Response(None)):
+            response = views.ActiveRunView.as_view(throttle_classes=())(request)
+        response.render()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(json.loads(response.content), {'run': None})
 
     @override_settings(COMMUNITY_CHAT_STARTUP_UPDATES_ENABLED=False)
     def test_disabled_returns_no_private_data(self):

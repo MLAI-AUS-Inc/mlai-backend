@@ -156,7 +156,13 @@ class GenerateView(ChatStartupAccess, founder.VibeRaisingEmailDraftStartView):
 
 
 class ActiveRunView(ChatStartupAccess, founder.VibeRaisingEmailDraftActiveRunView):
-    pass
+    def get(self, request):
+        response = super().get(request)
+        # DRF renders Response(None) as an empty body. Chat's query client
+        # requires a defined JSON value, including when no run is active.
+        if response.status_code == 200 and response.data is None:
+            response.data = {"run": None}
+        return response
 
 
 class RunView(ChatStartupAccess, founder.VibeRaisingEmailDraftStatusView):
