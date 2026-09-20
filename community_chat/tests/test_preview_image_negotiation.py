@@ -96,6 +96,7 @@ class PreviewImageNegotiationTests(SimpleTestCase):
                 response = LinkPreviewView.as_view(throttle_classes=[])(self.request(accept="application/json"))
             self.assertEqual(response.status_code, 200)
             self.assertEqual(bool(response.data["image_url"]), thumbnail)
+            self.assertTrue(response.data["image_is_thumbnail"])
 
 
 @override_settings(SLACK_BRIDGE_BOT_TOKEN="synthetic-test-token")

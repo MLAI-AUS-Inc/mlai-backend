@@ -68,13 +68,14 @@ class SlackFilePreview:
     def is_image(self) -> bool:
         return self.content_type in ALLOWED_IMAGE_TYPES or self.has_thumbnail
 
-    def as_payload(self) -> dict[str, str]:
+    def as_payload(self) -> dict[str, str | bool]:
         return {
             "href": self.href,
             "title": self.title,
             "description": self.description,
             "site_name": self.site_name,
             "image_url": "",
+            "image_is_thumbnail": self.content_type not in ALLOWED_IMAGE_TYPES,
         }
 
 
