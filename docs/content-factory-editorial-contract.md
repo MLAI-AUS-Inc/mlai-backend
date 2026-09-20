@@ -225,6 +225,11 @@ See the [cross-repository implementation report](../../content-factory/docs/astr
 
 ## Article recovery and publication observations (14 September 2026)
 
+Article serialization reports `liveVerification.state: unverified` with reason
+`source_run_unavailable` when its writing run is absent or belongs to another
+organisation. Missing historical evidence must not crash the article list or be
+treated as verified publication.
+
 The reliability implementation is additive and uses existing run JSON; it adds no migration. Worker snapshots and callbacks carry `generation`, `state_version`, typed `failure`, and `recovery`. State versions order writes within an execution generation. A newer explicit resume generation supersedes earlier events. The backend validates versions before handlers can mutate state, refund or notify, and serializes callbacks/status sync under the run row lock. Failure to store the event-ID claim defers delivery instead of executing without deduplication. Once a run adopts this protocol, unversioned events cannot overwrite it.
 
 The dashboard receives the same recovery decision used by the worker. A pending automatic retry suppresses manual retry controls. Unknown failure codes preserve their message and action.

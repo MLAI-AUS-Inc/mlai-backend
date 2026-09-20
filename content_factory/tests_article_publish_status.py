@@ -454,6 +454,23 @@ class WrittenArticleSerializerBucketTest(TestCase):
     def setUp(self):
         self.organization = Organization.objects.create(domain="mlai.au", name="MLAI")
 
+    def test_missing_or_foreign_source_run_is_unverified_without_crashing(self):
+        other = Organization.objects.create(domain="other.example", name="Other")
+        ContentFactoryRun.objects.create(
+            run_id="foreign-run", organization=other, workflow="article_generation",
+            domain=other.domain, status=ContentFactoryRunStatus.COMPLETED,
+        )
+        for index, source_run_id in enumerate(("", "missing-run", "foreign-run")):
+            with self.subTest(source_run_id=source_run_id):
+                article = WrittenArticle.objects.create(
+                    organization=self.organization, title="Article", slug=f"article-{index}",
+                    category="featured", primary_keyword="article", source_run_id=source_run_id,
+                )
+                payload = _serialize_written_article(article)
+                self.assertEqual(payload["liveVerification"], {
+                    "state": "unverified", "reason": "source_run_unavailable",
+                })
+
     def test_serializer_exposes_bucket_and_on_main_facts(self):
         article = WrittenArticle.objects.create(
             organization=self.organization,
