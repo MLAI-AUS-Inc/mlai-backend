@@ -67,7 +67,7 @@ class BootstrapView(ChatStartupAccess, APIView):
     def get(self, request):
         profile = get_or_create_founder_profile(request.user)
         return Response({
-            "enabled": True, "accountId": str(request.user.public_id),
+            "enabled": True, "accountId": str(request.user.community_chat_profile_id),
             "relayUrl": settings.COMMUNITY_CHAT_RELAY_URL,
             "profile": FounderProfileSerializer(profile).data,
             "capabilities": {"manual": True, "generation": True, "community": True},
