@@ -223,6 +223,31 @@ Do not substitute `manage.py test`: database-backed integration requires specifi
 See the [cross-repository implementation report](../../content-factory/docs/astra-onboarding-2026-09-10/README.md) for model routing, scaffold proof and remaining work.
 
 
+## Article recovery and publication observations (14 September 2026)
+
+The reliability implementation is additive and uses existing run JSON; it adds no migration. Worker snapshots and callbacks carry `generation`, `state_version`, typed `failure`, and `recovery`. State versions order writes within an execution generation. A newer explicit resume generation supersedes earlier events. The backend validates versions before handlers can mutate state, refund or notify, and serializes callbacks/status sync under the run row lock. Failure to store the event-ID claim defers delivery instead of executing without deduplication. Once a run adopts this protocol, unversioned events cannot overwrite it.
+
+The dashboard receives the same recovery decision used by the worker. A pending automatic retry suppresses manual retry controls. Unknown failure codes preserve their message and action.
+
+Sitemap entries are candidate URLs, not live-content proof. Publication refresh observes the current PR merge commit and compares an exact normalized article body/canonical URL with the saved source package. The `release_observations` namespace retains the HTTP evidence, content hashes, target commit, check time and last verified observation; worker polling cannot replace it. Changed input or target invalidates its current applicability. Historical on-main/publish facts remain intact. The dashboard distinguishes Merged from a recent verified Live observation. Browser/CSS visibility and hosting-provider deployment-job success remain separate from this HTTP check; JavaScript-only bodies stay unverified here.
+
+Pure serializer/ordering/content-identity tests run without database access:
+
+```sh
+python -m unittest content_factory.test_reliability_contract -v
+```
+
+After explicit approval to apply existing migrations to a temporary test database, validate the real handlers, refunds, snapshot reconciliation and publication observations using Python 3.11:
+
+```sh
+APP_ENV=test DATABASE_URL=sqlite:////tmp/mlai-article-reliability-tests.sqlite3 \
+  python manage.py test tests.test_content_factory_callback_idempotency \
+  tests.test_content_factory_run_sync content_factory.tests_article_publish_status \
+  integrations.tests_article --noinput
+```
+
+Deploy the backend's additive readers before compatible factory API/worker images and then the dashboard. No production article has been resumed or published as part of this implementation. Validate one controlled authoring and revision recovery at the normal approval boundary, then the plan's representative-run sample before broad rollout.
+
 ## Customer profiles and historical attribution (16 September 2026)
 
 The enriched catalogue record format uses `catalog_schema_version: 2`. Profiles add a required human-readable `name` and `description`, optional `pain_points`, `desired_outcomes`, and `knowledge_level`. Actions add `action_type` and `action_description`. Legacy records keep their original exact serialization; empty new defaults must not enter historical approval hashes. Admissions with enriched selected records use `schema_version: "2026-09-16.1"`; readers still accept `2026-09-11.1` admissions containing legacy records.

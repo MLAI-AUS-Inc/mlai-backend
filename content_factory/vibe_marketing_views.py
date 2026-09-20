@@ -2372,7 +2372,10 @@ def _normalize_keyword_memory(value) -> str:
 
 
 def _serialize_written_article(article, *, publish_attempt=None):
+    from content_factory.article_publish_status import latest_live_observation
     return {
+        "liveVerification": {key: value for key, value in latest_live_observation(article).items()
+            if key not in {"observed_body_text", "previous", "last_verified"}},
         "id": str(article.id),
         "title": article.title,
         "slug": article.slug,
@@ -7409,6 +7412,7 @@ PUBLISH_MERGE_EVIDENCE_RESULT_KEYS = (
     "publish_child_preview_url",
 )
 DJANGO_OWNED_ARTICLE_RESULT_KEYS = (
+    "release_observations",
     *PUBLISH_MERGE_EVIDENCE_RESULT_KEYS,
     "article_admission_notice",
     "article_system_review_comments",
@@ -10349,6 +10353,7 @@ def _strip_missing_setup_run_refs(result):
 def _serialize_run(run, *, context=None, latest_runs=None, checks=None, mode="full"):
     compact = mode in {"summary", "status"}
     step_states = _serialize_run_steps(run, compact=compact)
+    from content_factory.run_state import reliability_presentation
     result = _run_mapping(run.result)
     blocking_detail = _run_blocking_detail(result)
     humanized_failure_message = _humanized_run_failure_message(run, result)
@@ -10421,6 +10426,7 @@ def _serialize_run(run, *, context=None, latest_runs=None, checks=None, mode="fu
             **({"contentIsland": content_island, "content_island": content_island} if content_island else {}),
             "workflowProgress": _workflow_progress(context=context, run=run, latest_runs=latest_runs, checks=checks),
             "result": _strip_missing_setup_run_refs(_compact_result_for_run(run)),
+            **reliability_presentation(result),
         }
     content_package = _content_package_from_run(run)
     component_manifest = _component_manifest_from_run(run)
@@ -10473,6 +10479,7 @@ def _serialize_run(run, *, context=None, latest_runs=None, checks=None, mode="fu
         "componentFeedback": _component_feedback_from_run(run),
         "workflowProgress": _workflow_progress(context=context, run=run, latest_runs=latest_runs, checks=checks),
         "result": _strip_missing_setup_run_refs(result),
+        **reliability_presentation(result),
     }
 
 
@@ -11512,6 +11519,7 @@ def _run_result_from_remote(remote_data):
     else:
         merged = {}
     for key in (
+        "generation", "state_version", "failure", "recovery_intents", "budget",
         "warnings",
         "errors",
         "error",
@@ -12198,6 +12206,18 @@ def _sync_steps_from_remote(run, remote_data):
 
 
 def _sync_local_run_from_remote(run, remote_data):
+    from content_factory.run_state import stale_execution_event
+    if not isinstance(remote_data, dict) or not remote_data:
+        return run
+    with transaction.atomic():
+        ContentFactoryRun.objects.select_for_update().get(pk=run.pk)
+        run.refresh_from_db()
+        if stale_execution_event(run.result, remote_data, saved_status=run.status):
+            return run
+        return _sync_local_run_from_remote_locked(run, remote_data)
+
+
+def _sync_local_run_from_remote_locked(run, remote_data):
     if not isinstance(remote_data, dict) or not remote_data:
         return run
     remote_data = sanitize_json_for_postgres(remote_data)
@@ -12222,7 +12242,9 @@ def _sync_local_run_from_remote(run, remote_data):
         and remote_status in RUNNING_RUN_STATUSES
         and _article_system_setup_current_retry_attempt(remote_data, result)
     )
-    remote_active_retry_attempt = active_retry_signal(remote_data, result)
+    remote_active_retry_attempt = active_retry_signal(remote_data, result) or (
+        type(remote_data.get("generation")) is int and remote_data["generation"] > int((run.result or {}).get("generation", -1))
+    )
     if (
         run.workflow in SCAN_WORKFLOWS
         and run.status in SCAN_LOCAL_AUTHORITATIVE_STATUSES

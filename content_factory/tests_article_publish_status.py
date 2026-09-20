@@ -221,16 +221,47 @@ class RefreshPublishStatusesTest(TestCase):
         fields.update(overrides)
         return WrittenArticle.objects.create(**fields)
 
-    def test_sitemap_match_marks_article_live(self):
+    def test_live_body_receipt_is_version_bound_and_rechecked(self):
+        body = "<article><h1>Live article</h1><p>" + "The stated cost is AUD 50 and is not guaranteed. " * 5 + "</p></article>"
+        source = ContentFactoryRun.objects.create(run_id="live-source", workflow="direct_generate",
+            domain="mlai.au", result={"content_package": {"article_html": body}})
+        url = "https://mlai.au/articles/featured/live-article"
+        article = self._article("live-article", source_run_id=source.run_id,
+            pr_url="https://github.com/MLAI-AUS-Inc/mlai-au/pull/990")
+        response = mock.Mock(status_code=200)
+        response.iter_content.return_value = [('<link rel="canonical" href="' + url + '">' + body).encode()]
+        pr = {"status": ArticlePublishStatus.MERGED, "number": 990, "merge_commit_sha": "a" * 40, "base_ref": "main"}
+        with mock.patch("content_factory.article_publish_status._site_article_urls", return_value=[url]), \
+             mock.patch("content_factory.article_publish_status._github_pr_state", return_value=pr), \
+             mock.patch("content_factory.article_live_evidence.public_article_url", return_value=url), \
+             mock.patch("content_factory.article_publish_status.http_requests.get", return_value=response):
+            refresh_publish_statuses(self.organization, self.config, force=True)
+            article.refresh_from_db()
+            self.assertEqual(article.publish_status, ArticlePublishStatus.LIVE)
+            source.refresh_from_db()
+            receipt = source.result["release_observations"][str(article.id)]
+            self.assertEqual(receipt["state"], "verified")
+            self.assertEqual(receipt["expected_body_sha256"], receipt["observed_body_sha256"])
+            self.assertEqual(receipt["merge_commit_sha"], "a" * 40)
+            response.status_code = 404
+            refresh_publish_statuses(self.organization, self.config, force=True)
+        source.refresh_from_db()
+        receipt = source.result["release_observations"][str(article.id)]
+        self.assertEqual(receipt["state"], "unverified")
+        self.assertEqual(receipt["last_verified"]["state"], "verified")
+        article.refresh_from_db()
+        self.assertIsNotNone(article.on_main_verified_at)
+
+    def test_sitemap_match_alone_cannot_mark_article_live(self):
         article = self._article("live-article")
         with mock.patch("content_factory.article_publish_status.http_requests.get") as get:
             get.return_value = _mock_response(200, content=SITEMAP_XML)
             refreshed = refresh_publish_statuses(self.organization, self.config)
         article.refresh_from_db()
         self.assertEqual(len(refreshed), 1)
-        self.assertEqual(article.publish_status, ArticlePublishStatus.LIVE)
-        self.assertEqual(article.live_url, "https://mlai.au/articles/featured/live-article")
-        self.assertIsNotNone(article.live_verified_at)
+        self.assertEqual(article.publish_status, ArticlePublishStatus.WRITTEN)
+        self.assertIsNone(article.live_url)
+        self.assertIsNone(article.live_verified_at)
         self.assertIsNotNone(article.live_checked_at)
 
     def test_open_pr_confirmed_merged_via_github(self):
@@ -270,12 +301,15 @@ class RefreshPublishStatusesTest(TestCase):
         self.assertEqual(refreshed, [])
         get.assert_not_called()
 
-    def test_live_articles_are_not_rechecked(self):
-        self._article("done-article", publish_status=ArticlePublishStatus.LIVE)
+    def test_historical_live_articles_are_rechecked_without_erasing_history(self):
+        article = self._article("done-article", publish_status=ArticlePublishStatus.LIVE)
         with mock.patch("content_factory.article_publish_status.http_requests.get") as get:
+            get.return_value = _mock_response(200, content=SITEMAP_XML)
             refreshed = refresh_publish_statuses(self.organization, self.config)
-        self.assertEqual(refreshed, [])
-        get.assert_not_called()
+        self.assertEqual(len(refreshed), 1)
+        article.refresh_from_db()
+        self.assertEqual(article.publish_status, ArticlePublishStatus.LIVE)
+        self.assertEqual(refreshed[0]._live_observation["state"], "unverified")
 
     def test_sitemap_failure_is_best_effort(self):
         article = self._article("unreachable-article")

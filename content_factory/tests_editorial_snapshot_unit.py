@@ -10,7 +10,7 @@ from unittest.mock import Mock
 
 from .tests_editorial_dispatch_unit import selected_brief  # Isolated dummy settings, no app/DB setup.
 from .editorial_run_state import BRIEF_KEYS, EditorialRunConflict, merge_editorial_run_snapshot
-from .run_state import ACTIVE_RUN_STATUSES, ARTICLE_WORKFLOWS, active_retry_signal, clear_obsolete_active_run_blockers
+from .run_state import ACTIVE_RUN_STATUSES, ARTICLE_WORKFLOWS, active_retry_signal, clear_obsolete_active_run_blockers, stale_execution_event, merge_reliability_fields
 from django.db import OperationalError
 from rest_framework import status
 from rest_framework.response import Response
@@ -211,6 +211,7 @@ class EditorialSnapshotPersistenceSeamTests(unittest.TestCase):
             "logger": Mock(), "_rebind_billing_job": Mock(), "status": status, "Response": Response,
             "ContentFactoryRunSyncSerializer": ContentFactoryRunSyncSerializer,
             "ARTICLE_WORKFLOWS": ARTICLE_WORKFLOWS, "active_retry_signal": active_retry_signal,
+            "stale_execution_event": stale_execution_event, "merge_reliability_fields": merge_reliability_fields,
             "OperationalError": OperationalError, "connection": SimpleNamespace(vendor="sqlite"),
             "_is_retryable_sqlite_lock": lambda exc: "locked" in str(exc), "time": SimpleNamespace(sleep=Mock()),
             "_is_terminal_run_status": lambda value: value in {"completed", "cancelled", "failed", "denied", "blocked"},
