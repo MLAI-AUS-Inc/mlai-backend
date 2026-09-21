@@ -60,6 +60,14 @@ existing bridge behavior. The worker resolves the signed sender through the
 existing verified MLAI account/device-to-Slack identity link. A client-supplied
 Slack user ID is never accepted.
 
+This AI route requires current consent to the configured provider disclosure,
+including for older clients. Key-only legacy identities cannot grant account
+consent. The worker rechecks consent and the signed device's current account
+identity under the account lock before each external send. Withdrawal, account
+deactivation, revoked identity/device links, or a changed disclosure block queued
+work before it sends. The Home handoff flag is also false without consent.
+The direct `coworking/today/` endpoint above does not use AI and is unaffected.
+
 The worker posts the attributed Slack root, checkpoints its message mapping,
 and calls Public Roo's authenticated `/api/mention` with the verified member,
 Slack channel, root thread timestamp, `post_reply: true`, and a stable UUID.
@@ -76,8 +84,10 @@ delivered. This is not a general agent-creation endpoint.
 
 ## Legacy handoff rollout
 
-No new schema, migration, message backfill or production repair is required.
-This document describes the code contract, not evidence of a live deployment.
+The consent guard uses `community_chat.0011_account_privacy_controls`; this change
+adds no migration, message backfill or production repair. The specific migration
+was approved for disposable local tests, not production. This document describes
+the code contract, not evidence of a live deployment.
 
 1. Release the Public Roo change that supports `post_reply` and configure its
    `INTERNAL_MENTION_API_KEY`. Keep this credential separate from Admin Roo.
@@ -88,7 +98,8 @@ This document describes the code contract, not evidence of a live deployment.
    member has an unrevoked verified Slack identity link.
 4. Release the MLAI Chat clients. `GET community-chat/home/` advertises
    `feature_flags.coworking_booking: true` only when the service configuration,
-   enabled mapping and caller's verified Slack identity are present. This flag
+   enabled mapping, caller's verified Slack identity and current AI consent are
+   present. Configure only verified provider disclosures. This flag
    is configuration readiness, not a live Roo health probe. The normal native
    Roo path remains available when its valid public key is configured.
 5. After explicit authorization for a live booking, verify that one click
@@ -103,8 +114,11 @@ advertisement; already queued deliveries can still be inspected normally.
 
 `integrations.tests_coworking_handoff` covers configuration and caller identity,
 exact command scope, fixed booking dates, service authentication, reply
-acknowledgement, root reuse, child wakeup and preservation of deleted links.
-Home contract and signed bridge/identity regressions run alongside it using the
-approved 334-migration disposable database setup. The unrelated full bridge
-worker suite also needs the private Slack delivery table, which is outside
-that approved setup; it was not migrated locally for this change.
+acknowledgement, root reuse, child wakeup and preservation of deleted links. It
+also covers absent/withdrawn/stale consent, provider changes, revoked devices and
+links, inactive accounts, key-only identities, and withdrawal between the Slack
+root and Roo call. Local database tests use the specifically approved privacy
+migration closure in a disposable database. The PostgreSQL concurrency test
+holds each external send open, verifies that withdrawal waits on the account
+lock, and then verifies that a retry cannot send after withdrawal completes.
+That test is included in CI's privacy-boundary PostgreSQL job.

@@ -242,7 +242,9 @@ def latest_live_observation(article):
     if cached is not None:
         return cached
     run = _source_run_for_article(article)
-    receipts = ((run.result or {}).get("release_observations") or {}) if run else {}
+    if run is None:
+        return {"state": "unverified", "reason": "source_run_unavailable"}
+    receipts = (run.result or {}).get("release_observations") or {}
     receipt = receipts.get(str(article.id)) or {"state": "unverified"}
     # A republish changes the target PR. An observation for the previous target
     # remains history and cannot certify this target.

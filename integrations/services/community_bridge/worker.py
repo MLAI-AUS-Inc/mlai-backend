@@ -13,6 +13,7 @@ from slack_sdk.errors import SlackApiError
 
 from integrations.models import CommunityBridgeDeliveryType, CommunityBridgePlatform
 from integrations.services.community_bridge.buzz import BuzzBridgeClient
+from integrations.services.community_bridge.ai_consent import send_with_ai_consent
 from integrations.services.community_bridge.coworking import is_coworking_request, deliver_coworking_request
 from integrations.services.community_bridge.formatting import (
     build_mirrored_text,
@@ -486,6 +487,8 @@ class CommunityBridgeDiscordClient(discord.Client):
                 await deliver_coworking_request(delivery, text, thread_ts)
                 return
             response = await asyncio.to_thread(
+                send_with_ai_consent,
+                delivery,
                 SlackBridgeClient.post_message,
                 channel_id=delivery["target_channel_id"],
                 text=text,
@@ -521,6 +524,8 @@ class CommunityBridgeDiscordClient(discord.Client):
         if delivery["delivery_type"] == CommunityBridgeDeliveryType.EDIT:
             try:
                 await asyncio.to_thread(
+                    send_with_ai_consent,
+                    delivery,
                     SlackBridgeClient.update_message,
                     channel_id=link["destination_channel_id"],
                     message_id=link["destination_message_id"],
@@ -567,6 +572,8 @@ class CommunityBridgeDiscordClient(discord.Client):
                 return
             try:
                 await asyncio.to_thread(
+                    send_with_ai_consent,
+                    delivery,
                     SlackBridgeClient.add_reaction,
                     channel_id=delivery["target_channel_id"],
                     message_id=target_message_id,

@@ -1,5 +1,6 @@
 """Forward explicit MLAI Chat coworking requests to the existing Public Roo flow."""
 
+from contextlib import contextmanager
 from datetime import datetime
 import re
 from urllib.parse import urlparse
@@ -8,7 +9,10 @@ from zoneinfo import ZoneInfo
 
 import requests
 from django.conf import settings
+from django.contrib.auth import get_user_model
+from django.db import transaction
 
+from community_chat.privacy import has_ai_consent
 from integrations.models import CommunityBridgeChannel, CommunityBridgeIdentityLink
 from .identity import verified_identity_for_buzz
 
@@ -32,8 +36,8 @@ def _configuration():
 
 
 def coworking_booking_available(user):
-    """Report availability only for the member's verified Slack identity."""
-    if not _configuration():
+    """Report legacy AI handoff availability for a consented account only."""
+    if not _configuration() or not has_ai_consent(user.pk):
         return False
     workspaces = CommunityBridgeChannel.objects.filter(
         enabled=True, destination_platform="buzz",
@@ -58,16 +62,30 @@ def is_coworking_request(delivery):
     )
 
 
-def prepare_coworking_request(delivery):
-    """Resolve the signed sender server-side and freeze today's Melbourne date."""
-    if not _configuration():
-        raise CoworkingHandoffError("Public Roo booking handoff is not configured")
-    identity = verified_identity_for_buzz(
-        slack_workspace_id=delivery["channel"]["slack_workspace_id"],
-        buzz_pubkey=str(delivery["payload"].get("source_author_id") or ""),
-    )
-    if not identity or not identity.get("slack_user_id"):
-        raise CoworkingHandoffError("Booking requires a verified Slack identity")
+@contextmanager
+def _consented_identity(delivery):
+    """Serialize external AI handoffs with account consent withdrawal."""
+    source = {
+        "slack_workspace_id": delivery["channel"]["slack_workspace_id"],
+        "buzz_pubkey": str(delivery["payload"].get("source_author_id") or ""),
+    }
+    identity = verified_identity_for_buzz(**source)
+    if not identity or not identity.get("user_profile_id"):
+        raise CoworkingHandoffError("AI booking requires a verified MLAI account")
+    with transaction.atomic():
+        user = get_user_model().objects.select_for_update().filter(
+            community_chat_profile_id=identity["user_profile_id"], is_active=True,
+        ).first()
+        # Re-resolve after locking: queued work cannot rely on an old device/link.
+        current = verified_identity_for_buzz(**source)
+        if (user is None or not current or not current.get("slack_user_id")
+                or current.get("user_profile_id") != str(user.community_chat_profile_id)
+                or not has_ai_consent(user.pk)):
+            raise CoworkingHandoffError("AI booking requires current account consent")
+        yield current
+
+
+def _booking_payload(delivery, identity):
     day = datetime.fromtimestamp(delivery["created_at"], ZoneInfo("Australia/Melbourne")).date()
     return {
         "text": f"Please book me in on {day.isoformat()}.",
@@ -78,18 +96,27 @@ def prepare_coworking_request(delivery):
     }
 
 
-def dispatch_coworking_request(payload, thread_ts):
-    """Use Public Roo's service credential; Roo posts its own reply to Slack."""
+def prepare_coworking_request(delivery):
+    """Resolve a consented signed sender and freeze today's Melbourne date."""
+    if not _configuration():
+        raise CoworkingHandoffError("Public Roo booking handoff is not configured")
+    with _consented_identity(delivery) as identity:
+        return _booking_payload(delivery, identity)
+
+
+def dispatch_coworking_request(delivery, thread_ts):
+    """Recheck consent before each Roo dispatch, including checkpointed retries."""
     configuration = _configuration()
     if not configuration:
         raise CoworkingHandoffError("Public Roo booking handoff is not configured")
     url, key = configuration
     try:
-        response = requests.post(
-            url, headers={"Authorization": f"Bearer {key}"},
-            json={**payload, "thread_ts": thread_ts},
-            timeout=(5, 120), allow_redirects=False,
-        )
+        with _consented_identity(delivery) as identity:
+            response = requests.post(
+                url, headers={"Authorization": f"Bearer {key}"},
+                json={**_booking_payload(delivery, identity), "thread_ts": thread_ts},
+                timeout=(5, 120), allow_redirects=False,
+            )
         if response.status_code != 200:
             raise CoworkingHandoffError(f"Public Roo handoff returned HTTP {response.status_code}")
         result = response.json()
@@ -99,13 +126,23 @@ def dispatch_coworking_request(payload, thread_ts):
         raise CoworkingHandoffError("Public Roo booking handoff could not complete") from exc
 
 
+def _post_coworking_root(delivery, text, parent_ts):
+    from .slack import SlackBridgeClient
+
+    # The root itself mentions Roo, so it needs the same boundary as /api/mention.
+    with _consented_identity(delivery):
+        return SlackBridgeClient.post_message(
+            channel_id=delivery["target_channel_id"], text=text, thread_ts=parent_ts,
+            client_msg_id=str(uuid5(NAMESPACE_URL, f"mlai-community-bridge:{delivery['id']}")),
+        )
+
+
 async def deliver_coworking_request(delivery, text, parent_ts):
     """Checkpoint the Slack root so retries reuse the same booking conversation."""
     import asyncio
-    from .slack import SlackBridgeClient
     from .store import complete_create_delivery, complete_delivery, resolve_message_link
 
-    payload = await asyncio.to_thread(prepare_coworking_request, delivery)
+    await asyncio.to_thread(prepare_coworking_request, delivery)
     link = await asyncio.to_thread(
         resolve_message_link, source_platform="buzz",
         source_channel_id=delivery["source_channel_id"],
@@ -115,9 +152,7 @@ async def deliver_coworking_request(delivery, text, parent_ts):
         root_ts = link["destination_message_id"]
     else:
         response = await asyncio.to_thread(
-            SlackBridgeClient.post_message, channel_id=delivery["target_channel_id"],
-            text=text, thread_ts=parent_ts,
-            client_msg_id=str(uuid5(NAMESPACE_URL, f"mlai-community-bridge:{delivery['id']}")),
+            _post_coworking_root, delivery, text, parent_ts,
         )
         root_ts = str(response.get("message_id") or "")
         if not re.fullmatch(r"[0-9]+\.[0-9]+", root_ts):
@@ -128,5 +163,5 @@ async def deliver_coworking_request(delivery, text, parent_ts):
             destination_parent_message_id=parent_ts or "", destination_payload=response,
             mark_completed=False,
         )
-    await asyncio.to_thread(dispatch_coworking_request, payload, root_ts)
+    await asyncio.to_thread(dispatch_coworking_request, delivery, root_ts)
     await asyncio.to_thread(complete_delivery, delivery_id=delivery["id"], wake_waiting_children=True)
