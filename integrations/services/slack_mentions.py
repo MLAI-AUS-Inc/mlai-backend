@@ -13,6 +13,7 @@ from django.db import transaction
 
 from integrations.models import (
     CommunityBridgeChannel,
+    CommunityBridgeIdentityLink,
     CommunityBridgePlatform,
     SlackDmMirrorConversation,
 )
@@ -187,11 +188,24 @@ def search_mentions(grant, *, channel_id, query="", cursor="", limit=50):
         verified_identity_for_slack,
     )
 
+    # Most Slack members have not created a Chat account. Resolve all misses
+    # in one query; linked accounts still use the canonical live-device resolver.
+    linked_ids = set(
+        CommunityBridgeIdentityLink.objects.filter(
+            slack_workspace_id=grant.slack_workspace_id,
+            slack_user_id__in=[user["slack_user_id"] for user in users],
+            revoked_at__isnull=True,
+        ).values_list("slack_user_id", flat=True)
+    )
     result = []
     for user in users:
-        identity = verified_identity_for_slack(
-            slack_workspace_id=grant.slack_workspace_id,
-            slack_user_id=user["slack_user_id"],
+        identity = (
+            verified_identity_for_slack(
+                slack_workspace_id=grant.slack_workspace_id,
+                slack_user_id=user["slack_user_id"],
+            )
+            if user["slack_user_id"] in linked_ids
+            else None
         )
         result.append(
             {key: value for key, value in user.items() if key != "search"}

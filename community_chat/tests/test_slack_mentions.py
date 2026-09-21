@@ -57,6 +57,35 @@ class SlackMentionDirectoryTests(TestCase):
         )
         self.assertEqual(read.call_count, 1)
 
+    @patch(
+        "integrations.services.community_bridge.identity.verified_identity_for_slack"
+    )
+    @patch("integrations.services.slack_mentions._read")
+    def test_unlinked_directory_page_uses_one_identity_lookup(self, read, identity):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        read.return_value = {
+            "members": [
+                {
+                    "id": f"UFAKE{i}",
+                    "team_id": "TMLAI",
+                    "profile": {"display_name": f"Person {i}"},
+                }
+                for i in range(50)
+            ]
+        }
+        with CaptureQueriesContext(connection) as queries:
+            page = mentions.search_mentions(
+                self.grant, channel_id=self.channel, query="person"
+            )
+        self.assertEqual(len(page["users"]), 50)
+        identity.assert_not_called()
+        self.assertEqual(
+            sum("community_bridge_identity_link" in query["sql"] for query in queries),
+            1,
+        )
+
     @patch("integrations.services.slack_mentions._read")
     def test_budget_wait_keeps_a_resumable_cursor_and_roo_visible(self, read):
         read.side_effect = BudgetDeferred(3)
