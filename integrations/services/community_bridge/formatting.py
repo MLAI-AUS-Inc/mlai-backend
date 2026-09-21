@@ -176,6 +176,7 @@ def build_mirrored_text(
     author_display_name: str,
     body: str,
     attachments: Optional[Iterable[dict]] = None,
+    source_url: str = "",
 ) -> str:
     author_name = str(author_display_name or "Unknown user").strip() or "Unknown user"
     source_label = {
@@ -183,6 +184,12 @@ def build_mirrored_text(
         CommunityBridgePlatform.DISCORD: "Discord",
         CommunityBridgePlatform.BUZZ: "MLAI Chat",
     }.get(source_platform, "Community")
+    if (
+        destination_platform == CommunityBridgePlatform.SLACK
+        and source_platform == CommunityBridgePlatform.BUZZ
+        and source_url
+    ):
+        source_label = f"<{html.escape(source_url, quote=False)}|{source_label}>"
     normalized_body = _strip_trailing_whitespace(body)
     sections = [_format_author_line(destination_platform, author_name, source_label)]
     if normalized_body:

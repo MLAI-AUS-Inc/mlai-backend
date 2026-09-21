@@ -5,6 +5,7 @@ import time
 import logging
 import uuid
 from typing import Optional
+from urllib.parse import quote, urlencode
 
 import discord
 from discord.ext import tasks
@@ -487,6 +488,13 @@ class CommunityBridgeDiscordClient(discord.Client):
             author_display_name=author_display_name,
             body=body,
             attachments=payload.get("attachments") or [],
+            source_url=(
+                f"{settings.COMMUNITY_CHAT_FRONTEND_URL.rstrip('/')}/channels/"
+                f"{quote(delivery['source_channel_id'], safe='')}?"
+                f"{urlencode({'messageId': delivery['source_message_id']})}"
+                if delivery["source_platform"] == CommunityBridgePlatform.BUZZ
+                else ""
+            ),
         )
 
         if delivery["delivery_type"] == CommunityBridgeDeliveryType.CREATE:
