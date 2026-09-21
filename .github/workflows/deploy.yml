@@ -245,6 +245,7 @@ jobs:
           integrations.tests_slack_emoji \
           integrations.tests_community_bridge \
           integrations.tests_coworking_handoff \
+          integrations.tests_public_bridge_consent \
           integrations.tests_community_bridge_avatar_backfill \
           integrations.tests_community_bridge_mention_backfill \
           integrations.tests_community_bridge_contracts \
@@ -417,6 +418,8 @@ jobs:
           community_chat.tests.test_api.CommunityChatDeviceAuthorityTransactionTests \
           community_chat.tests.test_account_profiles.AccountProfileConcurrencyTests \
           community_chat.tests.test_account_privacy.AccountPrivacyConcurrencyTests \
+          integrations.tests_coworking_handoff.CoworkingConsentConcurrencyTests \
+          integrations.tests_public_bridge_consent.PublicBridgeConsentConcurrencyTests \
           community_chat.tests.test_volunteer_backfill.HistoricalBonusBackfillTests \
           community_chat.tests.test_volunteer_concurrency \
           roo.tests_api.FirstChannelPostAwardConcurrencyTests \

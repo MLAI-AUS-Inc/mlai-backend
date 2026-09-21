@@ -28,6 +28,14 @@ MLAI Chat is another client surface, not a one-time data migration.
   closed.
 - Mirrored messages are visibly attributed to the source author and platform,
   but are signed/sent by a dedicated MLAI bridge identity.
+- Chat-origin writes into public Slack require current account AI-sharing
+  permission, since that public history can be used as Roo context. Creates,
+  edits and reaction additions recheck consent at dispatch, including retries;
+  deletion and reaction removal remain possible after withdrawal. Missing
+  disclosure or a legacy key-only identity blocks the outbound delivery under
+  the normal retry/dead-letter policy. Local Chat delivery is unaffected. See
+  [account privacy controls](community-chat-account-privacy.md) for remaining
+  downstream context and native-agent gates.
 
 ## Canonical event
 
@@ -688,12 +696,12 @@ retains cached bootstrap badges and includes the retry delay. If a group's histo
 lookup pauses after its info lookup, that group remains unfinished; no empty or
 zero-count snapshot is fabricated. Authorization failures still reject the read.
 
-Private cursor sweeps exclude old or unknown directory entries outside the
-selected 7/30-day window, except current explicitly opened empty IMs. Recent
-pending imports remain eligible for read-state prewarming. Shared public targets
-are unchanged. Explicit mark-read operations retain the full authorized target
-set and source/device/consent checks, so a new displayed message can be acknowledged
-before discovery updates its conversation activity.
+Unread cursor sweeps include the full authorized directory, including old or
+unknown-activity conversations. The 7/30-day history window limits message-content
+probes, not unread eligibility. Device provisioning and consent checks still apply;
+undelivered or unmapped conversations contribute to incomplete coverage without
+exposing their identities. Explicit mark-read operations retain the same authority
+checks and only acknowledge a source timestamp observed in the client's viewport.
 
 Snapshots record `fetched_at` before the source read request starts, so a slow
 read cannot overwrite a newer acknowledgement. Join, leave, topic and other
@@ -712,8 +720,8 @@ With `MESSAGE_SYNC_ENABLED`, the independent `read_state` worker lane refreshes
 snapshots while all clients are closed. It rotates workspaces and owners under
 durable 120-second leases in the existing connector cursor, then resumes each
 account by stable Slack conversation ID. Only active consent and currently
-verified/provisioned devices qualify; old/out-of-window conversations do not
-consume the sweep. A budget pause retains the target and provider Retry-After;
+verified/provisioned devices qualify; old/out-of-window conversations remain
+eligible so persistent unreads are not lost. A budget pause retains the target and provider Retry-After;
 a source error advances past that target so it cannot stall the whole account.
 Group info/history pauses retain only allowlisted cursor metadata for 30 seconds,
 never message text. Expired worker claims and changed consent reject provider
@@ -722,9 +730,22 @@ calls and cache writes.
 The client endpoint reads the shared account cache only and returns all known
 snapshots in one response (`next_cursor: null`, `retry_after_seconds: 10`). Opening
 multiple clients therefore does not multiply Slack requests. Missing snapshots
-remain unknown. `authorized_channel_ids` gives the complete current target set;
-clients remove revoked targets but retain a known snapshot omitted by a cold cache.
-`snapshot_complete` describes cache coverage, not completion of message import.
+remain unknown. `authorized_channel_ids` gives the current target set, excluding
+confirmed source nonmembers/external channels. Clients remove those old badges and
+revoked targets but retain a known snapshot omitted by a cold cache.
+`read_state_coverage` reports `complete`, `fresh`, `discovery_complete`,
+`expected_channels`, `available_channels`, `excluded_channels`, `pending_channels`,
+and `checked_at`. Coverage requires finished discovery, no pending provisioning or
+scope gaps, and a source result for every eligible conversation. Only an explicit
+source membership/external-channel exclusion (`available: false, excluded: true`)
+counts as resolved; a missing or unavailable cursor never counts as read. Freshness
+requires every resolved source check to be at most 120 seconds old.
+`snapshot_complete` remains an alias of coverage completeness. Neither field means
+message import has finished. Unread target scans reuse the authorized grant and
+source catalogue without evaluating import-delivery/coverage subqueries per room.
+Clients apply coverage only from a complete-directory
+response, never from visible-row responses or read receipts. They retain known
+unreads while showing checking/updating until the directory is complete and fresh.
 Cache retention is 24 hours; the worker rechecks snapshots after
 60 seconds, with actual freshness dependent on directory size and shared API
 capacity. Visible rows use the same source snapshot as every other device.

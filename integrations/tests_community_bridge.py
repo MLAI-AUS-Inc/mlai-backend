@@ -18,6 +18,7 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 
 from community_chat.models import CommunityChatDevice, DeviceBindingStatus
+from community_chat.tests.privacy_fixtures import PROVIDERS, grant_test_ai_consent
 from integrations.models import (
     CommunityBridgeChannel,
     CommunityBridgeDelivery,
@@ -1792,12 +1793,19 @@ class CommunityBridgeSlackThreadRepairTests(TestCase):
 )
 class BuzzCommunityBridgeWorkerTests(TransactionTestCase):
     def setUp(self):
+        self.ai_settings = override_settings(
+            COMMUNITY_CHAT_AI_PROVIDERS=PROVIDERS,
+            COMMUNITY_CHAT_AI_DISCLOSURE_VERSION="bridge-test-v1",
+        )
+        self.ai_settings.enable()
+        self.addCleanup(self.ai_settings.disable)
         self.user = User.objects.create_user(
             email="alice.bridge@example.com",
             password="Correct-Horse-Bridge-9!",
             slack_id="U123",
             first_name="Alice",
         )
+        grant_test_ai_consent(self.user)
         self.device = CommunityChatDevice.objects.create(
             user=self.user,
             public_key="9" * 64,
@@ -2266,7 +2274,7 @@ class BuzzCommunityBridgeWorkerTests(TransactionTestCase):
             source_message_id=reaction_event_id,
             source_parent_message_id=original_event_id,
             target_channel_id=self.channel.slack_channel_id,
-            payload={"source_author_id": "c" * 64, "text": "👍", "attachments": []},
+            payload={"source_author_id": self.device.public_key, "text": "👍", "attachments": []},
             available_at=timezone.now(),
         )
 
@@ -2289,7 +2297,7 @@ class BuzzCommunityBridgeWorkerTests(TransactionTestCase):
             source_message_id=reaction_event_id,
             source_parent_message_id=original_event_id,
             target_channel_id=self.channel.slack_channel_id,
-            payload={"source_author_id": "c" * 64, "text": "👍", "attachments": []},
+            payload={"source_author_id": self.device.public_key, "text": "👍", "attachments": []},
             available_at=timezone.now(),
         )
         asyncio.run(self.client.process_pending_deliveries_once(limit=5))

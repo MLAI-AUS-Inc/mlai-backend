@@ -120,3 +120,28 @@ Preview and complete share these terminal errors:
 
 Clients must treat unrecognised success bodies as commit-uncertain and verify
 status before attempting another completion.
+
+## Private admin booking snapshot
+
+`GET /api/v1/points/coworking/bookings-for-date/?slack_user_id=U123&date=2026-09-21`
+requires the dedicated Roo service key (`HasStrictRooApiKey`) and the existing
+full Points Admin policy: active admin, committee, or portfolio lead, plus
+configured bootstrap admins. Partner/report-only access does not grant access.
+Roo supplies the actor from a signed Slack mention event, not user-entered arguments.
+
+The strict `YYYY-MM-DD` date is required. A successful response is:
+
+```json
+{"date":"2026-09-21","count":1,"people":[{"user_id":"42","name":"Alice Smith"}]}
+```
+
+The list includes active bookings from every booking source, excludes cancelled
+bookings, counts each user once, and sorts by name then user ID. Missing names
+use `Member <id>`; email, cost, and ledger data are not included. Empty dates
+return count zero and an empty list. Success responses use `Cache-Control:
+private, no-store`. Invalid input returns 400 and non-admin actors return 403;
+invalid service credentials are rejected by the existing permission layer.
+
+This read-only endpoint supports `@Roo coworking-today [YYYY-MM-DD]` in Roo and is
+independent of the existing `/coworking/report/` endpoint. It reports bookings,
+not physical arrival or presence. No schema change is required.
