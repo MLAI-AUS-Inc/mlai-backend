@@ -3,13 +3,14 @@ from unittest import mock
 
 from django.core.cache import cache
 from django.core.management import call_command
-from django.test import TestCase
+from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 
 from content_factory.article_publish_status import (
     advance_publish_status,
     article_bucket,
     derive_publish_status_from_evidence,
+    latest_live_observation,
     refresh_publish_statuses,
 )
 from content_factory.models import ArticlePublishStatus, OrganizationContentConfig, WrittenArticle
@@ -39,6 +40,22 @@ def _mock_response(status_code=200, content=b"", json_payload=None):
     response.content = content
     response.json.return_value = json_payload if json_payload is not None else {}
     return response
+
+
+class MissingSourceLiveObservationTest(SimpleTestCase):
+    @mock.patch("content_factory.article_publish_status._source_run_for_article", return_value=None)
+    def test_missing_source_run_stays_unverified(self, source_run):
+        for source_run_id in (None, "deleted-run"):
+            with self.subTest(source_run_id=source_run_id):
+                article = WrittenArticle(source_run_id=source_run_id, pr_url=None)
+                self.assertEqual(latest_live_observation(article), {"state": "unverified"})
+
+    @mock.patch("content_factory.article_publish_status._source_run_for_article")
+    def test_cached_observation_does_not_require_source_lookup(self, source_run):
+        article = WrittenArticle()
+        article._live_observation = {"state": "unverified", "reason": "capture_budget_deferred"}
+        self.assertEqual(latest_live_observation(article), article._live_observation)
+        source_run.assert_not_called()
 
 
 class DerivePublishStatusFromEvidenceTest(TestCase):
