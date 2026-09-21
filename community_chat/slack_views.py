@@ -377,6 +377,13 @@ class SlackUserDirectoryView(SlackDmMirrorApiView):
             raise ValidationError({"limit": "Use a number between 1 and 50."}) from exc
         try:
             grant = active_grant_for_user(request.user)
+            if request.query_params.get("channel_id"):
+                from integrations.services.slack_mentions import search_mentions
+                return Response(search_mentions(
+                    grant, channel_id=request.query_params["channel_id"],
+                    query=request.query_params.get("q", ""), limit=limit,
+                    cursor=request.query_params.get("cursor", ""),
+                ))
             payload = search_slack_users(
                 grant,
                 query=request.query_params.get("q", ""),
@@ -390,6 +397,23 @@ class SlackUserDirectoryView(SlackDmMirrorApiView):
         except (SlackClientError, DatabaseError) as exc:
             return _slack_endpoint_error_response(exc)
         return Response(payload)
+
+    def post(self, request):
+        """Explicitly invite selected people after their message was sent."""
+        from integrations.services.slack_mentions import invite_mentions
+        from integrations.services.message_sync.scheduler import BudgetDeferred
+        try:
+            return Response(invite_mentions(
+                active_grant_for_user(request.user),
+                channel_id=request.data.get("channel_id", ""),
+                user_ids=request.data.get("slack_user_ids"),
+            ))
+        except BudgetDeferred as exc:
+            return Response({"error": "slack_rate_limited", "retry_after_seconds": exc.retry_after}, status=429, headers={"Retry-After": str(exc.retry_after)})
+        except (SlackDmMirrorCredentialError, SlackDmMirrorUpstreamError, SlackClientError, DatabaseError) as exc:
+            return _slack_endpoint_error_response(exc)
+        except SlackDmMirrorError as exc:
+            raise ValidationError({"slack": str(exc)}) from exc
 
 
 class SlackDmStartView(SlackDmMirrorApiView):

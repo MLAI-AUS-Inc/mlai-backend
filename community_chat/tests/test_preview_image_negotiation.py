@@ -161,6 +161,23 @@ class SlackFileBudgetTests(SimpleTestCase):
             self.assertEqual(_slack_file_info("F123")["id"], "F123")
             self.assertEqual(client.return_value.files_info.call_count, 2)
 
+    def test_overlapping_metadata_reads_wait_for_one_provider_call(self):
+        with patch("community_chat.slack_file_previews.SlackBridgeClient.get_client") as client:
+            def read(**kwargs):
+                with self.assertRaises(SlackFilePreviewDeferred):
+                    _slack_file_info("F123")
+                return {"ok": True, "file": {"id": "F123"}}
+            client.return_value.files_info.side_effect = read
+            self.assertEqual(_slack_file_info("F123")["id"], "F123")
+            self.assertEqual(client.return_value.files_info.call_count, 1)
+
+    def test_network_timeout_is_retriable_and_releases_metadata_lock(self):
+        with patch("community_chat.slack_file_previews.SlackBridgeClient.get_client") as client:
+            client.return_value.files_info.side_effect = [TimeoutError(), {"ok": True, "file": {"id": "F123"}}]
+            with self.assertRaises(SlackFilePreviewDeferred):
+                _slack_file_info("F123")
+            self.assertEqual(_slack_file_info("F123")["id"], "F123")
+
     def test_owner_metadata_participates_in_user_app_workspace_budget(self):
         with patch(
             "community_chat.slack_file_previews.budgeted_client"

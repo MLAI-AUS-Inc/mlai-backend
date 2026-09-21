@@ -1106,6 +1106,15 @@ class BuzzCommunityBridgeEventViewTests(TestCase):
         self.assertEqual(delivery.target_platform, CommunityBridgePlatform.SLACK)
         self.assertEqual(delivery.target_channel_id, self.channel.slack_channel_id)
 
+    def test_explicit_slack_mentions_survive_callback_normalization(self):
+        payload = self._message_payload()
+        payload["raw_payload"]["tags"].append(["slack-mention", "UROO", "Roo"])
+        payload["normalized_event"]["text"] = "Hi @Roo"
+        response = self._post(payload)
+        self.assertEqual(response.status_code, 200)
+        delivery = CommunityBridgeDelivery.objects.get()
+        self.assertEqual(delivery.payload["metadata"]["slack_mention_tags"], [["slack-mention", "UROO", "Roo"]])
+
     def test_callback_receipt_is_idempotent(self):
         first = self._post(self._message_payload())
         second = self._post(self._message_payload())

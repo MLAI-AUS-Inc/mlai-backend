@@ -69,6 +69,11 @@ def render_outgoing_roo_mentions(text, tags, conversation):
     determined by the configured Slack ID and revalidated again before delivery.
     """
     allowed = {item["slack_user_id"] for item in roo_channel_targets(conversation)}
+    return render_slack_mentions(text, tags, allowed=allowed)
+
+
+def render_slack_mentions(text, tags, *, allowed=None):
+    """Render explicit identities; callers validate workspace authority before delivery."""
     mentions = [
         tag for tag in tags if isinstance(tag, list) and tag[:1] == ["slack-mention"]
     ]
@@ -80,7 +85,7 @@ def render_outgoing_roo_mentions(text, tags, conversation):
             len(tag) != 3
             or not all(isinstance(value, str) for value in tag)
             or not _ID.fullmatch(tag[1])
-            or tag[1] not in allowed
+            or (allowed is not None and tag[1] not in allowed)
             or not 1 <= len(tag[2]) <= 80
             or any(ord(char) < 32 or char in "`<>@" for char in tag[2])
         ):

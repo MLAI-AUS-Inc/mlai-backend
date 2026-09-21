@@ -1127,3 +1127,37 @@ Successful Slack-file HTTP responses are also `private, no-store`: clients and
 servers already cache by account/authorization scope, while a browser HTTP cache
 cannot represent a subsequent account's conversation access. Browser and Tauri
 CORS expose `Retry-After` without expanding credentialed origins.
+
+
+### Workspace mentions and reaction preflight (2026-09-21)
+
+`GET /community-chat/slack/users/` accepts `channel_id` for mention searches.
+This mode includes active workspace people and apps, with `is_member` (`null`
+while membership is loading), verified `profile_id`/`pubkey` bindings, a resumable
+`next_cursor`, `membership_pending`, and `retry_after_seconds`. It never returns
+email addresses. Unbridged native channel searches set `native_only`; invitations
+there use the verified native key and require an existing MLAI Chat account.
+Search pages are cached per grant/consent/OAuth generation and
+revalidated against current authority before returning. Clients must follow
+continuation cursors even when a page contains no matches.
+
+Explicit `slack-mention` tags preserve selected Slack IDs through public and
+owner-private deliveries. The worker validates workspace identities and excludes
+code spans when converting labels to Slack mention syntax. Non-members may be
+referenced; a mention itself does not invite them or grant channel access.
+
+After a successful send, the clients show a local, private invitation card.
+`POST /community-chat/slack/users/` accepts `channel_id` and `slack_user_ids` only
+after the user chooses to invite. It uses the owner's Slack token and Slack's
+role/scope checks. DMs require a new group conversation instead of exposing the
+existing DM's history. Native invitations remain relay membership events.
+
+`GET /community-chat/account/ai-consent/?reaction_target=<event-id>` adds
+`reaction_requires_consent` so clients can explain public Slack sharing before
+publishing a reaction. It returns no message content. The delivery-time consent
+check remains authoritative; permission failures are terminal, not transient
+provider failures. Connection retries reuse the original signed event ID.
+
+Preview clients cap concurrent downloads and retain loading state through bounded
+provider backoff. The backend coalesces concurrent metadata reads for the same
+Slack file, while each request still checks current account/channel authority.

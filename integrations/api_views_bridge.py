@@ -92,6 +92,13 @@ class BuzzCommunityBridgeEventView(APIView):
                 status=status.HTTP_200_OK,
             )
 
+        raw_event = payload.get("raw_payload") or {}
+        if isinstance(raw_event, dict):
+            normalized_event = {**normalized_event, "metadata": {**(normalized_event.get("metadata") or {}), "slack_mention_tags": [
+                tag for tag in raw_event.get("tags", [])
+                if isinstance(tag, list) and tag[:1] == ["slack-mention"]
+            ]}}
+
         result = ingest_inbound_event(
             source_platform=CommunityBridgePlatform.BUZZ,
             receipt_key=str(payload.get("receipt_key") or ""),
