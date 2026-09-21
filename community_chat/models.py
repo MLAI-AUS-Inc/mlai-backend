@@ -4,6 +4,12 @@ from django.conf import settings
 from django.db import models
 from django.db.models import Q
 
+from .onboarding_models import (  # noqa: F401 -- Django model discovery
+    CommunityMemberConsent,
+    CommunityMemberProfile,
+    CommunityMemberReviewRule,
+)
+
 from .volunteer.models import (  # noqa: F401 -- Django model discovery
     VolunteerAttendance,
     VolunteerMemberState,
@@ -287,6 +293,8 @@ class CommunityChatEmailCodeChallenge(models.Model):
     consumed_at = models.DateTimeField(blank=True, null=True)
     invalidated_at = models.DateTimeField(blank=True, null=True)
     requested_ip_digest = models.CharField(max_length=64, blank=True)
+    encrypted_signup_email = models.TextField(blank=True)
+    onboarding_version = models.PositiveSmallIntegerField(default=0)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

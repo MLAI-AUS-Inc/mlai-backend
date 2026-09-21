@@ -210,6 +210,7 @@ jobs:
           community_chat.tests.test_account_sessions \
           community_chat.tests.test_account_profiles.AccountProfileTests \
           community_chat.tests.test_account_privacy.AccountPrivacyTests \
+          community_chat.tests.test_onboarding.MemberOnboardingTests \
           community_chat.tests.test_adapter \
           community_chat.tests.test_api \
           community_chat.tests.test_device_auth \
@@ -418,6 +419,7 @@ jobs:
           community_chat.tests.test_api.CommunityChatDeviceAuthorityTransactionTests \
           community_chat.tests.test_account_profiles.AccountProfileConcurrencyTests \
           community_chat.tests.test_account_privacy.AccountPrivacyConcurrencyTests \
+          community_chat.tests.test_onboarding.MemberOnboardingConcurrencyTests \
           integrations.tests_coworking_handoff.CoworkingConsentConcurrencyTests \
           integrations.tests_public_bridge_consent.PublicBridgeConsentConcurrencyTests \
           community_chat.tests.test_volunteer_backfill.HistoricalBonusBackfillTests \

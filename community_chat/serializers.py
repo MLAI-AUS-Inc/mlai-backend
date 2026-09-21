@@ -118,6 +118,7 @@ class CommunityChatPasswordLoginSerializer(serializers.Serializer):
 
 class CommunityChatEmailCodeRequestSerializer(serializers.Serializer):
     email = serializers.EmailField(max_length=254)
+    onboarding_version = serializers.ChoiceField(choices=(1,), required=False, default=0)
     client_id = serializers.ChoiceField(choices=COMMUNITY_CHAT_CLIENT_IDS)
     device = CommunityChatDeviceLoginSerializer()
 

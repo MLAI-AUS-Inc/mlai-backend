@@ -5,7 +5,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .authentication import CommunityChatAccountAuthentication
+from .authentication import CommunityChatOnboardingAuthentication
 from .models import AccountDeletionRequest, AiConsentRecord
 from .privacy import ai_disclosure, deletion_policy, has_ai_consent, request_account_deletion, set_ai_consent
 from .throttles import CommunityChatScopedThrottle
@@ -44,7 +44,7 @@ def deletion_receipt(record):
 
 
 class PrivacyView(APIView):
-    authentication_classes = (CommunityChatAccountAuthentication,)
+    authentication_classes = (CommunityChatOnboardingAuthentication,)
     permission_classes = (IsAuthenticated,)
     throttle_classes = (CommunityChatScopedThrottle,)
     community_chat_throttle_scope = "community_chat_session"
@@ -70,6 +70,8 @@ class AiConsentView(PrivacyView):
 
 class AccountDeletionView(PrivacyView):
     """Initiate deletion inside the app and return a real, durable receipt."""
+
+    authentication_classes = (CommunityChatOnboardingAuthentication,)
 
     def get(self, request):
         records = AccountDeletionRequest.objects.filter(user=request.user).order_by("-requested_at")[:20]
