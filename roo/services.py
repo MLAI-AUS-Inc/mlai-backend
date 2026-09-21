@@ -560,7 +560,11 @@ class PointsService:
         """
         account = PointsService.get_or_create_account(user)
         PointsService._ensure_microroo_account(account)
+        from .digital_points import spendable_balance
         return {
+            'digital_balance_microroo': account.digital_balance_microroo,
+            'digital_refund_debt_microroo': account.digital_refund_debt_microroo,
+            'digital_service_balance_microroo': spendable_balance(account),
             'balance': account.balance,
             'earned_balance': account.earned_balance,
             'purchased_topup_balance': account.purchased_topup_balance,
@@ -644,6 +648,13 @@ class PointsService:
         """Spend an exact microroo amount without allowing a negative balance."""
         if delta_microroo <= 0:
             raise ValueError("Microroo spend delta must be positive")
+        from .digital_points import DIGITAL_SOURCES, spend as spend_digital
+        if source in DIGITAL_SOURCES:
+            return spend_digital(
+                user=user, amount=delta_microroo, source=source, description=description,
+                actor=created_by_slack_id, key=idempotency_key, reference_type=reference_type,
+                reference_id=reference_id, allow_reserved_turn_id=allow_reserved_turn_id,
+            )
         def validate_existing(existing: Ledger) -> None:
             PointsService._validate_idempotent_ledger(
                 existing,
@@ -1036,6 +1047,15 @@ class PointsService:
         """
         if delta <= 0:
             raise ValueError("Spend delta must be positive")
+        from .digital_points import DIGITAL_SOURCES, spend as spend_digital
+        if source in DIGITAL_SOURCES:
+            if purchased_delta_microroo is not None:
+                raise ValueError("Digital service spends allocate their own point buckets")
+            return spend_digital(
+                user=user, amount=PointsService.roo_to_microroo(delta), source=source,
+                description=description, actor=created_by_slack_id, key=idempotency_key,
+                reference_type=reference_type, reference_id=reference_id,
+            )
         delta_microroo = PointsService.roo_to_microroo(delta)
         if (
             purchased_delta_microroo is not None
@@ -1129,6 +1149,7 @@ class PointsService:
         purchased_delta: int = 0,
         purchased_delta_microroo: Optional[int] = None,
         reverse_lifetime_spent: bool = False,
+        original_spend_key: Optional[str] = None,
     ) -> Tuple[Ledger, bool]:
         """
         Refund points to a user (restore previously spent points).
@@ -1141,6 +1162,13 @@ class PointsService:
         """
         if delta <= 0:
             raise ValueError("Refund delta must be positive")
+        from .digital_points import DIGITAL_SOURCES, refund as refund_digital
+        if source in DIGITAL_SOURCES:
+            return refund_digital(
+                user=user, original_key=original_spend_key, amount=PointsService.roo_to_microroo(delta),
+                source=source, description=description, actor=created_by_slack_id, key=idempotency_key,
+                reference_type=reference_type, reference_id=reference_id,
+            )
         delta_microroo = PointsService.roo_to_microroo(delta)
 
         if purchased_delta_microroo is not None and purchased_delta:

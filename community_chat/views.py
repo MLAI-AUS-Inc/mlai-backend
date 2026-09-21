@@ -6,6 +6,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone as datetime_timezone
+from types import SimpleNamespace
 from urllib.parse import urlencode
 from zoneinfo import ZoneInfo
 
@@ -473,7 +474,7 @@ def _device_payload(device):
 
 
 class PasswordAuthView(APIView):
-    """Authenticate one existing MLAI account and mint one device bootstrap."""
+    """Authenticate an existing account with a scoped session and optional bootstrap."""
 
     authentication_classes = []
     permission_classes = [AllowAny]
@@ -557,33 +558,52 @@ class PasswordAuthView(APIView):
                 public_key=public_key,
                 revoked_at__isnull=True,
             ).update(revoked_at=now)
-            token = CommunityChatBootstrapToken.objects.create(
-                user=locked_user,
+            token = None
+            if _is_eligible(locked_user):
+                token = CommunityChatBootstrapToken.objects.create(
+                    user=locked_user,
+                    public_key=public_key,
+                    installation_id=installation_id,
+                    client_id=data["client_id"],
+                    origin=origin,
+                    platform=device_data["platform"],
+                    name=device_data.get("name", ""),
+                    token_hash=hashlib.sha256(raw_token.encode("utf-8")).hexdigest(),
+                    expires_at=now + timedelta(
+                        seconds=settings.COMMUNITY_CHAT_BOOTSTRAP_TOKEN_TTL_SECONDS
+                    ),
+                )
+            elif settings.COMMUNITY_CHAT_SIGNUP_ENABLED:
+                from .models import CommunityMemberProfile
+                CommunityMemberProfile.objects.get_or_create(user=locked_user)
+            # Password sign-in is a normal fresh authentication proof, never a
+            # reviewer bypass. The same installation/origin/session fencing and
+            # community admission rules apply as in email-code sign-in.
+            account_session = issue_account_session(locked_user, SimpleNamespace(
                 public_key=public_key,
                 installation_id=installation_id,
                 client_id=data["client_id"],
                 origin=origin,
                 platform=device_data["platform"],
-                name=device_data.get("name", ""),
-                token_hash=hashlib.sha256(raw_token.encode("utf-8")).hexdigest(),
-                expires_at=now
-                + timedelta(
-                    seconds=settings.COMMUNITY_CHAT_BOOTSTRAP_TOKEN_TTL_SECONDS
-                ),
-            )
+                device_name=device_data.get("name", ""),
+            ))
             update_last_login(None, locked_user)
 
-        return Response(
+        from .onboarding import onboarding_payload
+        response = Response(
             {
-                "status": "authenticated",
-                "bootstrap_token": raw_token,
-                "expires_at": token.expires_at,
+                "status": "authenticated" if token else "onboarding_required",
+                "bootstrap_token": raw_token if token else "",
+                "expires_at": token.expires_at if token else account_session.session.access_expires_at,
                 "relay_url": settings.COMMUNITY_CHAT_RELAY_URL,
                 "origin": origin,
                 "profile": own_chat_profile(locked_user),
+                "session": _account_session_payload(account_session),
+                "onboarding": onboarding_payload(locked_user),
             },
             status=status.HTTP_200_OK,
         )
+        return _attach_account_session(response, account_session)
 
 
 def _uniform_email_code_delay(started_at):

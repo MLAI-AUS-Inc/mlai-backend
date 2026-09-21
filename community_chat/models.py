@@ -53,6 +53,34 @@ class AccountDeletionRequest(models.Model):
         indexes = [models.Index(fields=("status", "requested_at"), name="chat_deletion_queue_idx")]
 
 
+class AccountDeletionTask(models.Model):
+    """Resumable cleanup work; a receipt is complete only after verified erasure."""
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        PROCESSING = "processing", "Processing"
+        COMPLETED = "completed", "Completed"
+        NEEDS_ATTENTION = "needs_attention", "Needs attention"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    request = models.ForeignKey(AccountDeletionRequest, on_delete=models.CASCADE, related_name="tasks")
+    target = models.CharField(max_length=64)
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING)
+    attempts = models.PositiveIntegerField(default=0)
+    next_attempt_at = models.DateTimeField(null=True, blank=True)
+    started_at = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    error_code = models.CharField(max_length=80, blank=True)
+    evidence = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(
+            fields=("request", "target"), name="chat_deletion_task_target_uniq",
+        )]
+        indexes = [models.Index(fields=("status", "next_attempt_at"), name="chat_deletion_task_queue_idx")]
+
+
 class AiConsentRecord(models.Model):
     """Versioned consent without storing prompts, attachments or credentials."""
 

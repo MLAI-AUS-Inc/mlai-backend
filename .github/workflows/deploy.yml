@@ -134,7 +134,7 @@ jobs:
         COMMUNITY_CHAT_RELAY_URL: wss://chat.mlai.au
         COMMUNITY_CHAT_ADAPTER_URL: http://10.126.0.9:3100
         COMMUNITY_CHAT_EMAIL_CODE_AUTH_ENABLED: "true"
-        COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED: "false"
+        COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED: "true"
         COMMUNITY_CHAT_DEVICE_AUTH_ENABLED: "true"
         CUSTOMERIO_COMMUNITY_CHAT_CODE_MESSAGE_ID: mlai_chat_sign_in_code
         CUSTOMERIO_API_KEY: ci-customerio-api-key-placeholder
@@ -180,6 +180,8 @@ jobs:
           roo.tests_api.CoworkingViewSetTests \
           roo.tests.CoworkingBookingAdminSafetyTests \
           roo.tests_kimi_usage \
+          roo.tests_apple_iap \
+          roo.test_apple_verification \
           roo.tests_meeting_rooms \
           core.tests.test_auth_contract \
           core.tests.test_auth_session \
@@ -210,6 +212,7 @@ jobs:
           community_chat.tests.test_account_sessions \
           community_chat.tests.test_account_profiles.AccountProfileTests \
           community_chat.tests.test_account_privacy.AccountPrivacyTests \
+          community_chat.tests.test_deletion_tasks \
           community_chat.tests.test_onboarding.MemberOnboardingTests \
           community_chat.tests.test_adapter \
           community_chat.tests.test_api \
@@ -420,6 +423,7 @@ jobs:
           community_chat.tests.test_api.CommunityChatDeviceAuthorityTransactionTests \
           community_chat.tests.test_account_profiles.AccountProfileConcurrencyTests \
           community_chat.tests.test_account_privacy.AccountPrivacyConcurrencyTests \
+          roo.tests_apple_iap.AppleConcurrencyTests \
           community_chat.tests.test_onboarding.MemberOnboardingConcurrencyTests \
           integrations.tests_coworking_handoff.CoworkingConsentConcurrencyTests \
           integrations.tests_public_bridge_consent.PublicBridgeConsentConcurrencyTests \
@@ -488,6 +492,7 @@ jobs:
           content_factory.tests_customer_profile_persistence \
           content_factory.tests_article_publish_status \
           content_factory.tests_written_article_discard \
+          roo.tests_apple_migrations \
           --verbosity 2
 
   deploy:
@@ -530,6 +535,7 @@ jobs:
         COMMUNITY_CHAT_EMAIL_CODE_DELIVERY_SECRET: ${{ secrets.COMMUNITY_CHAT_EMAIL_CODE_DELIVERY_SECRET }}
         COMMUNITY_CHAT_ADAPTER_TOKEN: ${{ secrets.COMMUNITY_CHAT_ADAPTER_TOKEN }}
         COMMUNITY_CHAT_ADAPTER_URL: ${{ vars.COMMUNITY_CHAT_ADAPTER_URL }}
+        COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED: ${{ vars.COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED || 'false' }}
         MESSAGE_SYNC_ENABLED: ${{ vars.MESSAGE_SYNC_ENABLED || 'false' }}
         MESSAGE_SYNC_SLACK_APP_ID: ${{ vars.MESSAGE_SYNC_SLACK_APP_ID }}
         MESSAGE_SYNC_SLACK_APP_TOKEN: ${{ secrets.MESSAGE_SYNC_SLACK_APP_TOKEN }}

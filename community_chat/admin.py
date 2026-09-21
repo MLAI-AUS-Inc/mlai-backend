@@ -3,6 +3,7 @@ from . import onboarding_admin  # noqa: F401 -- register the private review queu
 
 from .models import (
     AccountDeletionRequest,
+    AccountDeletionTask,
     AiConsentRecord,
     Moderator,
     CommunityChatBootstrapToken,
@@ -24,6 +25,21 @@ class AccountDeletionRequestAdmin(admin.ModelAdmin):
     list_filter = ("status", "scope")
     ordering = ("requested_at",)
     readonly_fields = tuple(field.name for field in AccountDeletionRequest._meta.fields)
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(AccountDeletionTask)
+class AccountDeletionTaskAdmin(admin.ModelAdmin):
+    """Inspect incomplete cleanup; operators cannot manufacture completion."""
+
+    list_display = ("id", "request_id", "target", "status", "attempts", "next_attempt_at", "error_code")
+    list_filter = ("status", "target")
+    readonly_fields = tuple(field.name for field in AccountDeletionTask._meta.fields)
 
     def has_add_permission(self, request):
         return False

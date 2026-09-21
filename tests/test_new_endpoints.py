@@ -32,6 +32,7 @@ from workflow_runs.models import (
 )
 from integrations.models import GitHubInstallation, UserIntegration
 from roo.models import ChannelFirstPost, PointsAccount
+from roo.services import PointsService
 
 User = get_user_model()
 
@@ -890,6 +891,14 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         from django.conf import settings
         settings.ROO_API_KEY = self.api_key
         self.client.credentials(HTTP_X_API_KEY=self.api_key)
+
+    def _charge_article(self, user, request_id):
+        return PointsService.spend(
+            user=user, delta=6, source="CONTENT_FACTORY", description="Test article",
+            created_by_slack_id=user.slack_id,
+            idempotency_key=f"content_factory:charge:{request_id}",
+            reference_type="CONTENT_FACTORY", reference_id=request_id,
+        )[0]
 
     @patch("integrations.services.github.refresh_github_token", side_effect=Exception("no stored token"))
     @patch("content_factory.service_views.ContentFactoryCallbackView._send_auth_required_notification")
@@ -2762,7 +2771,8 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
     @patch('integrations.services.slack.SlackService.send_dm')
     def test_generation_failed_publish_target_action_required_auto_refunds(self, mock_send_dm):
         user = User.objects.create_user(email="refund@example.com", password="password", slack_id="U123")
-        PointsAccount.objects.create(user=user, balance=14)
+        PointsAccount.objects.create(user=user, balance=20)
+        self._charge_article(user, "publish-target-request-1")
         ContentFactoryJob.objects.create(
             job_id="publish-target-run-1",
             domain="woofya.com.au",
@@ -2810,7 +2820,8 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         from workflow_runs.models import ContentFactoryRun
 
         user = User.objects.create_user(email="shortfall@example.com", password="password", slack_id="U123")
-        PointsAccount.objects.create(user=user, balance=14)
+        PointsAccount.objects.create(user=user, balance=20)
+        self._charge_article(user, "research-shortfall-request-1")
         ContentFactoryJob.objects.create(
             job_id="research-shortfall-run-1",
             domain="golden-vite-router-baseline.com",
@@ -2915,11 +2926,48 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         run = ContentFactoryRun.objects.get(run_id="insufficient-not-refundable-1")
         self.assertTrue(run.resume_available)
 
+    def test_auto_refund_never_claims_success_without_a_recorded_charge(self):
+        from integrations.services.article_generation import maybe_auto_refund_terminal_failure
+
+        user = User.objects.create_user(email="missing-charge@example.com", slack_id="UMISSING")
+        PointsAccount.objects.create(user=user, balance=10)
+        job = ContentFactoryJob.objects.create(
+            job_id="missing-charge", domain="example.com", slack_user_id=user.slack_id,
+            client_request_id="missing-charge", billing_amount=6, billing_status="charged",
+        )
+        self.assertEqual(maybe_auto_refund_terminal_failure(
+            job, error_code="PUBLISH_TARGET_ACTION_REQUIRED", error_message="No delivery",
+        ), (False, 0))
+        job.refresh_from_db()
+        self.assertEqual(job.billing_status, "charged")
+        self.assertEqual(user.points_account.balance, 10)
+
+    @patch("integrations.services.article_generation.get_content_factory_article_cost_points", return_value=0)
+    def test_auto_refund_reports_actual_charge_even_after_price_becomes_free(self, _price):
+        from integrations.services.article_generation import maybe_auto_refund_terminal_failure
+
+        user = User.objects.create_user(email="changed-price@example.com", slack_id="UCHANGED")
+        PointsAccount.objects.create(user=user, balance=20)
+        charge = self._charge_article(user, "changed-price")
+        job = ContentFactoryJob.objects.create(
+            job_id="changed-price", domain="example.com", slack_user_id=user.slack_id,
+            client_request_id="changed-price", billing_amount=6, billing_status="charged",
+        )
+        self.assertEqual(maybe_auto_refund_terminal_failure(
+            job, error_code="PUBLISH_TARGET_ACTION_REQUIRED", error_message="No delivery",
+        ), (True, 6))
+        user.points_account.refresh_from_db()
+        job.refresh_from_db()
+        self.assertEqual(user.points_account.balance, 20)
+        self.assertEqual(job.billing_status, "refunded")
+        self.assertEqual(job.billing_ledger.refund_of_id, charge.id)
+
     def test_maybe_auto_refund_honors_explicit_refundable_flag_outside_allowlist(self):
         from integrations.services.article_generation import maybe_auto_refund_terminal_failure
 
         user = User.objects.create_user(email="refundable@example.com", password="password", slack_id="U777")
-        PointsAccount.objects.create(user=user, balance=10)
+        PointsAccount.objects.create(user=user, balance=16)
+        self._charge_article(user, "explicit-refundable-request-1")
         job = ContentFactoryJob.objects.create(
             job_id="explicit-refundable-run-1",
             domain="golden-vite-router-baseline.com",

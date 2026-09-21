@@ -216,8 +216,9 @@ def _validate_community_chat_contract(errors: list[str]) -> None:
         )
     if not _as_bool(getattr(settings, "COMMUNITY_CHAT_EMAIL_CODE_AUTH_ENABLED", False)):
         errors.append("COMMUNITY_CHAT_EMAIL_CODE_AUTH_ENABLED must be true in production.")
-    if _as_bool(getattr(settings, "COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED", False)):
-        errors.append("COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED must be false in production.")
+    # Password sign-in now issues the same installation-bound, revocable account
+    # session and onboarding decision as email codes. It may be enabled as an
+    # ordinary login option; email-code and device auth remain required below.
     if not _as_bool(getattr(settings, "COMMUNITY_CHAT_DEVICE_AUTH_ENABLED", False)):
         errors.append("COMMUNITY_CHAT_DEVICE_AUTH_ENABLED must be true in production.")
     if not _as_clean_string(

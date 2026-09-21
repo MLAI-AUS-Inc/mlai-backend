@@ -56,6 +56,7 @@ def refund_empty_or_failed_research(run):
         return
     PointsService.refund(
         user=charge.user, delta=-charge.delta, source=charge.source,
+        original_spend_key=charge.idempotency_key,
         description=f"Island research refund: no usable islands for {run.domain}",
         created_by_slack_id=charge.created_by_slack_id,
         idempotency_key=f"content_factory:topic_generation:refund:{key}",
