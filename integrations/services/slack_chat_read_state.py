@@ -17,7 +17,6 @@ from slack_sdk.errors import SlackApiError
 from integrations.models import CommunityBridgeChannel
 from integrations.services.slack_chat_catalog import (
     OWNER_OPENED_KEY,
-    catalog_conversations,
     conversation_activity_at,
     conversation_kind,
     conversation_metadata,
@@ -152,30 +151,37 @@ def read_state_snapshot(details, *, kind, messages, owner_id):
     }
 
 
-def _targets(grant, public_key, *, recent_only=True):
+def _targets(grant, public_key, *, recent_only=False, coverage=None):
     key = str(public_key or "").strip().lower()
     if not re.fullmatch(r"[0-9a-f]{64}", key):
         raise ValidationError({"device": "Use a verified MLAI Chat device."})
-    return _targets_for_keys(grant, {key}, recent_only=recent_only)
+    return _targets_for_keys(grant, {key}, recent_only=recent_only, coverage=coverage)
 
 
-def _targets_for_keys(grant, keys, *, recent_only=True):
+def _targets_for_keys(grant, keys, *, recent_only=False, coverage=None):
     """Internal account sweep over currently verified, provisioned devices."""
     if not keys:
         return []
     targets = []
+    if coverage is not None:
+        coverage["pending_channels"] = 0
     days = _grant_history_days(grant) if recent_only else 0
     oldest = int(time.time() - days * 86400) if days else None
-    conversations = catalog_conversations(
-        grant.conversations.filter(
-            status="live", mlai_channel_id__isnull=False
-        ).order_by("-latest_synced_ts", "pk")
-    )
+    # Unread scans need source metadata, not the delivery/coverage annotations
+    # used by the import UI. Share the already-authorized grant rather than
+    # loading its large connection catalogue again for every conversation.
+    conversations = grant.conversations.filter(
+        status__in=["live", "awaiting_setup", "provisioning", "error"]
+    ).order_by("-latest_synced_ts", "pk")
     for conversation in conversations:
+        conversation.grant = grant
         kind = conversation_kind(conversation)
-        if not keys.intersection(conversation.participant_buzz_pubkeys or []):
-            continue
         if kind == "private_channel" and not private_channels_enabled(grant):
+            continue
+        if (conversation.status != "live" or not conversation.mlai_channel_id
+                or not keys.intersection(conversation.participant_buzz_pubkeys or [])):
+            if coverage is not None:
+                coverage["pending_channels"] += 1
             continue
         if oldest is not None:
             # Prewarm recent imports without spending Slack quota on the full
@@ -306,7 +312,7 @@ def refresh_target(grant, authority, target):
         target.kind in {"public_channel", "private_channel", "mpim"}
         and details.get("is_member") is not True
     ) or details.get("is_member") is False:
-        cached = {"available": False}
+        cached = {"available": False, "excluded": True}
     else:
         try:
             messages, count_source, partial = _unread_messages(authority, target, details.get("last_read", "0"))
@@ -357,7 +363,8 @@ def read_state_page(user, *, public_key, cursor=0, channel_ids=None):
         raise ValidationError({"cursor": "Use a non-negative page cursor."}) from exc
     grant = active_grant_for_user(user)
     _assert_grant_connection_authorized(grant)
-    targets = _targets(grant, public_key)
+    directory_coverage = {}
+    targets = _targets(grant, public_key, coverage=directory_coverage)
     if channel_ids is not None:
         if not isinstance(channel_ids, list) or len(channel_ids) > 4:
             raise ValidationError(
@@ -374,7 +381,11 @@ def read_state_page(user, *, public_key, cursor=0, channel_ids=None):
             enqueue_refresh(authority, targets)
         with transaction.atomic():
             locked_grant, connection = _lock_slack_grant_api_authority(authority, required_scopes={"im:read"})
-            targets = [t for t in _targets(locked_grant, public_key) if t.read_scope in authority.scopes
+            all_targets = _targets(locked_grant, public_key, coverage=directory_coverage)
+            directory_coverage["pending_channels"] = directory_coverage.get("pending_channels", 0) + sum(
+                t.read_scope not in authority.scopes for t in all_targets
+            )
+            targets = [t for t in all_targets if t.read_scope in authority.scopes
                        and (channel_ids is None or t.channel_id in requested)]
             stored = cache.get_many([_cache_key(authority, t) for t in targets])
             # This orders complete directory responses independently of each
@@ -384,12 +395,21 @@ def read_state_page(user, *, public_key, cursor=0, channel_ids=None):
             connection_cursor["read_directory_revision"] = directory_revision
             connection.sync_cursor = connection_cursor
             connection.save(update_fields=["sync_cursor", "updated_at"])
+            from .message_sync.read_coverage import read_coverage, source_excluded
+            coverage_states = {t.channel_id: stored.get(_cache_key(authority, t)) for t in targets}
+            coverage = read_coverage(
+                coverage_states,
+                discovery_complete=locked_grant.last_discovery_at is not None,
+                pending_channels=directory_coverage.get("pending_channels", 0),
+            )
         return {
             "directory_revision": directory_revision,
             "channels": {t.channel_id: stored[_cache_key(authority, t)] for t in targets
                          if _cache_key(authority, t) in stored},
-            "authorized_channel_ids": [t.channel_id for t in targets],
-            "snapshot_complete": len(stored) == len(targets),
+            "authorized_channel_ids": [t.channel_id for t in targets
+                                       if not source_excluded(coverage_states.get(t.channel_id))],
+            "snapshot_complete": coverage["complete"],
+            "read_state_coverage": coverage,
             "next_cursor": None,
             "retry_after_seconds": 10,
         }
@@ -434,9 +454,23 @@ def read_state_page(user, *, public_key, cursor=0, channel_ids=None):
         index += 1
     with transaction.atomic():
         _lock_slack_grant_api_authority(authority, required_scopes={"im:read"})
+        # Coverage spans the directory, including earlier pagination results.
+        stored = cache.get_many([_cache_key(authority, t) for t in targets])
+    from .message_sync.read_coverage import read_coverage, source_excluded
+    coverage_states = {t.channel_id: stored.get(_cache_key(authority, t)) for t in targets}
+    coverage_states.update(bootstrap)
+    coverage_states.update(results)
+    coverage = read_coverage(
+        coverage_states,
+        discovery_complete=grant.last_discovery_at is not None,
+        pending_channels=directory_coverage.get("pending_channels", 0),
+    )
     return {
         "channels": {**bootstrap, **results},
-        "authorized_channel_ids": [t.channel_id for t in targets],
+        "snapshot_complete": coverage["complete"],
+        "read_state_coverage": coverage,
+        "authorized_channel_ids": [t.channel_id for t in targets
+                                       if not source_excluded(coverage_states.get(t.channel_id))],
         "next_cursor": str(index) if index < len(targets) else None,
         "retry_after_seconds": max(retry_after, 10 if index < len(targets) else 60),
     }

@@ -243,6 +243,22 @@ class SlackReadStateTests(SimpleTestCase):
 
 
 class PrivateReadTargetTests(SimpleTestCase):
+    def test_unread_directory_keeps_old_and_unknown_rooms_under_bounded_history_consent(self):
+        old = self.conversation("DOLD", age=60)
+        unknown = self.conversation("DUNKNOWN")
+        other_device = self.conversation("DOTHER", age=1)
+        other_device.participant_buzz_pubkeys = ["2" * 64]
+        unprovisioned = self.conversation("DNEW", age=1)
+        unprovisioned.mlai_channel_id = None
+        unprovisioned.status = "provisioning"
+        with self.source_catalog([old, unknown, other_device, unprovisioned]):
+            for days in (7, 30):
+                self.grant.history_days = days
+                coverage = {}
+                targets = reads._targets(self.grant, self.key, coverage=coverage)
+                self.assertEqual([t.channel_id for t in targets], ["public", "DOLD", "DUNKNOWN"])
+                self.assertEqual(coverage["pending_channels"], 2)
+
     def setUp(self):
         self.now = timezone.now().replace(microsecond=0)
         self.key = "1" * 64
@@ -262,7 +278,7 @@ class PrivateReadTargetTests(SimpleTestCase):
             metadata[OWNER_OPENED_KEY] = reads.owner_open_intent(self.grant, self.key)
         self.grant.connection.provider_metadata[CATALOG_KEY][name] = metadata
         return SimpleNamespace(
-            grant=self.grant, slack_conversation_id=name, mlai_channel_id=name,
+            grant=self.grant, slack_conversation_id=name, mlai_channel_id=name, status="live",
             participant_buzz_pubkeys=[self.key], history_backfilled_at=None,
             latest_synced_ts=(
                 f"{int((self.now-timedelta(days=age)).timestamp())}.000001"
@@ -273,13 +289,14 @@ class PrivateReadTargetTests(SimpleTestCase):
     @contextmanager
     def source_catalog(self, conversations):
         public = SimpleNamespace(destination_channel_id="public", slack_channel_id="CPUBLIC")
-        with patch.object(reads, "catalog_conversations", return_value=conversations), patch.object(
+        self.grant.conversations.filter.return_value.order_by.return_value = conversations
+        with patch.object(
             reads.CommunityBridgeChannel.objects, "filter"
         ) as shared, patch.object(reads.time, "time", return_value=self.now.timestamp()):
             shared.return_value.exclude.return_value.order_by.return_value = [public]
             yield
 
-    def test_polling_ignores_old_unknown_and_other_device_rooms_but_prewarms_recent(self):
+    def test_optional_prefetch_ignores_old_unknown_and_other_device_rooms_but_prewarms_recent(self):
         recent = self.conversation("DRECENT", age=1)
         self.grant.connection.provider_metadata[CATALOG_KEY]["DRECENT"][
             "latest_message_ts"
@@ -292,31 +309,31 @@ class PrivateReadTargetTests(SimpleTestCase):
         group = self.conversation("GRECENT", age=2, kind="mpim")
         private = self.conversation("CPRIVATE", age=3, kind="private_channel")
         with self.source_catalog([old, unknown, other, recent, group, private]):
-            targets = reads._targets(self.grant, self.key)
+            targets = reads._targets(self.grant, self.key, recent_only=True)
         self.assertEqual([t.channel_id for t in targets], ["public", "DRECENT", "GRECENT", "CPRIVATE"])
         self.assertIsNone(recent.history_backfilled_at)
 
-    def test_polling_honors_seven_thirty_and_explicit_all_history_windows(self):
+    def test_optional_prefetch_honors_seven_thirty_and_explicit_all_history_windows(self):
         conversation = self.conversation("DRECENT", age=10)
         with self.source_catalog([conversation]):
             self.grant.history_days = 7
-            self.assertEqual([t.channel_id for t in reads._targets(self.grant, self.key)], ["public"])
+            self.assertEqual([t.channel_id for t in reads._targets(self.grant, self.key, recent_only=True)], ["public"])
             self.grant.history_days = 30
-            self.assertEqual(len(reads._targets(self.grant, self.key)), 2)
+            self.assertEqual(len(reads._targets(self.grant, self.key, recent_only=True)), 2)
             conversation.latest_synced_ts = ""
             self.grant.history_days = 0
-            self.assertEqual(len(reads._targets(self.grant, self.key)), 1)
+            self.assertEqual(len(reads._targets(self.grant, self.key, recent_only=True)), 1)
             self.grant.consent_version = ALL_HISTORY_CONSENT
-            self.assertEqual(len(reads._targets(self.grant, self.key)), 2)
+            self.assertEqual(len(reads._targets(self.grant, self.key, recent_only=True)), 2)
 
     def test_empty_dm_requires_current_explicit_open_and_cannot_override_old_activity(self):
         empty = self.conversation("DEMPTY", opened=True)
         old = self.conversation("DOLD", age=60, opened=True)
         group = self.conversation("GEMPTY", kind="mpim", opened=True)
         with self.source_catalog([empty, old, group]):
-            self.assertEqual([t.channel_id for t in reads._targets(self.grant, self.key)], ["public", "DEMPTY"])
+            self.assertEqual([t.channel_id for t in reads._targets(self.grant, self.key, recent_only=True)], ["public", "DEMPTY"])
             self.grant.consented_at += timedelta(seconds=1)
-            self.assertEqual([t.channel_id for t in reads._targets(self.grant, self.key)], ["public"])
+            self.assertEqual([t.channel_id for t in reads._targets(self.grant, self.key, recent_only=True)], ["public"])
 
     def test_mark_read_accepts_new_displayed_message_before_catalog_activity_refresh(self):
         conversation = self.conversation("DOLD", age=60)
@@ -402,7 +419,7 @@ class PrivateUnreadHistoryTests(SimpleTestCase):
 class ReadStatePageTests(SimpleTestCase):
     def page(self, requested=None, on_request=lambda: None, *, cursor=0, bootstrap=None, kind="im"):
         authority = SlackReadStateTests().authority()
-        grant = SimpleNamespace(slack_user_id="UOWNER")
+        grant = SimpleNamespace(slack_user_id="UOWNER", last_discovery_at=timezone.now())
         targets = [reads.ReadTarget(f"mirror-{i}", f"D{i}", kind) for i in range(8)]
 
         def response(*args, **kwargs):
@@ -580,6 +597,41 @@ class BackgroundReadCacheTests(SimpleTestCase):
         self.assertEqual(result['channels'], {'mirror-7': value})
         self.assertIsNone(result['next_cursor'])
         self.assertEqual(result['retry_after_seconds'], 10)
+        self.assertFalse(result['snapshot_complete'])
+        self.assertEqual(result['read_state_coverage']['available_channels'], 1)
+        self.assertEqual(result['read_state_coverage']['expected_channels'], 8)
+
+    def test_confirmed_nonmembership_removes_old_client_badges_without_hiding_unknowns(self):
+        from django.test import override_settings
+        authority = SlackReadStateTests().authority()
+        excluded = reads.ReadTarget("mirror-0", "D0", "im")
+        unknown = reads.ReadTarget("mirror-1", "D1", "im")
+        cached = {
+            reads._cache_key(authority, excluded): {"available": False, "excluded": True, "fetched_at": 1000},
+            reads._cache_key(authority, unknown): {"available": False, "fetched_at": 1000},
+        }
+        with override_settings(MESSAGE_SYNC_ENABLED=True):
+            result, _ = self.page(bootstrap=cached)
+        self.assertNotIn("mirror-0", result["authorized_channel_ids"])
+        self.assertIn("mirror-1", result["authorized_channel_ids"])
+        self.assertFalse(result["snapshot_complete"])
+
+    def test_full_shared_cache_still_requires_available_and_fresh_source_results(self):
+        from django.test import override_settings
+        authority = SlackReadStateTests().authority()
+        for available, fetched_at, complete, fresh in (
+            (False, 1000, False, False), (True, 800, True, False), (True, 1000, True, True),
+        ):
+            cached = {
+                reads._cache_key(authority, reads.ReadTarget(f"mirror-{i}", f"D{i}", "im")):
+                {"available": available, "is_unread": False, "fetched_at": fetched_at}
+                for i in range(8)
+            }
+            with override_settings(MESSAGE_SYNC_ENABLED=True), patch.object(reads.time, "time", return_value=1000):
+                result, calls = self.page(bootstrap=cached)
+            self.assertEqual(calls, [])
+            self.assertEqual(result["snapshot_complete"], complete)
+            self.assertEqual(result["read_state_coverage"]["fresh"], fresh)
 
     def test_metadata_checkpoint_resumes_history_without_repeating_info_or_retaining_text(self):
         authority = SlackReadStateTests().authority()
