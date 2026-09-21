@@ -12,6 +12,8 @@ from .identity import verified_identity_for_buzz
 class PublicBridgeConsentRequired(RuntimeError):
     """A queued public send lacks current account permission for AI sharing."""
 
+    permanent = True
+
 
 def send_with_ai_consent(delivery, send, **kwargs):
     """Recheck the signed sender and hold their consent lock through Slack I/O.

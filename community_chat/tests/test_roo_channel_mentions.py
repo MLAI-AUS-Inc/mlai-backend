@@ -291,10 +291,10 @@ class RooChannelDeliveryTests(TestCase):
         client.conversations_invite.assert_not_called()
 
     @patch("integrations.services.slack_dm_mirror.WebClient")
-    def test_removed_membership_prevents_post_even_after_message_was_queued(
+    def test_removed_owner_prevents_post_even_after_message_was_queued(
         self, web_client
     ):
-        client = self.slack_client(web_client, members=["UONE", "UTWO"])
+        client = self.slack_client(web_client, members=["UROO", "UTWO"])
         self.assertEqual(
             mirror.ingest_mlai_dm_event(self.payload())["status"], "enqueued"
         )
@@ -307,7 +307,7 @@ class RooChannelDeliveryTests(TestCase):
         )
         self.assertEqual(
             mirror.ingest_mlai_dm_event(
-                self.payload(tags=[["slack-mention", "UOTHER", "Roo"]])
+                self.payload(tags=[["slack-mention", "invalid", "Roo"]])
             )["status"],
             "rejected",
         )

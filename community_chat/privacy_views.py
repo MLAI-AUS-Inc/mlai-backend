@@ -57,8 +57,10 @@ class AiConsentView(PrivacyView):
         can_withdraw = AiConsentRecord.objects.filter(
             user=request.user, purpose="roo_chat", granted_at__isnull=False, withdrawn_at__isnull=True,
         ).exists()
+        from .reaction_permissions import reaction_requires_ai_consent
         return Response({**ai_disclosure(), "granted": bool(has_ai_consent(request.user.pk)),
-                         "can_withdraw": can_withdraw})
+                         "can_withdraw": can_withdraw,
+                         "reaction_requires_consent": reaction_requires_ai_consent(request.query_params.get("reaction_target"))})
 
     def put(self, request):
         serializer = ConsentSerializer(data=request.data)

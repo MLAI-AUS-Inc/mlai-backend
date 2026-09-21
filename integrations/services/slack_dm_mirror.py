@@ -3905,14 +3905,14 @@ def ingest_mlai_dm_event(payload: dict[str, Any]) -> dict[str, Any] | None:
             CommunityBridgeDeliveryType.EDIT,
         }:
             from integrations.services.slack_channel_mentions import (
-                render_outgoing_roo_mentions,
+                render_slack_mentions,
             )
 
             raw_payload = payload.get("raw_payload")
             tags = raw_payload.get("tags", []) if isinstance(raw_payload, dict) else []
             try:
-                queued_text, mention_ids = render_outgoing_roo_mentions(
-                    queued_text, tags if isinstance(tags, list) else [], conversation
+                queued_text, mention_ids = render_slack_mentions(
+                    queued_text, tags if isinstance(tags, list) else []
                 )
             except ValueError:
                 return {"status": "rejected", "error": "slack_mention_unavailable"}
@@ -7602,31 +7602,21 @@ def _verify_ai_recipients_before_send(delivery, client):
 
 def _verify_roo_mentions_before_send(delivery, client):
     """Revalidate a queued mention with Slack while the owner grant is locked."""
-    from integrations.services.slack_channel_mentions import validate_roo_channel_access
-    from integrations.services.slack_roo import public_roo_target
+    from integrations.services.slack_mentions import validate_mention_users
 
     ids = (delivery.metadata or {}).get("slack_mention_ids") or []
     if not ids:
         return
-    target = public_roo_target()
-    if not target or ids != [target[1]]:
-        raise SlackDmMirrorAuthorizationError(
-            "Roo is no longer available in this channel."
-        )
     conversation = delivery.conversation
-    channel = (
-        client.conversations_info(channel=conversation.slack_conversation_id).get(
-            "channel"
-        )
-        or {}
-    )
+    channel = client.conversations_info(channel=conversation.slack_conversation_id).get("channel") or {}
+    if (channel.get("id") != conversation.slack_conversation_id or channel.get("is_archived")
+            or any(channel.get(flag) for flag in ("is_ext_shared", "is_shared", "is_org_shared"))):
+        raise SlackDmMirrorAuthorizationError("This Slack conversation is no longer available.")
     members = set()
     cursor = ""
     seen = set()
     while True:
-        response = client.conversations_members(
-            channel=conversation.slack_conversation_id, limit=200, cursor=cursor
-        )
+        response = client.conversations_members(channel=conversation.slack_conversation_id, limit=200, cursor=cursor)
         members.update(response.get("members") or [])
         cursor = str((response.get("response_metadata") or {}).get("next_cursor") or "")
         if not cursor:
@@ -7634,11 +7624,10 @@ def _verify_roo_mentions_before_send(delivery, client):
         if cursor in seen:
             raise SlackDmMirrorError("Slack member pagination made no progress.")
         seen.add(cursor)
-    bot = client.users_info(user=target[1]).get("user") or {}
-    if not validate_roo_channel_access(conversation, channel, members, bot):
-        raise SlackDmMirrorAuthorizationError(
-            "Roo is no longer available in this channel."
-        )
+    if conversation.grant.slack_user_id not in members:
+        raise SlackDmMirrorAuthorizationError("You are no longer in this Slack conversation.")
+    validate_mention_users(client, ids, conversation.slack_workspace_id,
+                           scope=f"grant:{conversation.grant_id}:{connection_slack_oauth_generation(conversation.grant.connection)}")
 
 
 def _deliver_to_slack(delivery: SlackDmMirrorDelivery) -> None:

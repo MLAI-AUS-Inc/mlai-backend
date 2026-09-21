@@ -6,12 +6,13 @@ import hashlib
 import re
 from dataclasses import dataclass
 from urllib.parse import urlparse
+from urllib.error import URLError
 
 import requests
 from django.conf import settings
 from django.core.cache import cache
 from slack_sdk import WebClient
-from slack_sdk.errors import SlackApiError
+from slack_sdk.errors import SlackApiError, SlackRequestError
 
 from integrations.models import (
     CommunityBridgeChannel,
@@ -369,6 +370,19 @@ def _slack_file_info(
     cached = cache.get(cache_key)
     if isinstance(cached, dict):
         return cached
+    # Concurrent rows/devices requesting the same file share one source read.
+    # Authorization still runs for every caller after this metadata lookup.
+    lock_key = cache_key + ":loading"
+    if not cache.add(lock_key, True, timeout=30):
+        raise SlackFilePreviewDeferred(1)
+    try:
+        return _fetch_slack_file_info(file_id, access_token=access_token,
+                                      workspace_id=workspace_id, cache_key=cache_key)
+    finally:
+        cache.delete(lock_key)
+
+
+def _fetch_slack_file_info(file_id, *, access_token, workspace_id, cache_key):
     if not access_token and not SlackBridgeClient.is_configured():
         raise SlackFilePreviewError("Slack image previews are not configured.")
     try:
@@ -398,6 +412,8 @@ def _slack_file_info(
                 int(raw_retry) if str(raw_retry).isdigit() else 2
             ) from exc
         raise SlackFilePreviewError("The Slack file could not be loaded.") from exc
+    except (TimeoutError, ConnectionError, URLError, SlackRequestError) as exc:
+        raise SlackFilePreviewDeferred(2) from exc
     except Exception as exc:
         raise SlackFilePreviewError("The Slack file could not be loaded.") from exc
     if not response.get("ok") or not isinstance(response.get("file"), dict):

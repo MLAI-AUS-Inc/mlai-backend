@@ -473,11 +473,19 @@ class CommunityBridgeDiscordClient(discord.Client):
             source_platform=delivery["source_platform"],
             channel=delivery.get("channel"),
         )
+        from integrations.services.slack_channel_mentions import render_slack_mentions
+        from integrations.services.slack_mentions import validate_mention_users
+        body, mention_ids = render_slack_mentions(
+            str(payload.get("text") or ""), (payload.get("metadata") or {}).get("slack_mention_tags") or [],
+        )
+        if mention_ids:
+            await asyncio.to_thread(validate_mention_users, SlackBridgeClient.get_client(), mention_ids,
+                                    (delivery.get("channel") or {}).get("slack_workspace_id", ""), scope="public-bot")
         text = build_mirrored_text(
             destination_platform=CommunityBridgePlatform.SLACK,
             source_platform=delivery["source_platform"],
             author_display_name=author_display_name,
-            body=str(payload.get("text") or ""),
+            body=body,
             attachments=payload.get("attachments") or [],
         )
 
