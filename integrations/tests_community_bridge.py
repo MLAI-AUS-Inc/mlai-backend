@@ -2348,7 +2348,8 @@ class BuzzCommunityBridgeWorkerTests(TransactionTestCase):
 
         delivery.refresh_from_db()
         self.assertEqual(delivery.status, CommunityBridgeDeliveryStatus.COMPLETED)
-        self.assertIn("Alice (MLAI Chat)", mock_post.call_args.kwargs["text"])
+        self.assertIn("*Alice (<", mock_post.call_args.kwargs["text"])
+        self.assertIn("|MLAI Chat>)*", mock_post.call_args.kwargs["text"])
         self.assertRegex(
             mock_post.call_args.kwargs["client_msg_id"],
             r"^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",

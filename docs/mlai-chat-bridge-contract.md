@@ -28,6 +28,11 @@ MLAI Chat is another client surface, not a one-time data migration.
   closed.
 - Mirrored messages are visibly attributed to the source author and platform,
   but are signed/sent by a dedicated MLAI bridge identity.
+  For MLAI Chat messages delivered to Slack, the `MLAI Chat` attribution is a
+  hyperlink to the original message in the browser app at
+  `COMMUNITY_CHAT_FRONTEND_URL/channels/<channel>?messageId=<event>`. Creates,
+  replies, and subsequent edits use the same message target. Existing Slack
+  posts gain the link when edited; there is no historical rewrite.
 - Chat-origin writes into public Slack require current account AI-sharing
   permission, since that public history can be used as Roo context. Creates,
   edits and reaction additions recheck consent at dispatch, including retries;

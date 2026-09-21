@@ -1,5 +1,6 @@
 import uuid
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 from django.test import SimpleTestCase, override_settings
 
@@ -13,9 +14,77 @@ from integrations.services.community_bridge.contracts import (
     CanonicalBridgeEvent,
 )
 from integrations.services.community_bridge.formatting import (
+    build_mirrored_text,
     emoji_to_slack_reaction,
     slack_reaction_to_emoji,
 )
+from integrations.services.community_bridge.worker import CommunityBridgeDiscordClient
+
+
+@override_settings(COMMUNITY_CHAT_FRONTEND_URL="https://chat.example/")
+class SlackChatAttributionTests(SimpleTestCase):
+    async def test_create_reply_and_edit_link_to_original_chat_message(self):
+        worker = "integrations.services.community_bridge.worker"
+        client = SimpleNamespace(
+            _resolve_author_display_name=AsyncMock(return_value="Sam Donegan"),
+            _resolve_parent_destination_message=AsyncMock(return_value="1710000000.1"),
+        )
+        for operation, parent in [("create", ""), ("create", "parent-id"), ("edit", "parent-id")]:
+            with self.subTest(operation=operation, parent=parent):
+                delivery = {
+                    "id": "delivery-id",
+                    "source_platform": "buzz",
+                    "delivery_type": operation,
+                    "source_channel_id": "chat-channel",
+                    "source_message_id": "a" * 64,
+                    "source_parent_message_id": parent,
+                    "target_channel_id": "C-SLACK",
+                    "payload": {"text": "Hello from MLAI Chat"},
+                }
+                with (
+                    patch(f"{worker}.send_with_ai_consent", side_effect=lambda delivery, send, **kwargs: send(**kwargs)),
+                    patch(f"{worker}.SlackBridgeClient.post_message", return_value={}) as post,
+                    patch(f"{worker}.SlackBridgeClient.update_message") as update,
+                    patch(f"{worker}.complete_create_delivery"),
+                    patch(f"{worker}.complete_delivery"),
+                    patch(f"{worker}.resolve_message_link", return_value={
+                        "destination_channel_id": "C-SLACK",
+                        "destination_message_id": "1710000000.2",
+                    }),
+                ):
+                    await CommunityBridgeDiscordClient._deliver_to_slack(client, delivery)
+                sent = update if operation == "edit" else post
+                self.assertEqual(
+                    sent.call_args.kwargs["text"],
+                    "*Sam Donegan (<https://chat.example/channels/chat-channel?messageId="
+                    + "a" * 64 + "|MLAI Chat>)*\n\nHello from MLAI Chat",
+                )
+
+    def test_link_escapes_slack_control_characters(self):
+        self.assertEqual(
+            build_mirrored_text(
+                destination_platform="slack", source_platform="buzz",
+                author_display_name="Sam", body="Hello",
+                source_url="https://chat.example/channels/channel?messageId=abc&thread=root",
+            ),
+            "*Sam (<https://chat.example/channels/channel?messageId=abc&amp;thread=root|MLAI Chat>)*\n\nHello",
+        )
+
+    def test_other_platform_attribution_remains_plain_text(self):
+        for destination, source, expected in [
+            ("slack", "discord", "*Sam (Discord)*"),
+            ("buzz", "slack", "**Sam (Slack)**"),
+            ("discord", "buzz", "**Sam (MLAI Chat)**"),
+        ]:
+            with self.subTest(destination=destination, source=source):
+                self.assertEqual(
+                    build_mirrored_text(
+                        destination_platform=destination, source_platform=source,
+                        author_display_name="Sam", body="Hello",
+                        source_url="https://chat.example/",
+                    ),
+                    expected + "\n\nHello",
+                )
 
 
 class CanonicalBridgeEventTests(SimpleTestCase):
