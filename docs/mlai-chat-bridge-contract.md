@@ -1137,7 +1137,8 @@ while membership is loading), verified `profile_id`/`pubkey` bindings, a resumab
 `next_cursor`, `membership_pending`, and `retry_after_seconds`. It never returns
 email addresses. Unbridged native channel searches set `native_only`; invitations
 there use the verified native key and require an existing MLAI Chat account.
-Search pages are cached per grant/consent/OAuth generation and
+Unlinked identities are resolved with one batched query per page; linked accounts
+still resolve against current device bindings. Search pages are cached per grant/consent/OAuth generation and
 revalidated against current authority before returning. Clients must follow
 continuation cursors even when a page contains no matches.
 
