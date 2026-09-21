@@ -7,6 +7,8 @@ from django.db import models, transaction
 from django.db.models import Q
 from django.utils import timezone
 
+from .apple_models import AppleIapNotification, AppleIapTransaction  # noqa: F401
+
 
 POINTS_PURCHASE_EXPIRY_HOURS = 24
 
@@ -85,6 +87,8 @@ class PointsAccount(models.Model):
     # integer fields above remain during the compatibility window and expose
     # only whole, spendable Roo to older clients.
     balance_microroo = models.BigIntegerField(default=0, help_text="Current spendable balance in microroo")
+    digital_balance_microroo = models.PositiveBigIntegerField(default=0)
+    digital_refund_debt_microroo = models.PositiveBigIntegerField(default=0)
     earned_balance_microroo = models.BigIntegerField(default=0, help_text="Earned balance in microroo")
     purchased_topup_balance_microroo = models.BigIntegerField(default=0, help_text="Purchased balance in microroo")
     lifetime_earned_microroo = models.BigIntegerField(default=0, help_text="Lifetime earned in microroo")
@@ -531,6 +535,12 @@ class Ledger(models.Model):
     # New structured fields - nullable for backwards compat
     delta = models.IntegerField(null=True, blank=True, help_text="Points change (positive=earn, negative=spend)")
     delta_microroo = models.BigIntegerField(null=True, blank=True, help_text="Exact change in microroo")
+    digital_delta_microroo = models.BigIntegerField(default=0)
+    purchased_delta_microroo = models.BigIntegerField(null=True, blank=True)
+    refund_of = models.ForeignKey(
+        "self", null=True, blank=True, on_delete=models.SET_NULL,
+        related_name="service_refunds",
+    )
     kind = models.CharField(max_length=10, choices=KIND_CHOICES, null=True, blank=True)
     source = models.CharField(max_length=20, choices=SOURCE_CHOICES, default='LEGACY')
     reference_type = models.CharField(max_length=50, blank=True, null=True, help_text="e.g. TASK_SUBMISSION, BOOKING")

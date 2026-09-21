@@ -606,7 +606,7 @@ def _content_factory_balance_for_user(user) -> int:
 
     balance_data = PointsService.get_balance(user)
     try:
-        return int(balance_data.get("balance") or 0)
+        return int(balance_data.get("digital_service_balance_microroo") or 0) // 1_000_000
     except (TypeError, ValueError):
         return 0
 
@@ -854,6 +854,20 @@ def charge_content_factory_topic_generation_for_user(
     return user, ledger, cost_points
 
 
+def _original_content_charge_points(user, key):
+    """Refund the recorded charge even if the live price changes during a run."""
+    from roo.models import Ledger
+    charge = Ledger.objects.filter(idempotency_key=key, kind="SPEND").first()
+    if charge is None:
+        return 0
+    if charge.user_id != user.pk or charge.source != CONTENT_FACTORY_LEDGER_SOURCE:
+        raise ArticleGenerationError("The original charge does not belong to this request.")
+    amount = -(charge.delta_microroo or 0)
+    if amount <= 0 or amount % 1_000_000:
+        raise ArticleGenerationError("The original article charge needs reconciliation.")
+    return amount // 1_000_000
+
+
 def _refund_content_factory_request(
     *,
     user,
@@ -866,7 +880,7 @@ def _refund_content_factory_request(
     from roo.services import PointsService
 
     client_request_id = _get_client_request_id(article_request)
-    cost_points = get_content_factory_article_cost_points(resolved_domain)
+    cost_points = _original_content_charge_points(user, f"content_factory:charge:{client_request_id}")
     if cost_points == 0:
         return None
 
@@ -878,6 +892,7 @@ def _refund_content_factory_request(
         description=f"Automatic refund for failed Content Factory start for {resolved_domain}: {reason}",
         created_by_slack_id=requested_by_slack_user_id,
         idempotency_key=f"content_factory:refund:{client_request_id}",
+        original_spend_key=f"content_factory:charge:{client_request_id}",
         reference_type="CONTENT_FACTORY",
         reference_id=_ledger_reference_id(client_request_id),
     )
@@ -917,7 +932,7 @@ def refund_content_factory_topic_generation_for_user(
     from roo.services import PointsService
 
     client_request_id = _get_client_request_id(article_request)
-    cost_points = get_content_factory_content_island_topic_cost_points(resolved_domain)
+    cost_points = _original_content_charge_points(user, f"content_factory:topic_generation:charge:{client_request_id}")
     if cost_points == 0:
         return None
 
@@ -928,6 +943,7 @@ def refund_content_factory_topic_generation_for_user(
         description=f"Automatic refund for failed Content Factory topic generation for {resolved_domain}: {reason}",
         created_by_slack_id=actor_id,
         idempotency_key=f"content_factory:topic_generation:refund:{client_request_id}",
+        original_spend_key=f"content_factory:topic_generation:charge:{client_request_id}",
         reference_type="CONTENT_FACTORY",
         reference_id=_ledger_reference_id(client_request_id),
     )

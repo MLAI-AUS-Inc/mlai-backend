@@ -590,6 +590,10 @@ COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED = _env_is_true(
     'COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED',
     False,
 )
+APPLE_IAP_ENABLED = _env_is_true('APPLE_IAP_ENABLED', False)
+APPLE_IAP_SANDBOX_ACCOUNT_TOKENS = tuple(
+    value.strip() for value in os.getenv('APPLE_IAP_SANDBOX_ACCOUNT_TOKENS', '').split(',') if value.strip()
+)
 COMMUNITY_CHAT_DEVICE_AUTH_ENABLED = _env_is_true(
     'COMMUNITY_CHAT_DEVICE_AUTH_ENABLED',
     False,

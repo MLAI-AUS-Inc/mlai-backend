@@ -180,6 +180,8 @@ jobs:
           roo.tests_api.CoworkingViewSetTests \
           roo.tests.CoworkingBookingAdminSafetyTests \
           roo.tests_kimi_usage \
+          roo.tests_apple_iap \
+          roo.test_apple_verification \
           roo.tests_meeting_rooms \
           core.tests.test_auth_contract \
           core.tests.test_auth_session \
@@ -210,6 +212,7 @@ jobs:
           community_chat.tests.test_account_sessions \
           community_chat.tests.test_account_profiles.AccountProfileTests \
           community_chat.tests.test_account_privacy.AccountPrivacyTests \
+          community_chat.tests.test_deletion_tasks \
           community_chat.tests.test_onboarding.MemberOnboardingTests \
           community_chat.tests.test_adapter \
           community_chat.tests.test_api \
@@ -420,6 +423,7 @@ jobs:
           community_chat.tests.test_api.CommunityChatDeviceAuthorityTransactionTests \
           community_chat.tests.test_account_profiles.AccountProfileConcurrencyTests \
           community_chat.tests.test_account_privacy.AccountPrivacyConcurrencyTests \
+          roo.tests_apple_iap.AppleConcurrencyTests \
           community_chat.tests.test_onboarding.MemberOnboardingConcurrencyTests \
           integrations.tests_coworking_handoff.CoworkingConsentConcurrencyTests \
           integrations.tests_public_bridge_consent.PublicBridgeConsentConcurrencyTests \
@@ -488,6 +492,7 @@ jobs:
           content_factory.tests_customer_profile_persistence \
           content_factory.tests_article_publish_status \
           content_factory.tests_written_article_discard \
+          roo.tests_apple_migrations \
           --verbosity 2
 
   deploy:

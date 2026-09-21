@@ -77,6 +77,8 @@ cookies.txt
 /*.md
 /docs/*.md
 /docs/**/*.md
+!/docs/apple-iap-and-deletion-migrations.md
+!/docs/apple-app-review-operations.md
 !/docs/content-islands.md
 !/docs/content-factory-editorial-contract.md
 !/docs/mlai-coding-billing-contract.md

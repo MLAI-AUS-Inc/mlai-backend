@@ -406,6 +406,11 @@ class Command(BaseCommand):
                 "Cannot merge an account with an explicit Roo-Founder Tools link; "
                 "manual support is required."
             )
+        # App Store account tokens are immutable purchase ownership. Never
+        # discard that lineage through a generic identity merge.
+        from roo.apple_models import AppleIapTransaction
+        if AppleIapTransaction.objects.filter(user__in=(source, target)).exists():
+            raise CommandError("Accounts with Apple purchases require purchase-aware support before merging.")
         self._assert_no_external_identity_state(source)
         invalidate_unused_slack_founder_link_requests(source, target)
 

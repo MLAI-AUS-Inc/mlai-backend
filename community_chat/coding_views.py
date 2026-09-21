@@ -105,11 +105,11 @@ class CodingEntitlementView(APIView):
             {
                 "pilot_access": pilot_access,
                 "can_start_turn": bool(
-                    pilot_access and balance["balance_microroo"] > 0 and active is None
+                    pilot_access and balance["digital_service_balance_microroo"] > 0 and active is None
                 ),
                 "model": "kimi-k3",
-                "balance_microroo": microroo_string(balance["balance_microroo"]),
-                "balance_roo": roo_decimal_string(balance["balance_microroo"]),
+                "balance_microroo": microroo_string(balance["digital_service_balance_microroo"]),
+                "balance_roo": roo_decimal_string(balance["digital_service_balance_microroo"]),
                 "active_turn": _turn_payload(active) if active else None,
                 "pricing": pricing_payload(pricing),
                 "runtime": {
@@ -200,8 +200,8 @@ class CodingTurnFinalizeView(APIView):
                 "status": turn.status,
                 "charged_microroo": microroo_string(turn.settled_microroo),
                 "released_microroo": microroo_string(turn.released_microroo),
-                "balance_microroo": microroo_string(balance["balance_microroo"]),
-                "balance_roo": roo_decimal_string(balance["balance_microroo"]),
+                "balance_microroo": microroo_string(balance["digital_service_balance_microroo"]),
+                "balance_roo": roo_decimal_string(balance["digital_service_balance_microroo"]),
             },
             status=status.HTTP_202_ACCEPTED if has_ambiguous else status.HTTP_200_OK,
         )

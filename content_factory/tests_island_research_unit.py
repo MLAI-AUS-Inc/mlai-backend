@@ -121,7 +121,7 @@ class IslandResearchTests(unittest.TestCase):
 
     def test_terminal_failure_or_empty_result_refunds_actual_payer_once(self):
         payer = SimpleNamespace(pk="original-payer")
-        ledger = SimpleNamespace(user=payer, delta=-1, source="CONTENT_FACTORY", created_by_slack_id="web:payer", reference_id="key")
+        ledger = SimpleNamespace(idempotency_key="content_factory:topic_generation:charge:key", user=payer, delta=-1, source="CONTENT_FACTORY", created_by_slack_id="web:payer", reference_id="key")
         ledgers, points = Mock(), Mock()
         ledgers.select_related.return_value.filter.return_value.first.return_value = ledger
         run = SimpleNamespace(status="completed", domain="example.test", save=Mock(),
@@ -135,6 +135,7 @@ class IslandResearchTests(unittest.TestCase):
         points.refund.assert_called_once()
         self.assertIs(points.refund.call_args.kwargs["user"], payer)
         self.assertEqual(points.refund.call_args.kwargs["delta"], 1)
+        self.assertEqual(points.refund.call_args.kwargs["original_spend_key"], ledger.idempotency_key)
         self.assertTrue(run.result["island_research_refunded"])
 
     def test_ambiguous_dispatch_and_successful_research_are_never_refunded(self):

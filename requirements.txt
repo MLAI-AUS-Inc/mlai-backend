@@ -52,3 +52,4 @@ google-api-python-client
 playwright>=1.52.0
 redis>=4.2,<6  # Django builtin RedisCache (shared cross-worker cache; DO Valkey-compatible)
 sentry-sdk[django]>=2.0,<3  # Error reporting; inert unless SENTRY_DSN is set (see core/observability.py)
+app-store-server-library==3.1.2  # Apple's signed StoreKit transaction verifier

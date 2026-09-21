@@ -1,4 +1,5 @@
 from django.urls import include, path
+from .apple_iap_views import AppleIapView, AppleIapTransactionView, AppleIapNotificationView
 from .privacy_views import AccountDeletionView, AiConsentView
 from .onboarding_views import MemberOnboardingView
 from .permission_views import ChatPermissionsView, RelayChatRoleView, ChatModeratorView, ChatMemberRolesView
@@ -44,6 +45,10 @@ from .usage_views import (
 
 
 urlpatterns = [
+    path("apple-iap/", AppleIapView.as_view(), name="community_chat_apple_iap"),
+    path("apple-iap/transactions/", AppleIapTransactionView.as_view(), name="community_chat_apple_transaction"),
+    path("apple-iap/notifications/production/", AppleIapNotificationView.as_view(), {"environment": "production"}),
+    path("apple-iap/notifications/sandbox/", AppleIapNotificationView.as_view(), {"environment": "sandbox"}),
     path("account/onboarding/", MemberOnboardingView.as_view(), name="community_chat_onboarding"),
     path("account/deletion/", AccountDeletionView.as_view(), name="community_chat_account_deletion"),
     path("account/ai-consent/", AiConsentView.as_view(), name="community_chat_ai_consent"),

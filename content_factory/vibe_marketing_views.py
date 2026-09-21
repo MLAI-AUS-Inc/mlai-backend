@@ -637,7 +637,7 @@ def _roo_points_balance_for_user(user) -> int:
 
     balance_data = PointsService.get_balance(user)
     try:
-        return int(balance_data.get("balance") or 0)
+        return int(balance_data.get("digital_service_balance_microroo") or 0) // 1_000_000
     except (TypeError, ValueError):
         return 0
 

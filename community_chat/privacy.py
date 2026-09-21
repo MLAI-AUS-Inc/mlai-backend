@@ -101,8 +101,12 @@ def request_account_deletion(*, authenticated_session, scope, policy_version):
             status=AccountDeletionRequest.Status.COMPLETED,
         ).first()
         if existing:
+            from .deletion_tasks import schedule_deletion
+            schedule_deletion(existing)
             return existing, False
         if session.created_at < timezone.now() - timedelta(minutes=10):
             raise PermissionDenied({"code": "reauthentication_required", "detail": "Sign in again before requesting deletion."})
         record = AccountDeletionRequest.objects.create(user=user, scope=scope, policy_version=policy_version)
+        from .deletion_tasks import schedule_deletion
+        schedule_deletion(record)
         return record, True
