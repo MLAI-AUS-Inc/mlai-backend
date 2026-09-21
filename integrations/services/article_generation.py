@@ -1214,19 +1214,17 @@ def maybe_auto_refund_terminal_failure(
     request_meta = dict(getattr(billed_job, "request_meta", {}) or {})
     request_meta.setdefault("client_request_id", client_request_id)
     resolved_domain = getattr(billed_job, "domain", "") or request_meta.get("domain")
-    refund_points = get_content_factory_article_cost_points(resolved_domain)
-    if refund_points <= 0:
-        return False, 0
-
     refund_reason = str(error_message or resolved_error_code or "deterministic failure").strip()
-    _refund_content_factory_request(
+    refund_ledger = _refund_content_factory_request(
         user=user,
         slack_user_id=getattr(billed_job, "slack_user_id", "") or getattr(job, "slack_user_id", ""),
         article_request=request_meta,
         resolved_domain=resolved_domain,
         reason=refund_reason,
     )
-    return True, refund_points
+    if refund_ledger is None:
+        return False, 0
+    return True, refund_ledger.delta_microroo // 1_000_000
 
 
 def _job_uses_deferred_billing(job) -> bool:
