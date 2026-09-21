@@ -13,6 +13,9 @@ subsystem-specific contracts and runbooks.
 
 ## Community chat APIs
 
+- [Private member onboarding](community-chat-onboarding.md) — email signup,
+  adults-only admission, private preferences and committee review
+
 - [Account privacy controls](community-chat-account-privacy.md) — versioned AI
   consent, deletion-request receipts, and the remaining release gates
 

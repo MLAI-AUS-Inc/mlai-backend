@@ -47,6 +47,9 @@ def session(user_id=2):
 class StartupContractTests(TestCase):
     def setUp(self):
         self.factory = APIRequestFactory()
+        admission = patch("community_chat.onboarding.require_community_access")
+        self.admission = admission.start()
+        self.addCleanup(admission.stop)
 
     def request(self, method="get", **kwargs):
         return getattr(self.factory, method)("/api/v1/my-startup/test/", **kwargs)
@@ -61,7 +64,20 @@ class StartupContractTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data["user"], 2)
         authenticate.assert_called_once_with("mlai_session_access_chat-user-two")
+        self.admission.assert_called_once_with(authenticate.return_value.user)
         self.assertEqual(response["Cache-Control"], "private, no-store")
+
+    @patch("community_chat.authentication.authenticate_access_token")
+    def test_pending_member_cannot_enter_startup_facade(self, authenticate):
+        from rest_framework.exceptions import PermissionDenied
+
+        authenticate.return_value = session()
+        self.admission.side_effect = PermissionDenied("onboarding_required")
+        response = EchoView.as_view()(
+            self.request(HTTP_COOKIE="mlai_chat_access=valid")
+        )
+        self.assertEqual(response.status_code, 403)
+        self.admission.assert_called_once_with(authenticate.return_value.user)
 
     def test_legacy_cookie_alone_cannot_enter(self):
         self.assertEqual(

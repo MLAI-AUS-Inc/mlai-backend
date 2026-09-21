@@ -41,6 +41,7 @@ from hospital.authentication import CustomJWTAuthentication
 from .authentication import (
     TOKEN_PREFIX,
     CommunityChatAccountAuthentication,
+    CommunityChatOnboardingAuthentication,
     CommunityChatBootstrapAuthentication,
 )
 from .account_cookies import (
@@ -154,7 +155,8 @@ class _EmailCodeBindingConflict(ValueError):
 
 
 def _is_eligible(user):
-    return bool(user and user.is_authenticated and user.is_active)
+    from .onboarding import has_community_access
+    return bool(user and user.is_authenticated and has_community_access(user))
 
 
 def _require_eligible(user):
@@ -739,6 +741,7 @@ class EmailCodeRequestView(APIView):
             device_name=device.get("name", ""),
             public_key=device["public_key"],
             requested_ip_digest=ip_digest,
+            onboarding_version=data.get("onboarding_version", 0),
         )
         _uniform_email_code_delay(started_at)
         resend_available_at = challenge.created_at + timedelta(
@@ -798,7 +801,12 @@ class EmailCodeVerifyView(APIView):
                     # and terminal invalidation remain durable.
                     invalid_email_code = True
                 else:
-                    raw_token, token, _ = _issue_email_code_bootstrap(user, challenge)
+                    if settings.COMMUNITY_CHAT_SIGNUP_ENABLED and not _is_eligible(user):
+                        from .models import CommunityMemberProfile
+                        CommunityMemberProfile.objects.get_or_create(user=user)
+                    raw_token, token = "", None
+                    if _is_eligible(user):
+                        raw_token, token, _ = _issue_email_code_bootstrap(user, challenge)
                     account_session = issue_account_session(user, challenge)
         except _EmailCodeBindingConflict as exc:
             return Response(
@@ -821,15 +829,17 @@ class EmailCodeVerifyView(APIView):
         # the committed transaction above. Adapter DELETEs are content-free,
         # durable work drained by the community-bridge maintenance worker.
         # Never hold the login response open while a large DM archive drains.
+        from .onboarding import onboarding_payload
         response = Response(
             {
-                "status": "authenticated",
+                "status": "authenticated" if token is not None else "onboarding_required",
                 "bootstrap_token": raw_token,
-                "expires_at": token.expires_at,
+                "expires_at": token.expires_at if token is not None else account_session.session.access_expires_at,
                 "relay_url": settings.COMMUNITY_CHAT_RELAY_URL,
                 "origin": challenge.origin,
                 "profile": own_chat_profile(user),
                 "session": _account_session_payload(account_session),
+                "onboarding": onboarding_payload(user),
             },
             status=status.HTTP_200_OK,
         )
@@ -907,13 +917,14 @@ class AccountSessionLogoutView(APIView):
 class AccountView(APIView):
     """Read the member's account and update its versioned public profile."""
 
-    authentication_classes = (CommunityChatAccountAuthentication,)
+    authentication_classes = (CommunityChatOnboardingAuthentication,)
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
         return self._response(request, request.user)
 
     def patch(self, request):
+        _require_eligible(request.user)
         serializer = CommunityChatProfileUpdateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         try:
@@ -932,14 +943,16 @@ class AccountView(APIView):
         return self._response(request, user)
 
     def _response(self, request, user):
+        from .onboarding import onboarding_payload
         account_session = request.community_chat_account_session
         devices = CommunityChatDevice.objects.filter(
             user=user,
             status__in=(DeviceBindingStatus.PENDING, DeviceBindingStatus.VERIFIED),
         )
-        return Response(
+        response = Response(
             {
                 "authenticated": True,
+                "onboarding": onboarding_payload(user),
                 "profile": own_chat_profile(user),
                 "public_profile": public_chat_profile(user),
                 "session": {
@@ -955,6 +968,8 @@ class AccountView(APIView):
                 "devices": [_device_payload(device) for device in devices],
             }
         )
+        response["Cache-Control"] = "no-store"
+        return response
 
 
 class HomeView(APIView):

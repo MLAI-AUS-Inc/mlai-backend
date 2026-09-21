@@ -2,6 +2,7 @@ import base64
 import hashlib
 import logging
 import math
+from types import SimpleNamespace
 from datetime import timedelta
 
 from cryptography.fernet import Fernet, InvalidToken
@@ -33,6 +34,16 @@ def _decrypt_email_code(encrypted):
     return _cipher().decrypt(str(encrypted).encode("ascii")).decode("ascii")
 
 
+def encrypt_signup_email(email):
+    """Keep an unverified recipient encrypted until its short-lived proof ends."""
+    return _cipher().encrypt(str(email).encode("utf-8")).decode("ascii")
+
+
+def decrypt_signup_email(encrypted):
+    """Recover the recipient only inside verification or delivery code."""
+    return _cipher().decrypt(str(encrypted).encode("ascii")).decode("utf-8")
+
+
 def send_community_chat_email_code(user, code):
     """Send one code through the dedicated Customer.io transaction."""
 
@@ -56,7 +67,7 @@ def send_community_chat_email_code(user, code):
             "support_url": "https://mlai.au/support",
         },
         "to": user.email,
-        "identifiers": {"id": str(user.id)},
+        "identifiers": {"id": str(user.id)} if user.id is not None else {"email": user.email},
     }
     return APIClient(api_key).send_email(request_body)
 
@@ -71,6 +82,10 @@ def claim_email_code_delivery():
     """Lease one due outbox row, including an abandoned send lease."""
 
     now = timezone.now()
+    from .models import CommunityChatEmailCodeChallenge
+    CommunityChatEmailCodeChallenge.objects.filter(
+        expires_at__lte=now,
+    ).exclude(encrypted_signup_email="").update(encrypted_signup_email="")
     stale_claim = now - timedelta(seconds=DELIVERY_LEASE_SECONDS)
     with transaction.atomic():
         delivery = (
@@ -130,7 +145,7 @@ def deliver_email_code(delivery_id):
     challenge = delivery.challenge
     now = timezone.now()
     if (
-        challenge.user_id is None
+        (challenge.user_id is None and not challenge.encrypted_signup_email)
         or challenge.consumed_at is not None
         or challenge.invalidated_at is not None
         or challenge.expires_at <= now
@@ -139,7 +154,16 @@ def deliver_email_code(delivery_id):
 
     try:
         code = _decrypt_email_code(delivery.encrypted_code)
-        response = send_community_chat_email_code(challenge.user, code)
+        if challenge.user_id is None:
+            if not settings.COMMUNITY_CHAT_SIGNUP_ENABLED:
+                return _cancel_delivery(delivery, now)
+            recipient = SimpleNamespace(
+                id=None, email=decrypt_signup_email(challenge.encrypted_signup_email),
+                first_name="", full_name="",
+            )
+        else:
+            recipient = challenge.user
+        response = send_community_chat_email_code(recipient, code)
     except InvalidToken:
         logger.error(
             "Chat email-code delivery payload could not be decrypted delivery_id=%s",

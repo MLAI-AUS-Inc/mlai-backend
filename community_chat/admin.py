@@ -1,4 +1,5 @@
 from django.contrib import admin
+from . import onboarding_admin  # noqa: F401 -- register the private review queue
 
 from .models import (
     AccountDeletionRequest,
