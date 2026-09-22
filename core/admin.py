@@ -2,6 +2,7 @@ from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
 from django.utils.html import format_html
 from .models import (
+    AccountBan,
     GlobalSettings,
     PasswordResetChallenge,
     PasswordResetEmailDelivery,
@@ -13,6 +14,19 @@ from .forms import CustomUserCreationForm, CustomUserChangeForm
 class UserAdmin(BaseUserAdmin):
     add_form = CustomUserCreationForm
     form = CustomUserChangeForm
+    actions = ('ban_mlai_accounts',)
+
+    @admin.action(description='Ban selected MLAI accounts (retain email)')
+    def ban_mlai_accounts(self, request, queryset):
+        from community_chat.account_bans import ban_account
+        from rest_framework.exceptions import APIException
+        for user in queryset:
+            try:
+                ban = ban_account(actor=request.user, user_id=user.pk, reason='Administrator action')
+                self.message_user(request, f'Account {user.pk} banned' + ('; chat revocation pending' if ban.revocation_pending else ''))
+            except APIException as exc:
+                self.message_user(request, str(exc), level='error')
+
     model = User
     list_display = ('email', 'first_name', 'last_name', 'slack_id', 'is_staff', 'email_verified_at', 'date_joined', 'updated', 'avatar_preview')
     list_filter = ('is_staff', 'is_superuser', 'is_active', 'groups')
@@ -83,3 +97,30 @@ class PasswordResetEmailDeliveryAdmin(admin.ModelAdmin):
     list_filter = ('status',)
     search_fields = ('challenge__user__email', 'challenge_id')
     readonly_fields = tuple(field.name for field in PasswordResetEmailDelivery._meta.fields)
+
+
+@admin.register(AccountBan)
+class AccountBanAdmin(admin.ModelAdmin):
+    """Retained email records; changes go through the audited ban service."""
+    list_display = ('email', 'banned_by', 'created_at', 'revoked_at', 'revocation_pending')
+    search_fields = ('email', 'user__first_name', 'user__last_name')
+    list_filter = ('revocation_pending', 'revoked_at')
+    readonly_fields = tuple(field.name for field in AccountBan._meta.fields)
+    actions = ('lift_bans',)
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+    @admin.action(description='Lift selected MLAI account bans')
+    def lift_bans(self, request, queryset):
+        from community_chat.account_bans import lift_account_ban
+        from rest_framework.exceptions import APIException
+        for ban in queryset:
+            try:
+                lift_account_ban(actor=request.user, ban_id=ban.pk)
+                self.message_user(request, f'Ban {ban.pk} lifted; fresh sign-in required')
+            except APIException as exc:
+                self.message_user(request, str(exc), level='error')

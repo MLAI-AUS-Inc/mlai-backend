@@ -229,6 +229,8 @@ jobs:
           community_chat.tests.test_roo_slack_dm \
           community_chat.tests.test_roo_channel_mentions \
           community_chat.tests.test_slack_mentions \
+          community_chat.tests.test_workspace_mentions_unit \
+          community_chat.tests.test_account_bans \
           community_chat.tests.test_password_auth \
           community_chat.tests.test_slack_dm_ineligible_retirement \
           community_chat.tests.test_slack_dm_io_authority \
@@ -255,6 +257,7 @@ jobs:
           integrations.tests_community_bridge_mention_backfill \
           integrations.tests_community_bridge_contracts \
           core.tests.test_auth_contract \
+          core.tests.test_account_ban_guards \
           tests.test_runtime_hardening \
           tests.test_scheduled_discovery_operability \
           tests.test_ci_reuse_pr_checks \

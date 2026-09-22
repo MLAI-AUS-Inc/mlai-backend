@@ -516,7 +516,9 @@ def _lock_slack_grant_api_authority(
 ) -> tuple[SlackDmMirrorGrant, ExternalServiceConnection]:
     """Lock and revalidate one exact authority in the global privacy order."""
 
-    get_user_model().objects.select_for_update().get(pk=authority.user_id)
+    user = get_user_model().objects.select_for_update().get(pk=authority.user_id)
+    if not user.is_active:
+        raise SlackDmMirrorAuthorizationError("This account is unavailable.")
     locked_grants = list(
         SlackDmMirrorGrant.objects.select_for_update()
         .filter(user_id=authority.user_id)

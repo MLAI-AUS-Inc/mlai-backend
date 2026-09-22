@@ -1143,9 +1143,23 @@ while membership is loading), verified `profile_id`/`pubkey` bindings, a resumab
 email addresses. Unbridged native channel searches set `native_only`; invitations
 there use the verified native key and require an existing MLAI Chat account.
 Unlinked identities are resolved with one batched query per page; linked accounts
-still resolve against current device bindings. Search pages are cached per grant/consent/OAuth generation and
-revalidated against current authority before returning. Clients must follow
+still resolve against current device bindings. Active private-channel search pages
+are cached per grant/consent/OAuth generation and revalidated against current
+authority before returning. Clients must follow
 continuation cursors even when a page contains no matches.
+
+Mention searches do not require a private-message import grant. Approved community
+members can search the configured community bot's workspace directory when imports
+are paused, disconnected or absent. The bot's `auth.test` workspace must match
+`MESSAGE_SYNC_SLACK_BOT_WORKSPACE_ID`; its credential needs `users:read`. These
+public metadata caches are partitioned by workspace and installation credential.
+Private Slack membership still uses only the owner's live grant. A paused private
+channel or an inaccessible public membership list reports unknown membership,
+never a fabricated empty member list. The configured Public Roo target is returned
+on an initial matching search even when directory reads are temporarily deferred.
+The bot token is never used to read private messages or invite people. DM directory
+requests without `channel_id`, invitations and DM creation retain their existing
+owner-consent requirements.
 
 Explicit `slack-mention` tags preserve selected Slack IDs through public and
 owner-private deliveries. The worker validates workspace identities and excludes
