@@ -16,21 +16,36 @@ class DiscoveryWorkerCadenceTests(IsolatedAsyncioTestCase):
                 events = []
 
                 async def dispatch(fn):
-                    self.assertIs(fn, worker.discover_grants_if_due)
-                    events.append("claim")
+                    fn()
 
                 async def sleep(seconds):
                     events.append(seconds)
-                    if len(events) == 6:
+                    if len(events) == 9:
                         raise asyncio.CancelledError
 
                 with (
                     patch.object(worker.asyncio, "to_thread", side_effect=dispatch),
                     patch.object(worker.asyncio, "sleep", side_effect=sleep),
+                    patch("community_chat.account_bans.process_account_ban_revocations", side_effect=lambda: events.append("revoke")),
+                    patch.object(worker, "discover_grants_if_due", side_effect=lambda: events.append("claim")),
                     self.assertRaises(asyncio.CancelledError),
                 ):
                     await worker._run_discovery_loop()
-                self.assertEqual(events, ["claim", expected] * 3)
+                self.assertEqual(events, ["revoke", "claim", expected] * 3)
+
+    async def test_discord_maintenance_retries_bans_before_discovery(self):
+        events = []
+
+        async def dispatch(fn):
+            fn()
+
+        with (
+            patch.object(worker.asyncio, "to_thread", side_effect=dispatch),
+            patch("community_chat.account_bans.process_account_ban_revocations", side_effect=lambda: events.append("revoke")),
+            patch.object(worker, "discover_grants_if_due", side_effect=lambda: events.append("claim")),
+        ):
+            await worker.CommunityBridgeDiscordClient.slack_dm_discovery_loop.coro(SimpleNamespace())
+        self.assertEqual(events, ["revoke", "claim"])
 
     async def test_discord_loop_uses_same_cadence_without_duplicate_start(self):
         for enabled, expected in ((True, 1.0), (False, 5.0)):
