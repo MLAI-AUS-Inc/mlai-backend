@@ -165,6 +165,9 @@ def schedule_private_recoveries(limit=5, *, row_limit=200):
                     # The state lock excludes concurrent claims; preserve all
                     # cursors and provider budgets, only make archive work due.
                     state.jobs.filter(kind="archive", due_at__gt=now).update(due_at=now)
+                # History scheduling can qualify publication through another
+                # locked state instance; never replace its newer evidence.
+                state.refresh_from_db(fields=["verified_ranges"])
                 state.verified_ranges = {**state.verified_ranges, "recovery": {**recovery, "scheduled_at": now.isoformat()}}
                 state.save(update_fields=["verified_ranges"])
                 scheduled += 1

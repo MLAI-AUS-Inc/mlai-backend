@@ -116,6 +116,17 @@ owner; other verified devices remain eligible within the normal audience limit.
 Revoked keys cannot use a queued hint. A later enrollment supersedes an earlier
 hint without resetting discovery cursors or history.
 
+Published history is tracked separately from current synchronization progress.
+The existing sync-state JSON records exact owner, consent, room, source-member,
+device-audience and history-window evidence only after a complete source scan
+and its required deliveries have drained. Empty completed scans can also
+qualify. Catalogue reads inspect this durable record without writing it, so
+server cache expiry and routine rescans do not hide previously available
+history. A successful generation-checked device audience update can carry the
+unchanged proof forward. Consent changes, source retirement and explicit
+history resets invalidate it; an in-flight update cannot restore an invalidated
+proof. This adds no table or migration.
+
 This prevents future broken room links. Already-null room IDs require a separate
 scoped recovery: historical registration rows can refer to multiple rooms, so
 an operator must establish current consent, source membership and delivery

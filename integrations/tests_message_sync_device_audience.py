@@ -294,3 +294,76 @@ class StableDeviceAudienceTests(SlackDmIoAuthorityFixture, TransactionTestCase):
         self.assertFalse(finalize_registration_attempt(request["attempt_id"], channel_id=self.room))
         self.conversation.refresh_from_db()
         self.assertNotEqual(self.conversation.status, "live")
+
+    def publish(self):
+        from integrations.services.message_sync.publication import record_publication_locked
+        with transaction.atomic():
+            self.assertTrue(record_publication_locked(self.conversation))
+
+    def test_publication_follows_successful_device_cas_during_background_refresh(self):
+        from integrations.services.slack_chat_catalog import _publication_key, catalog_conversations, catalog_payload
+
+        state = self.coverage()
+        self.conversation.latest_synced_ts = str(timezone.now().timestamp())
+        self.conversation.save()
+        self.publish()
+        state.refresh_from_db()
+        original = dict(state.verified_ranges["publication"])
+        self.conversation.history_backfilled_at = None
+        self.conversation.save()
+        state.verified_ranges["archive"] = {"classification": "incomplete"}
+        state.save()
+        request, _ = self.prepare()
+        self.assertEqual(request["private_audience"]["publication_proof"], original)
+        self.finish(request)
+        self.conversation.refresh_from_db()
+        state.refresh_from_db()
+        self.assertIsNone(self.conversation.history_backfilled_at)
+        self.assertEqual(state.verified_ranges["publication"]["published_at"], original["published_at"])
+        self.assertEqual(state.verified_ranges["publication"]["scope"], _publication_key(self.conversation))
+        entries = catalog_payload(catalog_conversations(SlackDmMirrorConversation.objects.filter(pk=self.conversation.pk)), self.owner_key)
+        self.assertTrue(entries[0]["ready_for_display"])
+
+    def test_retry_carries_only_the_frozen_current_publication(self):
+        state = self.coverage()
+        self.publish()
+        state.refresh_from_db()
+        original = dict(state.verified_ranges["publication"])
+        first, _ = self.prepare()
+        second, _ = self.prepare()
+        self.assertEqual(second["private_audience"]["publication_proof"], original)
+        self.finish(second)
+        state.refresh_from_db()
+        self.assertEqual(state.verified_ranges["publication"]["published_at"], original["published_at"])
+
+    def test_reset_winning_before_cas_does_not_resurrect_publication(self):
+        from integrations.services.message_sync.publication import invalidate_publication_locked
+
+        state = self.coverage()
+        self.publish()
+        request, _ = self.prepare()
+        with transaction.atomic():
+            invalidate_publication_locked(self.conversation)
+            self.conversation.history_backfilled_at = None
+            self.conversation.save()
+        self.finish(request)
+        state.refresh_from_db()
+        self.assertNotIn("publication", state.verified_ranges)
+
+    def test_same_epoch_consent_change_cannot_carry_frozen_publication(self):
+        from integrations.services.message_sync.publication import publication_for_transition, rebind_publication_locked
+
+        state = self.coverage()
+        self.publish()
+        state.refresh_from_db()
+        original = dict(state.verified_ranges["publication"])
+        request, _ = self.prepare()
+        registration = SlackDmMirrorDelivery.objects.get(pk=request["attempt_id"])
+        self.grant.consent_version = "changed-consent"
+        self.grant.save()
+        self.conversation.grant = self.grant
+        with transaction.atomic():
+            self.assertIsNone(publication_for_transition(self.conversation))
+            rebind_publication_locked(self.conversation, registration)
+        state.refresh_from_db()
+        self.assertEqual(state.verified_ranges["publication"], original)

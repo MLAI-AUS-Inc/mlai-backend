@@ -4,10 +4,12 @@ from unittest.mock import patch
 import uuid
 
 from django.core.cache import cache
+from django.db import connection, transaction
 from django.test import TransactionTestCase
+from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
-from community_chat.tests.test_slack_dm_io_authority import SlackDmIoAuthorityFixture
-from integrations.models import BridgeSyncState, SlackDmMirrorDelivery
+from community_chat.tests.test_slack_dm_io_authority import SCOPES, SlackDmIoAuthorityFixture
+from integrations.models import BridgeSyncState, SlackDmMirrorConversation, SlackDmMirrorDelivery, SlackDmMirrorGrant
 from integrations.services import slack_dm_mirror as dm
 from integrations.services.slack_chat_catalog import (
     _publication_key, catalog_conversations, catalog_payload, retired_catalog_payload,
@@ -37,6 +39,14 @@ class SlackImportReadinessTests(SlackDmIoAuthorityFixture, TransactionTestCase):
     def catalog(self):
         return catalog_payload(catalog_conversations(self.grant.conversations.all()), self.owner_key)
 
+    def record_publication(self):
+        from integrations.services.message_sync.publication import record_publication_locked
+        with transaction.atomic():
+            grant = SlackDmMirrorGrant.objects.select_for_update().get(pk=self.grant.pk)
+            conversation = SlackDmMirrorConversation.objects.select_for_update().get(pk=self.conversation.pk)
+            conversation.grant = grant
+            return record_publication_locked(conversation)
+
     def test_recent_import_requires_versioned_current_room_archive_proof(self):
         for proof in (
             {}, {"classification": "accessible_range"},
@@ -59,7 +69,7 @@ class SlackImportReadinessTests(SlackDmIoAuthorityFixture, TransactionTestCase):
     def test_previous_publication_cache_cannot_bypass_current_room_proof(self):
         self.state.verified_ranges = {}
         self.state.save(update_fields=["verified_ranges"])
-        old_key = _publication_key(self.conversation).replace("published-v2:", "published-v1:")
+        old_key = _publication_key(self.conversation).replace("published-v3:", "published-v1:")
         cache.set(old_key, True, 86400)
         self.assertFalse(self.catalog()[0]["ready_for_display"])
 
@@ -175,8 +185,9 @@ class SlackImportReadinessTests(SlackDmIoAuthorityFixture, TransactionTestCase):
 
     def test_published_chat_survives_routine_refresh_but_not_new_consent(self):
         self.assertTrue(self.catalog()[0]["ready_for_display"])
-        self.conversation.history_backfilled_at = None
-        self.conversation.save()
+        with transaction.atomic():
+            dm._mark_conversation_history_due(self.conversation, reason="Routine refresh", reset_deliveries=False)
+        cache.clear()
         self.assertTrue(self.catalog()[0]["ready_for_display"])
         self.grant.consented_at = timezone.now() + timedelta(seconds=1)
         self.grant.save()
@@ -211,8 +222,8 @@ class SlackImportReadinessTests(SlackDmIoAuthorityFixture, TransactionTestCase):
         self.assertNotIn("history_reconcile_candidate", row.metadata)
 
     def test_optional_publication_cache_failure_preserves_durable_ready_import(self):
-        with patch("integrations.services.slack_chat_catalog.cache.get_many", side_effect=RuntimeError("cache unavailable")), patch(
-            "integrations.services.slack_chat_catalog.cache.set_many", side_effect=RuntimeError("cache unavailable")
+        with patch.object(cache, "get_many", side_effect=RuntimeError("cache unavailable")), patch.object(
+            cache, "set_many", side_effect=RuntimeError("cache unavailable")
         ):
             self.assertTrue(self.catalog()[0]["ready_for_display"])
 
@@ -353,3 +364,194 @@ class SlackImportReadinessTests(SlackDmIoAuthorityFixture, TransactionTestCase):
         self.grant.consented_at = timezone.now() + timedelta(seconds=1)
         self.grant.save()
         self.assertFalse(self.catalog()[0]["ready_for_display"])
+
+    def test_durable_publication_survives_cache_loss_and_background_scan(self):
+        self.assertTrue(self.record_publication())
+        self.state.refresh_from_db()
+        publication = dict(self.state.verified_ranges["publication"])
+        with transaction.atomic():
+            dm._mark_conversation_history_due(self.conversation, reason="Automatic refresh", reset_deliveries=False)
+        self.state.refresh_from_db()
+        self.state.verified_ranges["archive"] = {"classification": "incomplete"}
+        self.state.save(update_fields=["verified_ranges"])
+        cache.clear()
+        with CaptureQueriesContext(connection) as queries:
+            self.assertTrue(self.catalog()[0]["ready_for_display"])
+        self.assertFalse(any(query["sql"].lstrip().upper().startswith(("INSERT", "UPDATE", "DELETE")) for query in queries))
+        self.state.refresh_from_db()
+        self.assertEqual(self.state.verified_ranges["publication"], publication)
+        self.assertTrue(self.record_publication())
+        self.state.refresh_from_db()
+        self.assertEqual(self.state.verified_ranges["publication"], publication)
+
+    def test_legacy_import_is_qualified_before_refresh_without_trusting_cache(self):
+        cache.set(_publication_key(self.conversation), True, 86400)
+        with transaction.atomic():
+            dm._mark_conversation_history_due(self.conversation, reason="Automatic refresh", reset_deliveries=False)
+        self.state.refresh_from_db()
+        self.assertEqual(self.state.verified_ranges["publication"]["scope"], _publication_key(self.conversation))
+        cache.clear()
+        self.assertTrue(self.catalog()[0]["ready_for_display"])
+
+    def test_head_page_retains_legacy_publication_before_enqueuing_fresh_messages(self):
+        from integrations.services.message_sync.private_history import private_page
+        from integrations.services.message_sync.scheduler import claim_job, schedule_job
+
+        schedule_job(self.state, "head")
+        timestamp = f"{int(timezone.now().timestamp()) - 30}.000001"
+        with patch.object(dm, "_call_slack_with_grant_authority", return_value={
+            "ok": True, "messages": [{"ts": timestamp, "user": "UOTHER", "text": "new message"}],
+        }):
+            private_page(claim_job(kinds=["head"]), self.state)
+        self.state.refresh_from_db()
+        self.assertEqual(self.state.verified_ranges["publication"]["scope"], _publication_key(self.conversation))
+        self.assertEqual(self.state.verified_ranges["head"]["classification"], "accessible_range")
+        self.assertTrue(self.conversation.deliveries.filter(
+            source_message_id=timestamp, status="pending", metadata__backfill=True,
+        ).exists())
+        cache.clear()
+        self.assertTrue(self.catalog()[0]["ready_for_display"])
+
+    def test_explicit_current_coverage_request_refreshes_without_hiding_publication(self):
+        from integrations.services.message_sync.private_coverage import request_current_coverage
+
+        self.assertTrue(self.record_publication())
+        self.state.refresh_from_db()
+        published = self.state.verified_ranges["publication"]
+        self.state.verified_ranges["archive"] = {"classification": "unknown"}
+        self.state.save(update_fields=["verified_ranges"])
+        authority = dm._capture_slack_grant_api_authority(self.grant, refresh_token=False)
+        self.assertTrue(request_current_coverage(self.conversation, authority, set(SCOPES)))
+        self.conversation.refresh_from_db()
+        self.assertIsNone(self.conversation.history_backfilled_at)
+        self.state.refresh_from_db()
+        self.assertEqual(self.state.verified_ranges["publication"], published)
+        self.assertTrue(self.catalog()[0]["ready_for_display"])
+        self.assertFalse(request_current_coverage(self.conversation, authority, set(SCOPES)))
+
+    def test_recovery_scheduling_preserves_publication_and_operational_state(self):
+        from integrations.services.message_sync.recovery import schedule_private_recoveries
+
+        self.assertTrue(self.record_publication())
+        self.state.refresh_from_db()
+        published = self.state.verified_ranges["publication"]
+        SlackDmMirrorDelivery.objects.create(
+            conversation=self.conversation, source_platform="slack", status="dead",
+            source_message_id=f"{int(timezone.now().timestamp()) - 30}.000001",
+            source_author_id="UOTHER", operation="create", metadata={"backfill": True}, available_at=timezone.now(),
+        )
+        self.assertEqual(schedule_private_recoveries(), 1)
+        self.state.refresh_from_db()
+        self.assertEqual(self.state.verified_ranges["publication"], published)
+        self.assertIn("scheduled_at", self.state.verified_ranges["recovery"])
+        self.assertTrue(self.catalog()[0]["ready_for_display"])
+
+    def test_pending_failed_and_dead_deliveries_cannot_mint_publication(self):
+        row = SlackDmMirrorDelivery.objects.create(
+            conversation=self.conversation, source_platform="slack", source_message_id=self.conversation.latest_synced_ts,
+            source_author_id="UOTHER", operation="create", metadata={"backfill": True}, available_at=timezone.now(),
+        )
+        for status in ("pending", "processing", "failed", "dead"):
+            row.status = status
+            row.save()
+            cache.set(_publication_key(self.conversation), True, 86400)
+            self.assertFalse(self.record_publication())
+            self.assertFalse(self.catalog()[0]["ready_for_display"])
+        self.state.refresh_from_db()
+        self.assertNotIn("publication", self.state.verified_ranges)
+
+    def test_empty_scan_commits_publication_only_with_qualified_source_coverage(self):
+        self.state.verified_ranges = {}
+        self.state.save()
+        self.conversation.history_backfilled_at = None
+        self.conversation.save()
+        SlackDmMirrorDelivery.objects.create(
+            conversation=self.conversation, source_platform="slack", source_message_id=dm.HISTORY_MAIN_STATE_ID,
+            operation="create", status="completed", available_at=timezone.now(), metadata={
+                "import_contract_version": 2, "participant_hash": self.conversation.participant_hash,
+                "mlai_channel_id": str(self.conversation.mlai_channel_id), "observed_messages": False,
+            },
+        )
+        with transaction.atomic():
+            dm._finish_history_scan(self.conversation)
+        self.state.refresh_from_db()
+        self.assertEqual(self.state.verified_ranges["archive"]["classification"], "empty_accessible_range")
+        self.assertIn("publication", self.state.verified_ranges)
+
+    def test_last_single_delivery_commits_publication_after_success(self):
+        self.conversation.participant_identity_map = {"UOWNER": self.owner_key, "UOTHER": "b" * 64}
+        self.conversation.participant_buzz_pubkeys.append("b" * 64)
+        self.conversation.save()
+        rows = [SlackDmMirrorDelivery.objects.create(
+            conversation=self.conversation, source_platform="slack", source_message_id=f"{int(timezone.now().timestamp()) - 10}.{index:06d}",
+            source_author_id="UOTHER", operation="create", status="processing", encrypted_text="Synthetic message",
+            metadata={"backfill": True, "participant_hash": self.conversation.participant_hash}, available_at=timezone.now(),
+        ) for index in range(2)]
+        with patch.object(dm.BuzzBridgeClient, "deliver_private", return_value={"message_id": "e" * 64}):
+            dm._deliver_private(rows[0])
+            self.state.refresh_from_db()
+            self.assertNotIn("publication", self.state.verified_ranges)
+            dm._deliver_private(rows[1])
+        self.state.refresh_from_db()
+        self.assertEqual(self.state.verified_ranges["publication"]["scope"], _publication_key(self.conversation))
+
+    def test_last_batch_delivery_commits_publication(self):
+        self.conversation.participant_identity_map = {"UOWNER": self.owner_key, "UOTHER": "b" * 64}
+        self.conversation.participant_buzz_pubkeys.append("b" * 64)
+        self.conversation.save()
+        rows = [SlackDmMirrorDelivery.objects.create(
+            conversation=self.conversation, source_platform="slack", source_message_id=f"{int(timezone.now().timestamp()) - 10}.{index:06d}",
+            source_author_id="UOTHER", operation="create", status="processing", encrypted_text="Synthetic message",
+            metadata={"backfill": True, "participant_hash": self.conversation.participant_hash}, available_at=timezone.now(),
+        ) for index in range(2)]
+        with patch.object(dm.BuzzBridgeClient, "deliver_private_batch", return_value=[{"message_id": "e" * 64}, {"message_id": "f" * 64}]):
+            dm._deliver_private_batch(rows)
+        self.state.refresh_from_db()
+        self.assertEqual(self.state.verified_ranges["publication"]["scope"], _publication_key(self.conversation))
+
+    def test_publication_scope_cannot_survive_consent_window_room_or_audience_change(self):
+        self.assertTrue(self.record_publication())
+        self.conversation.history_backfilled_at = None
+        self.conversation.save()
+        self.assertTrue(self.catalog()[0]["ready_for_display"])
+        mutations = [
+            (self.grant, "consented_at", timezone.now() + timedelta(seconds=1)),
+            (self.grant, "consent_version", "changed-consent"),
+            (self.grant, "slack_user_id", "UANOTHER"),
+            (self.grant, "history_days", 7),
+            (self.conversation, "mlai_channel_id", uuid.uuid4()),
+            (self.conversation, "participant_hash", "different-audience"),
+            (self.conversation, "participant_slack_ids", ["UOWNER", "UOTHER", "UADDED"]),
+            (self.conversation, "participant_buzz_pubkeys", [self.owner_key, "c" * 64]),
+        ]
+        for obj, field, replacement in mutations:
+            with self.subTest(field=field):
+                before = getattr(obj, field)
+                setattr(obj, field, replacement)
+                obj.save()
+                self.assertFalse(self.catalog()[0]["ready_for_display"])
+                setattr(obj, field, before)
+                obj.save()
+
+    def test_explicit_reset_and_source_retirement_erase_publication(self):
+        self.assertTrue(self.record_publication())
+        with transaction.atomic():
+            dm._mark_conversation_history_due(self.conversation, reason="Explicit reset", reset_deliveries=True)
+        self.state.refresh_from_db()
+        self.assertNotIn("publication", self.state.verified_ranges)
+        self.assertFalse(self.catalog()[0]["ready_for_display"])
+        self.conversation.history_backfilled_at = timezone.now()
+        self.conversation.save()
+        self.assertTrue(self.record_publication())
+        dm._retire_ineligible_conversation(self.grant.pk, self.conversation.slack_conversation_id,
+                                         reason="Source access removed", reconcile_cleanup=False)
+        self.state.refresh_from_db()
+        self.assertNotIn("publication", self.state.verified_ranges)
+
+    def test_source_limited_or_unqualified_scan_never_mints_publication(self):
+        for proof in ({}, self.archive_proof(classification="source_limited"), self.archive_proof(channel_id=str(uuid.uuid4()))):
+            self.state.verified_ranges = {"archive": proof}
+            self.state.save()
+            self.assertFalse(self.record_publication())
+        self.state.refresh_from_db()
+        self.assertNotIn("publication", self.state.verified_ranges)

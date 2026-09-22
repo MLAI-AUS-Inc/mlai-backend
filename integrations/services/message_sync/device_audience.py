@@ -103,3 +103,7 @@ def rebind_history(conversation, registration):
             ranges["archive"] = {**proof, "participant_hash": conversation.participant_hash}
             state.verified_ranges = ranges
             state.save(update_fields=["verified_ranges"])
+    from .publication import rebind_publication_locked, record_publication_locked
+    rebind_publication_locked(conversation, registration)
+    # A prior lost acknowledgement may have been the last undelivered item.
+    record_publication_locked(conversation)

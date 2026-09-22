@@ -8,8 +8,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 import hashlib
 
-from django.core.cache import cache
-from django.db.models import Exists, OuterRef, Q
+from django.db.models import Exists, OuterRef, Q, Subquery
 
 CATALOG_KEY = "mlai_chat_conversations_v1"
 PRIVATE_CHANNEL_CONSENT = "slack-chat-v4-private-channels"
@@ -92,6 +91,9 @@ def catalog_conversations(conversations):
             private_conversation_id=OuterRef("pk"),
             verified_ranges__archive__classification="source_limited",
         )),
+        _publication_scope=Subquery(BridgeSyncState.objects.filter(
+            private_conversation_id=OuterRef("pk"),
+        ).values("verified_ranges__publication__scope")[:1]),
     )
 
 
@@ -118,7 +120,7 @@ def owner_open_intent(grant, public_key):
     }
 
 
-def ready_for_display(conversation, *, now=None, published=False, public_key=None):
+def ready_for_display(conversation, *, now=None, public_key=None):
     """Publish a mirror only after its selected source window has been delivered."""
     now = now or datetime.now(timezone.utc)
     grant = conversation.grant
@@ -129,6 +131,7 @@ def ready_for_display(conversation, *, now=None, published=False, public_key=Non
         or conversation.status != "live"
     ):
         return False
+    published = getattr(conversation, "_publication_scope", None) == _publication_key(conversation)
     if not published and (
         completed is None or completed < grant.consented_at
         or not getattr(conversation, "_import_verified", False)
@@ -146,17 +149,22 @@ def ready_for_display(conversation, *, now=None, published=False, public_key=Non
 
 
 def _publication_key(conversation):
-    """Bind a presentation latch to the exact owner, consent, room and devices."""
+    """Bind durable publication to the exact owner, consent, source and audience."""
     from integrations.services.slack_dm_mirror import _grant_history_days
 
     grant = conversation.grant
     value = ":".join(str(v) for v in (
-        getattr(grant, "pk", ""), grant.consented_at.isoformat(),
+        getattr(grant, "pk", ""), getattr(grant, "user_id", ""), grant.consented_at.isoformat(),
+        getattr(grant, "consent_version", ""),
+        getattr(grant, "connection_id", ""), getattr(grant, "slack_workspace_id", ""),
+        getattr(grant, "slack_user_id", ""),
+        getattr(conversation, "slack_workspace_id", ""), getattr(conversation, "slack_conversation_id", ""),
+        ",".join(sorted(getattr(conversation, "participant_slack_ids", None) or [])),
         conversation.mlai_channel_id, getattr(conversation, "participant_hash", ""),
         ",".join(sorted(conversation.participant_buzz_pubkeys or [])),
         _grant_history_days(grant),
     ))
-    return "slack-import-published-v2:" + hashlib.sha256(value.encode()).hexdigest()
+    return "slack-import-published-v3:" + hashlib.sha256(value.encode()).hexdigest()
 
 
 def catalog_payload(conversations, public_key):
@@ -169,25 +177,10 @@ def catalog_payload(conversations, public_key):
         if key and conversation.mlai_channel_id
         and key in (conversation.participant_buzz_pubkeys or [])
     ]
-    publication_keys = {id(c): _publication_key(c) for c in conversations}
-    try:
-        published = cache.get_many(publication_keys.values()) if conversations else {}
-    except Exception:
-        # This optional presentation latch must not take the status API down.
-        # Durable scan and outbox state can still qualify a completed import.
-        published = {}
     readiness = {
-        id(c): ready_for_display(c, published=published.get(publication_keys[id(c)]) is True, public_key=key)
+        id(c): ready_for_display(c, public_key=key)
         for c in conversations
     }
-    # The first complete import opens the chat. Routine background refreshes
-    # then preserve that usable snapshot instead of making chats disappear.
-    # Losing this presentation cache fails closed and repeats qualification.
-    if conversations:
-        try:
-            cache.set_many({publication_keys[id(c)]: True for c in conversations if readiness[id(c)]}, 86400)
-        except Exception:
-            pass
     return [
         {
             "channel_id": str(conversation.mlai_channel_id),
