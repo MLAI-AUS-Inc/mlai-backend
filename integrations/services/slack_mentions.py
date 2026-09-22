@@ -75,13 +75,12 @@ def _read(authority, method, **kwargs):
     )
 
 
-def _members(authority, channel):
-    key = _key(authority, "members", channel)
+def _members(read, cache_key, channel):
+    key = cache_key("members", channel)
     state = cache.get(key) or {"ids": [], "cursor": "", "complete": False}
     if not state["complete"]:
         try:
-            response = _read(
-                authority,
+            response = read(
                 "conversations_members",
                 channel=channel,
                 cursor=state["cursor"],
@@ -105,6 +104,40 @@ def search_mentions(grant, *, channel_id, query="", cursor="", limit=50):
     """Return one resumable directory page, with truthful channel membership."""
     channel, private = channel_for_grant(grant, channel_id, allow_native=True)
     authority = mirror._capture_slack_grant_api_authority(grant)
+    return _search_directory(
+        workspace=grant.slack_workspace_id,
+        channel=channel,
+        private=private,
+        query=query,
+        cursor=cursor,
+        limit=limit,
+        read=lambda method, **kwargs: _read(authority, method, **kwargs),
+        cache_key=lambda category, value: _key(authority, category, value),
+        validate=lambda: _validate_grant(authority),
+    )
+
+
+def _validate_grant(authority):
+    with transaction.atomic():
+        mirror._lock_slack_grant_api_authority(
+            authority, required_scopes={"users:read"}
+        )
+
+
+def _search_directory(
+    *,
+    workspace,
+    channel,
+    private,
+    query,
+    cursor,
+    limit,
+    read,
+    cache_key,
+    validate,
+    membership_unknown=False,
+):
+    """Shared pagination; callers supply distinct public or owner credentials."""
     query = str(query or "").strip().casefold()
     if len(query) > 100:
         raise mirror.SlackDmMirrorError(
@@ -114,14 +147,14 @@ def search_mentions(grant, *, channel_id, query="", cursor="", limit=50):
     members = (
         set(private.participant_slack_ids)
         if private
-        else _members(authority, channel) if channel else set()
+        else _members(read, cache_key, channel) if channel else set()
     )
-    key = _key(authority, "users", slack_cursor)
+    key = cache_key("users", slack_cursor)
     page = cache.get(key)
     retry_after = 0
     if page is None:
         try:
-            response = _read(authority, "users_list", limit=200, cursor=slack_cursor)
+            response = read("users_list", limit=200, cursor=slack_cursor)
             # Strip private Slack profile fields before placing anything in cache.
             page = {
                 "users": [
@@ -139,8 +172,7 @@ def search_mentions(grant, *, channel_id, query="", cursor="", limit=50):
                         ).casefold(),
                     }
                     for user in response.get("members") or []
-                    if isinstance(user, dict)
-                    and eligible_user(user, grant.slack_workspace_id)
+                    if isinstance(user, dict) and eligible_user(user, workspace)
                 ],
                 "next": str(
                     (response.get("response_metadata") or {}).get("next_cursor") or ""
@@ -168,7 +200,7 @@ def search_mentions(grant, *, channel_id, query="", cursor="", limit=50):
     if (
         not cursor
         and target
-        and target[0] == grant.slack_workspace_id
+        and target[0] == workspace
         and query in "roo"
         and not any(user["slack_user_id"] == target[1] for user in users)
     ):
@@ -192,7 +224,7 @@ def search_mentions(grant, *, channel_id, query="", cursor="", limit=50):
     # in one query; linked accounts still use the canonical live-device resolver.
     linked_ids = set(
         CommunityBridgeIdentityLink.objects.filter(
-            slack_workspace_id=grant.slack_workspace_id,
+            slack_workspace_id=workspace,
             slack_user_id__in=[user["slack_user_id"] for user in users],
             revoked_at__isnull=True,
         ).values_list("slack_user_id", flat=True)
@@ -201,7 +233,7 @@ def search_mentions(grant, *, channel_id, query="", cursor="", limit=50):
     for user in users:
         identity = (
             verified_identity_for_slack(
-                slack_workspace_id=grant.slack_workspace_id,
+                slack_workspace_id=workspace,
                 slack_user_id=user["slack_user_id"],
             )
             if user["slack_user_id"] in linked_ids
@@ -211,17 +243,16 @@ def search_mentions(grant, *, channel_id, query="", cursor="", limit=50):
             {key: value for key, value in user.items() if key != "search"}
             | {
                 "is_member": (
-                    None if members is None else user["slack_user_id"] in members
+                    None
+                    if members is None or membership_unknown
+                    else user["slack_user_id"] in members
                 ),
-                "native_only": not bool(channel),
+                "native_only": not bool(channel) and not membership_unknown,
                 "profile_id": (identity or {}).get("user_profile_id"),
                 "pubkey": (identity or {}).get("buzz_pubkey"),
             }
         )
-    with transaction.atomic():
-        mirror._lock_slack_grant_api_authority(
-            authority, required_scopes={"users:read"}
-        )
+    validate()
     return {
         "users": result,
         "next_cursor": next_cursor,

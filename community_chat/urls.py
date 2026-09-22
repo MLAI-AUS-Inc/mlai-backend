@@ -2,6 +2,7 @@ from django.urls import include, path
 from .apple_iap_views import AppleIapView, AppleIapTransactionView, AppleIapNotificationView
 from .privacy_views import AccountDeletionView, AiConsentView
 from .onboarding_views import MemberOnboardingView
+from .account_ban_views import AccountBanView
 from .permission_views import ChatPermissionsView, RelayChatRoleView, ChatModeratorView, ChatMemberRolesView
 
 from .views import (
@@ -45,6 +46,8 @@ from .usage_views import (
 
 
 urlpatterns = [
+    path("account-bans/", AccountBanView.as_view(), name="community_chat_account_bans"),
+    path("account-bans/<int:ban_id>/", AccountBanView.as_view(), name="community_chat_account_ban"),
     path("apple-iap/", AppleIapView.as_view(), name="community_chat_apple_iap"),
     path("apple-iap/transactions/", AppleIapTransactionView.as_view(), name="community_chat_apple_transaction"),
     path("apple-iap/notifications/production/", AppleIapNotificationView.as_view(), {"environment": "production"}),

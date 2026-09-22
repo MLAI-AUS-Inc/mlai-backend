@@ -42,7 +42,9 @@ def issue_account_session(user, challenge):
         # key/installation credentials. A session issuance that began earlier
         # therefore commits before the delete and is revoked by it, or waits
         # and becomes an explicit post-delete authorization.
-        get_user_model().objects.select_for_update().get(pk=user.pk)
+        user = get_user_model().objects.select_for_update().get(pk=user.pk)
+        if not user.is_active:
+            raise InvalidAccountSession("invalid_session")
         CommunityChatAccountSession.objects.filter(
             user=user,
             client_id=challenge.client_id,

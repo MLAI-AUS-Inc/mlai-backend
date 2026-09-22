@@ -376,16 +376,15 @@ class SlackUserDirectoryView(SlackDmMirrorApiView):
         except (TypeError, ValueError) as exc:
             raise ValidationError({"limit": "Use a number between 1 and 50."}) from exc
         try:
-            grant = active_grant_for_user(request.user)
             if request.query_params.get("channel_id"):
-                from integrations.services.slack_mentions import search_mentions
-                return Response(search_mentions(
-                    grant, channel_id=request.query_params["channel_id"],
+                from integrations.services.slack_mention_directory import search_workspace_mentions
+                return Response(search_workspace_mentions(
+                    request.user, channel_id=request.query_params["channel_id"],
                     query=request.query_params.get("q", ""), limit=limit,
                     cursor=request.query_params.get("cursor", ""),
                 ))
             payload = search_slack_users(
-                grant,
+                active_grant_for_user(request.user),
                 query=request.query_params.get("q", ""),
                 limit=limit,
                 cursor=request.query_params.get("cursor", ""),

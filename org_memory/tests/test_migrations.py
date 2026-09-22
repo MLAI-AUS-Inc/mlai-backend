@@ -1,4 +1,3 @@
-from django.contrib.auth import get_user_model
 from django.db import connection
 from django.db.migrations.executor import MigrationExecutor
 from django.test import TransactionTestCase, tag
@@ -18,16 +17,25 @@ class OrganizationAuthorizationMigrationTests(TransactionTestCase):
 
     def setUp(self):
         super().setUp()
+        # Restore even when fixture construction fails after the rewind.
+        self.addCleanup(self._restore_schema)
         executor = MigrationExecutor(connection)
         executor.migrate(self.migrate_from)
-        old_apps = executor.loader.project_state(self.migrate_from).apps
+        # Other apps can remain ahead of this target after the partial rewind.
+        # Build historical models from the schema actually applied in the database.
+        executor = MigrationExecutor(connection)
+        old_apps = executor.loader.project_state(
+            list(executor.loader.applied_migrations)
+        ).apps
 
         Organization = old_apps.get_model("organizations", "Organization")
         Workspace = old_apps.get_model("org_memory", "OrganizationSlackWorkspace")
         SlackIdentity = old_apps.get_model("org_memory", "OrganizationSlackIdentity")
+        User = old_apps.get_model("core", "User")
 
         organization = Organization.objects.create(name="Migration", domain="migration.test")
-        user = get_user_model().objects.create_user(email="migration@mlai.test")
+        # Current save hooks may require tables absent from this old schema.
+        user = User.objects.create(email="migration@mlai.test")
         workspace = Workspace.objects.create(
             organization=organization,
             slack_team_id="TMIGRATION1",
@@ -47,7 +55,7 @@ class OrganizationAuthorizationMigrationTests(TransactionTestCase):
         executor.migrate(self.migrate_to)
         self.apps = executor.loader.project_state(self.migrate_to).apps
 
-    def tearDown(self):
+    def _restore_schema(self):
         # Rewinding org_memory to 0001 also unapplies migrations in the apps
         # that depend on it, so the restore has to target every leaf in the
         # graph rather than org_memory alone. Reading the leaves from the
@@ -56,7 +64,6 @@ class OrganizationAuthorizationMigrationTests(TransactionTestCase):
         # database three migrations behind for anything running afterwards.
         executor = MigrationExecutor(connection)
         executor.migrate(executor.loader.graph.leaf_nodes())
-        super().tearDown()
 
     def test_initial_capabilities_are_seeded_and_duplicate_legacy_users_fail_closed(self):
         Capability = self.apps.get_model("org_memory", "OrganizationCapability")

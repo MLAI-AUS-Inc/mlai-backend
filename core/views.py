@@ -512,6 +512,9 @@ class MagicLinkVerifyView(APIView):
                     return _invalid_next_path_response()
 
                 user = User.objects.get(email__iexact=email)
+                from core.account_bans import account_is_banned
+                if account_is_banned(user):
+                    return Response({"error": "Account unavailable."}, status=status.HTTP_403_FORBIDDEN)
                 logger.info("Verified magic link for existing user_id=%s", user.id)
 
                 if app_param == 'admin' and not _is_operations_admin(user):

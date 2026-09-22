@@ -206,7 +206,7 @@ class CommunityBridgeDiscordClient(discord.Client):
 
     @tasks.loop(seconds=5.0)
     async def slack_dm_discovery_loop(self) -> None:
-        await asyncio.to_thread(discover_grants_if_due)
+        await asyncio.to_thread(_maintain_chat_accounts)
 
     @tasks.loop(seconds=HISTORY_REQUEST_INTERVAL_SECONDS)
     async def slack_dm_history_loop(self) -> None:
@@ -1005,5 +1005,11 @@ async def _run_read_state_workers():
 async def _run_discovery_loop() -> None:
     """Poll once per configured turn even with no work; never spin on deferral."""
     while True:
-        await asyncio.to_thread(discover_grants_if_due)
+        await asyncio.to_thread(_maintain_chat_accounts)
         await asyncio.sleep(discovery_poll_seconds())
+
+
+def _maintain_chat_accounts():
+    from community_chat.account_bans import process_account_ban_revocations
+    process_account_ban_revocations()
+    discover_grants_if_due()
