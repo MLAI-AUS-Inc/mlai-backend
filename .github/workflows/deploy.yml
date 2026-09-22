@@ -210,6 +210,7 @@ jobs:
           content_factory.tests_admin_metrics \
           tests.test_community_bridge_adapter_url \
           community_chat.tests.test_account_sessions \
+          community_chat.tests.test_session_device_binding \
           community_chat.tests.test_account_profiles.AccountProfileTests \
           community_chat.tests.test_account_privacy.AccountPrivacyTests \
           community_chat.tests.test_deletion_tasks \

@@ -2875,6 +2875,13 @@ def discover_conversations(
                 )
                 .exists()
             )
+            from .message_sync.device_recovery import DEVICE_AUDIENCE_HINT
+
+            # Enrollment can commit while this directory page is in flight.
+            # Its durable hint must survive the page's final discovery marker.
+            needs_followup = needs_followup or bool(
+                (locked_connection.sync_cursor or {}).get(DEVICE_AUDIENCE_HINT)
+            )
             raw_pending = (locked_connection.sync_cursor or {}).get(
                 PENDING_EVENT_CHECKPOINT_KEY,
                 [],
@@ -2929,6 +2936,7 @@ def _discover_conversation(
     activity_seconds: int | None = None,
     recent_activity: bool = True,
     check_recent_activity: bool = False,
+    required_owner_public_key: str | None = None,
 ) -> SlackDmMirrorConversation | None:
     # Preserve the private test/helper call shape while never trusting a
     # caller-supplied raw client for production I/O.
@@ -3031,7 +3039,8 @@ def _discover_conversation(
         activity_seconds=activity,
     )
     periodic_reconciliation_due = bool(
-        conversation.history_backfilled_at is not None
+        required_owner_public_key is None
+        and conversation.history_backfilled_at is not None
         and conversation.history_backfilled_at
         <= timezone.now() - timedelta(seconds=(
             DURABLE_HISTORY_RECONCILIATION_INTERVAL_SECONDS if getattr(settings, "MESSAGE_SYNC_ENABLED", False)
@@ -3042,6 +3051,7 @@ def _discover_conversation(
         conversation,
         force_backfill=force_backfill or periodic_reconciliation_due,
         reset_history=reset_history,
+        required_owner_public_key=required_owner_public_key,
     )
     return conversation
 

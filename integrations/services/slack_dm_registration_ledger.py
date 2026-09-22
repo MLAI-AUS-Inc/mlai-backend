@@ -625,6 +625,28 @@ def _registration_cleanup_disposition_locked(
     return "delete", None
 
 
+def _preserve_recovering_room(grant, conversation) -> bool:
+    """Keep a stable room pointer while its old device authority is retired.
+
+    A pointer is not membership: the room remains unpublished until a fresh
+    registration passes the existing consent, participant and relay CAS checks.
+    Source membership changes and explicit retirement clear their pointer before
+    cleanup; inactive consent must never acquire this recovery behavior.
+    """
+    from .message_sync.device_audience import enabled as stable_private_rooms
+
+    return bool(
+        stable_private_rooms()
+        and grant.status == SlackDmMirrorGrantStatus.ACTIVE
+        and grant.revoked_at is None
+        and conversation.status in (
+            SlackDmMirrorConversationStatus.PROVISIONING,
+            SlackDmMirrorConversationStatus.ERROR,
+        )
+        and conversation.mlai_channel_id
+    )
+
+
 def _mark_channel_registration_cleaned_locked(
     grant: SlackDmMirrorGrant,
     *,
@@ -663,7 +685,7 @@ def _mark_channel_registration_cleaned_locked(
         )
     )
     for conversation in conversations:
-        if (
+        if not _preserve_recovering_room(grant, conversation) and (
             grant.status != SlackDmMirrorGrantStatus.ACTIVE
             or conversation.status != SlackDmMirrorConversationStatus.LIVE
         ):
@@ -863,7 +885,8 @@ def _execute_registration_cleanup(claim: dict[str, Any]) -> str:
                             available_at=timezone.now(),
                         )
                     conversation.status = SlackDmMirrorConversationStatus.PROVISIONING
-                    conversation.mlai_channel_id = None
+                    if not _preserve_recovering_room(grant, conversation):
+                        conversation.mlai_channel_id = None
                     conversation.save(
                         update_fields=(
                             "status",
