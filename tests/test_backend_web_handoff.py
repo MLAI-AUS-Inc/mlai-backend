@@ -126,14 +126,16 @@ class WebHandoffIntegrationTests(unittest.TestCase):
             pass
 
     def switch(self, operation, target=None, *, check=True, env=None):
-        return subprocess.run(
+        result = subprocess.run(
             ["bash", str(SWITCH), operation, *([target] if target else [])],
             env=env or self.env,
             capture_output=True,
             text=True,
             timeout=10,
-            check=check,
         )
+        if check and result.returncode:
+            self.fail(f"route helper failed: {result.stderr}")
+        return result
 
     def start_web(self, port, release):
         server = ThreadingHTTPServer(("127.0.0.1", port), WebHandler)

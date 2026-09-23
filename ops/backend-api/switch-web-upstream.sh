@@ -54,7 +54,8 @@ if [ "$operation" = validate ]; then
     shadow="$(mktemp /tmp/mlai-api-master.XXXXXX)"
     trap 'rm -f "$rendered" "$shadow"' EXIT
     render > "$rendered"
-    printf 'events { worker_connections 32; }\nhttp { include "%s"; }\n' "$rendered" > "$shadow"
+    printf 'pid "%s.pid";\nerror_log stderr notice;\nevents { worker_connections 32; }\nhttp { include "%s"; }\n' \
+        "$shadow" "$rendered" > "$shadow"
     "$nginx_bin" -t -c "$shadow"
     exit
 fi
