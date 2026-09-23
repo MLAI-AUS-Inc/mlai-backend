@@ -272,6 +272,11 @@ class CodingPublicApiTests(APITestCase):
         self.assertEqual(response.data["balance_microroo"], "2000000")
         self.assertEqual(response.data["balance_roo"], "2.000000")
         self.assertEqual(response.data["pricing"]["margin_multiplier"], "1.300000")
+        self.assertEqual(response.data["runtime"]["kimi_code_version"], "0.36.1")
+        self.assertEqual(
+            response.data["runtime"]["compatible_kimi_code_versions"],
+            ["0.36.1", "0.39.1"],
+        )
 
     def test_entitlement_poll_does_not_reconcile_another_users_turn(self):
         other = User.objects.create_user(email="unrelated@mlai.au")

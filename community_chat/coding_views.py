@@ -116,6 +116,7 @@ class CodingEntitlementView(APIView):
                 "runtime": {
                     "desktop_only": True,
                     "kimi_code_version": "0.36.1",
+                    "compatible_kimi_code_versions": ["0.36.1", "0.39.1"],
                     "node_major": 24,
                 },
             }
