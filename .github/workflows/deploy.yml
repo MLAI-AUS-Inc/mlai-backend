@@ -11,6 +11,12 @@ permissions:
   contents: read
   pull-requests: read
 
+# A push to main must finish its schema/runtime transition before the next
+# release touches the same droplet. Never cancel a deploy midway through migrate.
+concurrency:
+  group: mlai-backend-deploy-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   # Pull requests run the complete suite and record the exact Git tree that
   # passed. A main push reuses that result only when GitHub associates the

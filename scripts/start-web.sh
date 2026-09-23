@@ -7,6 +7,8 @@ if [ "${RUN_MIGRATIONS_ON_START:-0}" = "1" ]; then
 fi
 
 exec gunicorn \
+  --preload \
+  --config /app/scripts/gunicorn.conf.py \
   --bind 0.0.0.0:8000 \
   --workers "${GUNICORN_WORKERS:-3}" \
   --worker-class sync \

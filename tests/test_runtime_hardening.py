@@ -52,6 +52,9 @@ class RuntimeHardeningConfigTests(SimpleTestCase):
         self.assertIn("--timeout", start_script)
         self.assertIn("--graceful-timeout", start_script)
         self.assertIn("--max-requests", start_script)
+        self.assertIn("--preload", start_script)
+        self.assertIn("--config /app/scripts/gunicorn.conf.py", start_script)
+        self.assertIn("get_resolver().url_patterns", (ROOT / "scripts" / "gunicorn.conf.py").read_text())
         self.assertNotIn("--threads", start_script)
 
         self.assertIn("${GUNICORN_WORKERS:-3}", start_script)
@@ -299,7 +302,7 @@ class RuntimeHardeningConfigTests(SimpleTestCase):
         deploy = (ROOT / "deploy.sh").read_text()
         function_start = deploy.index("    restore_runtime_on_error() {")
         function_end = deploy.index(
-            '\n    }\n\n    echo "⏸️ Pausing',
+            "\n    }\n\n    # A code-only release",
             function_start,
         ) + len("\n    }")
         recovery_function = deploy[function_start:function_end].replace("\\$", "$")
@@ -307,6 +310,7 @@ class RuntimeHardeningConfigTests(SimpleTestCase):
             recovery_function
             + r"""
 migration_started=1
+runtime_pause_started=1
 all_runtime_writer_services=(web scheduler memory-worker memory-scheduler community-email-worker bridge-worker bridge-reconciler bridge-retention analytics-sync)
 rollback_manifest="$(mktemp)"
 docker_log="$(mktemp)"
