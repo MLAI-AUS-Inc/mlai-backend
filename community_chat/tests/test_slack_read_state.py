@@ -15,7 +15,12 @@ from integrations.services.slack_chat_catalog import (
     OWNER_OPENED_KEY,
     PRIVATE_CHANNEL_CONSENT,
 )
-from integrations.services.slack_dm_mirror import SlackDmMirrorAuthorizationError
+from integrations.services.slack_dm_mirror import (
+    PUBLIC_UNREAD_SCOPES,
+    REQUIRED_SCOPES,
+    SlackDmMirrorAuthorizationError,
+    public_unread_needs_reauthorization,
+)
 
 
 def snapshot_connection():
@@ -117,6 +122,23 @@ class SlackReadStateTests(SimpleTestCase):
         self.assertTrue(result["is_unread"])
         self.assertEqual(result["unread_count"], 1)
         self.assertEqual(result["latest_ts"], "101.000001")
+
+    def test_group_uses_slack_display_count_when_available_and_history_when_not(self):
+        messages = [{"ts": "101.000001", "user": "UALICE", "text": "hello"}]
+        for count in (0, 3):
+            result = self.snapshot(
+                {"last_read": "100.000001", "unread_count_display": count},
+                messages,
+                kind="mpim",
+            )
+            self.assertEqual(result["unread_count"], count)
+            self.assertEqual(result["is_unread"], count > 0)
+            self.assertEqual(result["count_source"], "slack")
+        fallback = self.snapshot(
+            {"last_read": "100.000001"}, messages, kind="mpim",
+        )
+        self.assertEqual(fallback["unread_count"], 1)
+        self.assertEqual(fallback["count_source"], "imported_messages")
 
     def test_channel_badges_count_explicit_mentions_not_every_unread_message(self):
         result = self.snapshot(
@@ -491,7 +513,7 @@ class ReadStatePageTests(SimpleTestCase):
     def test_history_budget_pause_does_not_publish_an_incomplete_read_snapshot(self):
         deferral = reads.BudgetDeferred(65)
         with patch.object(reads, "_unread_messages", side_effect=deferral):
-            result, calls = self.page(cursor="2", kind="mpim")
+            result, calls = self.page(cursor="2", kind="private_channel")
         self.assertEqual(deferral.read_state_method, "conversations.history")
         self.assertEqual(result["channels"], {})
         self.assertEqual(result["next_cursor"], "2")
@@ -549,6 +571,37 @@ class ReadStatePageTests(SimpleTestCase):
 
 
 class SlackReadPermissionUpgradeTests(SimpleTestCase):
+    def test_public_unread_scope_gap_is_separate_from_private_dm_scopes(self):
+        self.assertTrue(public_unread_needs_reauthorization(REQUIRED_SCOPES))
+        self.assertFalse(public_unread_needs_reauthorization(
+            REQUIRED_SCOPES | PUBLIC_UNREAD_SCOPES
+        ))
+
+    def test_connect_with_old_private_only_grant_requests_oauth(self):
+        from rest_framework.test import APIRequestFactory, force_authenticate
+        from community_chat.slack_views import SlackDmMirrorView
+
+        connection = SimpleNamespace(scopes=list(REQUIRED_SCOPES))
+        request = APIRequestFactory().post(
+            "/community-chat/slack/", {"history_days": 30}, format="json",
+        )
+        force_authenticate(request, user=SimpleNamespace(is_authenticated=True))
+        with patch(
+            "community_chat.slack_views.slack_connection_for_user",
+            return_value=connection,
+        ), patch("community_chat.slack_views.activate_connection") as activate, patch(
+            "community_chat.slack_views.status_payload",
+            return_value={"connected": True, "enabled": True},
+        ), patch.object(
+            SlackDmMirrorView,
+            "_authorization_url",
+            return_value="https://api.mlai.au/oauth",
+        ):
+            response = SlackDmMirrorView.as_view(throttle_classes=[])(request)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["authorization_url"], "https://api.mlai.au/oauth")
+        activate.assert_not_called()
+
     def test_permission_upgrade_starts_oauth_without_resetting_existing_import(self):
         from rest_framework.test import APIRequestFactory, force_authenticate
         from community_chat.slack_views import SlackDmMirrorView
@@ -659,6 +712,59 @@ class BackgroundReadCacheTests(SimpleTestCase):
         self.assertTrue(result['is_unread'])
         self.assertEqual(result['unread_count'], 1)
         self.assertNotIn(reads._pending_key(authority, target), stored)
+
+    def test_group_badge_survives_history_budget_deferral_without_guessing_mentions(self):
+        authority = SlackReadStateTests().authority()
+        grant = SimpleNamespace(slack_user_id="UOWNER")
+        target = reads.ReadTarget("room", "G1", "mpim")
+        connection = snapshot_connection()
+        stored = {}
+        details = {
+            "id": "G1", "is_member": True, "last_read": "100.000001",
+            "latest": {"ts": "102.000001"}, "unread_count_display": 3,
+        }
+        with patch.object(reads.transaction, "atomic", side_effect=nullcontext), patch.object(
+            reads, "_lock_slack_grant_api_authority", return_value=(grant, connection)
+        ), patch.object(reads.cache, "get", side_effect=lambda key: stored.get(key)), patch.object(
+            reads.cache, "set", side_effect=lambda key, value, **kwargs: stored.__setitem__(key, value)
+        ), patch.object(reads.cache, "delete", side_effect=lambda key: stored.pop(key, None)), patch.object(
+            reads, "_call_slack_with_grant_authority", return_value={"channel": details}
+        ), patch.object(
+            reads, "_unread_messages", side_effect=reads.BudgetDeferred(3)
+        ) as history:
+            result = reads.refresh_target(grant, authority, target)
+        history.assert_called_once()
+        self.assertTrue(result["available"])
+        self.assertTrue(result["is_unread"])
+        self.assertEqual(result["unread_count"], 3)
+        self.assertIsNone(result["has_personal_mention"])
+        self.assertEqual(result["count_source"], "slack")
+        self.assertNotIn(reads._pending_key(authority, target), stored)
+
+    def test_partial_group_history_preserves_source_count_but_not_false_mention(self):
+        authority = SlackReadStateTests().authority()
+        grant = SimpleNamespace(slack_user_id="UOWNER")
+        target = reads.ReadTarget("room", "G1", "mpim")
+        connection = snapshot_connection()
+        stored = {}
+        details = {
+            "id": "G1", "is_member": True, "last_read": "100.000001",
+            "unread_count_display": 3,
+        }
+        with patch.object(reads.transaction, "atomic", side_effect=nullcontext), patch.object(
+            reads, "_lock_slack_grant_api_authority", return_value=(grant, connection)
+        ), patch.object(reads.cache, "get", side_effect=lambda key: stored.get(key)), patch.object(
+            reads.cache, "set", side_effect=lambda key, value, **kwargs: stored.__setitem__(key, value)
+        ), patch.object(reads.cache, "delete", side_effect=lambda key: stored.pop(key, None)), patch.object(
+            reads, "_call_slack_with_grant_authority", return_value={"channel": details}
+        ), patch.object(
+            reads, "_unread_messages",
+            return_value=([{"ts": "101.000001", "user": "UOTHER", "text": "hello"}], "slack_history", True),
+        ):
+            result = reads.refresh_target(grant, authority, target)
+        self.assertTrue(result["is_unread"])
+        self.assertEqual(result["unread_count"], 3)
+        self.assertIsNone(result["has_personal_mention"])
 
     def test_confirmed_read_overtaking_a_source_lookup_cannot_restore_a_stale_badge(self):
         authority = SlackReadStateTests().authority()

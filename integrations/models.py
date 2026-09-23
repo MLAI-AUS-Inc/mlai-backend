@@ -229,6 +229,41 @@ class SlackDmMirrorGrant(models.Model):
         return f"{self.slack_workspace_id}:{self.slack_user_id} ({self.status})"
 
 
+class SlackOwnerConversationInventory(models.Model):
+    """Source conversation metadata visible only to the connected Slack owner."""
+
+    grant = models.ForeignKey(
+        SlackDmMirrorGrant,
+        on_delete=models.CASCADE,
+        related_name="owner_conversation_inventory",
+    )
+    slack_conversation_id = models.CharField(max_length=100)
+    kind = models.CharField(max_length=24)
+    source_name = models.CharField(max_length=255, blank=True, default="")
+    counterpart_slack_user_id = models.CharField(max_length=100, blank=True, default="")
+    display_name = models.CharField(max_length=255, blank=True, default="")
+    source_activity_ts = models.CharField(max_length=32, blank=True, default="")
+    source_archived = models.BooleanField(null=True)
+    source_is_open = models.BooleanField(null=True)
+    eligibility = models.CharField(max_length=24, default="eligible")
+    last_seen_sweep_id = models.UUIDField(null=True)
+    first_seen_at = models.DateTimeField(auto_now_add=True)
+    last_seen_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "slack_owner_conversation_inventory"
+        constraints = [
+            models.UniqueConstraint(
+                fields=("grant", "slack_conversation_id"),
+                name="slack_owner_inv_grant_source_uniq",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=("grant", "kind", "id"), name="slack_owner_inv_page_idx"),
+            models.Index(fields=("grant", "last_seen_sweep_id"), name="slack_owner_inv_sweep_idx"),
+        ]
+
+
 class SlackDmMirrorConversation(models.Model):
     """One member-owned mirror of a Slack IM and its private MLAI conversation."""
 

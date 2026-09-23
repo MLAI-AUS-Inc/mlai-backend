@@ -260,6 +260,32 @@ receipts, message links, or relay events by hand during triage.
    password-email failures, membership denials, auth throttles, and latency
    before expanding the cohort.
 
+### Owner Slack conversation inventory activation
+
+Set the protected deployment variable `SLACK_OWNER_INVENTORY_ENABLED=true` only
+when `MESSAGE_SYNC_ENABLED=true` for the same release. The deployment stages
+inventory as `false` on the host, applies the approved inventory migration with
+the rest of the Django migration graph, and checks the graph before it writes
+the requested inventory value and starts the new runtime. It verifies the web
+container received that value and, when enabled, the bridge worker did too. A
+failed deployment stages inventory back to
+`false` during recovery. Leave the variable `false` to disable the endpoint;
+this switch does not change a member's Slack history consent.
+
+### Reviewed `#tech_volunteers` public bridge mapping
+
+After the backend deployment and migration check, dispatch
+`community-bridge-tech-volunteers.yml` with `mode=stage`. It writes only the
+reviewed `T05N9C1QSJC:C0BS0J2Q3M1` to
+`da406415-80c3-5a53-82a9-3d200597b856` mapping, disabled. Use
+`mode=inspect` to confirm the fixed destination and disabled state. Deploy the
+MLAI Chat relay room and allowlist, then verify the bridge signer is a member.
+Only then dispatch `mode=enable` with `confirm_relay_ready=true`. The enable
+step also checks that the mapping was staged and the bridge bot belongs to the
+reviewed local public Slack channel. Inspect again after enabling. The
+workflow accepts no channel IDs or shell commands as inputs. It does not
+create or map private Slack channels.
+
 ## Rollback triggers and procedure
 
 Rollback on authentication bypass, role escalation, cross-tenant/media access,

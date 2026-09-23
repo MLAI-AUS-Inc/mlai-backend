@@ -694,6 +694,10 @@ prioritizes visible rows without waiting for a large directory scan. The service
 uses the requesting member's Slack user token and existing consent/device fences;
 it never substitutes a bot's read cursor. Public mappings also require source
 membership, and private mappings remain restricted to the provisioned device.
+Status includes `public_unread_needs_reauthorization` when an existing private
+chat grant lacks `channels:read` or `channels:history`. Private DM read state
+continues while the member updates Slack permissions. A new connect request
+with that scope gap starts OAuth instead of silently reusing the old grant.
 
 A shared Slack budget deferral or cooldown returns HTTP 200 with completed
 snapshots and `next_cursor` pointing at the first unfinished target. The response
@@ -712,9 +716,9 @@ Snapshots record `fetched_at` before the source read request starts, so a slow
 read cannot overwrite a newer acknowledgement. Join, leave, topic and other
 control messages never become a readable latest-message frontier.
 
-Source cursors use Slack's microsecond timestamps. IM counts come directly from
-`unread_count_display`. Slack does not supply that count for other conversation
-types. Other channel/group badges inspect an unread source history page. This avoids
+Source cursors use Slack's microsecond timestamps. IM and MPIM counts use
+`unread_count_display` when Slack supplies it. Other channel/group badges
+inspect an unread source history page. This avoids
 waiting for the message import, and completed private delivery bodies are
 intentionally erased. This probe respects the grant's history window and
 stores only cursor/count metadata. Thread-only replies and the owner's own
@@ -778,6 +782,21 @@ does not pause an entire account. A secondary history/replies quota deferral
 pauses only that conversation for at least 15 seconds and its reported delay;
 independent DM info requests can continue. Visible hints expire after 90 seconds, activity
 hints after five minutes, and each account retains at most 256 hints.
+
+The owner Slack conversation inventory also hints at most four eligible,
+unrouted conversations from its first page when a verified owner requests it.
+Stale known-unread rows and never-observed rows each receive up to two places,
+then other stale rows fill any spare places. Existing unexpired hints are left
+alone. Later cursor pages do not enqueue refreshes. This GET only reads cached
+snapshots and writes bounded worker hints; the worker performs all Slack calls
+under the existing per-method budget and rechecks consent, membership and
+scopes. A cache age over 120 seconds remains visibly stale. In the inventory
+response, `read_state_coverage.observed_complete` means every eligible source
+has a known read observation under a complete discovery sweep, even if some
+observations are stale. `fresh_complete` requires no stale observations;
+`complete` retains the same strict meaning for older clients that use it to
+decide whether “All caught up” is safe. Permission-limited or stale discovery
+never satisfies any of these completion fields.
 
 Every source observation and confirmed write has a monotonically increasing
 `revision`. Full directory responses have a separate `directory_revision` under

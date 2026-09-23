@@ -155,8 +155,16 @@ def refresh_read_state_once():
             confirmed = flush_read_once(grant, authority, keys) if lease.turn % 4 != 3 else None
             if confirmed is not None:
                 return confirmed
-            targets = sorted((t for t in reads._targets_for_keys(grant, keys)
-                              if t.read_scope in authority.scopes), key=lambda t: t.slack_id)
+            routed_targets = [
+                target for target in reads._targets_for_keys(grant, keys)
+                if target.read_scope in authority.scopes
+            ]
+            from integrations.services.slack_owner_inventory import source_read_targets
+
+            targets = sorted(
+                routed_targets + source_read_targets(grant, authority, routed_targets),
+                key=lambda target: target.slack_id,
+            )
             with transaction.atomic():
                 _, connection = reads._lock_slack_grant_api_authority(authority, required_scopes={"im:read"})
                 snapshots = cache.get_many([reads._cache_key(authority, t) for t in targets])

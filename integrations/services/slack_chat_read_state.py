@@ -69,9 +69,10 @@ def _timestamp(value):
 def read_state_snapshot(details, *, kind, messages, owner_id):
     """Combine Slack's cursor with source messages, without fabricating counts.
 
-    Slack exposes unread_count_display only for IMs. For other conversations,
-    top-level source messages establish unread activity; numeric channel
-    badges count explicit user/broadcast mentions, while group DMs count messages.
+    Slack exposes unread_count_display for IMs and sometimes group DMs. For
+    other responses, top-level source messages establish unread activity;
+    numeric channel badges count explicit user/broadcast mentions, while group
+    DMs count messages.
     Thread-only replies and the owner's own messages do not increment the list.
     """
     read_at = _timestamp(details.get("last_read"))
@@ -111,7 +112,7 @@ def read_state_snapshot(details, *, kind, messages, owner_id):
         latest_stamp = max(latest_stamp, stamp)
         if stamp > read_at and message.get("user") != owner_id:
             unread.append(message)
-    count = details.get("unread_count_display") if kind == "im" else None
+    count = details.get("unread_count_display") if kind in {"im", "mpim"} else None
     authoritative_count = type(count) is int and count >= 0
     if authoritative_count:
         is_unread = count > 0
@@ -317,18 +318,25 @@ def refresh_target(grant, authority, target):
         try:
             messages, count_source, partial = _unread_messages(authority, target, details.get("last_read", "0"))
         except (BudgetDeferred, SlackDmMirrorRateLimited) as exc:
-            # Preserve the secondary stage even for an actual Slack 429,
-            # which differs from a local admission deferral before a request.
-            exc.read_state_method = "conversations.history"
-            # The allowlist excludes text, profiles, topic and private URLs.
-            safe = {name: details[name] for name in ("id", "is_member", "last_read", "unread_count_display") if name in details}
-            latest = details.get("latest") or {}
-            safe["latest"] = {name: latest[name] for name in ("ts", "hidden", "subtype") if name in latest}
-            with transaction.atomic():
-                _lock_slack_grant_api_authority(authority, required_scopes={target.read_scope})
-                if cache.get(key + ":receipt") == receipt:
-                    cache.set(pending_key, {"details": safe, "fetched_at": observed_at}, timeout=30)
-            raise
+            count = details.get("unread_count_display")
+            if target.kind == "mpim" and type(count) is int and count >= 0:
+                # Slack already supplied this member's group-DM badge. A
+                # history budget pause only prevents checking mentions, not
+                # publishing that authoritative unread count.
+                messages, count_source, partial = [], "slack", True
+            else:
+                # Preserve the secondary stage even for an actual Slack 429,
+                # which differs from a local admission deferral before a request.
+                exc.read_state_method = "conversations.history"
+                # The allowlist excludes text, profiles, topic and private URLs.
+                safe = {name: details[name] for name in ("id", "is_member", "last_read", "unread_count_display") if name in details}
+                latest = details.get("latest") or {}
+                safe["latest"] = {name: latest[name] for name in ("ts", "hidden", "subtype") if name in latest}
+                with transaction.atomic():
+                    _lock_slack_grant_api_authority(authority, required_scopes={target.read_scope})
+                    if cache.get(key + ":receipt") == receipt:
+                        cache.set(pending_key, {"details": safe, "fetched_at": observed_at}, timeout=30)
+                raise
         snapshot = read_state_snapshot(details, kind=target.kind, owner_id=grant.slack_user_id, messages=messages)
         if snapshot is not None:
             snapshot["fetched_at"] = observed_at
@@ -336,10 +344,12 @@ def refresh_target(grant, authority, target):
                 snapshot["count_source"] = count_source
                 if partial:
                     snapshot["unread_count"] = None
-                    if not snapshot["has_personal_mention"]:
-                        snapshot["has_personal_mention"] = None
                     if not snapshot["is_unread"]:
                         snapshot = None
+            if snapshot is not None and partial and snapshot["is_unread"] and not snapshot["has_personal_mention"]:
+                # A partial page cannot establish that no later unread post
+                # mentions the owner, even when Slack supplied the badge count.
+                snapshot["has_personal_mention"] = None
         cached = {"available": snapshot is not None, **(snapshot or {})}
     cached.setdefault("fetched_at", observed_at)
     with transaction.atomic():

@@ -19,6 +19,7 @@ ORG_MEMORY_PRODUCTION_DEPLOY_ENABLED="${ORG_MEMORY_PRODUCTION_DEPLOY_ENABLED:-fa
 ORG_MEMORY_PRODUCTION_PUBLIC_CHANNEL_ADMIN_SCOPE_APPROVED="${ORG_MEMORY_PRODUCTION_PUBLIC_CHANNEL_ADMIN_SCOPE_APPROVED:-false}"
 LINEAR_CHANNEL_ISSUE_MAX_COMMENTS="${LINEAR_CHANNEL_ISSUE_MAX_COMMENTS:-250}"
 MESSAGE_SYNC_ENABLED="${MESSAGE_SYNC_ENABLED:-false}"
+SLACK_OWNER_INVENTORY_ENABLED="${SLACK_OWNER_INVENTORY_ENABLED:-false}"
 COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED="${COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED:-false}"
 case "$COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED" in
     true|TRUE|True) COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED=true ;;
@@ -31,6 +32,16 @@ case "$MESSAGE_SYNC_ENABLED" in
     *) echo "MESSAGE_SYNC_ENABLED must be true or false." >&2; exit 1 ;;
 esac
 export MESSAGE_SYNC_ENABLED
+case "$SLACK_OWNER_INVENTORY_ENABLED" in
+    true|TRUE|True) SLACK_OWNER_INVENTORY_ENABLED=true ;;
+    false|FALSE|False) SLACK_OWNER_INVENTORY_ENABLED=false ;;
+    *) echo "SLACK_OWNER_INVENTORY_ENABLED must be true or false." >&2; exit 1 ;;
+esac
+if [ "$SLACK_OWNER_INVENTORY_ENABLED" = "true" ] && [ "$MESSAGE_SYNC_ENABLED" != "true" ]; then
+    echo "SLACK_OWNER_INVENTORY_ENABLED requires MESSAGE_SYNC_ENABLED=true." >&2
+    exit 1
+fi
+export SLACK_OWNER_INVENTORY_ENABLED
 
 case "$MEETING_ROOM_BOOKING_ENABLED" in
     true|TRUE|True|1|yes|YES|Yes|on|ON|On) MEETING_ROOM_BOOKING_ENABLED=true ;;
@@ -336,6 +347,9 @@ install_remote_env_value() {
 # The app-level token travels only through SSH stdin. Never reuse an OAuth
 # bot/user token: recipient expansion is a separate Slack authorization surface.
 install_remote_env_value MESSAGE_SYNC_ENABLED "$MESSAGE_SYNC_ENABLED"
+# Keep the new inventory endpoint disabled during migration and every
+# pre-activation check, even when this host was previously enabled.
+install_remote_env_value SLACK_OWNER_INVENTORY_ENABLED "false"
 # Install callback verification before activation so Slack can verify its URL.
 if [ -n "${MESSAGE_SYNC_SLACK_USER_APP_ID:-}" ]; then
     install_remote_env_value MESSAGE_SYNC_SLACK_USER_APP_ID "$MESSAGE_SYNC_SLACK_USER_APP_ID"
@@ -632,6 +646,7 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     cd $PROJECT_DIR
     meeting_room_booking_enabled="$MEETING_ROOM_BOOKING_ENABLED"
     office_manager_enabled="$OFFICE_MANAGER_ENABLED"
+    slack_owner_inventory_enabled="$SLACK_OWNER_INVENTORY_ENABLED"
     community_bridge_production_enabled="$COMMUNITY_BRIDGE_PRODUCTION_ENABLED"
     org_memory_production_deploy_enabled="$ORG_MEMORY_PRODUCTION_DEPLOY_ENABLED"
 
@@ -1154,8 +1169,9 @@ if parsed.username or parsed.password or parsed.query or parsed.fragment:
             fi
         fi
 
-        echo "⚠️ Deployment failed after runtime services were paused; staging Office Manager disabled and selecting fail-closed recovery."
+        echo "⚠️ Deployment failed after runtime services were paused; staging Office Manager and Slack owner inventory disabled for recovery."
         upsert_env_value OFFICE_MANAGER_ENABLED "false" || true
+        upsert_env_value SLACK_OWNER_INVENTORY_ENABLED "false" || true
         if [ "\$new_runtime_replacement_started" != "1" ] \
             && [ "\$migration_started" != "1" ]; then
             # These stopped containers still reference the last known-good images
@@ -1409,6 +1425,8 @@ PY
 
     echo "🚩 Applying the reviewed Office Manager activation state..."
     upsert_env_value OFFICE_MANAGER_ENABLED "\$office_manager_enabled"
+    echo "🚩 Applying the reviewed Slack owner inventory activation state..."
+    upsert_env_value SLACK_OWNER_INVENTORY_ENABLED "\$slack_owner_inventory_enabled"
 
     echo "🌐 Starting runtime services: \${runtime_services[*]}..."
     new_runtime_replacement_started=1
@@ -1435,7 +1453,22 @@ PY
         false
     fi
 
+    echo "🔁 Verifying the running web container picked up the Slack owner inventory flag..."
+    running_inventory_enabled=\$(docker compose exec -T web sh -lc 'printf "%s" "\$SLACK_OWNER_INVENTORY_ENABLED"' </dev/null)
+    if [ "\$running_inventory_enabled" != "$SLACK_OWNER_INVENTORY_ENABLED" ]; then
+        echo "Expected running web container SLACK_OWNER_INVENTORY_ENABLED=$SLACK_OWNER_INVENTORY_ENABLED but found \$running_inventory_enabled"
+        false
+    fi
+
     if [ "$MESSAGE_SYNC_ENABLED" = "true" ]; then
+        if [ "$SLACK_OWNER_INVENTORY_ENABLED" = "true" ]; then
+            echo "🔁 Verifying the bridge worker picked up the Slack owner inventory flag..."
+            running_worker_inventory_enabled=\$(docker compose exec -T bridge-worker sh -lc 'printf "%s" "\$SLACK_OWNER_INVENTORY_ENABLED"' </dev/null)
+            if [ "\$running_worker_inventory_enabled" != "true" ]; then
+                echo "Expected bridge worker SLACK_OWNER_INVENTORY_ENABLED=true but found \$running_worker_inventory_enabled"
+                false
+            fi
+        fi
         echo "Verifying durable sync progress in the new bridge worker..."
         sync_ready=0
         for attempt in \$(seq 1 18); do

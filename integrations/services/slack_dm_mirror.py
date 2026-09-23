@@ -148,6 +148,15 @@ DIRECT_DM_SCOPES = {
 }
 GROUP_DM_SCOPES = {"mpim:read", "mpim:history", "mpim:write"}
 REQUIRED_SCOPES = DIRECT_DM_SCOPES | GROUP_DM_SCOPES | PRIVATE_CHANNEL_SCOPES
+# Public channel unread snapshots use the owner's cursor and history. An older
+# DM grant may still work without these scopes, so diagnose this separately
+# rather than disabling its private read state while OAuth is upgraded.
+PUBLIC_UNREAD_SCOPES = {"channels:read", "channels:history"}
+
+
+def public_unread_needs_reauthorization(scopes) -> bool:
+    """Whether mapped public channels lack the owner's read permissions."""
+    return not PUBLIC_UNREAD_SCOPES.issubset(set(scopes or []))
 _last_grant_discovery_scan = 0.0
 _last_registration_cleanup_scan = 0.0
 _history_scan_available_at = 0.0
@@ -1123,6 +1132,39 @@ def status_payload(
     catalog_key = str(authenticated_public_key or "").strip().lower()
     if catalog_key not in active_device_keys:
         catalog_key = ""
+    from integrations.services.slack_owner_inventory import (
+        device_epoch as owner_inventory_device_epoch,
+        enabled as owner_inventory_enabled,
+        has_metadata_consent,
+    )
+
+    inventory_enabled = owner_inventory_enabled()
+    inventory_consent_required = False
+    inventory_epoch = None
+    if (
+        inventory_enabled and grant is not None
+        and grant.status == SlackDmMirrorGrantStatus.ACTIVE
+        and grant.revoked_at is None and connection is grant.connection
+    ):
+        try:
+            inventory_authority = _capture_slack_grant_api_authority(
+                grant, refresh_token=False,
+            )
+            inventory_consent_required = not has_metadata_consent(
+                grant.connection, inventory_authority,
+            )
+            if not inventory_consent_required and catalog_key:
+                device = CommunityChatDevice.objects.filter(
+                    user=user, public_key=catalog_key,
+                    status=DeviceBindingStatus.VERIFIED,
+                    revoked_at__isnull=True,
+                ).first()
+                if device is not None:
+                    inventory_epoch = owner_inventory_device_epoch(
+                        grant, inventory_authority, device,
+                    )
+        except SlackDmMirrorError:
+            inventory_consent_required = True
     counts["device_capacity_limited"] = sum(
         1
         for participant_ids in backfill_conversations.values_list(
@@ -1226,6 +1268,9 @@ def status_payload(
     history_days = _grant_history_days(grant) if grant else _bounded_history_days(30)
     return {
         "connected": connection is not None,
+        "inventory_enabled": inventory_enabled,
+        "inventory_consent_required": inventory_consent_required,
+        "inventory_epoch": inventory_epoch,
         "needs_reauthorization": bool(
             (grant is not None or connection is not None)
             and (
@@ -1242,6 +1287,12 @@ def status_payload(
                 )
                 or not str(connection.access_token or "").strip()
             )
+        ),
+        "public_unread_needs_reauthorization": bool(
+            grant is not None
+            and grant.status == SlackDmMirrorGrantStatus.ACTIVE
+            and connection is not None
+            and public_unread_needs_reauthorization(connection.scopes)
         ),
         "enabled": bool(grant and grant.status == SlackDmMirrorGrantStatus.ACTIVE),
         "status": grant.status if grant else "not_connected",
@@ -1372,7 +1423,7 @@ def activate_connection(
         # before returning. The authority version fences in-flight Slack reads.
         authority = _capture_slack_grant_api_authority(existing_grant)
         with transaction.atomic():
-            current, _ = _lock_slack_grant_api_authority(
+            current, locked_connection = _lock_slack_grant_api_authority(
                 authority, required_scopes=DIRECT_DM_SCOPES
             )
             if include_private_channels:
@@ -1389,6 +1440,8 @@ def activate_connection(
             )
             if requested_history_days != current.history_days:
                 backfill_grant(current, history_days=history_days)
+            from integrations.services.slack_owner_inventory import rotate_epoch_locked
+            rotate_epoch_locked(locked_connection)
             current.refresh_from_db()
         return current
     if existing_grant is not None:
@@ -1463,6 +1516,8 @@ def activate_connection(
                 history_days=requested_history_days,
                 consented_at=now,
             )
+            from integrations.services.slack_owner_inventory import rotate_epoch_locked
+            rotate_epoch_locked(locked_connection)
         else:
             conversations = list(
                 SlackDmMirrorConversation.objects.select_for_update()
@@ -1503,6 +1558,8 @@ def activate_connection(
                         "updated_at",
                     )
                 )
+                from integrations.services.slack_owner_inventory import rotate_epoch_locked
+                rotate_epoch_locked(locked_connection)
                 _normalize_grant_history_window_locked(grant)
                 _adopt_current_registration_generation_locked(grant)
                 if _registration_cleanup_pending_locked(grant.pk):
@@ -1525,13 +1582,20 @@ def activate_connection(
 
 
 def pause_grant(grant: SlackDmMirrorGrant) -> None:
-    now = timezone.now()
-    grant.status = SlackDmMirrorGrantStatus.PAUSED
-    grant.paused_at = now
-    grant.save(update_fields=("status", "paused_at", "updated_at"))
-    grant.conversations.filter(
-        status=SlackDmMirrorConversationStatus.LIVE,
-    ).update(status=SlackDmMirrorConversationStatus.PAUSED, updated_at=now)
+    from integrations.services.slack_owner_inventory import rotate_epoch_locked
+
+    with transaction.atomic():
+        get_user_model().objects.select_for_update().get(pk=grant.user_id)
+        grant = SlackDmMirrorGrant.objects.select_for_update().get(pk=grant.pk)
+        connection = ExternalServiceConnection.objects.select_for_update().get(pk=grant.connection_id)
+        now = timezone.now()
+        grant.status = SlackDmMirrorGrantStatus.PAUSED
+        grant.paused_at = now
+        grant.save(update_fields=("status", "paused_at", "updated_at"))
+        grant.conversations.filter(
+            status=SlackDmMirrorConversationStatus.LIVE,
+        ).update(status=SlackDmMirrorConversationStatus.PAUSED, updated_at=now)
+        rotate_epoch_locked(connection)
 
 
 def resume_grant(grant: SlackDmMirrorGrant) -> None:
@@ -1584,6 +1648,8 @@ def resume_grant(grant: SlackDmMirrorGrant) -> None:
                     "updated_at",
                 )
             )
+            from integrations.services.slack_owner_inventory import rotate_epoch_locked
+            rotate_epoch_locked(connection)
             _normalize_grant_history_window_locked(grant)
     if resume_error is not None:
         raise resume_error
@@ -1771,6 +1837,9 @@ def _revoke_grant_locally_locked(
     grant.revoked_at = now
     grant.last_error = ""
     grant.save(update_fields=("status", "revoked_at", "last_error", "updated_at"))
+    from integrations.models import SlackOwnerConversationInventory
+
+    SlackOwnerConversationInventory.objects.filter(grant=grant).delete()
     CommunityBridgeIdentityLink.objects.filter(
         slack_workspace_id=grant.slack_workspace_id,
         slack_user_id=grant.slack_user_id,
@@ -2649,6 +2718,18 @@ def discover_conversations(
         authority, cursor=cursor, seen_channel_ids=seen_channel_ids,
         failures=failures, started_at=discovery_started_at,
     )
+    from integrations.services.slack_owner_inventory import collect_public_page
+
+    try:
+        collect_public_page(authority)
+    except (SlackDmMirrorAuthorizationError, LeaseLost):
+        raise
+    except Exception as exc:
+        # The personal metadata sweep cannot stop the existing private import.
+        logger.warning(
+            "slack_owner_public_inventory_failed grant_id=%s error=%s",
+            grant.pk, exc,
+        )
     discovered = 0
     profile_cache: dict[str, dict[str, str]] = {}
     for stored_profiles in grant.conversations.values_list(
@@ -2676,17 +2757,38 @@ def discover_conversations(
             "users_conversations",
             required_scopes=DIRECT_DM_SCOPES,
             types=conversation_types,
-            exclude_archived=grant.consent_version != ALL_HISTORY_CONSENT,
+            exclude_archived=False,
             limit=20,
             cursor=cursor,
         )
-        raw_channels = [
-            raw for raw in response.get("channels") or [] if isinstance(raw, dict)
-        ]
+        source_channels = response.get("channels")
+        if not isinstance(source_channels, list) or any(
+            not isinstance(raw, dict) for raw in source_channels
+        ):
+            raise SlackDmMirrorUpstreamError("Slack returned a malformed conversation page.")
+        raw_channels = list(source_channels)
         raw_channels.sort(
             key=lambda raw: _slack_conversation_activity_seconds(raw) or -1,
             reverse=True,
         )
+        from integrations.services.slack_owner_inventory import record_private_page
+
+        record_private_page(
+            authority, raw_channels, started_at=discovery_started_at,
+            kinds=set(conversation_types.split(",")),
+            profiles=profile_cache,
+        )
+        from integrations.services.slack_owner_inventory import hydrate_source_names
+
+        try:
+            hydrate_source_names(authority, limit=4)
+        except (SlackDmMirrorAuthorizationError, LeaseLost):
+            raise
+        except Exception as exc:
+            logger.warning(
+                "slack_owner_name_hydration_failed grant_id=%s error=%s",
+                grant.pk, exc,
+            )
         for raw in raw_channels:
             if not isinstance(raw, dict):
                 continue
@@ -2846,6 +2948,12 @@ def discover_conversations(
             _reconcile_registration_cleanup(grant.pk, raise_on_pending=False)
             return discovered
         break
+    from integrations.services.slack_owner_inventory import complete_private_sweep
+
+    complete_private_sweep(
+        authority, started_at=discovery_started_at,
+        kinds=set(conversation_types.split(",")),
+    )
     unavailable_conversations = (
         SlackDmMirrorConversation.objects.filter(grant=grant)
         .exclude(status=SlackDmMirrorConversationStatus.PAUSED)
@@ -3632,9 +3740,8 @@ def ingest_slack_dm_event(payload: dict[str, Any]) -> dict[str, Any] | None:
     )
     channel_id = str(raw_channel_id or "").strip()
     workspace_id = str(payload.get("team_id") or "").strip()
-    if any(
-        bool(event.get(flag))
-        for flag in ("is_ext_shared_channel", "is_external_shared", "is_shared")
+    if bool(payload.get("is_ext_shared_channel")) or _is_external_shared_conversation(
+        event
     ):
         grant_ids = list(
             SlackDmMirrorConversation.objects.filter(
@@ -7651,7 +7758,7 @@ def _verify_roo_mentions_before_send(delivery, client):
     conversation = delivery.conversation
     channel = client.conversations_info(channel=conversation.slack_conversation_id).get("channel") or {}
     if (channel.get("id") != conversation.slack_conversation_id or channel.get("is_archived")
-            or any(channel.get(flag) for flag in ("is_ext_shared", "is_shared", "is_org_shared"))):
+            or _is_external_shared_conversation(channel)):
         raise SlackDmMirrorAuthorizationError("This Slack conversation is no longer available.")
     members = set()
     cursor = ""
@@ -8786,14 +8893,25 @@ def _decode_directory_cursor(value: str) -> tuple[str, int]:
 
 
 def _is_external_shared_conversation(raw_conversation: dict[str, Any]) -> bool:
-    return any(
+    """Exclude external sharing while retaining explicitly internal org sharing.
+
+    Slack sets ``is_shared`` for both Slack Connect and Enterprise internal
+    sharing. A shared conversation without an explicit internal classification
+    remains ineligible until the source confirms its audience.
+    """
+    if any(
         bool(raw_conversation.get(flag))
         for flag in (
             "is_ext_shared",
+            "is_ext_ws_shared",
+            "is_ext_shared_channel",
             "is_external_shared",
-            "is_org_shared",
-            "is_shared",
+            "is_pending_ext_shared",
         )
+    ):
+        return True
+    return bool(raw_conversation.get("is_shared")) and not bool(
+        raw_conversation.get("is_org_shared")
     )
 
 

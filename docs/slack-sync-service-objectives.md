@@ -170,7 +170,10 @@ does not claim bidirectional instantaneous read-marker push.
   that replay requires coordinated relay support for stable owner-conversation
   identity and membership generations, or a reviewed encrypted canonical cache.
   Skipping the current reset would break audience/privacy guarantees.
-- Current source support excludes Slack Connect conversations. Source retention,
+- Current source support excludes Slack Connect conversations, pending external
+  shares, and shared conversations whose audience Slack has not classified.
+  Enterprise channels explicitly shared only within the organisation remain
+  eligible under the same owner consent and device access checks. Source retention,
   missing permissions and unavailable history must be reported as limited scope.
 
 Sources: [Slack rate limits](https://docs.slack.dev/apis/web-api/rate-limits/),
