@@ -783,6 +783,21 @@ pauses only that conversation for at least 15 seconds and its reported delay;
 independent DM info requests can continue. Visible hints expire after 90 seconds, activity
 hints after five minutes, and each account retains at most 256 hints.
 
+The owner Slack conversation inventory also hints at most four eligible,
+unrouted conversations from its first page when a verified owner requests it.
+Stale known-unread rows and never-observed rows each receive up to two places,
+then other stale rows fill any spare places. Existing unexpired hints are left
+alone. Later cursor pages do not enqueue refreshes. This GET only reads cached
+snapshots and writes bounded worker hints; the worker performs all Slack calls
+under the existing per-method budget and rechecks consent, membership and
+scopes. A cache age over 120 seconds remains visibly stale. In the inventory
+response, `read_state_coverage.observed_complete` means every eligible source
+has a known read observation under a complete discovery sweep, even if some
+observations are stale. `fresh_complete` requires no stale observations;
+`complete` retains the same strict meaning for older clients that use it to
+decide whether “All caught up” is safe. Permission-limited or stale discovery
+never satisfies any of these completion fields.
+
 Every source observation and confirmed write has a monotonically increasing
 `revision`. Full directory responses have a separate `directory_revision` under
 the same authority lock. Clients reject older responses, including stale unknown

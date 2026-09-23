@@ -38,13 +38,16 @@ from integrations.services.slack_owner_inventory import (
     enabled,
     has_metadata_consent,
     _kind,
+    source_read_targets,
     state_for,
 )
+from integrations.services.message_sync.read_priority import KEY as READ_PRIORITY_KEY, enqueue_refresh
 from integrations.services.message_sync.scheduler import BudgetDeferred
 
 
 CURSOR_SALT = "slack-owner-inventory-page-v1"
 METADATA_FRESH_SECONDS = 600
+VISIBLE_SOURCE_HINT_LIMIT = 4
 
 
 class InventoryError(Exception):
@@ -230,9 +233,10 @@ def conversation_page(user, *, public_key, limit=50, cursor="", unread_only=Fals
     keys = [_cache_key(authority, target) for target in targets]
     snapshots = cache.get_many(keys)
     now = time.time()
+    raw_states = {row.pk: snapshots.get(key) for row, key in zip(rows, keys)}
     states = {
-        row.pk: _read_state(snapshots.get(key), now)
-        for row, key in zip(rows, keys)
+        row.pk: _read_state(raw_states[row.pk], now)
+        for row in rows
     }
     coverage = _coverage(state, now)
     read_summary = {
@@ -251,8 +255,13 @@ def conversation_page(user, *, public_key, limit=50, cursor="", unread_only=Fals
             read_summary["fresh_unread_count" if availability == "available" else "provisional_unread_count"] += 1
     discovery_complete = all(value == "complete" for value in coverage.values())
     discovery_terminal = all(value != "pending" for value in coverage.values())
+    observed_complete = discovery_complete and read_summary["unknown_count"] == 0
+    fresh_complete = observed_complete and read_summary["stale_count"] == 0
     read_summary.update(
-        complete=discovery_complete and read_summary["unknown_count"] == 0 and read_summary["stale_count"] == 0,
+        # Older clients use complete to decide whether "All caught up" is safe.
+        complete=fresh_complete,
+        observed_complete=observed_complete,
+        fresh_complete=fresh_complete,
         observed_at=timezone.now().isoformat(),
         inventory_revision=revision,
         read_revision=read_revision,
@@ -295,6 +304,26 @@ def conversation_page(user, *, public_key, limit=50, cursor="", unread_only=Fals
               public_key=device.public_key, state=state, read_state=states[row.pk], oldest=oldest)
         for row in selected
     ]
+    priority = {"stale_unread": [], "unknown": [], "stale_other": []}
+    if not cursor and selected:
+        # Only already-consented, provider-readable sources are candidates.
+        # The worker will recheck these boundaries before calling Slack.
+        source_targets = {
+            target.slack_id: target for target in source_read_targets(grant, authority, [])
+        }
+        for row, item in zip(selected, items):
+            target = source_targets.get(row.slack_conversation_id)
+            if target is None or item["mlai_channel_id"] is not None:
+                continue
+            snapshot = raw_states[row.pk] or {}
+            if snapshot.get("excluded") is True:
+                continue
+            read = states[row.pk]
+            if read["availability"] == "unknown":
+                priority["unknown"].append(target)
+            elif read["availability"] == "stale":
+                bucket = "stale_unread" if read["is_unread"] else "stale_other"
+                priority[bucket].append(target)
     with transaction.atomic():
         _, connection = _lock_slack_grant_api_authority(authority, required_scopes={"im:read"})
         if not CommunityChatDevice.objects.filter(
@@ -311,6 +340,22 @@ def conversation_page(user, *, public_key, limit=50, cursor="", unread_only=Fals
             "content_revision", current_read.get("revision"),
         ) or 0) != read_revision:
             raise InventoryError("inventory_cursor_stale", 409)
+        if priority["stale_unread"] or priority["unknown"] or priority["stale_other"]:
+            now = time.time()
+            hints = (connection.sync_cursor or {}).get(READ_PRIORITY_KEY) or {}
+            def unhinted(targets):
+                return [target for target in targets if
+                        (hints.get(target.slack_id) or {}).get("until", 0) <= now]
+            stale_unread = unhinted(priority["stale_unread"])
+            unknown = unhinted(priority["unknown"])
+            stale_other = unhinted(priority["stale_other"])
+            # Keep stale positives moving without starving never-observed rows.
+            chosen = stale_unread[:2] + unknown[:2]
+            chosen_ids = {target.slack_id for target in chosen}
+            chosen.extend(target for target in stale_unread + unknown + stale_other
+                          if target.slack_id not in chosen_ids)
+            if chosen:
+                enqueue_refresh(authority, chosen[:VISIBLE_SOURCE_HINT_LIMIT], reason="visible")
     return {
         "items": items,
         "next_cursor": next_cursor,

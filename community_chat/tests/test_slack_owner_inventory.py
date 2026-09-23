@@ -18,6 +18,7 @@ from integrations.models import (
 )
 from integrations.services import slack_dm_mirror as dm
 from integrations.services.slack_chat_read_state import ReadTarget, _cache_key
+from integrations.services.message_sync.read_priority import KEY as READ_PRIORITY_KEY
 from integrations.services.message_sync.read_snapshots import publish_snapshot
 from integrations.services.slack_owner_inventory import (
     collect_public_page, complete_private_sweep, grant_metadata_consent, record_private_page,
@@ -182,6 +183,96 @@ class SlackOwnerInventoryTests(SlackDmIoAuthorityFixture, TransactionTestCase):
                               cursor=first["next_cursor"], limit=1)
         self.assertEqual(stale.exception.code, "inventory_cursor_stale")
 
+    def test_first_page_hints_at_most_four_visible_source_reads_without_provider_calls(self):
+        self.consent()
+        rows = [self.row(f"D{i:03d}") for i in range(1, 9)]
+        record_private_page(self.authority, rows, started_at=timezone.now(), kinds={"im"})
+        for source_id, unread in (("D001", True), ("D002", True), ("D003", True),
+                                  ("D007", False), ("D008", False)):
+            cache.set(_cache_key(self.authority, ReadTarget(source_id, source_id, "im")),
+                      {"available": True, "is_unread": unread, "unread_count": int(unread),
+                       "has_personal_mention": False, "fetched_at": time.time() - 300},
+                      timeout=86400)
+        with patch("integrations.services.slack_owner_inventory_api._call_slack_with_grant_authority") as slack:
+            first = conversation_page(self.user, public_key=self.owner_key, limit=8)
+        slack.assert_not_called()
+        self.assertEqual(len(first["items"]), 8)
+        self.connection.refresh_from_db()
+        hints = self.connection.sync_cursor[READ_PRIORITY_KEY]
+        self.assertEqual(set(hints), {"D001", "D002", "D004", "D005"})
+        self.assertEqual({hint["reason"] for hint in hints.values()}, {"visible"})
+        original_hints = dict(hints)
+
+        # An active hint is retained, rather than renewed on every UI poll.
+        conversation_page(self.user, public_key=self.owner_key, limit=8)
+        self.connection.refresh_from_db()
+        hints = self.connection.sync_cursor[READ_PRIORITY_KEY]
+        self.assertEqual(set(hints), {f"D{i:03d}" for i in range(1, 9)})
+        self.assertEqual(hints["D001"], original_hints["D001"])
+
+    def test_cursor_pages_and_mapped_rooms_do_not_enqueue_source_hints(self):
+        self.consent()
+        record_private_page(self.authority, [self.row("DAAA"), self.row("DBBB")],
+                            started_at=timezone.now(), kinds={"im"})
+        channel_id = uuid.uuid4()
+        CommunityBridgeChannel.objects.create(
+            slack_workspace_id="TIOAUTH", slack_channel_id="CJOINED",
+            destination_platform=CommunityBridgePlatform.BUZZ,
+            destination_channel_id=str(channel_id), enabled=True,
+        )
+        with patch("integrations.services.slack_dm_mirror._call_slack_with_grant_authority", return_value={
+            "channels": [self.row("CJOINED", kind="public_channel", is_member=True)],
+            "response_metadata": {"next_cursor": ""},
+        }):
+            collect_public_page(self.authority)
+        first = conversation_page(self.user, public_key=self.owner_key, limit=1)
+        self.connection.refresh_from_db()
+        self.assertEqual(set(self.connection.sync_cursor[READ_PRIORITY_KEY]), {"DAAA"})
+        second = conversation_page(self.user, public_key=self.owner_key,
+                                   cursor=first["next_cursor"], limit=2)
+        self.assertEqual(len(second["items"]), 2)
+        self.connection.refresh_from_db()
+        self.assertEqual(set(self.connection.sync_cursor[READ_PRIORITY_KEY]), {"DAAA"})
+        conversation_page(self.user, public_key=self.owner_key, limit=3)
+        self.connection.refresh_from_db()
+        self.assertEqual(set(self.connection.sync_cursor[READ_PRIORITY_KEY]), {"DAAA", "DBBB"})
+
+    def test_external_shared_source_never_receives_visible_read_hint(self):
+        self.consent()
+        record_private_page(self.authority, [
+            self.row("DAAA"), self.row("DEXTERNAL", is_ext_shared=True),
+        ], started_at=timezone.now(), kinds={"im"})
+        page = conversation_page(self.user, public_key=self.owner_key)
+        self.assertEqual(
+            {item["slack_conversation_id"]: item["eligibility"] for item in page["items"]},
+            {"DAAA": "eligible", "DEXTERNAL": "unsupported_external"},
+        )
+        self.connection.refresh_from_db()
+        self.assertEqual(set(self.connection.sync_cursor[READ_PRIORITY_KEY]), {"DAAA"})
+
+    def test_observed_coverage_does_not_claim_fresh_or_all_caught_up(self):
+        self.consent()
+        started = timezone.now()
+        record_private_page(self.authority, [self.row("DSTALE")],
+                            started_at=started, kinds={"im", "mpim", "private_channel"})
+        complete_private_sweep(self.authority, started_at=started,
+                               kinds={"im", "mpim", "private_channel"})
+        with patch("integrations.services.slack_dm_mirror._call_slack_with_grant_authority", return_value={
+            "channels": [], "response_metadata": {"next_cursor": ""},
+        }):
+            collect_public_page(self.authority)
+        cache.set(_cache_key(self.authority, ReadTarget("DSTALE", "DSTALE", "im")),
+                  {"available": True, "is_unread": False, "unread_count": 0,
+                   "has_personal_mention": False, "fetched_at": time.time() - 300},
+                  timeout=86400)
+        page = conversation_page(self.user, public_key=self.owner_key)
+        coverage = page["read_state_coverage"]
+        self.assertTrue(page["discovery_complete"])
+        self.assertTrue(coverage["observed_complete"])
+        self.assertFalse(coverage["fresh_complete"])
+        self.assertFalse(coverage["complete"])
+        self.assertEqual(coverage["stale_count"], 1)
+
     def test_quiet_read_refresh_does_not_invalidate_unread_cursor(self):
         self.consent()
         started = timezone.now()
@@ -285,6 +376,8 @@ class SlackOwnerInventoryTests(SlackDmIoAuthorityFixture, TransactionTestCase):
         self.assertFalse(page["discovery_complete"])
         self.assertEqual(page["coverage"]["public_channel"], "permission_required")
         self.assertFalse(page["read_state_coverage"]["complete"])
+        self.assertFalse(page["read_state_coverage"]["observed_complete"])
+        self.assertFalse(page["read_state_coverage"]["fresh_complete"])
 
     def test_open_rechecks_source_and_schedules_only_in_window(self):
         self.consent()
