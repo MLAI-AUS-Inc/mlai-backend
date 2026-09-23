@@ -111,9 +111,15 @@ class VibeMarketingBootstrapPerformanceTests(SimpleTestCase):
         with patch.object(views, "_workflow_progress_context", return_value=(None, None, [], checks)), patch.object(
             views, "_topic_candidates_from_runs", side_effect=AssertionError("recomputed")
         ):
-            progress = views._workflow_progress(
-                checks=checks, topic_candidates=[{"keyword": "example"}]
-            )
-        choose_topic = next(step for step in progress["steps"] if step["id"] == "choose_topic")
-        self.assertEqual(choose_topic["status"], "needs_action")
-
+            for visible_candidates, expected_status in (
+                ([{"keyword": "example"}], "needs_action"),
+                ([], "ready"),
+            ):
+                with self.subTest(expected_status=expected_status):
+                    progress = views._workflow_progress(
+                        checks=checks, topic_candidates=visible_candidates
+                    )
+                    choose_topic = next(
+                        step for step in progress["steps"] if step["id"] == "choose_topic"
+                    )
+                    self.assertEqual(choose_topic["status"], expected_status)
