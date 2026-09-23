@@ -12,10 +12,10 @@ permissions:
   pull-requests: read
 
 # A push to main must finish its schema/runtime transition before the next
-# release touches the same droplet. Never cancel a deploy midway through migrate.
+# release touches the same droplet. Only superseded PR validation may cancel.
 concurrency:
   group: mlai-backend-deploy-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   # Pull requests run the complete suite and record the exact Git tree that
