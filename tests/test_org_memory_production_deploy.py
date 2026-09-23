@@ -206,7 +206,10 @@ class OrgMemoryProductionDeployTests(SimpleTestCase):
             deploy[post_migration_audit:],
         )
         self.assertGreater(
-            deploy.index("new_runtime_replacement_started=1"),
+            deploy.index(
+                "new_runtime_replacement_started=1",
+                deploy.index("compose_run_web python manage.py deploy_postmigrate"),
+            ),
             deploy.index("compose_run_web python manage.py deploy_postmigrate"),
         )
         self.assertLess(
@@ -245,7 +248,8 @@ class OrgMemoryProductionDeployTests(SimpleTestCase):
         )
 
         workflow = (ROOT / ".github" / "workflows" / "deploy.yml").read_text()
-        self.assertIn("run: bash -n deploy.sh", workflow)
+        self.assertIn("bash -n deploy.sh", workflow)
+        self.assertIn("bash -n ops/backend-api/switch-web-upstream.sh", workflow)
         deploy = (ROOT / "deploy.sh").read_text()
         self.assertIn("https://slack.com/api/conversations.history", deploy)
         self.assertIn(
