@@ -105,8 +105,9 @@ class SlackAllHistoryTests(SimpleTestCase):
             str(10_000_000 - 7 * 86400),
         )
 
+    @patch("integrations.services.message_sync.publication.record_publication_locked")
     @patch.object(mirror, "_clear_history_scan_states")
-    def test_refresh_does_not_reset_partial_archive_cursor(self, clear):
+    def test_refresh_does_not_reset_partial_archive_cursor(self, clear, publish):
         conversation = self.conversation()
         mirror._mark_conversation_history_due(
             conversation,
@@ -114,14 +115,16 @@ class SlackAllHistoryTests(SimpleTestCase):
             reset_deliveries=False,
             reconcile_current_state=True,
         )
+        publish.assert_called_once_with(conversation)
         clear.assert_not_called()
         conversation.save.assert_not_called()
         self.assertEqual(conversation.oldest_synced_ts, "123.000001")
 
+    @patch("integrations.services.message_sync.publication.record_publication_locked")
     @patch.object(mirror, "_mark_history_reconciliation_candidates_locked")
     @patch.object(mirror, "_clear_history_scan_states")
     def test_completed_archive_refresh_uses_recent_reconciliation(
-        self, clear, candidates
+        self, clear, candidates, publish
     ):
         conversation = self.conversation()
         conversation.history_backfilled_at = timezone.now() - timedelta(hours=1)
@@ -131,6 +134,7 @@ class SlackAllHistoryTests(SimpleTestCase):
             reset_deliveries=False,
             reconcile_current_state=True,
         )
+        publish.assert_called_once_with(conversation)
         clear.assert_called_once_with([conversation.pk])
         candidates.assert_called_once_with(conversation, recent_only=True)
 
@@ -521,7 +525,8 @@ class SlackAllHistoryTests(SimpleTestCase):
         self.assertNotIn("_mlai_original_thread_ts", message)
         thread.assert_called_once()
 
-    def test_upgrade_and_later_archive_pages_preserve_known_recency(self):
+    @patch("integrations.services.message_sync.publication.invalidate_publication_locked")
+    def test_upgrade_and_later_archive_pages_preserve_known_recency(self, invalidate):
         grant = self.grant(7, PRIVATE_CHANNEL_CONSENT)
         grant.status = "active"
         grant.revoked_at = None
@@ -550,6 +555,7 @@ class SlackAllHistoryTests(SimpleTestCase):
 
             conversations.filter.return_value.update.side_effect = update
             mirror.backfill_grant.__wrapped__(grant, history_days=0)
+        invalidate.assert_called_once_with(conversation)
         self.assertEqual(conversation.latest_synced_ts, "9999999.000001")
         mirror._advance_latest_synced_ts(conversation, "123.000001")
         self.assertEqual(conversation.latest_synced_ts, "9999999.000001")

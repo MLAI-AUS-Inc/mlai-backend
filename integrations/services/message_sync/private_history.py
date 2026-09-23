@@ -91,6 +91,13 @@ def private_page(lease, state):
         sync_state, _ = locked_job(lease)
         if read_boundary(dm, current, owner, epoch=expected.epoch, oldest=checkpoint["oldest"]) != expected:
             raise LeaseLost("sync_private_authority_changed")
+        from .publication import record_publication_locked
+        # Qualify a legacy completed room before head/thread repair adds new
+        # pending deliveries. Freshness work must not hide its existing history.
+        record_publication_locked(current)
+        # The qualifier writes through its own locked state instance. Retain
+        # that proof when this page subsequently updates its coverage ranges.
+        sync_state.refresh_from_db(fields=["verified_ranges"])
         current_days = dm._grant_history_days(owner)
         current_consent_floor = max(0, int(time.time()) - current_days * 86400) if current_days else 0
         current_floor = max(floor, current_consent_floor)

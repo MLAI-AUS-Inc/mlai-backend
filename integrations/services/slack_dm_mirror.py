@@ -759,6 +759,8 @@ def _store_conversation_membership_intent(
         previous_ids = sorted(conversation.participant_slack_ids or [])
         membership_changed = previous_ids != normalized_ids
         if membership_changed:
+            from .message_sync.publication import invalidate_publication_locked
+            invalidate_publication_locked(conversation)
             _prepare_conversation_registration_cleanup_locked(
                 grant,
                 conversation,
@@ -1637,6 +1639,8 @@ def backfill_grant(
     _clear_permanent_recovery_fences_locked(conversation_ids)
     for conversation in conversations:
         conversation.grant = grant
+        from .message_sync.publication import invalidate_publication_locked
+        invalidate_publication_locked(conversation)
         _mark_history_reconciliation_candidates_locked(conversation)
     SlackDmMirrorConversation.objects.filter(pk__in=conversation_ids).update(
         history_backfilled_at=None,
@@ -1777,6 +1781,9 @@ def _revoke_grant_locally_locked(
     )
     conversation_ids = [conversation.pk for conversation in conversations]
     for conversation in conversations:
+        from .message_sync.publication import invalidate_publication_locked
+        conversation.grant = grant
+        invalidate_publication_locked(conversation)
         conversation.status = SlackDmMirrorConversationStatus.PAUSED
         conversation.save(update_fields=("status", "updated_at"))
     _prepare_registration_cleanup_locked(
@@ -1954,6 +1961,8 @@ def _retire_ineligible_conversation(
         if conversation is None:
             return False
 
+        from .message_sync.publication import invalidate_publication_locked
+        invalidate_publication_locked(conversation)
         _prepare_conversation_registration_cleanup_locked(
             grant,
             conversation,
@@ -2875,6 +2884,13 @@ def discover_conversations(
                 )
                 .exists()
             )
+            from .message_sync.device_recovery import DEVICE_AUDIENCE_HINT
+
+            # Enrollment can commit while this directory page is in flight.
+            # Its durable hint must survive the page's final discovery marker.
+            needs_followup = needs_followup or bool(
+                (locked_connection.sync_cursor or {}).get(DEVICE_AUDIENCE_HINT)
+            )
             raw_pending = (locked_connection.sync_cursor or {}).get(
                 PENDING_EVENT_CHECKPOINT_KEY,
                 [],
@@ -2929,6 +2945,7 @@ def _discover_conversation(
     activity_seconds: int | None = None,
     recent_activity: bool = True,
     check_recent_activity: bool = False,
+    required_owner_public_key: str | None = None,
 ) -> SlackDmMirrorConversation | None:
     # Preserve the private test/helper call shape while never trusting a
     # caller-supplied raw client for production I/O.
@@ -3031,7 +3048,8 @@ def _discover_conversation(
         activity_seconds=activity,
     )
     periodic_reconciliation_due = bool(
-        conversation.history_backfilled_at is not None
+        required_owner_public_key is None
+        and conversation.history_backfilled_at is not None
         and conversation.history_backfilled_at
         <= timezone.now() - timedelta(seconds=(
             DURABLE_HISTORY_RECONCILIATION_INTERVAL_SECONDS if getattr(settings, "MESSAGE_SYNC_ENABLED", False)
@@ -3042,6 +3060,7 @@ def _discover_conversation(
         conversation,
         force_backfill=force_backfill or periodic_reconciliation_due,
         reset_history=reset_history,
+        required_owner_public_key=required_owner_public_key,
     )
     return conversation
 
@@ -4866,8 +4885,12 @@ def _prepare_owner_conversation_locked(
         or not conversation.mlai_channel_id
     )
     from .message_sync.device_audience import enabled as stable_private_rooms, coverage_for_transition
+    from .message_sync.publication import record_publication_locked, publication_for_transition
     preserve_room = bool(stable_private_rooms() and conversation.mlai_channel_id and not reset_history)
+    if preserve_room and needs_provision:
+        record_publication_locked(conversation)
     coverage_proof = coverage_for_transition(conversation) if preserve_room and needs_provision else None
+    publication_proof = publication_for_transition(conversation) if preserve_room and needs_provision else None
     if (participant_set_changed and not preserve_room) or reset_history:
         _mark_conversation_history_due(
             conversation,
@@ -4932,6 +4955,8 @@ def _prepare_owner_conversation_locked(
         private_audience = {"channel_id": str(conversation.mlai_channel_id), "generation": str(uuid.uuid4())}
         if coverage_proof:
             private_audience["coverage_proof"] = coverage_proof
+        if publication_proof:
+            private_audience["publication_proof"] = publication_proof
         attempt.metadata = {**attempt.metadata, "private_audience": private_audience}
         attempt.save(update_fields=["metadata", "updated_at"])
     return (
@@ -4953,6 +4978,14 @@ def _mark_conversation_history_due(
     reset_deliveries: bool,
     reconcile_current_state: bool = False,
 ) -> None:
+    from .message_sync.publication import invalidate_publication_locked, record_publication_locked
+
+    if reset_deliveries:
+        invalidate_publication_locked(conversation)
+    else:
+        # Qualify legacy complete rooms before a routine scan changes freshness.
+        # This never trusts the former cache latch or an incomplete outbox.
+        record_publication_locked(conversation)
     # A refresh must not throw away a background import cursor. Source events
     # and periodic discovery can arrive repeatedly during a large archive scan.
     if (
@@ -6802,6 +6835,8 @@ def _finish_history_scan(conversation: SlackDmMirrorConversation) -> None:
         _supersede_unrecovered_backfill_rows_locked(conversation)
     _release_history_deliveries(conversation)
     _clear_history_scan_states([conversation.pk], preserve_foreground=True)
+    from .message_sync.publication import record_publication_locked
+    record_publication_locked(conversation)
 
 
 def _complete_dependency_reconciliation_locked(
@@ -7143,6 +7178,8 @@ def _deliver_private(delivery: SlackDmMirrorDelivery) -> None:
         )
         if delivery.source_platform == CommunityBridgePlatform.SLACK:
             _deliver_to_mlai(delivery)
+            from .message_sync.publication import record_publication_locked
+            record_publication_locked(conversation)
             return
         if delivery.source_platform == CommunityBridgePlatform.BUZZ:
             _deliver_to_slack(delivery)
@@ -7317,6 +7354,8 @@ def _deliver_private_batch(claimed: list[SlackDmMirrorDelivery]) -> None:
         )
         grant.last_synced_at = now
         grant.save(update_fields=("last_synced_at", "updated_at"))
+        from .message_sync.publication import record_publication_locked
+        record_publication_locked(conversation)
 
 
 def _assert_private_delivery_authorized_locked(

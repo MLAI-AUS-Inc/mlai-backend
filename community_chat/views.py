@@ -1999,6 +1999,12 @@ class ConfirmView(APIView):
                     pk=request.user.pk
                 )
                 _require_current_chat_credential_locked(request, locked_user)
+                from integrations.services.message_sync.device_recovery import (
+                    lock_enrollment_recovery_grants,
+                    schedule_enrollment_recovery,
+                )
+
+                recovery_grants = lock_enrollment_recovery_grants(locked_user)
                 device = (
                     CommunityChatDevice.objects.select_for_update()
                     .filter(
@@ -2045,6 +2051,7 @@ class ConfirmView(APIView):
                         "updated_at",
                     )
                 )
+                schedule_enrollment_recovery(recovery_grants, device)
                 CommunityChatInviteAudit.objects.filter(
                     device=device,
                     confirmed_at__isnull=True,

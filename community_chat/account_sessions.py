@@ -8,7 +8,7 @@ from django.contrib.auth import get_user_model
 from django.db import transaction
 from django.utils import timezone
 
-from .models import CommunityChatAccountSession
+from .models import CommunityChatAccountSession, CommunityChatDevice, DeviceBindingStatus
 
 ACCESS_TOKEN_PREFIX = "mlai_session_access_"
 REFRESH_TOKEN_PREFIX = "mlai_session_refresh_"
@@ -81,6 +81,23 @@ def _valid_session(session, now):
     )
 
 
+def _validate_device_owner(session):
+    # Older clients could sign into another account with the previous account's
+    # relay key. Reject those already-issued credentials as well as refreshes:
+    # otherwise the account APIs and relay keep serving different identities.
+    # No binding is valid during onboarding, before device enrollment finishes.
+    if (
+        CommunityChatDevice.objects.filter(
+            public_key=session.public_key,
+            status__in=(DeviceBindingStatus.PENDING, DeviceBindingStatus.VERIFIED),
+            revoked_at__isnull=True,
+        )
+        .exclude(user_id=session.user_id)
+        .exists()
+    ):
+        raise InvalidAccountSession("invalid_session")
+
+
 def authenticate_access_token(raw_token):
     if not str(raw_token).startswith(ACCESS_TOKEN_PREFIX):
         raise InvalidAccountSession("invalid_session")
@@ -92,6 +109,7 @@ def authenticate_access_token(raw_token):
     )
     if not _valid_session(session, now) or session.access_expires_at <= now:
         raise InvalidAccountSession("invalid_session")
+    _validate_device_owner(session)
     CommunityChatAccountSession.objects.filter(id=session.id).update(last_used_at=now)
     session.last_used_at = now
     return session
@@ -113,6 +131,7 @@ def rotate_account_session(raw_refresh_token, *, required_origin=None):
         )
         if not _valid_session(session, now):
             raise InvalidAccountSession("invalid_session")
+        _validate_device_owner(session)
         if required_origin is not None and not secrets.compare_digest(
             session.origin,
             required_origin,
