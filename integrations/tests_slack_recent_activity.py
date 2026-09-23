@@ -317,6 +317,7 @@ class SlackRecentActivityTests(unittest.TestCase):
             ),
             0,
         )
+        self.assertLessEqual(self.call.call_args.kwargs["limit"], 5)
         self.mirror.assert_not_called()
         self.assertEqual(self.call.call_count, 1)
 

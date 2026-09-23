@@ -163,6 +163,9 @@ _history_scan_available_at = 0.0
 _history_expiration_cursor = 0
 _history_expiration_scan_available_at = 0.0
 GRANT_DISCOVERY_INTERVAL_SECONDS = 300
+# Each listed room can require further source reads and membership checks before
+# the next cursor is saved. Keep one turn safely inside the discovery lease.
+DISCOVERY_LIST_PAGE_SIZE = 5
 HISTORY_RECONCILIATION_INTERVAL_SECONDS = 3600
 DURABLE_HISTORY_RECONCILIATION_INTERVAL_SECONDS = 86400
 HISTORY_EXPIRATION_SCAN_INTERVAL_SECONDS = 60
@@ -2777,7 +2780,7 @@ def discover_conversations(
             required_scopes=DIRECT_DM_SCOPES,
             types=conversation_types,
             exclude_archived=False,
-            limit=20,
+            limit=DISCOVERY_LIST_PAGE_SIZE,
             cursor=cursor,
         )
         source_channels = response.get("channels")

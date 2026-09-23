@@ -1710,7 +1710,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
         client.users_conversations.assert_called_once_with(
             types="im,mpim",
             exclude_archived=False,
-            limit=20,
+            limit=5,
             cursor="",
         )
         self.assertEqual(
@@ -1833,7 +1833,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
         client.users_conversations.assert_called_with(
             types="im",
             exclude_archived=False,
-            limit=20,
+            limit=5,
             cursor="",
         )
         payload = status_payload(self.first)
