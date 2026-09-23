@@ -40,15 +40,23 @@ class VibeMarketingBootstrapPerformanceTests(SimpleTestCase):
                 workflow=workflow, run_id=run_id, domain="example.test", github_repo="",
                 status="completed", current_step="", approval_state="", resume_available=False,
                 created_at=now, updated_at=now, step_order=[], acceptance_summary={},
-                result={}, error="",
+                result={}, error="", verification_summary={},
             )
 
-        runs = [run("auto_discovery", "first"), run("auto_discovery", "second"), run("article", "third")]
+        runs = [
+            run("auto_discovery", "first"),
+            run("auto_discovery", "second"),
+            run("article", "third"),
+            run("repo_scan", "fourth"),
+            run("article_system_setup", "fifth"),
+        ]
         candidates = [{"keyword": "example"}]
         candidate_calculation = Mock(
             side_effect=lambda *args, **kwargs: [] if kwargs.get("include_written") else candidates
         )
         progress = Mock(return_value={})
+        bootstrap_setup_state = Mock(return_value={"source": "bootstrap"})
+        run_setup_state = Mock(side_effect=lambda **kwargs: {"source": kwargs["run"].workflow})
         stubs = {
             "_get_config": config,
             "_latest_runs_for_org": runs,
@@ -63,7 +71,7 @@ class VibeMarketingBootstrapPerformanceTests(SimpleTestCase):
             "_island_graph_for_bootstrap": None,
             "_latest_baseline_snapshot": None,
             "_profile_checks": {"scaffold": {"generationReady": False}},
-            "_article_setup_state_for_config": {},
+            "_article_setup_state_for_config": bootstrap_setup_state,
             "_guided_steps": ([], None),
             "_latest_run_matching": None,
             "google_baseline_connection_status": {},
@@ -84,12 +92,15 @@ class VibeMarketingBootstrapPerformanceTests(SimpleTestCase):
             "_run_blocking_detail": {"reason": "", "code": ""},
             "_humanized_run_failure_message": None,
             "_live_preview_from_run": {},
-            "_article_setup_state": {},
+            "_article_setup_state": run_setup_state,
             "_scan_progress_payloads": ({}, {}),
             "_run_content_island_payload": None,
             "_run_source_run_id": "",
             "_article_restart_available": False,
             "_compact_result_for_run": {},
+            "_content_package_from_run": {},
+            "_component_manifest_from_run": {},
+            "_component_feedback_from_run": {},
         }
         with ExitStack() as stack:
             for name, value in stubs.items():
@@ -97,12 +108,31 @@ class VibeMarketingBootstrapPerformanceTests(SimpleTestCase):
                     views, name, value if callable(value) else Mock(return_value=value)
                 ))
             payload = views._compute_bootstrap_payload(context, view="summary")
+            standalone = views._serialize_run(runs[0], context=context, mode="full")
 
         self.assertEqual(candidate_calculation.call_count, 2)  # available + hidden
-        self.assertEqual(progress.call_count, len(runs) + 1)  # each run + bootstrap
+        self.assertEqual(progress.call_count, len(runs) + 2)  # each run + bootstrap + standalone
         self.assertTrue(all(
             call.kwargs.get("topic_candidates") is candidates for call in progress.call_args_list
+            if call.kwargs.get("topic_candidates") is not None
         ))
+        bootstrap_setup_state.assert_called_once()
+        self.assertEqual(run_setup_state.call_count, 3)  # scan, setup, standalone run
+        self.assertEqual(
+            [call.kwargs["run"].workflow for call in run_setup_state.call_args_list],
+            ["repo_scan", "article_system_setup", "auto_discovery"],
+        )
+        self.assertTrue(all(
+            item["articleSetupState"] == {"source": "bootstrap"}
+            for item in payload["latestRuns"][:3]
+        ))
+        self.assertIsNot(
+            payload["latestRuns"][0]["articleSetupState"],
+            payload["latestRuns"][1]["articleSetupState"],
+        )
+        self.assertEqual(payload["latestRuns"][3]["articleSetupState"], {"source": "repo_scan"})
+        self.assertEqual(payload["latestRuns"][4]["articleSetupState"], {"source": "article_system_setup"})
+        self.assertEqual(standalone["articleSetupState"], {"source": "auto_discovery"})
         self.assertEqual(len(payload["latestRuns"]), len(runs))
         self.assertIs(payload["latestRunsByWorkflow"]["auto_discovery"], payload["latestRuns"][0])
 
