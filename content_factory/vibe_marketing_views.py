@@ -1765,7 +1765,12 @@ def _keyword_paa_questions(keyword, *, limit=4):
     ]
 
 
-def _keyword_is_available_for_topic_picker(keyword, *, include_written=False, coverage_memory=None):
+_COVERAGE_MATCH_NOT_SUPPLIED = object()
+
+
+def _keyword_is_available_for_topic_picker(
+    keyword, *, include_written=False, coverage_memory=None, coverage_match=_COVERAGE_MATCH_NOT_SUPPLIED
+):
     if include_written:
         return True
     if keyword.status in {KeywordStatus.WRITTEN, KeywordStatus.IN_PROGRESS, KeywordStatus.SKIPPED}:
@@ -1774,7 +1779,11 @@ def _keyword_is_available_for_topic_picker(keyword, *, include_written=False, co
         return False
     if keyword.cooldown_until and keyword.cooldown_until > timezone.now():
         return False
-    if coverage_memory and match_covered_topic(keyword=keyword.keyword, memory=coverage_memory):
+    if coverage_memory and (
+        coverage_match
+        if coverage_match is not _COVERAGE_MATCH_NOT_SUPPLIED
+        else match_covered_topic(keyword=keyword.keyword, memory=coverage_memory)
+    ):
         return False
     return True
 
@@ -2113,7 +2122,9 @@ def _topic_pillars_from_clusters(organization, config, *, declined_keyword_keys=
                 continue
             seen_keywords.add(keyword_key)
             coverage_match = match_covered_topic(keyword=keyword.keyword, memory=coverage_memory)
-            if not _keyword_is_available_for_topic_picker(keyword, coverage_memory=coverage_memory):
+            if not _keyword_is_available_for_topic_picker(
+                keyword, coverage_memory=coverage_memory, coverage_match=coverage_match
+            ):
                 continue
             candidate = _apply_topic_coverage_to_candidate(_topic_candidate_from_keyword(keyword), coverage_match)
             candidates.append(
@@ -2184,7 +2195,9 @@ def _topic_pillars_from_islands(organization, config, *, declined_keyword_keys=N
                 continue
             seen_keywords.add(keyword_key)
             coverage_match = match_covered_topic(keyword=keyword.keyword, memory=coverage_memory)
-            if not _keyword_is_available_for_topic_picker(keyword, coverage_memory=coverage_memory):
+            if not _keyword_is_available_for_topic_picker(
+                keyword, coverage_memory=coverage_memory, coverage_match=coverage_match
+            ):
                 continue
             candidate = _apply_topic_coverage_to_candidate(_topic_candidate_from_keyword(keyword), coverage_match)
             candidates.append(
@@ -2359,6 +2372,7 @@ def _stored_keyword_topic_candidates(
             keyword,
             include_written=include_written,
             coverage_memory=coverage_memory,
+            coverage_match=coverage_match,
         ):
             continue
         candidates.append(_apply_topic_coverage_to_candidate(_topic_candidate_from_keyword(keyword), coverage_match))
@@ -10350,7 +10364,10 @@ def _strip_missing_setup_run_refs(result):
     return scrubbed
 
 
-def _serialize_run(run, *, context=None, latest_runs=None, checks=None, mode="full", topic_candidates=None):
+def _serialize_run(
+    run, *, context=None, latest_runs=None, checks=None, mode="full",
+    topic_candidates=None, precomputed_article_setup_state=None,
+):
     compact = mode in {"summary", "status"}
     step_states = _serialize_run_steps(run, compact=compact)
     from content_factory.run_state import reliability_presentation
@@ -10365,11 +10382,15 @@ def _serialize_run(run, *, context=None, latest_runs=None, checks=None, mode="fu
     preview_url = result.get("preview_url") or result.get("article_url") or result.get("url")
     pr_url = result.get("pr_url") or result.get("pull_request_url") or result.get("draft_pr_url")
     live_preview = _live_preview_from_run(run)
-    article_setup_state = _article_setup_state(
-        context=context,
-        run=run,
-        latest_runs=latest_runs,
-        generation_ready=(checks or {}).get("scaffold", {}).get("generationReady") if checks else None,
+    article_setup_state = (
+        copy.deepcopy(precomputed_article_setup_state)
+        if precomputed_article_setup_state is not None
+        else _article_setup_state(
+            context=context,
+            run=run,
+            latest_runs=latest_runs,
+            generation_ready=(checks or {}).get("scaffold", {}).get("generationReady") if checks else None,
+        )
     )
     scan_progress, scan_progress_snake = _scan_progress_payloads(run)
     content_island = _run_content_island_payload(run)
@@ -10926,6 +10947,13 @@ def _compute_bootstrap_payload(context, request=None, *, view="full", config=Non
         _serialize_run(
             run, context=context, latest_runs=latest_runs, checks=checks,
             mode=run_mode, topic_candidates=topic_candidates,
+            # Only scan/setup runs can change which scan or setup is projected.
+            # Other runs are already in latest_runs and share this computed state.
+            precomputed_article_setup_state=(
+                article_setup_state
+                if run.workflow not in SCAN_WORKFLOWS and run.workflow != "article_system_setup"
+                else None
+            ),
         )
         for run in latest_runs
     ]

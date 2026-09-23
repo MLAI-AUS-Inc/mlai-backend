@@ -240,6 +240,9 @@ def build_topic_coverage_memory(organization, *, article_limit: Optional[int] = 
             )
 
     memory.pop("seen", None)
+    # This memory is a snapshot for one bootstrap/request. Candidate lists and
+    # island pillars ask about many of the same topics, including misses.
+    memory["_match_cache"] = {}
     return memory
 
 
@@ -286,14 +289,28 @@ def match_covered_topic(
         memory = build_topic_coverage_memory(organization)
 
     candidate_texts = _topic_text_candidates(keyword, title)
+    cache = memory.get("_match_cache")
+    if not isinstance(cache, dict):
+        cache = None
+    cache_key = tuple(normalize_topic_text(text) for text in candidate_texts)
+    if cache is not None and cache_key in cache:
+        cached = cache[cache_key]
+        # CoveredTopicMatch is mutable; preserve the previous fresh-result
+        # behavior while reusing the expensive record search.
+        return CoveredTopicMatch(*cached) if cached is not None else None
+
     for text in candidate_texts:
         normalized = normalize_topic_text(text)
         record = memory.get("exact", {}).get(normalized)
         if record:
+            if cache is not None:
+                cache[cache_key] = (record, "exact", 1.0)
             return CoveredTopicMatch(record=record, match_type="exact", similarity=1.0)
         slug = slugify(normalized)
         record = memory.get("slugs", {}).get(slug)
         if record:
+            if cache is not None:
+                cache[cache_key] = (record, "slug", 1.0)
             return CoveredTopicMatch(record=record, match_type="slug", similarity=1.0)
 
     for text in candidate_texts:
@@ -301,6 +318,10 @@ def match_covered_topic(
         for record in memory.get("records", []):
             similarity = _close_topic_match(text, candidate_tokens, record)
             if similarity is not None:
+                if cache is not None:
+                    cache[cache_key] = (record, "lexical_variant", similarity)
                 return CoveredTopicMatch(record=record, match_type="lexical_variant", similarity=similarity)
 
+    if cache is not None:
+        cache[cache_key] = None
     return None
