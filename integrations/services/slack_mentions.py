@@ -161,6 +161,12 @@ def _search_directory(
                     {
                         **mirror._serialize_slack_user(user),
                         "is_bot": bool(user.get("is_bot") or user.get("is_app_user")),
+                        "real_name": str(
+                            (user.get("profile") or {}).get("real_name")
+                            or user.get("real_name")
+                            or ""
+                        )[:255],
+                        "username": str(user.get("name") or "")[:255],
                         "search": " ".join(
                             str(value or "")
                             for value in (

@@ -1163,7 +1163,11 @@ CORS expose `Retry-After` without expanding credentialed origins.
 This mode includes active workspace people and apps, with `is_member` (`null`
 while membership is loading), verified `profile_id`/`pubkey` bindings, a resumable
 `next_cursor`, `membership_pending`, and `retry_after_seconds`. It never returns
-email addresses. Unbridged native channel searches set `native_only`; invitations
+email addresses. Mention rows also include display name, real name, username,
+avatar, and `is_bot` when known. The device-scoped
+`GET /community-chat/slack/?channel_id=<MLAI channel UUID>` includes the
+mirror's saved `participants`, allowing the composer to rank private-channel
+members before the wider workspace search completes. Unbridged native channel searches set `native_only`; invitations
 there use the verified native key and require an existing MLAI Chat account.
 Unlinked identities are resolved with one batched query per page; linked accounts
 still resolve against current device bindings. Active private-channel search pages
