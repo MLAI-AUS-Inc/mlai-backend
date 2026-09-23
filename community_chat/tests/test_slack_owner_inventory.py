@@ -163,7 +163,7 @@ class SlackOwnerInventoryTests(SlackDmIoAuthorityFixture, TransactionTestCase):
                          {"GOLD", "DNEW"})
         self.assertEqual(page["coverage"]["im"], "complete")
         self.assertEqual(page["coverage"]["mpim"], "complete")
-        self.assertEqual(page["coverage"]["private_channel"], "complete")
+        self.assertEqual(page["coverage"]["private_channel"], "permission_required")
         self.assertEqual(slack.call_count, 2)
         self.connection.refresh_from_db()
         cursor = dict(self.connection.sync_cursor)
