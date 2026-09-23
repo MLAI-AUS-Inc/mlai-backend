@@ -48,7 +48,7 @@ member's explicit choice before filling older inventory rows.
 | `counterpart_slack_user_id` | `CharField(max_length=100, blank=True)` for an IM; source user ID only |
 | `display_name` | `CharField(max_length=255, blank=True)`; optional profile-derived row label, resolved under the existing user token and request budget |
 | `source_activity_ts` | `CharField(max_length=32, blank=True)`; latest proven source message timestamp, never Slack's channel `updated` value |
-| `source_archived` | `BooleanField(default=False)` |
+| `source_archived` | `BooleanField(null=True)`; unknown when Slack omits the flag, never an invented `false` |
 | `source_is_open` | `BooleanField(null=True)`; preserve unknown when Slack omits this DM/MPIM flag |
 | `eligibility` | `CharField(max_length=24)` with `eligible`, `unsupported_external`, `unsupported_ambiguous`, `permission_limited` choices; this controls display only, never delivery authorization |
 | `last_seen_sweep_id` | `UUIDField(null=True)`; assigned when a source page is accepted under its exact grant/OAuth/consent epoch |
@@ -58,8 +58,9 @@ Constraints and indexes:
 
 - Unique `(grant, slack_conversation_id)`; source IDs can recur across
   workspaces, so a source ID alone is never a key.
-- Index `(grant, kind, source_archived, slack_conversation_id)` for stable
-  keyset pagination, plus `(grant, last_seen_sweep_id)` for full-sweep cleanup.
+- Index `(grant, kind, id)` for stable keyset pagination; mutable archived/name
+  fields never participate in the cursor. Also index `(grant,
+  last_seen_sweep_id)` for full-sweep cleanup.
 - Do not duplicate access tokens, message bodies, full participant sets, read
   cursors, or relay key material in this table. Existing conversation and
   read-state records retain those responsibilities.
@@ -80,8 +81,8 @@ Sweep `im,mpim,private_channel` and joined `public_channel` types with separate
 coverage checkpoints because their Slack scopes differ. Request
 `exclude_archived=false` for the metadata sweep so archived joined rows are
 visible with their archived flag; keep the importer's existing archive and
-message-window rules. Public enumeration
-requires `channels:read`, and missing permission yields
+message-window rules. Public enumeration requires `channels:read`, and missing
+permission yields
 `coverage.public_channel="permission_required"`, never an empty complete
 directory. Missing `mpim:read` or `groups:read` likewise marks that specific
 kind permission-limited rather than complete.
@@ -97,9 +98,14 @@ Allocate one sweep UUID per type group in the connection's existing
 `sync_cursor` checkpoint, along with page cursor and the exact grant, workspace,
 Slack user, OAuth generation, and consent generation. Store a compact
 `owner_inventory_sweep` summary there with completion time, source identity,
-and coverage per kind; do not add a second sweep table. On a complete source
-listing, publish that group's successful sweep marker and retire its rows not seen in that
-sweep only after all pages succeeded. A 429, unexpected page, process restart,
+and coverage per kind; do not add a second sweep table. Store a random
+`owner_inventory_epoch` and monotonic `owner_inventory_revision` in the same
+JSON cursor. Rotate the connection epoch on activation, reconnect, consent
+change, pause/resume, or OAuth authority change; atomically increment the
+revision with every committed inventory page, deletion, or sweep-state change.
+On a complete source listing, publish that group's successful sweep marker and
+retire its rows not seen in that sweep only after all pages succeeded. A 429,
+unexpected page, process restart,
 or per-conversation error leaves previous rows marked stale, not absent.
 Preserve the latest successful name/activity until revalidated; expose its
 observation time. Source event callbacks may update an existing row but cannot
@@ -117,10 +123,13 @@ existing `_is_external_shared_conversation` policy is the content gate.
 
 `GET /api/v1/community-chat/slack/conversations/?cursor=<opaque>&limit=50`
 in `community_chat/slack_views.py` and `community_chat/urls.py`. Clamp the limit
-to `1..100`; use a signed, versioned keyset cursor bound to grant ID, workspace,
-Slack user, OAuth/consent generation, and filter/sort key. A stale or foreign
-cursor returns a validation error without leaking rows. Set
-`Cache-Control: private, no-store`.
+to `1..100`; sort by immutable `(kind, id)`. Use a signed, versioned keyset
+cursor bound to grant ID, workspace, Slack user, OAuth/consent generation,
+verified device, inventory epoch and revision, and filter/sort key. A changed
+revision or epoch returns HTTP 409 `inventory_cursor_stale`, prompting a
+restart at page one; a foreign or tampered cursor returns HTTP 403. Increment
+the revision in the same transaction as row writes so pages cannot mix
+before and after states. Set `Cache-Control: private, no-store`.
 
 Require an authenticated account, active matching grant, connected Slack
 connection, and a currently verified `community_chat_public_key` belonging to
@@ -128,6 +137,15 @@ the owner. A missing/unverified device gets an error, not an empty response.
 Revalidate on every page. Never expose inventory through community/relay
 directory queries or the public bridge. A paused, revoked, disconnected, or
 identity-mismatched grant returns no source names.
+
+Return an opaque `inventory_epoch` from both this endpoint and the authenticated
+Slack status response, only while the grant and requesting device are valid.
+The client keys the inventory cache by it, keeps names in memory only, and
+evicts them on pause, revoke, disconnect, logout, account/device switch, or
+epoch change. No disk persistence. When the status call has no valid verified
+device or active grant, its epoch is `null`. Compose the per-device epoch from
+the connection's random epoch and the verified device binding, so
+re-verification changes it without mutating every device's source directory.
 
 ```json
 {
@@ -137,7 +155,10 @@ identity-mismatched grant returns no source names.
       "kind": "im",
       "name": "A person",
       "last_message_at": "2026-09-23T00:00:00Z",
-      "source_archived": false,
+      "metadata_observed_at": "2026-09-23T00:00:00Z",
+      "source_archived": null,
+      "source_is_open": true,
+      "eligibility": "eligible",
       "state": "source_only",
       "mlai_channel_id": null,
       "read_state": {
@@ -150,9 +171,12 @@ identity-mismatched grant returns no source names.
     }
   ],
   "next_cursor": null,
+  "inventory_epoch": "opaque-epoch",
+  "inventory_revision": 17,
   "total": 1,
   "eligible_total": 1,
   "discovery_complete": false,
+  "discovery_terminal": false,
   "last_sweep_at": null,
   "coverage": {
     "im": "pending",
@@ -166,6 +190,15 @@ identity-mismatched grant returns no source names.
 `total` counts all source rows for this grant, including archived and
 unsupported rows, both personal and joined public; it is provisional while
 `discovery_complete` is false. `eligible_total` excludes unsupported rows.
+`name` uses the Slack label, resolved profile name, counterpart Slack user ID,
+or source conversation ID in that order; it is never empty. Unknown activity
+has `last_message_at=null`. `metadata_observed_at` comes from the row's
+`last_seen_at` and is distinct from read-state observation. Nullable
+`source_archived` and `source_is_open` preserve unknown source flags. The
+`eligibility` code is one of `eligible`, `unsupported_external`,
+`unsupported_ambiguous`, or `permission_limited`; clients show a permission
+repair action only for the last code. `source_is_open=false` means Slack has
+closed the conversation in its sidebar, not that the member lost access.
 Private/DM states are derived from inventory plus current mirror and publication
 records: `source_only`, `importing`, `ready`, `out_of_window`, `error`,
 `unsupported`. A private/DM row receives a relay UUID only when the current
@@ -180,6 +213,11 @@ uses a fabricated UUID. Page responses distinguish stale inventory from a
 fresh complete sweep; each `coverage` kind reports `complete`, `pending`,
 `stale`, or `permission_required` as applicable. `discovery_complete=true`
 only when all four kinds are complete under the current grant and identity.
+`discovery_terminal=true` when no kind is `pending` (each is `complete`,
+`stale`, or `permission_required`); this stops an endless loading state while
+preserving the truthful incomplete flag. `last_sweep_at` is the last all-kind
+completed sweep, or `null` if there has not been one. The per-kind coverage states and
+row timestamps describe a partial or stale catalog.
 
 Unread state is keyed internally by Slack ID. Extend the current read-state
 worker's target sweep to include authorized inventory IDs even before a relay
@@ -204,6 +242,49 @@ rows, bounded history, Slack pagination, or missing `last_read` can leave the
 count or unread flag unknown; surface that uncertainty instead of promising
 exact live parity for data Slack has not supplied within the user's consent.
 
+Use **120 seconds** as the inventory read-state freshness threshold. Refresh
+source snapshots in a bounded background sweep using the existing Slack API
+budget, prioritizing IMs and known unread rows. Clients refetch cached
+inventory/read coverage every 30 seconds while visible and immediately after
+reconnect, focus, a read-state hint, or a confirmed mark-read. These refetches
+do not call Slack directly. A stale `is_unread=true` row remains in Catch up
+with a stale label so it does not disappear while refreshing, but the exact
+fresh-unread badge count excludes it and reports a separate provisional count.
+Unknown rows count as neither read nor unread. For an already visible MLAI
+room, the existing room row is the sole rendered entry; its Slack read-state
+snapshot is authoritative and the inventory row is deduplicated by
+`mlai_channel_id` and source ID. Source-only rows use the same Slack-ID cache.
+
+Support `?unread_only=1` on the same paginated endpoint. It returns rows whose
+cached `is_unread=true` (fresh or stale), with the same signed cursor bound to
+the filter, inventory revision, and current read-snapshot revision. A changed
+read revision returns the same HTTP 409 restart signal, preventing a
+mark-read or newly refreshed result from mixing filtered pages. Scan source
+IDs server-side in bounded
+batches and return only matching metadata; an empty page may still have a
+`next_cursor` while scanning. Every page includes `read_state_coverage` with
+`eligible_count`, `fresh_count`, `stale_count`, `unknown_count`,
+`fresh_unread_count`, `provisional_unread_count`, `complete`, and
+`observed_at`, plus the inventory and read revisions used to calculate it.
+This summary is calculated by the background source-read sweep for the current
+epoch; it does not require clients to load all catalog pages. A revision
+mismatch forces `complete=false` until the summary is rebuilt.
+`complete=true` requires a fresh snapshot for every eligible row under the
+current authorized scopes and a terminal metadata sweep. Until then the client
+can say "known unread; still checking" but cannot claim complete Slack parity.
+The unread-only page does not expose message bodies, read cursors, or a
+cross-user index.
+
+Error contract: HTTP 401 `authentication_required` for absent/expired account
+auth; HTTP 403 `device_unverified`, `slack_grant_paused`, or
+`slack_authority_changed` for an account with no current read authority; HTTP
+403 `inventory_cursor_invalid` for a foreign/tampered cursor; HTTP 404
+`slack_inventory_unavailable` for no grant, revoked/disconnected link, or a
+disabled rollout flag; HTTP 409 `inventory_cursor_stale` for a valid cursor
+from an older epoch/revision; HTTP 429 `inventory_rate_limited` with
+`Retry-After` for endpoint throttling; HTTP 503 `slack_storage_unavailable`
+for storage failure. All errors return no source names or cached items.
+
 An eventual `POST /api/v1/community-chat/slack/conversations/open/` accepts a
 source ID, rechecks current source membership, kind, sharing and grant/device
 authority, then uses the existing provision path only for messages allowed by
@@ -227,11 +308,14 @@ a channel route until a current relay UUID is ready.
    rows for a later reviewed cleanup. Do not reverse/drop a used table as a
    routine rollback. Grant revocation/account deletion still purge rows.
 4. Test paged source discovery, process restart/429, same-second activity,
-   empty/partial pages, per-row failure, archived/public/private/group/IM flags,
+   empty/partial pages, per-row failure, nullable archived/open source flags,
+   public/private/group/IM types,
    internal versus external sharing, consent/OAuth switch, device revoke,
-   owner isolation, disconnect cleanup, stale/foreign cursor, source-only
-   unread/Catch up inclusion, missing public scope, mapped versus unmapped
-   public rows, and source-only open attempts. Database tests must use a
+   owner isolation, disconnect cleanup, epoch rotation, mutation between
+   cursor pages, unread-only pagination, freshness and partial coverage,
+   source-only unread/Catch up deduplication, missing public scope, mapped
+   versus unmapped public rows, and source-only open attempts. Database tests
+   must use a
    disposable approved migration setup; no production data or credentials are
    needed.
 
