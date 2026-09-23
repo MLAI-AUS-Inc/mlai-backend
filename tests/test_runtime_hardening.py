@@ -1,6 +1,9 @@
 from pathlib import Path
+import importlib.util
 import re
 import subprocess
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from django.test import SimpleTestCase
 
@@ -42,9 +45,11 @@ class RuntimeHardeningConfigTests(SimpleTestCase):
                 return stripped.removeprefix("test:").strip()
         self.fail(f"Missing web healthcheck test in {compose_filename}")
 
-    def test_production_gunicorn_config_uses_sync_workers_and_short_timeouts(self):
+    def test_production_gunicorn_config_warms_routes_after_fork(self):
         compose = (ROOT / "docker-compose.yml").read_text()
         start_script = (ROOT / "scripts" / "start-web.sh").read_text()
+        gunicorn_config = (ROOT / "scripts" / "gunicorn.conf.py").read_text()
+        deploy = (ROOT / "deploy.sh").read_text()
 
         self.assertIn("--worker-class", start_script)
         self.assertIn("sync", start_script)
@@ -52,16 +57,37 @@ class RuntimeHardeningConfigTests(SimpleTestCase):
         self.assertIn("--timeout", start_script)
         self.assertIn("--graceful-timeout", start_script)
         self.assertIn("--max-requests", start_script)
-        self.assertIn("--preload", start_script)
+        self.assertNotIn("--preload", start_script)
         self.assertIn("--config /app/scripts/gunicorn.conf.py", start_script)
-        self.assertIn("get_resolver().url_patterns", (ROOT / "scripts" / "gunicorn.conf.py").read_text())
+        self.assertIn("def post_worker_init(worker):", gunicorn_config)
+        self.assertIn("get_resolver().url_patterns", gunicorn_config)
+        self.assertNotIn("def when_ready", gunicorn_config)
         self.assertNotIn("--threads", start_script)
 
         self.assertIn("${GUNICORN_WORKERS:-3}", start_script)
-        self.assertIn("${GUNICORN_TIMEOUT:-30}", start_script)
+        self.assertIn("${GUNICORN_TIMEOUT:-90}", start_script)
+        self.assertIn('upsert_env_value GUNICORN_WORKERS "4"', deploy)
+        self.assertIn('upsert_env_value GUNICORN_TIMEOUT "90"', deploy)
         self.assertIn("${GUNICORN_GRACEFUL_TIMEOUT:-30}", start_script)
         self.assertIn("${GUNICORN_MAX_REQUESTS:-300}", start_script)
         self.assertIn('RUN_MIGRATIONS_ON_START: "0"', compose)
+
+        spec = importlib.util.spec_from_file_location(
+            "mlai_gunicorn_config", ROOT / "scripts" / "gunicorn.conf.py"
+        )
+        config_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(config_module)
+        accessed = []
+
+        class Resolver:
+            @property
+            def url_patterns(self):
+                accessed.append(True)
+                return []
+
+        with patch("django.urls.get_resolver", return_value=Resolver()):
+            config_module.post_worker_init(SimpleNamespace(log=SimpleNamespace(info=lambda *args: None)))
+        self.assertEqual(accessed, [True])
 
     def test_web_runtime_does_not_mutate_schema_or_collect_static(self):
         production_compose = (ROOT / "docker-compose.yml").read_text()

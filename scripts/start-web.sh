@@ -7,13 +7,12 @@ if [ "${RUN_MIGRATIONS_ON_START:-0}" = "1" ]; then
 fi
 
 exec gunicorn \
-  --preload \
   --config /app/scripts/gunicorn.conf.py \
   --bind 0.0.0.0:8000 \
   --workers "${GUNICORN_WORKERS:-3}" \
   --worker-class sync \
   --keep-alive "${GUNICORN_KEEP_ALIVE:-2}" \
-  --timeout "${GUNICORN_TIMEOUT:-30}" \
+  --timeout "${GUNICORN_TIMEOUT:-90}" \
   --graceful-timeout "${GUNICORN_GRACEFUL_TIMEOUT:-30}" \
   --max-requests "${GUNICORN_MAX_REQUESTS:-300}" \
   --max-requests-jitter "${GUNICORN_MAX_REQUESTS_JITTER:-50}" \

@@ -755,10 +755,12 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     upsert_env_value ORG_MEMORY_ACTIONS_ENABLED "false"
     upsert_env_value ORG_MEMORY_ACTION_LINEAR_EXECUTION_ENABLED "false"
     upsert_env_value ORG_MEMORY_SELECTOR_EXPORT_ENABLED "false"
-    # Web concurrency: keep startup/import and request CPU within the 4-vCPU
-    # droplet's capacity. Additional sync workers help I/O, but 16 can cause a
-    # first-request import storm and exhaust the 30-second worker timeout.
-    upsert_env_value GUNICORN_WORKERS "8"
+    # Web concurrency: keep URL imports and request CPU within this 4-vCPU
+    # droplet's capacity. The previous 16 sync workers triggered simultaneous
+    # cold imports and 30-second worker timeouts. Firebase initializes a
+    # Firestore gRPC client during route import, so warming must be post-fork.
+    upsert_env_value GUNICORN_WORKERS "4"
+    upsert_env_value GUNICORN_TIMEOUT "90"
     print_redacted_env_status CONTENT_FACTORY_URL GITHUB_APP_ID GITHUB_APP_PRIVATE_KEY VALLEY_HARNESS_URL REDIS_URL ROO_SERVICE_URL ROO_SIM_PATIENT_KEY HEALTH_HACK_API_KEY ROO_API_KEY INTERNAL_API_KEY OFFICE_MANAGER_SLACK_BOT_TOKEN OFFICE_MANAGER_SLACK_CHANNEL_ID OFFICE_MANAGER_TIMEZONE VICTOR_AI_ROO_SIGNING_SECRET VICTOR_AI_ROO_ENABLED UMAMI_BASE_URL CONTENT_ANALYTICS_HOST_URL COMMUNITY_CHAT_ADAPTER_URL COMMUNITY_CHAT_ADAPTER_TOKEN COMMUNITY_CHAT_EMAIL_CODE_PEPPER COMMUNITY_CHAT_EMAIL_CODE_DELIVERY_SECRET CUSTOMERIO_API_KEY CUSTOMERIO_COMMUNITY_CHAT_CODE_MESSAGE_ID
     require_env_value CONTENT_FACTORY_URL "Set CONTENT_FACTORY_URL to http://<content-factory-private-ip>:8000 for the cross-droplet Content Factory deployment."
     require_env_value GITHUB_APP_ID "Set GITHUB_APP_ID to the MLAI Tools GitHub App id so Content Factory can receive installation tokens."
