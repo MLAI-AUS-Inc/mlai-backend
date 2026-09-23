@@ -14,6 +14,7 @@ x-logging: &default-logging
 services:
   web:
     build: .
+    image: mlai-backend-web
     logging: *default-logging
     command: sh /app/scripts/start-web.sh
     environment:
@@ -21,7 +22,7 @@ services:
       RUN_MIGRATIONS_ON_START: "0"
       JOBS_SCRAPE_HEADLESS: ${JOBS_SCRAPE_HEADLESS:-true}
     ports:
-      - "80:8000"
+      - "127.0.0.1:8001:8000"
     env_file:
       - .env
     depends_on:
@@ -38,6 +39,31 @@ services:
       mlai-shared:
         aliases:
           - mlai-backend-web
+
+  # Started explicitly by deploy.sh while the current web container serves.
+  # It has no shared-network alias, so internal clients keep using web.
+  web-candidate:
+    profiles: [deploy]
+    image: mlai-backend-web
+    logging: *default-logging
+    command: sh /app/scripts/start-web.sh
+    environment:
+      APP_ENV: ${APP_ENV:-production}
+      RUN_MIGRATIONS_ON_START: "0"
+      JOBS_SCRAPE_HEADLESS: ${JOBS_SCRAPE_HEADLESS:-true}
+    ports:
+      - "127.0.0.1:8002:8000"
+    env_file:
+      - .env
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; req=urllib.request.Request('http://127.0.0.1:8000/healthz/live', headers={'Connection':'close','X-Forwarded-Proto':'https'}); resp=urllib.request.urlopen(req, timeout=5); body=resp.read(); resp.close(); raise SystemExit(0 if body else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    networks:
+      - default
 
   scheduler:
     build: .

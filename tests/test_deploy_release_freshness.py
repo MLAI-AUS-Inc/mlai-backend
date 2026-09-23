@@ -93,6 +93,42 @@ class DeployReleaseFreshnessTests(unittest.TestCase):
             DEPLOY,
         )
 
+    def test_code_release_rechecks_before_candidate_and_both_route_flips(self):
+        handoff = DEPLOY.split('    echo "🌐 Starting runtime services:', 1)[1]
+        self.assertIn(
+            'verify_current_main_release_on_host\n        if ! systemctl',
+            handoff,
+        )
+        self.assertIn(
+            'wait_for_origin_web_health 8002 "$APP_RELEASE"\n'
+            '        verify_current_main_release_on_host',
+            handoff,
+        )
+        self.assertIn(
+            'wait_for_origin_web_health 8001 "$APP_RELEASE"\n'
+            '        verify_current_main_release_on_host',
+            handoff,
+        )
+        self.assertLess(
+            handoff.index('wait_for_nginx_workers_to_drain "\\$old_nginx_workers"'),
+            handoff.index('new_runtime_replacement_started=1'),
+        )
+
+    def test_first_proxy_adoption_rejects_pending_migration_before_pause(self):
+        marker = '    if [ "\\$migrations_pending" = "1" ] && [ "\\$web_proxy_preexisting" != "1" ]; then'
+        self.assertLess(DEPLOY.index(marker), DEPLOY.index('echo "⏸️ Pausing all runtime writers before DB migrations'))
+        guard = (marker + DEPLOY.split(marker, 1)[1].split("\n    fi", 1)[0] + "\n    fi").replace("\\$", "$")
+        for pending, proxy_present, expected in ((1, 0, 1), (0, 0, 0), (1, 1, 0)):
+            with self.subTest(pending=pending, proxy_present=proxy_present):
+                result = subprocess.run(
+                    ["bash", "-c", f"set -euo pipefail\nmigrations_pending={pending}\nweb_proxy_preexisting={proxy_present}\n{guard}\necho allowed"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                self.assertEqual(result.returncode, expected, result.stderr)
+                self.assertEqual("allowed" in result.stdout, expected == 0)
+
 
 if __name__ == "__main__":
     unittest.main()

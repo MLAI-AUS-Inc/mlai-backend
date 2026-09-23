@@ -4,6 +4,11 @@ Start with the repository [`README`](../README.md) and
 [`ARCHITECTURE`](../ARCHITECTURE.md). Use this index to find current
 subsystem-specific contracts and runbooks.
 
+## Production API
+
+- [Backend API web handoff](backend-api-web-handoff.md) — verified ingress,
+  first adoption, code-only route flips, rollback, and migration limits
+
 ## Content Factory
 
 - [Editorial and onboarding contract](content-factory-editorial-contract.md) — approved audience/offer persistence and drafting during website setup

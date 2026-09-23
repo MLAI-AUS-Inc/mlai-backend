@@ -757,6 +757,9 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     # Keep Slack's daily digest to three genuinely featured jobs. Other matches
     # remain available on the public daily jobs page.
     upsert_env_value JOBS_TOP_PICK_LIMIT "3"
+    # .env may retain a failed release's marker even when the old container
+    # never changed. Use the serving container as rollback truth.
+    previous_app_release=\$(docker compose exec -T web sh -lc 'printf "%s" "\$APP_RELEASE"' </dev/null 2>/dev/null || read_env_value APP_RELEASE)
     upsert_env_value APP_RELEASE "$APP_RELEASE"
     upsert_env_value HEALTH_HACK_AI_BUDGET_MODE "enforce"
     # Keep the atomic worst-case reservation aligned with Roo's enforced model
@@ -1181,7 +1184,85 @@ if parsed.username or parsed.password or parsed.query or parsed.fragment:
         return 1
     }
 
+    web_proxy_config=/etc/nginx/conf.d/mlai-backend-api.conf
+    web_proxy_script=ops/backend-api/switch-web-upstream.sh
+    web_proxy_preexisting=0
+    web_proxy_staged=0
+    web_proxy_switch_attempted=0
+    web_proxy_candidate_verified=0
+    web_direct_stopped=0
+    web_candidate_started=0
+    web_candidate_drain_workers=""
+    if [ -e "\$web_proxy_config" ]; then
+        if ! grep -qx '# managed-mlai-backend-api target=web' "\$web_proxy_config"; then
+            echo "❌ API proxy is not routing to the normal web slot; refusing to replace a potentially serving candidate." >&2
+            exit 1
+        fi
+        web_proxy_preexisting=1
+    fi
+    if [ -n "\$(docker compose ps -a -q web-candidate)" ]; then
+        echo "❌ A candidate web container remains from an earlier release; inspect its Nginx drain state before replacing it." >&2
+        exit 1
+    fi
+
+    nginx_worker_snapshot() {
+        local master_pid
+        master_pid=\$(cat /run/nginx.pid) || return 1
+        if ! [[ "\$master_pid" =~ ^[0-9]+$ ]] || ! kill -0 "\$master_pid" 2>/dev/null; then
+            echo "❌ Cannot identify the running Nginx master; refusing to drain a web slot." >&2
+            return 1
+        fi
+        if ! pgrep -P "\$master_pid"; then
+            echo "❌ Cannot identify Nginx workers; refusing to replace a web slot." >&2
+            return 1
+        fi
+    }
+
+    wait_for_nginx_workers_to_drain() {
+        local workers="\$1"
+        local pid still_running attempt
+        [ -n "\$workers" ] || return 0
+        for attempt in \$(seq 1 120); do
+            still_running=0
+            for pid in \$workers; do
+                if kill -0 "\$pid" 2>/dev/null; then
+                    still_running=1
+                    break
+                fi
+            done
+            [ "\$still_running" = 0 ] && return 0
+            sleep 1
+        done
+        echo "❌ Old Nginx workers still have in-flight requests after 120 seconds." >&2
+        return 1
+    }
+
+    wait_for_origin_web_health() {
+        local port="\$1" expected_release="\$2" expected_slot="\${3:-}"
+        local max_attempts="\${4:-45}" curl_timeout="\${5:-5}" retry_delay="\${6:-2}"
+        local headers body attempt
+        headers=\$(mktemp)
+        for attempt in \$(seq 1 "\$max_attempts"); do
+            body=\$(curl -fsS --max-time "\$curl_timeout" -D "\$headers" \
+                -H 'Host: api.mlai.au' -H 'X-Forwarded-Proto: https' \
+                "http://127.0.0.1:\$port/healthz/ready" 2>/dev/null || true)
+            if printf '%s\n' "\$body" | python3 -c \
+                'import json,sys; data=json.load(sys.stdin); sys.exit(0 if data.get("status") == "ok" and data.get("release") == sys.argv[1] else 1)' \
+                "\${expected_release:0:12}" 2>/dev/null \
+                && { [ -z "\$expected_slot" ] \
+                    || grep -iF "X-MLAI-Origin-Web-Slot: \$expected_slot" "\$headers" >/dev/null; }; then
+                rm -f "\$headers"
+                return 0
+            fi
+            sleep "\$retry_delay"
+        done
+        rm -f "\$headers"
+        echo "❌ Web slot \${expected_slot:-\$port} did not report release \${expected_release:0:12}." >&2
+        return 1
+    }
+
     runtime_restore_attempted=0
+    web_only_rollback=0
     runtime_pause_started=0
     new_runtime_replacement_started=0
     migration_started=0
@@ -1195,9 +1276,68 @@ if parsed.username or parsed.password or parsed.query or parsed.fragment:
         trap - ERR
         set +e
 
+        if [ "\${migrations_pending:-1}" = "0" ] && [ "\$web_candidate_started" = "1" ]; then
+            if [ "\$web_proxy_preexisting" != "1" ] \
+                && [ "\$web_proxy_candidate_verified" = "1" ]; then
+                # Once first adoption successfully serves the candidate, keep
+                # Nginx on port 80 during rollback and recreate old web on 8001.
+                if [ "\$new_runtime_replacement_started" != "1" ]; then
+                    web_only_rollback=1
+                fi
+                new_runtime_replacement_started=1
+            fi
+            if [ "\$new_runtime_replacement_started" != "1" ]; then
+                echo "⚠️ Restoring the original web route before runtime replacement."
+                if [ "\$web_proxy_preexisting" = "1" ] && [ "\$web_proxy_switch_attempted" = "1" ]; then
+                    drain_workers=\$(nginx_worker_snapshot) || return
+                    bash "\$web_proxy_script" switch web || return
+                    wait_for_origin_web_health 80 "\$previous_app_release" web || return
+                    wait_for_nginx_workers_to_drain "\$drain_workers" || return
+                elif [ "\$web_proxy_preexisting" != "1" ] && [ "\$web_proxy_staged" = "1" ]; then
+                    drain_workers=\$(nginx_worker_snapshot) || return
+                    bash "\$web_proxy_script" remove || return
+                    if [ "\$web_direct_stopped" = "1" ]; then
+                        old_web_running=\$(docker inspect --format '{{.State.Running}}' "\$old_direct_web_container_id" 2>/dev/null || true)
+                        if [ "\$old_web_running" != "true" ]; then
+                            direct_restored=0
+                            for attempt in \$(seq 1 60); do
+                                if docker start "\$old_direct_web_container_id" >/dev/null 2>&1; then
+                                    direct_restored=1
+                                    break
+                                fi
+                                sleep 0.25
+                            done
+                            [ "\$direct_restored" = "1" ] || { echo "❌ Old direct web could not reclaim port 80." >&2; return; }
+                        fi
+                        wait_for_origin_web_health 80 "\$previous_app_release" || return
+                    fi
+                    wait_for_nginx_workers_to_drain "\$drain_workers" || return
+                fi
+                docker compose stop web-candidate || true
+                docker compose rm -f web-candidate || true
+                if [ -n "\$previous_app_release" ]; then
+                    upsert_env_value APP_RELEASE "\$previous_app_release"
+                fi
+                return
+            fi
+
+            # A replacement web may be unhealthy. Serve from the still-healthy
+            # candidate while the old image is recreated on the normal slot.
+            wait_for_origin_web_health 8002 "$APP_RELEASE" "" 8 3 1 || return
+            if ! grep -qx '# managed-mlai-backend-api target=candidate' "\$web_proxy_config"; then
+                drain_workers=\$(nginx_worker_snapshot) || return
+                bash "\$web_proxy_script" switch candidate || return
+                wait_for_origin_web_health 80 "$APP_RELEASE" candidate || return
+                wait_for_nginx_workers_to_drain "\$drain_workers" || return
+            fi
+        fi
+
         if [ "\$runtime_pause_started" != "1" ] \
             && [ "\$new_runtime_replacement_started" != "1" ]; then
             echo "⚠️ Deployment failed before runtime replacement; existing services remain running."
+            if [ "\${migrations_pending:-1}" = "0" ] && [ -n "\$previous_app_release" ]; then
+                upsert_env_value APP_RELEASE "\$previous_app_release"
+            fi
             return
         fi
 
@@ -1223,9 +1363,15 @@ if parsed.username or parsed.password or parsed.query or parsed.fragment:
             # release even if a replacement container has already started.
             # Restore its recorded image tag before recreating services.
             echo "⚠️ Deployment failed before schema advancement; restoring the last known-good runtime images."
+            if [ -n "\$previous_app_release" ]; then
+                upsert_env_value APP_RELEASE "\$previous_app_release"
+            fi
             restored_services=()
             while IFS='|' read -r service image_id image_ref rollback_tag; do
                 [ -n "\$service" ] || continue
+                if [ "\$web_only_rollback" = "1" ] && [ "\$service" != "web" ]; then
+                    continue
+                fi
                 docker image tag "\$image_id" "\$image_ref"
                 restored_services+=("\$service")
             done < "\$rollback_manifest"
@@ -1236,7 +1382,21 @@ if parsed.username or parsed.password or parsed.query or parsed.fragment:
             else
                 echo "⚠️ No prior runtime containers were recorded; leaving services stopped for operator recovery."
             fi
-            if [ -n "\$previous_scheduler_container_id" ]; then
+            if [ "\$web_candidate_started" = "1" ]; then
+                wait_for_origin_web_health 8001 "\$previous_app_release" || return
+                drain_workers=\$(nginx_worker_snapshot) || return
+                bash "\$web_proxy_script" switch web || return
+                wait_for_origin_web_health 80 "\$previous_app_release" web || return
+                if wait_for_nginx_workers_to_drain "\$drain_workers"; then
+                    docker compose stop web-candidate || true
+                    docker compose rm -f web-candidate || true
+                else
+                    echo "⚠️ Keeping the candidate running until its in-flight requests drain." >&2
+                fi
+            fi
+            if [ "\$web_only_rollback" = "1" ]; then
+                echo "✅ Existing workers were not replaced during the failed proxy adoption."
+            elif [ -n "\$previous_scheduler_container_id" ]; then
                 verify_scheduler_recovery_tick \
                     "" \
                     "\$previous_scheduler_image_id" \
@@ -1274,6 +1434,10 @@ if parsed.username or parsed.password or parsed.query or parsed.fragment:
             echo "❌ Pending migration plan has no matching, specific approval; current runtime remains online." >&2
             false
         fi
+    fi
+    if [ "\$migrations_pending" = "1" ] && [ "\$web_proxy_preexisting" != "1" ]; then
+        echo "❌ First adoption of the API proxy requires a code-only release. A reviewed schema migration needs a separate rollout." >&2
+        false
     fi
 
     # Recovery disables errexit while attempting each restoration step. Always
@@ -1511,9 +1675,59 @@ PY
     echo "🌐 Starting runtime services: \${runtime_services[*]}..."
     if [ "\$migrations_pending" != "1" ]; then
         verify_current_main_release_on_host
+        if ! systemctl is-active --quiet nginx || ! nginx -t; then
+            echo "❌ Host Nginx is not ready for a safe API handoff." >&2
+            false
+        fi
+        if [ "\$web_proxy_preexisting" = "1" ]; then
+            wait_for_origin_web_health 80 "\$previous_app_release" web
+        else
+            wait_for_origin_web_health 80 "\$previous_app_release"
+        fi
+        web_candidate_started=1
+        docker compose up -d --no-deps --force-recreate web-candidate
+        wait_for_origin_web_health 8002 "$APP_RELEASE"
+        verify_current_main_release_on_host
+
+        if [ "\$web_proxy_preexisting" = "1" ]; then
+            old_nginx_workers=\$(nginx_worker_snapshot)
+            web_proxy_switch_attempted=1
+            bash "\$web_proxy_script" switch candidate
+            wait_for_origin_web_health 80 "$APP_RELEASE" candidate 8 3 1
+            web_proxy_candidate_verified=1
+            # Old Nginx workers finish requests against web after a reload.
+            # Replacing web before they exit would still drop those requests.
+            wait_for_nginx_workers_to_drain "\$old_nginx_workers"
+        else
+            # Validate a shadow Nginx config while Docker still owns port 80.
+            # Install the live include only after that port has been freed.
+            bash "\$web_proxy_script" validate candidate
+            web_proxy_staged=1
+            old_direct_web_container_id=\$(docker compose ps -q web)
+            [ -n "\$old_direct_web_container_id" ] || false
+            web_direct_stopped=1
+            docker compose stop web
+            web_proxy_switch_attempted=1
+            bash "\$web_proxy_script" switch candidate
+            wait_for_origin_web_health 80 "$APP_RELEASE" candidate 5 2 1
+            web_proxy_candidate_verified=1
+        fi
+    fi
+    if [ "\$migrations_pending" != "1" ]; then
+        verify_current_main_release_on_host
     fi
     new_runtime_replacement_started=1
     docker compose up -d --force-recreate "\${runtime_services[@]}"
+    if [ "\$migrations_pending" != "1" ]; then
+        wait_for_origin_web_health 8001 "$APP_RELEASE"
+        verify_current_main_release_on_host
+        web_candidate_drain_workers=\$(nginx_worker_snapshot)
+        bash "\$web_proxy_script" switch web
+        wait_for_origin_web_health 80 "$APP_RELEASE" web 8 3 1
+    else
+        wait_for_origin_web_health 8001 "$APP_RELEASE"
+        wait_for_origin_web_health 80 "$APP_RELEASE" web
+    fi
 
     if [ "\$bridge_worker_enabled" != "1" ]; then
         echo "🧹 Stopping disabled community bridge services..."
@@ -1728,9 +1942,21 @@ if slugs != expected:
         false
     fi
     rm -f "\$preflight_headers"
-    # All release and functional checks passed; rollback images are no longer
-    # needed. Keep the ERR trap active until this exact point.
+    # Release checks have committed the new web slot. Housekeeping cannot
+    # safely invoke image rollback after the candidate has been stopped.
     trap - ERR EXIT
+    if [ "\$web_candidate_started" = "1" ]; then
+        if wait_for_nginx_workers_to_drain "\$web_candidate_drain_workers"; then
+            if docker compose stop web-candidate; then
+                docker compose rm -f web-candidate || echo "⚠️ Candidate removal needs operator cleanup." >&2
+            else
+                echo "⚠️ Candidate stop needs operator cleanup." >&2
+            fi
+        else
+            echo "⚠️ Candidate kept alive for in-flight requests; the next deployment will wait for operator cleanup." >&2
+        fi
+    fi
+    # Rollback images are no longer needed after this verified release.
     rm -f "\$rollback_manifest"
     for rollback_tag in "\${rollback_tags[@]}"; do
         docker image rm "\$rollback_tag" >/dev/null 2>&1 || true
