@@ -5,17 +5,18 @@ on:
     branches: [ main ]
   push:
     branches: [ main ]
+  workflow_dispatch:
 
 permissions:
   actions: read
   contents: read
   pull-requests: read
 
-# Main releases share one concurrency group so they cannot mutate the droplet
-# together. PR checks use their commit SHA so an obsolete run cannot block
-# validation of a newer patch on the same PR.
+# Main push and manual releases share one concurrency group so they cannot
+# mutate the droplet together. PR checks use their commit SHA so an obsolete
+# run cannot block validation of a newer patch on the same PR.
 concurrency:
-  group: mlai-backend-deploy-${{ github.event_name == 'push' && github.ref || github.sha }}
+  group: mlai-backend-deploy-${{ github.event_name == 'pull_request' && github.sha || github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -508,7 +509,7 @@ jobs:
           --verbosity 2
 
   deploy:
-    if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.validation-route.result == 'success' && (needs.validation-route.outputs.reuse_pr_checks == 'true' || (needs.checks.result == 'success' && needs.postgres-search.result == 'success' && needs.migration-tests.result == 'success')) }}
+    if: ${{ always() && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main' && needs.validation-route.result == 'success' && (needs.validation-route.outputs.reuse_pr_checks == 'true' || (needs.checks.result == 'success' && needs.postgres-search.result == 'success' && needs.migration-tests.result == 'success')) }}
     runs-on: ubuntu-latest
     needs: [validation-route, checks, postgres-search, migration-tests]
     steps:

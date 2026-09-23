@@ -180,7 +180,7 @@ def _write_outputs(reuse: bool, reason: str) -> None:
 
 def main() -> int:
     if os.environ.get("GITHUB_EVENT_NAME") != "push":
-        _write_outputs(False, "pull requests always run the full validation suite")
+        _write_outputs(False, "non-push events always run the full validation suite")
         return 0
 
     try:
