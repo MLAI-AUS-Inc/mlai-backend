@@ -12,9 +12,21 @@ from roo.office_manager_policy import OFFICE_MANAGER_TEST_CHANNEL_ID
 
 
 DEPLOY_SCRIPT = (Path(__file__).resolve().parents[1] / "deploy.sh").read_text()
+DEPLOY_WORKFLOW = (
+    Path(__file__).resolve().parents[1] / ".github/workflows/deploy.yml"
+).read_text()
 
 
 class DeploymentRuntimeChecksTests(unittest.TestCase):
+    def test_manual_main_release_uses_the_same_full_validation_gate(self):
+        self.assertIn("  workflow_dispatch:\n", DEPLOY_WORKFLOW)
+        self.assertIn("github.event_name == 'workflow_dispatch'", DEPLOY_WORKFLOW)
+        self.assertIn("github.ref == 'refs/heads/main'", DEPLOY_WORKFLOW)
+        self.assertIn('current_sha="$(gh api "repos/$GITHUB_REPOSITORY/commits/main" --jq .sha)"', DEPLOY_WORKFLOW)
+        self.assertIn('[[ "$current_sha" != "$GITHUB_SHA" ]]', DEPLOY_WORKFLOW)
+        for required_job in ("checks", "postgres-search", "migration-tests"):
+            self.assertIn(f"needs.{required_job}.result == 'success'", DEPLOY_WORKFLOW)
+
     def test_failed_post_audit_keeps_code_only_runtime_serving(self):
         start = '    if ! run_office_manager_migration_audit "\\$office_manager_post_attestation"; then'
         branch = DEPLOY_SCRIPT.split(start, 1)[1].split(

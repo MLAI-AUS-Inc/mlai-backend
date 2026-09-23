@@ -119,6 +119,9 @@ development.
 Normal production deployment is owned by the reviewed GitHub workflow and
 deployment scripts. New engineers should not deploy during onboarding. Consult
 the relevant runbook in `docs/` for subsystem operations.
+If a main merge does not start its push workflow, an authorized operator can
+dispatch `Deploy to Digital Ocean` on `main`. The dispatch runs the complete
+validation suite before the production job and cannot deploy another ref.
 
 Main-branch deploys run one at a time. For a code-only release, `deploy.sh`
 checks the migration graph without applying it and keeps the current web and
