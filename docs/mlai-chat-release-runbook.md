@@ -272,6 +272,12 @@ failed deployment stages inventory back to
 `false` during recovery. Leave the variable `false` to disable the endpoint;
 this switch does not change a member's Slack history consent.
 
+After a member separately consents to the owner directory, the bridge worker
+lists private conversation metadata in bounded pages independently of message
+history import. The directory can therefore show old DMs while their messages
+remain outside the selected history window. Read-state snapshots use their own
+worker and may still be marked unknown or stale while Slack calls are pending.
+
 ### Reviewed `#tech_volunteers` public bridge mapping
 
 After the backend deployment and migration check, dispatch

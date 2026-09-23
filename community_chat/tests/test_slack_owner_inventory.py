@@ -21,7 +21,8 @@ from integrations.services.slack_chat_read_state import ReadTarget, _cache_key
 from integrations.services.message_sync.read_priority import KEY as READ_PRIORITY_KEY
 from integrations.services.message_sync.read_snapshots import publish_snapshot
 from integrations.services.slack_owner_inventory import (
-    collect_public_page, complete_private_sweep, grant_metadata_consent, record_private_page,
+    collect_private_page, collect_public_page, complete_private_sweep,
+    grant_metadata_consent, record_private_page,
     source_read_targets,
 )
 from integrations.services.slack_owner_inventory_api import (
@@ -132,6 +133,51 @@ class SlackOwnerInventoryTests(SlackDmIoAuthorityFixture, TransactionTestCase):
         self.assertTrue(SlackOwnerConversationInventory.objects.filter(slack_conversation_id="DOLDER").exists())
         complete_private_sweep(self.authority, started_at=new_cycle, kinds=kinds)
         self.assertFalse(SlackOwnerConversationInventory.objects.filter(slack_conversation_id="DOLDER").exists())
+
+    def test_private_metadata_pages_advance_without_history_import(self):
+        self.consent()
+        old_group = self.row("GOLD", kind="mpim", age=90 * 86400)
+        new_dm = self.row("DNEW", kind="im")
+        pages = [
+            {"channels": [old_group], "response_metadata": {"next_cursor": "next"}},
+            {"channels": [new_dm], "response_metadata": {"next_cursor": ""}},
+        ]
+        with patch("integrations.services.slack_dm_mirror._call_slack_with_grant_authority",
+                   side_effect=pages) as slack:
+            collect_private_page(self.authority)
+            self.assertEqual(slack.call_args.kwargs["limit"], 50)
+            self.assertEqual(slack.call_args.kwargs["cursor"], "")
+            self.connection.refresh_from_db()
+            state = self.connection.sync_cursor["slack_owner_inventory_v1"]
+            self.assertEqual(state["directory_private_cursor"], "next")
+            self.assertEqual(state["coverage"]["im"], "pending")
+            # A history-import page cannot replace the metadata scan marker.
+            record_private_page(self.authority, [self.row("DIMPORT")],
+                                started_at=timezone.now(), kinds={"im"})
+            self.assertFalse(SlackOwnerConversationInventory.objects.filter(
+                slack_conversation_id="DIMPORT").exists())
+            collect_private_page(self.authority)
+            self.assertEqual(slack.call_args.kwargs["cursor"], "next")
+        page = conversation_page(self.user, public_key=self.owner_key)
+        self.assertEqual({row["slack_conversation_id"] for row in page["items"]},
+                         {"GOLD", "DNEW"})
+        self.assertEqual(page["coverage"]["im"], "complete")
+        self.assertEqual(page["coverage"]["mpim"], "complete")
+        self.assertEqual(page["coverage"]["private_channel"], "permission_required")
+        self.assertEqual(slack.call_count, 2)
+        self.connection.refresh_from_db()
+        cursor = dict(self.connection.sync_cursor)
+        state = dict(cursor["slack_owner_inventory_v1"])
+        state["last_private_at"] = (timezone.now() - timedelta(minutes=6)).isoformat()
+        cursor["slack_owner_inventory_v1"] = state
+        self.connection.sync_cursor = cursor
+        self.connection.save(update_fields=("sync_cursor", "updated_at"))
+        with patch("integrations.services.slack_dm_mirror._call_slack_with_grant_authority",
+                   return_value={"channels": [new_dm], "response_metadata": {"next_cursor": ""}}):
+            collect_private_page(self.authority)
+        self.assertEqual(set(SlackOwnerConversationInventory.objects.filter(
+            grant=self.grant,
+        ).values_list("slack_conversation_id", flat=True)), {"DNEW"})
 
     def test_consent_mid_sweep_waits_for_a_new_complete_source_cycle(self):
         old_cycle = timezone.now() - timedelta(minutes=1)

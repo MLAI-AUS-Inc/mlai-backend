@@ -87,6 +87,9 @@ def _new_state(authority) -> dict:
         "revision": 1,
         "coverage": {kind: "pending" for kind in KINDS},
         "private_sweep": "",
+        "directory_private_sweep": "",
+        "directory_private_cursor": "",
+        "directory_private_enabled": False,
         "public_sweep": "",
         "public_cursor": "",
         "last_full_sweep_at": None,
@@ -128,7 +131,11 @@ def rotate_epoch_locked(connection) -> None:
     state = dict(cursor.get(KEY) or {})
     state.update(epoch=uuid.uuid4().hex, revision=int(state.get("revision") or 0) + 1)
     state["coverage"] = {kind: "pending" for kind in KINDS}
-    state.update(private_sweep="", public_sweep="", public_cursor="", last_full_sweep_at=None)
+    state.update(
+        private_sweep="", directory_private_sweep="", directory_private_cursor="",
+        directory_private_enabled=False, public_sweep="", public_cursor="",
+        last_full_sweep_at=None,
+    )
     cursor[KEY] = state
     connection.sync_cursor = cursor
     connection.save(update_fields=("sync_cursor", "updated_at"))
@@ -239,6 +246,10 @@ def record_private_page(authority, rows, *, started_at, kinds, profiles=None) ->
         state = state_for(connection, authority)
         if state.get("started_after") and started_at.isoformat() < state["started_after"]:
             return
+        if state.get("directory_private_enabled"):
+            # The independent metadata listing owns the sweep boundary. An
+            # older history-import page must not replace its deletion marker.
+            return
         sweep_id = _private_sweep_id(authority, started_at)
         _upsert_rows(grant, rows, sweep_id, expected_kinds=kinds, profiles=profiles)
         state.update(private_sweep=str(sweep_id), revision=int(state["revision"]) + 1)
@@ -258,6 +269,8 @@ def complete_private_sweep(authority, *, started_at, kinds) -> None:
         state = state_for(connection, authority)
         if state.get("started_after") and started_at.isoformat() < state["started_after"]:
             return
+        if state.get("directory_private_enabled"):
+            return
         sweep_id = _private_sweep_id(authority, started_at)
         if state.get("private_sweep") != str(sweep_id):
             return
@@ -276,6 +289,87 @@ def complete_private_sweep(authority, *, started_at, kinds) -> None:
         state["revision"] = int(state["revision"]) + 1
         if all(value == "complete" for value in coverage.values()):
             state["last_full_sweep_at"] = timezone.now().isoformat()
+        _save_state(connection, state)
+
+
+def collect_private_page(authority) -> None:
+    """List one owner-only metadata page independently of message import.
+
+    Old group chats may need many history or profile calls. Their import must
+    not prevent the owner from seeing later DMs in the source directory.
+    """
+    if not enabled():
+        return
+    from integrations.services.slack_dm_mirror import (
+        DIRECT_DM_SCOPES, GROUP_DM_SCOPES, _call_slack_with_grant_authority,
+        _lock_slack_grant_api_authority, private_channels_enabled,
+    )
+
+    with transaction.atomic():
+        grant, connection = _lock_slack_grant_api_authority(
+            authority, required_scopes=DIRECT_DM_SCOPES,
+        )
+        if not has_metadata_consent(connection, authority):
+            return
+        state = state_for(connection, authority)
+        last_private = state.get("last_private_at")
+        if all(state["coverage"].get(kind) != "pending" for kind in KINDS[:3]) and last_private:
+            try:
+                if timezone.now() - timezone.datetime.fromisoformat(last_private) < timedelta(minutes=5):
+                    return
+            except (ValueError, TypeError):
+                pass
+        kinds = {"im"}
+        if GROUP_DM_SCOPES.issubset(set(authority.scopes)):
+            kinds.add("mpim")
+        if private_channels_enabled(grant):
+            kinds.add("private_channel")
+        cursor = str(state.get("directory_private_cursor") or "")
+        sweep_id = state.get("directory_private_sweep") or uuid.uuid4().hex
+        # Fence history-import writes before the source request. They cannot
+        # overwrite this scan's last-seen marker while its cursor is in flight.
+        if not state.get("directory_private_enabled"):
+            state["directory_private_enabled"] = True
+            state["revision"] = int(state["revision"]) + 1
+            _save_state(connection, state)
+    response = _call_slack_with_grant_authority(
+        authority, "users_conversations", required_scopes=DIRECT_DM_SCOPES,
+        types=",".join(kind for kind in KINDS[:3] if kind in kinds),
+        exclude_archived=False, limit=50, cursor=cursor,
+    )
+    rows = response.get("channels")
+    if not isinstance(rows, list):
+        raise ValueError("Slack returned a malformed private conversation page.")
+    next_cursor = str((response.get("response_metadata") or {}).get("next_cursor") or "").strip()
+    if next_cursor and next_cursor == cursor:
+        raise ValueError("Slack private inventory pagination made no progress.")
+    with transaction.atomic():
+        grant, connection = _lock_slack_grant_api_authority(
+            authority, required_scopes=DIRECT_DM_SCOPES,
+        )
+        if not has_metadata_consent(connection, authority):
+            return
+        state = state_for(connection, authority)
+        if str(state.get("directory_private_cursor") or "") != cursor:
+            return
+        if state.get("directory_private_sweep") not in (None, "", sweep_id):
+            return
+        _upsert_rows(grant, rows, uuid.UUID(sweep_id), expected_kinds=kinds)
+        state.update(
+            directory_private_sweep=sweep_id, directory_private_cursor=next_cursor,
+            revision=int(state["revision"]) + 1,
+        )
+        if not next_cursor:
+            SlackOwnerConversationInventory.objects.filter(grant=grant, kind__in=KINDS[:3]).exclude(
+                last_seen_sweep_id=uuid.UUID(sweep_id),
+            ).delete()
+            coverage = dict(state["coverage"])
+            for kind in KINDS[:3]:
+                coverage[kind] = "complete" if kind in kinds else "permission_required"
+            state.update(coverage=coverage, directory_private_sweep="",
+                         last_private_at=timezone.now().isoformat())
+            if all(value == "complete" for value in coverage.values()):
+                state["last_full_sweep_at"] = timezone.now().isoformat()
         _save_state(connection, state)
 
 
