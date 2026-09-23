@@ -1765,7 +1765,12 @@ def _keyword_paa_questions(keyword, *, limit=4):
     ]
 
 
-def _keyword_is_available_for_topic_picker(keyword, *, include_written=False, coverage_memory=None):
+_COVERAGE_MATCH_NOT_SUPPLIED = object()
+
+
+def _keyword_is_available_for_topic_picker(
+    keyword, *, include_written=False, coverage_memory=None, coverage_match=_COVERAGE_MATCH_NOT_SUPPLIED
+):
     if include_written:
         return True
     if keyword.status in {KeywordStatus.WRITTEN, KeywordStatus.IN_PROGRESS, KeywordStatus.SKIPPED}:
@@ -1774,7 +1779,11 @@ def _keyword_is_available_for_topic_picker(keyword, *, include_written=False, co
         return False
     if keyword.cooldown_until and keyword.cooldown_until > timezone.now():
         return False
-    if coverage_memory and match_covered_topic(keyword=keyword.keyword, memory=coverage_memory):
+    if coverage_memory and (
+        coverage_match
+        if coverage_match is not _COVERAGE_MATCH_NOT_SUPPLIED
+        else match_covered_topic(keyword=keyword.keyword, memory=coverage_memory)
+    ):
         return False
     return True
 
@@ -2113,7 +2122,9 @@ def _topic_pillars_from_clusters(organization, config, *, declined_keyword_keys=
                 continue
             seen_keywords.add(keyword_key)
             coverage_match = match_covered_topic(keyword=keyword.keyword, memory=coverage_memory)
-            if not _keyword_is_available_for_topic_picker(keyword, coverage_memory=coverage_memory):
+            if not _keyword_is_available_for_topic_picker(
+                keyword, coverage_memory=coverage_memory, coverage_match=coverage_match
+            ):
                 continue
             candidate = _apply_topic_coverage_to_candidate(_topic_candidate_from_keyword(keyword), coverage_match)
             candidates.append(
@@ -2184,7 +2195,9 @@ def _topic_pillars_from_islands(organization, config, *, declined_keyword_keys=N
                 continue
             seen_keywords.add(keyword_key)
             coverage_match = match_covered_topic(keyword=keyword.keyword, memory=coverage_memory)
-            if not _keyword_is_available_for_topic_picker(keyword, coverage_memory=coverage_memory):
+            if not _keyword_is_available_for_topic_picker(
+                keyword, coverage_memory=coverage_memory, coverage_match=coverage_match
+            ):
                 continue
             candidate = _apply_topic_coverage_to_candidate(_topic_candidate_from_keyword(keyword), coverage_match)
             candidates.append(
@@ -2359,6 +2372,7 @@ def _stored_keyword_topic_candidates(
             keyword,
             include_written=include_written,
             coverage_memory=coverage_memory,
+            coverage_match=coverage_match,
         ):
             continue
         candidates.append(_apply_topic_coverage_to_candidate(_topic_candidate_from_keyword(keyword), coverage_match))

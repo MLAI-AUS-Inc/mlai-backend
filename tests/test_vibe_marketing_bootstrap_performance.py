@@ -12,7 +12,7 @@ from django.test import SimpleTestCase
 if not apps.ready:
     django.setup()
 
-from content_factory import vibe_marketing_views as views
+from content_factory import topic_coverage, vibe_marketing_views as views
 
 
 class VibeMarketingBootstrapPerformanceTests(SimpleTestCase):
@@ -123,3 +123,57 @@ class VibeMarketingBootstrapPerformanceTests(SimpleTestCase):
                         step for step in progress["steps"] if step["id"] == "choose_topic"
                     )
                     self.assertEqual(choose_topic["status"], expected_status)
+
+    def test_topic_coverage_snapshot_reuses_positive_and_negative_matches(self):
+        record = topic_coverage._record_for_text(
+            text="AI assistant for small business",
+            source="written_article",
+            reason="written_article",
+        )
+        memory = {
+            "records": [record],
+            "exact": {record.normalized: record},
+            "slugs": {record.slug: record},
+            "_match_cache": {},
+        }
+        with patch.object(
+            topic_coverage, "_close_topic_match", wraps=topic_coverage._close_topic_match
+        ) as compare:
+            first = topic_coverage.match_covered_topic(
+                keyword="small business AI assistant", memory=memory
+            )
+            repeated = topic_coverage.match_covered_topic(
+                keyword="Small-business artificial intelligence assistant", memory=memory
+            )
+            self.assertEqual(compare.call_count, 1)
+            self.assertEqual(first.match_type, "lexical_variant")
+            self.assertIs(first.record, repeated.record)
+            self.assertIsNot(first, repeated)
+
+            self.assertIsNone(topic_coverage.match_covered_topic(keyword="unrelated topic", memory=memory))
+            comparisons_after_miss = compare.call_count
+            self.assertIsNone(topic_coverage.match_covered_topic(keyword="Unrelated-topic", memory=memory))
+            self.assertEqual(compare.call_count, comparisons_after_miss)
+
+        other_memory = {"records": [], "exact": {}, "slugs": {}, "_match_cache": {}}
+        self.assertIsNone(topic_coverage.match_covered_topic(
+            keyword="small business AI assistant", memory=other_memory
+        ))
+
+    def test_precomputed_coverage_result_avoids_repeating_topic_match(self):
+        keyword = SimpleNamespace(
+            keyword="small business AI assistant", status="pending",
+            written_article_id=None, cooldown_until=None,
+        )
+        with patch.object(views, "match_covered_topic", side_effect=AssertionError("repeated")):
+            self.assertFalse(views._keyword_is_available_for_topic_picker(
+                keyword, coverage_memory={"records": []}, coverage_match=object()
+            ))
+            self.assertTrue(views._keyword_is_available_for_topic_picker(
+                keyword, coverage_memory={"records": []}, coverage_match=None
+            ))
+        with patch.object(views, "match_covered_topic", return_value=None) as matcher:
+            self.assertTrue(views._keyword_is_available_for_topic_picker(
+                keyword, coverage_memory={"records": []}
+            ))
+            matcher.assert_called_once()
