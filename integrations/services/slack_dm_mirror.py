@@ -3632,9 +3632,8 @@ def ingest_slack_dm_event(payload: dict[str, Any]) -> dict[str, Any] | None:
     )
     channel_id = str(raw_channel_id or "").strip()
     workspace_id = str(payload.get("team_id") or "").strip()
-    if any(
-        bool(event.get(flag))
-        for flag in ("is_ext_shared_channel", "is_external_shared", "is_shared")
+    if bool(payload.get("is_ext_shared_channel")) or _is_external_shared_conversation(
+        event
     ):
         grant_ids = list(
             SlackDmMirrorConversation.objects.filter(
@@ -7651,7 +7650,7 @@ def _verify_roo_mentions_before_send(delivery, client):
     conversation = delivery.conversation
     channel = client.conversations_info(channel=conversation.slack_conversation_id).get("channel") or {}
     if (channel.get("id") != conversation.slack_conversation_id or channel.get("is_archived")
-            or any(channel.get(flag) for flag in ("is_ext_shared", "is_shared", "is_org_shared"))):
+            or _is_external_shared_conversation(channel)):
         raise SlackDmMirrorAuthorizationError("This Slack conversation is no longer available.")
     members = set()
     cursor = ""
@@ -8786,14 +8785,25 @@ def _decode_directory_cursor(value: str) -> tuple[str, int]:
 
 
 def _is_external_shared_conversation(raw_conversation: dict[str, Any]) -> bool:
-    return any(
+    """Exclude external sharing while retaining explicitly internal org sharing.
+
+    Slack sets ``is_shared`` for both Slack Connect and Enterprise internal
+    sharing. A shared conversation without an explicit internal classification
+    remains ineligible until the source confirms its audience.
+    """
+    if any(
         bool(raw_conversation.get(flag))
         for flag in (
             "is_ext_shared",
+            "is_ext_ws_shared",
+            "is_ext_shared_channel",
             "is_external_shared",
-            "is_org_shared",
-            "is_shared",
+            "is_pending_ext_shared",
         )
+    ):
+        return True
+    return bool(raw_conversation.get("is_shared")) and not bool(
+        raw_conversation.get("is_org_shared")
     )
 
 
