@@ -87,6 +87,22 @@ class SlackOwnerInventoryTests(SlackDmIoAuthorityFixture, TransactionTestCase):
         self.assertEqual(page["coverage"]["public_channel"], "pending")
         self.assertEqual(page["read_state_coverage"]["unknown_count"], 2)
 
+    def test_metadata_consent_restarts_older_partial_discovery_cursor(self):
+        old_started = timezone.now() - timedelta(hours=1)
+        dm._save_discovery_checkpoint(
+            self.authority,
+            cursor="old-partial-page",
+            seen_channel_ids={"DOLDER"},
+            failures=[],
+            started_at=old_started,
+        )
+        self.consent()
+        cursor, seen, failures, started_at = dm._load_discovery_checkpoint(self.authority)
+        self.assertEqual(cursor, "")
+        self.assertEqual(seen, set())
+        self.assertEqual(failures, [])
+        self.assertGreater(started_at, old_started)
+
     def test_metadata_only_post_never_defaults_or_changes_history_consent(self):
         self.grant.status = "paused"
         self.grant.save(update_fields=("status", "updated_at"))

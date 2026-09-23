@@ -2160,6 +2160,25 @@ def _load_discovery_checkpoint(
             or started_at > fresh_started_at + timedelta(minutes=5)
         ):
             return "", set(), [], fresh_started_at
+        # Metadata-directory consent can be granted while an older bounded
+        # source listing is still in progress. Its earlier pages were not
+        # recorded for this consent, so resuming its cursor would leave the
+        # owner directory incomplete until the entire old sweep finishes.
+        from integrations.services.slack_owner_inventory import (
+            KEY as OWNER_INVENTORY_KEY,
+            has_metadata_consent,
+        )
+
+        if has_metadata_consent(connection, authority):
+            inventory_state = (connection.sync_cursor or {}).get(OWNER_INVENTORY_KEY)
+            if isinstance(inventory_state, dict):
+                started_after = parse_datetime(str(inventory_state.get("started_after") or ""))
+                if (
+                    started_after is not None
+                    and timezone.is_aware(started_after)
+                    and started_at < started_after
+                ):
+                    return "", set(), [], fresh_started_at
         if len(raw_seen) > MAX_DISCOVERY_CONVERSATIONS:
             raise SlackDmMirrorError(
                 "Slack discovery checkpoint exceeds the supported conversation limit."
