@@ -108,7 +108,12 @@ def _save_state(connection, state) -> None:
 
 
 def rotate_epoch_locked(connection) -> None:
-    """Invalidate client pages after a grant lifecycle transition."""
+    """Invalidate client pages and discard names after a grant transition.
+
+    A pause can outlast a Slack membership change. Re-enumerate on resume
+    before publishing any previously visible private channel names again.
+    """
+    SlackOwnerConversationInventory.objects.filter(grant__connection=connection).delete()
     cursor = dict(connection.sync_cursor or {})
     state = dict(cursor.get(KEY) or {})
     state.update(epoch=uuid.uuid4().hex, revision=int(state.get("revision") or 0) + 1)

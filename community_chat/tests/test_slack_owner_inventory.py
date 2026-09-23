@@ -126,6 +126,33 @@ class SlackOwnerInventoryTests(SlackDmIoAuthorityFixture, TransactionTestCase):
         self.assertEqual(page["items"], [])
         self.assertEqual(page["coverage"]["im"], "pending")
 
+    def test_pause_resume_requires_fresh_source_rows_before_showing_old_names(self):
+        self.consent()
+        record_private_page(
+            self.authority, [self.row("GOLDPRIVATE", kind="private_channel")],
+            started_at=timezone.now(), kinds={"private_channel"},
+        )
+        self.assertEqual(
+            [item["slack_conversation_id"] for item in conversation_page(
+                self.user, public_key=self.owner_key,
+            )["items"]],
+            ["GOLDPRIVATE"],
+        )
+        dm.pause_grant(self.grant)
+        self.assertFalse(
+            SlackOwnerConversationInventory.objects.filter(grant=self.grant).exists()
+        )
+        with (
+            patch("integrations.services.slack_dm_mirror._complete_registration_cleanup_before_activation"),
+            patch("integrations.services.slack_dm_mirror._prepare_generation_transition_locked"),
+            patch("integrations.services.slack_dm_mirror._registration_cleanup_pending_locked", return_value=False),
+            patch("integrations.services.slack_dm_mirror._normalize_grant_history_window_locked"),
+        ):
+            dm.resume_grant(self.grant)
+        page = conversation_page(self.user, public_key=self.owner_key)
+        self.assertEqual(page["items"], [])
+        self.assertEqual(page["coverage"]["private_channel"], "pending")
+
     def test_unread_only_includes_stale_positive_and_bound_cursor_revision(self):
         self.consent()
         started = timezone.now()

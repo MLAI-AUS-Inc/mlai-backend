@@ -52,7 +52,8 @@ class TechVolunteersBridgeWorkflowTests(unittest.TestCase):
             'channel.get("is_channel") is not True',
             'channel.get("is_private") is not False',
             'channel.get("is_member") is not True',
-            'channel.get("is_ext_shared") is True',
+            'from integrations.services.slack_dm_mirror import _is_external_shared_conversation',
+            '_is_external_shared_conversation(channel)',
         ):
             self.assertIn(guard, WORKFLOW)
         self.assertIn("ssh-private-key: ${{ secrets.DO_SSH_KEY }}", WORKFLOW)

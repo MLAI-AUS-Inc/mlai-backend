@@ -89,6 +89,7 @@ jobs:
             docker compose exec -T web python manage.py shell <<'PY'
           from django.conf import settings
           from integrations.models import CommunityBridgeChannel
+          from integrations.services.slack_dm_mirror import _is_external_shared_conversation
           from slack_sdk import WebClient
 
           mapping = CommunityBridgeChannel.objects.filter(slack_channel_id="C0BS0J2Q3M1").first()
@@ -106,7 +107,7 @@ jobs:
               or channel.get("is_channel") is not True
               or channel.get("is_private") is not False
               or channel.get("is_member") is not True
-              or channel.get("is_ext_shared") is True
+              or _is_external_shared_conversation(channel)
           ):
               raise SystemExit("Bridge bot must be a member of the reviewed local public Slack channel")
           PY
