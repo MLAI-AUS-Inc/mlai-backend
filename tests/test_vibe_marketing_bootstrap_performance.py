@@ -221,6 +221,21 @@ class VibeMarketingBootstrapPerformanceTests(SimpleTestCase):
                         self.assertIsNone(match)
                         self.assertEqual(CountingMatcher.ratio_calls, 0)
 
+            near_record = topic_coverage._record_for_text(
+                text="business automation workflows",
+                source="written_article", reason="written_article",
+            )
+            memory = {
+                "records": [near_record],
+                "exact": {near_record.normalized: near_record},
+                "slugs": {near_record.slug: near_record},
+            }
+            covered = topic_coverage.match_covered_topic(
+                keyword="business automation workflow", memory=memory
+            )
+            self.assertEqual(covered.match_type, "lexical_variant")
+            self.assertIs(covered.record, near_record)
+
     def test_precomputed_coverage_result_avoids_repeating_topic_match(self):
         keyword = SimpleNamespace(
             keyword="small business AI assistant", status="pending",
