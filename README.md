@@ -141,6 +141,13 @@ building images, pausing for an approved migration, or replacing containers.
 If `main` advances after a migration has begun, the current release completes
 the schema transition before the next queued release runs.
 
+For code-only releases, the origin API uses a [two-slot web handoff](docs/backend-api-web-handoff.md).
+The deployment verifies a candidate web process before changing the host
+Nginx route, waits for in-flight requests to drain before replacing either
+slot, and keeps the candidate available through release checks. The first
+adoption of Nginx on port 80 requires one controlled port-owner cutover.
+Approved schema migrations still pause writers and may interrupt API traffic.
+
 ## Documentation status
 
 Architecture and operational documents describe current behavior. Files under

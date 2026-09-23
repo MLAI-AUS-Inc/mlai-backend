@@ -63,6 +63,9 @@ class DeploymentRuntimeChecksTests(unittest.TestCase):
             with self.subTest(check_result=check_result, approval=approval, plan_result=plan_result):
                 script = "\n".join([
                     "set -euo pipefail",
+                    # This test exercises the steady-state migration gate;
+                    # first proxy adoption has its own fail-closed check.
+                    "web_proxy_preexisting=1",
                     'calls_file="$(mktemp)"',
                     "compose_run_web() {",
                     "  case \" $* \" in",

@@ -77,6 +77,7 @@ cookies.txt
 /*.md
 /docs/*.md
 /docs/**/*.md
+!/docs/backend-api-web-handoff.md
 !/docs/apple-iap-and-deletion-migrations.md
 !/docs/apple-app-review-operations.md
 !/docs/content-islands.md
