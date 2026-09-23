@@ -18,12 +18,17 @@ def publish_snapshot(connection, cache_key, snapshot):
     previous = cache.get(cache_key) or {}
     cursor = dict(connection.sync_cursor or {})
     state = dict(cursor.get(KEY) or {})
+    previous_revision = int(state.get("revision") or 0)
     revision = max(int(state.get("revision") or 0), int(previous.get("revision") or 0),
                    time.time_ns() // 1000) + 1
     snapshot = {**snapshot, "revision": revision}
     state["revision"] = revision
     if any(previous.get(field) != snapshot.get(field) for field in FIELDS):
-        state.update(pending=revision, due=0)
+        state.update(pending=revision, due=0, content_revision=revision)
+    else:
+        # Polling a quiet room updates freshness, but the unread-only result
+        # set did not change; keep a multi-page source cursor usable.
+        state.setdefault("content_revision", previous_revision)
     cursor[KEY] = state
     connection.sync_cursor = cursor
     connection.save(update_fields=["sync_cursor", "updated_at"])

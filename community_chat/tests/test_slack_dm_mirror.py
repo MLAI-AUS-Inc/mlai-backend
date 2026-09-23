@@ -1709,7 +1709,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
         self.assertEqual(self._message_deliveries(conversation).count(), 1)
         client.users_conversations.assert_called_once_with(
             types="im,mpim",
-            exclude_archived=True,
+            exclude_archived=False,
             limit=20,
             cursor="",
         )
@@ -1832,7 +1832,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
         self.assertEqual(client.conversations_history.call_count, 1)
         client.users_conversations.assert_called_with(
             types="im",
-            exclude_archived=True,
+            exclude_archived=False,
             limit=20,
             cursor="",
         )
