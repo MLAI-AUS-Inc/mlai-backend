@@ -19,7 +19,7 @@ class SlackOwnerInventoryDeployConfigTests(unittest.TestCase):
             WORKFLOW,
         )
         self.assertLess(
-            WORKFLOW.index("tests.test_slack_owner_inventory_deploy_config -v"),
+            WORKFLOW.index("tests.test_slack_owner_inventory_deploy_config"),
             WORKFLOW.index("pip install -r requirements.txt"),
         )
 

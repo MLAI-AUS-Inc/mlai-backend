@@ -1,0 +1,154 @@
+name: Manage reviewed tech_volunteers bridge mapping
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Inspect, stage disabled, or enable the fixed public mapping
+        required: true
+        default: inspect
+        type: choice
+        options:
+          - inspect
+          - stage
+          - enable
+      confirm_relay_ready:
+        description: For enable, confirm relay room, allowlist, and bridge signer membership
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-community-bridge-tech-volunteers
+  cancel-in-progress: false
+
+jobs:
+  mapping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate fixed operation
+        env:
+          MODE: ${{ inputs.mode }}
+          CONFIRM_RELAY_READY: ${{ inputs.confirm_relay_ready }}
+        run: |
+          set -euo pipefail
+          case "$MODE" in
+            inspect|stage) ;;
+            enable)
+              if [[ "$CONFIRM_RELAY_READY" != "true" ]]; then
+                echo "::error::Confirm the relay room, allowlist, and bridge signer membership before enabling."
+                exit 1
+              fi
+              ;;
+            *) exit 64 ;;
+          esac
+
+      - name: Install SSH key
+        uses: webfactory/ssh-agent@v0.10.0
+        with:
+          ssh-private-key: ${{ secrets.DO_SSH_KEY }}
+
+      - name: Add known host
+        run: ssh-keyscan -H 209.38.85.60 >> ~/.ssh/known_hosts
+
+      - name: Manage fixed public mapping
+        env:
+          MODE: ${{ inputs.mode }}
+        run: |
+          set -euo pipefail
+          ssh root@209.38.85.60 bash -s -- "$MODE" <<'REMOTE'
+          set -euo pipefail
+          mode="$1"
+          case "$mode" in inspect|stage|enable) ;; *) exit 64 ;; esac
+          cd /root/mlai-backend
+          docker compose exec -T web python manage.py migrate --check --noinput </dev/null
+
+          if [[ "$mode" != "inspect" ]]; then
+            # Refuse to repoint an existing Slack room or destination. The
+            # management command itself also rejects duplicate destinations.
+            docker compose exec -T web python manage.py shell <<'PY'
+          from integrations.models import CommunityBridgeChannel, CommunityBridgePlatform
+
+          source = CommunityBridgeChannel.objects.filter(slack_channel_id="C0BS0J2Q3M1").first()
+          if source and (
+              source.slack_workspace_id != "T05N9C1QSJC"
+              or source.destination_platform != CommunityBridgePlatform.BUZZ
+              or source.destination_channel_id != "da406415-80c3-5a53-82a9-3d200597b856"
+              or source.destination_workspace_id
+          ):
+              raise SystemExit("Existing tech_volunteers mapping differs from the reviewed IDs")
+          PY
+          fi
+
+          if [[ "$mode" == "enable" ]]; then
+            # Enabling requires the separately staged mapping and the bridge
+            # bot's current membership in a local, public Slack channel.
+            docker compose exec -T web python manage.py shell <<'PY'
+          from django.conf import settings
+          from integrations.models import CommunityBridgeChannel
+          from slack_sdk import WebClient
+
+          mapping = CommunityBridgeChannel.objects.filter(slack_channel_id="C0BS0J2Q3M1").first()
+          if mapping is None or mapping.enabled:
+              raise SystemExit("Stage the reviewed tech_volunteers mapping disabled before enabling")
+          token = settings.SLACK_BRIDGE_BOT_TOKEN
+          if not token:
+              raise SystemExit("Bridge bot credential is unavailable")
+          client = WebClient(token=token, timeout=20)
+          if client.auth_test().get("team_id") != "T05N9C1QSJC":
+              raise SystemExit("Bridge bot is not authorized for the reviewed Slack workspace")
+          channel = client.conversations_info(channel="C0BS0J2Q3M1").get("channel") or {}
+          if (
+              channel.get("id") != "C0BS0J2Q3M1"
+              or channel.get("is_channel") is not True
+              or channel.get("is_private") is not False
+              or channel.get("is_member") is not True
+              or channel.get("is_ext_shared") is True
+          ):
+              raise SystemExit("Bridge bot must be a member of the reviewed local public Slack channel")
+          PY
+          fi
+
+          if [[ "$mode" == "stage" || "$mode" == "enable" ]]; then
+            args=(
+              python manage.py upsert_community_bridge_channel
+              --slack-workspace-id T05N9C1QSJC
+              --slack-channel-id C0BS0J2Q3M1
+              --slack-channel-name tech_volunteers
+              --destination-platform buzz
+              --destination-channel-id da406415-80c3-5a53-82a9-3d200597b856
+              --destination-channel-name tech_volunteers
+            )
+            if [[ "$mode" == "stage" ]]; then
+              args+=(--disabled)
+            fi
+            docker compose exec -T web "${args[@]}" </dev/null
+          fi
+
+          if [[ "$mode" == "inspect" ]]; then
+            docker compose exec -T web python manage.py shell <<'PY'
+          import json
+          from integrations.models import CommunityBridgeChannel
+
+          row = CommunityBridgeChannel.objects.filter(slack_channel_id="C0BS0J2Q3M1").first()
+          print(json.dumps({
+              "state": "absent" if row is None else "present",
+              "slack_workspace_id": row.slack_workspace_id if row else None,
+              "slack_channel_id": "C0BS0J2Q3M1",
+              "slack_channel_name": row.slack_channel_name if row else None,
+              "destination_channel_id": row.destination_channel_id if row else None,
+              "destination_channel_name": row.destination_channel_name if row else None,
+              "destination_workspace_id": row.destination_workspace_id if row else None,
+              "destination_platform": row.destination_platform if row else None,
+              "enabled": row.enabled if row else None,
+          }, sort_keys=True))
+          PY
+          else
+            docker compose exec -T web python manage.py inspect_community_bridge \
+              --slack-channel-id C0BS0J2Q3M1 --recent-minutes 60 </dev/null
+          fi
+          docker compose ps web bridge-worker
+          REMOTE

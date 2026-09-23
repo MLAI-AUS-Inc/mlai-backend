@@ -272,6 +272,20 @@ failed deployment stages inventory back to
 `false` during recovery. Leave the variable `false` to disable the endpoint;
 this switch does not change a member's Slack history consent.
 
+### Reviewed `#tech_volunteers` public bridge mapping
+
+After the backend deployment and migration check, dispatch
+`community-bridge-tech-volunteers.yml` with `mode=stage`. It writes only the
+reviewed `T05N9C1QSJC:C0BS0J2Q3M1` to
+`da406415-80c3-5a53-82a9-3d200597b856` mapping, disabled. Use
+`mode=inspect` to confirm the fixed destination and disabled state. Deploy the
+MLAI Chat relay room and allowlist, then verify the bridge signer is a member.
+Only then dispatch `mode=enable` with `confirm_relay_ready=true`. The enable
+step also checks that the mapping was staged and the bridge bot belongs to the
+reviewed local public Slack channel. Inspect again after enabling. The
+workflow accepts no channel IDs or shell commands as inputs. It does not
+create or map private Slack channels.
+
 ## Rollback triggers and procedure
 
 Rollback on authentication bypass, role escalation, cross-tenant/media access,
