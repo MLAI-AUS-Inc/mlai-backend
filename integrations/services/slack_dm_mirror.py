@@ -2740,7 +2740,9 @@ def discover_conversations(
         authority, cursor=cursor, seen_channel_ids=seen_channel_ids,
         failures=failures, started_at=discovery_started_at,
     )
-    from integrations.services.slack_owner_inventory import collect_public_page
+    from integrations.services.slack_owner_inventory import (
+        collect_private_page, collect_public_page, hydrate_source_names,
+    )
 
     try:
         collect_public_page(authority)
@@ -2750,6 +2752,18 @@ def discover_conversations(
         # The personal metadata sweep cannot stop the existing private import.
         logger.warning(
             "slack_owner_public_inventory_failed grant_id=%s error=%s",
+            grant.pk, exc,
+        )
+    try:
+        collect_private_page(authority)
+        hydrate_source_names(authority, limit=4)
+    except (SlackDmMirrorAuthorizationError, LeaseLost):
+        raise
+    except Exception as exc:
+        # The owner metadata cursor is independent of history-import progress.
+        # A failed listing or label lookup must not stop the existing import.
+        logger.warning(
+            "slack_owner_private_inventory_failed grant_id=%s error=%s",
             grant.pk, exc,
         )
     discovered = 0
