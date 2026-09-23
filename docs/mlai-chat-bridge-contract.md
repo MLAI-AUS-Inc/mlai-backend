@@ -694,6 +694,10 @@ prioritizes visible rows without waiting for a large directory scan. The service
 uses the requesting member's Slack user token and existing consent/device fences;
 it never substitutes a bot's read cursor. Public mappings also require source
 membership, and private mappings remain restricted to the provisioned device.
+Status includes `public_unread_needs_reauthorization` when an existing private
+chat grant lacks `channels:read` or `channels:history`. Private DM read state
+continues while the member updates Slack permissions. A new connect request
+with that scope gap starts OAuth instead of silently reusing the old grant.
 
 A shared Slack budget deferral or cooldown returns HTTP 200 with completed
 snapshots and `next_cursor` pointing at the first unfinished target. The response
@@ -712,9 +716,9 @@ Snapshots record `fetched_at` before the source read request starts, so a slow
 read cannot overwrite a newer acknowledgement. Join, leave, topic and other
 control messages never become a readable latest-message frontier.
 
-Source cursors use Slack's microsecond timestamps. IM counts come directly from
-`unread_count_display`. Slack does not supply that count for other conversation
-types. Other channel/group badges inspect an unread source history page. This avoids
+Source cursors use Slack's microsecond timestamps. IM and MPIM counts use
+`unread_count_display` when Slack supplies it. Other channel/group badges
+inspect an unread source history page. This avoids
 waiting for the message import, and completed private delivery bodies are
 intentionally erased. This probe respects the grant's history window and
 stores only cursor/count metadata. Thread-only replies and the owner's own

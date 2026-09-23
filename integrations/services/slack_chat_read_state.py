@@ -69,9 +69,10 @@ def _timestamp(value):
 def read_state_snapshot(details, *, kind, messages, owner_id):
     """Combine Slack's cursor with source messages, without fabricating counts.
 
-    Slack exposes unread_count_display only for IMs. For other conversations,
-    top-level source messages establish unread activity; numeric channel
-    badges count explicit user/broadcast mentions, while group DMs count messages.
+    Slack exposes unread_count_display for IMs and sometimes group DMs. For
+    other responses, top-level source messages establish unread activity;
+    numeric channel badges count explicit user/broadcast mentions, while group
+    DMs count messages.
     Thread-only replies and the owner's own messages do not increment the list.
     """
     read_at = _timestamp(details.get("last_read"))
@@ -111,7 +112,7 @@ def read_state_snapshot(details, *, kind, messages, owner_id):
         latest_stamp = max(latest_stamp, stamp)
         if stamp > read_at and message.get("user") != owner_id:
             unread.append(message)
-    count = details.get("unread_count_display") if kind == "im" else None
+    count = details.get("unread_count_display") if kind in {"im", "mpim"} else None
     authoritative_count = type(count) is int and count >= 0
     if authoritative_count:
         is_unread = count > 0

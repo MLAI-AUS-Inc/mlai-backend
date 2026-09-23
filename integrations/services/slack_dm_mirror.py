@@ -148,6 +148,15 @@ DIRECT_DM_SCOPES = {
 }
 GROUP_DM_SCOPES = {"mpim:read", "mpim:history", "mpim:write"}
 REQUIRED_SCOPES = DIRECT_DM_SCOPES | GROUP_DM_SCOPES | PRIVATE_CHANNEL_SCOPES
+# Public channel unread snapshots use the owner's cursor and history. An older
+# DM grant may still work without these scopes, so diagnose this separately
+# rather than disabling its private read state while OAuth is upgraded.
+PUBLIC_UNREAD_SCOPES = {"channels:read", "channels:history"}
+
+
+def public_unread_needs_reauthorization(scopes) -> bool:
+    """Whether mapped public channels lack the owner's read permissions."""
+    return not PUBLIC_UNREAD_SCOPES.issubset(set(scopes or []))
 _last_grant_discovery_scan = 0.0
 _last_registration_cleanup_scan = 0.0
 _history_scan_available_at = 0.0
@@ -1242,6 +1251,12 @@ def status_payload(
                 )
                 or not str(connection.access_token or "").strip()
             )
+        ),
+        "public_unread_needs_reauthorization": bool(
+            grant is not None
+            and grant.status == SlackDmMirrorGrantStatus.ACTIVE
+            and connection is not None
+            and public_unread_needs_reauthorization(connection.scopes)
         ),
         "enabled": bool(grant and grant.status == SlackDmMirrorGrantStatus.ACTIVE),
         "status": grant.status if grant else "not_connected",

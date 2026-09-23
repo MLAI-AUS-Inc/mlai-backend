@@ -15,6 +15,7 @@ from slack_sdk.errors import SlackApiError, SlackClientError
 from hospital.authentication import CustomJWTAuthentication
 from integrations.models import SlackDmMirrorGrant
 from integrations.services.slack_dm_mirror import (
+    PUBLIC_UNREAD_SCOPES,
     REQUIRED_SCOPES,
     SlackDmMirrorCredentialError,
     SlackDmMirrorError,
@@ -219,7 +220,9 @@ class SlackDmMirrorView(SlackDmMirrorApiView):
         if (
             request.data.get("refresh_permissions") is not True
             and connection is not None
-            and REQUIRED_SCOPES.issubset(set(connection.scopes or []))
+            and (REQUIRED_SCOPES | PUBLIC_UNREAD_SCOPES).issubset(
+                set(connection.scopes or [])
+            )
         ):
             try:
                 activate_connection(
