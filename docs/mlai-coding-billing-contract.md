@@ -5,6 +5,13 @@ account access token. The inference gateway authenticates the internal call
 accounting endpoints with `X-API-Key: $ROO_API_KEY`. Client-supplied user IDs
 are never accepted on the public endpoints.
 
+All active, signed-in MLAI accounts can read their Coding entitlement and
+start a turn when they have a spendable Roo balance and no active turn. The
+`pilot_access` entitlement field is retained for older desktop clients and
+reports this account eligibility; pilot allowlists no longer apply. Turn
+creation still requires a device-bound Community Chat account session and a
+configured ticket signing key.
+
 ## Public account endpoints
 
 - `GET /api/v1/community-chat/coding/entitlement/`

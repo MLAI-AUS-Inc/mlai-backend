@@ -20,7 +20,7 @@ from roo.coding import (
     roo_decimal_string,
     ticket_jwks,
     turn_remaining_microroo,
-    user_has_pilot_access,
+    user_can_use_coding,
 )
 from roo.models import CodingModelCall, CodingTurn
 from roo.services import PointsService
@@ -100,12 +100,13 @@ class CodingEntitlementView(APIView):
             .select_related("pricing_version")
             .first()
         )
-        pilot_access = user_has_pilot_access(request.user)
+        coding_access = user_can_use_coding(request.user)
         return Response(
             {
-                "pilot_access": pilot_access,
+                # Retained for already-installed desktop clients.
+                "pilot_access": coding_access,
                 "can_start_turn": bool(
-                    pilot_access and balance["digital_service_balance_microroo"] > 0 and active is None
+                    coding_access and balance["digital_service_balance_microroo"] > 0 and active is None
                 ),
                 "model": "kimi-k3",
                 "balance_microroo": microroo_string(balance["digital_service_balance_microroo"]),

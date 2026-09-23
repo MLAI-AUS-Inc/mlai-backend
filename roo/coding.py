@@ -499,26 +499,9 @@ def issue_turn_ticket(turn: CodingTurn) -> IssuedTicket:
     return IssuedTicket(token=token, expires_at=expires_at)
 
 
-def user_has_pilot_access(user) -> bool:
-    if not user or not getattr(user, "is_authenticated", False) or not user.is_active:
-        return False
-    if getattr(user, "is_superuser", False):
-        return True
-    user_ids = {
-        str(item).strip().lower()
-        for item in getattr(settings, "MLAI_CODING_PILOT_USER_IDS", [])
-        if str(item).strip()
-    }
-    emails = {
-        str(item).strip().lower()
-        for item in getattr(settings, "MLAI_CODING_PILOT_EMAILS", [])
-        if str(item).strip()
-    }
-    return (
-        str(user.community_chat_profile_id).lower() in user_ids
-        or str(user.id).lower() in user_ids
-        or str(user.email).lower() in emails
-    )
+def user_can_use_coding(user) -> bool:
+    """Allow active authenticated accounts to use Roo-funded Coding turns."""
+    return bool(user and getattr(user, "is_authenticated", False) and user.is_active)
 
 
 def _turn_outstanding_microroo(turn: CodingTurn, *, exclude_call_id=None) -> int:
@@ -622,14 +605,14 @@ def _expire_active_turn(turn: CodingTurn, *, now) -> bool:
 
 @transaction.atomic
 def create_turn(*, user, account_session, idempotency_key, local_session_id, model) -> tuple[CodingTurn, bool]:
-    if not user_has_pilot_access(user):
+    if not user_can_use_coding(user):
         raise CodingError(
-            "pilot_access_required",
-            "MLAI Coding is currently available to pilot members only.",
+            "coding_access_required",
+            "An active MLAI account is required to use Coding.",
             http_status=403,
         )
     if model != "kimi-k3":
-        raise CodingError("unsupported_model", "Only kimi-k3 is available during the pilot.")
+        raise CodingError("unsupported_model", "Only kimi-k3 is available for Coding.")
     idem = _uuid(idempotency_key, "idempotency_key")
     local_id = _uuid(local_session_id, "local_session_id")
     if account_session is None or account_session.user_id != user.id:
