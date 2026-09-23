@@ -278,7 +278,7 @@ class RuntimeHardeningConfigTests(SimpleTestCase):
         self.assertLess(
             deploy.index('docker compose stop "\\${all_runtime_writer_services[@]}"'),
             deploy.index(
-                'docker compose up -d --force-recreate "\\${runtime_services[@]}"'
+                'docker compose up -d --no-deps --force-recreate "\\${runtime_services[@]}"'
             ),
         )
 
@@ -300,7 +300,7 @@ class RuntimeHardeningConfigTests(SimpleTestCase):
         )
         self.assertIn('docker image tag "\\$image_id" "\\$image_ref"', deploy)
         self.assertIn(
-            'docker compose up -d --force-recreate "\\${restored_services[@]}"',
+            'docker compose up -d --no-deps --force-recreate "\\${restored_services[@]}"',
             deploy,
         )
         failure_trap = re.search(r"^    trap .* ERR$", deploy, re.MULTILINE)
@@ -388,8 +388,8 @@ rm -f "$rollback_manifest" "$docker_log"
         )
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertIn("image tag old-image-id mlai-backend-web", completed.stdout)
-        self.assertIn("compose up -d --force-recreate web", completed.stdout)
-        self.assertNotIn("compose up -d --force-recreate web scheduler", completed.stdout)
+        self.assertIn("compose up -d --no-deps --force-recreate web", completed.stdout)
+        self.assertNotIn("compose up -d --no-deps --force-recreate web scheduler", completed.stdout)
 
     def test_bridge_deploy_validation_requires_explicit_production_activation(self):
         workflow = (ROOT / ".github" / "workflows" / "deploy.yml").read_text()

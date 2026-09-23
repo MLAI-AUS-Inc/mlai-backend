@@ -888,8 +888,13 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
         fi
     done
 
-    echo "🐘 Starting database..."
-    docker compose up -d db
+    # The database imports the long-lived .env, including APP_RELEASE and
+    # deployment-managed feature flags. A normal `up db` treats those changes
+    # as a config change and recreates Postgres during every code release.
+    # Start a missing/stopped database, but never replace a running database
+    # as a side effect of deploying application code.
+    echo "🐘 Ensuring database is running without replacement..."
+    docker compose up -d --no-recreate db
 
     echo "🏗️ Building runtime images: \${runtime_services[*]}..."
     verify_current_main_release_on_host
@@ -1376,7 +1381,7 @@ if parsed.username or parsed.password or parsed.query or parsed.fragment:
                 restored_services+=("\$service")
             done < "\$rollback_manifest"
             if [ "\${#restored_services[@]}" -gt 0 ]; then
-                docker compose up -d --force-recreate "\${restored_services[@]}"
+                docker compose up -d --no-deps --force-recreate "\${restored_services[@]}"
             elif [ "\${#previous_runtime_container_ids[@]}" -gt 0 ]; then
                 docker start "\${previous_runtime_container_ids[@]}" >/dev/null || true
             else
@@ -1410,7 +1415,7 @@ if parsed.username or parsed.password or parsed.query or parsed.fragment:
         # Once a migration began, the old binary may be incompatible with the
         # schema. Recreate the new image with staged-off features and require
         # a fresh scheduler tick after recovery.
-        docker compose up -d --force-recreate "\${runtime_services[@]}" || true
+        docker compose up -d --no-deps --force-recreate "\${runtime_services[@]}" || true
         verify_scheduler_recovery_tick "" "" 0 || true
     }
 
@@ -1473,7 +1478,7 @@ if parsed.username or parsed.password or parsed.query or parsed.fragment:
             # The nullable quarantine is understood only by the new image.
             # After a migration, start that image so an older binary cannot
             # reverse an allocation whose provenance 0037 marked unknown.
-            docker compose up -d --force-recreate "\${runtime_services[@]}"
+            docker compose up -d --no-deps --force-recreate "\${runtime_services[@]}"
             verify_scheduler_recovery_tick "" "" 0
             runtime_restore_attempted=1
         else
@@ -1717,7 +1722,7 @@ PY
         verify_current_main_release_on_host
     fi
     new_runtime_replacement_started=1
-    docker compose up -d --force-recreate "\${runtime_services[@]}"
+    docker compose up -d --no-deps --force-recreate "\${runtime_services[@]}"
     if [ "\$migrations_pending" != "1" ]; then
         wait_for_origin_web_health 8001 "$APP_RELEASE"
         verify_current_main_release_on_host

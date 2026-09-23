@@ -202,7 +202,7 @@ class OrgMemoryProductionDeployTests(SimpleTestCase):
             deploy[post_migration_audit:],
         )
         self.assertIn(
-            'docker compose up -d --force-recreate "\\${runtime_services[@]}"',
+            'docker compose up -d --no-deps --force-recreate "\\${runtime_services[@]}"',
             deploy[post_migration_audit:],
         )
         self.assertGreater(

@@ -22,6 +22,30 @@ NGINX = shutil.which("nginx")
 DEPLOY = (ROOT / "deploy.sh").read_text()
 
 
+class DatabaseContinuityTests(unittest.TestCase):
+    def test_application_release_does_not_replace_database_dependency(self):
+        # APP_RELEASE and many feature flags share the database's env_file.
+        # Compose otherwise recreates a healthy Postgres container on each
+        # code release, even before the web handoff begins.
+        commands = [
+            line.strip()
+            for line in DEPLOY.splitlines()
+            if line.strip().startswith("docker compose up -d ")
+        ]
+        self.assertEqual(len(commands), 6)
+        database = [line for line in commands if line.endswith(" db")]
+        self.assertEqual(database, ["docker compose up -d --no-recreate db"])
+        for command in commands:
+            if command not in database:
+                self.assertIn("--no-deps", command)
+        self.assertLess(
+            DEPLOY.index("docker compose up -d --no-recreate db"),
+            DEPLOY.index("compose_run_web python manage.py migrate --check --noinput"),
+        )
+        self.assertIn("APPROVED_MIGRATION_PLAN_SHA256", DEPLOY)
+        self.assertIn("compose_run_web python manage.py migrate --noinput", DEPLOY)
+
+
 def free_port():
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
@@ -330,8 +354,8 @@ class WebHandoffRollbackTests(unittest.TestCase):
 
     def test_failed_first_adoption_recreates_only_old_web(self):
         events = self.run_rollback(prior_proxy=False, replacement_started=False)
-        self.assertIn("docker compose up -d --force-recreate web", events)
-        self.assertNotIn("docker compose up -d --force-recreate web scheduler", events)
+        self.assertIn("docker compose up -d --no-deps --force-recreate web", events)
+        self.assertNotIn("docker compose up -d --no-deps --force-recreate web scheduler", events)
         self.assertNotIn("old-scheduler", events)
         self.assertLess(events.index("health 8001"), events.index("route web"))
 

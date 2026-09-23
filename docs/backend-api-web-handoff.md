@@ -12,6 +12,11 @@ adds port 80 without changing the analytics listener.
 After adoption, host Nginx forwards public API requests to `web` on
 `127.0.0.1:8001`. During a code-only deployment, `web-candidate` starts on
 `127.0.0.1:8002` from the newly built image. Both ports bind loopback only.
+The deploy starts a missing database without recreating an existing one, and
+recreates application services without starting their Compose dependencies.
+This prevents routine `.env` changes, including `APP_RELEASE`, from restarting
+Postgres during a code release. Database image or configuration changes need
+a separately planned maintenance step.
 The `web` service keeps its `mlai-backend-web` alias on the Docker shared
 network for internal clients; the candidate has no shared-network alias.
 Internal clients using that alias can still see a brief reconnect while `web`
