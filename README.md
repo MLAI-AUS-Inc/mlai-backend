@@ -135,6 +135,12 @@ GitHub Actions. Manual runs share the main release lock and must pass the full
 validation suite before deployment. Running that workflow from another branch
 performs validation only.
 
+The deploy script rejects a queued release if its full commit SHA is no longer
+the head of `main`. It checks before syncing files and again on the host before
+building images, pausing for an approved migration, or replacing containers.
+If `main` advances after a migration has begun, the current release completes
+the schema transition before the next queued release runs.
+
 ## Documentation status
 
 Architecture and operational documents describe current behavior. Files under

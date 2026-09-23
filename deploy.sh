@@ -296,6 +296,25 @@ if manifest.get("organization_domain") != "mlai.au":
     raise SystemExit("Admin Brain production approval must target mlai.au")
 PY
 fi
+verify_current_main_release() {
+    local current_main_sha
+    if [[ ! "$APP_RELEASE" =~ ^[0-9a-f]{40}$ ]]; then
+        echo "❌ APP_RELEASE must be the full main commit SHA." >&2
+        return 1
+    fi
+    if ! current_main_sha=$(git ls-remote https://github.com/MLAI-AUS-Inc/mlai-backend.git refs/heads/main | awk '{print $1}'); then
+        echo "❌ Cannot verify the current main commit; refusing to deploy." >&2
+        return 1
+    fi
+    if [ "$current_main_sha" != "$APP_RELEASE" ]; then
+        echo "❌ Stale deployment $APP_RELEASE; current main is $current_main_sha. No host files or containers were changed." >&2
+        return 1
+    fi
+}
+
+# A delayed push event can start after a newer release. Reject it before rsync
+# or the first credential/configuration write reaches the host.
+verify_current_main_release
 echo "🚀 Deploying release $APP_RELEASE to $DEPLOY_SSH_TARGET ($DROPLET_IP)..."
 
 # 1. Sync files to the server
@@ -593,6 +612,22 @@ echo "🔧 Configuring server..."
 ssh "$DEPLOY_SSH_TARGET" <<EOF
     set -euo pipefail
 
+    verify_current_main_release_on_host() {
+        local current_main_sha
+        if ! current_main_sha=\$(git ls-remote https://github.com/MLAI-AUS-Inc/mlai-backend.git refs/heads/main | awk '{print \$1}'); then
+            echo "❌ Cannot verify current main from the host; refusing to mutate runtime." >&2
+            return 1
+        fi
+        if [ "\$current_main_sha" != "$APP_RELEASE" ]; then
+            echo "❌ Stale deployment $APP_RELEASE; current main is \$current_main_sha. Refusing to mutate runtime." >&2
+            return 1
+        fi
+    }
+
+    # Recheck after file/env sync and again at the transition boundary. A
+    # newer push may have arrived while the runner was copying files.
+    verify_current_main_release_on_host
+
     upsert_env_value() {
         local key="\$1"
         local value="\$2"
@@ -854,6 +889,7 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     docker compose up -d db
 
     echo "🏗️ Building runtime images: \${runtime_services[*]}..."
+    verify_current_main_release_on_host
     docker compose build "\${runtime_services[@]}"
 
     # Every pre-migration gate (Redis security state, production URLs and
@@ -1246,6 +1282,7 @@ if parsed.username or parsed.password or parsed.query or parsed.fragment:
     trap 'deployment_status=\$?; if [ "\$deployment_status" != "0" ]; then restore_runtime_on_error; fi' EXIT
 
     if [ "\$migrations_pending" = "1" ]; then
+        verify_current_main_release_on_host
         echo "⏸️ Pausing all runtime writers before DB migrations..."
         runtime_pause_started=1
         docker compose stop "\${all_runtime_writer_services[@]}" || true
@@ -1472,6 +1509,9 @@ PY
     upsert_env_value SLACK_OWNER_INVENTORY_ENABLED "\$slack_owner_inventory_enabled"
 
     echo "🌐 Starting runtime services: \${runtime_services[*]}..."
+    if [ "\$migrations_pending" != "1" ]; then
+        verify_current_main_release_on_host
+    fi
     new_runtime_replacement_started=1
     docker compose up -d --force-recreate "\${runtime_services[@]}"
 
