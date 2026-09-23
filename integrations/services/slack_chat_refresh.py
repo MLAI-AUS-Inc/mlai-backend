@@ -135,6 +135,7 @@ def _refresh_status(conversation):
     from integrations.services.slack_chat_catalog import conversation_metadata
 
     from integrations.models import BridgeSyncState
+
     sync = BridgeSyncState.objects.filter(private_conversation=conversation).first()
     coverage = dict(sync.verified_ranges or {}).get("head", {}) if sync else {}
     if sync and sync.last_error_code:
@@ -157,7 +158,13 @@ def _refresh_status(conversation):
 
 def conversation_refresh_status(user, channel_id, *, public_key):
     """Read refresh progress only for the account's provisioned device."""
-    return _refresh_status(_authorized_conversation(user, channel_id, public_key))
+    from integrations.services.slack_chat_catalog import catalog_participants
+
+    conversation = _authorized_conversation(user, channel_id, public_key)
+    return {
+        **_refresh_status(conversation),
+        "participants": catalog_participants(conversation),
+    }
 
 
 @transaction.atomic
@@ -178,9 +185,11 @@ def request_conversation_refresh(user, channel_id, *, public_key):
     # Coalesce rapid reopen/device requests. Never restart a partially scanned import.
     recent = marker is not None and marker.updated_at > now - timedelta(seconds=30)
     from integrations.services.message_sync.inbox import enabled
+
     if enabled():
         from integrations.services.message_sync.history import ensure_state
         from integrations.services.message_sync.scheduler import schedule_job
+
         job = schedule_job(ensure_state(conversation), "head")
         # Route activity can request freshness without resetting archive work or
         # jumping ahead of the fair workspace/conversation scheduler.

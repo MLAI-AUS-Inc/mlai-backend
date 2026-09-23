@@ -20,9 +20,42 @@ from integrations.services.slack_chat_catalog import (
     raw_conversation_kind,
 )
 from integrations.services import slack_dm_mirror as mirror
+from integrations.services.slack_chat_refresh import conversation_refresh_status
 
 
 class SlackChatCatalogTests(SimpleTestCase):
+    def test_private_refresh_status_exposes_only_authorized_saved_participants(self):
+        conversation = SimpleNamespace(
+            grant=SimpleNamespace(slack_user_id="UOWNER"),
+            participant_slack_ids=["UOWNER", "UALICE"],
+            participant_profiles={
+                "UALICE": {
+                    "display_name": "Alice Smith",
+                    "avatar_url": "https://example.test/a.png",
+                }
+            },
+        )
+        with patch(
+            "integrations.services.slack_chat_refresh._authorized_conversation",
+            return_value=conversation,
+        ) as authorized, patch(
+            "integrations.services.slack_chat_refresh._refresh_status",
+            return_value={"status": "complete"},
+        ):
+            result = conversation_refresh_status(
+                "owner", "channel-id", public_key="owner-device"
+            )
+
+        authorized.assert_called_once_with("owner", "channel-id", "owner-device")
+        self.assertEqual(result["status"], "complete")
+        self.assertEqual(
+            [
+                (person["slack_user_id"], person["display_name"])
+                for person in result["participants"]
+            ],
+            [("UOWNER", "UOWNER"), ("UALICE", "Alice Smith")],
+        )
+
     def conversation(self, channel_id="CPRIVATE", kind="private_channel"):
         connection = SimpleNamespace(
             scopes=list(PRIVATE_CHANNEL_SCOPES),
@@ -31,8 +64,11 @@ class SlackChatCatalogTests(SimpleTestCase):
             },
         )
         grant = SimpleNamespace(
-            connection=connection, consent_version=PRIVATE_CHANNEL_CONSENT,
-            history_days=30, status="active", revoked_at=None,
+            connection=connection,
+            consent_version=PRIVATE_CHANNEL_CONSENT,
+            history_days=30,
+            status="active",
+            revoked_at=None,
             consented_at=timezone.now() - timedelta(days=1),
         )
         return SimpleNamespace(
@@ -40,7 +76,9 @@ class SlackChatCatalogTests(SimpleTestCase):
             slack_conversation_id=channel_id,
             mlai_channel_id="mirror",
             participant_buzz_pubkeys=["owner-device", "import-shadow"],
-            history_backfilled_at=None, status="live", _import_pending=False,
+            history_backfilled_at=None,
+            status="live",
+            _import_pending=False,
         )
 
     def test_default_is_seven_and_all_history_requires_explicit_zero(self):
