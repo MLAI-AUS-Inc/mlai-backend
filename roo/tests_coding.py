@@ -5,6 +5,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from decimal import Decimal
+from types import SimpleNamespace
 from unittest import skipUnless
 
 import jwt
@@ -16,7 +17,7 @@ from cryptography.hazmat.primitives.serialization import (
     PublicFormat,
 )
 from django.db import close_old_connections, connection
-from django.test import TestCase, TransactionTestCase, override_settings
+from django.test import SimpleTestCase, TestCase, TransactionTestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
 from rest_framework import status
@@ -33,6 +34,7 @@ from roo.coding import (
     finalize_turn,
     reconcile_coding_reservations,
     release_stale_ambiguous_calls,
+    user_can_use_coding,
 )
 from roo.models import (
     CodingModelCall,
@@ -59,7 +61,6 @@ _PUBLIC_PEM = _SIGNING_KEY.public_key().public_bytes(
 
 
 CODING_SETTINGS = {
-    "MLAI_CODING_PILOT_EMAILS": ["pilot@mlai.au"],
     "MLAI_CODING_TICKET_PRIVATE_KEY": _PRIVATE_PEM,
     "MLAI_CODING_TICKET_PUBLIC_KEY": _PUBLIC_PEM,
     "MLAI_CODING_TICKET_KEY_ID": "test-key",
@@ -105,6 +106,20 @@ def create_account_session(user, *, installation_id=None):
         expires_at=now + timedelta(days=30),
     )
     return session, raw
+
+
+class CodingAccessTests(SimpleTestCase):
+    def test_only_active_authenticated_accounts_are_eligible(self):
+        self.assertFalse(user_can_use_coding(None))
+        self.assertFalse(
+            user_can_use_coding(SimpleNamespace(is_authenticated=False, is_active=True))
+        )
+        self.assertFalse(
+            user_can_use_coding(SimpleNamespace(is_authenticated=True, is_active=False))
+        )
+        self.assertTrue(
+            user_can_use_coding(SimpleNamespace(is_authenticated=True, is_active=True))
+        )
 
 
 class MicrorooCompatibilityTests(TestCase):
@@ -337,14 +352,41 @@ class CodingPublicApiTests(APITestCase):
         self.assertEqual(response.data["reserved_microroo"], "2000000")
         self.assertEqual(response.data["total_balance_microroo"], "2000000")
 
-    def test_non_allowlisted_user_gets_readable_denial_without_identity_override(self):
+    def test_other_signed_in_user_with_roo_can_start_coding(self):
         other = User.objects.create_user(email="other@mlai.au")
+        PointsAccount.objects.create(user=other, balance=1, earned_balance=1)
         _, raw = create_account_session(other)
         self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {raw}")
         response = self.client.get(reverse("community_chat_coding_entitlement"))
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertFalse(response.data["pilot_access"])
-        self.assertFalse(response.data["can_start_turn"])
+        self.assertTrue(response.data["pilot_access"])
+        self.assertTrue(response.data["can_start_turn"])
+        created = self.client.post(
+            reverse("community_chat_coding_turn_create"),
+            {
+                "idempotency_key": str(uuid.uuid4()),
+                "local_session_id": str(uuid.uuid4()),
+                "model": "kimi-k3",
+            },
+            format="json",
+        )
+        self.assertEqual(created.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(CodingTurn.objects.get(id=created.data["turn_id"]).user, other)
+
+    def test_anonymous_user_cannot_read_entitlement_or_start_turn(self):
+        self.client.credentials()
+        entitlement = self.client.get(reverse("community_chat_coding_entitlement"))
+        turn = self.client.post(
+            reverse("community_chat_coding_turn_create"),
+            {
+                "idempotency_key": str(uuid.uuid4()),
+                "local_session_id": str(uuid.uuid4()),
+                "model": "kimi-k3",
+            },
+            format="json",
+        )
+        self.assertEqual(entitlement.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertEqual(turn.status_code, status.HTTP_401_UNAUTHORIZED)
 
     def test_turn_returns_device_scoped_five_minute_eddsa_ticket(self):
         local_id = uuid.uuid4()

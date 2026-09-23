@@ -1008,8 +1008,6 @@ if not 1 <= KIMI_ROO_POINTS_PER_PROMPT <= 100:
 # MLAI Coding uses short-lived, device-scoped Ed25519 tickets.  Keys remain
 # optional at process startup so non-Coding environments can run normally; the
 # Coding endpoints fail closed with 503 until a valid signing key is supplied.
-MLAI_CODING_PILOT_USER_IDS = _env_list('MLAI_CODING_PILOT_USER_IDS', [])
-MLAI_CODING_PILOT_EMAILS = _env_list('MLAI_CODING_PILOT_EMAILS', [])
 MLAI_CODING_PRICING_VERSION = os.getenv(
     'MLAI_CODING_PRICING_VERSION',
     'do-kimi-k3-2026-08',
