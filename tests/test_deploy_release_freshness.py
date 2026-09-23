@@ -17,6 +17,14 @@ def _function(name: str) -> str:
 
 
 class DeployReleaseFreshnessTests(unittest.TestCase):
+    def test_unquoted_remote_heredoc_has_no_backticks(self):
+        # Even a backtick in a comment is command-substituted by the local
+        # shell before this unquoted SSH heredoc is sent to the host.
+        remote_script = DEPLOY.split('ssh "$DEPLOY_SSH_TARGET" <<EOF\n', 1)[1].split(
+            '\nEOF', 1
+        )[0]
+        self.assertNotIn('`', remote_script)
+
     def test_runner_rejects_stale_or_unknown_main_before_any_host_mutation(self):
         guard = _function("verify_current_main_release")
         for latest, git_status, expected_status in (

@@ -889,7 +889,7 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     done
 
     # The database imports the long-lived .env, including APP_RELEASE and
-    # deployment-managed feature flags. A normal `up db` treats those changes
+    # deployment-managed feature flags. A normal Compose up of db treats those changes
     # as a config change and recreates Postgres during every code release.
     # Start a missing/stopped database, but never replace a running database
     # as a side effect of deploying application code.
