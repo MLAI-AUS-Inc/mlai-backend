@@ -9612,12 +9612,12 @@ def _workflow_progress(*, context=None, run=None, latest_runs=None, checks=None,
         status_by_id["research"] = "ready"
         action_by_id["research"] = _workflow_step_action("Start topic research", href=href_by_id["research"])
 
-    if topic_candidates is None:
-        topic_candidates = _topic_candidates_from_runs(latest_runs, organization=organization)
     if article_run:
         status_by_id["choose_topic"] = "complete"
         run_by_id["choose_topic"] = article_run.run_id
     elif checks.get("research", {}).get("passed"):
+        if topic_candidates is None:
+            topic_candidates = _topic_candidates_from_runs(latest_runs, organization=organization)
         status_by_id["choose_topic"] = "needs_action" if topic_candidates else "ready"
         action_by_id["choose_topic"] = _workflow_step_action("Choose article topic", href=href_by_id["choose_topic"])
 
@@ -10350,7 +10350,7 @@ def _strip_missing_setup_run_refs(result):
     return scrubbed
 
 
-def _serialize_run(run, *, context=None, latest_runs=None, checks=None, mode="full"):
+def _serialize_run(run, *, context=None, latest_runs=None, checks=None, mode="full", topic_candidates=None):
     compact = mode in {"summary", "status"}
     step_states = _serialize_run_steps(run, compact=compact)
     from content_factory.run_state import reliability_presentation
@@ -10424,7 +10424,9 @@ def _serialize_run(run, *, context=None, latest_runs=None, checks=None, mode="fu
             "scanProgress": scan_progress,
             "scan_progress": scan_progress_snake,
             **({"contentIsland": content_island, "content_island": content_island} if content_island else {}),
-            "workflowProgress": _workflow_progress(context=context, run=run, latest_runs=latest_runs, checks=checks),
+            "workflowProgress": _workflow_progress(
+                context=context, run=run, latest_runs=latest_runs, checks=checks, topic_candidates=topic_candidates
+            ),
             "result": _strip_missing_setup_run_refs(_compact_result_for_run(run)),
             **reliability_presentation(result),
         }
@@ -10477,7 +10479,9 @@ def _serialize_run(run, *, context=None, latest_runs=None, checks=None, mode="fu
         "scan_progress": scan_progress_snake,
         **({"contentIsland": content_island, "content_island": content_island} if content_island else {}),
         "componentFeedback": _component_feedback_from_run(run),
-        "workflowProgress": _workflow_progress(context=context, run=run, latest_runs=latest_runs, checks=checks),
+        "workflowProgress": _workflow_progress(
+            context=context, run=run, latest_runs=latest_runs, checks=checks, topic_candidates=topic_candidates
+        ),
         "result": _strip_missing_setup_run_refs(result),
         **reliability_presentation(result),
     }
@@ -10705,10 +10709,8 @@ def _bootstrap_cache_seconds() -> int:
 def _bootstrap_state_fingerprint(organization, company, config) -> str:
     """Cheap DB-derived version string of the org state the bootstrap depends on.
 
-    Prod runs a per-process LocMemCache (no shared cache), so cross-worker explicit
-    invalidation is impossible. Instead the cache key embeds this fingerprint: any
-    relevant write shifts it, so every worker auto-misses and recomputes. No
-    mutation endpoint needs to know the cache exists.
+    The cache key embeds this fingerprint so relevant writes invalidate cached
+    payloads across workers. No mutation endpoint needs to know the cache exists.
 
     Uses run created_at/count (not updated_at) deliberately: the ~2.5s status
     poll-sync rewrites runs constantly, and busting on that would defeat the cache
@@ -10769,7 +10771,11 @@ def _bootstrap_state_fingerprint(organization, company, config) -> str:
             return value.isoformat()
         return str(value)
 
-    return "|".join(_stamp(value) for value in parts)
+    # Cache backends such as Memcached reject keys over 250 bytes and keys with
+    # spaces. The raw fingerprint can contain long keyword arrays, URLs, and
+    # company details, which also leak into Django's CacheKeyWarning logs.
+    fingerprint = "|".join(_stamp(value) for value in parts)
+    return hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()
 
 
 def _bootstrap_cache_key(context, config, view):
@@ -10845,9 +10851,15 @@ def _compute_bootstrap_payload(context, request=None, *, view="full", config=Non
     if config is None:
         config = _get_config(context.organization)
     latest_runs = _latest_runs_for_org(context.organization)
-    _refreshed_setup_run, setup_pr_refreshed = _refresh_pending_article_system_setup_pr_status(context=context, config=config, latest_runs=latest_runs)
-    if setup_pr_refreshed:
-        latest_runs = _latest_runs_for_org(context.organization)
+    if not compact:
+        # A dashboard navigation must never wait for GitHub's PR API. The
+        # setup run page performs this refresh, and the next summary bootstrap
+        # observes its stored state through the cache fingerprint/TTL.
+        _refreshed_setup_run, setup_pr_refreshed = _refresh_pending_article_system_setup_pr_status(
+            context=context, config=config, latest_runs=latest_runs
+        )
+        if setup_pr_refreshed:
+            latest_runs = _latest_runs_for_org(context.organization)
     if not compact:
         # Sync written-article lifecycle (PR merged? live on the site?) so the
         # dashboard badge reflects reality; internally throttled + bounded.
@@ -10907,13 +10919,19 @@ def _compute_bootstrap_payload(context, request=None, *, view="full", config=Non
         generation_ready=checks.get("scaffold", {}).get("generationReady"),
     )
     guided_steps, current_guided_step = _guided_steps(checks)
-    latest_runs_by_workflow = {}
     run_mode = "summary" if compact else "full"
-    for run in latest_runs:
-        latest_runs_by_workflow.setdefault(
-            run.workflow,
-            _serialize_run(run, context=context, latest_runs=latest_runs, checks=checks, mode=run_mode),
+    # A run's workflow progress only needs topic availability, already derived
+    # above. Reusing it also avoids repeating coverage matching for every run.
+    serialized_runs = [
+        _serialize_run(
+            run, context=context, latest_runs=latest_runs, checks=checks,
+            mode=run_mode, topic_candidates=topic_candidates,
         )
+        for run in latest_runs
+    ]
+    latest_runs_by_workflow = {}
+    for serialized_run in serialized_runs:
+        latest_runs_by_workflow.setdefault(serialized_run["workflow"], serialized_run)
     latest_article_run = _latest_run_matching(latest_runs, ARTICLE_WORKFLOWS)
     google_status = google_baseline_connection_status(context.profile.user, context.organization)
     google_status["connectUrl"] = _google_baseline_connect_url(request, context)
@@ -10964,7 +10982,7 @@ def _compute_bootstrap_payload(context, request=None, *, view="full", config=Non
         "checks": checks,
         "articleSetupState": article_setup_state,
         "article_setup_state": article_setup_state,
-        "latestRuns": [_serialize_run(run, context=context, latest_runs=latest_runs, checks=checks, mode=run_mode) for run in latest_runs],
+        "latestRuns": serialized_runs,
         "latestRunsByWorkflow": latest_runs_by_workflow,
         "topicCandidates": topic_candidates,
         "topicPillars": topic_pillars,

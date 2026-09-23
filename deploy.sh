@@ -755,9 +755,12 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     upsert_env_value ORG_MEMORY_ACTIONS_ENABLED "false"
     upsert_env_value ORG_MEMORY_ACTION_LINEAR_EXECUTION_ENABLED "false"
     upsert_env_value ORG_MEMORY_SELECTOR_EXPORT_ENABLED "false"
-    # Web concurrency: gunicorn sync-worker count (read by scripts/start-web.sh).
-    # Sized to droplet RAM (~250MB/worker). 16 fits the 8GB/4vCPU droplet with headroom.
-    upsert_env_value GUNICORN_WORKERS "16"
+    # Web concurrency: keep URL imports and request CPU within this 4-vCPU
+    # droplet's capacity. The previous 16 sync workers triggered simultaneous
+    # cold imports and 30-second worker timeouts. Firebase initializes a
+    # Firestore gRPC client during route import, so warming must be post-fork.
+    upsert_env_value GUNICORN_WORKERS "4"
+    upsert_env_value GUNICORN_TIMEOUT "90"
     print_redacted_env_status CONTENT_FACTORY_URL GITHUB_APP_ID GITHUB_APP_PRIVATE_KEY VALLEY_HARNESS_URL REDIS_URL ROO_SERVICE_URL ROO_SIM_PATIENT_KEY HEALTH_HACK_API_KEY ROO_API_KEY INTERNAL_API_KEY OFFICE_MANAGER_SLACK_BOT_TOKEN OFFICE_MANAGER_SLACK_CHANNEL_ID OFFICE_MANAGER_TIMEZONE VICTOR_AI_ROO_SIGNING_SECRET VICTOR_AI_ROO_ENABLED UMAMI_BASE_URL CONTENT_ANALYTICS_HOST_URL COMMUNITY_CHAT_ADAPTER_URL COMMUNITY_CHAT_ADAPTER_TOKEN COMMUNITY_CHAT_EMAIL_CODE_PEPPER COMMUNITY_CHAT_EMAIL_CODE_DELIVERY_SECRET CUSTOMERIO_API_KEY CUSTOMERIO_COMMUNITY_CHAT_CODE_MESSAGE_ID
     require_env_value CONTENT_FACTORY_URL "Set CONTENT_FACTORY_URL to http://<content-factory-private-ip>:8000 for the cross-droplet Content Factory deployment."
     require_env_value GITHUB_APP_ID "Set GITHUB_APP_ID to the MLAI Tools GitHub App id so Content Factory can receive installation tokens."
@@ -1143,6 +1146,7 @@ if parsed.username or parsed.password or parsed.query or parsed.fragment:
     }
 
     runtime_restore_attempted=0
+    runtime_pause_started=0
     new_runtime_replacement_started=0
     migration_started=0
     schema_transition_started=0
@@ -1154,6 +1158,12 @@ if parsed.username or parsed.password or parsed.query or parsed.fragment:
         runtime_restore_attempted=1
         trap - ERR
         set +e
+
+        if [ "\$runtime_pause_started" != "1" ] \
+            && [ "\$new_runtime_replacement_started" != "1" ]; then
+            echo "⚠️ Deployment failed before runtime replacement; existing services remain running."
+            return
+        fi
 
         if [ "\$migration_started" = "1" ]; then
             if [ "\$schema_transition_completed" != "1" ]; then
@@ -1172,12 +1182,10 @@ if parsed.username or parsed.password or parsed.query or parsed.fragment:
         echo "⚠️ Deployment failed after runtime services were paused; staging Office Manager and Slack owner inventory disabled for recovery."
         upsert_env_value OFFICE_MANAGER_ENABLED "false" || true
         upsert_env_value SLACK_OWNER_INVENTORY_ENABLED "false" || true
-        if [ "\$new_runtime_replacement_started" != "1" ] \
-            && [ "\$migration_started" != "1" ]; then
-            # These stopped containers still reference the last known-good images
-            # and carry the environment that was validated with that release. Do
-            # not replace them with the just-built image: a pre/post-migration
-            # failure can leave that image waiting forever on migrate --check.
+        if [ "\$migration_started" != "1" ]; then
+            # No schema changed, so the previous image is the last known-good
+            # release even if a replacement container has already started.
+            # Restore its recorded image tag before recreating services.
             echo "⚠️ Deployment failed before schema advancement; restoring the last known-good runtime images."
             restored_services=()
             while IFS='|' read -r service image_id image_ref rollback_tag; do
@@ -1203,40 +1211,75 @@ if parsed.username or parsed.password or parsed.query or parsed.fragment:
             return
         fi
 
-        # Once the full migration graph has been checked (or replacement has
-        # begun), the new image is safe to recreate with the staged-off feature
-        # flag. Still require a fresh scheduler tick after recovery.
+        # Once a migration began, the old binary may be incompatible with the
+        # schema. Recreate the new image with staged-off features and require
+        # a fresh scheduler tick after recovery.
         docker compose up -d --force-recreate "\${runtime_services[@]}" || true
         verify_scheduler_recovery_tick "" "" 0 || true
     }
 
-    echo "⏸️ Pausing all runtime writers before DB migrations..."
-    docker compose stop "\${all_runtime_writer_services[@]}" || true
+    # A code-only release has no schema transition. Keep the current web and
+    # workers serving while the new image runs the remaining deployment gates.
+    # --check returns 0 only when Django sees no pending migrations. A pending
+    # plan requires its own explicit approval before any runtime is paused.
+    # A database or migration-loader failure also leaves the current runtime
+    # untouched.
+    echo "🔎 Checking pending migrations before pausing runtime services..."
+    migrations_pending=1
+    if compose_run_web python manage.py migrate --check --noinput; then
+        migrations_pending=0
+        echo "✅ No pending migrations; current runtime stays online during deployment checks."
+    else
+        migration_plan=\$(compose_run_web python manage.py migrate --plan --noinput)
+        printf '%s\n' "\$migration_plan"
+        approved_plan_sha256=\$(read_env_value APPROVED_MIGRATION_PLAN_SHA256)
+        actual_plan_sha256=\$(printf '%s' "\$migration_plan" | sha256sum | cut -d ' ' -f 1)
+        if [ -z "\$approved_plan_sha256" ] || [ "\$approved_plan_sha256" != "\$actual_plan_sha256" ]; then
+            echo "❌ Pending migration plan has no matching, specific approval; current runtime remains online." >&2
+            false
+        fi
+    fi
+
     # Recovery disables errexit while attempting each restoration step. Always
     # preserve the original failure and stop; recovery is not a successful deploy.
     trap 'deployment_status=\$?; restore_runtime_on_error; exit "\$deployment_status"' ERR
     trap 'deployment_status=\$?; if [ "\$deployment_status" != "0" ]; then restore_runtime_on_error; fi' EXIT
 
-    echo "🗄️ Running migrations..."
-    # From this point a failed migrate may still have committed earlier
-    # append-only migrations. Never restore either binary until the complete
-    # migration graph is proven; an intermediate schema is operator-repair-only.
-    migration_started=1
-    schema_transition_started=1
-    compose_run_web python manage.py migrate --noinput
-    compose_run_web python manage.py migrate --check --noinput
-    schema_transition_completed=1
+    if [ "\$migrations_pending" = "1" ]; then
+        echo "⏸️ Pausing all runtime writers before DB migrations..."
+        runtime_pause_started=1
+        docker compose stop "\${all_runtime_writer_services[@]}" || true
+        echo "🗄️ Running migrations..."
+        # From this point a failed migrate may still have committed earlier
+        # append-only migrations. Never restore either binary until the complete
+        # migration graph is proven; an intermediate schema is operator-repair-only.
+        migration_started=1
+        schema_transition_started=1
+        compose_run_web python manage.py migrate --noinput
+        compose_run_web python manage.py migrate --check --noinput
+        schema_transition_completed=1
+    else
+        # Confirm the migration graph still has no pending work before the new
+        # binary replaces live services. This cannot apply a migration.
+        compose_run_web python manage.py migrate --check --noinput
+    fi
 
     echo "🧬 Re-auditing Office Manager provenance after migrations..."
     if ! run_office_manager_migration_audit "\$office_manager_post_attestation"; then
         echo "❌ Post-migration Office Manager data requires operator reconciliation." >&2
-        # The nullable quarantine is understood only by the new image. Keep the
-        # feature off and start that image so an older binary cannot reverse an
-        # allocation whose provenance 0037 marked unknown.
         upsert_env_value OFFICE_MANAGER_ENABLED "false"
-        docker compose up -d --force-recreate "\${runtime_services[@]}"
-        verify_scheduler_recovery_tick "" "" 0
-        runtime_restore_attempted=1
+        if [ "\$migrations_pending" = "1" ]; then
+            # The nullable quarantine is understood only by the new image.
+            # After a migration, start that image so an older binary cannot
+            # reverse an allocation whose provenance 0037 marked unknown.
+            docker compose up -d --force-recreate "\${runtime_services[@]}"
+            verify_scheduler_recovery_tick "" "" 0
+            runtime_restore_attempted=1
+        else
+            # No schema changed and no runtime was paused. Leave the healthy
+            # previous image serving instead of replacing it with this build.
+            echo "⚠️ Code-only deployment check failed; existing runtime remains online."
+        fi
         false
     fi
 

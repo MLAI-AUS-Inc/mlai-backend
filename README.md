@@ -120,6 +120,15 @@ Normal production deployment is owned by the reviewed GitHub workflow and
 deployment scripts. New engineers should not deploy during onboarding. Consult
 the relevant runbook in `docs/` for subsystem operations.
 
+Main-branch deploys run one at a time. For a code-only release, `deploy.sh`
+checks the migration graph without applying it and keeps the current web and
+workers serving through deployment checks. An unexpected pending migration
+stops the release before runtime is paused unless the host has a matching
+`APPROVED_MIGRATION_PLAN_SHA256` for that exact reviewed plan. This gate does
+not replace the specific user approval required above. If a code-only release
+fails after replacing containers, deployment recovery restores the recorded
+previous images.
+
 ## Documentation status
 
 Architecture and operational documents describe current behavior. Files under

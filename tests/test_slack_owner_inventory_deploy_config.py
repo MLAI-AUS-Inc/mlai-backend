@@ -26,7 +26,7 @@ class SlackOwnerInventoryDeployConfigTests(unittest.TestCase):
     def test_flag_is_disabled_before_migration_and_activated_before_runtime_start(self):
         staged = DEPLOY.index('install_remote_env_value SLACK_OWNER_INVENTORY_ENABLED "false"')
         migration = DEPLOY.index("compose_run_web python manage.py migrate --noinput")
-        checked = DEPLOY.index("compose_run_web python manage.py migrate --check --noinput")
+        checked = DEPLOY.index("compose_run_web python manage.py migrate --check --noinput", migration)
         postmigrate = DEPLOY.index("compose_run_web python manage.py deploy_postmigrate")
         activated = DEPLOY.index(
             'upsert_env_value SLACK_OWNER_INVENTORY_ENABLED "\\$slack_owner_inventory_enabled"'

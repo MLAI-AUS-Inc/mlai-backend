@@ -11,6 +11,13 @@ permissions:
   contents: read
   pull-requests: read
 
+# Main releases share one concurrency group so they cannot mutate the droplet
+# together. PR checks use their commit SHA so an obsolete run cannot block
+# validation of a newer patch on the same PR.
+concurrency:
+  group: mlai-backend-deploy-${{ github.event_name == 'push' && github.ref || github.sha }}
+  cancel-in-progress: false
+
 jobs:
   # Pull requests run the complete suite and record the exact Git tree that
   # passed. A main push reuses that result only when GitHub associates the
