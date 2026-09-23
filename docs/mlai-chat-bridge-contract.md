@@ -380,6 +380,10 @@ Private registration sends these included owner-device keys separately as
 participant. The adapter polls each private channel only for that registration's
 callback-author keys, so one owner's device authorization cannot broaden
 another channel's callback scope.
+Device recovery retains its retry hint when a room is cooling down. While an
+owner-consented private directory sweep is incomplete, that idle turn advances
+one directory page; after the sweep, the cooldown does not trigger repeated
+full Slack listings. The room is retried when its cooldown expires.
 
 Every private-registration POST has a distinct, content-free durable attempt
 row written before adapter I/O. The row binds the exact consent generation,

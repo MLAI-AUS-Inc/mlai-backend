@@ -364,6 +364,33 @@ class EnrollmentDeviceRecoveryTests(SlackDmIoAuthorityFixture, TransactionTestCa
         self.connection.refresh_from_db()
         self.assertIn(str(self.conversation.pk), self.connection.sync_cursor[DEVICE_AUDIENCE_HINT]["retry_after"])
 
+    @override_settings(SLACK_OWNER_INVENTORY_ENABLED=True)
+    def test_recovery_cooldown_yields_to_consented_incomplete_owner_directory(self):
+        from integrations.services.slack_owner_inventory import KEY, grant_metadata_consent
+
+        self.schedule()
+        with patch.object(dm, "_call_slack_with_grant_authority", side_effect=RuntimeError("synthetic timeout")):
+            self.assertTrue(self.recover())
+        grant_metadata_consent(self.grant)
+        with patch.object(dm, "_call_slack_with_grant_authority") as source:
+            self.assertFalse(self.recover())
+        source.assert_not_called()
+        self.connection.refresh_from_db()
+        self.assertIn(str(self.conversation.pk), self.connection.sync_cursor[DEVICE_AUDIENCE_HINT]["retry_after"])
+
+        cursor = dict(self.connection.sync_cursor)
+        inventory = dict(cursor[KEY])
+        inventory["coverage"] = {
+            "im": "complete", "mpim": "complete", "private_channel": "complete",
+            "public_channel": "pending",
+        }
+        cursor[KEY] = inventory
+        self.connection.sync_cursor = cursor
+        self.connection.save(update_fields=("sync_cursor",))
+        with patch.object(dm, "_call_slack_with_grant_authority") as source:
+            self.assertTrue(self.recover())
+        source.assert_not_called()
+
     def test_confirmation_and_hint_roll_back_together(self):
         self.device.status = "pending"
         self.device.save()

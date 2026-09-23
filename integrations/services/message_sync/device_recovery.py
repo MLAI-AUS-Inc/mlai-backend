@@ -105,9 +105,10 @@ def _update_device_hint(authority, public_key, *, failed_conversation=None):
 def recover_recent_conversation(grant, authority, *, profile_cache, cycle_started_at):
     """Attempt one known recent room under the caller's fair discovery lease.
 
-    Return False only when no recovery is due. Budget deferrals propagate so
-    the directory worker resumes this room's metadata checkpoint next turn.
-    The historical directory cursor is never reset by device recovery.
+    Return False when no recovery is due, or when a cooling-down recovery can
+    yield its turn to an incomplete consented owner directory. Budget deferrals
+    propagate so the worker resumes this room's metadata checkpoint next turn.
+    Device recovery never resets the directory cursor.
     """
     from integrations.services import slack_dm_mirror as dm
 
@@ -149,7 +150,14 @@ def recover_recent_conversation(grant, authority, *, profile_cache, cycle_starte
     else:
         if requested_key and not waiting_for_retry:
             _update_device_hint(authority, requested_key)
-        return waiting_for_retry
+        if waiting_for_retry:
+            from integrations.services.slack_owner_inventory import needs_private_sweep
+
+            # Advance the initial private inventory during a recovery cooldown,
+            # but keep the old idle behavior once that sweep is complete so a
+            # retry hint does not cause repeated full Slack directory scans.
+            return not needs_private_sweep(grant.connection, authority)
+        return False
     try:
         _recover(candidate, authority, profile_cache, cycle_started_at, required_owner_public_key=requested_key or None)
     except Exception as exc:

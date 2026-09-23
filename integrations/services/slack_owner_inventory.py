@@ -100,6 +100,16 @@ def state_for(connection, authority) -> dict:
     return raw
 
 
+def needs_private_sweep(connection, authority) -> bool:
+    """Let a consented owner directory advance during device retry cooldowns."""
+    if not enabled() or not has_metadata_consent(connection, authority):
+        return False
+    coverage = state_for(connection, authority).get("coverage")
+    return isinstance(coverage, dict) and any(
+        coverage.get(kind) == "pending" for kind in KINDS[:3]
+    )
+
+
 def _save_state(connection, state) -> None:
     cursor = dict(connection.sync_cursor or {})
     cursor[KEY] = state
