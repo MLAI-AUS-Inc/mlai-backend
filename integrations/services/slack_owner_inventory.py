@@ -345,7 +345,7 @@ def source_read_targets(grant, authority, existing_targets):
     seen = {target.slack_id for target in existing_targets}
     targets = []
     for row in grant.owner_conversation_inventory.filter(eligibility="eligible").order_by("slack_conversation_id"):
-        if row.slack_conversation_id in seen or row.source_archived is True:
+        if row.slack_conversation_id in seen:
             continue
         target = ReadTarget(
             channel_id=row.slack_conversation_id,

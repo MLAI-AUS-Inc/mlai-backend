@@ -241,7 +241,7 @@ def conversation_page(user, *, public_key, limit=50, cursor="", unread_only=Fals
         "provisional_unread_count": 0,
     }
     for row in rows:
-        if row.eligibility != "eligible" or row.source_archived is True:
+        if row.eligibility != "eligible":
             continue
         read_summary["eligible_count"] += 1
         snapshot = states[row.pk]
@@ -261,8 +261,7 @@ def conversation_page(user, *, public_key, limit=50, cursor="", unread_only=Fals
     if unread_only:
         visible = [
             row for row in visible
-            if row.eligibility == "eligible" and row.source_archived is not True
-            and states[row.pk]["is_unread"] is True
+            if row.eligibility == "eligible" and states[row.pk]["is_unread"] is True
         ]
     selected = visible[:limit]
     next_cursor = None
