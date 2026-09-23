@@ -50,7 +50,7 @@ jobs:
         python-version: "3.11"
 
     - name: Test deployment failure handling and live contract
-      run: python -m unittest tests.test_deploy_runtime_checks tests.test_message_sync_deploy_config -v
+      run: python -m unittest tests.test_deploy_runtime_checks tests.test_message_sync_deploy_config tests.test_slack_owner_inventory_deploy_config -v
 
     - name: Check jobs delivery contracts without database access
       run: python -m unittest tests.test_jobs_delivery_unit -v
@@ -541,6 +541,7 @@ jobs:
         COMMUNITY_CHAT_ADAPTER_URL: ${{ vars.COMMUNITY_CHAT_ADAPTER_URL }}
         COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED: ${{ vars.COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED || 'false' }}
         MESSAGE_SYNC_ENABLED: ${{ vars.MESSAGE_SYNC_ENABLED || 'false' }}
+        SLACK_OWNER_INVENTORY_ENABLED: ${{ vars.SLACK_OWNER_INVENTORY_ENABLED || 'false' }}
         MESSAGE_SYNC_SLACK_APP_ID: ${{ vars.MESSAGE_SYNC_SLACK_APP_ID }}
         MESSAGE_SYNC_SLACK_APP_TOKEN: ${{ secrets.MESSAGE_SYNC_SLACK_APP_TOKEN }}
         MESSAGE_SYNC_SLACK_USER_APP_ID: ${{ vars.MESSAGE_SYNC_SLACK_USER_APP_ID }}

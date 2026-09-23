@@ -260,6 +260,18 @@ receipts, message links, or relay events by hand during triage.
    password-email failures, membership denials, auth throttles, and latency
    before expanding the cohort.
 
+### Owner Slack conversation inventory activation
+
+Set the protected deployment variable `SLACK_OWNER_INVENTORY_ENABLED=true` only
+when `MESSAGE_SYNC_ENABLED=true` for the same release. The deployment stages
+inventory as `false` on the host, applies the approved inventory migration with
+the rest of the Django migration graph, and checks the graph before it writes
+the requested inventory value and starts the new runtime. It verifies the web
+container received that value and, when enabled, the bridge worker did too. A
+failed deployment stages inventory back to
+`false` during recovery. Leave the variable `false` to disable the endpoint;
+this switch does not change a member's Slack history consent.
+
 ## Rollback triggers and procedure
 
 Rollback on authentication bypass, role escalation, cross-tenant/media access,
