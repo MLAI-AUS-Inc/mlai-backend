@@ -333,6 +333,38 @@ grep -Fx 'compose stop web scheduler memory-worker memory-scheduler community-em
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertIn("keeping all runtime writers safely disabled", completed.stdout)
 
+    def test_code_only_health_failure_rolls_back_after_replacement(self):
+        deploy = (ROOT / "deploy.sh").read_text()
+        function_start = deploy.index("    restore_runtime_on_error() {")
+        function_end = deploy.index(
+            "\n    }\n\n    # A code-only release", function_start
+        ) + len("\n    }")
+        recovery_function = deploy[function_start:function_end].replace("\\$", "$")
+        probe = recovery_function + r"""
+runtime_restore_attempted=0
+runtime_pause_started=0
+new_runtime_replacement_started=1
+migration_started=0
+previous_scheduler_container_id=""
+previous_runtime_container_ids=()
+runtime_services=(web scheduler)
+rollback_manifest="$(mktemp)"
+docker_log="$(mktemp)"
+printf 'web|old-image-id|mlai-backend-web|rollback-tag\n' > "$rollback_manifest"
+upsert_env_value() { :; }
+docker() { printf '%s\n' "$*" >> "$docker_log"; }
+restore_runtime_on_error
+cat "$docker_log"
+rm -f "$rollback_manifest" "$docker_log"
+"""
+        completed = subprocess.run(
+            ["bash", "-c", probe], check=False, capture_output=True, text=True
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("image tag old-image-id mlai-backend-web", completed.stdout)
+        self.assertIn("compose up -d --force-recreate web", completed.stdout)
+        self.assertNotIn("compose up -d --force-recreate web scheduler", completed.stdout)
+
     def test_bridge_deploy_validation_requires_explicit_production_activation(self):
         workflow = (ROOT / ".github" / "workflows" / "deploy.yml").read_text()
 

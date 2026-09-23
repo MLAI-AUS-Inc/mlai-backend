@@ -15,6 +15,34 @@ DEPLOY_SCRIPT = (Path(__file__).resolve().parents[1] / "deploy.sh").read_text()
 
 
 class DeploymentRuntimeChecksTests(unittest.TestCase):
+    def test_failed_post_audit_keeps_code_only_runtime_serving(self):
+        start = '    if ! run_office_manager_migration_audit "\\$office_manager_post_attestation"; then'
+        branch = DEPLOY_SCRIPT.split(start, 1)[1].split(
+            '    # Migration readiness, vector installation', 1
+        )[0]
+        branch = (start + branch).replace("\\$", "$")
+        for migrations_pending, should_recreate in (("0", False), ("1", True)):
+            with self.subTest(migrations_pending=migrations_pending):
+                script = "\n".join([
+                    "set -euo pipefail",
+                    f"migrations_pending={migrations_pending}",
+                    'office_manager_post_attestation=reviewed',
+                    'runtime_services=(web scheduler)',
+                    'runtime_restore_attempted=0',
+                    'run_office_manager_migration_audit() { return 1; }',
+                    'upsert_env_value() { :; }',
+                    'docker() { echo docker-recreate; }',
+                    'verify_scheduler_recovery_tick() { echo scheduler-verified; }',
+                    branch,
+                    'echo unexpectedly-continued',
+                ])
+                result = subprocess.run(["bash", "-c", script], text=True, capture_output=True, timeout=5)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertNotIn("unexpectedly-continued", result.stdout)
+                self.assertEqual("docker-recreate" in result.stdout, should_recreate)
+                if not should_recreate:
+                    self.assertIn("existing runtime remains online", result.stdout)
+
     def test_migration_free_release_keeps_runtime_online_during_checks(self):
         # Execute the deployment's actual decision block with stubbed Django
         # commands. No database or production service is involved.

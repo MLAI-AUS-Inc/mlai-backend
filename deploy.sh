@@ -1180,12 +1180,10 @@ if parsed.username or parsed.password or parsed.query or parsed.fragment:
         echo "⚠️ Deployment failed after runtime services were paused; staging Office Manager and Slack owner inventory disabled for recovery."
         upsert_env_value OFFICE_MANAGER_ENABLED "false" || true
         upsert_env_value SLACK_OWNER_INVENTORY_ENABLED "false" || true
-        if [ "\$new_runtime_replacement_started" != "1" ] \
-            && [ "\$migration_started" != "1" ]; then
-            # These stopped containers still reference the last known-good images
-            # and carry the environment that was validated with that release. Do
-            # not replace them with the just-built image: a pre/post-migration
-            # failure can leave that image waiting forever on migrate --check.
+        if [ "\$migration_started" != "1" ]; then
+            # No schema changed, so the previous image is the last known-good
+            # release even if a replacement container has already started.
+            # Restore its recorded image tag before recreating services.
             echo "⚠️ Deployment failed before schema advancement; restoring the last known-good runtime images."
             restored_services=()
             while IFS='|' read -r service image_id image_ref rollback_tag; do
@@ -1211,9 +1209,9 @@ if parsed.username or parsed.password or parsed.query or parsed.fragment:
             return
         fi
 
-        # Once the full migration graph has been checked (or replacement has
-        # begun), the new image is safe to recreate with the staged-off feature
-        # flag. Still require a fresh scheduler tick after recovery.
+        # Once a migration began, the old binary may be incompatible with the
+        # schema. Recreate the new image with staged-off features and require
+        # a fresh scheduler tick after recovery.
         docker compose up -d --force-recreate "\${runtime_services[@]}" || true
         verify_scheduler_recovery_tick "" "" 0 || true
     }
@@ -1267,13 +1265,19 @@ if parsed.username or parsed.password or parsed.query or parsed.fragment:
     echo "🧬 Re-auditing Office Manager provenance after migrations..."
     if ! run_office_manager_migration_audit "\$office_manager_post_attestation"; then
         echo "❌ Post-migration Office Manager data requires operator reconciliation." >&2
-        # The nullable quarantine is understood only by the new image. Keep the
-        # feature off and start that image so an older binary cannot reverse an
-        # allocation whose provenance 0037 marked unknown.
         upsert_env_value OFFICE_MANAGER_ENABLED "false"
-        docker compose up -d --force-recreate "\${runtime_services[@]}"
-        verify_scheduler_recovery_tick "" "" 0
-        runtime_restore_attempted=1
+        if [ "\$migrations_pending" = "1" ]; then
+            # The nullable quarantine is understood only by the new image.
+            # After a migration, start that image so an older binary cannot
+            # reverse an allocation whose provenance 0037 marked unknown.
+            docker compose up -d --force-recreate "\${runtime_services[@]}"
+            verify_scheduler_recovery_tick "" "" 0
+            runtime_restore_attempted=1
+        else
+            # No schema changed and no runtime was paused. Leave the healthy
+            # previous image serving instead of replacing it with this build.
+            echo "⚠️ Code-only deployment check failed; existing runtime remains online."
+        fi
         false
     fi
 
