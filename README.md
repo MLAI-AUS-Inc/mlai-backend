@@ -129,6 +129,12 @@ not replace the specific user approval required above. If a code-only release
 fails after replacing containers, deployment recovery restores the recorded
 previous images.
 
+If a reviewed main commit does not start its push-triggered release, an
+operator can manually run **Deploy to Digital Ocean** from the `main` branch in
+GitHub Actions. Manual runs share the main release lock and must pass the full
+validation suite before deployment. Running that workflow from another branch
+performs validation only.
+
 ## Documentation status
 
 Architecture and operational documents describe current behavior. Files under
