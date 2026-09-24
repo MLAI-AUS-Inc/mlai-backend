@@ -10458,31 +10458,46 @@ def _article_result_without_projected_artifacts(
     ``latest_control_response``. This is a response-only projection: the stored
     result and its approval/publish evidence are never changed.
     """
-    omitted = set()
-    if review_draft_html:
-        omitted.update({"review_draft_html", "reviewDraftHtml"})
-    if component_manifest is not None:
-        omitted.update({"component_manifest", "componentManifest"})
-    if content_package is not None:
-        omitted.update({"delivery_package", "deliveryPackage", "content_package", "contentPackage"})
+    artifact_kind = {
+        "review_draft_html": "review_html", "reviewDraftHtml": "review_html",
+        "component_manifest": "manifest", "componentManifest": "manifest",
+        "delivery_package": "package", "deliveryPackage": "package",
+        "content_package": "package", "contentPackage": "package",
+        "section_issues": "issues", "sectionIssues": "issues",
+        "artifacts": "artifacts", "diagnostics": "diagnostics",
+    }
+    projected_values = {
+        "review_html": review_draft_html,
+        "manifest": component_manifest,
+        "package": content_package,
+        "artifacts": artifacts,
+        "diagnostics": diagnostics,
+    }
+    retained_raw = {kind: [] for kind in set(artifact_kind.values())}
+    nested_keys = {"result", "latest_control_response"}
 
-    def is_projected(key, value):
-        if key in {"section_issues", "sectionIssues"}:
+    def is_projected(kind, value):
+        if kind == "issues":
+            # The public issue contract intentionally discards private fields.
             return public_section_issues(value) == section_issues
-        if key == "artifacts":
-            return value == artifacts
-        if key == "diagnostics":
-            return value == diagnostics
-        return False
+        return value == projected_values[kind]
 
     def project(mapping, depth):
-        return {
-            key: project(value, depth - 1)
-            if depth and key in {"result", "latest_control_response"} and isinstance(value, dict)
-            else value
-            for key, value in mapping.items()
-            if key not in omitted and not is_projected(key, value)
-        }
+        response = {}
+        # Process direct values first so nested duplicates cannot displace the
+        # canonical root value if a worker changes its JSON key order.
+        for key, value in sorted(mapping.items(), key=lambda item: item[0] in nested_keys):
+            kind = artifact_kind.get(key)
+            if kind:
+                if is_projected(kind, value) or any(value == kept for kept in retained_raw[kind]):
+                    continue
+                retained_raw[kind].append(value)
+            response[key] = (
+                project(value, depth - 1)
+                if depth and key in nested_keys and isinstance(value, dict)
+                else value
+            )
+        return response
 
     return project(result, 2)
 
