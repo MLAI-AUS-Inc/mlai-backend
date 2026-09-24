@@ -4186,6 +4186,23 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         remote_post.assert_not_called()
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
+    def test_regressed_preview_quality_blocks_receipt_based_promote_retry(self):
+        self._approve_review_for_publish_retry(self.run)
+        approved_hash = self.run.run_request[RECEIPT_KEY]["quality_inputs_sha256"]
+        for quality_status in ("blocking_findings", "queued"):
+            with self.subTest(quality_status=quality_status):
+                self.run.result["article_preview_quality"]["status"] = quality_status
+                self.run.save(update_fields=["result", "updated_at"])
+                with patch("content_factory.vibe_marketing_views.http_client.post") as remote_post:
+                    response = self.client.post(
+                        f"/api/v1/vibe-marketing/runs/{self.run.run_id}/promote-bundle", {}, format="json"
+                    )
+                self.assertEqual(response.status_code, 409)
+                self.assertIn("Approve this exact article preview", response.data["detail"])
+                self.assertEqual(self.run.result["article_preview_quality"]["inputs_sha256"], approved_hash)
+                remote_post.assert_not_called()
+
+    @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
     def test_promote_bundle_targets_accepted_component_revision(self):
         revision_run = ContentFactoryRun.objects.create(
             run_id="article-run-comments-revision-accepted",

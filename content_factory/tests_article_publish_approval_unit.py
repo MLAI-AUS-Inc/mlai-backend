@@ -60,12 +60,33 @@ class ArticlePublishApprovalReceiptTests(SimpleTestCase):
                 run.result["publish_child_run_id"] = "publish-child-1"
                 self.assertFalse(_article_publish_retry_authorized(run))
 
+    def test_receipt_rejects_regressed_quality_status_with_unchanged_hash(self):
+        for status in ("blocking_findings", "queued"):
+            with self.subTest(status=status):
+                run = _review_run()
+                receipt = make_article_publish_approval_receipt(run, actor_id="founder-1")
+                run.approval_state = "approved"
+                run.run_request[RECEIPT_KEY] = receipt
+                run.result["article_preview_quality"]["status"] = status
+                self.assertEqual(run.result["article_preview_quality"]["inputs_sha256"], receipt["quality_inputs_sha256"])
+                self.assertFalse(article_publish_approval_receipt_matches(run))
+                self.assertFalse(_article_publish_retry_authorized(run))
+
+        run = _review_run()
+        run.run_request[RECEIPT_KEY] = make_article_publish_approval_receipt(run, actor_id="founder-1")
+        run.approval_state = "approved"
+        run.result["article_preview_quality"]["status"] = "advisory_findings"
+        self.assertTrue(_article_publish_retry_authorized(run))
+
     def test_legacy_retry_requires_prior_approval_and_known_child(self):
         run = _review_run()
         run.result["publish_child_run_id"] = "publish-child-1"
         self.assertFalse(_article_publish_retry_authorized(run))
         run.approval_state = "approved"
         self.assertTrue(_article_publish_retry_authorized(run))
+        for status in ("blocking_findings", "queued"):
+            run.result["article_preview_quality"]["status"] = status
+            self.assertTrue(_article_publish_retry_authorized(run))
         del run.result["publish_child_run_id"]
         self.assertFalse(_article_publish_retry_authorized(run))
 

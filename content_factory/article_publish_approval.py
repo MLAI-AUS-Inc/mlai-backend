@@ -7,10 +7,17 @@ import re
 
 
 RECEIPT_KEY = "article_publish_approval_receipt"
+ACCEPTED_QUALITY_STATUSES = {"passed", "advisory_findings"}
 
 
 def _mapping(value):
     return value if isinstance(value, dict) else {}
+
+
+def _quality_status(run):
+    result = _mapping(getattr(run, "result", None))
+    quality = _mapping(result.get("article_preview_quality"))
+    return str(quality.get("status") or "").strip().lower()
 
 
 def article_review_identity(run):
@@ -45,9 +52,7 @@ def article_review_identity_is_complete(run):
     quality_hash = identity["quality_inputs_sha256"]
     if quality_hash and not re.fullmatch(r"[0-9a-fA-F]{64}", quality_hash):
         return False
-    result = _mapping(getattr(run, "result", None))
-    quality = _mapping(result.get("article_preview_quality"))
-    if str(quality.get("status") or "").strip().lower() in {"passed", "advisory_findings"} and not quality_hash:
+    if _quality_status(run) in ACCEPTED_QUALITY_STATUSES and not quality_hash:
         return False
     return True
 
@@ -68,6 +73,8 @@ def make_article_publish_approval_receipt(run, *, actor_id):
 def article_publish_approval_receipt_matches(run):
     """A later promote retry may use only the same run and hosted review."""
     if str(getattr(run, "approval_state", "") or "").strip() != "approved":
+        return False
+    if _quality_status(run) not in ACCEPTED_QUALITY_STATUSES:
         return False
     request = _mapping(getattr(run, "run_request", None))
     receipt = _mapping(request.get(RECEIPT_KEY))

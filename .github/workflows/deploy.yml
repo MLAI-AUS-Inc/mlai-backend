@@ -240,6 +240,7 @@ jobs:
           tests.test_vibe_marketing_component_comments.VibeMarketingComponentCommentTests.test_failed_intermediate_does_not_allow_stale_promote_retry \
           tests.test_vibe_marketing_component_comments.VibeMarketingComponentCommentTests.test_existing_publish_child_approval_does_not_need_article_preview_proof \
           tests.test_vibe_marketing_component_comments.VibeMarketingComponentCommentTests.test_changed_preview_commit_invalidates_promotion_receipt \
+          tests.test_vibe_marketing_component_comments.VibeMarketingComponentCommentTests.test_regressed_preview_quality_blocks_receipt_based_promote_retry \
           tests.test_vibe_marketing_workflow_progress_unit \
           content_factory.tests_admin_metrics \
           tests.test_community_bridge_adapter_url \
