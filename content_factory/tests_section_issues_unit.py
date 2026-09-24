@@ -34,21 +34,28 @@ class SectionIssueContractTests(SimpleTestCase):
         self.assertNotIn("very-secret-token", str(issues))
         self.assertNotIn("artifact_root", issues[0])
 
-    def test_remote_status_and_compact_run_keep_only_typed_section_issues(self):
+    def test_remote_status_and_run_expose_reviewable_draft_without_polling_html(self):
         raw = [{
             "sectionId": "section:intro", "claimId": "claim-001",
             "claimExcerpt": "An unsupported sentence.", "state": "needs_review",
             "internal": "never expose",
         }]
-        merged = views._run_result_from_remote({"status": "failed", "section_issues": raw})
+        draft_html = '<article><h1>Review me</h1><p data-source-section-id="intro">Draft</p></article>'
+        merged = views._run_result_from_remote({
+            "status": "failed", "section_issues": raw,
+            "review_draft_html": draft_html,
+            "review_draft_actions_available": True,
+        })
         self.assertEqual(merged["section_issues"], raw)
+        self.assertEqual(merged["review_draft_html"], draft_html)
+        self.assertIs(merged["review_draft_actions_available"], True)
         now = datetime.now(timezone.utc)
         run = SimpleNamespace(
             run_id="run-1", workflow="direct_generate", domain="mlai.au", github_repo="example/repo",
             status="failed", current_step="ground_section:intro", approval_state="pending",
             resume_available=False, created_at=now, updated_at=now, step_order=[],
             steps=SimpleNamespace(order_by=lambda *args: []), result=merged, run_request={},
-            acceptance_summary={}, error="Grounding failed",
+            acceptance_summary={}, verification_summary={}, error="Grounding failed",
         )
         with (
             patch.object(views, "_article_setup_state", return_value={}),
@@ -57,11 +64,28 @@ class SectionIssueContractTests(SimpleTestCase):
             patch.object(views, "_run_content_island_payload", return_value=None),
             patch.object(views, "_article_restart_available", return_value=False),
             patch.object(views, "_run_source_run_id", return_value=""),
+            patch.object(views, "_content_package_from_run", return_value=None),
+            patch.object(views, "_component_manifest_from_run", return_value=None),
+            patch.object(views, "_component_feedback_from_run", return_value={}),
         ):
-            serialized = views._serialize_run(run, mode="status")
-        self.assertEqual(serialized["sectionIssues"][0]["id"], "section:intro:claim-001")
-        self.assertNotIn("internal", str(serialized["sectionIssues"]))
-        self.assertEqual(serialized["diagnostics"], {})
+            compact = views._serialize_run(run, mode="status")
+            full = views._serialize_run(run, mode="full")
+            run.result = {
+                "review_draft_html": {"unexpected": "payload"},
+                "review_draft_actions_available": "false",
+            }
+            malformed = views._serialize_run(run, mode="full")
+        self.assertEqual(compact["sectionIssues"][0]["id"], "section:intro:claim-001")
+        self.assertNotIn("internal", str(compact["sectionIssues"]))
+        self.assertEqual(compact["diagnostics"], {})
+        self.assertIs(compact["reviewDraftActionsAvailable"], True)
+        self.assertNotIn("reviewDraftHtml", compact)
+        self.assertNotIn(draft_html, str(compact))
+        self.assertEqual(full["reviewDraftHtml"], draft_html)
+        self.assertIs(full["reviewDraftActionsAvailable"], True)
+        self.assertEqual(malformed["reviewDraftHtml"], "")
+        self.assertIs(malformed["reviewDraftActionsAvailable"], False)
+        self.assertNotIn("review_draft_html", views.COMPACT_RUN_RESULT_KEYS)
 
     def test_delete_action_is_explicit_and_bound_to_exact_section(self):
         input_payload = {

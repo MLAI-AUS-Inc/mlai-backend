@@ -10428,6 +10428,13 @@ def _serialize_run(
     from content_factory.run_state import reliability_presentation
     result = _run_mapping(run.result)
     section_issues = public_section_issues(result.get("section_issues") or result.get("sectionIssues"))
+    review_draft_html = result.get("review_draft_html") or result.get("reviewDraftHtml")
+    if not isinstance(review_draft_html, str):
+        review_draft_html = ""
+    review_draft_actions_available = (
+        result.get("review_draft_actions_available") is True
+        or result.get("reviewDraftActionsAvailable") is True
+    )
     blocking_detail = _run_blocking_detail(result)
     humanized_failure_message = _humanized_run_failure_message(run, result)
     error_list = (
@@ -10484,6 +10491,7 @@ def _serialize_run(
             "routePath": result.get("route_path") or result.get("path"),
             "diagnostics": {},
             "sectionIssues": section_issues,
+            "reviewDraftActionsAvailable": review_draft_actions_available,
             "publishChildStatus": result.get("publish_child_status"),
             "publishChildRecoverable": result.get("publish_child_recoverable"),
             "publishChildWaitReason": result.get("publish_child_wait_reason"),
@@ -10537,6 +10545,8 @@ def _serialize_run(
         "routePath": result.get("route_path") or result.get("path"),
         "diagnostics": result.get("diagnostics") or run.verification_summary or {},
         "sectionIssues": section_issues,
+        "reviewDraftHtml": review_draft_html,
+        "reviewDraftActionsAvailable": review_draft_actions_available,
         "publishChildStatus": result.get("publish_child_status"),
         "publishChildRecoverable": result.get("publish_child_recoverable"),
         "publishChildWaitReason": result.get("publish_child_wait_reason"),
@@ -11648,6 +11658,10 @@ def _run_result_from_remote(remote_data):
         "component_manifest",
         "section_issues",
         "sectionIssues",
+        "review_draft_html",
+        "review_draft_actions_available",
+        "reviewDraftHtml",
+        "reviewDraftActionsAvailable",
         "publish_child_status",
         "publish_child_recoverable",
         "publish_child_wait_reason",
