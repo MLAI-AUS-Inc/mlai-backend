@@ -34,6 +34,35 @@ class SectionIssueContractTests(SimpleTestCase):
         self.assertNotIn("very-secret-token", str(issues))
         self.assertNotIn("artifact_root", issues[0])
 
+    def test_article_wide_evidence_issue_is_visible_but_other_claim_ids_are_rejected(self):
+        issues = public_section_issues([
+            {
+                "section_id": "section:article",
+                "claim_id": "evidence-support",
+                "state": "needs_review",
+                "reason": "Editorial evidence support failed.",
+            },
+            {
+                "section_id": "section:article",
+                "claim_id": "anything-else",
+                "state": "needs_review",
+            },
+        ])
+        self.assertEqual(len(issues), 1)
+        self.assertEqual(issues[0]["id"], "section:article:evidence-support")
+        self.assertEqual(issues[0]["reason"], "Editorial evidence support failed.")
+
+    def test_remote_review_html_is_bounded_before_storage(self):
+        oversized = "x" * (views.MAX_REVIEW_DRAFT_HTML_CHARS + 1)
+        merged = views._run_result_from_remote({
+            "result": {
+                "review_draft_html": oversized,
+                "review_draft_actions_available": True,
+            },
+        })
+        self.assertNotIn("review_draft_html", merged)
+        self.assertIs(merged["review_draft_actions_available"], False)
+
     def test_remote_status_and_run_expose_reviewable_draft_without_polling_html(self):
         raw = [{
             "sectionId": "section:intro", "claimId": "claim-001",

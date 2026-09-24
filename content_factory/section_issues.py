@@ -11,7 +11,7 @@ import re
 
 
 _SECTION_ID = re.compile(r"^section:[a-zA-Z0-9][a-zA-Z0-9_-]{0,119}$")
-_CLAIM_ID = re.compile(r"^claim-[0-9]{1,6}$")
+_CLAIM_ID = re.compile(r"^(?:claim-[0-9]{1,6}|evidence-support)$")
 _SECRET = re.compile(
     r"(?i)(?:\bBearer\s+\S+|\bsk[-_][A-Za-z0-9_-]{8,}"
     r"|\b(?:ghp|gho|ghu|ghs|ghr|github_pat)_[A-Za-z0-9_-]{8,}"

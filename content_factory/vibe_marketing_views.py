@@ -10032,6 +10032,15 @@ COMPACT_RUN_RESULT_KEYS = {
     "url",
 }
 
+# Review-only HTML is an article-sized fallback, not an unbounded run artifact.
+# Keep well above a normal article while limiting storage and response size if a
+# remote worker accidentally returns a build log or entire site in this field.
+MAX_REVIEW_DRAFT_HTML_CHARS = 2_000_000
+
+
+def _bounded_review_draft_html(value):
+    return value if isinstance(value, str) and len(value) <= MAX_REVIEW_DRAFT_HTML_CHARS else ""
+
 COMPACT_DISCOVERY_RESULT_KEYS = {
     "candidates",
     "keyword_options",
@@ -10432,12 +10441,14 @@ def _serialize_run(
     from content_factory.run_state import reliability_presentation
     result = _run_mapping(run.result)
     section_issues = public_section_issues(result.get("section_issues") or result.get("sectionIssues"))
-    review_draft_html = result.get("review_draft_html") or result.get("reviewDraftHtml")
-    if not isinstance(review_draft_html, str):
-        review_draft_html = ""
+    raw_review_draft_html = result.get("review_draft_html") or result.get("reviewDraftHtml")
+    review_draft_html = _bounded_review_draft_html(raw_review_draft_html)
     review_draft_actions_available = (
-        result.get("review_draft_actions_available") is True
-        or result.get("reviewDraftActionsAvailable") is True
+        not (isinstance(raw_review_draft_html, str) and len(raw_review_draft_html) > MAX_REVIEW_DRAFT_HTML_CHARS)
+        and (
+            result.get("review_draft_actions_available") is True
+            or result.get("reviewDraftActionsAvailable") is True
+        )
     )
     blocking_detail = _run_blocking_detail(result)
     humanized_failure_message = _humanized_run_failure_message(run, result)
@@ -11765,6 +11776,15 @@ def _run_result_from_remote(remote_data):
             merged[key] = remote_data.get(key)
     if not merged and remote_data:
         merged = dict(remote_data)
+    review_draft_too_large = False
+    for key in ("review_draft_html", "reviewDraftHtml"):
+        value = merged.get(key)
+        if value is not None and not _bounded_review_draft_html(value):
+            review_draft_too_large |= isinstance(value, str) and len(value) > MAX_REVIEW_DRAFT_HTML_CHARS
+            merged.pop(key, None)
+    if review_draft_too_large:
+        merged["review_draft_actions_available"] = False
+        merged["reviewDraftActionsAvailable"] = False
     return merged
 
 
