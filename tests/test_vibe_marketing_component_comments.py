@@ -3691,6 +3691,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         self.run.approval_state = ContentFactoryApprovalState.APPROVAL_REQUIRED
         self.run.acceptance_summary = {"content_packaged": True}
         self.run.result = {
+            "generation": 1,
             "status": "preview_ready",
             "delivery_mode": "publish_code",
             "review_surface_kind": "component_live_preview",
@@ -3701,7 +3702,14 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
                 "status": "ready",
                 "previewUrl": "https://preview.example/articles/generated",
                 "exactRender": True,
+                "resumeGeneration": 0,
                 "proof": {"commitSha": "a" * 40},
+            },
+            "article_preview_quality": {
+                "status": "passed_no_baseline",
+                "preview_url": "https://preview.example/articles/generated",
+                "resume_generation": 0,
+                "inputs_sha256": "b" * 64,
             },
             "delivery_package": {
                 "title": "Australian Founders and What the Term Means Today",
@@ -3744,6 +3752,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         self.run.current_step = "await_review"
         self.run.approval_state = ContentFactoryApprovalState.APPROVAL_REQUIRED
         self.run.result = {
+            "generation": 1,
             "status": "preview_ready",
             "preview_url": "https://preview.example/articles/generated",
             "livePreview": {
@@ -3751,7 +3760,16 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
                 "status": "ready",
                 "previewUrl": "https://preview.example/articles/generated",
                 "exactRender": True,
+                "resumeGeneration": 0,
                 "proof": {"commitSha": "a" * 40},
+            },
+            # The saved review was eligible, but CF may start a quality
+            # recheck before it handles the approval request.
+            "article_preview_quality": {
+                "status": "passed_no_baseline",
+                "preview_url": "https://preview.example/articles/generated",
+                "resume_generation": 0,
+                "inputs_sha256": "b" * 64,
             },
         }
         self.run.save(
