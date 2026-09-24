@@ -78,7 +78,8 @@ def flush_read_once(grant, authority, keys):
         return None
     intent_key, intent = pending[0]
     source_id = intent.get("source_id")
-    target = next((t for t in reads._targets_for_keys(grant, {intent.get("public_key")} & keys, recent_only=False)
+    target = next((t for t in reads._targets_for_keys(grant, {intent.get("public_key")} & keys,
+                                                 recent_only=False, include_source=True)
                    if t.slack_id == source_id and t.channel_id == intent.get("channel_id")), None)
     valid = (target is not None and intent.get("public_key") in keys
              and now - intent.get("requested_at", 0) < 7 * 86400

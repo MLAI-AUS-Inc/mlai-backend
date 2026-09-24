@@ -17,6 +17,7 @@ from integrations.models import (
     SlackOwnerConversationInventory,
 )
 from integrations.services import slack_dm_mirror as dm
+from integrations.services import slack_chat_read_state as reads
 from integrations.services.slack_chat_read_state import ReadTarget, _cache_key
 from integrations.services.message_sync.read_priority import KEY as READ_PRIORITY_KEY
 from integrations.services.message_sync.read_snapshots import publish_snapshot
@@ -26,7 +27,8 @@ from integrations.services.slack_owner_inventory import (
     source_read_targets,
 )
 from integrations.services.slack_owner_inventory_api import (
-    InventoryError, conversation_page, request_open,
+    InventoryError, conversation_page, mark_inventory_read,
+    mark_inventory_unread, request_open,
 )
 
 
@@ -378,6 +380,52 @@ class SlackOwnerInventoryTests(SlackDmIoAuthorityFixture, TransactionTestCase):
         routed = [ReadTarget("room", "DIOAUTH", "im", conversation=self.conversation)]
         source = source_read_targets(self.grant, self.authority, routed)
         self.assertEqual([(t.channel_id, t.slack_id) for t in source], [("DNEW", "DNEW")])
+        aliases = source_read_targets(self.grant, self.authority, routed, include_routed=True)
+        self.assertEqual(
+            [(t.channel_id, t.slack_id) for t in aliases],
+            [("DIOAUTH", "DIOAUTH"), ("DNEW", "DNEW")],
+        )
+
+    def test_source_only_mark_read_uses_server_observed_frontier(self):
+        self.consent()
+        record_private_page(self.authority, [self.row("DNEW")],
+                            started_at=timezone.now(), kinds={"im"})
+        key = _cache_key(self.authority, ReadTarget("DNEW", "DNEW", "im"))
+        with self.assertRaises(InventoryError) as missing:
+            mark_inventory_read(self.user, public_key=self.owner_key,
+                                slack_conversation_id="DNEW")
+        self.assertEqual(missing.exception.code, "inventory_read_state_unavailable")
+        cache.set(key, {"available": True, "is_unread": True,
+                        "last_read": "100.000001", "latest_ts": "101.000001"})
+        with patch.object(reads, "mark_read", return_value={"synced": True}) as mark:
+            result = mark_inventory_read(self.user, public_key=self.owner_key,
+                                         slack_conversation_id="DNEW")
+        self.assertEqual(result, {"synced": True})
+        self.assertEqual(mark.call_args.kwargs["channel_id"], "DNEW")
+        self.assertEqual(mark.call_args.kwargs["source_ts"], "101.000001")
+
+    def test_source_only_mark_unread_moves_slack_cursor_and_publishes_snapshot(self):
+        self.consent()
+        record_private_page(self.authority, [self.row("DNEW")],
+                            started_at=timezone.now(), kinds={"im"})
+        responses = [
+            {"channel": {"id": "DNEW", "is_im": True, "is_member": True,
+                         "last_read": "101.000001", "latest": {"ts": "101.000001"}}},
+            {"messages": [
+                {"ts": "101.000001", "user": "UOTHER", "text": "latest"},
+                {"ts": "100.000001", "user": self.grant.slack_user_id, "text": "older"},
+            ], "has_more": False},
+            {"ok": True},
+        ]
+        with patch.object(reads, "_call_slack_with_grant_authority", side_effect=responses) as source:
+            result = mark_inventory_unread(self.user, public_key=self.owner_key,
+                                           slack_conversation_id="DNEW")
+        self.assertTrue(result["synced"])
+        self.assertTrue(result["channels"]["DNEW"]["is_unread"])
+        self.assertEqual(result["last_read"], "100.000001")
+        self.assertEqual([c.args[1] for c in source.call_args_list],
+                         ["conversations_info", "conversations_history", "conversations_mark"])
+        self.assertEqual(source.call_args.kwargs["ts"], "100.000001")
 
     def test_new_oauth_authority_hides_old_names_until_new_consent(self):
         self.consent()

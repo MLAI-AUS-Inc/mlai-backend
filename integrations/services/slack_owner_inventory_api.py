@@ -371,6 +371,43 @@ def conversation_page(user, *, public_key, limit=50, cursor="", unread_only=Fals
     }
 
 
+def mark_inventory_read(user, *, public_key, slack_conversation_id):
+    """Acknowledge a known owner unread even before its MLAI room is ready.
+
+    Only the source cursor observed by the server may be acknowledged. A row
+    without a current, visible Slack frontier stays unread for a later retry.
+    """
+    from integrations.services.slack_chat_read_state import mark_read, _timestamp
+
+    grant, authority, _, _ = _authorized(user, public_key)
+    source_id = str(slack_conversation_id or "").strip()
+    row = grant.owner_conversation_inventory.filter(
+        slack_conversation_id=source_id, eligibility="eligible",
+    ).first()
+    if row is None:
+        raise InventoryError("inventory_conversation_unavailable", 404)
+    target = ReadTarget(source_id, source_id, row.kind)
+    snapshot = cache.get(_cache_key(authority, target)) or {}
+    latest = snapshot.get("latest_ts")
+    if (snapshot.get("available") is not True or snapshot.get("is_unread") is not True
+            or _timestamp(latest) is None or _timestamp(latest) <= (_timestamp(snapshot.get("last_read")) or 0)):
+        raise InventoryError("inventory_read_state_unavailable", 409)
+    return mark_read(user, public_key=public_key, channel_id=source_id, source_ts=latest)
+
+
+def mark_inventory_unread(user, *, public_key, slack_conversation_id):
+    """Move only an eligible owner's Slack conversation back to unread."""
+    from integrations.services.slack_chat_read_state import mark_unread
+
+    grant, _, _, _ = _authorized(user, public_key)
+    source_id = str(slack_conversation_id or "").strip()
+    if not grant.owner_conversation_inventory.filter(
+        slack_conversation_id=source_id, eligibility="eligible",
+    ).exists():
+        raise InventoryError("inventory_conversation_unavailable", 404)
+    return mark_unread(user, public_key=public_key, channel_id=source_id)
+
+
 def request_open(user, *, public_key, slack_conversation_id):
     """Prioritize existing consented discovery for one verified owner row."""
     grant, authority, device, _ = _authorized(user, public_key)
