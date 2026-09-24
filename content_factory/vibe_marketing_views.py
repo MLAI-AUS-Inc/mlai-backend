@@ -9514,6 +9514,9 @@ def _workflow_progress(*, context=None, run=None, latest_runs=None, checks=None,
     package_can_promote = _run_can_promote_package(article_run, config=config)
     publish_complete = bool(publish_evidence.get("previewUrl") or publish_evidence.get("prUrl"))
     article_result = _run_mapping(article_run.result) if article_run else {}
+    preview_quality_status = str(
+        _run_mapping(article_result.get("article_preview_quality")).get("status") or ""
+    ).strip().lower()
     publish_handoff_pending = bool(article_result.get("publish_handoff_pending"))
     publish_handoff_stale = _publish_handoff_stale_for_run(article_run)
     publish_child_recoverable = _publish_child_run_recoverable(publish_child_run) or bool(article_result.get("publish_child_recoverable"))
@@ -9707,6 +9710,17 @@ def _workflow_progress(*, context=None, run=None, latest_runs=None, checks=None,
         href_by_id["publish"] = _run_url(publish_child_run or article_run)
         run_by_id["publish"] = (publish_child_run or article_run).run_id
         summary_by_id["publish"] = "Publishing child run is in progress." if publish_child_run else "Publish handoff is pending."
+    elif content_package_ready and preview_quality_status == "blocking_findings":
+        status_by_id["publish"] = "blocked"
+        href_by_id["publish"] = _run_url(article_run) + "?articleStep=review"
+        run_by_id["publish"] = article_run.run_id
+        action_by_id["publish"] = _workflow_step_action("Review preview findings", href=href_by_id["publish"])
+        summary_by_id["publish"] = "Resolve the hosted preview quality findings before publishing."
+    elif content_package_ready and preview_quality_status in {"queued", "running", "transient_findings"}:
+        status_by_id["publish"] = "locked"
+        href_by_id["publish"] = _run_url(article_run) + "?articleStep=review"
+        run_by_id["publish"] = article_run.run_id
+        summary_by_id["publish"] = "Hosted preview quality verification must finish before publishing."
     elif publish_child_recoverable and content_package_ready and package_can_promote:
         status_by_id["publish"] = "ready"
         href_by_id["publish"] = _run_url(article_run)
@@ -9866,9 +9880,22 @@ def _workflow_progress(*, context=None, run=None, latest_runs=None, checks=None,
 
     active_statuses = {"blocked", "needs_action", "running", "ready"}
     current_step = next((step for step in steps if step["status"] in active_statuses), steps[-1])
-    if run_scoped_article and run.status in RUNNING_RUN_STATUSES:
-        active_article_step_id = "revise" if run.workflow == "article_revision" else "generate"
-        current_step = next(step for step in steps if step["id"] == active_article_step_id)
+    if run_scoped_article:
+        if run.status in RUNNING_RUN_STATUSES:
+            active_article_step_id = "revise" if run.workflow == "article_revision" else "generate"
+            current_step = next(step for step in steps if step["id"] == active_article_step_id)
+        else:
+            # This page describes one article run. An unfinished organization
+            # baseline remains actionable in the setup wizard, but must not
+            # replace the article's own review/publish step here.
+            article_steps = [
+                step for step in steps
+                if step["id"] in {"generate", "review", "revise", "package", "publish", "automation"}
+            ]
+            current_step = next(
+                (step for step in article_steps if step["status"] in active_statuses),
+                next((step for step in reversed(article_steps) if step["status"] == "complete"), article_steps[0]),
+            )
     current_index = WORKFLOW_STEP_IDS.index(current_step["id"])
     next_step = next((step for step in steps[current_index + 1 :] if step["status"] != "locked"), None)
     return {
