@@ -441,7 +441,7 @@ def collect_public_page(authority) -> None:
         _save_state(connection, state)
 
 
-def source_read_targets(grant, authority, existing_targets):
+def source_read_targets(grant, authority, existing_targets, *, include_routed=False):
     """Add consented source conversations to the account's unread sweep.
 
     Targets already represented by a routed room share the same Slack cache key,
@@ -454,7 +454,7 @@ def source_read_targets(grant, authority, existing_targets):
     seen = {target.slack_id for target in existing_targets}
     targets = []
     for row in grant.owner_conversation_inventory.filter(eligibility="eligible").order_by("slack_conversation_id"):
-        if row.slack_conversation_id in seen:
+        if row.slack_conversation_id in seen and not include_routed:
             continue
         target = ReadTarget(
             channel_id=row.slack_conversation_id,

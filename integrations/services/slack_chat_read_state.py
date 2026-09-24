@@ -155,14 +155,15 @@ def read_state_snapshot(details, *, kind, messages, owner_id):
     }
 
 
-def _targets(grant, public_key, *, recent_only=False, coverage=None):
+def _targets(grant, public_key, *, recent_only=False, coverage=None, include_source=False):
     key = str(public_key or "").strip().lower()
     if not re.fullmatch(r"[0-9a-f]{64}", key):
         raise ValidationError({"device": "Use a verified MLAI Chat device."})
-    return _targets_for_keys(grant, {key}, recent_only=recent_only, coverage=coverage)
+    return _targets_for_keys(grant, {key}, recent_only=recent_only, coverage=coverage,
+                             include_source=include_source)
 
 
-def _targets_for_keys(grant, keys, *, recent_only=False, coverage=None):
+def _targets_for_keys(grant, keys, *, recent_only=False, coverage=None, include_source=False):
     """Internal account sweep over currently verified, provisioned devices."""
     if not keys:
         return []
@@ -221,7 +222,14 @@ def _targets_for_keys(grant, keys, *, recent_only=False, coverage=None):
         .order_by("slack_channel_id")
     ]
     # Public channels first, then the most recently active private conversations.
-    return public + targets
+    routed = public + targets
+    if include_source:
+        from .slack_owner_inventory import source_read_targets
+        return routed + source_read_targets(
+            grant, _capture_slack_grant_api_authority(grant), routed,
+            include_routed=True,
+        )
+    return routed
 
 
 def _cache_key(authority, target):
@@ -499,7 +507,7 @@ def mark_read(user, *, public_key, channel_id, source_ts):
     target = next(
         # A user can read a new message before discovery updates its activity.
         # Keep explicit acknowledgements independent of the polling window.
-        (t for t in _targets(grant, public_key, recent_only=False)
+        (t for t in _targets(grant, public_key, recent_only=False, include_source=True)
          if t.channel_id == str(channel_id)),
         None,
     )
@@ -532,13 +540,110 @@ def mark_read(user, *, public_key, channel_id, source_ts):
     return result
 
 
+def mark_unread(user, *, public_key, channel_id):
+    """Move the owner's Slack cursor before the latest visible post by another user."""
+    grant = active_grant_for_user(user)
+    _assert_grant_connection_authorized(grant)
+    target = next(
+        (t for t in _targets(grant, public_key, recent_only=False, include_source=True)
+         if t.channel_id == str(channel_id)), None,
+    )
+    if target is None:
+        raise ValidationError({"channel_id": "Slack conversation is not available to this device."})
+    write_scope = {
+        "im": "im:write", "mpim": "mpim:write", "private_channel": "groups:write",
+    }.get(target.kind, "channels:write")
+    history_scope = {
+        "im": "im:history", "mpim": "mpim:history",
+        "private_channel": "groups:history",
+    }.get(target.kind, "channels:history")
+    authority = _capture_slack_grant_api_authority(grant)
+    required = {target.read_scope, write_scope, history_scope}
+    if not required.issubset(authority.scopes):
+        return {"synced": False, "needs_reauthorization": True}
+    with transaction.atomic():
+        _lock_slack_grant_api_authority(authority, required_scopes=required)
+        from .slack_dm_mirror import _locked_active_verified_device
+        if _locked_active_verified_device(authority.user_id, public_key) is None:
+            raise SlackDmMirrorError("The requesting device is no longer verified.")
+        response = _call_slack_with_grant_authority(
+            authority, "conversations_info", required_scopes=required,
+            channel=target.slack_id,
+        )
+        details = response.get("channel") or {}
+        if (details.get("id") != target.slack_id
+                or _is_external_shared_conversation(details)
+                or details.get("is_member") is False
+                or (target.kind != "im" and details.get("is_member") is not True)):
+            raise SlackDmMirrorError("Slack conversation is not available.")
+        response = _call_slack_with_grant_authority(
+            authority, "conversations_history", required_scopes=required,
+            channel=target.slack_id, limit=100,
+        )
+        messages = response.get("messages") or []
+        visible = [m for m in messages if m.get("ts") and not m.get("hidden")
+                   and str(m.get("subtype") or "") in
+                   {"", "bot_message", "file_share", "me_message", "thread_broadcast"}
+                   and (not m.get("thread_ts") or m.get("thread_ts") == m.get("ts")
+                        or m.get("broadcast") or m.get("reply_broadcast")
+                        or m.get("subtype") == "thread_broadcast")]
+        target_index = next((i for i, m in enumerate(visible)
+                             if m.get("user") != authority.slack_user_id), None)
+        if target_index is None:
+            raise ValidationError({"channel_id": "No visible message can be marked unread."})
+        latest_unread = _timestamp(visible[target_index]["ts"])
+        if latest_unread is None:
+            raise ValidationError({"channel_id": "Slack returned an invalid message timestamp."})
+        previous = _timestamp(details.get("last_read"))
+        if previous is None:
+            raise ValidationError({"channel_id": "Slack read cursor is unavailable."})
+        if previous >= latest_unread:
+            if target_index + 1 < len(visible):
+                cursor = str(visible[target_index + 1]["ts"])
+            elif response.get("has_more"):
+                raise ValidationError({"channel_id": "Older Slack messages are still loading. Try again."})
+            else:
+                cursor = "0000000000.000000"
+        else:
+            cursor = str(details["last_read"])
+        now = time.time()
+        details = {**details, "last_read": cursor}
+        details.pop("unread_count_display", None)
+        snapshot = read_state_snapshot(
+            details, kind=target.kind, messages=visible,
+            owner_id=authority.slack_user_id,
+        )
+        if snapshot is None or not snapshot["is_unread"]:
+            raise SlackDmMirrorError("Slack could not confirm this unread state.")
+        if previous >= latest_unread:
+            _call_slack_with_grant_authority(
+                authority, "conversations_mark", required_scopes=required,
+                channel=target.slack_id, ts=cursor,
+            )
+        snapshot.update(available=True, confirmed_at=now, fetched_at=now,
+                        refresh_required=True)
+        key = _cache_key(authority, target)
+        _, connection = _lock_slack_grant_api_authority(authority, required_scopes=required)
+        from .message_sync.receipts import KEY as READ_RECEIPTS_KEY
+        queue = dict((connection.sync_cursor or {}).get(READ_RECEIPTS_KEY) or {})
+        queue = {k: v for k, v in queue.items() if v.get("source_id") != target.slack_id}
+        connection.sync_cursor = {**(connection.sync_cursor or {}), READ_RECEIPTS_KEY: queue}
+        connection.save(update_fields=["sync_cursor", "updated_at"])
+        cache.set(key + ":receipt", uuid.uuid4().hex, timeout=86400)
+        from .message_sync.read_snapshots import publish_snapshot
+        snapshot = publish_snapshot(connection, key, snapshot)
+        cache.delete(_pending_key(authority, target))
+    return {"synced": True, "last_read": cursor, "confirmed_at": now,
+            "channels": {target.channel_id: snapshot}}
+
+
 def apply_read(authority, target, *, source_ts, required, public_key=None, device_binding=None):
     """Confirm a source read and immediately share the same result with peers."""
     stamp = _timestamp(source_ts)
     # Serialize competing device reads and the read-before-write check with the
     # same owner consent lock used by the bridge. Never move a cursor backwards.
     with transaction.atomic():
-        _lock_slack_grant_api_authority(authority, required_scopes=required)
+        _, connection = _lock_slack_grant_api_authority(authority, required_scopes=required)
         if public_key is not None:
             from .slack_dm_mirror import _locked_active_verified_device
             device = _locked_active_verified_device(authority.user_id, public_key)
@@ -546,6 +651,16 @@ def apply_read(authority, target, *, source_ts, required, public_key=None, devic
                 "device_id": str(device.pk), "verified_at": str(device.verified_at),
             }):
                 raise SlackDmMirrorError("The requesting device is no longer verified.")
+        if device_binding is not None:
+            from .message_sync.receipts import KEY as READ_RECEIPTS_KEY
+            queued = ((connection.sync_cursor or {}).get(READ_RECEIPTS_KEY) or {}).get(
+                f"{target.slack_id}:{device_binding['device_id']}"
+            )
+            if (queued is None or queued.get("device") != device_binding
+                    or queued.get("source_ts") != source_ts):
+                # A later explicit mark-unread cancelled this read while it
+                # waited for the owner lock. Never replay it into Slack.
+                return {"synced": False, "cancelled": True}
         response = _call_slack_with_grant_authority(
             authority,
             "conversations_info",

@@ -888,6 +888,30 @@ requests `groups:write` and `channels:write` for channel read positions. Source
 read failures retain the app's local acknowledgement. No schema migration is
 required.
 
+`PATCH slack/` also accepts `{action: "mark_unread", channel_id}`. It checks
+the same owner/device and Slack membership authority, reads a bounded source
+history page, and moves the cursor before the newest visible post by another
+person. It cancels older queued read receipts under the same owner lock before
+publishing a new source revision. When Slack has no eligible post, its cursor is
+unavailable, or older history is needed to locate the prior message, the call
+fails without claiming a successful unread. This action is synchronous; a
+provider rate limit leaves the previous state intact for the user to retry.
+
+For an owner-directory conversation without a usable MLAI room,
+`PATCH slack/conversations/` with
+`{action: "mark_read", slack_conversation_id}` acknowledges the server's latest
+observed visible Slack message. It requires an active grant, metadata consent,
+a verified device, an eligible owner inventory row, source scopes and live
+Slack membership. An unknown frontier returns
+`inventory_read_state_unavailable` (409) rather than inventing a cursor.
+Successful and queued responses use the same durable read receipt and
+cross-device snapshot revision as a routed room. The request contains no
+message body or client-selected timestamp. Opening the directory alone does
+not acknowledge messages the user has not viewed.
+The same owner-directory endpoint accepts
+`{action: "mark_unread", slack_conversation_id}` and applies the same source
+cursor operation to a verified eligible row.
+
 Connected clients may POST `refresh_permissions: true` with their current
 `history_days` to obtain a fresh Slack authorization URL. This opt-in permission
 upgrade preserves the active grant and import until OAuth completes.
