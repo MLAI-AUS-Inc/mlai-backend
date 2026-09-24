@@ -7,7 +7,7 @@ from unittest.mock import patch
 from content_factory.vibe_marketing_views import _workflow_progress
 
 
-def _article_progress(*, quality_status="", run_status="approval_required", packaged=True):
+def _article_progress(*, quality_status="", run_status="approval_required", packaged=True, run_scoped=True):
     result = {
         "status": "preview_ready",
         "promote_bundle_url": "/api/runs/article-1/promote-bundle",
@@ -55,7 +55,7 @@ def _article_progress(*, quality_status="", run_status="approval_required", pack
             return_value={},
         ),
     ):
-        return _workflow_progress(run=run, topic_candidates=[])
+        return _workflow_progress(run=run if run_scoped else None, topic_candidates=[])
 
 
 def _step(progress, step_id):
@@ -63,6 +63,12 @@ def _step(progress, step_id):
 
 
 class ArticleRunWorkflowProgressTests(TestCase):
+    def test_organization_wizard_still_requires_its_baseline(self):
+        progress = _article_progress(run_scoped=False)
+
+        self.assertEqual(progress["currentStepId"], "baseline")
+        self.assertEqual(_step(progress, "baseline")["status"], "ready")
+
     def test_run_page_prioritizes_review_without_erasing_the_real_baseline_requirement(self):
         progress = _article_progress()
 
