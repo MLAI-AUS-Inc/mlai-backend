@@ -21,9 +21,13 @@ def _review_run():
             "livePreview": {
                 "previewUrl": "https://preview.example/articles/featured/one",
                 "exactRender": True,
+                "resumeGeneration": 0,
                 "proof": {"commitSha": "a" * 40},
             },
-            "article_preview_quality": {"status": "passed", "inputs_sha256": "b" * 64},
+            "article_preview_quality": {
+                "status": "passed", "preview_url": "https://preview.example/articles/featured/one",
+                "resume_generation": 0, "inputs_sha256": "b" * 64,
+            },
         },
     )
 
@@ -44,7 +48,7 @@ class ArticlePublishApprovalReceiptTests(SimpleTestCase):
         self.assertTrue(_article_publish_retry_authorized(run))
 
     def test_receipt_rejects_changed_run_preview_commit_and_quality(self):
-        for changed in ("run_id", "preview_url", "commit_sha", "quality_inputs_sha256"):
+        for changed in ("run_id", "preview_url", "commit_sha", "resume_generation", "quality_inputs_sha256"):
             with self.subTest(changed=changed):
                 run = _review_run()
                 run.run_request[RECEIPT_KEY] = make_article_publish_approval_receipt(run, actor_id="founder-1")
@@ -55,6 +59,8 @@ class ArticlePublishApprovalReceiptTests(SimpleTestCase):
                     run.result["livePreview"]["previewUrl"] = "https://preview.example/articles/featured/two"
                 elif changed == "commit_sha":
                     run.result["livePreview"]["proof"]["commitSha"] = "c" * 40
+                elif changed == "resume_generation":
+                    run.result["livePreview"]["resumeGeneration"] = 1
                 else:
                     run.result["article_preview_quality"]["inputs_sha256"] = "d" * 64
                 run.result["publish_child_run_id"] = "publish-child-1"
@@ -81,8 +87,11 @@ class ArticlePublishApprovalReceiptTests(SimpleTestCase):
     def test_no_baseline_quality_requires_hash_and_allows_exact_retry(self):
         run = _review_run()
         run.result["article_preview_quality"]["status"] = "passed_no_baseline"
+        run.result["livePreview"]["resumeGeneration"] = "0"
+        run.result["article_preview_quality"]["resume_generation"] = "0"
         receipt = make_article_publish_approval_receipt(run, actor_id="founder-1")
         self.assertIsNotNone(receipt)
+        self.assertEqual(receipt["resume_generation"], 0)
         self.assertEqual(receipt["quality_inputs_sha256"], "b" * 64)
         run.approval_state = "approved"
         run.run_request[RECEIPT_KEY] = receipt
@@ -95,6 +104,39 @@ class ArticlePublishApprovalReceiptTests(SimpleTestCase):
         run.result["article_preview_quality"].pop("inputs_sha256")
         self.assertIsNone(make_article_publish_approval_receipt(run, actor_id="founder-1"))
         self.assertFalse(_article_publish_retry_authorized(run))
+
+    def test_receipt_rejects_render_or_quality_target_drift(self):
+        for changed in ("exact_render", "quality_preview_url", "quality_generation"):
+            with self.subTest(changed=changed):
+                run = _review_run()
+                run.result["article_preview_quality"]["status"] = "passed_no_baseline"
+                receipt = make_article_publish_approval_receipt(run, actor_id="founder-1")
+                self.assertIsNotNone(receipt)
+                run.approval_state = "approved"
+                run.run_request[RECEIPT_KEY] = receipt
+                if changed == "exact_render":
+                    run.result["livePreview"]["exactRender"] = False
+                elif changed == "quality_preview_url":
+                    run.result["article_preview_quality"]["preview_url"] = "https://preview.example/articles/other"
+                else:
+                    run.result["article_preview_quality"]["resume_generation"] = 1
+                self.assertFalse(article_publish_approval_receipt_matches(run))
+                self.assertFalse(_article_publish_retry_authorized(run))
+
+    def test_receipt_creation_rejects_inexact_or_stale_hosted_quality(self):
+        for changed in ("exact_render", "quality_preview_url", "quality_generation", "missing_quality"):
+            with self.subTest(changed=changed):
+                run = _review_run()
+                run.result["article_preview_quality"]["status"] = "passed_no_baseline"
+                if changed == "exact_render":
+                    run.result["livePreview"]["exactRender"] = False
+                elif changed == "quality_preview_url":
+                    run.result["article_preview_quality"]["preview_url"] = "https://preview.example/articles/other"
+                elif changed == "quality_generation":
+                    run.result["livePreview"]["resumeGeneration"] = 1
+                else:
+                    run.result.pop("article_preview_quality")
+                self.assertIsNone(make_article_publish_approval_receipt(run, actor_id="founder-1"))
 
     def test_legacy_retry_requires_prior_approval_and_known_child(self):
         run = _review_run()
@@ -133,4 +175,4 @@ class ArticlePublishApprovalReceiptTests(SimpleTestCase):
         run.result["article_preview_quality"]["status"] = "passed_no_baseline"
         self.assertIsNone(make_article_publish_approval_receipt(run, actor_id="founder-1"))
         run.result.pop("article_preview_quality")
-        self.assertIsNotNone(make_article_publish_approval_receipt(run, actor_id="founder-1"))
+        self.assertIsNone(make_article_publish_approval_receipt(run, actor_id="founder-1"))

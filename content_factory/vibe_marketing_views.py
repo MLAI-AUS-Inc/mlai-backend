@@ -16956,7 +16956,7 @@ class VibeMarketingRunControlView(APIView):
                 )
             if not article_review_identity_is_complete(run):
                 return Response(
-                    {"detail": "The hosted article preview needs a verified commit before approval."},
+                    {"detail": "The hosted article preview and quality review must match this revision before approval."},
                     status=status.HTTP_409_CONFLICT,
                 )
 

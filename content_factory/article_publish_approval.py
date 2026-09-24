@@ -20,12 +20,34 @@ def _quality_status(run):
     return str(quality.get("status") or "").strip().lower()
 
 
+def _first_present(mapping, *keys):
+    for key in keys:
+        if key in mapping and mapping[key] is not None:
+            return mapping[key]
+    return None
+
+
+def _generation(value):
+    """Normalize the hosted attempt number without accepting booleans or fractions."""
+    if type(value) is int:
+        return value if value >= 0 else None
+    if isinstance(value, str) and re.fullmatch(r"[0-9]+", value.strip()):
+        try:
+            return int(value.strip())
+        except ValueError:
+            return None
+    return None
+
+
 def article_review_identity(run):
     """Identify the exact hosted review represented by a local article run."""
     result = _mapping(getattr(run, "result", None))
     live = _mapping(result.get("livePreview") or result.get("live_preview"))
     proof = _mapping(live.get("proof"))
     quality = _mapping(result.get("article_preview_quality"))
+    live_generation = _first_present(live, "resume_generation", "resumeGeneration", "attempt_number", "attemptNumber")
+    if live_generation is None:
+        live_generation = _first_present(result, "resume_generation", "resumeGeneration")
     return {
         "run_id": str(getattr(run, "run_id", "") or "").strip(),
         "preview_url": str(
@@ -38,21 +60,37 @@ def article_review_identity(run):
             or proof.get("commit_sha")
             or ""
         ).strip(),
+        "resume_generation": _generation(0 if live_generation is None else live_generation),
         "quality_inputs_sha256": str(quality.get("inputs_sha256") or "").strip(),
     }
 
 
 def article_review_identity_is_complete(run):
-    """Require a hosted preview proof, plus the quality input hash when passed."""
+    """Require the exact hosted render and current quality for this attempt."""
     identity = article_review_identity(run)
     if not identity["run_id"] or not identity["preview_url"]:
         return False
+    result = _mapping(getattr(run, "result", None))
+    live = _mapping(result.get("livePreview") or result.get("live_preview"))
+    quality = _mapping(result.get("article_preview_quality"))
+    if _first_present(live, "exactRender", "exact_render") is not True:
+        return False
     if not re.fullmatch(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})", identity["commit_sha"]):
         return False
-    quality_hash = identity["quality_inputs_sha256"]
-    if quality_hash and not re.fullmatch(r"[0-9a-fA-F]{64}", quality_hash):
+    if _quality_status(run) not in ACCEPTED_QUALITY_STATUSES:
         return False
-    if _quality_status(run) in ACCEPTED_QUALITY_STATUSES and not quality_hash:
+    quality_url = str(quality.get("preview_url") or quality.get("previewUrl") or "").strip()
+    quality_generation = _generation(_first_present(quality, "resume_generation", "resumeGeneration"))
+    if (
+        not quality_url
+        or quality_url != identity["preview_url"]
+        or identity["resume_generation"] is None
+        or quality_generation is None
+        or quality_generation != identity["resume_generation"]
+    ):
+        return False
+    quality_hash = identity["quality_inputs_sha256"]
+    if not re.fullmatch(r"[0-9a-fA-F]{64}", quality_hash):
         return False
     return True
 

@@ -56,11 +56,17 @@ class _PublishRetryApprovalFixture:
         live_preview = dict(result.get("livePreview") or {})
         live_preview.setdefault("previewUrl", preview_url)
         live_preview.setdefault("exactRender", True)
+        live_preview.setdefault("resumeGeneration", 0)
         proof = dict(live_preview.get("proof") or {})
         proof.setdefault("commitSha", "a" * 40)
         live_preview["proof"] = proof
         result["livePreview"] = live_preview
-        result.setdefault("article_preview_quality", {"status": "passed", "inputs_sha256": "b" * 64})
+        quality = dict(result.get("article_preview_quality") or {})
+        quality.setdefault("status", "passed")
+        quality.setdefault("preview_url", preview_url)
+        quality.setdefault("resume_generation", 0)
+        quality.setdefault("inputs_sha256", "b" * 64)
+        result["article_preview_quality"] = quality
         run.result = result
         run.approval_state = ContentFactoryApprovalState.APPROVED
         run_request = dict(run.run_request or {})
@@ -91,9 +97,14 @@ class _PublishRetryApprovalFixture:
                 "preview_url": "https://preview.example/ready-grandchild",
                 "livePreview": {
                     "previewUrl": "https://preview.example/ready-grandchild",
+                    "exactRender": True,
+                    "resumeGeneration": 0,
                     "proof": {"commitSha": "c" * 40},
                 },
-                "article_preview_quality": {"status": "passed", "inputs_sha256": "d" * 64},
+                "article_preview_quality": {
+                    "status": "passed", "preview_url": "https://preview.example/ready-grandchild",
+                    "resume_generation": 0, "inputs_sha256": "d" * 64,
+                },
             },
         )
         return failed, latest
@@ -3980,9 +3991,13 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
             "livePreview": {
                 "previewUrl": "https://preview.example/review",
                 "exactRender": True,
+                "resumeGeneration": 0,
                 "proof": {"commitSha": "a" * 40},
             },
-            "article_preview_quality": {"status": "passed", "inputs_sha256": "b" * 64},
+            "article_preview_quality": {
+                "status": "passed", "preview_url": "https://preview.example/review",
+                "resume_generation": 0, "inputs_sha256": "b" * 64,
+            },
         }
         self.run.save(update_fields=["status", "approval_state", "result", "updated_at"])
 
@@ -4002,6 +4017,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         self.assertEqual(receipt["run_id"], self.run.run_id)
         self.assertEqual(receipt["preview_url"], "https://preview.example/review")
         self.assertEqual(receipt["commit_sha"], "a" * 40)
+        self.assertEqual(receipt["resume_generation"], 0)
         self.assertEqual(receipt["quality_inputs_sha256"], "b" * 64)
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
@@ -4012,7 +4028,13 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
             "preview_url": "https://preview.example/review",
             "livePreview": {
                 "previewUrl": "https://preview.example/review",
+                "exactRender": True,
+                "resumeGeneration": 0,
                 "proof": {"commitSha": "a" * 40},
+            },
+            "article_preview_quality": {
+                "status": "passed", "preview_url": "https://preview.example/review",
+                "resume_generation": 0, "inputs_sha256": "b" * 64,
             },
         }
         self.run.save(update_fields=["status", "approval_state", "result", "updated_at"])
@@ -4065,9 +4087,14 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
                 "preview_url": "https://preview.example/latest",
                 "livePreview": {
                     "previewUrl": "https://preview.example/latest",
+                    "exactRender": True,
+                    "resumeGeneration": 0,
                     "proof": {"commitSha": "c" * 40},
                 },
-                "article_preview_quality": {"status": "passed", "inputs_sha256": "d" * 64},
+                "article_preview_quality": {
+                    "status": "passed", "preview_url": "https://preview.example/latest",
+                    "resume_generation": 0, "inputs_sha256": "d" * 64,
+                },
             },
         )
         with patch("content_factory.vibe_marketing_views.http_client.post") as remote_post:
