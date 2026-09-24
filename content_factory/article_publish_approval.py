@@ -50,6 +50,7 @@ def article_review_identity(run):
         live_generation = _first_present(result, "resume_generation", "resumeGeneration")
     return {
         "run_id": str(getattr(run, "run_id", "") or "").strip(),
+        "run_generation": _generation(result.get("generation")),
         "preview_url": str(
             live.get("previewUrl")
             or live.get("preview_url")
@@ -73,6 +74,8 @@ def article_review_identity_is_complete(run):
     result = _mapping(getattr(run, "result", None))
     live = _mapping(result.get("livePreview") or result.get("live_preview"))
     quality = _mapping(result.get("article_preview_quality"))
+    if "generation" in result and identity["run_generation"] is None:
+        return False
     if _first_present(live, "exactRender", "exact_render") is not True:
         return False
     if not re.fullmatch(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})", identity["commit_sha"]):

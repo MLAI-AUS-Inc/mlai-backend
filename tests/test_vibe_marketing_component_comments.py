@@ -51,6 +51,7 @@ class _PublishRetryApprovalFixture:
     def _approve_review_for_publish_retry(self, run):
         """Seed an explicit prior approval for tests of publish retry behavior."""
         result = dict(run.result or {})
+        result.setdefault("generation", 1)
         preview_url = str(result.get("preview_url") or f"https://preview.example/{run.run_id}")
         result.setdefault("preview_url", preview_url)
         live_preview = dict(result.get("livePreview") or {})
@@ -93,6 +94,7 @@ class _PublishRetryApprovalFixture:
             approval_state=ContentFactoryApprovalState.APPROVAL_REQUIRED,
             run_request={"source_run_id": failed.run_id},
             result={
+                "generation": 1,
                 "status": "preview_ready",
                 "preview_url": "https://preview.example/ready-grandchild",
                 "livePreview": {
@@ -3987,6 +3989,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         self.run.status = ContentFactoryRunStatus.AWAITING_APPROVAL
         self.run.approval_state = ContentFactoryApprovalState.APPROVAL_REQUIRED
         self.run.result = {
+            "generation": 1,
             "preview_url": "https://preview.example/review",
             "livePreview": {
                 "previewUrl": "https://preview.example/review",
@@ -4015,6 +4018,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         receipt = self.run.run_request[RECEIPT_KEY]
         self.assertEqual(self.run.approval_state, ContentFactoryApprovalState.APPROVED)
         self.assertEqual(receipt["run_id"], self.run.run_id)
+        self.assertEqual(receipt["run_generation"], 1)
         self.assertEqual(receipt["preview_url"], "https://preview.example/review")
         self.assertEqual(receipt["commit_sha"], "a" * 40)
         self.assertEqual(receipt["resume_generation"], 0)

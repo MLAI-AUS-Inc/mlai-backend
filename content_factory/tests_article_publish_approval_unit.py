@@ -17,6 +17,7 @@ def _review_run():
         approval_state="approval_required",
         run_request={},
         result={
+            "generation": 0,
             "preview_url": "https://preview.example/articles/featured/one",
             "livePreview": {
                 "previewUrl": "https://preview.example/articles/featured/one",
@@ -66,6 +67,18 @@ class ArticlePublishApprovalReceiptTests(SimpleTestCase):
                 run.result["publish_child_run_id"] = "publish-child-1"
                 self.assertFalse(_article_publish_retry_authorized(run))
 
+    def test_receipt_rejects_changed_run_generation_with_unchanged_hosted_review(self):
+        run = _review_run()
+        receipt = make_article_publish_approval_receipt(run, actor_id="founder-1")
+        self.assertEqual(receipt["run_generation"], 0)
+        run.approval_state = "approved"
+        run.run_request[RECEIPT_KEY] = receipt
+        run.result["generation"] = 1
+        self.assertEqual(run.result["livePreview"]["resumeGeneration"], 0)
+        self.assertEqual(run.result["article_preview_quality"]["resume_generation"], 0)
+        self.assertFalse(article_publish_approval_receipt_matches(run))
+        self.assertFalse(_article_publish_retry_authorized(run))
+
     def test_receipt_rejects_regressed_quality_status_with_unchanged_hash(self):
         for status in ("blocking_findings", "queued"):
             with self.subTest(status=status):
@@ -87,10 +100,13 @@ class ArticlePublishApprovalReceiptTests(SimpleTestCase):
     def test_no_baseline_quality_requires_hash_and_allows_exact_retry(self):
         run = _review_run()
         run.result["article_preview_quality"]["status"] = "passed_no_baseline"
+        # The run lease generation and hosted preview attempt are separate.
+        run.result["generation"] = 1
         run.result["livePreview"]["resumeGeneration"] = "0"
         run.result["article_preview_quality"]["resume_generation"] = "0"
         receipt = make_article_publish_approval_receipt(run, actor_id="founder-1")
         self.assertIsNotNone(receipt)
+        self.assertEqual(receipt["run_generation"], 1)
         self.assertEqual(receipt["resume_generation"], 0)
         self.assertEqual(receipt["quality_inputs_sha256"], "b" * 64)
         run.approval_state = "approved"
