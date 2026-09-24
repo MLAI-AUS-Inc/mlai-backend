@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import re
 
 
 RECEIPT_KEY = "article_publish_approval_receipt"
@@ -23,26 +24,38 @@ def article_review_identity(run):
         "preview_url": str(
             live.get("previewUrl")
             or live.get("preview_url")
-            or result.get("preview_url")
-            or result.get("previewUrl")
             or ""
         ).strip(),
         "commit_sha": str(
             proof.get("commitSha")
             or proof.get("commit_sha")
-            or live.get("commitSha")
-            or live.get("commit_sha")
-            or result.get("branch_commit_sha")
             or ""
         ).strip(),
         "quality_inputs_sha256": str(quality.get("inputs_sha256") or "").strip(),
     }
 
 
+def article_review_identity_is_complete(run):
+    """Require a hosted preview proof, plus the quality input hash when passed."""
+    identity = article_review_identity(run)
+    if not identity["run_id"] or not identity["preview_url"]:
+        return False
+    if not re.fullmatch(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})", identity["commit_sha"]):
+        return False
+    quality_hash = identity["quality_inputs_sha256"]
+    if quality_hash and not re.fullmatch(r"[0-9a-fA-F]{64}", quality_hash):
+        return False
+    result = _mapping(getattr(run, "result", None))
+    quality = _mapping(result.get("article_preview_quality"))
+    if str(quality.get("status") or "").strip().lower() in {"passed", "advisory_findings"} and not quality_hash:
+        return False
+    return True
+
+
 def make_article_publish_approval_receipt(run, *, actor_id):
     """Record an explicit successful approve action, not preview readiness alone."""
     identity = article_review_identity(run)
-    if not identity["run_id"] or not identity["preview_url"] or not actor_id:
+    if not article_review_identity_is_complete(run) or not actor_id:
         return None
     return {
         **identity,
@@ -61,6 +74,6 @@ def article_publish_approval_receipt_matches(run):
     if receipt.get("action") != "approve" or not receipt.get("actor_id") or not receipt.get("approved_at"):
         return False
     identity = article_review_identity(run)
-    if not identity["run_id"] or not identity["preview_url"]:
+    if not article_review_identity_is_complete(run):
         return False
     return all(receipt.get(key) == value for key, value in identity.items())

@@ -68,3 +68,28 @@ class ArticlePublishApprovalReceiptTests(SimpleTestCase):
         self.assertTrue(_article_publish_retry_authorized(run))
         del run.result["publish_child_run_id"]
         self.assertFalse(_article_publish_retry_authorized(run))
+
+    def test_receipt_requires_hosted_proof_not_fallback_or_forged_commit(self):
+        run = _review_run()
+        receipt = make_article_publish_approval_receipt(run, actor_id="founder-1")
+        del run.result["livePreview"]["proof"]
+        run.result["livePreview"]["commitSha"] = "a" * 40
+        run.result["branch_commit_sha"] = "a" * 40
+        self.assertIsNone(make_article_publish_approval_receipt(run, actor_id="founder-1"))
+        run.approval_state = "approved"
+        run.result["publish_child_run_id"] = "publish-child-1"
+        run.run_request[RECEIPT_KEY] = receipt
+        self.assertFalse(article_publish_approval_receipt_matches(run))
+        self.assertFalse(_article_publish_retry_authorized(run))
+
+    def test_receipt_requires_valid_commit_and_applicable_quality_hash(self):
+        run = _review_run()
+        run.result["livePreview"]["proof"]["commitSha"] = "not-a-commit"
+        self.assertIsNone(make_article_publish_approval_receipt(run, actor_id="founder-1"))
+        run.result["livePreview"]["proof"]["commitSha"] = "a" * 40
+        run.result["article_preview_quality"].pop("inputs_sha256")
+        self.assertIsNone(make_article_publish_approval_receipt(run, actor_id="founder-1"))
+        run.result["article_preview_quality"]["status"] = "advisory_findings"
+        self.assertIsNone(make_article_publish_approval_receipt(run, actor_id="founder-1"))
+        run.result.pop("article_preview_quality")
+        self.assertIsNotNone(make_article_publish_approval_receipt(run, actor_id="founder-1"))

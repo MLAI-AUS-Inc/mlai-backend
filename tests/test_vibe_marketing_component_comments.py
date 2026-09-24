@@ -53,10 +53,13 @@ class _PublishRetryApprovalFixture:
         result = dict(run.result or {})
         preview_url = str(result.get("preview_url") or f"https://preview.example/{run.run_id}")
         result.setdefault("preview_url", preview_url)
-        result.setdefault(
-            "livePreview",
-            {"previewUrl": preview_url, "exactRender": True, "proof": {"commitSha": "a" * 40}},
-        )
+        live_preview = dict(result.get("livePreview") or {})
+        live_preview.setdefault("previewUrl", preview_url)
+        live_preview.setdefault("exactRender", True)
+        proof = dict(live_preview.get("proof") or {})
+        proof.setdefault("commitSha", "a" * 40)
+        live_preview["proof"] = proof
+        result["livePreview"] = live_preview
         result.setdefault("article_preview_quality", {"status": "passed", "inputs_sha256": "b" * 64})
         run.result = result
         run.approval_state = ContentFactoryApprovalState.APPROVED
@@ -3655,6 +3658,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
                 "status": "ready",
                 "previewUrl": "https://preview.example/articles/generated",
                 "exactRender": True,
+                "proof": {"commitSha": "a" * 40},
             },
             "delivery_package": {
                 "title": "Australian Founders and What the Term Means Today",
@@ -3704,6 +3708,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
                 "status": "ready",
                 "previewUrl": "https://preview.example/articles/generated",
                 "exactRender": True,
+                "proof": {"commitSha": "a" * 40},
             },
         }
         self.run.save(
@@ -3891,6 +3896,52 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         remote_post.assert_not_called()
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
+    def test_proofless_approval_and_forged_receipt_cannot_publish(self):
+        self.run.status = ContentFactoryRunStatus.AWAITING_APPROVAL
+        self.run.approval_state = ContentFactoryApprovalState.APPROVAL_REQUIRED
+        self.run.result = {
+            "status": "preview_ready",
+            "preview_url": "https://preview.example/review",
+            "branch_commit_sha": "a" * 40,
+            "livePreview": {
+                "previewUrl": "https://preview.example/review",
+                "commitSha": "a" * 40,
+            },
+            "article_preview_quality": {"status": "passed", "inputs_sha256": "b" * 64},
+        }
+        self.run.save(update_fields=["status", "approval_state", "result", "updated_at"])
+
+        with patch("content_factory.vibe_marketing_views.http_client.post") as remote_post:
+            response = self.client.post(
+                f"/api/v1/vibe-marketing/runs/{self.run.run_id}/approve", {}, format="json"
+            )
+        self.assertEqual(response.status_code, 409)
+        remote_post.assert_not_called()
+        self.run.refresh_from_db()
+        self.assertNotIn(RECEIPT_KEY, self.run.run_request)
+
+        self.run.approval_state = ContentFactoryApprovalState.APPROVED
+        self.run.run_request = {
+            **(self.run.run_request or {}),
+            RECEIPT_KEY: {
+                "action": "approve",
+                "actor_id": str(self.user.pk),
+                "approved_at": timezone.now().isoformat(),
+                "run_id": self.run.run_id,
+                "preview_url": "https://preview.example/review",
+                "commit_sha": "a" * 40,
+                "quality_inputs_sha256": "b" * 64,
+            },
+        }
+        self.run.save(update_fields=["approval_state", "run_request", "updated_at"])
+        with patch("content_factory.vibe_marketing_views.http_client.post") as remote_post:
+            response = self.client.post(
+                f"/api/v1/vibe-marketing/runs/{self.run.run_id}/promote-bundle", {}, format="json"
+            )
+        self.assertEqual(response.status_code, 409)
+        remote_post.assert_not_called()
+
+    @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
     def test_approve_article_records_receipt_for_exact_review(self):
         self.run.status = ContentFactoryRunStatus.AWAITING_APPROVAL
         self.run.approval_state = ContentFactoryApprovalState.APPROVAL_REQUIRED
@@ -3927,7 +3978,13 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
     def test_failed_article_approval_does_not_record_receipt(self):
         self.run.status = ContentFactoryRunStatus.AWAITING_APPROVAL
         self.run.approval_state = ContentFactoryApprovalState.APPROVAL_REQUIRED
-        self.run.result = {"preview_url": "https://preview.example/review"}
+        self.run.result = {
+            "preview_url": "https://preview.example/review",
+            "livePreview": {
+                "previewUrl": "https://preview.example/review",
+                "proof": {"commitSha": "a" * 40},
+            },
+        }
         self.run.save(update_fields=["status", "approval_state", "result", "updated_at"])
 
         with patch(
@@ -3962,6 +4019,74 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
             )
         self.assertEqual(response.status_code, 409)
         remote_post.assert_not_called()
+
+    @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
+    def test_older_source_cannot_approve_newer_review_ready_revision(self):
+        latest = ContentFactoryRun.objects.create(
+            run_id="article-run-comments-latest-approval-revision",
+            workflow="article_revision",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.AWAITING_APPROVAL,
+            approval_state=ContentFactoryApprovalState.APPROVAL_REQUIRED,
+            run_request={"source_run_id": self.run.run_id},
+            result={
+                "status": "preview_ready",
+                "preview_url": "https://preview.example/latest",
+                "livePreview": {
+                    "previewUrl": "https://preview.example/latest",
+                    "proof": {"commitSha": "c" * 40},
+                },
+                "article_preview_quality": {"status": "passed", "inputs_sha256": "d" * 64},
+            },
+        )
+        with patch("content_factory.vibe_marketing_views.http_client.post") as remote_post:
+            response = self.client.post(
+                f"/api/v1/vibe-marketing/runs/{self.run.run_id}/approve", {}, format="json"
+            )
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.data["latestRunId"], latest.run_id)
+        remote_post.assert_not_called()
+
+        def fake_post(url, json=None, headers=None, timeout=None):
+            self.assertTrue(url.endswith(f"/api/runs/{latest.run_id}/approve"))
+            return _Response(status_code=200, payload={"run_id": latest.run_id, "status": "completed"})
+
+        with patch("content_factory.vibe_marketing_views.http_client.post", side_effect=fake_post) as remote_post:
+            response = self.client.post(
+                f"/api/v1/vibe-marketing/runs/{latest.run_id}/approve", {}, format="json"
+            )
+        self.assertEqual(response.status_code, 200)
+        remote_post.assert_called_once()
+        latest.refresh_from_db()
+        self.assertEqual(latest.run_request[RECEIPT_KEY]["commit_sha"], "c" * 40)
+
+    @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
+    def test_existing_publish_child_approval_does_not_need_article_preview_proof(self):
+        child = ContentFactoryRun.objects.create(
+            run_id="article-run-comments-existing-publish-child",
+            workflow="article_generation",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.APPROVAL_REQUIRED,
+            approval_state=ContentFactoryApprovalState.APPROVAL_REQUIRED,
+            run_request={"source_run_id": self.run.run_id, "delivery_mode": "publish_code"},
+            result={
+                "publish_child_run_id": "article-run-comments-existing-publish-child",
+                "pr_url": "https://github.example/articles/pull/1",
+            },
+        )
+
+        def fake_post(url, json=None, headers=None, timeout=None):
+            self.assertTrue(url.endswith(f"/api/runs/{child.run_id}/approve"))
+            return _Response(status_code=200, payload={"run_id": child.run_id, "status": "completed"})
+
+        with patch("content_factory.vibe_marketing_views.http_client.post", side_effect=fake_post) as remote_post:
+            response = self.client.post(
+                f"/api/v1/vibe-marketing/runs/{child.run_id}/approve", {}, format="json"
+            )
+        self.assertEqual(response.status_code, 200)
+        remote_post.assert_called_once()
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
     def test_changed_preview_commit_invalidates_promotion_receipt(self):

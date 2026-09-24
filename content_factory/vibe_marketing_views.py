@@ -47,6 +47,7 @@ from content_factory.article_publish_approval import (
     RECEIPT_KEY as ARTICLE_PUBLISH_APPROVAL_RECEIPT_KEY,
     article_publish_approval_receipt_matches,
     article_review_identity,
+    article_review_identity_is_complete,
     make_article_publish_approval_receipt,
 )
 from content_factory.article_system import (
@@ -16908,7 +16909,7 @@ def _article_publish_retry_authorized(run):
 
 
 def _record_article_publish_approval_receipt(run, *, actor_id, expected_identity):
-    if not expected_identity.get("preview_url"):
+    if not article_review_identity_is_complete(run):
         return False
     with transaction.atomic():
         current = ContentFactoryRun.objects.select_for_update().get(pk=run.pk)
@@ -16936,6 +16937,22 @@ class VibeMarketingRunControlView(APIView):
         run = get_object_or_404(ContentFactoryRun, run_id=run_id)
         if not _run_belongs_to_context(run, context):
             return Response({"detail": "Run not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        if action == "approve" and run.workflow in ARTICLE_WORKFLOWS and not _is_publish_child_run(run):
+            latest_revision = _latest_review_ready_component_revision(run, context)
+            if latest_revision is not None:
+                return Response(
+                    {
+                        "detail": "A newer article revision is ready. Review and approve that draft instead.",
+                        "latestRunId": latest_revision.run_id,
+                    },
+                    status=status.HTTP_409_CONFLICT,
+                )
+            if not article_review_identity_is_complete(run):
+                return Response(
+                    {"detail": "The hosted article preview needs a verified commit before approval."},
+                    status=status.HTTP_409_CONFLICT,
+                )
 
         approval_review_identity = (
             article_review_identity(run)
