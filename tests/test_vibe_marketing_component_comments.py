@@ -2058,7 +2058,10 @@ class VibeMarketingComponentCommentTests(TestCase):
             captured["payload"] = json
             return _Response(status_code=202, payload={"run_id": "article-failed-package-revision", "status": "queued"})
 
-        with patch("content_factory.vibe_marketing_views.http_client.post", side_effect=fake_post):
+        with (
+            patch("content_factory.vibe_marketing_views.http_client.post", side_effect=fake_post),
+            patch("content_factory.vibe_marketing_views.ContentFactoryHealingRecord.objects.update_or_create") as create_learning,
+        ):
             submit_response = self.client.post(
                 f"/api/v1/vibe-marketing/runs/{self.run.run_id}/comments/submit", {}, format="json"
             )
@@ -2068,6 +2071,7 @@ class VibeMarketingComponentCommentTests(TestCase):
         self.assertEqual(captured["payload"]["comments"][0]["component_id"], "section:intro")
         self.assertEqual(captured["payload"]["comments"][0]["requested_action"], "delete_section")
         self.assertEqual(captured["payload"]["source_run_id"], self.run.run_id)
+        create_learning.assert_not_called()
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
     def test_submit_component_revision_reuses_original_article_billing_without_balance_gate(self):

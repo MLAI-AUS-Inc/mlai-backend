@@ -5011,6 +5011,10 @@ def _feedback_family_key(*, domain, github_repo, comment):
 
 def _create_editorial_feedback_candidates(*, organization, run, comments, batch_id):
     for comment in comments:
+        # A one-off deletion of an unsupported section is a revision command,
+        # not a reusable writing preference for future articles.
+        if (comment.context or {}).get("requestedAction") == "delete_section":
+            continue
         rule = _normalized_component_feedback_rule(comment)
         if not rule:
             continue
