@@ -12193,7 +12193,7 @@ def _create_local_run(*, workflow, domain, github_repo="", actor_id="", payload=
     return run
 
 
-def _call_content_factory_run_status(run_id, *, workflow=""):
+def _call_content_factory_run_status(run_id, *, workflow="", include_review_draft=False):
     remote_config = _content_factory_remote_config()
     if not remote_config["enabled"]:
         if workflow == "startup_autofill" or _remote_required_for_workflow(workflow):
@@ -12216,10 +12216,11 @@ def _call_content_factory_run_status(run_id, *, workflow=""):
         return {}
 
     try:
+        request_options = {"headers": _content_factory_headers(), "timeout": (3, 15)}
+        if include_review_draft:
+            request_options["params"] = {"include_review_draft": "true"}
         response = http_client.get(
-            f"{remote_config['base_url']}/api/runs/{run_id}",
-            headers=_content_factory_headers(),
-            timeout=(3, 15),
+            f"{remote_config['base_url']}/api/runs/{run_id}", **request_options,
         )
     except http_client.RequestException as exc:
         logger.warning(
@@ -15913,7 +15914,27 @@ class VibeMarketingRunView(APIView):
             # polling it would 404 and clobber the pending verdict. Resolution
             # happens via the key lookup above on each poll.
             skip_remote_status = True
-        remote_data = {} if skip_remote_status else _call_content_factory_run_status(run.run_id, workflow=run.workflow)
+        remote_data = {} if skip_remote_status else _call_content_factory_run_status(
+            run.run_id, workflow=run.workflow,
+        )
+        if (
+            view == "full" and run.workflow in ARTICLE_WORKFLOWS and isinstance(remote_data, dict)
+            and str(remote_data.get("status") or "").lower() in {"failed", "blocked"}
+            and (remote_data.get("section_issues") or remote_data.get("sectionIssues"))
+            and not (remote_data.get("review_draft_html") or remote_data.get("reviewDraftHtml"))
+        ):
+            review_data = _call_content_factory_run_status(
+                run.run_id, workflow=run.workflow, include_review_draft=True,
+            )
+            if (
+                isinstance(review_data, dict)
+                and str(review_data.get("run_id") or review_data.get("job_id") or "") == run.run_id
+                and str(review_data.get("status") or "").lower() in {"failed", "blocked"}
+            ):
+                for key in ("review_draft_html", "reviewDraftHtml", "review_draft_actions_available",
+                            "reviewDraftActionsAvailable"):
+                    if key in review_data:
+                        remote_data[key] = review_data[key]
         if skip_remote_status:
             logger.info(
                 "content_factory_status_poll_skipped run_id=%s workflow=%s status=%s reason=%s",

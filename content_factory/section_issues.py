@@ -59,7 +59,7 @@ def public_section_issues(raw):
                 "reason": _safe_text(value.get("reason"), 240)
                 or "This claim could not be substantiated by the gathered sources.",
                 "state": state,
-                "sourceHint": _safe_text(value.get("sourceHint") or value.get("source_hint"), 160)
+                "sourceHint": _safe_text(value.get("sourceHint") or value.get("source_hint"), 420)
                 or "Check the research sources or remove this section.",
             }
         )
