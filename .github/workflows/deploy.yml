@@ -236,6 +236,8 @@ jobs:
           tests.test_vibe_marketing_component_comments.VibeMarketingComponentCommentTests.test_failed_article_approval_does_not_record_receipt \
           tests.test_vibe_marketing_component_comments.VibeMarketingComponentCommentTests.test_older_approved_run_cannot_promote_unapproved_latest_revision \
           tests.test_vibe_marketing_component_comments.VibeMarketingComponentCommentTests.test_older_source_cannot_approve_newer_review_ready_revision \
+          tests.test_vibe_marketing_component_comments.VibeMarketingComponentCommentTests.test_failed_intermediate_does_not_hide_newest_revision_from_approve \
+          tests.test_vibe_marketing_component_comments.VibeMarketingComponentCommentTests.test_failed_intermediate_does_not_allow_stale_promote_retry \
           tests.test_vibe_marketing_component_comments.VibeMarketingComponentCommentTests.test_existing_publish_child_approval_does_not_need_article_preview_proof \
           tests.test_vibe_marketing_component_comments.VibeMarketingComponentCommentTests.test_changed_preview_commit_invalidates_promotion_receipt \
           tests.test_vibe_marketing_workflow_progress_unit \

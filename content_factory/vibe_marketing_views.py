@@ -8356,7 +8356,7 @@ def _latest_review_ready_component_revision(run, context):
     denormalized component_feedback_revision_run_id metadata.
     """
 
-    if not run or run.workflow not in ARTICLE_WORKFLOWS:
+    if not run or run.workflow not in ARTICLE_WORKFLOWS or not _run_belongs_to_context(run, context):
         return None
     candidates = list(
         ContentFactoryRun.objects.filter(
@@ -8364,26 +8364,32 @@ def _latest_review_ready_component_revision(run, context):
             workflow="article_revision",
         ).order_by("created_at", "id")
     )
-    candidates = [
-        candidate
-        for candidate in candidates
-        if _run_belongs_to_context(candidate, context)
-        and _component_revision_is_review_ready(candidate)
-    ]
-    current = run
+    children_by_source = {}
+    owned_candidates = []
+    for candidate in candidates:
+        if not _run_belongs_to_context(candidate, context):
+            continue
+        owned_candidates.append(candidate)
+        children_by_source.setdefault(_run_source_run_id(candidate), []).append(candidate)
+
+    # A failed or still-running intermediate revision may already have a newer
+    # review-ready child. Traverse the entire owned lineage before choosing the
+    # newest reviewable descendant; filtering first would hide that child.
     visited = {run.run_id}
-    while True:
-        children = [
-            candidate
-            for candidate in candidates
-            if candidate.run_id not in visited
-            and _run_source_run_id(candidate) == current.run_id
-        ]
-        if not children:
-            break
-        current = children[-1]
-        visited.add(current.run_id)
-    return current if current.pk != run.pk else None
+    pending = [run.run_id]
+    while pending:
+        source_run_id = pending.pop()
+        for child in children_by_source.get(source_run_id, []):
+            if child.run_id in visited:
+                continue
+            visited.add(child.run_id)
+            pending.append(child.run_id)
+
+    latest = None
+    for candidate in owned_candidates:
+        if candidate.pk != run.pk and candidate.run_id in visited and _component_revision_is_review_ready(candidate):
+            latest = candidate
+    return latest
 
 
 def _run_can_promote_package(run, config=None):
