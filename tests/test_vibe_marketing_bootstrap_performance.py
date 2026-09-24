@@ -2,6 +2,7 @@
 
 from contextlib import ExitStack
 from datetime import datetime, timezone
+from difflib import SequenceMatcher
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -189,6 +190,51 @@ class VibeMarketingBootstrapPerformanceTests(SimpleTestCase):
         self.assertIsNone(topic_coverage.match_covered_topic(
             keyword="small business AI assistant", memory=other_memory
         ))
+
+    def test_lexical_upper_bounds_skip_full_ratio_without_losing_close_variants(self):
+        class CountingMatcher(SequenceMatcher):
+            ratio_calls = 0
+
+            def ratio(self):
+                type(self).ratio_calls += 1
+                return super().ratio()
+
+        cases = (
+            ("alpha beta gamma", "alpha beta delta epsilon zeta eta theta iota kappa", False),
+            ("alpha beta delta gamma", "alpha beta zeta theta", False),
+            ("business automation workflow", "business automation workflows", True),
+        )
+        with patch.object(topic_coverage, "SequenceMatcher", CountingMatcher):
+            for candidate, existing, expected_match in cases:
+                with self.subTest(candidate=candidate):
+                    CountingMatcher.ratio_calls = 0
+                    record = topic_coverage._record_for_text(
+                        text=existing, source="written_article", reason="written_article"
+                    )
+                    match = topic_coverage._close_topic_match(
+                        candidate, topic_coverage.topic_content_tokens(candidate), record
+                    )
+                    if expected_match:
+                        self.assertGreaterEqual(match, 0.9)
+                        self.assertEqual(CountingMatcher.ratio_calls, 1)
+                    else:
+                        self.assertIsNone(match)
+                        self.assertEqual(CountingMatcher.ratio_calls, 0)
+
+            near_record = topic_coverage._record_for_text(
+                text="business automation workflows",
+                source="written_article", reason="written_article",
+            )
+            memory = {
+                "records": [near_record],
+                "exact": {near_record.normalized: near_record},
+                "slugs": {near_record.slug: near_record},
+            }
+            covered = topic_coverage.match_covered_topic(
+                keyword="business automation workflow", memory=memory
+            )
+            self.assertEqual(covered.match_type, "lexical_variant")
+            self.assertIs(covered.record, near_record)
 
     def test_precomputed_coverage_result_avoids_repeating_topic_match(self):
         keyword = SimpleNamespace(

@@ -246,7 +246,13 @@ def build_topic_coverage_memory(organization, *, article_limit: Optional[int] = 
     return memory
 
 
-def _close_topic_match(candidate_text: str, candidate_tokens: frozenset[str], record: CoveredTopicRecord) -> Optional[float]:
+def _close_topic_match(
+    candidate_text: str,
+    candidate_tokens: frozenset[str],
+    record: CoveredTopicRecord,
+    *,
+    candidate_canonical: Optional[str] = None,
+) -> Optional[float]:
     if len(candidate_tokens) < 2 or len(record.tokens) < 2:
         return None
 
@@ -269,7 +275,16 @@ def _close_topic_match(candidate_text: str, candidate_tokens: frozenset[str], re
         return jaccard
 
     if candidate_text and record.canonical:
-        ratio = SequenceMatcher(None, canonical_topic_content(candidate_text), record.canonical).ratio()
+        canonical = candidate_canonical if candidate_canonical is not None else canonical_topic_content(candidate_text)
+        total_length = len(canonical) + len(record.canonical)
+        # These are upper bounds on SequenceMatcher.ratio(). Most shared-token
+        # pairs cannot reach 0.9; skip the expensive matching-block search.
+        if total_length and 2 * min(len(canonical), len(record.canonical)) / total_length < 0.9:
+            return None
+        matcher = SequenceMatcher(None, canonical, record.canonical)
+        if matcher.quick_ratio() < 0.9:
+            return None
+        ratio = matcher.ratio()
         if ratio >= 0.9:
             return ratio
 
@@ -315,8 +330,11 @@ def match_covered_topic(
 
     for text in candidate_texts:
         candidate_tokens = topic_content_tokens(text)
+        candidate_canonical = " ".join(sorted(candidate_tokens))
         for record in memory.get("records", []):
-            similarity = _close_topic_match(text, candidate_tokens, record)
+            similarity = _close_topic_match(
+                text, candidate_tokens, record, candidate_canonical=candidate_canonical
+            )
             if similarity is not None:
                 if cache is not None:
                     cache[cache_key] = (record, "lexical_variant", similarity)
