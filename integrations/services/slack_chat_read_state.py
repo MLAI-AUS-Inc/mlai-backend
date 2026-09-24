@@ -46,6 +46,9 @@ class ReadTarget:
     kind: str
     conversation: object = None
     bridge: object = None
+    # Owner-directory activity can prioritize an unknown cursor without
+    # treating the conversation as unread or importing its message history.
+    source_activity_ts: str = ""
 
     @property
     def read_scope(self):

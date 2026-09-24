@@ -1,10 +1,11 @@
 """Priority, version ordering and durable notification failures."""
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from django.test import SimpleTestCase, TransactionTestCase, override_settings
 
 from community_chat.tests.test_slack_dm_io_authority import SlackDmIoAuthorityFixture
-from integrations.services import slack_chat_read_state as reads
+from integrations.services import slack_chat_read_state as reads, slack_owner_inventory
 from integrations.services.message_sync import read_priority as priority, read_snapshots, read_state
 
 
@@ -36,6 +37,53 @@ class SelectionTests(SimpleTestCase):
         chosen = priority.select_target(targets, {}, lambda t: t.slack_id,
             {read_state.KEY: {'retries': {'D1': 2000}}}, now=1000, turn=0)
         self.assertEqual(chosen.slack_id, 'D2')
+
+    def test_recent_unknown_gets_one_priority_turn_without_starving_unread_or_old_rooms(self):
+        now = 1_800_000_000
+        old = reads.ReadTarget('old', 'D1', 'im', source_activity_ts=str(now - 60 * 86400))
+        recent = reads.ReadTarget('recent', 'D2', 'im', source_activity_ts=str(now - 86400))
+        unread = reads.ReadTarget('unread', 'D3', 'im')
+        values = {'D3': {'available': True, 'is_unread': True, 'fetched_at': now - 120}}
+        targets = [old, recent, unread]
+        for turn, expected in ((0, unread), (1, unread), (2, recent), (3, old)):
+            self.assertEqual(priority.select_target(targets, values, lambda t: t.slack_id,
+                             {}, now=now, turn=turn), expected)
+        # A source observation, even a read one, removes the recent-unknown priority.
+        values['D2'] = {'available': True, 'is_unread': False, 'fetched_at': now}
+        self.assertEqual(priority.select_target(targets, values, lambda t: t.slack_id,
+                         {}, now=now, turn=2), unread)
+
+    def test_recent_unknown_priority_requires_valid_activity_and_source_authority(self):
+        now = 1_800_000_000
+        recent = reads.ReadTarget('recent', 'D1', 'im', source_activity_ts=str(now - 10))
+        malformed = reads.ReadTarget('malformed', 'D2', 'im', source_activity_ts='nan')
+        future = reads.ReadTarget('future', 'D3', 'im', source_activity_ts=str(now + 301))
+        excluded = reads.ReadTarget('excluded', 'D4', 'im', source_activity_ts=str(now - 10))
+        values = {'D4': {'available': False, 'excluded': True, 'fetched_at': now - 120}}
+        for target in (malformed, future, excluded):
+            self.assertEqual(priority.select_target([target, recent], values, lambda t: t.slack_id,
+                             {}, now=now, turn=2), recent)
+        self.assertEqual(priority.select_target([recent, malformed], values, lambda t: t.slack_id,
+                         {read_state.KEY: {'retries': {'D1': now + 60}}}, now=now, turn=2), malformed)
+
+    def test_source_activity_only_enters_consented_scope_eligible_targets(self):
+        rows = [
+            SimpleNamespace(slack_conversation_id='D1', kind='im', source_activity_ts='1800000000'),
+            SimpleNamespace(slack_conversation_id='G1', kind='private_channel', source_activity_ts='1800000000'),
+        ]
+        directory = SimpleNamespace(filter=lambda **_kwargs: SimpleNamespace(order_by=lambda *_fields: rows))
+        grant = SimpleNamespace(connection=object(), owner_conversation_inventory=directory)
+        authority = SimpleNamespace(scopes={'im:read'})
+        with patch.object(slack_owner_inventory, 'enabled', return_value=True), patch.object(
+            slack_owner_inventory, 'has_metadata_consent', return_value=True
+        ):
+            targets = slack_owner_inventory.source_read_targets(grant, authority, [])
+        self.assertEqual([(target.slack_id, target.source_activity_ts) for target in targets],
+                         [('D1', '1800000000')])
+        with patch.object(slack_owner_inventory, 'enabled', return_value=True), patch.object(
+            slack_owner_inventory, 'has_metadata_consent', return_value=False
+        ):
+            self.assertEqual(slack_owner_inventory.source_read_targets(grant, authority, []), [])
 
 
 @override_settings(MESSAGE_SYNC_ENABLED=True)

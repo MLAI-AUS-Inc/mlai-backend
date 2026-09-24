@@ -786,6 +786,11 @@ does not pause an entire account. A secondary history/replies quota deferral
 pauses only that conversation for at least 15 seconds and its reported delay;
 independent DM info requests can continue. Visible hints expire after 90 seconds, activity
 hints after five minutes, and each account retains at most 256 hints.
+When no explicit hint is waiting, one priority turn favors a source-only
+conversation with activity in the last seven days and no confirmed read
+snapshot. The other two favor known unreads, falling back to recent unknowns;
+the fourth turn remains oldest-first for historical rooms. Source activity
+only changes polling order and never assigns an unread badge or expands consent.
 
 The owner Slack conversation inventory also hints at most four eligible,
 unrouted conversations from its first page when a verified owner requests it.
