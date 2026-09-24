@@ -78,6 +78,24 @@ class ArticlePublishApprovalReceiptTests(SimpleTestCase):
         run.result["article_preview_quality"]["status"] = "advisory_findings"
         self.assertTrue(_article_publish_retry_authorized(run))
 
+    def test_no_baseline_quality_requires_hash_and_allows_exact_retry(self):
+        run = _review_run()
+        run.result["article_preview_quality"]["status"] = "passed_no_baseline"
+        receipt = make_article_publish_approval_receipt(run, actor_id="founder-1")
+        self.assertIsNotNone(receipt)
+        self.assertEqual(receipt["quality_inputs_sha256"], "b" * 64)
+        run.approval_state = "approved"
+        run.run_request[RECEIPT_KEY] = receipt
+        self.assertTrue(article_publish_approval_receipt_matches(run))
+        self.assertTrue(_article_publish_retry_authorized(run))
+
+        run.result["article_preview_quality"]["inputs_sha256"] = "c" * 64
+        self.assertFalse(_article_publish_retry_authorized(run))
+
+        run.result["article_preview_quality"].pop("inputs_sha256")
+        self.assertIsNone(make_article_publish_approval_receipt(run, actor_id="founder-1"))
+        self.assertFalse(_article_publish_retry_authorized(run))
+
     def test_legacy_retry_requires_prior_approval_and_known_child(self):
         run = _review_run()
         run.result["publish_child_run_id"] = "publish-child-1"
@@ -111,6 +129,8 @@ class ArticlePublishApprovalReceiptTests(SimpleTestCase):
         run.result["article_preview_quality"].pop("inputs_sha256")
         self.assertIsNone(make_article_publish_approval_receipt(run, actor_id="founder-1"))
         run.result["article_preview_quality"]["status"] = "advisory_findings"
+        self.assertIsNone(make_article_publish_approval_receipt(run, actor_id="founder-1"))
+        run.result["article_preview_quality"]["status"] = "passed_no_baseline"
         self.assertIsNone(make_article_publish_approval_receipt(run, actor_id="founder-1"))
         run.result.pop("article_preview_quality")
         self.assertIsNotNone(make_article_publish_approval_receipt(run, actor_id="founder-1"))

@@ -7,7 +7,7 @@ import re
 
 
 RECEIPT_KEY = "article_publish_approval_receipt"
-ACCEPTED_QUALITY_STATUSES = {"passed", "advisory_findings"}
+ACCEPTED_QUALITY_STATUSES = {"passed", "passed_no_baseline", "advisory_findings"}
 
 
 def _mapping(value):
