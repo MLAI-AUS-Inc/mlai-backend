@@ -23,6 +23,7 @@ from workflow_runs.models import (
 )
 from content_factory.vibe_marketing_views import (
     _apply_setup_merge_result,
+    _call_content_factory_run_status,
     _call_content_factory_live_preview,
     _content_package_from_run,
     _live_preview_from_run,
@@ -2025,6 +2026,100 @@ class VibeMarketingComponentCommentTests(TestCase):
 
         comment.refresh_from_db()
         self.assertEqual(comment.status, "submitted")
+
+    @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
+    def test_failed_package_review_draft_can_submit_section_deletion(self):
+        self.run.status = ContentFactoryRunStatus.FAILED
+        self.run.current_step = "package_content_delivery"
+        self.run.result = {
+            "review_draft_html": '<article><section data-cf-component-id="section:intro">Unsupported claim</section></article>',
+            "review_draft_actions_available": True,
+            "section_issues": [{
+                "section_id": "section:intro", "claim_id": "claim-001",
+                "state": "needs_review", "reason": "Evidence not found.",
+            }],
+        }
+        self.run.save(update_fields=["status", "current_step", "result", "updated_at"])
+
+        comment_response = self.client.post(
+            f"/api/v1/vibe-marketing/runs/{self.run.run_id}/comments",
+            {
+                "componentId": "section:intro",
+                "sourceSectionId": "intro",
+                "body": "Remove this unsupported section.",
+                "requestedAction": "delete_section",
+            },
+            format="json",
+        )
+        self.assertEqual(comment_response.status_code, 201)
+        captured = {}
+
+        def fake_post(url, json=None, headers=None, timeout=None):
+            captured["url"] = url
+            captured["payload"] = json
+            return _Response(status_code=202, payload={"run_id": "article-failed-package-revision", "status": "queued"})
+
+        with (
+            patch("content_factory.vibe_marketing_views.http_client.post", side_effect=fake_post),
+            patch("content_factory.vibe_marketing_views.ContentFactoryHealingRecord.objects.update_or_create") as create_learning,
+        ):
+            submit_response = self.client.post(
+                f"/api/v1/vibe-marketing/runs/{self.run.run_id}/comments/submit", {}, format="json"
+            )
+
+        self.assertEqual(submit_response.status_code, 202)
+        self.assertEqual(captured["url"], f"https://content-factory.test/api/runs/{self.run.run_id}/component-revisions")
+        self.assertEqual(captured["payload"]["comments"][0]["component_id"], "section:intro")
+        self.assertEqual(captured["payload"]["comments"][0]["requested_action"], "delete_section")
+        self.assertEqual(captured["payload"]["source_run_id"], self.run.run_id)
+        create_learning.assert_not_called()
+
+    @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
+    def test_failed_evidence_full_view_fetches_review_html_without_compact_payload(self):
+        self.run.status = ContentFactoryRunStatus.FAILED
+        self.run.current_step = "package_content_delivery"
+        self.run.save(update_fields=["status", "current_step", "updated_at"])
+        issue = {"sectionId": "section:intro", "claimId": "evidence-support",
+                 "state": "needs_review", "reason": "Official guidance missing.",
+                 "sourceHint": "Captured primary sources: https://business.gov.au/online-and-digital/artificial-intelligence"}
+        calls = []
+
+        def fake_status(run_id, workflow="", include_review_draft=False):
+            calls.append(include_review_draft)
+            payload = {"run_id": run_id, "status": "failed", "section_issues": [issue]}
+            if include_review_draft:
+                payload.update({"review_draft_html": '<article><section id="intro">Draft</section></article>',
+                                "review_draft_actions_available": True})
+            return payload
+
+        with patch("content_factory.vibe_marketing_views._call_content_factory_run_status", side_effect=fake_status):
+            compact = self.client.get(f"/api/v1/vibe-marketing/runs/{self.run.run_id}?view=status")
+            self.assertEqual(compact.status_code, 200)
+            self.assertEqual(compact.data["sectionIssues"][0]["claimId"], "evidence-support")
+            self.assertFalse(compact.data.get("reviewDraftHtml"))
+            self.assertNotIn(True, calls)
+            full = self.client.get(f"/api/v1/vibe-marketing/runs/{self.run.run_id}")
+        self.assertEqual(full.status_code, 200)
+        self.assertIn('id="intro"', full.data["reviewDraftHtml"])
+        self.assertTrue(full.data["reviewDraftActionsAvailable"])
+        self.assertIn(True, calls)
+        self.assertIn("https://business.gov.au/", full.data["sectionIssues"][0]["sourceHint"])
+
+    @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
+    def test_review_draft_transport_requests_html_only_when_explicit(self):
+        requests = []
+
+        def fake_get(url, **kwargs):
+            requests.append((url, kwargs))
+            return _Response(status_code=200, payload={"run_id": self.run.run_id, "status": "failed"})
+
+        with patch("content_factory.vibe_marketing_views.http_client.get", side_effect=fake_get):
+            _call_content_factory_run_status(self.run.run_id, workflow="article_generation")
+            _call_content_factory_run_status(
+                self.run.run_id, workflow="article_generation", include_review_draft=True,
+            )
+        self.assertNotIn("params", requests[0][1])
+        self.assertEqual(requests[1][1]["params"], {"include_review_draft": "true"})
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
     def test_submit_component_revision_reuses_original_article_billing_without_balance_gate(self):

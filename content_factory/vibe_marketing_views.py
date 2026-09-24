@@ -61,6 +61,7 @@ from content_factory.dispatch_binding import bind_dispatch_token_run, run_is_dis
 from content_factory.editorial_catalog import article_brief_for_catalog
 from content_factory.google_baseline import collect_verified_google_metrics, google_baseline_connection_status
 from content_factory.run_state import ARTICLE_WORKFLOWS, active_retry_signal, clear_obsolete_active_run_blockers
+from content_factory.section_issues import public_section_issues
 from content_analytics.services.config import (
     analytics_article_manifest,
     analytics_config_for_content_factory,
@@ -4691,6 +4692,7 @@ def _serialize_component_comment(comment):
         "anchor": comment.anchor or None,
         "context": comment.context or None,
         "body": comment.body,
+        "requestedAction": (comment.context or {}).get("requestedAction") or None,
         "status": comment.status,
         "batchId": comment.batch_id or None,
         "createdAt": comment.created_at.isoformat() if comment.created_at else None,
@@ -4879,12 +4881,37 @@ def _comment_context_from_request(data):
 
 def _request_includes_comment_context(data):
     getter = data.get if hasattr(data, "get") else (lambda _key, default=None: default)
-    return getter("context") not in (None, "")
+    return (
+        getter("context") not in (None, "")
+        or getter("requestedAction") is not None
+        or getter("requested_action") is not None
+    )
+
+
+def _component_comment_action_error(data, payload):
+    """Reject malformed deletion commands before they enter a feedback batch."""
+    requested = str(data.get("requestedAction") or data.get("requested_action") or "").strip()
+    if not requested:
+        return None
+    if requested != "delete_section":
+        return "Unknown article review action."
+    component_id = payload["component_id"]
+    if not re.fullmatch(r"section:[A-Za-z0-9][A-Za-z0-9_-]{0,119}", component_id):
+        return "Choose an exact article section before deleting it."
+    source_section_id = payload["source_section_id"]
+    if source_section_id and source_section_id != component_id.removeprefix("section:"):
+        return "The selected section and source section do not match."
+    payload["source_section_id"] = component_id.removeprefix("section:")
+    return None
 
 
 def _comment_payload_from_request(data):
     component_id = str(data.get("componentId") or data.get("component_id") or "").strip()
     body = str(data.get("body") or data.get("comment") or "").strip()
+    context = _comment_context_from_request(data)
+    requested_action = str(data.get("requestedAction") or data.get("requested_action") or "").strip()
+    if requested_action == "delete_section":
+        context["requestedAction"] = requested_action
     return {
         "component_id": component_id,
         "component_type": str(data.get("componentType") or data.get("component_type") or "").strip(),
@@ -4892,7 +4919,7 @@ def _comment_payload_from_request(data):
         "source_section_id": str(data.get("sourceSectionId") or data.get("source_section_id") or "").strip(),
         "selector": str(data.get("selector") or "").strip() or _selector_for_component(component_id),
         "anchor": _comment_anchor_from_request(data),
-        "context": _comment_context_from_request(data),
+        "context": context,
         "body": body,
     }
 
@@ -4918,6 +4945,7 @@ def _remote_comment_payload(comment, run=None):
         "anchor": comment.anchor or {},
         "context": comment.context or {},
         "body": comment.body,
+        "requested_action": (comment.context or {}).get("requestedAction") or "",
     }
 
 
@@ -4983,6 +5011,10 @@ def _feedback_family_key(*, domain, github_repo, comment):
 
 def _create_editorial_feedback_candidates(*, organization, run, comments, batch_id):
     for comment in comments:
+        # A one-off deletion of an unsupported section is a revision command,
+        # not a reusable writing preference for future articles.
+        if (comment.context or {}).get("requestedAction") == "delete_section":
+            continue
         rule = _normalized_component_feedback_rule(comment)
         if not rule:
             continue
@@ -10000,6 +10032,15 @@ COMPACT_RUN_RESULT_KEYS = {
     "url",
 }
 
+# Review-only HTML is an article-sized fallback, not an unbounded run artifact.
+# Keep well above a normal article while limiting storage and response size if a
+# remote worker accidentally returns a build log or entire site in this field.
+MAX_REVIEW_DRAFT_HTML_CHARS = 2_000_000
+
+
+def _bounded_review_draft_html(value):
+    return value if isinstance(value, str) and len(value) <= MAX_REVIEW_DRAFT_HTML_CHARS else ""
+
 COMPACT_DISCOVERY_RESULT_KEYS = {
     "candidates",
     "keyword_options",
@@ -10399,6 +10440,16 @@ def _serialize_run(
     step_states = _serialize_run_steps(run, compact=compact)
     from content_factory.run_state import reliability_presentation
     result = _run_mapping(run.result)
+    section_issues = public_section_issues(result.get("section_issues") or result.get("sectionIssues"))
+    raw_review_draft_html = result.get("review_draft_html") or result.get("reviewDraftHtml")
+    review_draft_html = _bounded_review_draft_html(raw_review_draft_html)
+    review_draft_actions_available = (
+        not (isinstance(raw_review_draft_html, str) and len(raw_review_draft_html) > MAX_REVIEW_DRAFT_HTML_CHARS)
+        and (
+            result.get("review_draft_actions_available") is True
+            or result.get("reviewDraftActionsAvailable") is True
+        )
+    )
     blocking_detail = _run_blocking_detail(result)
     humanized_failure_message = _humanized_run_failure_message(run, result)
     error_list = (
@@ -10454,6 +10505,8 @@ def _serialize_run(
             "prUrl": pr_url,
             "routePath": result.get("route_path") or result.get("path"),
             "diagnostics": {},
+            "sectionIssues": section_issues,
+            "reviewDraftActionsAvailable": review_draft_actions_available,
             "publishChildStatus": result.get("publish_child_status"),
             "publishChildRecoverable": result.get("publish_child_recoverable"),
             "publishChildWaitReason": result.get("publish_child_wait_reason"),
@@ -10506,6 +10559,9 @@ def _serialize_run(
         "prUrl": pr_url,
         "routePath": result.get("route_path") or result.get("path"),
         "diagnostics": result.get("diagnostics") or run.verification_summary or {},
+        "sectionIssues": section_issues,
+        "reviewDraftHtml": review_draft_html,
+        "reviewDraftActionsAvailable": review_draft_actions_available,
         "publishChildStatus": result.get("publish_child_status"),
         "publishChildRecoverable": result.get("publish_child_recoverable"),
         "publishChildWaitReason": result.get("publish_child_wait_reason"),
@@ -11615,6 +11671,12 @@ def _run_result_from_remote(remote_data):
         "live_preview",
         "componentManifest",
         "component_manifest",
+        "section_issues",
+        "sectionIssues",
+        "review_draft_html",
+        "review_draft_actions_available",
+        "reviewDraftHtml",
+        "reviewDraftActionsAvailable",
         "publish_child_status",
         "publish_child_recoverable",
         "publish_child_wait_reason",
@@ -11714,6 +11776,15 @@ def _run_result_from_remote(remote_data):
             merged[key] = remote_data.get(key)
     if not merged and remote_data:
         merged = dict(remote_data)
+    review_draft_too_large = False
+    for key in ("review_draft_html", "reviewDraftHtml"):
+        value = merged.get(key)
+        if value is not None and not _bounded_review_draft_html(value):
+            review_draft_too_large |= isinstance(value, str) and len(value) > MAX_REVIEW_DRAFT_HTML_CHARS
+            merged.pop(key, None)
+    if review_draft_too_large:
+        merged["review_draft_actions_available"] = False
+        merged["reviewDraftActionsAvailable"] = False
     return merged
 
 
@@ -12122,7 +12193,7 @@ def _create_local_run(*, workflow, domain, github_repo="", actor_id="", payload=
     return run
 
 
-def _call_content_factory_run_status(run_id, *, workflow=""):
+def _call_content_factory_run_status(run_id, *, workflow="", include_review_draft=False):
     remote_config = _content_factory_remote_config()
     if not remote_config["enabled"]:
         if workflow == "startup_autofill" or _remote_required_for_workflow(workflow):
@@ -12145,10 +12216,11 @@ def _call_content_factory_run_status(run_id, *, workflow=""):
         return {}
 
     try:
+        request_options = {"headers": _content_factory_headers(), "timeout": (3, 15)}
+        if include_review_draft:
+            request_options["params"] = {"include_review_draft": "true"}
         response = http_client.get(
-            f"{remote_config['base_url']}/api/runs/{run_id}",
-            headers=_content_factory_headers(),
-            timeout=(3, 15),
+            f"{remote_config['base_url']}/api/runs/{run_id}", **request_options,
         )
     except http_client.RequestException as exc:
         logger.warning(
@@ -15842,7 +15914,27 @@ class VibeMarketingRunView(APIView):
             # polling it would 404 and clobber the pending verdict. Resolution
             # happens via the key lookup above on each poll.
             skip_remote_status = True
-        remote_data = {} if skip_remote_status else _call_content_factory_run_status(run.run_id, workflow=run.workflow)
+        remote_data = {} if skip_remote_status else _call_content_factory_run_status(
+            run.run_id, workflow=run.workflow,
+        )
+        if (
+            view == "full" and run.workflow in ARTICLE_WORKFLOWS and isinstance(remote_data, dict)
+            and str(remote_data.get("status") or "").lower() in {"failed", "blocked"}
+            and (remote_data.get("section_issues") or remote_data.get("sectionIssues"))
+            and not (remote_data.get("review_draft_html") or remote_data.get("reviewDraftHtml"))
+        ):
+            review_data = _call_content_factory_run_status(
+                run.run_id, workflow=run.workflow, include_review_draft=True,
+            )
+            if (
+                isinstance(review_data, dict)
+                and str(review_data.get("run_id") or review_data.get("job_id") or "") == run.run_id
+                and str(review_data.get("status") or "").lower() in {"failed", "blocked"}
+            ):
+                for key in ("review_draft_html", "reviewDraftHtml", "review_draft_actions_available",
+                            "reviewDraftActionsAvailable"):
+                    if key in review_data:
+                        remote_data[key] = review_data[key]
         if skip_remote_status:
             logger.info(
                 "content_factory_status_poll_skipped run_id=%s workflow=%s status=%s reason=%s",
@@ -16274,6 +16366,9 @@ class VibeMarketingRunCommentsView(VibeMarketingRunCommentsMixin, APIView):
         if error_response is not None:
             return error_response
         payload = _comment_payload_from_request(request.data or {})
+        action_error = _component_comment_action_error(request.data or {}, payload)
+        if action_error:
+            return Response({"detail": action_error}, status=status.HTTP_400_BAD_REQUEST)
         if not payload["component_id"]:
             return Response({"detail": "Choose an article component before adding a comment."}, status=status.HTTP_400_BAD_REQUEST)
         if not payload["body"]:
@@ -16295,6 +16390,9 @@ class VibeMarketingRunCommentDetailView(VibeMarketingRunCommentsMixin, APIView):
         if comment.status != VibeMarketingComponentCommentStatus.DRAFT:
             return Response({"detail": "Only draft comments can be updated."}, status=status.HTTP_400_BAD_REQUEST)
         payload = _comment_payload_from_request(request.data or {})
+        action_error = _component_comment_action_error(request.data or {}, payload)
+        if action_error:
+            return Response({"detail": action_error}, status=status.HTTP_400_BAD_REQUEST)
         if not _request_includes_comment_anchor(request.data or {}):
             payload["anchor"] = comment.anchor or {}
         if not _request_includes_comment_context(request.data or {}):
