@@ -19,7 +19,10 @@ from integrations.models import (
 )
 from integrations.services.message_sync.scheduler import BudgetDeferred
 from integrations.services.slack_roo import public_roo_target
+from integrations.services.slack_workspace_users import PAGE_LIMIT, cached_workspace_snapshot
 from integrations.services import slack_dm_mirror as mirror
+
+SNAPSHOT_CURSOR_PREFIX = "snapshot-v1:"
 
 
 def eligible_user(user, workspace):
@@ -124,6 +127,74 @@ def _validate_grant(authority):
         )
 
 
+def sanitized_directory_page(response, workspace):
+    """Keep only mention fields from a Slack users.list response."""
+    return {
+        "users": [
+            {
+                **mirror._serialize_slack_user(user),
+                "is_bot": bool(user.get("is_bot") or user.get("is_app_user")),
+                "real_name": str(
+                    (user.get("profile") or {}).get("real_name")
+                    or user.get("real_name")
+                    or ""
+                )[:255],
+                "username": str(user.get("name") or "")[:255],
+                "search": " ".join(
+                    str(value or "")
+                    for value in (
+                        user.get("name"),
+                        user.get("real_name"),
+                        (user.get("profile") or {}).get("display_name"),
+                        (user.get("profile") or {}).get("real_name"),
+                    )
+                ).casefold(),
+            }
+            for user in response.get("members") or []
+            if isinstance(user, dict) and eligible_user(user, workspace)
+        ],
+        "next": str(
+            (response.get("response_metadata") or {}).get("next_cursor") or ""
+        ).strip(),
+    }
+
+
+def _snapshot_page(snapshot, *, query, start, limit):
+    """Search all cached names before returning a bounded, resumable page."""
+    matches = [user for user in snapshot["users"] if query in user["search"]]
+
+    def rank(user):
+        name = user["display_name"].casefold()
+        username = user["username"].casefold()
+        if not query:
+            match_rank = 0
+        elif query in {name, username}:
+            match_rank = 0
+        elif name.startswith(query) or username.startswith(query):
+            match_rank = 1
+        elif any(part.startswith(query) for part in name.split()):
+            match_rank = 2
+        else:
+            match_rank = 3
+        return (
+            match_rank,
+            name,
+            user["slack_user_id"],
+        )
+
+    matches.sort(key=rank)
+    users = matches[start : start + limit]
+    next_start = start + len(users)
+    next_cursor = (
+        mirror._encode_directory_cursor(
+            f"{SNAPSHOT_CURSOR_PREFIX}{snapshot['version']}:{next_start}", 0
+        )
+        if next_start < len(matches)
+        else ""
+    )
+    return users, next_cursor
+
+
 def _search_directory(
     *,
     workspace,
@@ -144,63 +215,58 @@ def _search_directory(
             "Slack user search is limited to 100 characters."
         )
     slack_cursor, offset = mirror._decode_directory_cursor(cursor)
+    limit = max(1, min(int(limit), 50))
     members = (
         set(private.participant_slack_ids)
         if private
         else _members(read, cache_key, channel) if channel else set()
     )
-    key = cache_key("users", slack_cursor)
-    page = cache.get(key)
+    snapshot_version = ""
+    snapshot_start = offset
+    if slack_cursor.startswith(SNAPSHOT_CURSOR_PREFIX):
+        suffix = slack_cursor.removeprefix(SNAPSHOT_CURSOR_PREFIX)
+        version, separator, start = suffix.partition(":")
+        if not separator or not re.fullmatch(r"[0-9a-f]{32}", version) or not start.isdecimal() or len(start) > 10:
+            raise mirror.SlackDmMirrorError("Slack directory cursor is invalid.")
+        snapshot_version = version
+        snapshot_start += int(start)
+    snapshot = (
+        cached_workspace_snapshot(workspace, version=snapshot_version)
+        if not slack_cursor or snapshot_version
+        else None
+    )
     retry_after = 0
-    if page is None:
-        try:
-            response = read("users_list", limit=200, cursor=slack_cursor)
-            # Strip private Slack profile fields before placing anything in cache.
-            page = {
-                "users": [
-                    {
-                        **mirror._serialize_slack_user(user),
-                        "is_bot": bool(user.get("is_bot") or user.get("is_app_user")),
-                        "real_name": str(
-                            (user.get("profile") or {}).get("real_name")
-                            or user.get("real_name")
-                            or ""
-                        )[:255],
-                        "username": str(user.get("name") or "")[:255],
-                        "search": " ".join(
-                            str(value or "")
-                            for value in (
-                                user.get("name"),
-                                user.get("real_name"),
-                                (user.get("profile") or {}).get("display_name"),
-                                (user.get("profile") or {}).get("real_name"),
-                            )
-                        ).casefold(),
-                    }
-                    for user in response.get("members") or []
-                    if isinstance(user, dict) and eligible_user(user, workspace)
-                ],
-                "next": str(
-                    (response.get("response_metadata") or {}).get("next_cursor") or ""
-                ),
-            }
-            cache.set(key, page, timeout=600)
-        except BudgetDeferred as exc:
-            retry_after = max(1, int(exc.retry_after))
-    if page is None:
-        users = []
-        next_cursor = mirror._encode_directory_cursor(slack_cursor, offset)
-    else:
-        matches = [user for user in page["users"] if query in user["search"]]
-        limit = max(1, min(int(limit), 50))
-        users = matches[offset : offset + limit]
-        next_cursor = (
-            mirror._encode_directory_cursor(slack_cursor, offset + limit)
-            if offset + limit < len(matches)
-            else (
-                mirror._encode_directory_cursor(page["next"], 0) if page["next"] else ""
-            )
+    if snapshot is not None:
+        users, next_cursor = _snapshot_page(
+            snapshot, query=query, start=snapshot_start, limit=limit,
         )
+    else:
+        if slack_cursor.startswith(SNAPSHOT_CURSOR_PREFIX):
+            # A snapshot expired between client pages. Restart the ordinary
+            # Slack cursor walk rather than sending our cache cursor upstream.
+            slack_cursor, offset = "", 0
+        key = cache_key("users", slack_cursor)
+        page = cache.get(key)
+        if page is None:
+            try:
+                response = read("users_list", limit=PAGE_LIMIT, cursor=slack_cursor)
+                page = sanitized_directory_page(response, workspace)
+                cache.set(key, page, timeout=600)
+            except BudgetDeferred as exc:
+                retry_after = max(1, int(exc.retry_after))
+        if page is None:
+            users = []
+            next_cursor = mirror._encode_directory_cursor(slack_cursor, offset)
+        else:
+            matches = [user for user in page["users"] if query in user["search"]]
+            users = matches[offset : offset + limit]
+            next_cursor = (
+                mirror._encode_directory_cursor(slack_cursor, offset + limit)
+                if offset + limit < len(matches)
+                else (
+                    mirror._encode_directory_cursor(page["next"], 0) if page["next"] else ""
+                )
+            )
     # Roo is available immediately, including in Roo DMs and empty searches.
     target = public_roo_target()
     if (

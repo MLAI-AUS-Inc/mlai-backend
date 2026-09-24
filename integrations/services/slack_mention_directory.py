@@ -1,10 +1,7 @@
 """Community directory reads, independent of private-message import consent."""
 
-import hashlib
-import re
 import uuid
 
-from django.conf import settings
 from django.core.cache import cache
 from slack_sdk.errors import SlackApiError
 
@@ -17,6 +14,7 @@ from integrations.models import (
 from integrations.services import slack_dm_mirror as mirror
 from integrations.services.community_bridge.slack import SlackBridgeClient
 from integrations.services.slack_mentions import _search_directory, search_mentions
+from integrations.services.slack_workspace_users import cache_key, configured_scope
 
 
 def search_workspace_mentions(user, *, channel_id, query="", cursor="", limit=50):
@@ -53,25 +51,18 @@ def search_workspace_mentions(user, *, channel_id, query="", cursor="", limit=50
             limit=limit,
         )
 
-    workspace = str(
-        getattr(settings, "MESSAGE_SYNC_SLACK_BOT_WORKSPACE_ID", "") or ""
-    ).strip()
-    token = str(getattr(settings, "SLACK_BRIDGE_BOT_TOKEN", "") or "").strip()
-    if not re.fullmatch(r"T[A-Z0-9]+", workspace) or not token:
+    configured = configured_scope()
+    if configured is None:
         raise mirror.SlackDmMirrorError(
             "The community Slack directory is not configured."
         )
-    # Partition cached public metadata when the installation credential changes.
-    scope = hashlib.sha256(f"{workspace}:{token}".encode()).hexdigest()
+    workspace, scope = configured
 
-    def cache_key(category, value):
-        return (
-            "slack-community-directory-v1:"
-            + hashlib.sha256(f"{scope}:{category}:{value}".encode()).hexdigest()
-        )
+    def scoped_key(category, value):
+        return cache_key(scope, category, value)
 
     client = SlackBridgeClient.get_client()
-    verified_key = cache_key("workspace", "")
+    verified_key = scoped_key("workspace", "")
     public = CommunityBridgeChannel.objects.filter(
         enabled=True,
         destination_platform=CommunityBridgePlatform.BUZZ,
@@ -110,13 +101,13 @@ def search_workspace_mentions(user, *, channel_id, query="", cursor="", limit=50
         cursor=cursor,
         limit=limit,
         read=read,
-        cache_key=cache_key,
+        cache_key=scoped_key,
         validate=lambda: None,
         membership_unknown=membership_unknown,
     )
     if membership_unknown:
         if public:
-            cache.delete(cache_key("members", public.slack_channel_id))
+            cache.delete(scoped_key("members", public.slack_channel_id))
         for entry in result["users"]:
             entry["is_member"] = None
             entry["native_only"] = False

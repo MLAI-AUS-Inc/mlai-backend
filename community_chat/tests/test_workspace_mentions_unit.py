@@ -7,6 +7,8 @@ from slack_sdk.errors import SlackApiError
 
 from integrations.services import slack_mention_directory as directory
 from integrations.services import slack_dm_mirror as mirror
+from integrations.services import slack_mentions as mentions
+from integrations.services import slack_workspace_users as snapshots
 from integrations.services.message_sync.scheduler import BudgetDeferred
 
 
@@ -116,6 +118,52 @@ class WorkspaceMentionTests(SimpleTestCase):
             self.search()
         self.client.users_list.assert_not_called()
 
+    def test_snapshot_cursor_keeps_original_order_during_refresh(self):
+        self.client.users_list.return_value = {
+            "members": [
+                {"id": "UBOB", "team_id": "TMLAI", "name": "Bob Person"},
+                {"id": "UCARL", "team_id": "TMLAI", "name": "Carl Person"},
+            ]
+        }
+        self.assertEqual(snapshots.warm_workspace_directory_once(), 1)
+        first = self.search(query="person", limit=1)
+        self.assertEqual(first["users"][0]["slack_user_id"], "UBOB")
+        _, scope = snapshots.configured_scope()
+        snapshot_key = snapshots.cache_key(scope, "snapshot")
+        saved = cache.get(snapshot_key)
+        saved["completed_at"] = 0
+        cache.set(snapshot_key, saved, timeout=snapshots.SNAPSHOT_TTL_SECONDS)
+        self.client.users_list.return_value = {
+            "members": [
+                {"id": "UAARDVARK", "team_id": "TMLAI", "name": "Aardvark Person"},
+                {"id": "UBOB", "team_id": "TMLAI", "name": "Bob Person"},
+                {"id": "UCARL", "team_id": "TMLAI", "name": "Carl Person"},
+            ]
+        }
+        self.assertEqual(snapshots.warm_workspace_directory_once(), 1)
+        second = self.search(query="person", cursor=first["next_cursor"], limit=1)
+        self.assertEqual(second["users"][0]["slack_user_id"], "UCARL")
+        self.assertEqual(self.search(query="person", limit=1)["users"][0]["slack_user_id"], "UAARDVARK")
+
+    def test_owner_private_search_can_use_public_names_with_owner_validation(self):
+        self.assertEqual(snapshots.warm_workspace_directory_once(), 1)
+        self.client.users_list.reset_mock()
+        validate = MagicMock()
+        read = MagicMock(side_effect=AssertionError("unexpected Slack read"))
+        result = mentions._search_directory(
+            workspace="TMLAI", channel="DPRIVATE",
+            private=SimpleNamespace(
+                participant_slack_ids=["UALICE"], participant_profiles={}
+            ),
+            query="alice", cursor="", limit=7, read=read,
+            cache_key=lambda category, value: f"private:{category}:{value}",
+            validate=validate,
+        )
+        self.assertEqual(result["users"][0]["slack_user_id"], "UALICE")
+        self.assertTrue(result["users"][0]["is_member"])
+        validate.assert_called_once()
+        read.assert_not_called()
+
     def test_roo_remains_available_while_provider_budget_is_deferred(self):
         self.client.auth_test.side_effect = BudgetDeferred(3)
         result = self.search(query="roo")
@@ -142,3 +190,70 @@ class WorkspaceMentionTests(SimpleTestCase):
             self.search()
         self.assertIs(private.call_args.args[0], grant)
         self.client.auth_test.assert_not_called()
+
+    def test_background_warm_searches_all_pages_without_live_directory_calls(self):
+        self.client.users_list.side_effect = [
+            {
+                "members": [
+                    {"id": "UBOB", "team_id": "TMLAI", "name": "Bob Person"},
+                    {"id": "UCARL", "team_id": "TMLAI", "name": "Carl Person"},
+                ],
+                "response_metadata": {"next_cursor": "page-2"},
+            },
+            {
+                "members": [
+                    {
+                        "id": "UALICE", "team_id": "TMLAI",
+                        "profile": {
+                            "display_name": "Alice Person",
+                            "email": "secret@example.test",
+                        },
+                    }
+                ],
+                "response_metadata": {"next_cursor": ""},
+            },
+        ]
+        self.assertEqual(snapshots.warm_workspace_directory_once(), 1)
+        self.assertIsNone(snapshots.cached_workspace_users("TMLAI"))
+        self.assertEqual(snapshots.warm_workspace_directory_once(), 1)
+        self.assertEqual(len(snapshots.cached_workspace_users("TMLAI")), 3)
+        self.client.users_list.reset_mock()
+
+        first = self.search(query="person", limit=1)
+        self.assertEqual(first["users"][0]["slack_user_id"], "UALICE")
+        self.assertTrue(first["users"][0]["is_member"])
+        self.assertTrue(first["next_cursor"])
+        second = self.search(query="person", cursor=first["next_cursor"], limit=1)
+        third = self.search(query="person", cursor=second["next_cursor"], limit=1)
+        self.assertEqual(
+            [second["users"][0]["slack_user_id"], third["users"][0]["slack_user_id"]],
+            ["UBOB", "UCARL"],
+        )
+        self.assertEqual(third["next_cursor"], "")
+        self.assertNotIn("secret@example.test", str(snapshots.cached_workspace_users("TMLAI")))
+        self.client.users_list.assert_not_called()
+
+    def test_warm_deferral_keeps_last_complete_snapshot_and_avoids_retry_spin(self):
+        self.assertEqual(snapshots.warm_workspace_directory_once(), 1)
+        workspace, scope = snapshots.configured_scope()
+        snapshot_key = snapshots.cache_key(scope, "snapshot")
+        saved = cache.get(snapshot_key)
+        saved["completed_at"] = 0
+        cache.set(snapshot_key, saved, timeout=snapshots.SNAPSHOT_TTL_SECONDS)
+        self.client.users_list.side_effect = BudgetDeferred(3)
+        self.assertEqual(snapshots.warm_workspace_directory_once(), 0)
+        calls = self.client.users_list.call_count
+        self.assertEqual(snapshots.warm_workspace_directory_once(), 0)
+        self.assertEqual(self.client.users_list.call_count, calls)
+        self.assertEqual(len(snapshots.cached_workspace_users(workspace)), 2)
+
+    def test_snapshot_is_bound_to_configured_credential_and_workspace(self):
+        self.assertEqual(snapshots.warm_workspace_directory_once(), 1)
+        self.assertIsNone(snapshots.cached_workspace_users("TOTHER"))
+        with override_settings(SLACK_BRIDGE_BOT_TOKEN="another-installation"):
+            self.assertIsNone(snapshots.cached_workspace_users("TMLAI"))
+        self.client.auth_test.return_value = {"team_id": "TOTHER"}
+        cache.clear()
+        with self.assertRaisesMessage(ValueError, "slack_directory_workspace_mismatch"):
+            snapshots.warm_workspace_directory_once()
+        self.assertIsNone(snapshots.cached_workspace_users("TMLAI"))
