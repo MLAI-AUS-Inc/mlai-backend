@@ -461,6 +461,7 @@ def source_read_targets(grant, authority, existing_targets):
             slack_id=row.slack_conversation_id,
             kind=row.kind,
             conversation=row,
+            source_activity_ts=row.source_activity_ts,
         )
         if target.read_scope not in authority.scopes:
             continue

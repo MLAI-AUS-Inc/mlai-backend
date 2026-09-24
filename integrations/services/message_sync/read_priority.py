@@ -1,10 +1,12 @@
 """Bounded, durable read-refresh hints. Hints never grant access or mark a read."""
+import math
 import time
 
 from django.db import transaction
 
 KEY = "message_sync_read_priority_v1"
 MAX_HINTS = 256
+RECENT_SOURCE_ACTIVITY_SECONDS = 7 * 86400
 
 
 def enqueue_refresh(authority, targets, *, reason="visible"):
@@ -34,7 +36,7 @@ def enqueue_refresh(authority, targets, *, reason="visible"):
 
 
 def select_target(ordered, snapshots, cache_key, cursor, *, now, turn):
-    """Serve three priority turns, then an oldest-first background turn.
+    """Serve visible, known-unread and recent-unknown work with background fairness.
 
     A quiet room keeps its place even while visible rooms continually renew
     their hints. Shared Slack admission and account fairness remain unchanged.
@@ -48,16 +50,36 @@ def select_target(ordered, snapshots, cache_key, cursor, *, now, turn):
         return now - snapshot(target).get("fetched_at", 0)
     def hinted(target):
         return (hints.get(target.slack_id) or {}).get("until", 0) > now
+    def recent_unknown(target):
+        value = snapshot(target)
+        if value.get("excluded") is True or (
+            value.get("available") is True and type(value.get("is_unread")) is bool
+        ):
+            return False
+        try:
+            activity = float(target.source_activity_ts)
+        except (AttributeError, TypeError, ValueError):
+            return False
+        return (math.isfinite(activity) and
+                now - RECENT_SOURCE_ACTIVITY_SECONDS <= activity <= now + 300)
     foreground = [t for t in eligible if
               (hinted(t) and age(t) >= 15)
               or (snapshot(t).get("refresh_required") and age(t) >= 1)]
     unread = [t for t in eligible if snapshot(t).get("is_unread") and age(t) >= 60]
+    recent = [t for t in eligible if age(t) >= 60 and recent_unknown(t)]
     background = [t for t in eligible if age(t) >= 60]
     # Stable sorting preserves the source-ID continuation for equal ages.
     # An older unseen unread must not consume every priority turn until an
     # explicit visible hint expires. Oldest-first still applies within each
     # tier and to the reserved background turn.
-    candidates = background if turn % 4 == 3 and background else foreground or unread or background
+    if turn % 4 == 3 and background:
+        candidates = background
+    elif foreground:
+        candidates = foreground
+    elif turn % 4 == 2 and recent:
+        candidates = recent
+    else:
+        candidates = unread or recent or background
     return max(candidates, key=age, default=None)
 
 
