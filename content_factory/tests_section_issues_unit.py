@@ -134,6 +134,9 @@ class SectionIssueContractTests(SimpleTestCase):
             "latest_control_response": {
                 "review_draft_html": draft_html,
                 "delivery_package": package,
+                "artifacts": [{"detail": "artifact detail " * 1_000}],
+                "diagnostics": {"log": "diagnostic line " * 1_000},
+                "section_issues": [{"section_id": "section:intro", "claim_id": "claim-001", "state": "needs_review", "reason": "Evidence needs review.", "internal": "private"}],
                 "publish_child_status": "queued",
             },
             "publish_handoff_pending": True,
@@ -159,6 +162,26 @@ class SectionIssueContractTests(SimpleTestCase):
             patch.object(views, "_component_feedback_from_run", return_value={}),
         ):
             serialized = views._serialize_run(run, mode="full")
+            nested_only = {
+                "latest_control_response": {
+                    "artifacts": [{"name": "review.html", "detail": "artifact detail " * 1_000}],
+                    "diagnostics": {"log": "diagnostic line " * 1_000},
+                    "section_issues": [{"section_id": "section:intro", "claim_id": "claim-002", "state": "needs_review", "reason": "Check evidence."}],
+                    "publish_child_status": "queued",
+                },
+            }
+            run.result = nested_only
+            nested_only_serialized = views._serialize_run(run, mode="full")
+            run.result = {
+                **raw_result,
+                "latest_control_response": {
+                    "artifacts": [{"name": "different-artifact"}],
+                    "diagnostics": {"different": True},
+                    "section_issues": [{"section_id": "section:other", "claim_id": "claim-003", "state": "needs_review"}],
+                    "publish_child_status": "queued",
+                },
+            }
+            conflicting_serialized = views._serialize_run(run, mode="full")
 
         self.assertEqual(serialized["reviewDraftHtml"], draft_html)
         self.assertEqual(serialized["componentManifest"], manifest)
@@ -178,6 +201,20 @@ class SectionIssueContractTests(SimpleTestCase):
         old_wire_bytes = len(json.dumps({**serialized, "result": raw_result}))
         new_wire_bytes = len(json.dumps(serialized))
         self.assertLess(new_wire_bytes, old_wire_bytes * 0.55)
+        self.assertEqual(nested_only_serialized["artifacts"], nested_only["latest_control_response"]["artifacts"])
+        self.assertEqual(nested_only_serialized["diagnostics"], nested_only["latest_control_response"]["diagnostics"])
+        self.assertEqual(nested_only_serialized["sectionIssues"][0]["claimId"], "claim-002")
+        self.assertEqual(nested_only_serialized["result"]["latest_control_response"], {"publish_child_status": "queued"})
+        self.assertEqual(conflicting_serialized["artifacts"], raw_result["artifacts"])
+        self.assertEqual(conflicting_serialized["diagnostics"], raw_result["diagnostics"])
+        self.assertEqual(conflicting_serialized["sectionIssues"][0]["claimId"], "claim-001")
+        self.assertEqual(
+            conflicting_serialized["result"]["latest_control_response"]["artifacts"],
+            [{"name": "different-artifact"}],
+        )
+        self.assertEqual(conflicting_serialized["result"]["latest_control_response"]["diagnostics"], {"different": True})
+        self.assertEqual(conflicting_serialized["result"]["latest_control_response"]["section_issues"][0]["section_id"], "section:other")
+        self.assertEqual(conflicting_serialized["result"]["latest_control_response"]["publish_child_status"], "queued")
 
     def test_delete_action_is_explicit_and_bound_to_exact_section(self):
         input_payload = {

@@ -10434,6 +10434,7 @@ def _strip_missing_setup_run_refs(result):
 
 def _article_result_without_projected_artifacts(
     result, *, review_draft_html, component_manifest, content_package,
+    section_issues, artifacts, diagnostics,
 ):
     """Keep article control state while avoiding duplicate review artifacts.
 
@@ -10450,17 +10451,39 @@ def _article_result_without_projected_artifacts(
     if content_package is not None:
         omitted.update({"delivery_package", "deliveryPackage", "content_package", "contentPackage"})
 
-    def project(mapping, depth, *, root=False):
-        excluded = omitted | ({"section_issues", "sectionIssues", "artifacts", "diagnostics"} if root else set())
+    def is_projected(key, value):
+        if key in {"section_issues", "sectionIssues"}:
+            return public_section_issues(value) == section_issues
+        if key == "artifacts":
+            return value == artifacts
+        if key == "diagnostics":
+            return value == diagnostics
+        return False
+
+    def project(mapping, depth):
         return {
             key: project(value, depth - 1)
             if depth and key in {"result", "latest_control_response"} and isinstance(value, dict)
             else value
             for key, value in mapping.items()
-            if key not in excluded
+            if key not in omitted and not is_projected(key, value)
         }
 
-    return project(result, 2, root=True)
+    return project(result, 2)
+
+
+def _nested_run_result_value(result, *keys):
+    """First nonempty value from a run result and its common worker wrappers."""
+    for source in (
+        result,
+        _run_mapping(result.get("result")),
+        _run_mapping(result.get("latest_control_response")),
+    ):
+        for key in keys:
+            value = source.get(key)
+            if value not in (None, "", [], {}):
+                return value
+    return None
 
 
 def _serialize_run(
@@ -10471,7 +10494,7 @@ def _serialize_run(
     step_states = _serialize_run_steps(run, compact=compact)
     from content_factory.run_state import reliability_presentation
     result = _run_mapping(run.result)
-    section_issues = public_section_issues(result.get("section_issues") or result.get("sectionIssues"))
+    section_issues = public_section_issues(_nested_run_result_value(result, "section_issues", "sectionIssues"))
     raw_review_draft_html = result.get("review_draft_html") or result.get("reviewDraftHtml")
     review_draft_html = _bounded_review_draft_html(raw_review_draft_html)
     review_draft_actions_available = (
@@ -10564,6 +10587,8 @@ def _serialize_run(
         }
     content_package = _content_package_from_run(run)
     component_manifest = _component_manifest_from_run(run)
+    artifacts = _nested_run_result_value(result, "artifacts") or []
+    diagnostics = result.get("diagnostics") or run.verification_summary or _nested_run_result_value(result, "diagnostics") or {}
     # The review page reads these large artifacts from their dedicated fields.
     # Keeping their raw worker copies in result can send an article/manifest
     # several times in a single full run response. Leave workflow, approval and
@@ -10573,6 +10598,9 @@ def _serialize_run(
         review_draft_html=review_draft_html,
         component_manifest=component_manifest,
         content_package=content_package,
+        section_issues=section_issues,
+        artifacts=artifacts,
+        diagnostics=diagnostics,
     ) if run.workflow in ARTICLE_WORKFLOWS else result
     return {
         "runId": run.run_id,
@@ -10595,11 +10623,11 @@ def _serialize_run(
         "errorCode": result.get("error_code"),
         "blockingReason": blocking_detail["reason"] or None,
         "blockingCode": blocking_detail["code"] or None,
-        "artifacts": result.get("artifacts") or [],
+        "artifacts": artifacts,
         "previewUrl": preview_url,
         "prUrl": pr_url,
         "routePath": result.get("route_path") or result.get("path"),
-        "diagnostics": result.get("diagnostics") or run.verification_summary or {},
+        "diagnostics": diagnostics,
         "sectionIssues": section_issues,
         "reviewDraftHtml": review_draft_html,
         "reviewDraftActionsAvailable": review_draft_actions_available,

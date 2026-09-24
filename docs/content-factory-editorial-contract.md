@@ -290,4 +290,6 @@ An individual full article run exposes `reviewDraftHtml`, `componentManifest`,
 fields. Its `result` still carries workflow and publish control values, but no
 longer repeats the raw copies of those projected artifacts. This projection
 does not change the saved run or the article approval checks. Compact run
-status responses continue to omit article HTML.
+status responses continue to omit article HTML. Nested worker artifacts,
+diagnostics and section issues are projected to the dedicated fields when they
+are the only available source; a different nested value stays in `result`.
