@@ -287,9 +287,12 @@ run endpoint; the index does not repeat those large values.
 
 An individual full article run exposes `reviewDraftHtml`, `componentManifest`,
 `contentPackage`, `sectionIssues`, artifacts and diagnostics in their dedicated
-fields. Its `result` still carries workflow and publish control values, but no
-longer repeats the raw copies of those projected artifacts. This projection
-does not change the saved run or the article approval checks. Compact run
-status responses continue to omit article HTML. Nested worker artifacts,
-diagnostics and section issues are projected to the dedicated fields when they
-are the only available source; a different nested value stays in `result`.
+fields. Its `result` still carries workflow and publish control values. The
+response omits only identical redundant copies; `contentPackage` is metadata,
+so a raw delivery package with article content remains available. Distinct
+nested review HTML and component manifests also remain available. This
+projection does not change the saved run or the article approval checks.
+Compact run status responses continue to omit article HTML. Nested worker
+artifacts, diagnostics and section issues are projected to the dedicated fields
+when they are the only available source; a different nested value stays in
+`result`.
