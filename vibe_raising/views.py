@@ -3055,19 +3055,28 @@ class VibeRaisingEmailDraftStartView(APIView):
             binding.save(update_fields=["google_connection", "updated_at"])
 
         if request.data.get("updateId") or request.data.get("creationKey"):
-            from startup_updates.update_identity import resolve_update, narrative_window, identity_payload
+            from startup_updates.update_identity import (
+                default_generation_date, identity_payload, narrative_window,
+                parse_generation_date, resolve_update,
+            )
             from startup_updates.revisions import RevisionConflict
             from rest_framework.exceptions import ValidationError
             try:
-                requested_date = date.fromisoformat(str(request.data.get("updateDate")))
                 requested_id = int(request.data["updateId"]) if request.data.get("updateId") else None
             except (ValueError, TypeError):
-                raise ValidationError({"updateDate": "Choose a valid update date."})
+                raise ValidationError({"updateId": "Choose a valid update."})
+            requested_date = parse_generation_date(request.data, update_id=requested_id)
             with transaction.atomic():
                 draft, _ = resolve_update(organization, month=target_month, update_id=requested_id,
                     creation_key=request.data.get("creationKey"), update_date=requested_date)
                 if str(request.data.get("expectedRevision") or "") != str(draft.current_revision_id or ""):
                     raise RevisionConflict()
+                if requested_date is None:
+                    from zoneinfo import ZoneInfo
+                    reporting_zone = ZoneInfo(_startup_profile.reporting_timezone or "UTC")
+                    requested_date = default_generation_date(
+                        draft, today=timezone.now().astimezone(reporting_zone).date(),
+                    )
                 target_month = draft.month
                 period = narrative_window(organization, draft, requested_date,
                     requested_start=request.data.get("narrativeStart"), requested_end=request.data.get("narrativeEnd"))
