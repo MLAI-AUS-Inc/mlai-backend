@@ -121,6 +121,63 @@ class StartupFacadeTests(SimpleTestCase):
         self.assertEqual(result['metricEvidence'], {'revenue': {'quality': 'founder_asserted'}})
         self.assertEqual(result['metrics']['revenue'], '0')
 
+    def _metric_review_fixture(self, config=None):
+        memo = {'kpi_snapshot': [
+            {'metric_key': 'revenue', 'label': 'Revenue', 'unit': 'AUD'},
+            {'metric_key': 'monthlyCosts', 'label': 'Costs', 'unit': 'AUD'},
+        ]}
+        if config is not None:
+            memo['display_config'] = config
+        revision = Obj(structured_memo=memo, validation={}, snapshot=Obj(payload={}))
+        draft = Obj(current_revision=revision, published_revision=revision,
+            current_revision_id=1, published_revision_id=None, organization=Obj(name='Acme'))
+        dto = {
+            'metrics': {'revenue': 'AUD 100', 'monthlyCosts': 'AUD 50'},
+            'metricEvidence': {'revenue': {'quality': 'verified'}, 'monthlyCosts': {'quality': 'verified'}},
+            'metricHistory': {'revenue': [100], 'monthlyCosts': [50]},
+            'financialSnapshot': {'cash': 900},
+            'conciseAnalysis': {'grossMargin': 50},
+            'progressCharts': [{'series': [{'points': [{'value': 50}]}]}],
+            'evidenceSnapshot': {'metrics': [{'key': 'revenue', 'display_value': 'AUD 100'}]},
+        }
+        return draft, dto
+
+    def test_empty_metric_selection_hides_figures_in_existing_chat_review(self):
+        draft, dto = self._metric_review_fixture({'full_metric_keys': [], 'snippet_metric_keys': []})
+        with patch('community_chat.startups.presentation._serialize_monthly_update', return_value=dto):
+            review = update_payload(draft)
+            community = update_payload(draft, community=True)
+        for field in ('metrics', 'metricEvidence', 'metricHistory'):
+            self.assertEqual(review[field], {})
+        for field in ('financialSnapshot', 'conciseAnalysis', 'progressCharts'):
+            self.assertIsNone(review[field])
+        self.assertEqual(community['metrics'], {})
+        self.assertEqual(community['metricEvidence'], {})
+        self.assertNotIn('evidenceSnapshot', community)
+        # The saved revision and owner-only evidence still support editing.
+        self.assertEqual(draft.current_revision.structured_memo['kpi_snapshot'][0]['metric_key'], 'revenue')
+        self.assertEqual(review['evidenceSnapshot']['metrics'][0]['display_value'], 'AUD 100')
+
+    def test_selected_metric_is_the_only_chat_review_figure(self):
+        draft, dto = self._metric_review_fixture({'fullMetricKeys': ['revenue'], 'snippetMetricKeys': []})
+        with patch('community_chat.startups.presentation._serialize_monthly_update', return_value=dto):
+            review = update_payload(draft)
+        self.assertEqual(review['metrics'], {'revenue': 'AUD 100'})
+        self.assertEqual(set(review['metricEvidence']), {'revenue'})
+        self.assertEqual(review['metricHistory'], {'revenue': [100]})
+        self.assertIsNone(review['financialSnapshot'])
+        self.assertIsNone(review['progressCharts'])
+
+    def test_missing_metric_selection_keeps_legacy_chat_display(self):
+        draft, dto = self._metric_review_fixture()
+        with patch('community_chat.startups.presentation._serialize_monthly_update', return_value=dto):
+            review = update_payload(draft)
+        self.assertEqual(review['metrics'], {'revenue': 'AUD 100', 'monthlyCosts': 'AUD 50'})
+        self.assertEqual(set(review['metricEvidence']), {'revenue', 'monthlyCosts'})
+        self.assertEqual(review['metricHistory'], {'revenue': [100], 'monthlyCosts': [50]})
+        self.assertEqual(review['financialSnapshot'], {'cash': 900})
+        self.assertEqual(review['progressCharts'], [{'series': [{'points': [{'value': 50}]}]}])
+
 
 class ReviewPolicyTests(SimpleTestCase):
     def test_manual_write_is_explicitly_asserted(self):
