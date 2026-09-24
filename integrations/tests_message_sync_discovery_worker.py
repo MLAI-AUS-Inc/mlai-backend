@@ -53,15 +53,18 @@ class DiscoveryWorkerCadenceTests(IsolatedAsyncioTestCase):
                 client = SimpleNamespace(
                     _delivery_loop_started=False,
                     _slack_dm_maintenance_started=False,
+                    _slack_user_directory_started=False,
                     delivery_loop=Mock(),
                     slack_dm_discovery_loop=Mock(),
                     slack_dm_history_loop=Mock(),
                     slack_dm_delivery_loop=Mock(),
                     sync_inbox_loop=Mock(),
                     slack_read_state_loop=Mock(),
+                    slack_user_directory_loop=Mock(),
                 )
                 with patch.object(worker.asyncio, "to_thread", new=AsyncMock()):
                     await worker.CommunityBridgeDiscordClient.setup_hook(client)
                     await worker.CommunityBridgeDiscordClient.setup_hook(client)
                 client.slack_dm_discovery_loop.change_interval.assert_called_once_with(seconds=expected)
                 client.slack_dm_discovery_loop.start.assert_called_once()
+                client.slack_user_directory_loop.start.assert_called_once()

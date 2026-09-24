@@ -57,6 +57,7 @@ from integrations.services.message_sync.history import seed_states
 from integrations.services.message_sync.discovery import discovery_poll_seconds
 from integrations.services.message_sync.read_state import refresh_read_state_once
 from integrations.services.message_sync.execution import run_lane
+from integrations.services.slack_workspace_users import warm_workspace_directory_once
 
 logger = logging.getLogger(__name__)
 WORKER_ID = f"{socket.gethostname()}:{os.getpid()}"[:100]
@@ -87,6 +88,7 @@ class CommunityBridgeDiscordClient(discord.Client):
         self._delivery_heartbeat_at = {}
         self._delivery_loop_started = False
         self._slack_dm_maintenance_started = False
+        self._slack_user_directory_started = False
 
     async def setup_hook(self) -> None:
         await asyncio.to_thread(reset_stale_processing_deliveries)
@@ -103,6 +105,9 @@ class CommunityBridgeDiscordClient(discord.Client):
             self.sync_inbox_loop.start()
             self.slack_read_state_loop.start()
             self._slack_dm_maintenance_started = True
+        if not self._slack_user_directory_started:
+            self.slack_user_directory_loop.start()
+            self._slack_user_directory_started = True
 
     async def on_ready(self) -> None:
         logger.info("community_bridge_discord_ready user=%s", getattr(self.user, "id", ""))
@@ -110,7 +115,8 @@ class CommunityBridgeDiscordClient(discord.Client):
     async def close(self) -> None:
         """Stop every maintenance lane before releasing the Discord connection."""
         for loop in (self.delivery_loop, self.slack_dm_delivery_loop,
-                     self.slack_dm_discovery_loop, self.slack_dm_history_loop, self.sync_inbox_loop, self.slack_read_state_loop):
+                     self.slack_dm_discovery_loop, self.slack_dm_history_loop, self.sync_inbox_loop, self.slack_read_state_loop,
+                     self.slack_user_directory_loop):
             loop.cancel()
         await super().close()
 
@@ -207,6 +213,10 @@ class CommunityBridgeDiscordClient(discord.Client):
     @tasks.loop(seconds=5.0)
     async def slack_dm_discovery_loop(self) -> None:
         await asyncio.to_thread(_maintain_chat_accounts)
+
+    @tasks.loop(seconds=3.0)
+    async def slack_user_directory_loop(self) -> None:
+        await _warm_workspace_directory_turn()
 
     @tasks.loop(seconds=HISTORY_REQUEST_INTERVAL_SECONDS)
     async def slack_dm_history_loop(self) -> None:
@@ -980,6 +990,11 @@ async def _run_headless_delivery_worker(client: CommunityBridgeDiscordClient) ->
             await client.process_read_state_once()
             await asyncio.sleep(1.0)
 
+    async def user_directory_loop():
+        while True:
+            await _warm_workspace_directory_turn()
+            await asyncio.sleep(3.0)
+
     async with asyncio.TaskGroup() as group:
         group.create_task(inbox_loop())
         group.create_task(read_state_loop())
@@ -987,6 +1002,7 @@ async def _run_headless_delivery_worker(client: CommunityBridgeDiscordClient) ->
         group.create_task(history_loop())
         group.create_task(delivery_loop())
         group.create_task(private_delivery_loop())
+        group.create_task(user_directory_loop())
 
 
 async def _run_history_workers():
@@ -1007,6 +1023,13 @@ async def _run_discovery_loop() -> None:
     while True:
         await asyncio.to_thread(_maintain_chat_accounts)
         await asyncio.sleep(discovery_poll_seconds())
+
+
+async def _warm_workspace_directory_turn() -> None:
+    try:
+        await asyncio.to_thread(warm_workspace_directory_once)
+    except Exception as exc:
+        logger.warning("slack_user_directory_warm_failed error_code=%s", type(exc).__name__)
 
 
 def _maintain_chat_accounts():

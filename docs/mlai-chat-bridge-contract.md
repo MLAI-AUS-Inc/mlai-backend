@@ -1180,6 +1180,15 @@ members can search the configured community bot's workspace directory when impor
 are paused, disconnected or absent. The bot's `auth.test` workspace must match
 `MESSAGE_SYNC_SLACK_BOT_WORKSPACE_ID`; its credential needs `users:read`. These
 public metadata caches are partitioned by workspace and installation credential.
+The bridge worker warms one `users.list` page per turn into a shared sanitized
+workspace snapshot, then refreshes the complete directory every 15 minutes.
+Until the final page is available, searches continue to use the existing
+resumable page cache. Completed snapshots let a name query search the whole
+workspace immediately; response pages remain limited to 50 people and cursors
+stay bound to a snapshot through refresh. A prior complete snapshot remains
+available while a refresh is in progress. Private-channel searches can use
+that same public-name snapshot only in the configured workspace and still
+validate the owner's live grant and derive membership from the owner's channel.
 Private Slack membership still uses only the owner's live grant. A paused private
 channel or an inaccessible public membership list reports unknown membership,
 never a fabricated empty member list. The configured Public Roo target is returned
