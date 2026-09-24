@@ -294,3 +294,18 @@ WrittenArticle attribution is resolved from the exact tenant-owned saved writing
 ## Article run workflow progress
 
 `workflowProgress.currentStepId` on a specific article run points to that run's current generation, review, revision, or publication action. An incomplete organization baseline remains `ready` in `steps` and in the organization setup wizard; it does not replace the article action in the run-page header. A packaged draft with `article_preview_quality.status=blocking_findings` has a blocked Publish step linked to review. While that quality check is queued, running, or retrying transient findings, Publish is locked. Passed or advisory quality findings retain the normal publishing path. Existing PR or publication evidence remains authoritative for a publish run already in progress or complete.
+
+## Vibe Marketing response size
+
+The bootstrap response keeps complete recent runs in `latestRuns`. Its
+`latestRunsByWorkflow` field is a small index of the newest run per workflow,
+carrying identifiers, status, approval and publish control state. Clients that
+need the run's result or review artifacts use `latestRuns` or the individual
+run endpoint; the index does not repeat those large values.
+
+An individual full article run exposes `reviewDraftHtml`, `componentManifest`,
+`contentPackage`, `sectionIssues`, artifacts and diagnostics in their dedicated
+fields. Its `result` still carries workflow and publish control values, but no
+longer repeats the raw copies of those projected artifacts. This projection
+does not change the saved run or the article approval checks. Compact run
+status responses continue to omit article HTML.

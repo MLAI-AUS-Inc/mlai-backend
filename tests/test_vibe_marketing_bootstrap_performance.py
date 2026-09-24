@@ -3,6 +3,7 @@
 from contextlib import ExitStack
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
+import json
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -135,7 +136,35 @@ class VibeMarketingBootstrapPerformanceTests(SimpleTestCase):
         self.assertEqual(payload["latestRuns"][4]["articleSetupState"], {"source": "article_system_setup"})
         self.assertEqual(standalone["articleSetupState"], {"source": "auto_discovery"})
         self.assertEqual(len(payload["latestRuns"]), len(runs))
-        self.assertIs(payload["latestRunsByWorkflow"]["auto_discovery"], payload["latestRuns"][0])
+        self.assertEqual(
+            payload["latestRunsByWorkflow"]["auto_discovery"]["runId"],
+            payload["latestRuns"][0]["runId"],
+        )
+        self.assertNotIn("result", payload["latestRunsByWorkflow"]["auto_discovery"])
+
+    def test_workflow_index_keeps_run_state_without_reserializing_article_artifacts(self):
+        serialized_run = {
+            "runId": "review-1", "workflow": "article_revision", "status": "awaiting_approval",
+            "currentStep": "await_review", "approvalState": "pending",
+            "sourceRunId": "article-1", "previewUrl": "https://preview.example/article",
+            "publishChildStatus": "queued", "publishChildRecoverable": True,
+            "result": {"article_body": "article text " * 20_000},
+            "reviewDraftHtml": "<article>review</article>" * 8_000,
+            "componentManifest": {"components": [{"body": "component " * 10_000}]},
+        }
+        workflow_ref = views._bootstrap_workflow_run_ref(serialized_run)
+        self.assertEqual(workflow_ref["runId"], "review-1")
+        self.assertEqual(workflow_ref["status"], "awaiting_approval")
+        self.assertEqual(workflow_ref["approvalState"], "pending")
+        self.assertEqual(workflow_ref["sourceRunId"], "article-1")
+        self.assertEqual(workflow_ref["publishChildStatus"], "queued")
+        self.assertIs(workflow_ref["publishChildRecoverable"], True)
+        self.assertNotIn("result", workflow_ref)
+        self.assertNotIn("reviewDraftHtml", workflow_ref)
+        self.assertNotIn("componentManifest", workflow_ref)
+        old_wire_bytes = len(json.dumps({"latestRuns": [serialized_run], "latestRunsByWorkflow": {"article_revision": serialized_run}}))
+        new_wire_bytes = len(json.dumps({"latestRuns": [serialized_run], "latestRunsByWorkflow": {"article_revision": workflow_ref}}))
+        self.assertLess(new_wire_bytes, old_wire_bytes * 0.55)
 
     def test_precomputed_candidates_bypass_progress_recalculation(self):
         checks = {"research": {"passed": True}}
