@@ -45,9 +45,11 @@ from content_factory.article_setup_reset import (
 )
 from content_factory.article_publish_approval import (
     RECEIPT_KEY as ARTICLE_PUBLISH_APPROVAL_RECEIPT_KEY,
+    RECEIPT_REQUIRED_KEY as ARTICLE_PUBLISH_APPROVAL_RECEIPT_REQUIRED_KEY,
     article_publish_approval_receipt_matches,
     article_review_identity,
     article_review_identity_is_complete,
+    article_review_identity_matches_approved_run,
     make_article_publish_approval_receipt,
 )
 from content_factory.article_system import (
@@ -16906,12 +16908,32 @@ def _article_publish_retry_authorized(run):
     Runs approved before durable local receipts existed can retry an already
     recorded child. They cannot initiate a new child from a fresh draft.
     """
-    if ARTICLE_PUBLISH_APPROVAL_RECEIPT_KEY in _run_mapping(run.run_request):
+    run_request = _run_mapping(run.run_request)
+    if ARTICLE_PUBLISH_APPROVAL_RECEIPT_KEY in run_request:
         return article_publish_approval_receipt_matches(run)
+    if ARTICLE_PUBLISH_APPROVAL_RECEIPT_REQUIRED_KEY in run_request:
+        return False
     return bool(
         run.approval_state == ContentFactoryApprovalState.APPROVED
         and _publish_child_run_id_for_run(run)
     )
+
+
+def _require_article_publish_approval_receipt(run, *, expected_identity):
+    """Persist the strict retry gate before sending a new article approval."""
+    with transaction.atomic():
+        current = ContentFactoryRun.objects.select_for_update().get(pk=run.pk)
+        if (
+            not article_review_identity_is_complete(current)
+            or article_review_identity(current) != expected_identity
+        ):
+            return False
+        run_request = dict(current.run_request or {})
+        run_request[ARTICLE_PUBLISH_APPROVAL_RECEIPT_REQUIRED_KEY] = True
+        current.run_request = run_request
+        current.save(update_fields=["run_request", "updated_at"])
+        run.run_request = run_request
+    return True
 
 
 def _record_article_publish_approval_receipt(run, *, actor_id, expected_identity):
@@ -16919,10 +16941,7 @@ def _record_article_publish_approval_receipt(run, *, actor_id, expected_identity
         return False
     with transaction.atomic():
         current = ContentFactoryRun.objects.select_for_update().get(pk=run.pk)
-        if (
-            current.approval_state != ContentFactoryApprovalState.APPROVED
-            or article_review_identity(current) != expected_identity
-        ):
+        if not article_review_identity_matches_approved_run(current, expected_identity):
             return False
         receipt = make_article_publish_approval_receipt(current, actor_id=actor_id)
         if not receipt:
@@ -16935,6 +16954,19 @@ def _record_article_publish_approval_receipt(run, *, actor_id, expected_identity
     return True
 
 
+def _article_publish_approval_receipt_failure(run):
+    return Response(
+        {
+            "detail": (
+                "Article approval reached Content Factory, but the reviewed preview changed "
+                "before its approval receipt was saved. Refresh the article and approve the current preview again."
+            ),
+            "runId": run.run_id,
+        },
+        status=status.HTTP_409_CONFLICT,
+    )
+
+
 class VibeMarketingRunControlView(APIView):
     def post(self, request, run_id, action):
         context, error_response = _resolve_context_or_response(request, require_domain=False)
@@ -16944,7 +16976,12 @@ class VibeMarketingRunControlView(APIView):
         if not _run_belongs_to_context(run, context):
             return Response({"detail": "Run not found."}, status=status.HTTP_404_NOT_FOUND)
 
-        if action == "approve" and run.workflow in ARTICLE_WORKFLOWS and not _is_publish_child_run(run):
+        approval_requires_receipt = (
+            action == "approve"
+            and run.workflow in ARTICLE_WORKFLOWS
+            and not _is_publish_child_run(run)
+        )
+        if approval_requires_receipt:
             latest_revision = _latest_review_ready_component_revision(run, context)
             if latest_revision is not None:
                 return Response(
@@ -16962,7 +16999,7 @@ class VibeMarketingRunControlView(APIView):
 
         approval_review_identity = (
             article_review_identity(run)
-            if action == "approve" and run.workflow in ARTICLE_WORKFLOWS
+            if approval_requires_receipt
             else None
         )
 
@@ -17237,6 +17274,13 @@ class VibeMarketingRunControlView(APIView):
                 action="article_revision",
                 current_balance=gate_balance,
             )
+        if approval_requires_receipt and not _require_article_publish_approval_receipt(
+            run, expected_identity=approval_review_identity
+        ):
+            return Response(
+                {"detail": "The article preview changed before approval. Refresh and review the current preview."},
+                status=status.HTTP_409_CONFLICT,
+            )
         remote_data = _call_content_factory_run_action(
             run_id=remote_run.run_id,
             action=action,
@@ -17397,11 +17441,12 @@ class VibeMarketingRunControlView(APIView):
                 mark_source_approved=True,
             )
             if publish_run is not None:
-                _record_article_publish_approval_receipt(
+                if approval_requires_receipt and not _record_article_publish_approval_receipt(
                     run,
                     actor_id=founder_actor_id_for_user(request.user) or str(request.user.pk),
                     expected_identity=approval_review_identity,
-                )
+                ):
+                    return _article_publish_approval_receipt_failure(run)
                 return Response(_serialize_run(publish_run, context=context), status=status.HTTP_202_ACCEPTED)
 
         if action == "approve":
@@ -17647,12 +17692,12 @@ class VibeMarketingRunControlView(APIView):
                 )
             run.result = result
         run.save(update_fields=["approval_state", "status", "current_step", "resume_available", "result", "error", "updated_at"])
-        if action == "approve" and run.workflow in ARTICLE_WORKFLOWS:
-            _record_article_publish_approval_receipt(
-                run,
-                actor_id=founder_actor_id_for_user(request.user) or str(request.user.pk),
-                expected_identity=approval_review_identity,
-            )
+        if approval_requires_receipt and not _record_article_publish_approval_receipt(
+            run,
+            actor_id=founder_actor_id_for_user(request.user) or str(request.user.pk),
+            expected_identity=approval_review_identity,
+        ):
+            return _article_publish_approval_receipt_failure(run)
         return Response(_serialize_run(run, context=context), status=status.HTTP_200_OK)
 
 

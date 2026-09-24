@@ -7,6 +7,7 @@ import re
 
 
 RECEIPT_KEY = "article_publish_approval_receipt"
+RECEIPT_REQUIRED_KEY = "article_publish_approval_receipt_required"
 ACCEPTED_QUALITY_STATUSES = {"passed", "passed_no_baseline", "advisory_findings"}
 
 
@@ -109,6 +110,15 @@ def make_article_publish_approval_receipt(run, *, actor_id):
         "actor_id": str(actor_id),
         "approved_at": datetime.now(timezone.utc).isoformat(),
     }
+
+
+def article_review_identity_matches_approved_run(run, expected_identity):
+    """Check the saved postapprove run against the review sent for approval."""
+    return bool(
+        str(getattr(run, "approval_state", "") or "").strip() == "approved"
+        and article_review_identity_is_complete(run)
+        and article_review_identity(run) == expected_identity
+    )
 
 
 def article_publish_approval_receipt_matches(run):
