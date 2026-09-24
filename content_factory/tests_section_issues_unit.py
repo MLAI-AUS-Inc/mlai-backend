@@ -1,5 +1,6 @@
 """Contract checks for article section issue presentation and review actions."""
 
+import json
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -112,9 +113,71 @@ class SectionIssueContractTests(SimpleTestCase):
         self.assertNotIn(draft_html, str(compact))
         self.assertEqual(full["reviewDraftHtml"], draft_html)
         self.assertIs(full["reviewDraftActionsAvailable"], True)
+        self.assertNotIn("review_draft_html", full["result"])
+        self.assertEqual(merged["review_draft_html"], draft_html)
         self.assertEqual(malformed["reviewDraftHtml"], "")
         self.assertIs(malformed["reviewDraftActionsAvailable"], False)
         self.assertNotIn("review_draft_html", views.COMPACT_RUN_RESULT_KEYS)
+
+    def test_full_article_run_projects_large_review_artifacts_once(self):
+        now = datetime.now(timezone.utc)
+        draft_html = "<p>Review paragraph</p>" * 8_000
+        manifest = {"components": [{"id": "section:intro", "body": "component body " * 5_000}]}
+        package = {"title": "Example article", "slug": "example-article", "article_markdown": "draft prose " * 8_000}
+        raw_result = {
+            "review_draft_html": draft_html,
+            "component_manifest": manifest,
+            "delivery_package": package,
+            "artifacts": [{"detail": "artifact detail " * 1_000}],
+            "diagnostics": {"log": "diagnostic line " * 1_000},
+            "section_issues": [{"section_id": "section:intro", "claim_id": "claim-001", "state": "needs_review", "reason": "Evidence needs review."}],
+            "latest_control_response": {
+                "review_draft_html": draft_html,
+                "delivery_package": package,
+                "publish_child_status": "queued",
+            },
+            "publish_handoff_pending": True,
+            "publish_child_run_id": "publish-1",
+            "approval_receipt": {"run_id": "review-1", "approved": False},
+        }
+        run = SimpleNamespace(
+            run_id="review-1", workflow="article_revision", domain="example.test", github_repo="example/repo",
+            status="awaiting_approval", current_step="await_review", approval_state="pending",
+            resume_available=False, created_at=now, updated_at=now, step_order=[],
+            steps=SimpleNamespace(order_by=lambda *args: []), result=raw_result, run_request={},
+            acceptance_summary={}, verification_summary={}, error="",
+        )
+        with (
+            patch.object(views, "_article_setup_state", return_value={}),
+            patch.object(views, "_workflow_progress", return_value={}),
+            patch.object(views, "_live_preview_from_run", return_value={"available": True}),
+            patch.object(views, "_run_content_island_payload", return_value=None),
+            patch.object(views, "_article_restart_available", return_value=False),
+            patch.object(views, "_run_source_run_id", return_value="article-1"),
+            patch.object(views, "_content_package_from_run", return_value={"title": "Example article", "contentPackaged": True}),
+            patch.object(views, "_component_manifest_from_run", return_value=manifest),
+            patch.object(views, "_component_feedback_from_run", return_value={}),
+        ):
+            serialized = views._serialize_run(run, mode="full")
+
+        self.assertEqual(serialized["reviewDraftHtml"], draft_html)
+        self.assertEqual(serialized["componentManifest"], manifest)
+        self.assertEqual(serialized["contentPackage"]["title"], "Example article")
+        self.assertEqual(serialized["artifacts"], raw_result["artifacts"])
+        self.assertEqual(serialized["diagnostics"], raw_result["diagnostics"])
+        self.assertEqual(serialized["sectionIssues"][0]["sectionId"], "section:intro")
+        self.assertEqual(serialized["approvalState"], "pending")
+        self.assertEqual(serialized["sourceRunId"], "article-1")
+        self.assertEqual(serialized["result"]["publish_child_run_id"], "publish-1")
+        self.assertTrue(serialized["result"]["publish_handoff_pending"])
+        self.assertEqual(serialized["result"]["approval_receipt"], raw_result["approval_receipt"])
+        self.assertEqual(serialized["result"]["latest_control_response"], {"publish_child_status": "queued"})
+        for key in ("review_draft_html", "component_manifest", "delivery_package", "artifacts", "diagnostics", "section_issues"):
+            self.assertNotIn(key, serialized["result"])
+            self.assertIn(key, raw_result)  # No mutation of the persisted run.
+        old_wire_bytes = len(json.dumps({**serialized, "result": raw_result}))
+        new_wire_bytes = len(json.dumps(serialized))
+        self.assertLess(new_wire_bytes, old_wire_bytes * 0.55)
 
     def test_delete_action_is_explicit_and_bound_to_exact_section(self):
         input_payload = {

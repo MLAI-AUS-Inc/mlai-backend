@@ -10432,6 +10432,37 @@ def _strip_missing_setup_run_refs(result):
     return scrubbed
 
 
+def _article_result_without_projected_artifacts(
+    result, *, review_draft_html, component_manifest, content_package,
+):
+    """Keep article control state while avoiding duplicate review artifacts.
+
+    The full run response has dedicated, normalized fields for these values.
+    Remote responses can also repeat them under ``result`` and
+    ``latest_control_response``. This is a response-only projection: the stored
+    result and its approval/publish evidence are never changed.
+    """
+    omitted = set()
+    if review_draft_html:
+        omitted.update({"review_draft_html", "reviewDraftHtml"})
+    if component_manifest is not None:
+        omitted.update({"component_manifest", "componentManifest"})
+    if content_package is not None:
+        omitted.update({"delivery_package", "deliveryPackage", "content_package", "contentPackage"})
+
+    def project(mapping, depth, *, root=False):
+        excluded = omitted | ({"section_issues", "sectionIssues", "artifacts", "diagnostics"} if root else set())
+        return {
+            key: project(value, depth - 1)
+            if depth and key in {"result", "latest_control_response"} and isinstance(value, dict)
+            else value
+            for key, value in mapping.items()
+            if key not in excluded
+        }
+
+    return project(result, 2, root=True)
+
+
 def _serialize_run(
     run, *, context=None, latest_runs=None, checks=None, mode="full",
     topic_candidates=None, precomputed_article_setup_state=None,
@@ -10533,6 +10564,16 @@ def _serialize_run(
         }
     content_package = _content_package_from_run(run)
     component_manifest = _component_manifest_from_run(run)
+    # The review page reads these large artifacts from their dedicated fields.
+    # Keeping their raw worker copies in result can send an article/manifest
+    # several times in a single full run response. Leave workflow, approval and
+    # publish control values in result for existing clients.
+    response_result = _article_result_without_projected_artifacts(
+        result,
+        review_draft_html=review_draft_html,
+        component_manifest=component_manifest,
+        content_package=content_package,
+    ) if run.workflow in ARTICLE_WORKFLOWS else result
     return {
         "runId": run.run_id,
             "editorialSnapshot": editorial_snapshot,
@@ -10586,7 +10627,7 @@ def _serialize_run(
         "workflowProgress": _workflow_progress(
             context=context, run=run, latest_runs=latest_runs, checks=checks, topic_candidates=topic_candidates
         ),
-        "result": _strip_missing_setup_run_refs(result),
+        "result": _strip_missing_setup_run_refs(response_result),
         **reliability_presentation(result),
     }
 
@@ -10950,6 +10991,19 @@ def _serialize_bootstrap(context, request=None, *, view="full"):
     return _overlay_live_bootstrap_fields(payload, context=context, request=request)
 
 
+_BOOTSTRAP_WORKFLOW_RUN_FIELDS = (
+    "runId", "workflow", "status", "currentStep", "approvalState", "sourceRunId",
+    "resumeAvailable", "restartAvailable", "retryAvailable", "updatedAt",
+    "previewUrl", "prUrl", "routePath", "blockingReason", "blockingCode",
+    "publishChildStatus", "publishChildRecoverable", "publishChildWaitReason",
+)
+
+
+def _bootstrap_workflow_run_ref(serialized_run):
+    """Small workflow index; the complete item remains in latestRuns."""
+    return {key: serialized_run.get(key) for key in _BOOTSTRAP_WORKFLOW_RUN_FIELDS}
+
+
 def _compute_bootstrap_payload(context, request=None, *, view="full", config=None):
     compact = view == "summary"
     if config is None:
@@ -11042,7 +11096,9 @@ def _compute_bootstrap_payload(context, request=None, *, view="full", config=Non
     ]
     latest_runs_by_workflow = {}
     for serialized_run in serialized_runs:
-        latest_runs_by_workflow.setdefault(serialized_run["workflow"], serialized_run)
+        latest_runs_by_workflow.setdefault(
+            serialized_run["workflow"], _bootstrap_workflow_run_ref(serialized_run)
+        )
     latest_article_run = _latest_run_matching(latest_runs, ARTICLE_WORKFLOWS)
     google_status = google_baseline_connection_status(context.profile.user, context.organization)
     google_status["connectUrl"] = _google_baseline_connect_url(request, context)
