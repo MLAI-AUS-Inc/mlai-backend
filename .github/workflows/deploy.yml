@@ -225,6 +225,8 @@ jobs:
           tests.test_content_factory_callback_idempotency \
           tests.test_content_factory_reconciliation \
           tests.test_content_factory_status_contract \
+          content_factory.tests_section_issues_unit \
+          tests.test_vibe_marketing_component_comments.VibeMarketingComponentCommentTests.test_failed_package_review_draft_can_submit_section_deletion \
           tests.test_vibe_marketing_workflow_progress_unit \
           content_factory.tests_admin_metrics \
           tests.test_community_bridge_adapter_url \
