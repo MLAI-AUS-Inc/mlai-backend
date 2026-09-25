@@ -1255,6 +1255,17 @@ The bot token is never used to read private messages or invite people. DM direct
 requests without `channel_id`, invitations and DM creation retain their existing
 owner-consent requirements.
 
+DM directory reads without `channel_id` also reuse the warmed workspace snapshot
+and its versioned pagination. If no snapshot exists, owner-scoped sanitized pages
+are shared between name searches for ten minutes. Owner consent is checked before
+reading cached people and again before returning. DM pages omit the owner and
+bots, and expose optional `pubkey` and `profile_id` from the existing verified
+identity resolver. Links are resolved live on every page, never stored with the
+cached names or inferred from matching names. Clients can combine native and
+Slack directories using this verified key and choose an available common
+transport for the recipients. A native-only person and an unlinked Slack-only
+person still have no common private conversation transport.
+
 Explicit `slack-mention` tags preserve selected Slack IDs through public and
 owner-private deliveries. The worker validates workspace identities and excludes
 code spans when converting labels to Slack mention syntax. Non-members may be

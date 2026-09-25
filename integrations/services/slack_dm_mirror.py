@@ -647,61 +647,13 @@ def search_slack_users(
     limit: int = 20,
     cursor: str = "",
 ) -> dict[str, Any]:
-    """Search the owner's internal Slack human directory without emails."""
+    """Search cached workspace people and expose their verified Chat identities."""
+    from integrations.services.slack_dm_directory import search_dm_directory
 
-    query_text = str(query or "").strip().casefold()
-    if len(query_text) > 100:
-        raise SlackDmMirrorError("Slack user search is limited to 100 characters.")
-    result_limit = max(1, min(int(limit), 50))
-    slack_cursor, offset = _decode_directory_cursor(cursor)
-    authority = _capture_slack_grant_api_authority(grant)
-    users: list[dict[str, str]] = []
-    next_cursor = ""
-    pages = 0
-    while len(users) < result_limit and pages < 20:
-        page_cursor = slack_cursor
-        response = _call_slack_with_grant_authority(
-            authority,
-            "users_list",
-            required_scopes=DIRECT_DM_SCOPES,
-            limit=200,
-            cursor=page_cursor,
-        )
-        pages += 1
-        members = [
-            member
-            for member in response.get("members") or []
-            if isinstance(member, dict)
-            and _is_eligible_slack_user(
-                member,
-                workspace_id=grant.slack_workspace_id,
-                owner_slack_user_id=grant.slack_user_id,
-            )
-        ]
-        matches = [
-            _serialize_slack_user(member)
-            for member in members
-            if _slack_user_matches(member, query_text)
-        ]
-        matches = matches[offset:]
-        remaining = result_limit - len(users)
-        users.extend(matches[:remaining])
-        consumed = min(len(matches), remaining)
-        if consumed < len(matches):
-            next_cursor = _encode_directory_cursor(page_cursor, offset + consumed)
-            break
-        slack_cursor = str(
-            (response.get("response_metadata") or {}).get("next_cursor") or ""
-        ).strip()
-        offset = 0
-        if not slack_cursor:
-            break
-        if len(users) >= result_limit:
-            next_cursor = _encode_directory_cursor(slack_cursor, 0)
-            break
-    if not next_cursor and slack_cursor:
-        next_cursor = _encode_directory_cursor(slack_cursor, 0)
-    return {"users": users, "next_cursor": next_cursor}
+    return search_dm_directory(
+        _capture_slack_grant_api_authority(grant),
+        query=query, limit=limit, cursor=cursor,
+    )
 
 
 def _store_conversation_membership_intent(
