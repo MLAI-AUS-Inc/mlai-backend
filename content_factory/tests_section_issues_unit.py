@@ -12,6 +12,37 @@ from content_factory import vibe_marketing_views as views
 
 
 class SectionIssueContractTests(SimpleTestCase):
+    def test_hosted_quality_issues_appear_in_full_and_compact_article_views(self):
+        from content_factory.tests_hosted_quality_issues_unit import sixth_shaped_report
+
+        quality, preview, manifest = sixth_shaped_report()
+        now = datetime.now(timezone.utc)
+        run = SimpleNamespace(
+            run_id="article-review-1", workflow="article_revision", domain="mlai.au", github_repo="example/repo",
+            status="awaiting_approval", current_step="await_review", approval_state="approval_required",
+            resume_available=False, created_at=now, updated_at=now, step_order=[],
+            steps=SimpleNamespace(order_by=lambda *args: [], all=lambda: []),
+            result={"article_preview_quality": quality, "live_preview": preview,
+                    "content_package": {"component_manifest": manifest}},
+            run_request={}, acceptance_summary={}, verification_summary={}, error="",
+        )
+        with (
+            patch.object(views, "_article_setup_state", return_value={}),
+            patch.object(views, "_workflow_progress", return_value={}),
+            patch.object(views, "_run_content_island_payload", return_value=None),
+            patch.object(views, "_article_restart_available", return_value=False),
+            patch.object(views, "_run_source_run_id", return_value=""),
+            patch.object(views, "_component_feedback_from_run", return_value={}),
+        ):
+            compact = views._serialize_run(run, mode="status")
+            full = views._serialize_run(run, mode="full")
+        for response in (compact, full):
+            self.assertEqual(
+                [(item["claimId"], item["componentId"]) for item in response["hostedQualityIssues"]],
+                [("claim-150", "resource-cta"), ("claim-158", "image:test-assistant"), ("claim-174", None)],
+            )
+        self.assertNotIn("contentPackage", compact)
+
     def test_projection_is_bounded_and_never_returns_raw_diagnostics(self):
         issues = public_section_issues(
             [
