@@ -133,7 +133,7 @@ def sanitized_directory_page(response, workspace):
         "users": [
             {
                 **mirror._serialize_slack_user(user),
-                "is_bot": bool(user.get("is_bot") or user.get("is_app_user")),
+                "is_bot": bool(user.get("is_bot") or user.get("is_app_user") or user.get("bot_id")),
                 "real_name": str(
                     (user.get("profile") or {}).get("real_name")
                     or user.get("real_name")

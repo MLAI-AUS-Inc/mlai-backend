@@ -627,6 +627,11 @@ class SlackDmMirrorApiTests(APITestCase):
                     "slack_user_id": "UHUMAN",
                     "display_name": "Alice",
                     "avatar_url": "https://example.com/alice.png",
+                    "is_bot": False,
+                    "real_name": "",
+                    "username": "alice",
+                    "pubkey": None,
+                    "profile_id": None,
                 }
             ],
         )
