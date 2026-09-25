@@ -43,6 +43,15 @@ from content_factory.article_setup_reset import (
     clear_cancelled_article_setup_config,
     reset_article_setup_config,
 )
+from content_factory.article_publish_approval import (
+    RECEIPT_KEY as ARTICLE_PUBLISH_APPROVAL_RECEIPT_KEY,
+    RECEIPT_REQUIRED_KEY as ARTICLE_PUBLISH_APPROVAL_RECEIPT_REQUIRED_KEY,
+    article_publish_approval_receipt_matches,
+    article_review_identity,
+    article_review_identity_is_complete,
+    article_review_identity_matches_approved_run,
+    make_article_publish_approval_receipt,
+)
 from content_factory.article_system import (
     PUBLISH_DISCONNECTED_KEY,
     article_system_ready,
@@ -8349,7 +8358,7 @@ def _latest_review_ready_component_revision(run, context):
     denormalized component_feedback_revision_run_id metadata.
     """
 
-    if not run or run.workflow not in ARTICLE_WORKFLOWS:
+    if not run or run.workflow not in ARTICLE_WORKFLOWS or not _run_belongs_to_context(run, context):
         return None
     candidates = list(
         ContentFactoryRun.objects.filter(
@@ -8357,26 +8366,32 @@ def _latest_review_ready_component_revision(run, context):
             workflow="article_revision",
         ).order_by("created_at", "id")
     )
-    candidates = [
-        candidate
-        for candidate in candidates
-        if _run_belongs_to_context(candidate, context)
-        and _component_revision_is_review_ready(candidate)
-    ]
-    current = run
+    children_by_source = {}
+    owned_candidates = []
+    for candidate in candidates:
+        if not _run_belongs_to_context(candidate, context):
+            continue
+        owned_candidates.append(candidate)
+        children_by_source.setdefault(_run_source_run_id(candidate), []).append(candidate)
+
+    # A failed or still-running intermediate revision may already have a newer
+    # review-ready child. Traverse the entire owned lineage before choosing the
+    # newest reviewable descendant; filtering first would hide that child.
     visited = {run.run_id}
-    while True:
-        children = [
-            candidate
-            for candidate in candidates
-            if candidate.run_id not in visited
-            and _run_source_run_id(candidate) == current.run_id
-        ]
-        if not children:
-            break
-        current = children[-1]
-        visited.add(current.run_id)
-    return current if current.pk != run.pk else None
+    pending = [run.run_id]
+    while pending:
+        source_run_id = pending.pop()
+        for child in children_by_source.get(source_run_id, []):
+            if child.run_id in visited:
+                continue
+            visited.add(child.run_id)
+            pending.append(child.run_id)
+
+    latest = None
+    for candidate in owned_candidates:
+        if candidate.pk != run.pk and candidate.run_id in visited and _component_revision_is_review_ready(candidate):
+            latest = candidate
+    return latest
 
 
 def _run_can_promote_package(run, config=None):
@@ -16604,6 +16619,8 @@ class VibeMarketingRunCommentsAcceptRevisionView(VibeMarketingRunCommentsMixin, 
         context, run, error_response = self._resolve_run(request, run_id)
         if error_response is not None:
             return error_response
+        if run.workflow != "article_revision":
+            return Response({"detail": "Only a completed article revision can be accepted."}, status=status.HTTP_400_BAD_REQUEST)
         run_request = run.run_request if isinstance(run.run_request, dict) else {}
         result = run.result or {}
         source_run_id = str(
@@ -16628,6 +16645,16 @@ class VibeMarketingRunCommentsAcceptRevisionView(VibeMarketingRunCommentsMixin, 
             return Response({"detail": "Feedback batch id is required."}, status=status.HTTP_400_BAD_REQUEST)
         if run.status != ContentFactoryRunStatus.COMPLETED:
             return Response({"detail": "The revised article must be completed before accepting feedback."}, status=status.HTTP_400_BAD_REQUEST)
+        identity = article_review_identity(run)
+        if not article_review_identity_is_complete(run) or any((
+            str(request.data.get("reviewedRunId") or "").strip() != identity["run_id"],
+            str(request.data.get("reviewedPreviewUrl") or "").strip() != identity["preview_url"],
+            str(request.data.get("reviewedPreviewRevision") or "").strip() != identity["commit_sha"],
+        )):
+            return Response(
+                {"detail": "The revised article preview and quality review must match this revision before feedback can be accepted."},
+                status=status.HTTP_409_CONFLICT,
+            )
 
         promoted_count, archived_count = _promote_editorial_feedback_batch(
             run=source_run, batch_id=batch_id, revision_run_id=run.run_id
@@ -16887,6 +16914,71 @@ def _accepted_component_revision_for_publish(run, context):
     return latest_revision or revision_run
 
 
+def _article_publish_retry_authorized(run):
+    """Only an approved review may create or repair a publish handoff.
+
+    Runs approved before durable local receipts existed can retry an already
+    recorded child. They cannot initiate a new child from a fresh draft.
+    """
+    run_request = _run_mapping(run.run_request)
+    if ARTICLE_PUBLISH_APPROVAL_RECEIPT_KEY in run_request:
+        return article_publish_approval_receipt_matches(run)
+    if ARTICLE_PUBLISH_APPROVAL_RECEIPT_REQUIRED_KEY in run_request:
+        return False
+    return bool(
+        run.approval_state == ContentFactoryApprovalState.APPROVED
+        and _publish_child_run_id_for_run(run)
+    )
+
+
+def _require_article_publish_approval_receipt(run, *, expected_identity):
+    """Persist the strict retry gate before sending a new article approval."""
+    with transaction.atomic():
+        current = ContentFactoryRun.objects.select_for_update().get(pk=run.pk)
+        if (
+            not article_review_identity_is_complete(current)
+            or article_review_identity(current) != expected_identity
+        ):
+            return False
+        run_request = dict(current.run_request or {})
+        run_request[ARTICLE_PUBLISH_APPROVAL_RECEIPT_REQUIRED_KEY] = True
+        current.run_request = run_request
+        current.save(update_fields=["run_request", "updated_at"])
+        run.run_request = run_request
+    return True
+
+
+def _record_article_publish_approval_receipt(run, *, actor_id, expected_identity):
+    if not article_review_identity_is_complete(run):
+        return False
+    with transaction.atomic():
+        current = ContentFactoryRun.objects.select_for_update().get(pk=run.pk)
+        if not article_review_identity_matches_approved_run(current, expected_identity):
+            return False
+        receipt = make_article_publish_approval_receipt(current, actor_id=actor_id)
+        if not receipt:
+            return False
+        run_request = dict(current.run_request or {})
+        run_request[ARTICLE_PUBLISH_APPROVAL_RECEIPT_KEY] = receipt
+        current.run_request = run_request
+        current.save(update_fields=["run_request", "updated_at"])
+        run.run_request = run_request
+    return True
+
+
+def _article_publish_approval_receipt_failure(run):
+    return Response(
+        {
+            "detail": (
+                "Article approval reached Content Factory, but the reviewed preview changed "
+                "before its approval receipt was saved. Refresh the article and approve the current preview again."
+            ),
+            "runId": run.run_id,
+        },
+        status=status.HTTP_409_CONFLICT,
+    )
+
+
 class VibeMarketingRunControlView(APIView):
     def post(self, request, run_id, action):
         context, error_response = _resolve_context_or_response(request, require_domain=False)
@@ -16895,6 +16987,33 @@ class VibeMarketingRunControlView(APIView):
         run = get_object_or_404(ContentFactoryRun, run_id=run_id)
         if not _run_belongs_to_context(run, context):
             return Response({"detail": "Run not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        approval_requires_receipt = (
+            action == "approve"
+            and run.workflow in ARTICLE_WORKFLOWS
+            and not _is_publish_child_run(run)
+        )
+        if approval_requires_receipt:
+            latest_revision = _latest_review_ready_component_revision(run, context)
+            if latest_revision is not None:
+                return Response(
+                    {
+                        "detail": "A newer article revision is ready. Review and approve that draft instead.",
+                        "latestRunId": latest_revision.run_id,
+                    },
+                    status=status.HTTP_409_CONFLICT,
+                )
+            if not article_review_identity_is_complete(run):
+                return Response(
+                    {"detail": "The hosted article preview and quality review must match this revision before approval."},
+                    status=status.HTTP_409_CONFLICT,
+                )
+
+        approval_review_identity = (
+            article_review_identity(run)
+            if approval_requires_receipt
+            else None
+        )
 
         payload = dict(request.data or {})
         payload.setdefault("request_source", CONTENT_FACTORY_REQUEST_SOURCE)
@@ -17112,6 +17231,11 @@ class VibeMarketingRunControlView(APIView):
                 remote_run = accepted_revision
                 payload.setdefault("review_source_run_id", run.run_id)
                 payload.setdefault("source_run_id", accepted_revision.run_id)
+            if not _article_publish_retry_authorized(remote_run):
+                return Response(
+                    {"detail": "Approve this exact article preview before publishing it."},
+                    status=status.HTTP_409_CONFLICT,
+                )
             # Prefer the newest revision's child. An older source may already
             # have a completed publish child from the regression this path is
             # designed to repair; returning it would publish/reopen stale code.
@@ -17161,6 +17285,13 @@ class VibeMarketingRunControlView(APIView):
                 domain=context.organization.domain,
                 action="article_revision",
                 current_balance=gate_balance,
+            )
+        if approval_requires_receipt and not _require_article_publish_approval_receipt(
+            run, expected_identity=approval_review_identity
+        ):
+            return Response(
+                {"detail": "The article preview changed before approval. Refresh and review the current preview."},
+                status=status.HTTP_409_CONFLICT,
             )
         remote_data = _call_content_factory_run_action(
             run_id=remote_run.run_id,
@@ -17212,6 +17343,12 @@ class VibeMarketingRunControlView(APIView):
                     "contentFactoryStatusCode": remote_status_code,
                 },
                 status=remote_status_code,
+            )
+
+        if action == "approve" and remote_data.get("error"):
+            return Response(
+                {"detail": str(remote_data["error"]), "runId": run.run_id},
+                status=status.HTTP_502_BAD_GATEWAY,
             )
 
         if action == "retry-preview-quality":
@@ -17316,6 +17453,12 @@ class VibeMarketingRunControlView(APIView):
                 mark_source_approved=True,
             )
             if publish_run is not None:
+                if approval_requires_receipt and not _record_article_publish_approval_receipt(
+                    run,
+                    actor_id=founder_actor_id_for_user(request.user) or str(request.user.pk),
+                    expected_identity=approval_review_identity,
+                ):
+                    return _article_publish_approval_receipt_failure(run)
                 return Response(_serialize_run(publish_run, context=context), status=status.HTTP_202_ACCEPTED)
 
         if action == "approve":
@@ -17561,6 +17704,12 @@ class VibeMarketingRunControlView(APIView):
                 )
             run.result = result
         run.save(update_fields=["approval_state", "status", "current_step", "resume_available", "result", "error", "updated_at"])
+        if approval_requires_receipt and not _record_article_publish_approval_receipt(
+            run,
+            actor_id=founder_actor_id_for_user(request.user) or str(request.user.pk),
+            expected_identity=approval_review_identity,
+        ):
+            return _article_publish_approval_receipt_failure(run)
         return Response(_serialize_run(run, context=context), status=status.HTTP_200_OK)
 
 
