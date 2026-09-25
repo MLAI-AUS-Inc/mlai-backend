@@ -505,6 +505,7 @@ REST_FRAMEWORK = {
         'community_chat_link_preview': os.getenv('COMMUNITY_CHAT_LINK_PREVIEW_RATE', '300/minute'),
         'community_chat_slack_snapshot_device': os.getenv('COMMUNITY_CHAT_SLACK_SNAPSHOT_DEVICE_RATE', '120/minute'),
         'community_chat_slack_snapshot_account': os.getenv('COMMUNITY_CHAT_SLACK_SNAPSHOT_ACCOUNT_RATE', '600/minute'),
+        'community_chat_slack_open': os.getenv('COMMUNITY_CHAT_SLACK_OPEN_RATE', '60/minute'),
         'community_chat_slack_read_receipt': os.getenv('COMMUNITY_CHAT_SLACK_READ_RECEIPT_RATE', '60/minute'),
         'community_chat_home': os.getenv('COMMUNITY_CHAT_HOME_RATE', '60/minute'),
         'community_chat_upcoming_events': os.getenv('COMMUNITY_CHAT_UPCOMING_EVENTS_RATE', '60/minute'),

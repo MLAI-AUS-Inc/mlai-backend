@@ -408,26 +408,9 @@ def mark_inventory_unread(user, *, public_key, slack_conversation_id):
     return mark_unread(user, public_key=public_key, channel_id=source_id)
 
 
-def request_open(user, *, public_key, slack_conversation_id):
-    """Prioritize existing consented discovery for one verified owner row."""
-    grant, authority, device, _ = _authorized(user, public_key)
-    source_id = str(slack_conversation_id or "").strip()
-    row = grant.owner_conversation_inventory.filter(slack_conversation_id=source_id).first()
-    if row is None:
-        raise InventoryError("inventory_conversation_unavailable", 404)
-    if row.eligibility != "eligible":
-        raise InventoryError(row.eligibility, 409)
-    if row.kind == "public_channel":
-        bridge = CommunityBridgeChannel.objects.filter(
-            slack_workspace_id=authority.workspace_id,
-            slack_channel_id=source_id,
-            destination_platform=CommunityBridgePlatform.BUZZ,
-            enabled=True,
-        ).first()
-        channel_id = _valid_uuid(bridge.destination_channel_id) if bridge is not None else None
-        if channel_id is None:
-            raise InventoryError("public_mapping_required", 409)
-        return 200, {"state": "ready", "mlai_channel_id": channel_id}
+def _validate_open_source(grant, authority, row):
+    """Recheck source membership and history consent in the discovery worker."""
+    source_id = row.slack_conversation_id
     days = _grant_history_days(grant)
     if days and row.source_archived is True:
         raise InventoryError("inventory_history_consent_required", 409)
@@ -501,34 +484,52 @@ def request_open(user, *, public_key, slack_conversation_id):
             raise InventoryError("slack_upstream_unavailable", 502)
     if days and activity < time.time() - days * 86400:
         raise InventoryError("inventory_history_consent_required", 409)
+    return details, activity
+
+
+def request_open(user, *, public_key, slack_conversation_id):
+    """Resolve a ready mirror or queue one bounded owner/device-scoped import."""
+    from integrations.services.slack_open_requests import complete_open_locked, enqueue_open_locked
+
+    grant, authority, device, _ = _authorized(user, public_key)
+    source_id = str(slack_conversation_id or "").strip()
     with transaction.atomic():
-        locked_grant, connection = _lock_slack_grant_api_authority(
+        grant, connection = _lock_slack_grant_api_authority(
             authority, required_scopes={"im:read"},
         )
         if not CommunityChatDevice.objects.filter(
             pk=device.pk, user=user, public_key=device.public_key,
             status="verified", revoked_at__isnull=True,
+            verified_at=device.verified_at,
         ).exists():
             raise InventoryError("device_unverified", 403)
         if not has_metadata_consent(connection, authority):
             raise InventoryError("inventory_consent_required", 403)
-        if not locked_grant.owner_conversation_inventory.filter(
-            pk=row.pk, eligibility="eligible",
-        ).exists():
+        row = grant.owner_conversation_inventory.filter(slack_conversation_id=source_id).first()
+        if row is None:
             raise InventoryError("inventory_conversation_unavailable", 404)
-        mirror = catalog_conversations(locked_grant.conversations.filter(
+        if row.eligibility != "eligible":
+            raise InventoryError(row.eligibility, 409)
+        if row.kind == "public_channel":
+            bridge = CommunityBridgeChannel.objects.filter(
+                slack_workspace_id=authority.workspace_id, slack_channel_id=source_id,
+                destination_platform=CommunityBridgePlatform.BUZZ, enabled=True,
+            ).first()
+            channel_id = _valid_uuid(bridge.destination_channel_id) if bridge is not None else None
+            if channel_id is None:
+                raise InventoryError("public_mapping_required", 409)
+            return 200, {"state": "ready", "mlai_channel_id": channel_id}
+        if _grant_history_days(grant) and row.source_archived is True:
+            raise InventoryError("inventory_history_consent_required", 409)
+        mirror = catalog_conversations(grant.conversations.filter(
             slack_conversation_id=source_id,
         )).first()
         if mirror is not None:
-            mirror.grant = locked_grant
-            if (
-                device.public_key in (mirror.participant_buzz_pubkeys or [])
-                and mirror.mlai_channel_id
-                and ready_for_display(mirror, public_key=device.public_key)
-            ):
+            mirror.grant = grant
+            if (device.public_key in (mirror.participant_buzz_pubkeys or [])
+                    and mirror.mlai_channel_id
+                    and ready_for_display(mirror, public_key=device.public_key)):
+                complete_open_locked(connection, device, source_id)
                 return 200, {"state": "ready", "mlai_channel_id": str(mirror.mlai_channel_id)}
-        # The importer owns membership, source window and relay provisioning.
-        # This hint changes no consent, history range or shared bridge mapping.
-        locked_grant.last_discovery_at = None
-        locked_grant.save(update_fields=("last_discovery_at", "updated_at"))
-    return 202, {"state": "importing", "mlai_channel_id": None, "retry_after_seconds": 10}
+        payload = enqueue_open_locked(grant, connection, authority, device, row)
+    return 202, payload

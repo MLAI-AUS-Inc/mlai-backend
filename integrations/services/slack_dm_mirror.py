@@ -2724,6 +2724,10 @@ def discover_conversations(
     ):
         raise SlackDmMirrorError("Re-authorize Slack before discovering DMs.")
     authority = _capture_slack_grant_api_authority(grant)
+    from integrations.services.slack_open_requests import process_next_open
+
+    if process_next_open(grant, authority):
+        return 1
     include_group_dms = GROUP_DM_SCOPES.issubset(set(grant.connection.scopes or []))
     conversation_types = "im,mpim" if include_group_dms else "im"
     if private_channels_enabled(grant):
@@ -3035,6 +3039,9 @@ def discover_conversations(
             needs_followup = needs_followup or bool(
                 (locked_connection.sync_cursor or {}).get(DEVICE_AUDIENCE_HINT)
             )
+            from .slack_open_requests import has_pending_opens
+
+            needs_followup = needs_followup or has_pending_opens(locked_connection.sync_cursor)
             raw_pending = (locked_connection.sync_cursor or {}).get(
                 PENDING_EVENT_CHECKPOINT_KEY,
                 [],
