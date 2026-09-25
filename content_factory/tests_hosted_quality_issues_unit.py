@@ -81,6 +81,12 @@ class HostedQualityIssueTests(unittest.TestCase):
         issues = public_hosted_quality_issues(quality, preview, manifest, resume_generation=0)
         self.assertIsNone(issues[1]["componentId"])
 
+    def test_other_resource_claims_do_not_guess_the_cta(self):
+        quality, preview, manifest = sixth_shaped_report()
+        quality["visible_content_acceptance"]["errors"][0] = "claim-150: A paragraph needs another source"
+        issues = public_hosted_quality_issues(quality, preview, manifest, resume_generation=0)
+        self.assertIsNone(issues[0]["componentId"])
+
     def test_errors_are_bounded_and_redacted(self):
         quality, preview, manifest = sixth_shaped_report()
         changed = deepcopy(quality)
