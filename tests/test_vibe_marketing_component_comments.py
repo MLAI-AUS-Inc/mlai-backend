@@ -4298,6 +4298,22 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         revision_run.refresh_from_db()
         self.assertEqual(self.run.result["publish_child_run_id"], "article-publish-child-from-revision")
         self.assertEqual(revision_run.result["publish_child_run_id"], "article-publish-child-from-revision")
+        steps = {step["id"]: step for step in response.data["workflowProgress"]["steps"]}
+        self.assertEqual(steps["publish"]["status"], "running")
+        self.assertEqual(steps["revise"]["status"], "complete")
+        self.assertIsNone(steps["revise"].get("primaryAction"))
+
+        # The selected revision can lack a feedback batch of its own even
+        # after founder approval. The running publish child still closes review.
+        self.run.result.pop("component_feedback_latest_batch")
+        self.run.save(update_fields=["result", "updated_at"])
+        progress = _workflow_progress(
+            run=revision_run, latest_runs=[publish_run, revision_run, self.run], checks={},
+        )
+        revision_steps = {step["id"]: step for step in progress["steps"]}
+        self.assertEqual(revision_steps["publish"]["status"], "running")
+        self.assertEqual(revision_steps["revise"]["status"], "complete")
+        self.assertIsNone(revision_steps["revise"].get("primaryAction"))
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
     def test_stale_run_view_and_publish_target_latest_review_ready_revision(self):

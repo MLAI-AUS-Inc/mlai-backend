@@ -9732,6 +9732,13 @@ def _workflow_progress(*, context=None, run=None, latest_runs=None, checks=None,
         href_by_id["revise"] = _run_url(article_run)
         run_by_id["revise"] = article_run.run_id
 
+    # A publish handoff is proof that this review stage was accepted. A
+    # revision's own feedback batch may be absent, so do not present its old
+    # "Accept revised article" action while the child is publishing.
+    if publish_running or publish_complete:
+        status_by_id["revise"] = "complete"
+        action_by_id.pop("revise", None)
+
     if content_package_ready:
         status_by_id["package"] = "complete"
         href_by_id["package"] = _run_url(article_run)
