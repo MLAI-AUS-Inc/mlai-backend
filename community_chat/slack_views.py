@@ -267,7 +267,9 @@ class SlackOwnerConversationView(SlackOwnerInventoryApiView):
 
 
 class SlackOwnerConversationOpenView(SlackOwnerInventoryApiView):
-    """Ask the existing importer to prioritize one consented source row."""
+    """Resolve a cached mirror or enqueue one consented source conversation."""
+
+    community_chat_throttle_scope = "community_chat_slack_open"
 
     def post(self, request):
         from integrations.services.slack_owner_inventory_api import InventoryError, request_open

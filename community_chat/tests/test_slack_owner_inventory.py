@@ -27,7 +27,7 @@ from integrations.services.slack_owner_inventory import (
     source_read_targets,
 )
 from integrations.services.slack_owner_inventory_api import (
-    InventoryError, conversation_page, mark_inventory_read,
+    InventoryError, _validate_open_source, conversation_page, mark_inventory_read,
     mark_inventory_unread, request_open,
 )
 
@@ -505,13 +505,13 @@ class SlackOwnerInventoryTests(SlackDmIoAuthorityFixture, TransactionTestCase):
 
         with patch("integrations.services.slack_owner_inventory_api._call_slack_with_grant_authority", side_effect=source):
             with self.assertRaises(InventoryError) as old:
-                request_open(self.user, public_key=self.owner_key, slack_conversation_id="DOLD")
+                _validate_open_source(self.grant, self.authority, self.grant.owner_conversation_inventory.get(slack_conversation_id="DOLD"))
         self.assertEqual(old.exception.code, "inventory_history_consent_required")
         with patch("integrations.services.slack_owner_inventory_api._call_slack_with_grant_authority", side_effect=source) as source_call:
             status, payload = request_open(self.user, public_key=self.owner_key,
                                            slack_conversation_id="DRECENT")
         self.assertEqual((status, payload["state"]), (202, "importing"))
-        source_call.assert_called_once()
+        source_call.assert_not_called()
         self.grant.refresh_from_db()
         self.assertIsNone(self.grant.last_discovery_at)
         self.assertEqual(self.grant.history_days, 30)
@@ -531,6 +531,6 @@ class SlackOwnerInventoryTests(SlackDmIoAuthorityFixture, TransactionTestCase):
 
         with patch("integrations.services.slack_owner_inventory_api._call_slack_with_grant_authority", side_effect=source):
             with self.assertRaises(InventoryError) as empty:
-                request_open(self.user, public_key=self.owner_key, slack_conversation_id="DEMPTY")
+                _validate_open_source(self.grant, self.authority, self.grant.owner_conversation_inventory.get(slack_conversation_id="DEMPTY"))
         self.assertEqual(empty.exception.code, "inventory_no_in_window_activity")
         self.assertEqual(calls, ["conversations_info", "conversations_history"])

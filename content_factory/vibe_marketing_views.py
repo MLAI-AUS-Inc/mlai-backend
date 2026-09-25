@@ -71,6 +71,7 @@ from content_factory.editorial_catalog import article_brief_for_catalog
 from content_factory.google_baseline import collect_verified_google_metrics, google_baseline_connection_status
 from content_factory.run_state import ARTICLE_WORKFLOWS, active_retry_signal, clear_obsolete_active_run_blockers
 from content_factory.section_issues import public_section_issues
+from content_factory.hosted_quality_issues import public_hosted_quality_issues
 from content_analytics.services.config import (
     analytics_article_manifest,
     analytics_config_for_content_factory,
@@ -10447,6 +10448,75 @@ def _strip_missing_setup_run_refs(result):
     return scrubbed
 
 
+def _article_result_without_projected_artifacts(
+    result, *, review_draft_html, component_manifest, content_package,
+    section_issues, artifacts, diagnostics,
+):
+    """Keep article control state while avoiding duplicate review artifacts.
+
+    The full run response has dedicated, normalized fields for these values.
+    Remote responses can also repeat them under ``result`` and
+    ``latest_control_response``. This is a response-only projection: the stored
+    result and its approval/publish evidence are never changed.
+    """
+    artifact_kind = {
+        "review_draft_html": "review_html", "reviewDraftHtml": "review_html",
+        "component_manifest": "manifest", "componentManifest": "manifest",
+        "delivery_package": "package", "deliveryPackage": "package",
+        "content_package": "package", "contentPackage": "package",
+        "section_issues": "issues", "sectionIssues": "issues",
+        "artifacts": "artifacts", "diagnostics": "diagnostics",
+    }
+    projected_values = {
+        "review_html": review_draft_html,
+        "manifest": component_manifest,
+        "package": content_package,
+        "artifacts": artifacts,
+        "diagnostics": diagnostics,
+    }
+    retained_raw = {kind: [] for kind in set(artifact_kind.values())}
+    nested_keys = {"result", "latest_control_response"}
+
+    def is_projected(kind, value):
+        if kind == "issues":
+            # The public issue contract intentionally discards private fields.
+            return public_section_issues(value) == section_issues
+        return value == projected_values[kind]
+
+    def project(mapping, depth):
+        response = {}
+        # Process direct values first so nested duplicates cannot displace the
+        # canonical root value if a worker changes its JSON key order.
+        for key, value in sorted(mapping.items(), key=lambda item: item[0] in nested_keys):
+            kind = artifact_kind.get(key)
+            if kind:
+                if is_projected(kind, value) or any(value == kept for kept in retained_raw[kind]):
+                    continue
+                retained_raw[kind].append(value)
+            response[key] = (
+                project(value, depth - 1)
+                if depth and key in nested_keys and isinstance(value, dict)
+                else value
+            )
+        return response
+
+    return project(result, 2)
+
+
+def _nested_run_result_value(result, *keys):
+    """First nonempty value from a run result and its common worker wrappers."""
+    for source in (
+        result,
+        _run_mapping(result.get("result")),
+        _run_mapping(result.get("latest_control_response")),
+    ):
+        for key in keys:
+            value = source.get(key)
+            if value not in (None, "", [], {}):
+                return value
+    return None
+
+
 def _serialize_run(
     run, *, context=None, latest_runs=None, checks=None, mode="full",
     topic_candidates=None, precomputed_article_setup_state=None,
@@ -10455,7 +10525,21 @@ def _serialize_run(
     step_states = _serialize_run_steps(run, compact=compact)
     from content_factory.run_state import reliability_presentation
     result = _run_mapping(run.result)
-    section_issues = public_section_issues(result.get("section_issues") or result.get("sectionIssues"))
+    section_issues = public_section_issues(_nested_run_result_value(result, "section_issues", "sectionIssues"))
+    raw_quality = _nested_run_result_value(result, "article_preview_quality", "articlePreviewQuality")
+    needs_hosted_issues = _run_mapping(raw_quality).get("status") == "blocking_findings"
+    component_manifest = (
+        _component_manifest_from_run(run)
+        if run.workflow in ARTICLE_WORKFLOWS and (not compact or needs_hosted_issues)
+        else None
+    )
+    raw_preview = _nested_run_result_value(result, "live_preview", "livePreview")
+    hosted_quality_issues = public_hosted_quality_issues(
+        raw_quality,
+        raw_preview,
+        component_manifest,
+        resume_generation=result.get("resume_generation", 0),
+    ) if run.workflow in ARTICLE_WORKFLOWS else []
     raw_review_draft_html = result.get("review_draft_html") or result.get("reviewDraftHtml")
     review_draft_html = _bounded_review_draft_html(raw_review_draft_html)
     review_draft_actions_available = (
@@ -10521,6 +10605,7 @@ def _serialize_run(
             "routePath": result.get("route_path") or result.get("path"),
             "diagnostics": {},
             "sectionIssues": section_issues,
+            "hostedQualityIssues": hosted_quality_issues,
             "reviewDraftActionsAvailable": review_draft_actions_available,
             "publishChildStatus": result.get("publish_child_status"),
             "publishChildRecoverable": result.get("publish_child_recoverable"),
@@ -10547,7 +10632,21 @@ def _serialize_run(
             **reliability_presentation(result),
         }
     content_package = _content_package_from_run(run)
-    component_manifest = _component_manifest_from_run(run)
+    artifacts = _nested_run_result_value(result, "artifacts") or []
+    diagnostics = result.get("diagnostics") or run.verification_summary or _nested_run_result_value(result, "diagnostics") or {}
+    # The review page reads these large artifacts from their dedicated fields.
+    # Keeping their raw worker copies in result can send an article/manifest
+    # several times in a single full run response. Leave workflow, approval and
+    # publish control values in result for existing clients.
+    response_result = _article_result_without_projected_artifacts(
+        result,
+        review_draft_html=review_draft_html,
+        component_manifest=component_manifest,
+        content_package=content_package,
+        section_issues=section_issues,
+        artifacts=artifacts,
+        diagnostics=diagnostics,
+    ) if run.workflow in ARTICLE_WORKFLOWS else result
     return {
         "runId": run.run_id,
             "editorialSnapshot": editorial_snapshot,
@@ -10569,12 +10668,13 @@ def _serialize_run(
         "errorCode": result.get("error_code"),
         "blockingReason": blocking_detail["reason"] or None,
         "blockingCode": blocking_detail["code"] or None,
-        "artifacts": result.get("artifacts") or [],
+        "artifacts": artifacts,
         "previewUrl": preview_url,
         "prUrl": pr_url,
         "routePath": result.get("route_path") or result.get("path"),
-        "diagnostics": result.get("diagnostics") or run.verification_summary or {},
+        "diagnostics": diagnostics,
         "sectionIssues": section_issues,
+        "hostedQualityIssues": hosted_quality_issues,
         "reviewDraftHtml": review_draft_html,
         "reviewDraftActionsAvailable": review_draft_actions_available,
         "publishChildStatus": result.get("publish_child_status"),
@@ -10601,7 +10701,7 @@ def _serialize_run(
         "workflowProgress": _workflow_progress(
             context=context, run=run, latest_runs=latest_runs, checks=checks, topic_candidates=topic_candidates
         ),
-        "result": _strip_missing_setup_run_refs(result),
+        "result": _strip_missing_setup_run_refs(response_result),
         **reliability_presentation(result),
     }
 
@@ -10965,6 +11065,19 @@ def _serialize_bootstrap(context, request=None, *, view="full"):
     return _overlay_live_bootstrap_fields(payload, context=context, request=request)
 
 
+_BOOTSTRAP_WORKFLOW_RUN_FIELDS = (
+    "runId", "workflow", "status", "currentStep", "approvalState", "sourceRunId",
+    "resumeAvailable", "restartAvailable", "retryAvailable", "updatedAt",
+    "previewUrl", "prUrl", "routePath", "blockingReason", "blockingCode",
+    "publishChildStatus", "publishChildRecoverable", "publishChildWaitReason",
+)
+
+
+def _bootstrap_workflow_run_ref(serialized_run):
+    """Small workflow index; the complete item remains in latestRuns."""
+    return {key: serialized_run.get(key) for key in _BOOTSTRAP_WORKFLOW_RUN_FIELDS}
+
+
 def _compute_bootstrap_payload(context, request=None, *, view="full", config=None):
     compact = view == "summary"
     if config is None:
@@ -11057,7 +11170,9 @@ def _compute_bootstrap_payload(context, request=None, *, view="full", config=Non
     ]
     latest_runs_by_workflow = {}
     for serialized_run in serialized_runs:
-        latest_runs_by_workflow.setdefault(serialized_run["workflow"], serialized_run)
+        latest_runs_by_workflow.setdefault(
+            serialized_run["workflow"], _bootstrap_workflow_run_ref(serialized_run)
+        )
     latest_article_run = _latest_run_matching(latest_runs, ARTICLE_WORKFLOWS)
     google_status = google_baseline_connection_status(context.profile.user, context.organization)
     google_status["connectUrl"] = _google_baseline_connect_url(request, context)

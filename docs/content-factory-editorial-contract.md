@@ -294,3 +294,25 @@ WrittenArticle attribution is resolved from the exact tenant-owned saved writing
 ## Article run workflow progress
 
 `workflowProgress.currentStepId` on a specific article run points to that run's current generation, review, revision, or publication action. An incomplete organization baseline remains `ready` in `steps` and in the organization setup wizard; it does not replace the article action in the run-page header. A packaged draft with `article_preview_quality.status=blocking_findings` has a blocked Publish step linked to review. While that quality check is queued, running, or retrying transient findings, Publish is locked. Passed or advisory quality findings retain the normal publishing path. Existing PR or publication evidence remains authoritative for a publish run already in progress or complete.
+
+Full and compact article run responses include a bounded `hostedQualityIssues` list for claim-specific hosted quality errors. Each item has a claim ID, a short reason, and an optional component ID. Image findings use the captured image index only when the reviewed image count and signed component inventory agree. Resource and disclosure findings have no attested component location in the current report and remain in the list without a page anchor. The current visible reviewer permits no article repair and records exactly one attempt; multi-attempt reports fail closed until their final claim identity has an explicit contract. The projection requires the exact available render, preview URL, preview attempt generation, and a review time after preview startup. It supplies no section removal authority. The persisted quality report and approval gate remain authoritative.
+
+## Vibe Marketing response size
+
+The bootstrap response keeps complete recent runs in `latestRuns`. Its
+`latestRunsByWorkflow` field is a small index of the newest run per workflow,
+carrying identifiers, status, approval and publish control state. Clients that
+need the run's result or review artifacts use `latestRuns` or the individual
+run endpoint; the index does not repeat those large values.
+
+An individual full article run exposes `reviewDraftHtml`, `componentManifest`,
+`contentPackage`, `sectionIssues`, artifacts and diagnostics in their dedicated
+fields. Its `result` still carries workflow and publish control values. The
+response omits only identical redundant copies; `contentPackage` is metadata,
+so a raw delivery package with article content remains available. Distinct
+nested review HTML and component manifests also remain available. This
+projection does not change the saved run or the article approval checks.
+Compact run status responses continue to omit article HTML. Nested worker
+artifacts, diagnostics and section issues are projected to the dedicated fields
+when they are the only available source; a different nested value stays in
+`result`.

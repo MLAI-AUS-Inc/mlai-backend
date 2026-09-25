@@ -136,6 +136,14 @@ def claim_job(*, kinds=None, lease_seconds=120, prefer_import=False):
     state_order = []
     if prefer_import:
         from integrations.models import SlackDmMirrorConversation
+        from integrations.services.slack_chat_refresh import prioritize_open_conversations
+
+        # Explicit opens get first import service within the selected owner.
+        # Ordinary turns retain least-recently-served background fairness.
+        candidates = prioritize_open_conversations(
+            candidates, conversation_field="private_conversation_id",
+        )
+        state_order.append("-foreground_refresh")
         from .private_coverage import recent_conversations
         pending_private = recent_conversations(SlackDmMirrorConversation.objects.filter(
             pk=OuterRef("private_conversation_id"), history_backfilled_at__isnull=True,

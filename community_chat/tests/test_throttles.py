@@ -6,7 +6,7 @@ from django.test import SimpleTestCase, override_settings
 
 from community_chat.throttles import enforce_bootstrap_limits
 from community_chat.throttles import CommunityChatScopedThrottle
-from community_chat.slack_views import SlackDmMirrorView
+from community_chat.slack_views import SlackDmMirrorView, SlackOwnerConversationOpenView
 
 
 @override_settings(CACHES={"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}})
@@ -17,6 +17,7 @@ class SlackPollingThrottleTests(SimpleTestCase):
             "community_chat_slack_snapshot_device": "2/minute",
             "community_chat_slack_snapshot_account": "5/minute",
             "community_chat_slack_read_receipt": "2/minute",
+            "community_chat_slack_open": "2/minute",
             "community_chat_home": "1/minute",
         })
         rates.start()
@@ -54,6 +55,16 @@ class SlackPollingThrottleTests(SimpleTestCase):
         self.assertTrue(self.allowed(device=None))
         self.assertTrue(self.allowed(device=None))
         self.assertFalse(self.allowed(device=None))
+
+    def test_foreground_open_keeps_its_budget_when_background_and_home_are_full(self):
+        self.assertTrue(self.allowed())
+        self.assertTrue(self.allowed())
+        self.assertFalse(self.allowed())
+        self.assertTrue(self.allowed(method="PATCH", action="pause"))
+        request = SimpleNamespace(user=SimpleNamespace(pk=1, is_authenticated=True))
+        view = SlackOwnerConversationOpenView()
+        decisions = [CommunityChatScopedThrottle().allow_request(request, view) for _ in range(3)]
+        self.assertEqual(decisions, [True, True, False])
 
     def test_connection_controls_retain_their_existing_limit(self):
         self.assertTrue(self.allowed(method="PATCH", action="pause"))

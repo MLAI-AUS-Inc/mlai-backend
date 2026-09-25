@@ -775,6 +775,35 @@ by this API, so complete first-party badge parity cannot be guaranteed.
 See [Slack conversations.info](https://docs.slack.dev/reference/methods/conversations.info/)
 and [Slack's RTM availability](https://docs.slack.dev/tools/node-slack-sdk/rtm-api/).
 
+### Opening owner Slack conversations
+
+`POST slack/conversations/open/` resolves an existing published, device-authorized
+mirror without requesting Slack metadata. Source-only conversations return
+`202 {state: "importing", mlai_channel_id: null, retry_after_seconds: 2}` and queue
+one bounded, content-free owner/device intent. Clients open the selected
+conversation view immediately and retry this endpoint after its reported delay;
+they do not need to load the full Slack directory between the inbox and the chat.
+Polling coalesces with the same intent and never resets its provider backoff.
+
+The existing discovery worker handles one targeted open before enumerating the
+owner's directory. It rechecks the current consent, device verification epoch,
+source membership, source scopes and selected history window, then uses the same
+private provisioning and resumable metadata logic as discovery. The shared
+app/workspace/method budgets and Slack Retry-After remain unchanged. At most 16
+intents are retained per owner for 15 minutes; completed provisioning leaves
+history to the normal import worker. A partially processed foreground intent
+retains its place during backoff so another directory page cannot discard its
+member/profile checkpoint. A new intent arriving during a full directory scan
+keeps discovery due after that scan finishes.
+
+Requested rooms receive first service on import-priority turns within the
+selected owner for five minutes. Ordinary turns retain least-recently-served
+background rotation and workspace/owner fairness. A ready response still requires
+current-room source coverage and delivery publication; an empty or incomplete
+import is never represented as a fully loaded chat. Open requests use their own
+`COMMUNITY_CHAT_SLACK_OPEN_RATE` (default 60/minute), independent of Home, snapshot
+polling and read receipts. No new schema migration is needed.
+
 ### Read freshness and device continuity
 
 Visible-chat requests enqueue bounded metadata-only hints for the background
