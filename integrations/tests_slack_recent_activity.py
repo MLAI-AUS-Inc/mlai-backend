@@ -237,6 +237,7 @@ class SlackRecentActivityTests(unittest.TestCase):
             status="connected",
             access_token="test-only",
             scopes=list(s.DIRECT_DM_SCOPES),
+            sync_cursor={},
         )
         grant.history_days = history_days
         if history_days == 0:
