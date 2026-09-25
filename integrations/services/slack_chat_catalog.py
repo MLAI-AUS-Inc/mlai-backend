@@ -75,6 +75,11 @@ def catalog_conversations(conversations):
         conversation_id=OuterRef("pk"), source_platform="slack",
         metadata__backfill=True,
         status__in=["pending", "processing", "failed", "dead"],
+    ).exclude(
+        # Room replacement leaves content-free cancellation tombstones. A later
+        # audience update can rebind their metadata; these are not undelivered
+        # changes in the replacement room (the refresh status uses this too).
+        status="dead", last_error="Private conversation participants changed",
     ).filter(
         Q(metadata__history_recovery_superseded__isnull=True)
         | Q(metadata__history_recovery_superseded=False),

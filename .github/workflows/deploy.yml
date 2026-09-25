@@ -81,6 +81,9 @@ jobs:
     - name: Check unified DM directory without database access
       run: python scripts/test_without_database.py community_chat.tests.test_unified_dm_directory_unit
 
+    - name: Check Slack conversation opening without database access
+      run: python scripts/test_without_database.py community_chat.tests.test_slack_inventory_openable community_chat.tests.test_slack_open_requests
+
     - name: Run no-database editorial contract checks
       run: |
         python -m unittest \

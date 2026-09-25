@@ -161,7 +161,7 @@ def _cursor(cursor, *, binding):
     return tuple(last)
 
 
-def _item(row, *, mirror, public_map, public_key, state, read_state, oldest):
+def _item(row, *, mirror, public_map, public_key, state, read_state, oldest, open_error=None):
     source_activity = _timestamp_iso(row.source_activity_ts)
     mirror_activity = conversation_activity_at(mirror) if mirror is not None else None
     activity = source_activity or mirror_activity
@@ -196,6 +196,16 @@ def _item(row, *, mirror, public_map, public_key, state, read_state, oldest):
         status = "importing"
     else:
         status = "source_only"
+    if status not in {"ready", "mapped"} and open_error in {
+        "inventory_history_consent_required", "inventory_no_in_window_activity",
+    }:
+        status = "out_of_window"
+    openable = row.eligibility == "eligible" and (
+        (status in {"ready", "mapped"} and bool(channel_id))
+        or (row.kind in {"im", "mpim", "private_channel"}
+            and status in {"source_only", "importing"}
+            and row.source_is_open is not False and not open_error)
+    )
     return {
         "slack_conversation_id": row.slack_conversation_id,
         "kind": row.kind,
@@ -206,6 +216,7 @@ def _item(row, *, mirror, public_map, public_key, state, read_state, oldest):
         "source_is_open": row.source_is_open,
         "eligibility": row.eligibility,
         "state": status,
+        "openable": openable,
         "mlai_channel_id": channel_id,
         "read_state": read_state,
     }
@@ -272,14 +283,11 @@ def conversation_page(user, *, public_key, limit=50, cursor="", unread_only=Fals
             row for row in visible
             if row.eligibility == "eligible" and states[row.pk]["is_unread"] is True
         ]
-    selected = visible[:limit]
-    next_cursor = None
-    if len(visible) > len(selected) and selected:
-        next_cursor = signing.dumps(
-            {"binding": binding, "after": [selected[-1].kind, selected[-1].pk]},
-            salt=CURSOR_SALT,
-        )
-    selected_ids = [row.slack_conversation_id for row in selected]
+    # Resolve every known unread before pagination. Filtering a page afterwards
+    # can produce empty first pages and badges for conversations that cannot open.
+    described = {row.pk: row for row in (visible if unread_only else visible[:limit])}
+    described.update({row.pk: row for row in rows if states[row.pk]["is_unread"] is True})
+    selected_ids = [row.slack_conversation_id for row in described.values()]
     mirrors = {
         mirror.slack_conversation_id: mirror
         for mirror in catalog_conversations(grant.conversations.filter(
@@ -299,11 +307,35 @@ def conversation_page(user, *, public_key, limit=50, cursor="", unread_only=Fals
     }
     days = _grant_history_days(grant)
     oldest = time.time() - days * 86400 if days else None
-    items = [
-        _item(row, mirror=mirrors.get(row.slack_conversation_id), public_map=public_map,
-              public_key=device.public_key, state=state, read_state=states[row.pk], oldest=oldest)
-        for row in selected
-    ]
+    from integrations.services.slack_open_requests import _live_requests
+
+    requests = _live_requests(grant.connection.sync_cursor or {}, now)
+    def open_error(row):
+        request = requests.get(f"{device.pk}:{row.slack_conversation_id}") or {}
+        return request.get("error") if request.get("epoch") == epoch else None
+    described_items = {
+        row.pk: _item(
+            row, mirror=mirrors.get(row.slack_conversation_id), public_map=public_map,
+            public_key=device.public_key, state=state, read_state=states[row.pk],
+            oldest=oldest, open_error=open_error(row),
+        ) for row in described.values()
+    }
+    for name, availability in (("fresh_unread_count", "available"), ("provisional_unread_count", "stale")):
+        read_summary[name] = sum(
+            item["openable"] and item["read_state"]["is_unread"] is True
+            and item["read_state"]["availability"] == availability
+            for item in described_items.values()
+        )
+    if unread_only:
+        visible = [row for row in visible if described_items[row.pk]["openable"]]
+    selected = visible[:limit]
+    next_cursor = None
+    if len(visible) > len(selected) and selected:
+        next_cursor = signing.dumps(
+            {"binding": binding, "after": [selected[-1].kind, selected[-1].pk]},
+            salt=CURSOR_SALT,
+        )
+    items = [described_items[row.pk] for row in selected]
     priority = {"stale_unread": [], "unknown": [], "stale_other": []}
     if not cursor and selected:
         # Only already-consented, provider-readable sources are candidates.
@@ -519,8 +551,6 @@ def request_open(user, *, public_key, slack_conversation_id):
             if channel_id is None:
                 raise InventoryError("public_mapping_required", 409)
             return 200, {"state": "ready", "mlai_channel_id": channel_id}
-        if _grant_history_days(grant) and row.source_archived is True:
-            raise InventoryError("inventory_history_consent_required", 409)
         mirror = catalog_conversations(grant.conversations.filter(
             slack_conversation_id=source_id,
         )).first()
@@ -531,5 +561,7 @@ def request_open(user, *, public_key, slack_conversation_id):
                     and ready_for_display(mirror, public_key=device.public_key)):
                 complete_open_locked(connection, device, source_id)
                 return 200, {"state": "ready", "mlai_channel_id": str(mirror.mlai_channel_id)}
+        if _grant_history_days(grant) and row.source_archived is True:
+            raise InventoryError("inventory_history_consent_required", 409)
         payload = enqueue_open_locked(grant, connection, authority, device, row)
     return 202, payload
