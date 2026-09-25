@@ -186,6 +186,18 @@ For founder Vibe Marketing runs, `POST /api/v1/vibe-marketing/runs/{run_id}/appr
 
 `promote-bundle` and `publish-pr` are retry actions. Before contacting Content Factory, they require the selected newest revision's matching receipt, approved state, exact hosted render, and current hosted quality status of `passed`, `passed_no_baseline`, or `advisory_findings`. Before a new source approval is sent to Content Factory, the backend saves a receipt-required marker. If the reviewed identity changes before the postapproval receipt is saved, the approve action returns a conflict; the marker prevents a recorded child from entering the older receipt-free retry path. An older approved run with an already recorded publish child and no marker may retry without a local receipt for compatibility; that path cannot initiate a fresh child. A changed run, run generation, preview URL, commit SHA, preview resume generation or quality input hash, or a regressed quality status, invalidates receipt-based promotion and requires a fresh review and approval. Content Factory still checks its hosted review evidence and source bundle at its own boundary. The frontend compares the visible review identity before it sends `approve`; the backend receipt records the server's saved review identity and explicit approve action, not a claim that the browser rendered the page.
 
+`POST /api/v1/vibe-marketing/runs/<revisionRunId>/comments/accept-revision`
+accepts feedback on a completed `article_revision` run. The request includes
+the feedback `batchId`, `sourceRunId`, and the exact revision the founder
+reviewed: `reviewedRunId`, `reviewedPreviewUrl`, and
+`reviewedPreviewRevision` (the hosted render's commit SHA). The run must have
+an exact hosted render and a current quality result of `passed`,
+`passed_no_baseline`, or `advisory_findings` for the same preview URL and
+preview-attempt generation. The quality input digest must be present. Missing,
+pending, blocking, or stale quality and changed review identity return 409
+before comments or learned preferences are promoted. Accepting revision
+feedback is separate from approving the article for publication.
+
 ## Verification and rollout
 
 On 11 September, **68 no-database tests pass**: 17 existing pure catalogue tests, 18 owner/service API tests and 33 policy/dispatch/CI tests. The latter execute the actual article-start body, restart, charge, queue, result mapping and poll-time reconciliation functions with controlled ORM/HTTP/billing seams. They cover all four ICPs plus explicit OUTSIDE, changed or unavailable policy, lost responses, same-key retries, deferred refunds and late existing-run binding. They do not prove JWT authentication, real ownership queries, SQL locking, ledger effects, rollback or persistence. The website's three focused editorial files pass 164 tests/888 assertions; typecheck/internal links and backend syntax/whitespace checks pass. The worker's earlier three-module 163-test result is historical and was not rerun in this dispatch pass. No production credentials, requests, migrations or deployments were used.
@@ -282,20 +294,3 @@ WrittenArticle attribution is resolved from the exact tenant-owned saved writing
 ## Article run workflow progress
 
 `workflowProgress.currentStepId` on a specific article run points to that run's current generation, review, revision, or publication action. An incomplete organization baseline remains `ready` in `steps` and in the organization setup wizard; it does not replace the article action in the run-page header. A packaged draft with `article_preview_quality.status=blocking_findings` has a blocked Publish step linked to review. While that quality check is queued, running, or retrying transient findings, Publish is locked. Passed or advisory quality findings retain the normal publishing path. Existing PR or publication evidence remains authoritative for a publish run already in progress or complete.
-
-## Founder article revision acceptance
-
-`POST /api/v1/vibe-marketing/runs/<revisionRunId>/comments/accept-revision`
-accepts feedback on a completed `article_revision` run. The request includes
-the feedback `batchId`, `sourceRunId`, and the exact revision the founder
-reviewed: `reviewedRunId`, `reviewedPreviewUrl`, and
-`reviewedPreviewRevision` (the hosted render's commit SHA). The run must have
-an exact hosted render and a current quality result of `passed`,
-`passed_no_baseline`, or `advisory_findings` for the same preview URL and
-preview-attempt generation. The quality input digest must be present. Missing,
-pending, blocking, or stale quality and changed review identity return 409
-before comments or learned preferences are promoted.
-
-Accepting revision feedback is separate from approving the article for
-publication. The `approve` action still requires its own exact founder review
-and records the publish approval receipt before a publish retry can proceed.
