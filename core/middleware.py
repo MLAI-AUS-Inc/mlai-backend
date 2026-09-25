@@ -22,11 +22,11 @@ SENSITIVE_QUERY_PARAMETERS = {
 
 
 class DesktopAuthCorsMiddleware:
-    """Allow exact Tauri origins to call Community Chat without cookies."""
+    """Allow exact Tauri origins to call Chat account APIs without cookies."""
 
     _ALLOWED_ORIGINS = {"http://tauri.localhost", "tauri://localhost"}
-    _ALLOWED_PATH_PREFIX = "/api/v1/community-chat/"
-    _ALLOWED_METHODS = {"DELETE", "GET", "HEAD", "PATCH", "POST"}
+    _ALLOWED_PATH_PREFIXES = ("/api/v1/community-chat/", "/api/v1/my-startup/")
+    _ALLOWED_METHODS = {"DELETE", "GET", "HEAD", "PATCH", "POST", "PUT"}
     _ALLOWED_REQUEST_HEADERS = {"authorization", "content-type", "x-request-id"}
 
     def __init__(self, get_response):
@@ -35,7 +35,7 @@ class DesktopAuthCorsMiddleware:
     def __call__(self, request):
         origin = str(request.headers.get("Origin") or "").strip().rstrip("/")
         if (
-            not request.path.startswith(self._ALLOWED_PATH_PREFIX)
+            not request.path.startswith(self._ALLOWED_PATH_PREFIXES)
             or origin not in self._ALLOWED_ORIGINS
         ):
             return self.get_response(request)
@@ -68,7 +68,7 @@ class DesktopAuthCorsMiddleware:
             del response["Access-Control-Allow-Credentials"]
         response["Access-Control-Allow-Origin"] = origin
         response["Access-Control-Allow-Methods"] = (
-            "DELETE, GET, HEAD, PATCH, POST, OPTIONS"
+            "DELETE, GET, HEAD, PATCH, POST, PUT, OPTIONS"
         )
         response["Access-Control-Allow-Headers"] = (
             "authorization, content-type, x-request-id"
