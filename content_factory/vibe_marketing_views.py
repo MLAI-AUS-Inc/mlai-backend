@@ -16619,6 +16619,8 @@ class VibeMarketingRunCommentsAcceptRevisionView(VibeMarketingRunCommentsMixin, 
         context, run, error_response = self._resolve_run(request, run_id)
         if error_response is not None:
             return error_response
+        if run.workflow != "article_revision":
+            return Response({"detail": "Only a completed article revision can be accepted."}, status=status.HTTP_400_BAD_REQUEST)
         run_request = run.run_request if isinstance(run.run_request, dict) else {}
         result = run.result or {}
         source_run_id = str(
@@ -16643,6 +16645,16 @@ class VibeMarketingRunCommentsAcceptRevisionView(VibeMarketingRunCommentsMixin, 
             return Response({"detail": "Feedback batch id is required."}, status=status.HTTP_400_BAD_REQUEST)
         if run.status != ContentFactoryRunStatus.COMPLETED:
             return Response({"detail": "The revised article must be completed before accepting feedback."}, status=status.HTTP_400_BAD_REQUEST)
+        identity = article_review_identity(run)
+        if not article_review_identity_is_complete(run) or any((
+            str(request.data.get("reviewedRunId") or "").strip() != identity["run_id"],
+            str(request.data.get("reviewedPreviewUrl") or "").strip() != identity["preview_url"],
+            str(request.data.get("reviewedPreviewRevision") or "").strip() != identity["commit_sha"],
+        )):
+            return Response(
+                {"detail": "The revised article preview and quality review must match this revision before feedback can be accepted."},
+                status=status.HTTP_409_CONFLICT,
+            )
 
         promoted_count, archived_count = _promote_editorial_feedback_batch(
             run=source_run, batch_id=batch_id, revision_run_id=run.run_id
