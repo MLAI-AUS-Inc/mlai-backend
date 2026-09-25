@@ -73,6 +73,12 @@ def public_hosted_quality_issues(quality, preview, manifest, *, resume_generatio
     claims = _mapping(claims).get("claims")
     if not isinstance(claims, list) or len(claims) > 500:
         return []
+    if any(not isinstance(item, dict) or not isinstance(item.get("claim_id"), str)
+           or not isinstance(item.get("source_id"), str) for item in claims):
+        return []
+    claim_ids = [item["claim_id"] for item in claims]
+    if len(claim_ids) != len(set(claim_ids)):
+        return []
     claim_sources = {
         item["claim_id"]: item.get("source_id")
         for item in claims if isinstance(item, dict)
@@ -131,7 +137,8 @@ def public_hosted_quality_issues(quality, preview, manifest, *, resume_generatio
             index = int(image[1])
             if index < len(image_ids):
                 component_id = image_ids[index]
-        elif source == "artifact:verified-resource" and resource_mapping_safe:
+        elif (source == "artifact:verified-resource" and resource_mapping_safe
+              and reason.lower() == "generated resource cannot substantiate an external claim"):
             component_id = "resource-cta"
         component = component_by_id.get(component_id) if component_id else None
         source_section = component.get("sourceSectionId") if component else None
