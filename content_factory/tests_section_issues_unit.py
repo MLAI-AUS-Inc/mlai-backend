@@ -39,7 +39,7 @@ class SectionIssueContractTests(SimpleTestCase):
         for response in (compact, full):
             self.assertEqual(
                 [(item["claimId"], item["componentId"]) for item in response["hostedQualityIssues"]],
-                [("claim-150", "resource-cta"), ("claim-158", "image:test-assistant"), ("claim-174", None)],
+                [("claim-150", None), ("claim-158", "image:test-assistant"), ("claim-174", None)],
             )
         self.assertNotIn("contentPackage", compact)
 

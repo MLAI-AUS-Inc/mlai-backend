@@ -1,9 +1,9 @@
 """Bounded, preview-bound issue markers for hosted article quality review.
 
 The visible reviewer numbers claims in the rendered article, separately from
-the package grounding ledger. Only the captured image index and verified
-resource source have a safe component mapping in the existing report. Other
-findings remain visible without inventing an article location.
+the package grounding ledger. Only the captured image index has a safe
+component mapping in the existing report. Other findings remain visible
+without inventing an article location.
 """
 
 from __future__ import annotations
@@ -110,13 +110,6 @@ def public_hosted_quality_issues(quality, preview, manifest, *, resume_generatio
         and image_count == len(image_ids) and len(set(image_ids)) == len(image_ids)
         and image_count > 0
     )
-    resource = component_by_id.get("resource-cta")
-    resource_mapping_safe = bool(
-        resource and resource.get("type") == "resource-cta"
-        and resource.get("editable") is True
-        and component_ids.count("resource-cta") == 1
-    )
-
     errors = visible.get("errors")
     if not isinstance(errors, list):
         return []
@@ -137,9 +130,6 @@ def public_hosted_quality_issues(quality, preview, manifest, *, resume_generatio
             index = int(image[1])
             if index < len(image_ids):
                 component_id = image_ids[index]
-        elif (source == "artifact:verified-resource" and resource_mapping_safe
-              and reason.lower() == "generated resource cannot substantiate an external claim"):
-            component_id = "resource-cta"
         component = component_by_id.get(component_id) if component_id else None
         source_section = component.get("sourceSectionId") if component else None
         section_id = f"section:{source_section}" if isinstance(source_section, str) and source_section else None

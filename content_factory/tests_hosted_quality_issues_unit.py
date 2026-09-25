@@ -52,11 +52,11 @@ def sixth_shaped_report():
 
 
 class HostedQualityIssueTests(unittest.TestCase):
-    def test_sixth_shaped_findings_anchor_image_and_resource_but_not_disclosure(self):
+    def test_sixth_shaped_findings_anchor_image_without_guessing_resource_or_disclosure(self):
         quality, preview, manifest = sixth_shaped_report()
         issues = public_hosted_quality_issues(quality, preview, manifest, resume_generation=0)
         self.assertEqual([item["claimId"] for item in issues], ["claim-150", "claim-158", "claim-174"])
-        self.assertEqual(issues[0]["componentId"], "resource-cta")
+        self.assertIsNone(issues[0]["componentId"])
         self.assertEqual(issues[1]["componentId"], "image:test-assistant")
         self.assertEqual(issues[1]["sectionId"], "section:test-assistant")
         self.assertIsNone(issues[2]["componentId"])
@@ -81,11 +81,16 @@ class HostedQualityIssueTests(unittest.TestCase):
         issues = public_hosted_quality_issues(quality, preview, manifest, resume_generation=0)
         self.assertIsNone(issues[1]["componentId"])
 
-    def test_other_resource_claims_do_not_guess_the_cta(self):
+    def test_resource_source_never_proves_a_component_location(self):
         quality, preview, manifest = sixth_shaped_report()
-        quality["visible_content_acceptance"]["errors"][0] = "claim-150: A paragraph needs another source"
         issues = public_hosted_quality_issues(quality, preview, manifest, resume_generation=0)
         self.assertIsNone(issues[0]["componentId"])
+
+    def test_multiple_review_attempts_fail_closed_until_claim_identity_is_attested(self):
+        quality, preview, manifest = sixth_shaped_report()
+        review = quality["visible_content_acceptance"]["review"]
+        review["attempts"].append(deepcopy(review["attempts"][0]))
+        self.assertEqual(public_hosted_quality_issues(quality, preview, manifest, resume_generation=0), [])
 
     def test_errors_are_bounded_and_redacted(self):
         quality, preview, manifest = sixth_shaped_report()
