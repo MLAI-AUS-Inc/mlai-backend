@@ -8,6 +8,14 @@ Company identity is explicit in frontend queries. The existing business views st
 
 ## Additional endpoints
 
+Desktop Chat uses its protected native Chat account bearer session and omits cookies.
+The exact Tauri origins `tauri://localhost` and `http://tauri.localhost` are allowed
+through `DesktopAuthCorsMiddleware` for this namespace, including PUT catalogue
+and settings saves. This does not enable native cookies or access to legacy JWT
+routes. Deploy this CORS change before releasing the desktop My startup tab.
+Provider OAuth, Roo account linking and embedded previews still use the browser
+workspace because those operations depend on its cookies.
+
 | Endpoint | Contract |
 | --- | --- |
 | `POST /connectors/<provider>/connect/` | Initiate Google Search Console, Google Analytics or Slack OAuth as the Chat user; require an owned company and a return URL under the configured Chat `/my-startup` origin. Provider callbacks stay at the existing backend URLs. |
