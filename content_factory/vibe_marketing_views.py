@@ -71,6 +71,7 @@ from content_factory.editorial_catalog import article_brief_for_catalog
 from content_factory.google_baseline import collect_verified_google_metrics, google_baseline_connection_status
 from content_factory.run_state import ARTICLE_WORKFLOWS, active_retry_signal, clear_obsolete_active_run_blockers
 from content_factory.section_issues import public_section_issues
+from content_factory.hosted_quality_issues import public_hosted_quality_issues
 from content_analytics.services.config import (
     analytics_article_manifest,
     analytics_config_for_content_factory,
@@ -10525,6 +10526,20 @@ def _serialize_run(
     from content_factory.run_state import reliability_presentation
     result = _run_mapping(run.result)
     section_issues = public_section_issues(_nested_run_result_value(result, "section_issues", "sectionIssues"))
+    raw_quality = _nested_run_result_value(result, "article_preview_quality", "articlePreviewQuality")
+    needs_hosted_issues = _run_mapping(raw_quality).get("status") == "blocking_findings"
+    component_manifest = (
+        _component_manifest_from_run(run)
+        if run.workflow in ARTICLE_WORKFLOWS and (not compact or needs_hosted_issues)
+        else None
+    )
+    raw_preview = _nested_run_result_value(result, "live_preview", "livePreview")
+    hosted_quality_issues = public_hosted_quality_issues(
+        raw_quality,
+        raw_preview,
+        component_manifest,
+        resume_generation=result.get("resume_generation", 0),
+    ) if run.workflow in ARTICLE_WORKFLOWS else []
     raw_review_draft_html = result.get("review_draft_html") or result.get("reviewDraftHtml")
     review_draft_html = _bounded_review_draft_html(raw_review_draft_html)
     review_draft_actions_available = (
@@ -10590,6 +10605,7 @@ def _serialize_run(
             "routePath": result.get("route_path") or result.get("path"),
             "diagnostics": {},
             "sectionIssues": section_issues,
+            "hostedQualityIssues": hosted_quality_issues,
             "reviewDraftActionsAvailable": review_draft_actions_available,
             "publishChildStatus": result.get("publish_child_status"),
             "publishChildRecoverable": result.get("publish_child_recoverable"),
@@ -10616,7 +10632,6 @@ def _serialize_run(
             **reliability_presentation(result),
         }
     content_package = _content_package_from_run(run)
-    component_manifest = _component_manifest_from_run(run)
     artifacts = _nested_run_result_value(result, "artifacts") or []
     diagnostics = result.get("diagnostics") or run.verification_summary or _nested_run_result_value(result, "diagnostics") or {}
     # The review page reads these large artifacts from their dedicated fields.
@@ -10659,6 +10674,7 @@ def _serialize_run(
         "routePath": result.get("route_path") or result.get("path"),
         "diagnostics": diagnostics,
         "sectionIssues": section_issues,
+        "hostedQualityIssues": hosted_quality_issues,
         "reviewDraftHtml": review_draft_html,
         "reviewDraftActionsAvailable": review_draft_actions_available,
         "publishChildStatus": result.get("publish_child_status"),
