@@ -1,5 +1,6 @@
 """Contract checks for article section issue presentation and review actions."""
 
+import json
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -112,9 +113,160 @@ class SectionIssueContractTests(SimpleTestCase):
         self.assertNotIn(draft_html, str(compact))
         self.assertEqual(full["reviewDraftHtml"], draft_html)
         self.assertIs(full["reviewDraftActionsAvailable"], True)
+        self.assertNotIn("review_draft_html", full["result"])
+        self.assertEqual(merged["review_draft_html"], draft_html)
         self.assertEqual(malformed["reviewDraftHtml"], "")
         self.assertIs(malformed["reviewDraftActionsAvailable"], False)
         self.assertNotIn("review_draft_html", views.COMPACT_RUN_RESULT_KEYS)
+
+    def test_full_article_run_projects_large_review_artifacts_once(self):
+        now = datetime.now(timezone.utc)
+        draft_html = "<p>Review paragraph</p>" * 8_000
+        manifest = {"components": [{"id": "section:intro", "body": "component body " * 5_000}]}
+        package = {"title": "Example article", "slug": "example-article", "article_markdown": "draft prose " * 8_000}
+        raw_result = {
+            "review_draft_html": draft_html,
+            "component_manifest": manifest,
+            "delivery_package": package,
+            "artifacts": [{"detail": "artifact detail " * 1_000}],
+            "diagnostics": {"log": "diagnostic line " * 1_000},
+            "section_issues": [{"section_id": "section:intro", "claim_id": "claim-001", "state": "needs_review", "reason": "Evidence needs review."}],
+            "latest_control_response": {
+                "review_draft_html": draft_html,
+                "delivery_package": package,
+                "artifacts": [{"detail": "artifact detail " * 1_000}],
+                "diagnostics": {"log": "diagnostic line " * 1_000},
+                "section_issues": [{"section_id": "section:intro", "claim_id": "claim-001", "state": "needs_review", "reason": "Evidence needs review.", "internal": "private"}],
+                "publish_child_status": "queued",
+            },
+            "publish_handoff_pending": True,
+            "publish_child_run_id": "publish-1",
+            "approval_receipt": {"run_id": "review-1", "approved": False},
+        }
+        run = SimpleNamespace(
+            run_id="review-1", workflow="article_revision", domain="example.test", github_repo="example/repo",
+            status="awaiting_approval", current_step="await_review", approval_state="pending",
+            resume_available=False, created_at=now, updated_at=now, step_order=[],
+            steps=SimpleNamespace(order_by=lambda *args: []), result=raw_result, run_request={},
+            acceptance_summary={}, verification_summary={}, error="",
+        )
+        with (
+            patch.object(views, "_article_setup_state", return_value={}),
+            patch.object(views, "_workflow_progress", return_value={}),
+            patch.object(views, "_live_preview_from_run", return_value={"available": True}),
+            patch.object(views, "_run_content_island_payload", return_value=None),
+            patch.object(views, "_article_restart_available", return_value=False),
+            patch.object(views, "_run_source_run_id", return_value="article-1"),
+            patch.object(views, "_content_package_from_run", return_value={"title": "Example article", "contentPackaged": True}),
+            patch.object(views, "_component_manifest_from_run", return_value=manifest),
+            patch.object(views, "_component_feedback_from_run", return_value={}),
+        ):
+            serialized = views._serialize_run(run, mode="full")
+            nested_only = {
+                "latest_control_response": {
+                    "artifacts": [{"name": "review.html", "detail": "artifact detail " * 1_000}],
+                    "diagnostics": {"log": "diagnostic line " * 1_000},
+                    "section_issues": [{"section_id": "section:intro", "claim_id": "claim-002", "state": "needs_review", "reason": "Check evidence."}],
+                    "publish_child_status": "queued",
+                },
+            }
+            run.result = nested_only
+            nested_only_serialized = views._serialize_run(run, mode="full")
+            run.result = {
+                **raw_result,
+                "latest_control_response": {
+                    "artifacts": [{"name": "different-artifact"}],
+                    "diagnostics": {"different": True},
+                    "section_issues": [{"section_id": "section:other", "claim_id": "claim-003", "state": "needs_review"}],
+                    "publish_child_status": "queued",
+                },
+            }
+            conflicting_serialized = views._serialize_run(run, mode="full")
+
+        self.assertEqual(serialized["reviewDraftHtml"], draft_html)
+        self.assertEqual(serialized["componentManifest"], manifest)
+        self.assertEqual(serialized["contentPackage"]["title"], "Example article")
+        self.assertEqual(serialized["artifacts"], raw_result["artifacts"])
+        self.assertEqual(serialized["diagnostics"], raw_result["diagnostics"])
+        self.assertEqual(serialized["sectionIssues"][0]["sectionId"], "section:intro")
+        self.assertEqual(serialized["approvalState"], "pending")
+        self.assertEqual(serialized["sourceRunId"], "article-1")
+        self.assertEqual(serialized["result"]["publish_child_run_id"], "publish-1")
+        self.assertTrue(serialized["result"]["publish_handoff_pending"])
+        self.assertEqual(serialized["result"]["approval_receipt"], raw_result["approval_receipt"])
+        self.assertEqual(serialized["result"]["latest_control_response"], {"publish_child_status": "queued"})
+        for key in ("review_draft_html", "component_manifest", "artifacts", "diagnostics", "section_issues"):
+            self.assertNotIn(key, serialized["result"])
+            self.assertIn(key, raw_result)  # No mutation of the persisted run.
+        # contentPackage is metadata, so it cannot replace the full raw package.
+        self.assertEqual(serialized["result"]["delivery_package"], package)
+        old_wire_bytes = len(json.dumps({**serialized, "result": raw_result}))
+        new_wire_bytes = len(json.dumps(serialized))
+        self.assertLess(new_wire_bytes, old_wire_bytes * 0.55)
+        self.assertEqual(nested_only_serialized["artifacts"], nested_only["latest_control_response"]["artifacts"])
+        self.assertEqual(nested_only_serialized["diagnostics"], nested_only["latest_control_response"]["diagnostics"])
+        self.assertEqual(nested_only_serialized["sectionIssues"][0]["claimId"], "claim-002")
+        self.assertEqual(nested_only_serialized["result"]["latest_control_response"], {"publish_child_status": "queued"})
+        self.assertEqual(conflicting_serialized["artifacts"], raw_result["artifacts"])
+        self.assertEqual(conflicting_serialized["diagnostics"], raw_result["diagnostics"])
+        self.assertEqual(conflicting_serialized["sectionIssues"][0]["claimId"], "claim-001")
+        self.assertEqual(
+            conflicting_serialized["result"]["latest_control_response"]["artifacts"],
+            [{"name": "different-artifact"}],
+        )
+        self.assertEqual(conflicting_serialized["result"]["latest_control_response"]["diagnostics"], {"different": True})
+        self.assertEqual(conflicting_serialized["result"]["latest_control_response"]["section_issues"][0]["section_id"], "section:other")
+        self.assertEqual(conflicting_serialized["result"]["latest_control_response"]["publish_child_status"], "queued")
+
+    def test_distinct_nested_article_artifacts_survive_and_equal_copies_do_not(self):
+        html_a, html_b = "<p>Article A</p>", "<p>Article B</p>"
+        manifest_a = {"components": [{"id": "section:a", "body": "A"}]}
+        manifest_b = {"components": [{"id": "section:b", "body": "B"}]}
+        package_a = {"title": "Article A", "article_markdown": "A markdown body"}
+        package_b = {"title": "Article B", "article_markdown": "B markdown body"}
+        raw = {
+            "review_draft_html": html_a,
+            "component_manifest": manifest_a,
+            "delivery_package": package_a,
+            "result": {
+                "review_draft_html": html_b,
+                "component_manifest": manifest_b,
+                "delivery_package": package_b,
+                "publish_child_run_id": "publish-b",
+            },
+            "latest_control_response": {
+                "review_draft_html": html_b,
+                "component_manifest": manifest_b,
+                "delivery_package": package_a,
+                "publish_child_status": "queued",
+            },
+        }
+        projected = views._article_result_without_projected_artifacts(
+            raw,
+            review_draft_html=html_a,
+            component_manifest=manifest_a,
+            content_package={"title": "Article A", "contentPackaged": True},
+            section_issues=[], artifacts=[], diagnostics={},
+        )
+        self.assertNotIn("review_draft_html", projected)
+        self.assertNotIn("component_manifest", projected)
+        self.assertEqual(projected["delivery_package"], package_a)
+        self.assertEqual(projected["result"]["review_draft_html"], html_b)
+        self.assertEqual(projected["result"]["component_manifest"], manifest_b)
+        self.assertEqual(projected["result"]["delivery_package"], package_b)
+        self.assertEqual(projected["result"]["publish_child_run_id"], "publish-b")
+        self.assertEqual(projected["latest_control_response"], {"publish_child_status": "queued"})
+        self.assertEqual(raw["latest_control_response"]["delivery_package"], package_a)
+
+        # An augmented top-level manifest is not byte-for-byte the raw one.
+        # Keep one raw copy, while discarding its equal nested duplicate.
+        augmented = {"components": manifest_a["components"] + [{"id": "fixed-review-controls"}]}
+        projected_augmented = views._article_result_without_projected_artifacts(
+            {"component_manifest": manifest_a, "result": {"component_manifest": manifest_a}},
+            review_draft_html="", component_manifest=augmented,
+            content_package=None, section_issues=[], artifacts=[], diagnostics={},
+        )
+        self.assertEqual(projected_augmented, {"component_manifest": manifest_a, "result": {}})
 
     def test_delete_action_is_explicit_and_bound_to_exact_section(self):
         input_payload = {

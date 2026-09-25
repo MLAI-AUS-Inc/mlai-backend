@@ -43,6 +43,15 @@ from content_factory.article_setup_reset import (
     clear_cancelled_article_setup_config,
     reset_article_setup_config,
 )
+from content_factory.article_publish_approval import (
+    RECEIPT_KEY as ARTICLE_PUBLISH_APPROVAL_RECEIPT_KEY,
+    RECEIPT_REQUIRED_KEY as ARTICLE_PUBLISH_APPROVAL_RECEIPT_REQUIRED_KEY,
+    article_publish_approval_receipt_matches,
+    article_review_identity,
+    article_review_identity_is_complete,
+    article_review_identity_matches_approved_run,
+    make_article_publish_approval_receipt,
+)
 from content_factory.article_system import (
     PUBLISH_DISCONNECTED_KEY,
     article_system_ready,
@@ -8349,7 +8358,7 @@ def _latest_review_ready_component_revision(run, context):
     denormalized component_feedback_revision_run_id metadata.
     """
 
-    if not run or run.workflow not in ARTICLE_WORKFLOWS:
+    if not run or run.workflow not in ARTICLE_WORKFLOWS or not _run_belongs_to_context(run, context):
         return None
     candidates = list(
         ContentFactoryRun.objects.filter(
@@ -8357,26 +8366,32 @@ def _latest_review_ready_component_revision(run, context):
             workflow="article_revision",
         ).order_by("created_at", "id")
     )
-    candidates = [
-        candidate
-        for candidate in candidates
-        if _run_belongs_to_context(candidate, context)
-        and _component_revision_is_review_ready(candidate)
-    ]
-    current = run
+    children_by_source = {}
+    owned_candidates = []
+    for candidate in candidates:
+        if not _run_belongs_to_context(candidate, context):
+            continue
+        owned_candidates.append(candidate)
+        children_by_source.setdefault(_run_source_run_id(candidate), []).append(candidate)
+
+    # A failed or still-running intermediate revision may already have a newer
+    # review-ready child. Traverse the entire owned lineage before choosing the
+    # newest reviewable descendant; filtering first would hide that child.
     visited = {run.run_id}
-    while True:
-        children = [
-            candidate
-            for candidate in candidates
-            if candidate.run_id not in visited
-            and _run_source_run_id(candidate) == current.run_id
-        ]
-        if not children:
-            break
-        current = children[-1]
-        visited.add(current.run_id)
-    return current if current.pk != run.pk else None
+    pending = [run.run_id]
+    while pending:
+        source_run_id = pending.pop()
+        for child in children_by_source.get(source_run_id, []):
+            if child.run_id in visited:
+                continue
+            visited.add(child.run_id)
+            pending.append(child.run_id)
+
+    latest = None
+    for candidate in owned_candidates:
+        if candidate.pk != run.pk and candidate.run_id in visited and _component_revision_is_review_ready(candidate):
+            latest = candidate
+    return latest
 
 
 def _run_can_promote_package(run, config=None):
@@ -10432,6 +10447,75 @@ def _strip_missing_setup_run_refs(result):
     return scrubbed
 
 
+def _article_result_without_projected_artifacts(
+    result, *, review_draft_html, component_manifest, content_package,
+    section_issues, artifacts, diagnostics,
+):
+    """Keep article control state while avoiding duplicate review artifacts.
+
+    The full run response has dedicated, normalized fields for these values.
+    Remote responses can also repeat them under ``result`` and
+    ``latest_control_response``. This is a response-only projection: the stored
+    result and its approval/publish evidence are never changed.
+    """
+    artifact_kind = {
+        "review_draft_html": "review_html", "reviewDraftHtml": "review_html",
+        "component_manifest": "manifest", "componentManifest": "manifest",
+        "delivery_package": "package", "deliveryPackage": "package",
+        "content_package": "package", "contentPackage": "package",
+        "section_issues": "issues", "sectionIssues": "issues",
+        "artifacts": "artifacts", "diagnostics": "diagnostics",
+    }
+    projected_values = {
+        "review_html": review_draft_html,
+        "manifest": component_manifest,
+        "package": content_package,
+        "artifacts": artifacts,
+        "diagnostics": diagnostics,
+    }
+    retained_raw = {kind: [] for kind in set(artifact_kind.values())}
+    nested_keys = {"result", "latest_control_response"}
+
+    def is_projected(kind, value):
+        if kind == "issues":
+            # The public issue contract intentionally discards private fields.
+            return public_section_issues(value) == section_issues
+        return value == projected_values[kind]
+
+    def project(mapping, depth):
+        response = {}
+        # Process direct values first so nested duplicates cannot displace the
+        # canonical root value if a worker changes its JSON key order.
+        for key, value in sorted(mapping.items(), key=lambda item: item[0] in nested_keys):
+            kind = artifact_kind.get(key)
+            if kind:
+                if is_projected(kind, value) or any(value == kept for kept in retained_raw[kind]):
+                    continue
+                retained_raw[kind].append(value)
+            response[key] = (
+                project(value, depth - 1)
+                if depth and key in nested_keys and isinstance(value, dict)
+                else value
+            )
+        return response
+
+    return project(result, 2)
+
+
+def _nested_run_result_value(result, *keys):
+    """First nonempty value from a run result and its common worker wrappers."""
+    for source in (
+        result,
+        _run_mapping(result.get("result")),
+        _run_mapping(result.get("latest_control_response")),
+    ):
+        for key in keys:
+            value = source.get(key)
+            if value not in (None, "", [], {}):
+                return value
+    return None
+
+
 def _serialize_run(
     run, *, context=None, latest_runs=None, checks=None, mode="full",
     topic_candidates=None, precomputed_article_setup_state=None,
@@ -10440,7 +10524,7 @@ def _serialize_run(
     step_states = _serialize_run_steps(run, compact=compact)
     from content_factory.run_state import reliability_presentation
     result = _run_mapping(run.result)
-    section_issues = public_section_issues(result.get("section_issues") or result.get("sectionIssues"))
+    section_issues = public_section_issues(_nested_run_result_value(result, "section_issues", "sectionIssues"))
     raw_review_draft_html = result.get("review_draft_html") or result.get("reviewDraftHtml")
     review_draft_html = _bounded_review_draft_html(raw_review_draft_html)
     review_draft_actions_available = (
@@ -10533,6 +10617,21 @@ def _serialize_run(
         }
     content_package = _content_package_from_run(run)
     component_manifest = _component_manifest_from_run(run)
+    artifacts = _nested_run_result_value(result, "artifacts") or []
+    diagnostics = result.get("diagnostics") or run.verification_summary or _nested_run_result_value(result, "diagnostics") or {}
+    # The review page reads these large artifacts from their dedicated fields.
+    # Keeping their raw worker copies in result can send an article/manifest
+    # several times in a single full run response. Leave workflow, approval and
+    # publish control values in result for existing clients.
+    response_result = _article_result_without_projected_artifacts(
+        result,
+        review_draft_html=review_draft_html,
+        component_manifest=component_manifest,
+        content_package=content_package,
+        section_issues=section_issues,
+        artifacts=artifacts,
+        diagnostics=diagnostics,
+    ) if run.workflow in ARTICLE_WORKFLOWS else result
     return {
         "runId": run.run_id,
             "editorialSnapshot": editorial_snapshot,
@@ -10554,11 +10653,11 @@ def _serialize_run(
         "errorCode": result.get("error_code"),
         "blockingReason": blocking_detail["reason"] or None,
         "blockingCode": blocking_detail["code"] or None,
-        "artifacts": result.get("artifacts") or [],
+        "artifacts": artifacts,
         "previewUrl": preview_url,
         "prUrl": pr_url,
         "routePath": result.get("route_path") or result.get("path"),
-        "diagnostics": result.get("diagnostics") or run.verification_summary or {},
+        "diagnostics": diagnostics,
         "sectionIssues": section_issues,
         "reviewDraftHtml": review_draft_html,
         "reviewDraftActionsAvailable": review_draft_actions_available,
@@ -10586,7 +10685,7 @@ def _serialize_run(
         "workflowProgress": _workflow_progress(
             context=context, run=run, latest_runs=latest_runs, checks=checks, topic_candidates=topic_candidates
         ),
-        "result": _strip_missing_setup_run_refs(result),
+        "result": _strip_missing_setup_run_refs(response_result),
         **reliability_presentation(result),
     }
 
@@ -10950,6 +11049,19 @@ def _serialize_bootstrap(context, request=None, *, view="full"):
     return _overlay_live_bootstrap_fields(payload, context=context, request=request)
 
 
+_BOOTSTRAP_WORKFLOW_RUN_FIELDS = (
+    "runId", "workflow", "status", "currentStep", "approvalState", "sourceRunId",
+    "resumeAvailable", "restartAvailable", "retryAvailable", "updatedAt",
+    "previewUrl", "prUrl", "routePath", "blockingReason", "blockingCode",
+    "publishChildStatus", "publishChildRecoverable", "publishChildWaitReason",
+)
+
+
+def _bootstrap_workflow_run_ref(serialized_run):
+    """Small workflow index; the complete item remains in latestRuns."""
+    return {key: serialized_run.get(key) for key in _BOOTSTRAP_WORKFLOW_RUN_FIELDS}
+
+
 def _compute_bootstrap_payload(context, request=None, *, view="full", config=None):
     compact = view == "summary"
     if config is None:
@@ -11042,7 +11154,9 @@ def _compute_bootstrap_payload(context, request=None, *, view="full", config=Non
     ]
     latest_runs_by_workflow = {}
     for serialized_run in serialized_runs:
-        latest_runs_by_workflow.setdefault(serialized_run["workflow"], serialized_run)
+        latest_runs_by_workflow.setdefault(
+            serialized_run["workflow"], _bootstrap_workflow_run_ref(serialized_run)
+        )
     latest_article_run = _latest_run_matching(latest_runs, ARTICLE_WORKFLOWS)
     google_status = google_baseline_connection_status(context.profile.user, context.organization)
     google_status["connectUrl"] = _google_baseline_connect_url(request, context)
@@ -16604,6 +16718,8 @@ class VibeMarketingRunCommentsAcceptRevisionView(VibeMarketingRunCommentsMixin, 
         context, run, error_response = self._resolve_run(request, run_id)
         if error_response is not None:
             return error_response
+        if run.workflow != "article_revision":
+            return Response({"detail": "Only a completed article revision can be accepted."}, status=status.HTTP_400_BAD_REQUEST)
         run_request = run.run_request if isinstance(run.run_request, dict) else {}
         result = run.result or {}
         source_run_id = str(
@@ -16628,6 +16744,16 @@ class VibeMarketingRunCommentsAcceptRevisionView(VibeMarketingRunCommentsMixin, 
             return Response({"detail": "Feedback batch id is required."}, status=status.HTTP_400_BAD_REQUEST)
         if run.status != ContentFactoryRunStatus.COMPLETED:
             return Response({"detail": "The revised article must be completed before accepting feedback."}, status=status.HTTP_400_BAD_REQUEST)
+        identity = article_review_identity(run)
+        if not article_review_identity_is_complete(run) or any((
+            str(request.data.get("reviewedRunId") or "").strip() != identity["run_id"],
+            str(request.data.get("reviewedPreviewUrl") or "").strip() != identity["preview_url"],
+            str(request.data.get("reviewedPreviewRevision") or "").strip() != identity["commit_sha"],
+        )):
+            return Response(
+                {"detail": "The revised article preview and quality review must match this revision before feedback can be accepted."},
+                status=status.HTTP_409_CONFLICT,
+            )
 
         promoted_count, archived_count = _promote_editorial_feedback_batch(
             run=source_run, batch_id=batch_id, revision_run_id=run.run_id
@@ -16887,6 +17013,71 @@ def _accepted_component_revision_for_publish(run, context):
     return latest_revision or revision_run
 
 
+def _article_publish_retry_authorized(run):
+    """Only an approved review may create or repair a publish handoff.
+
+    Runs approved before durable local receipts existed can retry an already
+    recorded child. They cannot initiate a new child from a fresh draft.
+    """
+    run_request = _run_mapping(run.run_request)
+    if ARTICLE_PUBLISH_APPROVAL_RECEIPT_KEY in run_request:
+        return article_publish_approval_receipt_matches(run)
+    if ARTICLE_PUBLISH_APPROVAL_RECEIPT_REQUIRED_KEY in run_request:
+        return False
+    return bool(
+        run.approval_state == ContentFactoryApprovalState.APPROVED
+        and _publish_child_run_id_for_run(run)
+    )
+
+
+def _require_article_publish_approval_receipt(run, *, expected_identity):
+    """Persist the strict retry gate before sending a new article approval."""
+    with transaction.atomic():
+        current = ContentFactoryRun.objects.select_for_update().get(pk=run.pk)
+        if (
+            not article_review_identity_is_complete(current)
+            or article_review_identity(current) != expected_identity
+        ):
+            return False
+        run_request = dict(current.run_request or {})
+        run_request[ARTICLE_PUBLISH_APPROVAL_RECEIPT_REQUIRED_KEY] = True
+        current.run_request = run_request
+        current.save(update_fields=["run_request", "updated_at"])
+        run.run_request = run_request
+    return True
+
+
+def _record_article_publish_approval_receipt(run, *, actor_id, expected_identity):
+    if not article_review_identity_is_complete(run):
+        return False
+    with transaction.atomic():
+        current = ContentFactoryRun.objects.select_for_update().get(pk=run.pk)
+        if not article_review_identity_matches_approved_run(current, expected_identity):
+            return False
+        receipt = make_article_publish_approval_receipt(current, actor_id=actor_id)
+        if not receipt:
+            return False
+        run_request = dict(current.run_request or {})
+        run_request[ARTICLE_PUBLISH_APPROVAL_RECEIPT_KEY] = receipt
+        current.run_request = run_request
+        current.save(update_fields=["run_request", "updated_at"])
+        run.run_request = run_request
+    return True
+
+
+def _article_publish_approval_receipt_failure(run):
+    return Response(
+        {
+            "detail": (
+                "Article approval reached Content Factory, but the reviewed preview changed "
+                "before its approval receipt was saved. Refresh the article and approve the current preview again."
+            ),
+            "runId": run.run_id,
+        },
+        status=status.HTTP_409_CONFLICT,
+    )
+
+
 class VibeMarketingRunControlView(APIView):
     def post(self, request, run_id, action):
         context, error_response = _resolve_context_or_response(request, require_domain=False)
@@ -16895,6 +17086,33 @@ class VibeMarketingRunControlView(APIView):
         run = get_object_or_404(ContentFactoryRun, run_id=run_id)
         if not _run_belongs_to_context(run, context):
             return Response({"detail": "Run not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        approval_requires_receipt = (
+            action == "approve"
+            and run.workflow in ARTICLE_WORKFLOWS
+            and not _is_publish_child_run(run)
+        )
+        if approval_requires_receipt:
+            latest_revision = _latest_review_ready_component_revision(run, context)
+            if latest_revision is not None:
+                return Response(
+                    {
+                        "detail": "A newer article revision is ready. Review and approve that draft instead.",
+                        "latestRunId": latest_revision.run_id,
+                    },
+                    status=status.HTTP_409_CONFLICT,
+                )
+            if not article_review_identity_is_complete(run):
+                return Response(
+                    {"detail": "The hosted article preview and quality review must match this revision before approval."},
+                    status=status.HTTP_409_CONFLICT,
+                )
+
+        approval_review_identity = (
+            article_review_identity(run)
+            if approval_requires_receipt
+            else None
+        )
 
         payload = dict(request.data or {})
         payload.setdefault("request_source", CONTENT_FACTORY_REQUEST_SOURCE)
@@ -17112,6 +17330,11 @@ class VibeMarketingRunControlView(APIView):
                 remote_run = accepted_revision
                 payload.setdefault("review_source_run_id", run.run_id)
                 payload.setdefault("source_run_id", accepted_revision.run_id)
+            if not _article_publish_retry_authorized(remote_run):
+                return Response(
+                    {"detail": "Approve this exact article preview before publishing it."},
+                    status=status.HTTP_409_CONFLICT,
+                )
             # Prefer the newest revision's child. An older source may already
             # have a completed publish child from the regression this path is
             # designed to repair; returning it would publish/reopen stale code.
@@ -17161,6 +17384,13 @@ class VibeMarketingRunControlView(APIView):
                 domain=context.organization.domain,
                 action="article_revision",
                 current_balance=gate_balance,
+            )
+        if approval_requires_receipt and not _require_article_publish_approval_receipt(
+            run, expected_identity=approval_review_identity
+        ):
+            return Response(
+                {"detail": "The article preview changed before approval. Refresh and review the current preview."},
+                status=status.HTTP_409_CONFLICT,
             )
         remote_data = _call_content_factory_run_action(
             run_id=remote_run.run_id,
@@ -17212,6 +17442,12 @@ class VibeMarketingRunControlView(APIView):
                     "contentFactoryStatusCode": remote_status_code,
                 },
                 status=remote_status_code,
+            )
+
+        if action == "approve" and remote_data.get("error"):
+            return Response(
+                {"detail": str(remote_data["error"]), "runId": run.run_id},
+                status=status.HTTP_502_BAD_GATEWAY,
             )
 
         if action == "retry-preview-quality":
@@ -17316,6 +17552,12 @@ class VibeMarketingRunControlView(APIView):
                 mark_source_approved=True,
             )
             if publish_run is not None:
+                if approval_requires_receipt and not _record_article_publish_approval_receipt(
+                    run,
+                    actor_id=founder_actor_id_for_user(request.user) or str(request.user.pk),
+                    expected_identity=approval_review_identity,
+                ):
+                    return _article_publish_approval_receipt_failure(run)
                 return Response(_serialize_run(publish_run, context=context), status=status.HTTP_202_ACCEPTED)
 
         if action == "approve":
@@ -17561,6 +17803,12 @@ class VibeMarketingRunControlView(APIView):
                 )
             run.result = result
         run.save(update_fields=["approval_state", "status", "current_step", "resume_available", "result", "error", "updated_at"])
+        if approval_requires_receipt and not _record_article_publish_approval_receipt(
+            run,
+            actor_id=founder_actor_id_for_user(request.user) or str(request.user.pk),
+            expected_identity=approval_review_identity,
+        ):
+            return _article_publish_approval_receipt_failure(run)
         return Response(_serialize_run(run, context=context), status=status.HTTP_200_OK)
 
 

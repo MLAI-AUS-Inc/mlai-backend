@@ -226,7 +226,21 @@ jobs:
           tests.test_content_factory_reconciliation \
           tests.test_content_factory_status_contract \
           content_factory.tests_section_issues_unit \
+          content_factory.tests_article_publish_approval_unit \
           tests.test_vibe_marketing_component_comments.VibeMarketingComponentCommentTests.test_failed_package_review_draft_can_submit_section_deletion \
+          tests.test_vibe_marketing_component_comments.VibeMarketingComponentCommentTests.test_approve_preview_ready_article_creates_local_publish_child_run \
+          tests.test_vibe_marketing_component_comments.VibeMarketingComponentCommentTests.test_approve_propagates_content_factory_conflict_and_keeps_review_state \
+          tests.test_vibe_marketing_component_comments.VibeMarketingComponentCommentTests.test_unapproved_article_cannot_promote_or_publish_pr_directly \
+          tests.test_vibe_marketing_component_comments.VibeMarketingComponentCommentTests.test_proofless_approval_and_forged_receipt_cannot_publish \
+          tests.test_vibe_marketing_component_comments.VibeMarketingComponentCommentTests.test_approve_article_records_receipt_for_exact_review \
+          tests.test_vibe_marketing_component_comments.VibeMarketingComponentCommentTests.test_failed_article_approval_does_not_record_receipt \
+          tests.test_vibe_marketing_component_comments.VibeMarketingComponentCommentTests.test_older_approved_run_cannot_promote_unapproved_latest_revision \
+          tests.test_vibe_marketing_component_comments.VibeMarketingComponentCommentTests.test_older_source_cannot_approve_newer_review_ready_revision \
+          tests.test_vibe_marketing_component_comments.VibeMarketingComponentCommentTests.test_failed_intermediate_does_not_hide_newest_revision_from_approve \
+          tests.test_vibe_marketing_component_comments.VibeMarketingComponentCommentTests.test_failed_intermediate_does_not_allow_stale_promote_retry \
+          tests.test_vibe_marketing_component_comments.VibeMarketingComponentCommentTests.test_existing_publish_child_approval_does_not_need_article_preview_proof \
+          tests.test_vibe_marketing_component_comments.VibeMarketingComponentCommentTests.test_changed_preview_commit_invalidates_promotion_receipt \
+          tests.test_vibe_marketing_component_comments.VibeMarketingComponentCommentTests.test_regressed_preview_quality_blocks_receipt_based_promote_retry \
           tests.test_vibe_marketing_workflow_progress_unit \
           content_factory.tests_admin_metrics \
           tests.test_community_bridge_adapter_url \
