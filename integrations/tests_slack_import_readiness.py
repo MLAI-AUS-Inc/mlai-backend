@@ -146,6 +146,24 @@ class SlackImportReadinessTests(SlackDmIoAuthorityFixture, TransactionTestCase):
         self.assertEqual(status["backfill"]["complete"], 0)
         self.assertEqual(status["backfill"]["pending"], 1)
 
+    def test_cancelled_previous_room_delete_does_not_block_current_room(self):
+        row = SlackDmMirrorDelivery.objects.create(
+            conversation=self.conversation, source_platform="slack",
+            source_message_id=self.conversation.latest_synced_ts, operation="delete",
+            status="dead", last_error="Private conversation participants changed",
+            metadata={"backfill": True, "participant_hash": self.conversation.participant_hash},
+            available_at=timezone.now(),
+        )
+        self.assertTrue(self.catalog()[0]["ready_for_display"])
+        # Real current-room deletion failures must still block first publication.
+        row.last_error = "Relay delivery failed"
+        row.save(update_fields=["last_error"])
+        self.assertFalse(self.catalog()[0]["ready_for_display"])
+        row.last_error = "Private conversation participants changed"
+        row.status = "pending"
+        row.save(update_fields=["last_error", "status"])
+        self.assertFalse(self.catalog()[0]["ready_for_display"])
+
     def test_paused_chat_stays_in_catalog_as_a_hidden_type_fence(self):
         self.conversation.status = "paused"
         self.conversation.save()

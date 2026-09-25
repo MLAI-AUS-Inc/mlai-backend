@@ -23,6 +23,7 @@ class SlackOpenRequestsTests(SimpleTestCase):
         )
         self.device = SimpleNamespace(pk=4, public_key="a" * 64, verified_at=None)
         self.authority = SimpleNamespace(grant_id=7)
+        self.progress = SimpleNamespace(value={}, membership_fence="room-membership", save=MagicMock())
         self.row = SimpleNamespace(
             slack_conversation_id="DCINDY", kind="im", eligibility="eligible",
             source_archived=False,
@@ -38,6 +39,7 @@ class SlackOpenRequestsTests(SimpleTestCase):
             ("integrations.services.slack_owner_inventory_api.CommunityChatDevice.objects", {}),
             ("integrations.services.slack_owner_inventory_api.has_metadata_consent", {"return_value": True}),
             ("integrations.services.slack_owner_inventory_api._grant_history_days", {"return_value": 30}),
+            ("integrations.services.slack_discovery_progress.conversation_progress", {"side_effect": lambda *args: nullcontext(self.progress)}),
         ):
             patcher = patch(target, **options)
             patcher.start()
@@ -128,9 +130,9 @@ class SlackOpenRequestsTests(SimpleTestCase):
         if changed_epoch:
             next(iter(self.connection.sync_cursor[opens.KEY].values()))["epoch"] = "old"
         conversation = SimpleNamespace(pk=7)
-        with patch.object(api, "_validate_open_source", return_value=({"id": "DCINDY"}, int(self.now)), side_effect=source_error) as source, patch(
-            "integrations.services.slack_discovery_progress.conversation_progress", return_value=nullcontext(),
-        ), patch.object(dm, "_discover_conversation", return_value=conversation, side_effect=import_error) as discover, patch.object(
+        with patch.object(api, "_validate_open_source", return_value=({"id": "DCINDY"}, int(self.now)), side_effect=source_error) as source, patch.object(
+            dm, "_discover_conversation", return_value=conversation, side_effect=import_error,
+        ) as discover, patch.object(
             dm, "_drain_staged_events_for_conversation",
         ), patch.object(opens, "_prioritize_history") as prioritize, patch.object(opens, "_update") as update:
             self.assertTrue(opens.process_next_open(self.grant, self.authority))
@@ -161,11 +163,47 @@ class SlackOpenRequestsTests(SimpleTestCase):
 
     def test_backoff_begins_after_slow_source_work(self):
         self.enqueue()
-        with patch.object(opens.time, "time", side_effect=[self.now, self.now + 8]), patch.object(
+        with patch.object(opens.time, "time", side_effect=[self.now, self.now, self.now + 8]), patch.object(
             api, "_validate_open_source", side_effect=BudgetDeferred(60),
         ), patch.object(opens, "_update") as update:
             opens.process_next_open(self.grant, self.authority)
         self.assertEqual(update.call_args.kwargs, {"due": self.now + 68})
+
+    def test_nested_provider_deferral_reuses_recent_validated_source(self):
+        source, _, _, _ = self.run_worker(import_error=BudgetDeferred(2))
+        source.assert_called_once()
+        source, discover, _, update = self.run_worker()
+        source.assert_not_called()
+        discover.assert_called_once()
+        self.assertEqual(update.call_args.kwargs, {"state": "importing"})
+
+    def test_source_checkpoint_does_not_persist_provider_message_payloads(self):
+        details = {
+            "id": "DCINDY", "user": "UCINDY", "name": "Cindy", "is_im": True,
+            "is_member": True, "is_open": True,
+            "latest": {"text": "private message", "ts": str(self.now)},
+            "topic": {"value": "private topic"}, "messages": ["private body"],
+        }
+        with patch.object(api, "_validate_open_source", return_value=(details, int(self.now))):
+            actual, activity = opens._validated_source(self.grant, self.authority, self.row, self.progress)
+        self.assertEqual(actual, {
+            "id": "DCINDY", "user": "UCINDY", "name": "Cindy", "is_im": True,
+            "is_member": True, "is_open": True,
+        })
+        self.assertEqual(activity, int(self.now))
+        self.assertNotIn("private", str(self.progress.value))
+        self.progress.save.assert_called_once()
+
+    def test_source_checkpoint_expires_and_never_survives_membership_change(self):
+        with patch.object(api, "_validate_open_source", return_value=({"id": "DCINDY"}, int(self.now))) as source:
+            opens._validated_source(self.grant, self.authority, self.row, self.progress)
+            with patch.object(opens.time, "time", return_value=self.now + opens.SOURCE_VALIDATION_TTL):
+                opens._validated_source(self.grant, self.authority, self.row, self.progress)
+            self.assertEqual(source.call_count, 2)
+            self.progress.membership_fence = "changed-room-membership"
+            with patch.object(opens.time, "time", return_value=self.now + opens.SOURCE_VALIDATION_TTL + 1):
+                opens._validated_source(self.grant, self.authority, self.row, self.progress)
+            self.assertEqual(source.call_count, 3)
 
     def test_worker_rejects_old_consent_or_device_epoch_before_provider_io(self):
         source, discover, _, update = self.run_worker(changed_epoch=True)

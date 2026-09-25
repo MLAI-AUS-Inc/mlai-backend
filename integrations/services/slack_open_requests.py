@@ -14,6 +14,7 @@ from integrations.services.message_sync.scheduler import BudgetDeferred, LeaseLo
 KEY = "slack_conversation_open_requests_v1"
 MAX_REQUESTS = 16
 REQUEST_TTL = 900
+SOURCE_VALIDATION_TTL = 60
 logger = logging.getLogger(__name__)
 
 
@@ -117,6 +118,44 @@ def _retry_failure(authority, key, request, code):
         _update(authority, key, request, due=time.time() + 30, attempts=attempts)
 
 
+def _validated_source(grant, authority, row, progress):
+    """Resume a recent source check across nested membership/profile deferrals.
+
+    The existing directory checkpoint binds this to one request, OAuth/consent
+    generation, source, history window and current room membership. Persist only
+    bounded conversation metadata: Slack's info response can contain messages.
+    """
+    from integrations.services.slack_owner_inventory_api import _validate_open_source
+
+    now = time.time()
+    cached = progress.value.get("open_source") or {}
+    if (isinstance(cached, dict)
+            and isinstance(cached.get("checked_at"), (int, float))
+            and 0 <= now - cached["checked_at"] < SOURCE_VALIDATION_TTL
+            and cached.get("membership_fence") == progress.membership_fence
+            and isinstance(cached.get("details"), dict)
+            and cached["details"].get("id") == row.slack_conversation_id
+            and isinstance(cached.get("activity"), int)):
+        return dict(cached["details"]), cached["activity"]
+    details, activity = _validate_open_source(grant, authority, row)
+    safe_details = {
+        key: str(details[key])[:limit]
+        for key, limit in (("id", 100), ("user", 100), ("name", 255))
+        if key in details
+    }
+    safe_details.update({
+        key: details[key] for key in (
+            "is_im", "is_mpim", "is_private", "is_member", "is_open", "is_archived",
+        ) if isinstance(details.get(key), bool)
+    })
+    progress.value["open_source"] = {
+        "details": safe_details, "activity": activity,
+        "checked_at": time.time(), "membership_fence": progress.membership_fence,
+    }
+    progress.save()
+    return safe_details, activity
+
+
 def process_next_open(grant, authority):
     """Process one requested source before full-directory work, preserving quotas.
 
@@ -128,7 +167,7 @@ def process_next_open(grant, authority):
     from integrations.services.slack_discovery_progress import conversation_progress
     from integrations.services.slack_owner_inventory import device_epoch
     from integrations.services.slack_owner_inventory_api import (
-        InventoryError, _authorized, _validate_open_source,
+        InventoryError, _authorized,
     )
 
     now = time.time()
@@ -154,9 +193,9 @@ def process_next_open(grant, authority):
         ).first()
         if row is None or row.kind == "public_channel":
             raise InventoryError("inventory_conversation_unavailable", 404)
-        details, activity = _validate_open_source(current_grant, authority, row)
         started_at = datetime.fromtimestamp(request["requested_at"], tz=dt_timezone.utc)
-        with conversation_progress(authority, row.slack_conversation_id, row.kind, started_at):
+        with conversation_progress(authority, row.slack_conversation_id, row.kind, started_at) as progress:
+            details, activity = _validated_source(current_grant, authority, row, progress)
             conversation = dm._discover_conversation(
                 current_grant, authority, details, profile_cache={},
                 force_backfill=False, reset_history=False,

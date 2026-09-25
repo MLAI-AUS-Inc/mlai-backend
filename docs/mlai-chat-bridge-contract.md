@@ -785,6 +785,16 @@ conversation view immediately and retry this endpoint after its reported delay;
 they do not need to load the full Slack directory between the inbox and the chat.
 Polling coalesces with the same intent and never resets its provider backoff.
 
+Inventory items include `openable`, an owner/device-scoped availability hint.
+The unread-only directory filters this before pagination and counts only these
+actionable rows in its fresh/provisional unread totals. Out-of-window, closed
+unimported, unsupported, unmapped public and errored conversations remain in the
+explicit directory but do not appear in Unreads or Catch up. An eligible private
+source can still open through the asynchronous import; a ready authorized room
+can open immediately. A current-device terminal open failure suppresses the
+stale inventory row while that result is retained. Source-wide discovery and
+read-coverage totals remain separate, and this hint never grants relay access.
+
 The existing discovery worker handles one targeted open before enumerating the
 owner's directory. It rechecks the current consent, device verification epoch,
 source membership, source scopes and selected history window, then uses the same
@@ -795,6 +805,14 @@ history to the normal import worker. A partially processed foreground intent
 retains its place during backoff so another directory page cannot discard its
 member/profile checkpoint. A new intent arriving during a full directory scan
 keeps discovery due after that scan finishes.
+
+Successful source validation is also checkpointed for up to 60 seconds under
+the same request, source, OAuth, consent, history-window and membership boundary.
+Nested provider deferrals reuse only bounded metadata and an activity timestamp;
+message bodies are never cached there. Expiry or changed membership requires a
+fresh source check. Web and desktop hydrate only the selected authorized room
+and its membership/status in parallel, then cache it; opening does not await a
+full-directory reload. Mobile already uses the same targeted-room approach.
 
 Requested rooms receive first service on import-priority turns within the
 selected owner for five minutes. Ordinary turns retain least-recently-served
@@ -1053,6 +1071,9 @@ empty scan, using an intent bound to the exact consent, OAuth generation and
 owner device. This does not make a background-discovered empty conversation or
 a conversation with actual old activity eligible. Progress counts use the same
 durable scan, consent, source-limit and delivery prerequisites.
+Cancelled delivery tombstones from a replaced room (`dead` with the exact
+participant-change cancellation reason) do not block the new room's publication,
+matching refresh progress. Genuine current-room delivery failures still do.
 Clients hide unready imports while preserving native chats. They also filter
 cached Slack bodies by the same source cutoff and use full Slack timestamps to
 order messages sharing a second.
