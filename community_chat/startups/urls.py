@@ -1,6 +1,6 @@
 from django.urls import path
 from . import views
-from .connections import ConnectView, connect_browser
+from .connections import ConnectView, DisconnectView, connect_browser
 
 urlpatterns = [
     path("connect/browser/", connect_browser, name="chat_startups_connect_browser"),
@@ -10,6 +10,7 @@ urlpatterns = [
     path("active-company/", views.ActiveCompanyView.as_view()),
     path("settings/", views.SettingsView.as_view()),
     path("sources/", views.SourcesView.as_view()),
+    path("sources/<str:provider>/", DisconnectView.as_view()),
     path("updates/", views.UpdatesView.as_view(), name="chat_startups_updates"),
     path("updates/<int:update_id>/", views.UpdateView.as_view(), name="chat_startups_update"),
     path("updates/<int:update_id>/publish/", views.PublishView.as_view(), name="chat_startups_publish"),

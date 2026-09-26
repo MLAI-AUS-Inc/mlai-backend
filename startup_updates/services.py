@@ -2140,10 +2140,11 @@ def build_slack_run_context(
     queryset = SlackChannelSelection.objects.filter(
         organization=organization,
         connection=connection,
-        selected=True,
     )
-    if selected_channel_ids:
+    if selected_channel_ids is not None:
         queryset = queryset.filter(channel_id__in=selected_channel_ids)
+    else:
+        queryset = queryset.filter(selected=True)
     channels = [
         {
             "channel_id": selection.channel_id,
@@ -2268,6 +2269,11 @@ def pin_startup_update_run_slack_authority(
                 selected=True,
             ).values_list("channel_id", flat=True)
         )
+        if "automatic_source_scope" in request_payload:
+            requested_ids = request_payload["automatic_source_scope"].get("slack", [])
+            channel_ids = list(SlackChannelSelection.objects.filter(
+                connection=connection, channel_id__in=requested_ids,
+            ).values_list("channel_id", flat=True))
         request_payload["slack_channel_ids"] = channel_ids
         external_context = dict(request_payload.get("external_context") or {})
         external_context[ExternalServiceProvider.SLACK] = build_slack_run_context(
@@ -2287,10 +2293,11 @@ def pin_startup_update_run_slack_authority(
 def build_linear_run_context(*, organization: Organization, selected_project_ids: Optional[list[str]] = None) -> dict:
     queryset = LinearProjectSelection.objects.filter(
         organization=organization,
-        selected=True,
     ).exclude(connection__status=ExternalServiceConnectionStatus.DISCONNECTED)
     if selected_project_ids is not None:
         queryset = queryset.filter(linear_project_id__in=selected_project_ids)
+    else:
+        queryset = queryset.filter(selected=True)
     projects = [
         {
             "project_id": selection.linear_project_id,
@@ -2366,7 +2373,7 @@ def build_notion_run_context(*, organization: Organization) -> dict:
     }
 
 
-def build_google_analytics_run_context(*, organization: Organization) -> dict:
+def build_google_analytics_run_context(*, organization: Organization, property_ids=None) -> dict:
     connection = (
         ExternalServiceConnection.objects.filter(
             organization=organization,
@@ -2387,7 +2394,7 @@ def build_google_analytics_run_context(*, organization: Organization) -> dict:
             }
             for selection in GoogleAnalyticsPropertySelection.objects.filter(
                 connection=connection,
-                selected=True,
+                **({"property_id__in": property_ids} if property_ids is not None else {"selected": True}),
             ).order_by("property_display_name", "property_id")
         ]
     property_ids = [item["property_id"] for item in selected_properties]
@@ -2415,8 +2422,9 @@ def build_luma_run_context(
     organization: Organization,
     target_month: date,
     warnings: Optional[list[str]] = None,
+    activity_period=None,
 ) -> dict:
-    """Selected-month Luma events plus a two-week narrative context buffer."""
+    """Use a rolling Chat activity window, or the legacy monthly context window."""
 
     month = _month_start(target_month)
     month_end = _month_end(month)
@@ -2429,6 +2437,13 @@ def build_luma_run_context(
     context_end_at = datetime.combine(context_end, time.max, tzinfo=local_tz).astimezone(
         dt_timezone.utc
     )
+
+    from startup_updates.activity_scope import activity_window
+    recent_window = activity_window(activity_period)
+    if recent_window:
+        context_start_at, context_end_at = recent_window
+        context_end_at -= timedelta(microseconds=1)
+        context_start, context_end = context_start_at.date(), context_end_at.date()
 
     connection = (
         ExternalServiceConnection.objects.filter(
@@ -2462,7 +2477,7 @@ def build_luma_run_context(
                 "url": row.event_url,
                 "start_at": row.start_at.isoformat() if row.start_at else None,
                 "local_date": local_date.isoformat() if local_date else None,
-                "context_role": context_role,
+                "context_role": "recent_activity" if recent_window else context_role,
                 "counted_in_selected_month_metrics": in_target_month,
                 "registration_count": int(row.registration_count or 0),
                 "checked_in_count": int(row.checked_in_count or 0),
@@ -2489,12 +2504,15 @@ def build_luma_run_context(
     return {
         "source": "luma",
         "purpose": "automatic_target_month_event_context",
-        "event_selection_mode": "target_month",
+        "event_selection_mode": "recent_activity" if recent_window else "target_month",
+        "activity_window_days": 30 if recent_window else None,
         "target_month": month.isoformat(),
-        "context_days_each_side": LUMA_EVENT_CONTEXT_DAYS,
+        "context_days_each_side": 0 if recent_window else LUMA_EVENT_CONTEXT_DAYS,
         "context_start": context_start.isoformat(),
         "context_end": context_end.isoformat(),
         "counting_rule": (
+            "Event activity is limited to the recent window; stored metric observations retain their reporting-month scope."
+            if recent_window else
             "Only selected_month events contribute to the target month's metrics; "
             "before_month and after_month events are narrative context only."
         ),
@@ -2514,6 +2532,8 @@ def build_external_context_for_sources(
     manual_document_ids: Optional[list[str]] = None,
     manual_summary: Optional[str] = None,
     slack_connection: Optional[ExternalServiceConnection] = None,
+    activity_period=None,
+    resource_scope=None,
 ) -> dict[str, Any]:
     selected = set(input_sources or [])
     context: dict[str, Any] = {}
@@ -2543,17 +2563,18 @@ def build_external_context_for_sources(
     if ExternalServiceProvider.LINEAR in selected:
         context["linear"] = build_linear_run_context(
             organization=organization,
-            selected_project_ids=None,
+            selected_project_ids=(resource_scope or {}).get("linear"),
         )
     if ExternalServiceProvider.NOTION in selected:
         context["notion"] = build_notion_run_context(organization=organization)
     if ExternalServiceProvider.GOOGLE_ANALYTICS in selected:
-        context["google_analytics"] = build_google_analytics_run_context(organization=organization)
+        context["google_analytics"] = build_google_analytics_run_context(organization=organization, property_ids=(resource_scope or {}).get("google_analytics"))
     if ExternalServiceProvider.LUMA in selected:
         context["luma"] = build_luma_run_context(
             organization=organization,
             target_month=_month_start(end_date),
             warnings=warnings_by_source.get(ExternalServiceProvider.LUMA),
+            activity_period=activity_period,
         )
     if MANUAL_DOCUMENTS_SOURCE in selected:
         context[MANUAL_DOCUMENTS_SOURCE] = build_manual_documents_run_context(
@@ -2739,6 +2760,8 @@ def refresh_startup_update_run_source_context(
                 selected=True,
             ).exclude(connection__status=ExternalServiceConnectionStatus.DISCONNECTED)
         ]
+    if "automatic_source_scope" in run_request and ExternalServiceProvider.LINEAR in set(selected_input_sources):
+        run_request["linear_project_ids"] = run_request["automatic_source_scope"].get("linear", [])
     if ExternalServiceProvider.NOTION in set(selected_input_sources):
         binding = (
             UserStartupBinding.objects.select_related("user")
@@ -2788,6 +2811,8 @@ def refresh_startup_update_run_source_context(
                     selected=True,
                 ).order_by("property_display_name", "property_id")
             ]
+            if "automatic_source_scope" in run_request:
+                run_request["google_analytics_property_ids"] = run_request["automatic_source_scope"].get("google_analytics", [])
     external_context = build_external_context_for_sources(
         organization=organization,
         input_sources=selected_input_sources,
@@ -2797,6 +2822,8 @@ def refresh_startup_update_run_source_context(
         manual_document_ids=run_request.get("manual_document_ids"),
         manual_summary=run_request.get("manual_summary"),
         slack_connection=None,
+        activity_period=run_request.get("narrative_period") if run_request.get("activity_window_days") else None,
+        resource_scope=run_request.get("automatic_source_scope"),
     )
     if ExternalServiceProvider.XERO in set(selected_input_sources or []):
         xero_metrics = publish_xero_metric_observations(
@@ -3471,6 +3498,7 @@ def create_startup_update_run(
     force_regenerate: bool = False,
     update_draft=None,
     narrative_period=None,
+    automatic_source_scope=False,
 ) -> ContentFactoryRun:
     now = timezone.now()
     profile = getattr(organization, "startup_profile", None)
@@ -3570,6 +3598,10 @@ def create_startup_update_run(
         "backfill_window_end": backfill_end.isoformat(),
         "startup_context": startup_context,
     }
+    if automatic_source_scope:
+        from startup_updates.activity_scope import discover_activity_resources
+        run_request["automatic_source_scope"] = discover_activity_resources(binding.user, organization, selected_input_sources)
+        run_request["activity_window_days"] = 30
     if update_draft:
         run_request["update_id"] = update_draft.pk
         run_request["creation_key"] = str(update_draft.creation_key) if update_draft.creation_key else None
@@ -3616,6 +3648,8 @@ def create_startup_update_run(
                     selected=True,
                 ).order_by("property_display_name", "property_id")
             ]
+            if automatic_source_scope:
+                selected_ga_property_ids = run_request["automatic_source_scope"].get("google_analytics", [])
             run_request["google_analytics_property_ids"] = selected_ga_property_ids
     selected_slack_channels = []
     if ExternalServiceProvider.SLACK in selected_source_set:
@@ -3631,6 +3665,8 @@ def create_startup_update_run(
                 selected=True,
             ).exclude(connection__status=ExternalServiceConnectionStatus.DISCONNECTED)
         ]
+        if automatic_source_scope:
+            selected_linear_projects = run_request["automatic_source_scope"].get("linear", [])
         run_request["linear_project_ids"] = selected_linear_projects
     external_context = build_external_context_for_sources(
         organization=organization,
@@ -3641,6 +3677,8 @@ def create_startup_update_run(
         manual_document_ids=run_request.get("manual_document_ids"),
         manual_summary=run_request.get("manual_summary"),
         slack_connection=None,
+        activity_period=run_request.get("narrative_period") if run_request.get("activity_window_days") else None,
+        resource_scope=run_request.get("automatic_source_scope"),
     )
     if external_context:
         if ExternalServiceProvider.SLACK in external_context:
@@ -5229,8 +5267,11 @@ def compact_slack_thread_bundle(
     thread: SlackThreadArtifact,
     *,
     slack_thread_id: str,
+    activity_period=None,
 ) -> dict[str, Any]:
-    payloads = [item for item in (thread.message_payloads or []) if isinstance(item, dict)]
+    from startup_updates.activity_scope import message_in_activity_window
+    payloads = [item for item in (thread.message_payloads or []) if isinstance(item, dict)
+        and message_in_activity_window(item, activity_period)]
     hint_ids = set()
     extraction_hints = thread.extraction_hints or {}
     if isinstance(extraction_hints, dict):
@@ -5282,9 +5323,9 @@ def compact_slack_thread_bundle(
         "channel_id": thread.channel_id,
         "channel_name": thread.channel_name,
         "thread_ts": thread.thread_ts,
-        "source_message_ids": thread.source_message_ids or [],
-        "source_message_count": thread.source_message_count,
-        "cleaned_text": "\n".join(lines) or thread.cleaned_text[:SLACK_COMPACT_MAX_CHARS],
+        "source_message_ids": [item.get("message_id") for item in payloads] if activity_period else thread.source_message_ids or [],
+        "source_message_count": len(payloads) if activity_period else thread.source_message_count,
+        "cleaned_text": "\n".join(lines) or ("" if activity_period else thread.cleaned_text[:SLACK_COMPACT_MAX_CHARS]),
         "participant_summary": {
             **(thread.participant_summary or {}),
             "compression": {
@@ -5316,13 +5357,18 @@ def _linear_update_public_id(update: LinearProjectUpdateArtifact) -> str:
     return f"linear:update:{update.linear_project_update_id}"
 
 
-def compact_linear_project_bundle(project: LinearProjectArtifact) -> dict[str, Any]:
+def compact_linear_project_bundle(project: LinearProjectArtifact, *, activity_period=None) -> dict[str, Any]:
     extraction_hints = project.extraction_hints if isinstance(project.extraction_hints, dict) else {}
     important_issue_ids = {str(item or "") for item in extraction_hints.get("important_issue_ids") or []}
     important_update_ids = {str(item or "") for item in extraction_hints.get("important_update_ids") or []}
 
     issue_queryset = project.issues.order_by("-updated_at_linear", "-id")
     update_queryset = project.project_updates.order_by("-updated_at_linear", "-id")
+    from startup_updates.activity_scope import activity_window
+    window = activity_window(activity_period)
+    if window:
+        issue_queryset = issue_queryset.filter(updated_at_linear__gte=window[0], updated_at_linear__lt=window[1])
+        update_queryset = update_queryset.filter(updated_at_linear__gte=window[0], updated_at_linear__lt=window[1])
     issues = []
     omitted_issue_count = 0
     for index, issue in enumerate(issue_queryset):
@@ -5397,6 +5443,11 @@ def compact_linear_project_bundle(project: LinearProjectArtifact) -> dict[str, A
 
     return {
         "linear_project_id": _linear_project_public_id(project),
+        "has_period_activity": not window or bool(issues or updates) or any(
+            window[0] <= stamp < window[1]
+            for key in ("createdAt", "updatedAt", "startedAt", "completedAt", "canceledAt")
+            if (stamp := parse_datetime(str((project.raw_payload or {}).get(key) or ""))) and timezone.is_aware(stamp)
+        ),
         "project_id": project.linear_project_id,
         "project_name": project.name,
         "description": project.description[:1500],

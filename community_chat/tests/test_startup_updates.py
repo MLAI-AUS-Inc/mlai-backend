@@ -272,7 +272,7 @@ class ConnectionHandoffTests(SimpleTestCase):
             response = connect_browser(request)
         self.assertEqual(response.status_code, 200)
         self.assertEqual(request.GET['company_id'], 'owned')
-        self.assertTrue(request.GET['next'].startswith('https://chat.example/pulse?startup=owned'))
+        self.assertTrue(request.GET['next'].startswith('https://chat.example/my-startup/connections?company_id=owned'))
         connect.assert_called_once_with(request, 'gmail')
 
 

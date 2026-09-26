@@ -89,6 +89,7 @@ CONNECTOR_OAUTH_STATE_MAX_AGE_SECONDS = 15 * 60
 SLACK_OAUTH_STATE_GENERATION_KEY = "slack_oauth_generation"
 DEFAULT_CONNECTOR_NEXT_PATH = "/vibe-raising/connect-data"
 ALLOWED_CONNECTOR_NEXT_PREFIXES = (
+    "/my-startup/connections?",
     "/pulse?",
     "/vibe-raising/connect-data",
     "/vibe-raising/create-update",
@@ -4122,6 +4123,7 @@ def sync_linear_connection_page(
     *,
     run_id: str,
     project_ids: Optional[Iterable[str]] = None,
+    include_unselected: bool = False,
 ) -> dict[str, Any]:
     if connection.provider != ExternalServiceProvider.LINEAR:
         raise ConnectorConfigurationError("Connection is not a Linear connection.")
@@ -4130,7 +4132,7 @@ def sync_linear_connection_page(
     if not connection.access_token:
         raise ConnectorOAuthError("Linear connection needs to be reauthorised.")
 
-    selected_qs = _selected_linear_projects(connection)
+    selected_qs = LinearProjectSelection.objects.filter(connection=connection) if include_unselected else _selected_linear_projects(connection)
     if project_ids is not None:
         selected_set = {str(item or "").strip() for item in project_ids if str(item or "").strip()}
         selected_qs = selected_qs.filter(linear_project_id__in=selected_set)
@@ -4817,6 +4819,7 @@ def _slack_api_request_and_persist_messages(
     expected_sync_cursor: dict[str, Any],
     method: str,
     params: dict[str, Any],
+    include_unselected: bool = False,
 ) -> tuple[dict[str, Any], list[SlackMessageArtifact]]:
     """Run one Slack page and persist its messages at one authority point."""
 
@@ -4827,7 +4830,7 @@ def _slack_api_request_and_persist_messages(
             .filter(
                 pk=selection_id,
                 connection=connection,
-                selected=True,
+                **({} if include_unselected else {"selected": True}),
             )
             .first()
         )
@@ -5135,6 +5138,7 @@ def sync_slack_connection_page(
     channel_ids: Optional[Iterable[str]] = None,
     oldest: Optional[Any] = None,
     latest: Optional[Any] = None,
+    include_unselected: bool = False,
 ) -> dict[str, Any]:
     if connection.provider != ExternalServiceProvider.SLACK:
         raise ConnectorConfigurationError("Connection is not a Slack connection.")
@@ -5154,17 +5158,23 @@ def sync_slack_connection_page(
         raise ConnectorConfigurationError("Slack sync run id is required.")
     selected_set = (
         {str(item or "").strip() for item in channel_ids if str(item or "").strip()}
-        if channel_ids
+        if channel_ids is not None
         else None
     )
+    def scoped_channels():
+        rows = SlackChannelSelection.objects.filter(connection=connection)
+        if not include_unselected:
+            rows = rows.filter(selected=True)
+        # An explicit empty run scope must never fall back to every channel.
+        if selected_set is not None:
+            rows = rows.filter(channel_id__in=selected_set)
+        return rows.order_by("channel_name", "channel_id")
+
     authority = _slack_connection_authority(connection)
     synced_at = timezone.now()
     with transaction.atomic():
         connection = _lock_slack_connection_authority(authority)
-        selected_qs = _selected_slack_channels(connection).select_for_update()
-        if selected_set is not None:
-            selected_qs = selected_qs.filter(channel_id__in=selected_set)
-        selections = list(selected_qs)
+        selections = list(scoped_channels().select_for_update())
         if not selections:
             raise ConnectorConfigurationError("Select at least one Slack channel before syncing.")
         selection = next(
@@ -5231,6 +5241,8 @@ def sync_slack_connection_page(
                 "channel": selection.channel_id,
                 "ts": thread_ts,
                 "limit": history_limit,
+                **({"oldest": explicit_oldest} if explicit_oldest else {}),
+                **({"latest": explicit_latest} if explicit_latest else {}),
             }
             reply_cursor = str(reply_state.get("cursor") or "").strip()
             if reply_cursor:
@@ -5239,6 +5251,7 @@ def sync_slack_connection_page(
                 authority,
                 selection_id=selection.pk,
                 expected_sync_cursor=initial_selection_cursor,
+                include_unselected=include_unselected,
                 method="conversations.replies",
                 params=reply_params,
             )
@@ -5270,6 +5283,7 @@ def sync_slack_connection_page(
                 authority,
                 selection_id=selection.pk,
                 expected_sync_cursor=initial_selection_cursor,
+                include_unselected=include_unselected,
                 method="conversations.history",
                 params=params,
             )
@@ -5300,6 +5314,8 @@ def sync_slack_connection_page(
                     "channel": selection.channel_id,
                     "ts": thread_ts,
                     "limit": history_limit,
+                    **({"oldest": explicit_oldest} if explicit_oldest else {}),
+                    **({"latest": explicit_latest} if explicit_latest else {}),
                 }
                 reply_cursor = str(reply_state.get("cursor") or "").strip()
                 if reply_cursor:
@@ -5308,6 +5324,7 @@ def sync_slack_connection_page(
                     authority,
                     selection_id=selection.pk,
                     expected_sync_cursor=initial_selection_cursor,
+                    include_unselected=include_unselected,
                     method="conversations.replies",
                     params=reply_params,
                 )
@@ -5326,12 +5343,8 @@ def sync_slack_connection_page(
         with transaction.atomic():
             connection = _lock_slack_connection_authority(authority)
             locked_selection = (
-                SlackChannelSelection.objects.select_for_update()
-                .filter(
-                    pk=selection.pk,
-                    connection=connection,
-                    selected=True,
-                )
+                scoped_channels().select_for_update()
+                .filter(pk=selection.pk)
                 .first()
             )
             if locked_selection is None:
@@ -5382,7 +5395,7 @@ def sync_slack_connection_page(
             )
 
             current_selections = list(
-                _selected_slack_channels(connection).select_for_update()
+                scoped_channels().select_for_update()
             )
             has_more = selection_has_more or any(
                 _slack_selection_needs_work(item, run_id=selected_run_id)
