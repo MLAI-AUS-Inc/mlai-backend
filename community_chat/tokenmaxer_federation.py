@@ -63,6 +63,7 @@ def _fold_source_payloads(payloads):
                     ),
                     "sessions": 0,
                     "grand_total": 0,
+                    "source_totals": [],
                     **{field: 0 for field in TOKEN_FIELDS},
                 },
             )
@@ -70,8 +71,15 @@ def _fold_source_payloads(payloads):
                 field: _non_negative_int(raw.get(field))
                 for field in TOKEN_FIELDS
             }
-            entry["sessions"] += _non_negative_int(raw.get("sessions"))
-            entry["grand_total"] += normalized_token_total(source, totals)
+            sessions = _non_negative_int(raw.get("sessions"))
+            grand_total = normalized_token_total(source, totals)
+            entry["sessions"] += sessions
+            entry["grand_total"] += grand_total
+            entry["source_totals"].append({
+                "source": source,
+                "sessions": sessions,
+                "grand_total": grand_total,
+            })
             for field, count in totals.items():
                 entry[field] += count
     return list(by_username.values())
@@ -82,8 +90,8 @@ def fetch_public_tokenmaxer_entries(window):
     if not settings.TOKENMAXER_FEDERATION_ENABLED:
         return []
 
-    fresh_key = f"community-chat:tokenmaxer:{window}:v1"
-    stale_key = f"community-chat:tokenmaxer:{window}:stale:v1"
+    fresh_key = f"community-chat:tokenmaxer:{window}:v2"
+    stale_key = f"community-chat:tokenmaxer:{window}:stale:v2"
     cached = cache.get(fresh_key)
     if isinstance(cached, list):
         return cached

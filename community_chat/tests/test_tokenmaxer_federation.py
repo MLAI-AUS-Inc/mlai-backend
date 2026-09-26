@@ -52,6 +52,10 @@ class TokenmaxerFederationTests(SimpleTestCase):
         self.assertEqual(entries[0]["grand_total"], 1_410)
         self.assertEqual(entries[0]["cache_read_tokens"], 1_000)
         self.assertEqual(entries[0]["external_id"], "tokenmaxer:jack")
+        self.assertEqual(entries[0]["source_totals"], [
+            {"source": "codex", "sessions": 2, "grand_total": 1_120},
+            {"source": "claude_code", "sessions": 1, "grand_total": 290},
+        ])
 
     @override_settings(
         TOKENMAXER_FEDERATION_ENABLED=True,
@@ -80,7 +84,7 @@ class TokenmaxerFederationTests(SimpleTestCase):
     @patch("community_chat.tokenmaxer_federation.requests.get")
     def test_upstream_failure_uses_last_good_snapshot(self, get):
         cache.set(
-            "community-chat:tokenmaxer:today:stale:v1",
+            "community-chat:tokenmaxer:today:stale:v2",
             [{"external_id": "tokenmaxer:dave"}],
             timeout=60,
         )
