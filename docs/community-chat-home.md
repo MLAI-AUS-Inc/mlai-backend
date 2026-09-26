@@ -227,3 +227,27 @@ The channel-title label is omitted and the open-chat button sits below the
 message. The small self-reporting attribution replaces the reporting-period
 subtitle under the leaderboard heading. Changing a leaderboard filter does not
 change the shared discussion channel.
+
+### Coding agent leaderboard
+
+Responses also include `agents`: a list ranked by descending normalized token
+total (ties ordered by source ID). Each row contains `rank`, `source`,
+`display_name`, `grand_total`, `sessions`, and `participants`. Claude Code,
+Codex, Cursor, OpenCode and Pi are currently accepted reporter sources. Agent
+identity comes from the reporter's `source`, never from its model name.
+
+The agent ranking uses all public leaderboard entries in the selected window
+and scope, before the people `limit` is applied. It excludes hidden accounts,
+including a hidden caller's separate `you` row. `participants` counts public
+leaderboard identities with positive usage for each agent; a person using
+multiple agents contributes to each. Australia-wide totals include the existing
+Tokenmaxer cohort; as with the people board, external handles are not linked to
+MLAI identities. Agents without positive usage are omitted.
+
+People entries additionally carry `source_totals` rows with `source`, `sessions`
+and `grand_total`. These reuse the existing source normalization, including
+Codex/Pi inclusive-cache handling. No session content, schema migration or new
+reporter setup is required. Clients hide the widget when `agents` is absent
+(older backend) and show an empty state for an explicitly empty list. The
+Tokenmaxer cache version is advanced so old cached entries cannot silently omit
+the source breakdown.

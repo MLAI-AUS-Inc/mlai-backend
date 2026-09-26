@@ -46,6 +46,7 @@ from .token_usage import (
     parse_sessions,
     upsert_sessions,
 )
+from .token_agent_leaderboard import agent_leaderboard
 from .tokenmaxer_federation import fetch_public_tokenmaxer_entries
 
 
@@ -118,6 +119,7 @@ def _empty_entry(account_id, *, has_reported):
         "sessions": 0,
         "grand_total": 0,
         "has_reported": has_reported,
+        "source_totals": [],
         **{field: 0 for field in TOKEN_FIELDS},
     }
 
@@ -134,7 +136,10 @@ def _aggregate_entries(rows, initial):
         sessions=Count(session_identity, distinct=True),
         **{field: Sum(field) for field in TOKEN_FIELDS},
     )
-    entries = {account_id: dict(entry) for account_id, entry in initial.items()}
+    entries = {
+        account_id: dict(entry, source_totals=list(entry["source_totals"]))
+        for account_id, entry in initial.items()
+    }
     for group in grouped:
         account_id = group["account_id"]
         entry = entries.setdefault(
@@ -142,8 +147,15 @@ def _aggregate_entries(rows, initial):
             _empty_entry(account_id, has_reported=True),
         )
         totals = {field: int(group[field] or 0) for field in TOKEN_FIELDS}
-        entry["sessions"] += int(group["sessions"] or 0)
-        entry["grand_total"] += normalized_token_total(group["source"], totals)
+        sessions = int(group["sessions"] or 0)
+        grand_total = normalized_token_total(group["source"], totals)
+        entry["sessions"] += sessions
+        entry["grand_total"] += grand_total
+        entry["source_totals"].append({
+            "source": group["source"],
+            "sessions": sessions,
+            "grand_total": grand_total,
+        })
         entry["has_reported"] = True
         for field, value in totals.items():
             entry[field] += value
@@ -159,6 +171,7 @@ def _external_payload(entry):
         "profile_url": entry["profile_url"],
         "origin": "tokenmaxer",
         "has_reported": True,
+        "source_totals": entry.get("source_totals", []),
         **{key: entry[key] for key in ("sessions", "grand_total", *TOKEN_FIELDS)},
     }
 
@@ -468,6 +481,7 @@ class TokenUsageLeaderboardView(APIView):
                 "date_from": date_from.isoformat() if date_from else None,
                 "date_to": date_to.isoformat() if date_to else None,
                 "entries": ranked,
+                "agents": agent_leaderboard(combined),
                 # A member outside the cut still sees where they stand;
                 # otherwise connecting appears to have done nothing.
                 "you": you,
