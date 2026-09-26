@@ -1,9 +1,12 @@
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest import TestCase
+from unittest.mock import patch
 
 from scripts.ci_reuse_pr_checks import (
     attestation_name,
     find_reusable_validation,
+    main,
 )
 
 
@@ -119,3 +122,24 @@ class ReusePrChecksTests(TestCase):
         self.assertIn("needs.checks.result == 'success'", workflow)
         self.assertIn("needs.postgres-search.result == 'success'", workflow)
         self.assertIn("needs.migration-tests.result == 'success'", workflow)
+
+    def test_manual_dispatch_uses_full_checks_and_main_release_gate(self):
+        workflow = (
+            Path(__file__).resolve().parents[1] / ".github/workflows/deploy.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("  workflow_dispatch:", workflow)
+        self.assertIn("github.event_name == 'workflow_dispatch'", workflow)
+        self.assertIn("github.ref == 'refs/heads/main'", workflow)
+        self.assertIn(
+            "github.event_name == 'pull_request' && github.sha || github.ref",
+            workflow,
+        )
+
+        with TemporaryDirectory() as temporary_directory:
+            output_path = Path(temporary_directory) / "github-output"
+            with patch.dict(
+                "os.environ",
+                {"GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_OUTPUT": str(output_path)},
+            ):
+                self.assertEqual(main(), 0)
+            self.assertIn("reuse_pr_checks=false", output_path.read_text())

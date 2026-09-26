@@ -82,6 +82,9 @@ class CommunityChatBootstrapAuthentication(BaseAuthentication):
         if not hmac.compare_digest(token.token_hash, token_hash):
             raise AuthenticationFailed("Community chat authorization is invalid.")
 
+        from .onboarding import require_community_access
+        require_community_access(token.user)
+
         request.community_chat_public_key = token.public_key
         request.community_chat_bootstrap_token = token
         request.community_chat_installation_id = token.installation_id
@@ -97,6 +100,8 @@ class CommunityChatBootstrapAuthentication(BaseAuthentication):
 
 class CommunityChatAccountAuthentication(BaseAuthentication):
     """Authenticate the narrowly scoped access token for an MLAI Chat session."""
+
+    allow_pending_membership = False
 
     def authenticate(self, request):
         header = request.headers.get("Authorization", "")
@@ -131,6 +136,9 @@ class CommunityChatAccountAuthentication(BaseAuthentication):
                 session.origin,
             ):
                 raise AuthenticationFailed("MLAI Chat session origin is invalid.")
+        if not self.allow_pending_membership:
+            from .onboarding import require_community_access
+            require_community_access(session.user)
         request.community_chat_account_session = session
         request.community_chat_public_key = session.public_key
         request.community_chat_installation_id = session.installation_id
@@ -142,3 +150,9 @@ class CommunityChatAccountAuthentication(BaseAuthentication):
 
     def authenticate_header(self, request):
         return "Bearer"
+
+
+class CommunityChatOnboardingAuthentication(CommunityChatAccountAuthentication):
+    """Pending members may access only explicitly opted-in own-account views."""
+
+    allow_pending_membership = True

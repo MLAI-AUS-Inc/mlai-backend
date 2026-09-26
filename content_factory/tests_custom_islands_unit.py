@@ -68,6 +68,9 @@ class CustomIslandUnitTests(unittest.TestCase):
         self.assertTrue(custom_island_slug({**clean, "name": "人工智能"}).startswith("custom-island-"))
 
     def setUp(self):
+        self.selection_patch = patch("content_factory.island_selection.selection_runs", return_value=[])
+        self.selection_patch.start()
+        self.addCleanup(self.selection_patch.stop)
         self.org = SimpleNamespace(pk="company-org-1")
         self.resolve = Mock(return_value=(SimpleNamespace(organization=self.org), None))
         self.manager = Mock()

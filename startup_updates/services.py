@@ -5477,6 +5477,9 @@ def render_monthly_update_markdown(structured_memo: dict) -> str:
         ("Next 30 Days", memo.get("next_30_days") or []),
     ]
 
+    if isinstance(memo.get("progress_charts"), list):
+        sections = [(heading, items) for heading, items in sections if heading != "KPI Snapshot"]
+
     lines = []
     if title:
         lines.append(f"# {title}")
@@ -5507,6 +5510,18 @@ def render_monthly_update_markdown(structured_memo: dict) -> str:
             lines.append("- None noted.")
         lines.append("")
 
+    # Chart disclosure also applies to text/export consumers, not only React.
+    for chart in memo.get("progress_charts") or []:
+        for series in chart["series"]:
+            label = str(series["label"]).replace("\n", " ")
+            lines.extend([f"## {label}", f"{series['source']} · {series['unit']} · {series['timezone']}", series["definition"], ""])
+            for point in series["points"]:
+                value = "Unavailable" if point["value"] is None else str(point["value"])
+                partial = " (partial)" if point["partial"] else ""
+                lines.append(f"- {point['date'][:7]}: {value}{partial}")
+            if chart["spec"].get("caption"):
+                lines.append(chart["spec"]["caption"])
+            lines.append("")
     return "\n".join(lines).strip() + "\n"
 
 

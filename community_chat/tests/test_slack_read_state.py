@@ -1,16 +1,55 @@
 """Database-free regression coverage for Slack's per-account unread contract."""
 
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
+from datetime import timedelta
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from django.test import SimpleTestCase
+from django.utils import timezone
 
 from integrations.services import slack_chat_read_state as reads
-from integrations.services.slack_dm_mirror import SlackDmMirrorAuthorizationError
+from integrations.services.slack_chat_catalog import (
+    ALL_HISTORY_CONSENT,
+    CATALOG_KEY,
+    OWNER_OPENED_KEY,
+    PRIVATE_CHANNEL_CONSENT,
+)
+from integrations.services.slack_dm_mirror import (
+    PUBLIC_UNREAD_SCOPES,
+    REQUIRED_SCOPES,
+    SlackDmMirrorAuthorizationError,
+    public_unread_needs_reauthorization,
+)
+
+
+def snapshot_connection():
+    """In-memory connection for database-free tests of versioned snapshots."""
+    return SimpleNamespace(sync_cursor={}, save=MagicMock())
 
 
 class SlackReadStateTests(SimpleTestCase):
+    def test_personal_mentions_exclude_broadcasts_other_people_and_read_posts(self):
+        details = {"last_read": "100.000001"}
+
+        def snapshot(messages):
+            return reads.read_state_snapshot(
+                details, kind="private_channel", messages=messages, owner_id="UOWNER",
+            )
+
+        ordinary = [
+            {"ts": "101.000001", "user": "UOTHER", "text": "<!channel> <!here> <@UOTHER>"},
+            {"ts": "100.000001", "user": "UOTHER", "text": "<@UOWNER> already read"},
+            {"ts": "102.000001", "user": "UOWNER", "text": "<@UOWNER> self"},
+        ]
+        result = snapshot(ordinary)
+        self.assertTrue(result["is_unread"])
+        self.assertFalse(result["has_personal_mention"])
+        self.assertEqual(result["unread_count"], 1)
+        for text in ("Hello <@UOWNER>", "Hello <@UOWNER|Sam>"):
+            message = {"ts": "103.000001", "user": "UOTHER", "text": text}
+            self.assertTrue(snapshot(ordinary + [message])["has_personal_mention"])
+
     def test_latest_join_does_not_leave_an_unreachable_unread_frontier(self):
         result = reads.read_state_snapshot(
             {"last_read": "100.000001", "latest": {"ts": "103.000001", "subtype": "channel_join"}},
@@ -84,6 +123,23 @@ class SlackReadStateTests(SimpleTestCase):
         self.assertEqual(result["unread_count"], 1)
         self.assertEqual(result["latest_ts"], "101.000001")
 
+    def test_group_uses_slack_display_count_when_available_and_history_when_not(self):
+        messages = [{"ts": "101.000001", "user": "UALICE", "text": "hello"}]
+        for count in (0, 3):
+            result = self.snapshot(
+                {"last_read": "100.000001", "unread_count_display": count},
+                messages,
+                kind="mpim",
+            )
+            self.assertEqual(result["unread_count"], count)
+            self.assertEqual(result["is_unread"], count > 0)
+            self.assertEqual(result["count_source"], "slack")
+        fallback = self.snapshot(
+            {"last_read": "100.000001"}, messages, kind="mpim",
+        )
+        self.assertEqual(fallback["unread_count"], 1)
+        self.assertEqual(fallback["count_source"], "imported_messages")
+
     def test_channel_badges_count_explicit_mentions_not_every_unread_message(self):
         result = self.snapshot(
             {"last_read": "100.000001"},
@@ -120,6 +176,7 @@ class SlackReadStateTests(SimpleTestCase):
             oauth_generation=5,
             workspace_id="TWORK",
             slack_user_id="UOWNER",
+            scopes=("im:read", "mpim:read", "groups:read", "channels:read"),
         )
         fields.update(changes)
         return SimpleNamespace(**fields)
@@ -149,7 +206,9 @@ class SlackReadStateTests(SimpleTestCase):
         ), patch.object(
             reads.transaction, "atomic", side_effect=nullcontext
         ), patch.object(
-            reads, "_lock_slack_grant_api_authority"
+            reads, "_lock_slack_grant_api_authority", return_value=(grant, snapshot_connection())
+        ), patch(
+            "integrations.services.slack_dm_mirror._locked_active_verified_device", return_value=object()
         ), patch.object(
             reads.cache, "delete"
         ), patch.object(
@@ -205,7 +264,133 @@ class SlackReadStateTests(SimpleTestCase):
             cached.assert_not_called()
 
 
+class PrivateReadTargetTests(SimpleTestCase):
+    def test_unread_directory_keeps_old_and_unknown_rooms_under_bounded_history_consent(self):
+        old = self.conversation("DOLD", age=60)
+        unknown = self.conversation("DUNKNOWN")
+        other_device = self.conversation("DOTHER", age=1)
+        other_device.participant_buzz_pubkeys = ["2" * 64]
+        unprovisioned = self.conversation("DNEW", age=1)
+        unprovisioned.mlai_channel_id = None
+        unprovisioned.status = "provisioning"
+        with self.source_catalog([old, unknown, other_device, unprovisioned]):
+            for days in (7, 30):
+                self.grant.history_days = days
+                coverage = {}
+                targets = reads._targets(self.grant, self.key, coverage=coverage)
+                self.assertEqual([t.channel_id for t in targets], ["public", "DOLD", "DUNKNOWN"])
+                self.assertEqual(coverage["pending_channels"], 2)
+
+    def setUp(self):
+        self.now = timezone.now().replace(microsecond=0)
+        self.key = "1" * 64
+        self.grant = SimpleNamespace(
+            pk=1, slack_user_id="UOWNER", slack_workspace_id="TWORK",
+            history_days=30, consent_version=PRIVATE_CHANNEL_CONSENT,
+            consented_at=self.now, conversations=MagicMock(),
+            connection=SimpleNamespace(
+                scopes=["groups:read", "groups:history", "im:read", "im:write"],
+                provider_metadata={CATALOG_KEY: {}},
+            ),
+        )
+
+    def conversation(self, name, *, age=None, kind="im", opened=False):
+        metadata = {"kind": kind}
+        if opened:
+            metadata[OWNER_OPENED_KEY] = reads.owner_open_intent(self.grant, self.key)
+        self.grant.connection.provider_metadata[CATALOG_KEY][name] = metadata
+        return SimpleNamespace(
+            grant=self.grant, slack_conversation_id=name, mlai_channel_id=name, status="live",
+            participant_buzz_pubkeys=[self.key], history_backfilled_at=None,
+            latest_synced_ts=(
+                f"{int((self.now-timedelta(days=age)).timestamp())}.000001"
+                if age is not None else ""
+            ),
+        )
+
+    @contextmanager
+    def source_catalog(self, conversations):
+        public = SimpleNamespace(destination_channel_id="public", slack_channel_id="CPUBLIC")
+        self.grant.conversations.filter.return_value.order_by.return_value = conversations
+        with patch.object(
+            reads.CommunityBridgeChannel.objects, "filter"
+        ) as shared, patch.object(reads.time, "time", return_value=self.now.timestamp()):
+            shared.return_value.exclude.return_value.order_by.return_value = [public]
+            yield
+
+    def test_optional_prefetch_ignores_old_unknown_and_other_device_rooms_but_prewarms_recent(self):
+        recent = self.conversation("DRECENT", age=1)
+        self.grant.connection.provider_metadata[CATALOG_KEY]["DRECENT"][
+            "latest_message_ts"
+        ] = recent.latest_synced_ts
+        recent.latest_synced_ts = ""
+        old = self.conversation("DOLD", age=60)
+        unknown = self.conversation("DUNKNOWN")
+        other = self.conversation("DOTHER", age=1)
+        other.participant_buzz_pubkeys = ["2" * 64]
+        group = self.conversation("GRECENT", age=2, kind="mpim")
+        private = self.conversation("CPRIVATE", age=3, kind="private_channel")
+        with self.source_catalog([old, unknown, other, recent, group, private]):
+            targets = reads._targets(self.grant, self.key, recent_only=True)
+        self.assertEqual([t.channel_id for t in targets], ["public", "DRECENT", "GRECENT", "CPRIVATE"])
+        self.assertIsNone(recent.history_backfilled_at)
+
+    def test_optional_prefetch_honors_seven_thirty_and_explicit_all_history_windows(self):
+        conversation = self.conversation("DRECENT", age=10)
+        with self.source_catalog([conversation]):
+            self.grant.history_days = 7
+            self.assertEqual([t.channel_id for t in reads._targets(self.grant, self.key, recent_only=True)], ["public"])
+            self.grant.history_days = 30
+            self.assertEqual(len(reads._targets(self.grant, self.key, recent_only=True)), 2)
+            conversation.latest_synced_ts = ""
+            self.grant.history_days = 0
+            self.assertEqual(len(reads._targets(self.grant, self.key, recent_only=True)), 1)
+            self.grant.consent_version = ALL_HISTORY_CONSENT
+            self.assertEqual(len(reads._targets(self.grant, self.key, recent_only=True)), 2)
+
+    def test_empty_dm_requires_current_explicit_open_and_cannot_override_old_activity(self):
+        empty = self.conversation("DEMPTY", opened=True)
+        old = self.conversation("DOLD", age=60, opened=True)
+        group = self.conversation("GEMPTY", kind="mpim", opened=True)
+        with self.source_catalog([empty, old, group]):
+            self.assertEqual([t.channel_id for t in reads._targets(self.grant, self.key, recent_only=True)], ["public", "DEMPTY"])
+            self.grant.consented_at += timedelta(seconds=1)
+            self.assertEqual([t.channel_id for t in reads._targets(self.grant, self.key, recent_only=True)], ["public"])
+
+    def test_mark_read_accepts_new_displayed_message_before_catalog_activity_refresh(self):
+        conversation = self.conversation("DOLD", age=60)
+        source_ts = f"{int(self.now.timestamp())}.000001"
+        with self.source_catalog([conversation]), patch.object(
+            reads, "active_grant_for_user", return_value=self.grant
+        ), patch.object(reads, "_assert_grant_connection_authorized"), patch.object(
+            reads, "_capture_slack_grant_api_authority", return_value=SlackReadStateTests().authority()
+        ), patch.object(reads.transaction, "atomic", side_effect=nullcontext), patch.object(
+            reads, "_lock_slack_grant_api_authority", return_value=(self.grant, snapshot_connection())
+        ), patch("integrations.services.slack_dm_mirror._locked_active_verified_device", return_value=object()), patch.object(reads.cache, "delete"), patch.object(
+            reads, "_call_slack_with_grant_authority",
+            return_value={"channel": {
+                "id": "DOLD", "last_read": f"{int(self.now.timestamp())-1}.000001"
+            }},
+        ) as call:
+            result = reads.mark_read(
+                object(), public_key=self.key, channel_id="DOLD", source_ts=source_ts
+            )
+        self.assertTrue(result["synced"])
+        self.assertEqual([c.args[1] for c in call.call_args_list], ["conversations_info", "conversations_mark"])
+
+
 class PrivateUnreadHistoryTests(SimpleTestCase):
+    def test_never_read_public_channel_omits_zero_oldest(self):
+        target = reads.ReadTarget("public", "C123", "public_channel")
+        with patch.object(
+            reads, "_call_slack_with_grant_authority",
+            return_value={"messages": [], "has_more": False},
+        ) as call:
+            reads._unread_messages(object(), target, "0.000000")
+        self.assertNotIn("oldest", call.call_args.kwargs)
+        self.assertEqual(call.call_args.kwargs["limit"], 100)
+        self.assertEqual(call.call_args.kwargs["required_scopes"], {"channels:history"})
+
     def test_erased_queue_bodies_cannot_hide_source_mentions(self):
         target = reads.ReadTarget(
             "mirror",
@@ -254,16 +439,17 @@ class PrivateUnreadHistoryTests(SimpleTestCase):
 
 
 class ReadStatePageTests(SimpleTestCase):
-    def page(self, requested=None, on_request=lambda: None):
+    def page(self, requested=None, on_request=lambda: None, *, cursor=0, bootstrap=None, kind="im"):
         authority = SlackReadStateTests().authority()
-        grant = SimpleNamespace(slack_user_id="UOWNER")
-        targets = [reads.ReadTarget(f"mirror-{i}", f"D{i}", "im") for i in range(8)]
+        grant = SimpleNamespace(slack_user_id="UOWNER", last_discovery_at=timezone.now())
+        targets = [reads.ReadTarget(f"mirror-{i}", f"D{i}", kind) for i in range(8)]
 
         def response(*args, **kwargs):
             on_request()
             return {
                 "channel": {
                     "id": kwargs["channel"],
+                    "is_member": True,
                     "last_read": "100.000001",
                     "latest": {"ts": "101.000001"},
                     "unread_count_display": 1,
@@ -279,20 +465,88 @@ class ReadStatePageTests(SimpleTestCase):
         ), patch.object(
             reads.transaction, "atomic", side_effect=nullcontext
         ), patch.object(
-            reads, "_lock_slack_grant_api_authority"
+            reads, "_lock_slack_grant_api_authority", return_value=(grant, snapshot_connection())
         ), patch.object(
             reads.cache, "get", return_value=None
         ), patch.object(
-            reads.cache, "get_many", return_value={}
+            reads.cache, "get_many", return_value=bootstrap or {}
         ), patch.object(
             reads.cache, "set"
         ), patch.object(
             reads, "_call_slack_with_grant_authority", side_effect=response
         ) as call:
             result = reads.read_state_page(
-                object(), public_key="key", channel_ids=requested
+                object(), public_key="key", channel_ids=requested, cursor=cursor
             )
             return result, call.call_args_list
+
+    def test_budget_pause_returns_completed_counts_and_resumes_without_starvation(self):
+        # A fast source response consumes the only currently admitted slot.
+        # Every poll must keep that result and move to the next conversation.
+        cursor = "0"
+        received = {}
+        for index in range(8):
+            attempts = []
+            def one_admitted_call():
+                attempts.append(True)
+                if len(attempts) > 1:
+                    raise reads.BudgetDeferred(3)
+            result, calls = self.page(on_request=one_admitted_call, cursor=cursor)
+            received.update(result["channels"])
+            self.assertEqual(calls[0].kwargs["channel"], f"D{index}")
+            self.assertEqual(result["next_cursor"], str(index+1) if index < 7 else None)
+            cursor = result["next_cursor"]
+        self.assertEqual(len(received), 8)
+        self.assertTrue(all(value["unread_count"] == 1 for value in received.values()))
+
+    def test_first_call_cooldown_preserves_cursor_and_retry_after(self):
+        for error in (reads.BudgetDeferred(127), reads.SlackDmMirrorRateLimited("pause")):
+            with self.subTest(error=type(error).__name__):
+                def paused():
+                    raise error
+                result, calls = self.page(on_request=paused, cursor="3")
+                self.assertEqual(result["channels"], {})
+                self.assertEqual(result["next_cursor"], "3")
+                self.assertEqual(result["retry_after_seconds"], getattr(error, "retry_after", 60))
+                self.assertEqual(len(calls), 1)
+
+    def test_history_budget_pause_does_not_publish_an_incomplete_read_snapshot(self):
+        deferral = reads.BudgetDeferred(65)
+        with patch.object(reads, "_unread_messages", side_effect=deferral):
+            result, calls = self.page(cursor="2", kind="private_channel")
+        self.assertEqual(deferral.read_state_method, "conversations.history")
+        self.assertEqual(result["channels"], {})
+        self.assertEqual(result["next_cursor"], "2")
+        self.assertEqual(result["retry_after_seconds"], 65)
+        self.assertEqual(len(calls), 1)
+
+    def test_partial_history_keeps_personal_mentions_unknown_unless_observed(self):
+        for text, expected in (("<!channel> broadcast", None), ("<@UOWNER> personal", True)):
+            with self.subTest(text=text), patch.object(
+                reads, "_unread_messages",
+                return_value=([{"ts": "101.000001", "user": "UOTHER", "text": text}], "history", True),
+            ):
+                result, _ = self.page(["mirror-0"], kind="private_channel")
+            snapshot = result["channels"]["mirror-0"]
+            self.assertIs(snapshot["has_personal_mention"], expected)
+            self.assertIsNone(snapshot["unread_count"])
+
+    def test_first_call_pause_still_returns_previously_cached_badges(self):
+        target = reads.ReadTarget("mirror-7", "D7", "im")
+        cached = {"available": True, "is_unread": True, "unread_count": 3,
+                  "last_read": "100.000001", "latest_ts": "103.000001", "fetched_at": 1000}
+        key = reads._cache_key(SlackReadStateTests().authority(), target)
+        def paused():
+            raise reads.BudgetDeferred(17)
+        result, _ = self.page(on_request=paused, bootstrap={key: cached})
+        self.assertEqual(result["channels"], {"mirror-7": cached})
+        self.assertEqual(result["next_cursor"], "0")
+
+    def test_authorization_failure_still_rejects_the_page(self):
+        def revoked():
+            raise SlackDmMirrorAuthorizationError("revoked")
+        with self.assertRaises(SlackDmMirrorAuthorizationError):
+            self.page(on_request=revoked)
 
     def test_slow_read_keeps_request_start_time_so_it_cannot_undo_a_newer_write(self):
         clock = [1000]
@@ -317,6 +571,37 @@ class ReadStatePageTests(SimpleTestCase):
 
 
 class SlackReadPermissionUpgradeTests(SimpleTestCase):
+    def test_public_unread_scope_gap_is_separate_from_private_dm_scopes(self):
+        self.assertTrue(public_unread_needs_reauthorization(REQUIRED_SCOPES))
+        self.assertFalse(public_unread_needs_reauthorization(
+            REQUIRED_SCOPES | PUBLIC_UNREAD_SCOPES
+        ))
+
+    def test_connect_with_old_private_only_grant_requests_oauth(self):
+        from rest_framework.test import APIRequestFactory, force_authenticate
+        from community_chat.slack_views import SlackDmMirrorView
+
+        connection = SimpleNamespace(scopes=list(REQUIRED_SCOPES))
+        request = APIRequestFactory().post(
+            "/community-chat/slack/", {"history_days": 30}, format="json",
+        )
+        force_authenticate(request, user=SimpleNamespace(is_authenticated=True))
+        with patch(
+            "community_chat.slack_views.slack_connection_for_user",
+            return_value=connection,
+        ), patch("community_chat.slack_views.activate_connection") as activate, patch(
+            "community_chat.slack_views.status_payload",
+            return_value={"connected": True, "enabled": True},
+        ), patch.object(
+            SlackDmMirrorView,
+            "_authorization_url",
+            return_value="https://api.mlai.au/oauth",
+        ):
+            response = SlackDmMirrorView.as_view(throttle_classes=[])(request)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["authorization_url"], "https://api.mlai.au/oauth")
+        activate.assert_not_called()
+
     def test_permission_upgrade_starts_oauth_without_resetting_existing_import(self):
         from rest_framework.test import APIRequestFactory, force_authenticate
         from community_chat.slack_views import SlackDmMirrorView
@@ -349,3 +634,151 @@ class SlackReadPermissionUpgradeTests(SimpleTestCase):
         authorize.assert_called_once()
         self.assertEqual(authorize.call_args.kwargs["history_days"], 0)
         activate.assert_not_called()
+
+
+class BackgroundReadCacheTests(SimpleTestCase):
+    page = ReadStatePageTests.page
+
+    def test_enabled_worker_makes_client_reads_cache_only_and_returns_all_known_badges(self):
+        from django.test import override_settings
+        target = reads.ReadTarget('mirror-7', 'D7', 'im')
+        key = reads._cache_key(SlackReadStateTests().authority(), target)
+        value = {'available': True, 'is_unread': True, 'unread_count': 4, 'fetched_at': 1000}
+        with override_settings(MESSAGE_SYNC_ENABLED=True):
+            result, calls = self.page(cursor=3, bootstrap={key: value})
+        self.assertEqual(calls, [])
+        self.assertEqual(result['channels'], {'mirror-7': value})
+        self.assertIsNone(result['next_cursor'])
+        self.assertEqual(result['retry_after_seconds'], 10)
+        self.assertFalse(result['snapshot_complete'])
+        self.assertEqual(result['read_state_coverage']['available_channels'], 1)
+        self.assertEqual(result['read_state_coverage']['expected_channels'], 8)
+
+    def test_confirmed_nonmembership_removes_old_client_badges_without_hiding_unknowns(self):
+        from django.test import override_settings
+        authority = SlackReadStateTests().authority()
+        excluded = reads.ReadTarget("mirror-0", "D0", "im")
+        unknown = reads.ReadTarget("mirror-1", "D1", "im")
+        cached = {
+            reads._cache_key(authority, excluded): {"available": False, "excluded": True, "fetched_at": 1000},
+            reads._cache_key(authority, unknown): {"available": False, "fetched_at": 1000},
+        }
+        with override_settings(MESSAGE_SYNC_ENABLED=True):
+            result, _ = self.page(bootstrap=cached)
+        self.assertNotIn("mirror-0", result["authorized_channel_ids"])
+        self.assertIn("mirror-1", result["authorized_channel_ids"])
+        self.assertFalse(result["snapshot_complete"])
+
+    def test_full_shared_cache_still_requires_available_and_fresh_source_results(self):
+        from django.test import override_settings
+        authority = SlackReadStateTests().authority()
+        for available, fetched_at, complete, fresh in (
+            (False, 1000, False, False), (True, 800, True, False), (True, 1000, True, True),
+        ):
+            cached = {
+                reads._cache_key(authority, reads.ReadTarget(f"mirror-{i}", f"D{i}", "im")):
+                {"available": available, "is_unread": False, "fetched_at": fetched_at}
+                for i in range(8)
+            }
+            with override_settings(MESSAGE_SYNC_ENABLED=True), patch.object(reads.time, "time", return_value=1000):
+                result, calls = self.page(bootstrap=cached)
+            self.assertEqual(calls, [])
+            self.assertEqual(result["snapshot_complete"], complete)
+            self.assertEqual(result["read_state_coverage"]["fresh"], fresh)
+
+    def test_metadata_checkpoint_resumes_history_without_repeating_info_or_retaining_text(self):
+        authority = SlackReadStateTests().authority()
+        grant = SimpleNamespace(slack_user_id='UOWNER')
+        target = reads.ReadTarget('room', 'G1', 'mpim')
+        stored = {}
+        details = {'id': 'G1', 'is_member': True, 'last_read': '100.000001',
+                   'topic': {'value': 'private topic'},
+                   'latest': {'ts': '102.000001', 'text': 'private content'}}
+        with patch.object(reads.transaction, 'atomic', side_effect=nullcontext), patch.object(
+            reads, '_lock_slack_grant_api_authority', return_value=(grant, snapshot_connection())
+        ), patch.object(reads.cache, 'get', side_effect=lambda key: stored.get(key)), patch.object(
+            reads.cache, 'set', side_effect=lambda key, value, **kwargs: stored.__setitem__(key, value)
+        ), patch.object(reads.cache, 'delete', side_effect=lambda key: stored.pop(key, None)), patch.object(
+            reads, '_call_slack_with_grant_authority', return_value={'channel': details}
+        ) as info, patch.object(reads, '_unread_messages', side_effect=[
+            reads.BudgetDeferred(3), ([{'ts': '102.000001', 'user': 'UOTHER'}], 'slack_history', False)
+        ]):
+            with self.assertRaises(reads.BudgetDeferred):
+                reads.refresh_target(grant, authority, target)
+            self.assertNotIn('private', str(stored))
+            self.assertNotIn(reads._cache_key(authority, target), stored)
+            result = reads.refresh_target(grant, authority, target)
+        self.assertEqual(info.call_count, 1)
+        self.assertTrue(result['is_unread'])
+        self.assertEqual(result['unread_count'], 1)
+        self.assertNotIn(reads._pending_key(authority, target), stored)
+
+    def test_group_badge_survives_history_budget_deferral_without_guessing_mentions(self):
+        authority = SlackReadStateTests().authority()
+        grant = SimpleNamespace(slack_user_id="UOWNER")
+        target = reads.ReadTarget("room", "G1", "mpim")
+        connection = snapshot_connection()
+        stored = {}
+        details = {
+            "id": "G1", "is_member": True, "last_read": "100.000001",
+            "latest": {"ts": "102.000001"}, "unread_count_display": 3,
+        }
+        with patch.object(reads.transaction, "atomic", side_effect=nullcontext), patch.object(
+            reads, "_lock_slack_grant_api_authority", return_value=(grant, connection)
+        ), patch.object(reads.cache, "get", side_effect=lambda key: stored.get(key)), patch.object(
+            reads.cache, "set", side_effect=lambda key, value, **kwargs: stored.__setitem__(key, value)
+        ), patch.object(reads.cache, "delete", side_effect=lambda key: stored.pop(key, None)), patch.object(
+            reads, "_call_slack_with_grant_authority", return_value={"channel": details}
+        ), patch.object(
+            reads, "_unread_messages", side_effect=reads.BudgetDeferred(3)
+        ) as history:
+            result = reads.refresh_target(grant, authority, target)
+        history.assert_called_once()
+        self.assertTrue(result["available"])
+        self.assertTrue(result["is_unread"])
+        self.assertEqual(result["unread_count"], 3)
+        self.assertIsNone(result["has_personal_mention"])
+        self.assertEqual(result["count_source"], "slack")
+        self.assertNotIn(reads._pending_key(authority, target), stored)
+
+    def test_partial_group_history_preserves_source_count_but_not_false_mention(self):
+        authority = SlackReadStateTests().authority()
+        grant = SimpleNamespace(slack_user_id="UOWNER")
+        target = reads.ReadTarget("room", "G1", "mpim")
+        connection = snapshot_connection()
+        stored = {}
+        details = {
+            "id": "G1", "is_member": True, "last_read": "100.000001",
+            "unread_count_display": 3,
+        }
+        with patch.object(reads.transaction, "atomic", side_effect=nullcontext), patch.object(
+            reads, "_lock_slack_grant_api_authority", return_value=(grant, connection)
+        ), patch.object(reads.cache, "get", side_effect=lambda key: stored.get(key)), patch.object(
+            reads.cache, "set", side_effect=lambda key, value, **kwargs: stored.__setitem__(key, value)
+        ), patch.object(reads.cache, "delete", side_effect=lambda key: stored.pop(key, None)), patch.object(
+            reads, "_call_slack_with_grant_authority", return_value={"channel": details}
+        ), patch.object(
+            reads, "_unread_messages",
+            return_value=([{"ts": "101.000001", "user": "UOTHER", "text": "hello"}], "slack_history", True),
+        ):
+            result = reads.refresh_target(grant, authority, target)
+        self.assertTrue(result["is_unread"])
+        self.assertEqual(result["unread_count"], 3)
+        self.assertIsNone(result["has_personal_mention"])
+
+    def test_confirmed_read_overtaking_a_source_lookup_cannot_restore_a_stale_badge(self):
+        authority = SlackReadStateTests().authority()
+        grant = SimpleNamespace(slack_user_id='UOWNER')
+        target = reads.ReadTarget('room', 'D1', 'im')
+        stored = {}
+        def response(*args, **kwargs):
+            stored[reads._cache_key(authority, target) + ':receipt'] = 'new-confirmation'
+            return {'channel': {'id': 'D1', 'last_read': '100.000001', 'unread_count_display': 3}}
+        with patch.object(reads.transaction, 'atomic', side_effect=nullcontext), patch.object(
+            reads, '_lock_slack_grant_api_authority', return_value=(grant, snapshot_connection())
+        ), patch.object(reads.cache, 'get', side_effect=lambda key: stored.get(key)), patch.object(
+            reads.cache, 'set'
+        ) as publish, patch.object(reads, '_call_slack_with_grant_authority', side_effect=response):
+            with self.assertRaises(reads.BudgetDeferred):
+                reads.refresh_target(grant, authority, target)
+        publish.assert_not_called()

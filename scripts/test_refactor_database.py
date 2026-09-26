@@ -18,34 +18,63 @@ import tempfile
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
-NEW_MIGRATIONS = {
-    ("content_factory", "0039_encrypt_github_credentials"),
-    ("content_factory", "0040_backfill_github_credential_envelopes"),
-}
+APPROVED_INVENTORY = ROOT / "docs/refactor-release-test-migrations-2026-09-26.json"
 KEYS = '{"test":"MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="}'
+
+
+def database_is_disposable(config, *, engine, directory, database):
+    """Restrict every connection to this invocation's temporary storage."""
+    if engine == "postgres":
+        return (
+            config["ENGINE"] == "django.db.backends.postgresql"
+            and config.get("HOST") == database["HOST"]
+            and config.get("PORT") == database["PORT"]
+            and config.get("USER") == database["USER"]
+            # Django uses NAME=None to create its test database via maintenance.
+            and config.get("NAME") in {None, "refactor", "test_refactor"}
+        )
+    if config["ENGINE"] != "django.db.backends.sqlite3":
+        return False
+    name = str(config.get("NAME", ""))
+    if name in {":memory:", "file:memorydb_default?mode=memory&cache=shared"}:
+        return True
+    if not name or name.startswith("file:"):
+        return False
+    # Resolve traversal and existing symlinks before checking containment.
+    return Path(name).resolve().is_relative_to(directory.resolve())
 
 
 def validate_inventory():
     from django.db.migrations.loader import MigrationLoader
-    inventory = json.loads((ROOT / "docs/refactor-test-migrations-2026-09-14.json").read_text())
+    inventory = json.loads(APPROVED_INVENTORY.read_text())
+    if inventory.get("approval_status") != "approved":
+        raise RuntimeError("The exact disposable-test migration inventory still needs approval.")
     approved = {(row["app"], row["name"]): row["sha256"] for row in inventory["migrations"]}
+    if len(approved) != inventory.get("migration_count") or len(approved) != len(inventory["migrations"]):
+        raise RuntimeError("The approved migration inventory has an invalid count or duplicate entries.")
     loader = MigrationLoader(None)
-    if set(loader.disk_migrations) != set(approved) | NEW_MIGRATIONS:
+    if set(loader.disk_migrations) != set(approved):
         raise RuntimeError("Migration set differs from the specifically approved inventory.")
+    if loader.detect_conflicts():
+        raise RuntimeError("The approved migration graph has conflicting leaf nodes.")
     for key, expected in approved.items():
         module = importlib.import_module(loader.disk_migrations[key].__module__)
         if hashlib.sha256(Path(module.__file__).read_bytes()).hexdigest() != expected:
             raise RuntimeError(f"Approved migration changed: {key[0]}.{key[1]}")
-    print(f"Approved migration inventory verified: {len(approved)} existing + 2 new.", flush=True)
+    print(f"Approved migration inventory verified: {len(approved)} exact file hashes.", flush=True)
 
 
-def replay_with_legacy_rows():
+def replay_with_legacy_rows(*, editorial_first=False):
     from django.db import connection
     from django.db.migrations.executor import MigrationExecutor
     from integrations.fields import encrypt_credential_value, LegacyPlaintextEncryptedTextField
     executor = MigrationExecutor(connection)
+    checkpoint = (
+        "0041_writtenarticle_editorial_attribution" if editorial_first
+        else "0038_delete_seo_topicmap_researchsession"
+    )
     old_targets = [
-        (app, "0038_delete_seo_topicmap_researchsession") if app == "content_factory" else (app, name)
+        (app, checkpoint) if app == "content_factory" else (app, name)
         for app, name in executor.loader.graph.leaf_nodes()
     ]
     executor.migrate(old_targets)
@@ -60,9 +89,22 @@ def replay_with_legacy_rows():
         ids.append(Config.objects.create(
             organization=org, github_token_encrypted=access, github_refresh_token_encrypted=refresh,
         ).pk)
+    Article = old_apps.get_model("content_factory", "WrittenArticle")
+    article = Article.objects.create(
+        organization_id=org.pk, title="Existing editorial attribution", slug="legacy-refactor",
+        category="guides", primary_keyword="existing topic",
+        **({"editorial_snapshot": {"audience_id": "approved-audience"},
+            "original_editorial_snapshot": {"audience_id": "original-audience"},
+            "audience_id": "approved-audience", "audience_version": 2,
+            "editorial_provenance_status": "known"} if editorial_first else {}),
+    )
+    article_before = Article.objects.values().get(pk=article.pk)
     executor = MigrationExecutor(connection)
-    executor.migrate([("content_factory", "0039_encrypt_github_credentials")])
-    state = executor.loader.project_state([("content_factory", "0039_encrypt_github_credentials")])
+    compatibility_targets = [("content_factory", "0039_encrypt_github_credentials")]
+    if editorial_first:
+        compatibility_targets.append(("content_factory", checkpoint))
+    executor.migrate(compatibility_targets)
+    state = executor.loader.project_state(compatibility_targets)
     Config = state.apps.get_model("content_factory", "OrganizationContentConfig")
     assert isinstance(Config._meta.get_field("github_token_encrypted"), LegacyPlaintextEncryptedTextField)
     assert Config.objects.get(pk=ids[0]).github_token_encrypted == "synthetic-replay-access"
@@ -73,7 +115,15 @@ def replay_with_legacy_rows():
         rows = cursor.fetchall()
     assert all(value.startswith("mlai-enc:v1:") for value in rows[0])
     assert rows[1:] == [(existing_ciphertext, None), (None, "")]
-    print("Fresh migration replay and seeded 0038 → 0039 → 0040 conversion passed.", flush=True)
+    final_apps = executor.loader.project_state(executor.loader.graph.leaf_nodes()).apps
+    Article = final_apps.get_model("content_factory", "WrittenArticle")
+    article_after = Article.objects.values().get(pk=article.pk)
+    assert {key: article_after[key] for key in article_before} == article_before
+    if not editorial_first:
+        assert article_after["editorial_snapshot"] is None
+        assert article_after["original_editorial_snapshot"] is None
+        assert article_after["editorial_provenance_status"] == "unknown"
+    print(f"Seeded {checkpoint} → encrypted credentials and merged editorial graph passed.", flush=True)
 
 
 def run_checks(args, directory, database):
@@ -82,21 +132,9 @@ def run_checks(args, directory, database):
     original_ensure = BaseDatabaseWrapper.ensure_connection
 
     def ensure_local_database(wrapper):
-        config = wrapper.settings_dict
-        if args.engine == "postgres":
-            safe = (
-                config["ENGINE"] == "django.db.backends.postgresql"
-                and config.get("HOST") == database["HOST"]
-                # Django's test-db creator uses NAME=None for the maintenance
-                # connection, still strictly within our fresh socket cluster.
-                and config.get("NAME") in {None, "refactor", "test_refactor"}
-            )
-        else:
-            name = str(config.get("NAME", ""))
-            safe = config["ENGINE"] == "django.db.backends.sqlite3" and (
-                name.startswith(str(directory) + "/") or name.startswith("file:memorydb_") or name == ":memory:"
-            )
-        if not safe:
+        if not database_is_disposable(
+            wrapper.settings_dict, engine=args.engine, directory=directory, database=database,
+        ):
             raise RuntimeError("Refusing a connection outside this disposable refactor database.")
         return original_ensure(wrapper)
 
@@ -113,8 +151,8 @@ def run_checks(args, directory, database):
         validate_inventory()
         from django.core.management import call_command
         try:
-            if args.replay:
-                replay_with_legacy_rows()
+            if args.replay or args.replay_from_main:
+                replay_with_legacy_rows(editorial_first=args.replay_from_main)
             if args.labels:
                 call_command("test", *args.labels, interactive=False, verbosity=2, exclude_tags=args.exclude_tag)
             call_command("check")
@@ -127,11 +165,14 @@ def run_checks(args, directory, database):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--engine", choices=("postgres", "sqlite"), default="postgres")
-    parser.add_argument("--replay", action="store_true")
+    replay = parser.add_mutually_exclusive_group()
+    replay.add_argument("--replay", action="store_true")
+    replay.add_argument("--replay-from-main", action="store_true",
+                        help="Seed existing editorial attribution before adding credential migrations.")
     parser.add_argument("--exclude-tag", action="append", default=[])
     parser.add_argument("labels", nargs="*")
     args = parser.parse_args()
-    if not args.labels and not args.replay:
+    if not args.labels and not args.replay and not args.replay_from_main:
         parser.error("Select test labels or --replay.")
     programs = {}
     if args.engine == "postgres":

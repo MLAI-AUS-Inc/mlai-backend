@@ -145,6 +145,7 @@ class MessageReferenceAccessTests(TestCase):
             grant=grant,
             slack_workspace_id="TTEST",
             slack_conversation_id="DPRIVATE",
+            participant_hash="current-reference-audience",
             status="live",
             mlai_channel_id=CHANNEL_ID,
         )
@@ -157,7 +158,10 @@ class MessageReferenceAccessTests(TestCase):
             status="completed",
             available_at=timezone.now(),
             completed_at=timezone.now(),
-            metadata={"destination_message_id": EVENT_ID},
+            metadata={
+                "destination_message_id": EVENT_ID,
+                "participant_hash": conversation.participant_hash,
+            },
         )
         url = URL.replace("CREF", "DPRIVATE")
         self.assertEqual(

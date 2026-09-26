@@ -79,6 +79,9 @@ class ValidateProdUrlsTests(SimpleTestCase):
     def test_valid_prod_urls_allow_http_internal_service_hosts(self):
         self.assertEqual(self._validation_errors(), [])
 
+    def test_normal_password_sign_in_can_coexist_with_required_email_and_device_auth(self):
+        self.assertEqual(self._validation_errors(COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED=True), [])
+
     def test_content_factory_docker_alias_is_rejected_by_default(self):
         errors = self._validation_errors(CONTENT_FACTORY_URL="http://content-factory-web:8000")
 
@@ -233,7 +236,8 @@ class ValidateProdUrlsTests(SimpleTestCase):
         self.assertIn("COMMUNITY_CHAT_FRONTEND_URL: https://chat.mlai.au", workflow)
         self.assertIn("COMMUNITY_CHAT_RELAY_URL: wss://chat.mlai.au", workflow)
         self.assertIn('COMMUNITY_CHAT_EMAIL_CODE_AUTH_ENABLED: "true"', workflow)
-        self.assertIn('COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED: "false"', workflow)
+        self.assertIn('COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED: "true"', workflow)
+        self.assertIn("COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED: ${{ vars.COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED || 'false' }}", workflow)
         self.assertIn('COMMUNITY_CHAT_DEVICE_AUTH_ENABLED: "true"', workflow)
         self.assertIn("CUSTOMERIO_COMMUNITY_CHAT_CODE_MESSAGE_ID:", workflow)
         self.assertIn(
@@ -285,10 +289,6 @@ class ValidateProdUrlsTests(SimpleTestCase):
 
         self.assertIn(
             "COMMUNITY_CHAT_EMAIL_CODE_AUTH_ENABLED must be true in production.",
-            errors,
-        )
-        self.assertIn(
-            "COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED must be false in production.",
             errors,
         )
         self.assertIn(

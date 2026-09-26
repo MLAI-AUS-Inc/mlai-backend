@@ -30,6 +30,20 @@ class ContentFactoryRunStepSerializer(serializers.Serializer):
 
 
 class ContentFactoryRunSyncSerializer(serializers.Serializer):
+    generation = serializers.IntegerField(required=False, min_value=0)
+    state_version = serializers.IntegerField(required=False, min_value=0)
+    failure = serializers.DictField(required=False)
+    recovery = serializers.DictField(required=False)
+    recovery_intents = serializers.DictField(required=False)
+    budget = serializers.DictField(required=False)
+
+    def validate(self, attrs):
+        from content_factory.run_state import execution_version
+        try:
+            execution_version(attrs)
+        except ValueError as exc:
+            raise serializers.ValidationError(str(exc))
+        return attrs
     run_id = serializers.CharField()
     workflow = serializers.CharField()
     domain = serializers.CharField(required=False, allow_blank=True, allow_null=True)

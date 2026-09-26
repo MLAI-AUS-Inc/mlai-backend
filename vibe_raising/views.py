@@ -210,10 +210,10 @@ def _connector_oauth_guarded(callback):
     return wrapped
 
 
-def _sync_selected_connector_sources_for_draft(user, input_sources: list[str]) -> dict[str, list[str]]:
+def _sync_selected_connector_sources_for_draft(user, input_sources: list[str], *, organization=None) -> dict[str, list[str]]:
     warnings: dict[str, list[str]] = {}
     selected = set(input_sources or [])
-    organization = active_organization_for_user(user)
+    organization = organization or active_organization_for_user(user)
     provider_labels = {
         ExternalServiceProvider.XERO: "Xero",
         ExternalServiceProvider.LINEAR: "Linear",
@@ -457,6 +457,10 @@ def _serialize_run_summary(run):
         "stepStates": step_states,
         "targetMonth": target_month.isoformat() if target_month else None,
         "inputSources": startup_update_run_input_sources(run),
+        "sourceWarnings": merge_source_warnings(
+            {key: value.get("warnings", []) for key, value in ((run.run_request or {}).get("external_context") or {}).items() if isinstance(value, dict)},
+            (run.result or {}).get("source_warnings") or {},
+        ),
         "createdAt": run.created_at.isoformat(),
         "updatedAt": run.updated_at.isoformat(),
     }
@@ -988,12 +992,17 @@ def _build_manual_structured_memo(payload):
 
 
 def _serialize_monthly_update(draft, structured_memo=None, *, published=False):
+    from .progress import public_chart_payload
     from startup_updates.revisions import frozen_memo, revision_payload
     revision = draft.published_revision if published and draft.published_revision_id else draft.current_revision
     if revision:
         structured_memo = frozen_memo(draft, published=published and bool(draft.published_revision_id))
     if structured_memo is None:
         structured_memo = _structured_memo_with_xero_metrics(draft)
+    if published and isinstance(structured_memo.get("progress_charts"), list):
+        # Disclosure is explicit. Narrative is reviewed separately by the founder.
+        structured_memo = {**structured_memo, "metrics": {}, "kpi_snapshot": [], "metric_suggestions": [],
+            "metric_history": {}, "financial_snapshot": None, "concise_analysis": None}
     video_metadata = _structured_memo_video_metadata(structured_memo)
     published_at = getattr(draft, "published_at", None)
     if revision and revision.pk != draft.published_revision_id:
@@ -1037,6 +1046,7 @@ def _serialize_monthly_update(draft, structured_memo=None, *, published=False):
         "reportingPeriod": (structured_memo or {}).get("reporting_period"),
         "evidenceWarnings": (structured_memo or {}).get("evidence_warnings", []),
         "metricHistory": (structured_memo or {}).get("metric_history", {}),
+        "progressCharts": public_chart_payload(structured_memo.get("progress_charts")),
         "financialSnapshot": _structured_memo_financial_snapshot(structured_memo),
         "conciseAnalysis": _structured_memo_concise_analysis(structured_memo),
         "presentationMode": _structured_memo_text(structured_memo, "presentation_mode", "presentationMode"),
@@ -1986,6 +1996,7 @@ def _build_email_draft_payload(
         "authUrl": auth_url,
         "run": run_payload,
         "progress": progress_payload,
+        "sourceWarnings": (run_payload or {}).get("sourceWarnings", {}),
         "draft": draft_payload,
         "runId": run_payload["runId"] if run_payload else None,
         "status": run_payload["status"] if run_payload else None,
@@ -2021,6 +2032,7 @@ def _build_email_draft_results_payload(*, request, user, company, domain, run_id
         _get_drafts_for_run(
             ContentFactoryRun.objects.filter(
                 workflow=STARTUP_UPDATE_WORKFLOW,
+                domain=domain,
                 run_id=run_id,
             ).first()
         )
@@ -2657,6 +2669,8 @@ class VibeRaisingMonthlyUpdateView(APIView):
             from rest_framework.exceptions import ValidationError
             raise ValidationError({"detail": str(exc)}) from exc
         memo = _build_manual_structured_memo(structured_payload)
+        if "chartSelections" in serializer.validated_data:
+            memo["_progress_chart_specs"] = serializer.validated_data["chartSelections"]
         if is_creation_request and not draft.current_revision_id:
             memo["_creation_request_hash"] = creation_request_hash
         if draft.current_revision_id:
@@ -2668,9 +2682,17 @@ class VibeRaisingMonthlyUpdateView(APIView):
                 memo.pop("financial_snapshot", None)
         else:
             memo.pop("financial_snapshot", None)
+        from startup_updates.review_policy import manual_validation
+        validation = manual_validation(
+            _serialize_monthly_update(draft) if draft.current_revision_id else None,
+            serializer.validated_data,
+            draft.current_revision.validation if draft.current_revision_id else None,
+            metrics_changed=bool(changed_metrics),
+        )
         revision = save_revision(draft, memo, snapshot=snapshot,
             expected_revision=serializer.validated_data.get("expectedRevision"),
-            audience="community" if "community" in audience_visibility else "private")
+            audience="community" if "community" in audience_visibility else "private",
+            validation=validation)
         draft.refresh_from_db()
         draft.title = f"{company.name} {serializer.validated_data['month']} {serializer.validated_data['year']} Update"
         draft.status = MonthlyUpdateDraftStatus.DRAFT
@@ -2682,7 +2704,7 @@ class VibeRaisingMonthlyUpdateView(APIView):
         # company per month; best-effort, never blocks the save).
         from roo.services import StartupUpdateRewardService
 
-        if draft_status == MonthlyUpdateDraftStatus.READY:
+        if save_mode != "draft" and draft_status == MonthlyUpdateDraftStatus.READY:
             StartupUpdateRewardService.award_monthly_update_completion(
                 user=request.user, company=company, month_bucket=month_bucket, draft=draft,
             )
@@ -2796,8 +2818,8 @@ class VibeRaisingStartupUpdateBootstrapView(APIView):
 
         return Response(
             {
-                "googleConnected": bool(binding.google_connection or active_google_connection(request.user)),
-                **gmail_scope_status_payload(binding.google_connection or active_google_connection(request.user)),
+                "googleConnected": bool(binding.google_connection or google_connection_for_org(request.user, organization)),
+                **gmail_scope_status_payload(binding.google_connection or google_connection_for_org(request.user, organization)),
                 "company": _serialize_company_summary(company),
                 "binding": _serialize_binding_summary(binding),
                 "oauthUrl": _build_google_oauth_url(request),
@@ -2848,13 +2870,13 @@ class VibeRaisingStartupUpdateRunView(APIView):
             target_month = _requested_target_month_from_request(request)
         except ValueError as exc:
             return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
-        google_connection = active_google_connection(request.user)
+        google_connection = google_connection_for_org(request.user, organization)
         input_sources, google_connection, gmail_scope_warnings = coerce_startup_update_sources_for_gmail_scope(
             input_sources,
             google_connection,
         )
         source_warnings = merge_source_warnings(
-            _sync_selected_connector_sources_for_draft(request.user, input_sources),
+            _sync_selected_connector_sources_for_draft(request.user, input_sources, organization=organization),
             gmail_scope_warnings,
         )
         if gmail_required_for_sources(input_sources) and (
@@ -3005,13 +3027,13 @@ class VibeRaisingEmailDraftStartView(APIView):
             target_month = _requested_target_month_from_request(request)
         except ValueError as exc:
             return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
-        google_connection = active_google_connection(request.user)
+        google_connection = google_connection_for_org(request.user, organization)
         input_sources, google_connection, gmail_scope_warnings = coerce_startup_update_sources_for_gmail_scope(
             input_sources,
             google_connection,
         )
         source_warnings = merge_source_warnings(
-            _sync_selected_connector_sources_for_draft(request.user, input_sources),
+            _sync_selected_connector_sources_for_draft(request.user, input_sources, organization=organization),
             gmail_scope_warnings,
         )
         if gmail_required_for_sources(input_sources) and (
@@ -3033,19 +3055,28 @@ class VibeRaisingEmailDraftStartView(APIView):
             binding.save(update_fields=["google_connection", "updated_at"])
 
         if request.data.get("updateId") or request.data.get("creationKey"):
-            from startup_updates.update_identity import resolve_update, narrative_window, identity_payload
+            from startup_updates.update_identity import (
+                default_generation_date, identity_payload, narrative_window,
+                parse_generation_date, resolve_update,
+            )
             from startup_updates.revisions import RevisionConflict
             from rest_framework.exceptions import ValidationError
             try:
-                requested_date = date.fromisoformat(str(request.data.get("updateDate")))
                 requested_id = int(request.data["updateId"]) if request.data.get("updateId") else None
             except (ValueError, TypeError):
-                raise ValidationError({"updateDate": "Choose a valid update date."})
+                raise ValidationError({"updateId": "Choose a valid update."})
+            requested_date = parse_generation_date(request.data, update_id=requested_id)
             with transaction.atomic():
                 draft, _ = resolve_update(organization, month=target_month, update_id=requested_id,
                     creation_key=request.data.get("creationKey"), update_date=requested_date)
                 if str(request.data.get("expectedRevision") or "") != str(draft.current_revision_id or ""):
                     raise RevisionConflict()
+                if requested_date is None:
+                    from zoneinfo import ZoneInfo
+                    reporting_zone = ZoneInfo(_startup_profile.reporting_timezone or "UTC")
+                    requested_date = default_generation_date(
+                        draft, today=timezone.now().astimezone(reporting_zone).date(),
+                    )
                 target_month = draft.month
                 period = narrative_window(organization, draft, requested_date,
                     requested_start=request.data.get("narrativeStart"), requested_end=request.data.get("narrativeEnd"))
@@ -3303,7 +3334,7 @@ class VibeRaisingEmailDraftActiveRunView(APIView):
         if error_response:
             return error_response
 
-        google_connection = active_google_connection(request.user)
+        google_connection = google_connection_for_org(request.user, context["company"].organization)
         google_connection_id = getattr(google_connection, "id", None)
         domain = context["domain"]
         if not domain:
@@ -3353,7 +3384,7 @@ class VibeRaisingEmailDraftCancelView(APIView):
             user=request.user,
             company=company,
         )
-        google_connection = active_google_connection(request.user)
+        google_connection = google_connection_for_org(request.user, organization)
         google_connection_id = getattr(google_connection, "id", None) or binding.google_connection_id
 
         try:

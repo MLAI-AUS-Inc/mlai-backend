@@ -19,12 +19,29 @@ ORG_MEMORY_PRODUCTION_DEPLOY_ENABLED="${ORG_MEMORY_PRODUCTION_DEPLOY_ENABLED:-fa
 ORG_MEMORY_PRODUCTION_PUBLIC_CHANNEL_ADMIN_SCOPE_APPROVED="${ORG_MEMORY_PRODUCTION_PUBLIC_CHANNEL_ADMIN_SCOPE_APPROVED:-false}"
 LINEAR_CHANNEL_ISSUE_MAX_COMMENTS="${LINEAR_CHANNEL_ISSUE_MAX_COMMENTS:-250}"
 MESSAGE_SYNC_ENABLED="${MESSAGE_SYNC_ENABLED:-false}"
+SLACK_OWNER_INVENTORY_ENABLED="${SLACK_OWNER_INVENTORY_ENABLED:-false}"
+COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED="${COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED:-false}"
+case "$COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED" in
+    true|TRUE|True) COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED=true ;;
+    false|FALSE|False) COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED=false ;;
+    *) echo "COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED must be true or false." >&2; exit 1 ;;
+esac
 case "$MESSAGE_SYNC_ENABLED" in
     true|TRUE|True) MESSAGE_SYNC_ENABLED=true ;;
     false|FALSE|False) MESSAGE_SYNC_ENABLED=false ;;
     *) echo "MESSAGE_SYNC_ENABLED must be true or false." >&2; exit 1 ;;
 esac
 export MESSAGE_SYNC_ENABLED
+case "$SLACK_OWNER_INVENTORY_ENABLED" in
+    true|TRUE|True) SLACK_OWNER_INVENTORY_ENABLED=true ;;
+    false|FALSE|False) SLACK_OWNER_INVENTORY_ENABLED=false ;;
+    *) echo "SLACK_OWNER_INVENTORY_ENABLED must be true or false." >&2; exit 1 ;;
+esac
+if [ "$SLACK_OWNER_INVENTORY_ENABLED" = "true" ] && [ "$MESSAGE_SYNC_ENABLED" != "true" ]; then
+    echo "SLACK_OWNER_INVENTORY_ENABLED requires MESSAGE_SYNC_ENABLED=true." >&2
+    exit 1
+fi
+export SLACK_OWNER_INVENTORY_ENABLED
 
 case "$MEETING_ROOM_BOOKING_ENABLED" in
     true|TRUE|True|1|yes|YES|Yes|on|ON|On) MEETING_ROOM_BOOKING_ENABLED=true ;;
@@ -279,6 +296,25 @@ if manifest.get("organization_domain") != "mlai.au":
     raise SystemExit("Admin Brain production approval must target mlai.au")
 PY
 fi
+verify_current_main_release() {
+    local current_main_sha
+    if [[ ! "$APP_RELEASE" =~ ^[0-9a-f]{40}$ ]]; then
+        echo "❌ APP_RELEASE must be the full main commit SHA." >&2
+        return 1
+    fi
+    if ! current_main_sha=$(git ls-remote https://github.com/MLAI-AUS-Inc/mlai-backend.git refs/heads/main | awk '{print $1}'); then
+        echo "❌ Cannot verify the current main commit; refusing to deploy." >&2
+        return 1
+    fi
+    if [ "$current_main_sha" != "$APP_RELEASE" ]; then
+        echo "❌ Stale deployment $APP_RELEASE; current main is $current_main_sha. No host files or containers were changed." >&2
+        return 1
+    fi
+}
+
+# A delayed push event can start after a newer release. Reject it before rsync
+# or the first credential/configuration write reaches the host.
+verify_current_main_release
 echo "🚀 Deploying release $APP_RELEASE to $DEPLOY_SSH_TARGET ($DROPLET_IP)..."
 
 # 1. Sync files to the server
@@ -330,6 +366,9 @@ install_remote_env_value() {
 # The app-level token travels only through SSH stdin. Never reuse an OAuth
 # bot/user token: recipient expansion is a separate Slack authorization surface.
 install_remote_env_value MESSAGE_SYNC_ENABLED "$MESSAGE_SYNC_ENABLED"
+# Keep the new inventory endpoint disabled during migration and every
+# pre-activation check, even when this host was previously enabled.
+install_remote_env_value SLACK_OWNER_INVENTORY_ENABLED "false"
 # Install callback verification before activation so Slack can verify its URL.
 if [ -n "${MESSAGE_SYNC_SLACK_USER_APP_ID:-}" ]; then
     install_remote_env_value MESSAGE_SYNC_SLACK_USER_APP_ID "$MESSAGE_SYNC_SLACK_USER_APP_ID"
@@ -573,6 +612,22 @@ echo "🔧 Configuring server..."
 ssh "$DEPLOY_SSH_TARGET" <<EOF
     set -euo pipefail
 
+    verify_current_main_release_on_host() {
+        local current_main_sha
+        if ! current_main_sha=\$(git ls-remote https://github.com/MLAI-AUS-Inc/mlai-backend.git refs/heads/main | awk '{print \$1}'); then
+            echo "❌ Cannot verify current main from the host; refusing to mutate runtime." >&2
+            return 1
+        fi
+        if [ "\$current_main_sha" != "$APP_RELEASE" ]; then
+            echo "❌ Stale deployment $APP_RELEASE; current main is \$current_main_sha. Refusing to mutate runtime." >&2
+            return 1
+        fi
+    }
+
+    # Recheck after file/env sync and again at the transition boundary. A
+    # newer push may have arrived while the runner was copying files.
+    verify_current_main_release_on_host
+
     upsert_env_value() {
         local key="\$1"
         local value="\$2"
@@ -626,6 +681,7 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     cd $PROJECT_DIR
     meeting_room_booking_enabled="$MEETING_ROOM_BOOKING_ENABLED"
     office_manager_enabled="$OFFICE_MANAGER_ENABLED"
+    slack_owner_inventory_enabled="$SLACK_OWNER_INVENTORY_ENABLED"
     community_bridge_production_enabled="$COMMUNITY_BRIDGE_PRODUCTION_ENABLED"
     org_memory_production_deploy_enabled="$ORG_MEMORY_PRODUCTION_DEPLOY_ENABLED"
 
@@ -655,7 +711,7 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     upsert_env_value COMMUNITY_CHAT_RELAY_URL "wss://chat.mlai.au"
     upsert_env_value COMMUNITY_CHAT_ADAPTER_URL "$COMMUNITY_CHAT_ADAPTER_URL"
     upsert_env_value COMMUNITY_CHAT_EMAIL_CODE_AUTH_ENABLED "true"
-    upsert_env_value COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED "false"
+    upsert_env_value COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED "$COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED"
     upsert_env_value COMMUNITY_CHAT_DEVICE_AUTH_ENABLED "true"
     upsert_env_value CUSTOMERIO_COMMUNITY_CHAT_CODE_MESSAGE_ID "mlai_chat_sign_in_code"
     upsert_env_value COMMUNITY_CHAT_ALLOWED_ORIGINS "https://chat.mlai.au,tauri://localhost,http://tauri.localhost,mlaichat://callback"
@@ -701,6 +757,9 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     # Keep Slack's daily digest to three genuinely featured jobs. Other matches
     # remain available on the public daily jobs page.
     upsert_env_value JOBS_TOP_PICK_LIMIT "3"
+    # .env may retain a failed release's marker even when the old container
+    # never changed. Use the serving container as rollback truth.
+    previous_app_release=\$(docker compose exec -T web sh -lc 'printf "%s" "\$APP_RELEASE"' </dev/null 2>/dev/null || read_env_value APP_RELEASE)
     upsert_env_value APP_RELEASE "$APP_RELEASE"
     upsert_env_value HEALTH_HACK_AI_BUDGET_MODE "enforce"
     # Keep the atomic worst-case reservation aligned with Roo's enforced model
@@ -734,9 +793,12 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     upsert_env_value ORG_MEMORY_ACTIONS_ENABLED "false"
     upsert_env_value ORG_MEMORY_ACTION_LINEAR_EXECUTION_ENABLED "false"
     upsert_env_value ORG_MEMORY_SELECTOR_EXPORT_ENABLED "false"
-    # Web concurrency: gunicorn sync-worker count (read by scripts/start-web.sh).
-    # Sized to droplet RAM (~250MB/worker). 16 fits the 8GB/4vCPU droplet with headroom.
-    upsert_env_value GUNICORN_WORKERS "16"
+    # Web concurrency: keep URL imports and request CPU within this 4-vCPU
+    # droplet's capacity. The previous 16 sync workers triggered simultaneous
+    # cold imports and 30-second worker timeouts. Firebase initializes a
+    # Firestore gRPC client during route import, so warming must be post-fork.
+    upsert_env_value GUNICORN_WORKERS "4"
+    upsert_env_value GUNICORN_TIMEOUT "90"
     print_redacted_env_status CONTENT_FACTORY_URL GITHUB_APP_ID GITHUB_APP_PRIVATE_KEY VALLEY_HARNESS_URL REDIS_URL ROO_SERVICE_URL ROO_SIM_PATIENT_KEY HEALTH_HACK_API_KEY ROO_API_KEY INTERNAL_API_KEY OFFICE_MANAGER_SLACK_BOT_TOKEN OFFICE_MANAGER_SLACK_CHANNEL_ID OFFICE_MANAGER_TIMEZONE VICTOR_AI_ROO_SIGNING_SECRET VICTOR_AI_ROO_ENABLED UMAMI_BASE_URL CONTENT_ANALYTICS_HOST_URL COMMUNITY_CHAT_ADAPTER_URL COMMUNITY_CHAT_ADAPTER_TOKEN COMMUNITY_CHAT_EMAIL_CODE_PEPPER COMMUNITY_CHAT_EMAIL_CODE_DELIVERY_SECRET CUSTOMERIO_API_KEY CUSTOMERIO_COMMUNITY_CHAT_CODE_MESSAGE_ID
     require_env_value CONTENT_FACTORY_URL "Set CONTENT_FACTORY_URL to http://<content-factory-private-ip>:8000 for the cross-droplet Content Factory deployment."
     require_env_value GITHUB_APP_ID "Set GITHUB_APP_ID to the MLAI Tools GitHub App id so Content Factory can receive installation tokens."
@@ -804,9 +866,11 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
         echo "ℹ️ Skipping analytics-sync startup because the Umami analytics contract is not fully configured."
     fi
 
+    committee_remuneration_enabled=0
     case "\$(read_env_value COMMITTEE_REMUNERATION_ENABLED)" in
         true|TRUE|True|1|yes|YES|Yes|on|ON|On)
-            runtime_services+=("\${committee_runtime_services[@]}") ;;
+            runtime_services+=("\${committee_runtime_services[@]}")
+            committee_remuneration_enabled=1 ;;
     esac
 
     docker network inspect mlai-shared >/dev/null 2>&1 || docker network create mlai-shared
@@ -830,10 +894,16 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
         fi
     done
 
-    echo "🐘 Starting database..."
-    docker compose up -d db
+    # The database imports the long-lived .env, including APP_RELEASE and
+    # deployment-managed feature flags. A normal Compose up of db treats those changes
+    # as a config change and recreates Postgres during every code release.
+    # Start a missing/stopped database, but never replace a running database
+    # as a side effect of deploying application code.
+    echo "🐘 Ensuring database is running without replacement..."
+    docker compose up -d --no-recreate db
 
     echo "🏗️ Building runtime images: \${runtime_services[*]}..."
+    verify_current_main_release_on_host
     docker compose build "\${runtime_services[@]}"
 
     # Every pre-migration gate (Redis security state, production URLs and
@@ -1125,7 +1195,86 @@ if parsed.username or parsed.password or parsed.query or parsed.fragment:
         return 1
     }
 
+    web_proxy_config=/etc/nginx/conf.d/mlai-backend-api.conf
+    web_proxy_script=ops/backend-api/switch-web-upstream.sh
+    web_proxy_preexisting=0
+    web_proxy_staged=0
+    web_proxy_switch_attempted=0
+    web_proxy_candidate_verified=0
+    web_direct_stopped=0
+    web_candidate_started=0
+    web_candidate_drain_workers=""
+    if [ -e "\$web_proxy_config" ]; then
+        if ! grep -qx '# managed-mlai-backend-api target=web' "\$web_proxy_config"; then
+            echo "❌ API proxy is not routing to the normal web slot; refusing to replace a potentially serving candidate." >&2
+            exit 1
+        fi
+        web_proxy_preexisting=1
+    fi
+    if [ -n "\$(docker compose ps -a -q web-candidate)" ]; then
+        echo "❌ A candidate web container remains from an earlier release; inspect its Nginx drain state before replacing it." >&2
+        exit 1
+    fi
+
+    nginx_worker_snapshot() {
+        local master_pid
+        master_pid=\$(cat /run/nginx.pid) || return 1
+        if ! [[ "\$master_pid" =~ ^[0-9]+$ ]] || ! kill -0 "\$master_pid" 2>/dev/null; then
+            echo "❌ Cannot identify the running Nginx master; refusing to drain a web slot." >&2
+            return 1
+        fi
+        if ! pgrep -P "\$master_pid"; then
+            echo "❌ Cannot identify Nginx workers; refusing to replace a web slot." >&2
+            return 1
+        fi
+    }
+
+    wait_for_nginx_workers_to_drain() {
+        local workers="\$1"
+        local pid still_running attempt
+        [ -n "\$workers" ] || return 0
+        for attempt in \$(seq 1 120); do
+            still_running=0
+            for pid in \$workers; do
+                if kill -0 "\$pid" 2>/dev/null; then
+                    still_running=1
+                    break
+                fi
+            done
+            [ "\$still_running" = 0 ] && return 0
+            sleep 1
+        done
+        echo "❌ Old Nginx workers still have in-flight requests after 120 seconds." >&2
+        return 1
+    }
+
+    wait_for_origin_web_health() {
+        local port="\$1" expected_release="\$2" expected_slot="\${3:-}"
+        local max_attempts="\${4:-45}" curl_timeout="\${5:-5}" retry_delay="\${6:-2}"
+        local headers body attempt
+        headers=\$(mktemp)
+        for attempt in \$(seq 1 "\$max_attempts"); do
+            body=\$(curl -fsS --max-time "\$curl_timeout" -D "\$headers" \
+                -H 'Host: api.mlai.au' -H 'X-Forwarded-Proto: https' \
+                "http://127.0.0.1:\$port/healthz/ready" 2>/dev/null || true)
+            if printf '%s\n' "\$body" | python3 -c \
+                'import json,sys; data=json.load(sys.stdin); sys.exit(0 if data.get("status") == "ok" and data.get("release") == sys.argv[1] else 1)' \
+                "\${expected_release:0:12}" 2>/dev/null \
+                && { [ -z "\$expected_slot" ] \
+                    || grep -iF "X-MLAI-Origin-Web-Slot: \$expected_slot" "\$headers" >/dev/null; }; then
+                rm -f "\$headers"
+                return 0
+            fi
+            sleep "\$retry_delay"
+        done
+        rm -f "\$headers"
+        echo "❌ Web slot \${expected_slot:-\$port} did not report release \${expected_release:0:12}." >&2
+        return 1
+    }
+
     runtime_restore_attempted=0
+    web_only_rollback=0
+    runtime_pause_started=0
     new_runtime_replacement_started=0
     migration_started=0
     schema_transition_started=0
@@ -1137,6 +1286,71 @@ if parsed.username or parsed.password or parsed.query or parsed.fragment:
         runtime_restore_attempted=1
         trap - ERR
         set +e
+
+        if [ "\${migrations_pending:-1}" = "0" ] && [ "\$web_candidate_started" = "1" ]; then
+            if [ "\$web_proxy_preexisting" != "1" ] \
+                && [ "\$web_proxy_candidate_verified" = "1" ]; then
+                # Once first adoption successfully serves the candidate, keep
+                # Nginx on port 80 during rollback and recreate old web on 8001.
+                if [ "\$new_runtime_replacement_started" != "1" ]; then
+                    web_only_rollback=1
+                fi
+                new_runtime_replacement_started=1
+            fi
+            if [ "\$new_runtime_replacement_started" != "1" ]; then
+                echo "⚠️ Restoring the original web route before runtime replacement."
+                if [ "\$web_proxy_preexisting" = "1" ] && [ "\$web_proxy_switch_attempted" = "1" ]; then
+                    drain_workers=\$(nginx_worker_snapshot) || return
+                    bash "\$web_proxy_script" switch web || return
+                    wait_for_origin_web_health 80 "\$previous_app_release" web || return
+                    wait_for_nginx_workers_to_drain "\$drain_workers" || return
+                elif [ "\$web_proxy_preexisting" != "1" ] && [ "\$web_proxy_staged" = "1" ]; then
+                    drain_workers=\$(nginx_worker_snapshot) || return
+                    bash "\$web_proxy_script" remove || return
+                    if [ "\$web_direct_stopped" = "1" ]; then
+                        old_web_running=\$(docker inspect --format '{{.State.Running}}' "\$old_direct_web_container_id" 2>/dev/null || true)
+                        if [ "\$old_web_running" != "true" ]; then
+                            direct_restored=0
+                            for attempt in \$(seq 1 60); do
+                                if docker start "\$old_direct_web_container_id" >/dev/null 2>&1; then
+                                    direct_restored=1
+                                    break
+                                fi
+                                sleep 0.25
+                            done
+                            [ "\$direct_restored" = "1" ] || { echo "❌ Old direct web could not reclaim port 80." >&2; return; }
+                        fi
+                        wait_for_origin_web_health 80 "\$previous_app_release" || return
+                    fi
+                    wait_for_nginx_workers_to_drain "\$drain_workers" || return
+                fi
+                docker compose stop web-candidate || true
+                docker compose rm -f web-candidate || true
+                if [ -n "\$previous_app_release" ]; then
+                    upsert_env_value APP_RELEASE "\$previous_app_release"
+                fi
+                return
+            fi
+
+            # A replacement web may be unhealthy. Serve from the still-healthy
+            # candidate while the old image is recreated on the normal slot.
+            wait_for_origin_web_health 8002 "$APP_RELEASE" "" 8 3 1 || return
+            if ! grep -qx '# managed-mlai-backend-api target=candidate' "\$web_proxy_config"; then
+                drain_workers=\$(nginx_worker_snapshot) || return
+                bash "\$web_proxy_script" switch candidate || return
+                wait_for_origin_web_health 80 "$APP_RELEASE" candidate || return
+                wait_for_nginx_workers_to_drain "\$drain_workers" || return
+            fi
+        fi
+
+        if [ "\$runtime_pause_started" != "1" ] \
+            && [ "\$new_runtime_replacement_started" != "1" ]; then
+            echo "⚠️ Deployment failed before runtime replacement; existing services remain running."
+            if [ "\${migrations_pending:-1}" = "0" ] && [ -n "\$previous_app_release" ]; then
+                upsert_env_value APP_RELEASE "\$previous_app_release"
+            fi
+            return
+        fi
 
         if [ "\$migration_started" = "1" ]; then
             if [ "\$schema_transition_completed" != "1" ]; then
@@ -1152,29 +1366,66 @@ if parsed.username or parsed.password or parsed.query or parsed.fragment:
             fi
         fi
 
-        echo "⚠️ Deployment failed after runtime services were paused; staging Office Manager disabled and selecting fail-closed recovery."
+        echo "⚠️ Deployment failed after runtime services were paused; staging Office Manager and Slack owner inventory disabled for recovery."
         upsert_env_value OFFICE_MANAGER_ENABLED "false" || true
-        if [ "\$new_runtime_replacement_started" != "1" ] \
-            && [ "\$migration_started" != "1" ]; then
-            # These stopped containers still reference the last known-good images
-            # and carry the environment that was validated with that release. Do
-            # not replace them with the just-built image: a pre/post-migration
-            # failure can leave that image waiting forever on migrate --check.
+        upsert_env_value SLACK_OWNER_INVENTORY_ENABLED "false" || true
+        if [ "\$migration_started" != "1" ]; then
+            # No schema changed, so the previous image is the last known-good
+            # release even if a replacement container has already started.
+            # Restore its recorded image tag before recreating services.
             echo "⚠️ Deployment failed before schema advancement; restoring the last known-good runtime images."
+            if [ -n "\$previous_app_release" ]; then
+                upsert_env_value APP_RELEASE "\$previous_app_release"
+            fi
             restored_services=()
             while IFS='|' read -r service image_id image_ref rollback_tag; do
                 [ -n "\$service" ] || continue
+                if [ "\$web_only_rollback" = "1" ] && [ "\$service" != "web" ]; then
+                    continue
+                fi
                 docker image tag "\$image_id" "\$image_ref"
                 restored_services+=("\$service")
             done < "\$rollback_manifest"
+            if [ "\$new_runtime_replacement_started" = "1" ] && [ "\$web_only_rollback" != "1" ]; then
+                # Writers introduced by this release have no previous image to
+                # restore. Stop them so a failed code-only rollout cannot leave
+                # new workers consuming jobs alongside the restored scheduler.
+                # The handoff candidate stays alive until old web is verified.
+                for service in "\${runtime_services[@]}"; do
+                    had_previous_image=0
+                    for restored_service in "\${restored_services[@]}"; do
+                        if [ "\$service" = "\$restored_service" ]; then
+                            had_previous_image=1
+                            break
+                        fi
+                    done
+                    if [ "\$had_previous_image" = "0" ]; then
+                        docker compose stop "\$service" || return
+                    fi
+                done
+            fi
             if [ "\${#restored_services[@]}" -gt 0 ]; then
-                docker compose up -d --force-recreate "\${restored_services[@]}"
+                docker compose up -d --no-deps --force-recreate "\${restored_services[@]}"
             elif [ "\${#previous_runtime_container_ids[@]}" -gt 0 ]; then
                 docker start "\${previous_runtime_container_ids[@]}" >/dev/null || true
             else
                 echo "⚠️ No prior runtime containers were recorded; leaving services stopped for operator recovery."
             fi
-            if [ -n "\$previous_scheduler_container_id" ]; then
+            if [ "\$web_candidate_started" = "1" ]; then
+                wait_for_origin_web_health 8001 "\$previous_app_release" || return
+                drain_workers=\$(nginx_worker_snapshot) || return
+                bash "\$web_proxy_script" switch web || return
+                wait_for_origin_web_health 80 "\$previous_app_release" web || return
+                if wait_for_nginx_workers_to_drain "\$drain_workers"; then
+                    docker compose stop web-candidate || true
+                    docker compose rm -f web-candidate || true
+                else
+                    echo "⚠️ Keeping the candidate running until its in-flight requests drain." >&2
+                fi
+            fi
+            if [ "\$web_only_rollback" = "1" ]; then
+                echo "✅ Existing workers were not replaced during the failed proxy adoption."
+            elif [ -n "\$previous_scheduler_container_id" ]; then
                 verify_scheduler_recovery_tick \
                     "" \
                     "\$previous_scheduler_image_id" \
@@ -1185,40 +1436,81 @@ if parsed.username or parsed.password or parsed.query or parsed.fragment:
             return
         fi
 
-        # Once the full migration graph has been checked (or replacement has
-        # begun), the new image is safe to recreate with the staged-off feature
-        # flag. Still require a fresh scheduler tick after recovery.
-        docker compose up -d --force-recreate "\${runtime_services[@]}" || true
+        # Once a migration began, the old binary may be incompatible with the
+        # schema. Recreate the new image with staged-off features and require
+        # a fresh scheduler tick after recovery.
+        docker compose up -d --no-deps --force-recreate "\${runtime_services[@]}" || true
         verify_scheduler_recovery_tick "" "" 0 || true
     }
 
-    echo "⏸️ Pausing all runtime writers before DB migrations..."
+    # A code-only release has no schema transition. Keep the current web and
+    # workers serving while the new image runs the remaining deployment gates.
+    # --check returns 0 only when Django sees no pending migrations. A pending
+    # plan requires its own explicit approval before any runtime is paused.
+    # A database or migration-loader failure also leaves the current runtime
+    # untouched.
+    echo "🔎 Checking pending migrations before pausing runtime services..."
+    migrations_pending=1
+    if compose_run_web python manage.py migrate --check --noinput; then
+        migrations_pending=0
+        echo "✅ No pending migrations; current runtime stays online during deployment checks."
+    else
+        migration_plan=\$(compose_run_web python manage.py migrate --plan --noinput)
+        printf '%s\n' "\$migration_plan"
+        approved_plan_sha256=\$(read_env_value APPROVED_MIGRATION_PLAN_SHA256)
+        actual_plan_sha256=\$(printf '%s' "\$migration_plan" | sha256sum | cut -d ' ' -f 1)
+        if [ -z "\$approved_plan_sha256" ] || [ "\$approved_plan_sha256" != "\$actual_plan_sha256" ]; then
+            echo "❌ Pending migration plan has no matching, specific approval; current runtime remains online." >&2
+            false
+        fi
+    fi
+    if [ "\$migrations_pending" = "1" ] && [ "\$web_proxy_preexisting" != "1" ]; then
+        echo "❌ First adoption of the API proxy requires a code-only release. A reviewed schema migration needs a separate rollout." >&2
+        false
+    fi
+
     # Recovery disables errexit while attempting each restoration step. Always
     # preserve the original failure and stop; recovery is not a successful deploy.
     trap 'deployment_status=\$?; restore_runtime_on_error; exit "\$deployment_status"' ERR
     trap 'deployment_status=\$?; if [ "\$deployment_status" != "0" ]; then restore_runtime_on_error; fi' EXIT
-    docker compose stop "\${all_runtime_writer_services[@]}"
-
-    echo "🗄️ Running migrations..."
-    # From this point a failed migrate may still have committed earlier
-    # append-only migrations. Never restore either binary until the complete
-    # migration graph is proven; an intermediate schema is operator-repair-only.
-    migration_started=1
-    schema_transition_started=1
-    compose_run_web python manage.py migrate --noinput
-    compose_run_web python manage.py migrate --check --noinput
-    schema_transition_completed=1
+    if [ "\$migrations_pending" = "1" ]; then
+        verify_current_main_release_on_host
+        echo "⏸️ Pausing all runtime writers before DB migrations..."
+        runtime_pause_started=1
+        # A partial stop is recoverable, but no schema change is safe until
+        # every writer has stopped successfully. Preserve this failure status.
+        docker compose stop "\${all_runtime_writer_services[@]}"
+        echo "🗄️ Running migrations..."
+        # From this point a failed migrate may still have committed earlier
+        # append-only migrations. Never restore either binary until the complete
+        # migration graph is proven; an intermediate schema is operator-repair-only.
+        migration_started=1
+        schema_transition_started=1
+        compose_run_web python manage.py migrate --noinput
+        compose_run_web python manage.py migrate --check --noinput
+        schema_transition_completed=1
+    else
+        # Confirm the migration graph still has no pending work before the new
+        # binary replaces live services. This cannot apply a migration.
+        compose_run_web python manage.py migrate --check --noinput
+    fi
 
     echo "🧬 Re-auditing Office Manager provenance after migrations..."
     if ! run_office_manager_migration_audit "\$office_manager_post_attestation"; then
         echo "❌ Post-migration Office Manager data requires operator reconciliation." >&2
-        # The nullable quarantine is understood only by the new image. Keep the
-        # feature off and start that image so an older binary cannot reverse an
-        # allocation whose provenance 0037 marked unknown.
         upsert_env_value OFFICE_MANAGER_ENABLED "false"
-        docker compose up -d --force-recreate "\${runtime_services[@]}"
-        verify_scheduler_recovery_tick "" "" 0
-        runtime_restore_attempted=1
+        if [ "\$migrations_pending" = "1" ]; then
+            # The nullable quarantine is understood only by the new image.
+            # After a migration, start that image so an older binary cannot
+            # reverse an allocation whose provenance 0037 marked unknown.
+            docker compose up -d --no-deps --force-recreate "\${runtime_services[@]}"
+            verify_scheduler_recovery_tick "" "" 0
+            runtime_restore_attempted=1
+        else
+            # No schema changed and no runtime was paused. Leave the healthy
+            # previous image serving instead of replacing it with this build.
+            echo "⚠️ Code-only deployment check failed; existing runtime remains online."
+        fi
         false
     fi
 
@@ -1407,10 +1699,65 @@ PY
 
     echo "🚩 Applying the reviewed Office Manager activation state..."
     upsert_env_value OFFICE_MANAGER_ENABLED "\$office_manager_enabled"
+    echo "🚩 Applying the reviewed Slack owner inventory activation state..."
+    upsert_env_value SLACK_OWNER_INVENTORY_ENABLED "\$slack_owner_inventory_enabled"
 
     echo "🌐 Starting runtime services: \${runtime_services[*]}..."
+    if [ "\$migrations_pending" != "1" ]; then
+        verify_current_main_release_on_host
+        if ! systemctl is-active --quiet nginx || ! nginx -t; then
+            echo "❌ Host Nginx is not ready for a safe API handoff." >&2
+            false
+        fi
+        if [ "\$web_proxy_preexisting" = "1" ]; then
+            wait_for_origin_web_health 80 "\$previous_app_release" web
+        else
+            wait_for_origin_web_health 80 "\$previous_app_release"
+        fi
+        web_candidate_started=1
+        docker compose up -d --no-deps --force-recreate web-candidate
+        wait_for_origin_web_health 8002 "$APP_RELEASE"
+        verify_current_main_release_on_host
+
+        if [ "\$web_proxy_preexisting" = "1" ]; then
+            old_nginx_workers=\$(nginx_worker_snapshot)
+            web_proxy_switch_attempted=1
+            bash "\$web_proxy_script" switch candidate
+            wait_for_origin_web_health 80 "$APP_RELEASE" candidate 8 3 1
+            web_proxy_candidate_verified=1
+            # Old Nginx workers finish requests against web after a reload.
+            # Replacing web before they exit would still drop those requests.
+            wait_for_nginx_workers_to_drain "\$old_nginx_workers"
+        else
+            # Validate a shadow Nginx config while Docker still owns port 80.
+            # Install the live include only after that port has been freed.
+            bash "\$web_proxy_script" validate candidate
+            web_proxy_staged=1
+            old_direct_web_container_id=\$(docker compose ps -q web)
+            [ -n "\$old_direct_web_container_id" ] || false
+            web_direct_stopped=1
+            docker compose stop web
+            web_proxy_switch_attempted=1
+            bash "\$web_proxy_script" switch candidate
+            wait_for_origin_web_health 80 "$APP_RELEASE" candidate 5 2 1
+            web_proxy_candidate_verified=1
+        fi
+    fi
+    if [ "\$migrations_pending" != "1" ]; then
+        verify_current_main_release_on_host
+    fi
     new_runtime_replacement_started=1
-    docker compose up -d --force-recreate "\${runtime_services[@]}"
+    docker compose up -d --no-deps --force-recreate "\${runtime_services[@]}"
+    if [ "\$migrations_pending" != "1" ]; then
+        wait_for_origin_web_health 8001 "$APP_RELEASE"
+        verify_current_main_release_on_host
+        web_candidate_drain_workers=\$(nginx_worker_snapshot)
+        bash "\$web_proxy_script" switch web
+        wait_for_origin_web_health 80 "$APP_RELEASE" web 8 3 1
+    else
+        wait_for_origin_web_health 8001 "$APP_RELEASE"
+        wait_for_origin_web_health 80 "$APP_RELEASE" web
+    fi
 
     if [ "\$bridge_worker_enabled" != "1" ]; then
         echo "🧹 Stopping disabled community bridge services..."
@@ -1424,6 +1771,12 @@ PY
         docker compose rm -f analytics-sync || true
     fi
 
+    if [ "\$committee_remuneration_enabled" != "1" ]; then
+        echo "🧹 Stopping disabled committee remuneration service..."
+        docker compose stop "\${committee_runtime_services[@]}"
+        docker compose rm -f "\${committee_runtime_services[@]}"
+    fi
+
     echo "🔁 Verifying the running web container picked up APP_RELEASE..."
     running_release=\$(docker compose exec -T web sh -lc 'printf "%s" "\$APP_RELEASE"' </dev/null)
     if [ "\$running_release" != "$APP_RELEASE" ]; then
@@ -1433,11 +1786,26 @@ PY
         false
     fi
 
+    echo "🔁 Verifying the running web container picked up the Slack owner inventory flag..."
+    running_inventory_enabled=\$(docker compose exec -T web sh -lc 'printf "%s" "\$SLACK_OWNER_INVENTORY_ENABLED"' </dev/null)
+    if [ "\$running_inventory_enabled" != "$SLACK_OWNER_INVENTORY_ENABLED" ]; then
+        echo "Expected running web container SLACK_OWNER_INVENTORY_ENABLED=$SLACK_OWNER_INVENTORY_ENABLED but found \$running_inventory_enabled"
+        false
+    fi
+
     if [ "$MESSAGE_SYNC_ENABLED" = "true" ]; then
+        if [ "$SLACK_OWNER_INVENTORY_ENABLED" = "true" ]; then
+            echo "🔁 Verifying the bridge worker picked up the Slack owner inventory flag..."
+            running_worker_inventory_enabled=\$(docker compose exec -T bridge-worker sh -lc 'printf "%s" "\$SLACK_OWNER_INVENTORY_ENABLED"' </dev/null)
+            if [ "\$running_worker_inventory_enabled" != "true" ]; then
+                echo "Expected bridge worker SLACK_OWNER_INVENTORY_ENABLED=true but found \$running_worker_inventory_enabled"
+                false
+            fi
+        fi
         echo "Verifying durable sync progress in the new bridge worker..."
         sync_ready=0
         for attempt in \$(seq 1 18); do
-            if docker compose exec -T bridge-worker python manage.py message_sync_status --check --local-worker >/dev/null 2>&1; then
+            if docker compose exec -T bridge-worker python manage.py message_sync_status --check --local-worker </dev/null >/dev/null 2>&1; then
                 sync_ready=1
                 break
             fi
@@ -1610,9 +1978,21 @@ if slugs != expected:
         false
     fi
     rm -f "\$preflight_headers"
-    # All release and functional checks passed; rollback images are no longer
-    # needed. Keep the ERR trap active until this exact point.
+    # Release checks have committed the new web slot. Housekeeping cannot
+    # safely invoke image rollback after the candidate has been stopped.
     trap - ERR EXIT
+    if [ "\$web_candidate_started" = "1" ]; then
+        if wait_for_nginx_workers_to_drain "\$web_candidate_drain_workers"; then
+            if docker compose stop web-candidate; then
+                docker compose rm -f web-candidate || echo "⚠️ Candidate removal needs operator cleanup." >&2
+            else
+                echo "⚠️ Candidate stop needs operator cleanup." >&2
+            fi
+        else
+            echo "⚠️ Candidate kept alive for in-flight requests; the next deployment will wait for operator cleanup." >&2
+        fi
+    fi
+    # Rollback images are no longer needed after this verified release.
     rm -f "\$rollback_manifest"
     for rollback_tag in "\${rollback_tags[@]}"; do
         docker image rm "\$rollback_tag" >/dev/null 2>&1 || true

@@ -58,7 +58,9 @@ def guide_contact(guide, reviewer=None):
 
 def opportunity_dto(record, viewer):
     """Serialize a curated opportunity after server-side visibility validation."""
-    action = active_policy()[record.action_key]
+    action = active_policy().get(record.action_key)
+    # Retired activities can still have historical opportunities to display.
+    requires_attendance = action["requires_attendance"] if action else True
     event = public_event(record.event_id) if record.kind == "event" else None
     event = event or {}
     volunteer_channel = channels().get("volunteer")
@@ -88,11 +90,12 @@ def opportunity_dto(record, viewer):
         reward_roo=roo(record.reward_microroo),
         reward_max_roo=roo(record.reward_max_microroo),
         recommended_level=record.recommended_level,
-        requires_attendance=action["requires_attendance"],
+        requires_attendance=requires_attendance,
         status=record.status,
         version=record.version,
-        can_request=capabilities(viewer)["can_request"]
-        and (not action["requires_attendance"] or attendance_verified(viewer)),
+        can_request=action is not None
+        and capabilities(viewer)["can_request"]
+        and (not requires_attendance or attendance_verified(viewer)),
     )
 
 

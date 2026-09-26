@@ -6,6 +6,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone as datetime_timezone
+from types import SimpleNamespace
 from urllib.parse import urlencode
 from zoneinfo import ZoneInfo
 
@@ -41,6 +42,7 @@ from core.authentication import CustomJWTAuthentication
 from .authentication import (
     TOKEN_PREFIX,
     CommunityChatAccountAuthentication,
+    CommunityChatOnboardingAuthentication,
     CommunityChatBootstrapAuthentication,
 )
 from .account_cookies import (
@@ -97,6 +99,7 @@ from .slack_message_references import (
 )
 from .slack_file_previews import (
     SlackFilePreviewError,
+    SlackFilePreviewDeferred,
     fetch_slack_file_image,
     fetch_slack_file_preview,
 )
@@ -131,7 +134,7 @@ DESKTOP_AUTH_ORIGINS = (
 DESKTOP_AUTHORIZATION_CODE_SALT = "community-chat.desktop-authorization.v1"
 DESKTOP_AUTHORIZATION_CODE_INVALID_DETAIL = "Desktop authorization code is invalid."
 PKCE_CHALLENGE_RE = re.compile(r"^[A-Za-z0-9_-]{43}$")
-UPCOMING_EVENTS_CACHE_KEY = "community-chat:upcoming-events:v2"
+UPCOMING_EVENTS_CACHE_KEY = "community-chat:upcoming-events:v3"
 UPCOMING_EVENT_FIELDS = (
     "id",
     "cover_url",
@@ -150,7 +153,8 @@ class _EmailCodeBindingConflict(ValueError):
 
 
 def _is_eligible(user):
-    return bool(user and user.is_authenticated and user.is_active)
+    from .onboarding import has_community_access
+    return bool(user and user.is_authenticated and has_community_access(user))
 
 
 def _require_eligible(user):
@@ -467,7 +471,7 @@ def _device_payload(device):
 
 
 class PasswordAuthView(APIView):
-    """Authenticate one existing MLAI account and mint one device bootstrap."""
+    """Authenticate an existing account with a scoped session and optional bootstrap."""
 
     authentication_classes = []
     permission_classes = [AllowAny]
@@ -551,33 +555,52 @@ class PasswordAuthView(APIView):
                 public_key=public_key,
                 revoked_at__isnull=True,
             ).update(revoked_at=now)
-            token = CommunityChatBootstrapToken.objects.create(
-                user=locked_user,
+            token = None
+            if _is_eligible(locked_user):
+                token = CommunityChatBootstrapToken.objects.create(
+                    user=locked_user,
+                    public_key=public_key,
+                    installation_id=installation_id,
+                    client_id=data["client_id"],
+                    origin=origin,
+                    platform=device_data["platform"],
+                    name=device_data.get("name", ""),
+                    token_hash=hashlib.sha256(raw_token.encode("utf-8")).hexdigest(),
+                    expires_at=now + timedelta(
+                        seconds=settings.COMMUNITY_CHAT_BOOTSTRAP_TOKEN_TTL_SECONDS
+                    ),
+                )
+            elif settings.COMMUNITY_CHAT_SIGNUP_ENABLED:
+                from .models import CommunityMemberProfile
+                CommunityMemberProfile.objects.get_or_create(user=locked_user)
+            # Password sign-in is a normal fresh authentication proof, never a
+            # reviewer bypass. The same installation/origin/session fencing and
+            # community admission rules apply as in email-code sign-in.
+            account_session = issue_account_session(locked_user, SimpleNamespace(
                 public_key=public_key,
                 installation_id=installation_id,
                 client_id=data["client_id"],
                 origin=origin,
                 platform=device_data["platform"],
-                name=device_data.get("name", ""),
-                token_hash=hashlib.sha256(raw_token.encode("utf-8")).hexdigest(),
-                expires_at=now
-                + timedelta(
-                    seconds=settings.COMMUNITY_CHAT_BOOTSTRAP_TOKEN_TTL_SECONDS
-                ),
-            )
+                device_name=device_data.get("name", ""),
+            ))
             update_last_login(None, locked_user)
 
-        return Response(
+        from .onboarding import onboarding_payload
+        response = Response(
             {
-                "status": "authenticated",
-                "bootstrap_token": raw_token,
-                "expires_at": token.expires_at,
+                "status": "authenticated" if token else "onboarding_required",
+                "bootstrap_token": raw_token if token else "",
+                "expires_at": token.expires_at if token else account_session.session.access_expires_at,
                 "relay_url": settings.COMMUNITY_CHAT_RELAY_URL,
                 "origin": origin,
                 "profile": own_chat_profile(locked_user),
+                "session": _account_session_payload(account_session),
+                "onboarding": onboarding_payload(locked_user),
             },
             status=status.HTTP_200_OK,
         )
+        return _attach_account_session(response, account_session)
 
 
 def _uniform_email_code_delay(started_at):
@@ -735,6 +758,7 @@ class EmailCodeRequestView(APIView):
             device_name=device.get("name", ""),
             public_key=device["public_key"],
             requested_ip_digest=ip_digest,
+            onboarding_version=data.get("onboarding_version", 0),
         )
         _uniform_email_code_delay(started_at)
         resend_available_at = challenge.created_at + timedelta(
@@ -794,7 +818,12 @@ class EmailCodeVerifyView(APIView):
                     # and terminal invalidation remain durable.
                     invalid_email_code = True
                 else:
-                    raw_token, token, _ = _issue_email_code_bootstrap(user, challenge)
+                    if settings.COMMUNITY_CHAT_SIGNUP_ENABLED and not _is_eligible(user):
+                        from .models import CommunityMemberProfile
+                        CommunityMemberProfile.objects.get_or_create(user=user)
+                    raw_token, token = "", None
+                    if _is_eligible(user):
+                        raw_token, token, _ = _issue_email_code_bootstrap(user, challenge)
                     account_session = issue_account_session(user, challenge)
         except _EmailCodeBindingConflict as exc:
             return Response(
@@ -817,15 +846,17 @@ class EmailCodeVerifyView(APIView):
         # the committed transaction above. Adapter DELETEs are content-free,
         # durable work drained by the community-bridge maintenance worker.
         # Never hold the login response open while a large DM archive drains.
+        from .onboarding import onboarding_payload
         response = Response(
             {
-                "status": "authenticated",
+                "status": "authenticated" if token is not None else "onboarding_required",
                 "bootstrap_token": raw_token,
-                "expires_at": token.expires_at,
+                "expires_at": token.expires_at if token is not None else account_session.session.access_expires_at,
                 "relay_url": settings.COMMUNITY_CHAT_RELAY_URL,
                 "origin": challenge.origin,
                 "profile": own_chat_profile(user),
                 "session": _account_session_payload(account_session),
+                "onboarding": onboarding_payload(user),
             },
             status=status.HTTP_200_OK,
         )
@@ -903,13 +934,14 @@ class AccountSessionLogoutView(APIView):
 class AccountView(APIView):
     """Read the member's account and update its versioned public profile."""
 
-    authentication_classes = (CommunityChatAccountAuthentication,)
+    authentication_classes = (CommunityChatOnboardingAuthentication,)
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
         return self._response(request, request.user)
 
     def patch(self, request):
+        _require_eligible(request.user)
         serializer = CommunityChatProfileUpdateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         try:
@@ -928,14 +960,16 @@ class AccountView(APIView):
         return self._response(request, user)
 
     def _response(self, request, user):
+        from .onboarding import onboarding_payload
         account_session = request.community_chat_account_session
         devices = CommunityChatDevice.objects.filter(
             user=user,
             status__in=(DeviceBindingStatus.PENDING, DeviceBindingStatus.VERIFIED),
         )
-        return Response(
+        response = Response(
             {
                 "authenticated": True,
+                "onboarding": onboarding_payload(user),
                 "profile": own_chat_profile(user),
                 "public_profile": public_chat_profile(user),
                 "session": {
@@ -951,6 +985,8 @@ class AccountView(APIView):
                 "devices": [_device_payload(device) for device in devices],
             }
         )
+        response["Cache-Control"] = "no-store"
+        return response
 
 
 class UpcomingEventsView(APIView):
@@ -962,27 +998,28 @@ class UpcomingEventsView(APIView):
     community_chat_throttle_scope = "community_chat_upcoming_events"
 
     def get(self, request):
-        raw_limit = request.query_params.get("limit") or 5
+        raw_limit = request.query_params.get("limit")
         try:
-            requested_limit = int(raw_limit)
+            requested_limit = int(raw_limit) if raw_limit is not None else None
         except (TypeError, ValueError):
             return Response(
                 {"error": "invalid_limit"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        if requested_limit < 1:
+        if requested_limit is not None and requested_limit < 1:
             return Response(
                 {"error": "invalid_limit"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        requested_limit = min(requested_limit, 10)
+        if requested_limit is not None:
+            requested_limit = min(requested_limit, 10)
 
         events = cache.get(UPCOMING_EVENTS_CACHE_KEY)
         if not isinstance(events, list):
             try:
                 events = LumaAttendeeReportService(
                     timeout=settings.LUMA_API_TIMEOUT_SECONDS,
-                ).list_upcoming_events(limit=10)
+                ).list_upcoming_events()
             except LumaConfigurationError:
                 return Response(
                     {"error": "upcoming_events_unavailable"},
@@ -1052,7 +1089,15 @@ class PublicProfileBatchView(APIView):
         for device in devices:
             devices_by_key.setdefault(device.public_key, device)
         profiles = {
-            public_key: public_chat_profile(devices_by_key[public_key].user)
+            public_key: {
+                **public_chat_profile(devices_by_key[public_key].user),
+                # Historical keys retain attribution but must not be offered
+                # as current notification targets by mention autocomplete.
+                "mentionable": (
+                    devices_by_key[public_key].status == DeviceBindingStatus.VERIFIED
+                    and devices_by_key[public_key].revoked_at is None
+                ),
+            }
             for public_key in public_keys
             if public_key in devices_by_key
         }
@@ -1088,6 +1133,18 @@ class LinkPreviewView(APIView):
         try:
             slack_preview = fetch_slack_file_preview(raw_url, user=request.user)
             preview = slack_preview or fetch_link_preview(raw_url)
+        except SlackFilePreviewDeferred as exc:
+            response = Response(
+                {
+                    "error": "preview_pending",
+                    "detail": str(exc),
+                    "retry_after_seconds": exc.retry_after,
+                },
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+            response["Retry-After"] = str(exc.retry_after)
+            response["Cache-Control"] = "private, no-store"
+            return response
         except (LinkPreviewError, SlackFilePreviewError) as exc:
             return Response(
                 {"error": "preview_unavailable", "detail": str(exc)},
@@ -1099,13 +1156,17 @@ class LinkPreviewView(APIView):
             payload["image_url"] = request.build_absolute_uri(
                 f"{image_path}?{urlencode({'slack_file': slack_preview.file_id})}"
             )
-        elif preview.image_url:
+        elif not slack_preview and preview.image_url:
             image_path = reverse("community_chat_link_preview_image")
             payload["image_url"] = request.build_absolute_uri(
                 f"{image_path}?{urlencode({'url': preview.image_url})}"
             )
         response = Response(payload)
-        response["Cache-Control"] = "private, max-age=3600"
+        # HTTP caches cannot key a user's Slack file rights by conversation.
+        # Account-scoped client/server caches already retain successful reads.
+        response["Cache-Control"] = (
+            "private, no-store" if slack_preview else "private, max-age=3600"
+        )
         return response
 
 
@@ -1149,13 +1210,27 @@ class LinkPreviewImageView(APIView):
                 content_type, body = fetch_preview_image(
                     str(request.query_params.get("url") or "").strip()
                 )
+        except SlackFilePreviewDeferred as exc:
+            response = Response(
+                {
+                    "error": "preview_pending",
+                    "detail": str(exc),
+                    "retry_after_seconds": exc.retry_after,
+                },
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+            response["Retry-After"] = str(exc.retry_after)
+            response["Cache-Control"] = "private, no-store"
+            return response
         except (LinkPreviewError, SlackFilePreviewError) as exc:
             return Response(
                 {"error": "preview_image_unavailable", "detail": str(exc)},
                 status=status.HTTP_422_UNPROCESSABLE_ENTITY,
             )
         response = HttpResponse(body, content_type=content_type)
-        response["Cache-Control"] = "private, max-age=21600"
+        response["Cache-Control"] = (
+            "private, no-store" if slack_file_id else "private, max-age=21600"
+        )
         response["Cross-Origin-Resource-Policy"] = "same-site"
         return response
 
@@ -1820,6 +1895,12 @@ class ConfirmView(APIView):
                     pk=request.user.pk
                 )
                 _require_current_chat_credential_locked(request, locked_user)
+                from integrations.services.message_sync.device_recovery import (
+                    lock_enrollment_recovery_grants,
+                    schedule_enrollment_recovery,
+                )
+
+                recovery_grants = lock_enrollment_recovery_grants(locked_user)
                 device = (
                     CommunityChatDevice.objects.select_for_update()
                     .filter(
@@ -1866,6 +1947,7 @@ class ConfirmView(APIView):
                         "updated_at",
                     )
                 )
+                schedule_enrollment_recovery(recovery_grants, device)
                 CommunityChatInviteAudit.objects.filter(
                     device=device,
                     confirmed_at__isnull=True,

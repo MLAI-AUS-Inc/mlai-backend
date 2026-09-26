@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from django.conf import settings as django_settings
 
+DEFAULT_JOBS_SLACK_CHANNEL = "C05QE82M2KE"
+
 
 class JobsSettings:
     @property
@@ -97,7 +99,12 @@ class JobsSettings:
 
     @property
     def slack_jobs_channel(self) -> str:
-        return str(getattr(django_settings, "JOBS_SLACK_CHANNEL", "#jobs") or "#jobs")
+        channel = str(getattr(django_settings, "JOBS_SLACK_CHANNEL", "") or "").strip()
+        # TECH-34: preserve the destination across the original channel's rename,
+        # including deployments that still carry its old name in their .env.
+        if not channel or channel == "#jobs-and-founder-matching":
+            return DEFAULT_JOBS_SLACK_CHANNEL
+        return channel
 
     @property
     def slack_webhook_url(self) -> str | None:

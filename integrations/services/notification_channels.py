@@ -145,6 +145,7 @@ def serialize_automation(
         "frequencyPerDay": automation.frequency_per_day,
         "localSendTimes": list(automation.local_send_times or []),
         "enabled": automation.status == ResearchAutomationStatus.ACTIVE,
+        "pauseReason": (automation.metadata or {}).get("daily_research", {}).get("pause_reason", ""),
     }
 
 
@@ -704,4 +705,8 @@ def ensure_research_automation_for_org(
         update_fields.append("notification_channel")
     if update_fields:
         automation.save(update_fields=update_fields + ["updated_at"])
+        if enabled and "status" in update_fields:
+            from .daily_research_policy import record_engagement
+            record_engagement(organization, resume=True)
+            automation.refresh_from_db()
     return automation, channels

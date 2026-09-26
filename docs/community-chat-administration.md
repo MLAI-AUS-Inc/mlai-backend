@@ -17,6 +17,16 @@ All paths below are relative to `/api/v1/community-chat/`:
 - `POST moderators/<public_key>/`: body `{"enabled": true|false}`. Chat admins
   can appoint or disable a Moderator for the account owning the verified key.
   Self/administrator appointments are protected. Changes are in Django LogEntry.
+- `POST account-bans/`: body `{"public_key": "<verified-key>", "reason": "optional"}`.
+  Admin-only account-wide denial, preserving the account and canonical email.
+  Self, staff and administrator targets are protected. Returns a ban record;
+  HTTP 202 and `revocation_pending: true` mean account authentication is blocked
+  but Chat device revocation is still retrying. HTTP 200 confirms that cleanup.
+- `GET account-bans/?after=<id>`: admin-only active bans, including retained email,
+  name, reason and revocation status. Returns at most 100 `bans` and a `next` ID
+  (null when complete). Responses use `Cache-Control: no-store`.
+- `POST account-bans/<id>/`: body `{"enabled": false}` lifts a ban after device
+  revocation completes. It does not revive old sessions, imports or devices.
 - `GET relay-roles/<public_key>/`: read-only service lookup returning only role,
   key and relay URL. Requires `Bearer COMMUNITY_CHAT_ROLE_SERVICE_TOKEN`, an
   independent secret of at least 32 bytes; defaults to disabled. Unknown,
@@ -39,3 +49,46 @@ Apply this reviewed migration in production before enabling the role service.
 Its scope is only the new Moderator table; it changes no existing admin records.
 Production migration/application and deployment still require explicit approval
 under AGENTS.md. No production migration or rollout was performed.
+
+## Account-wide bans (locally validated, 2026-09-22)
+
+The approved `core.0069_account_ban` creates a retained `AccountBan` record with
+a protected account reference and unique canonical email. See the exact
+[schema scope](../plans/account-ban-schema-2026-09-22.md) and
+[migration](../core/migrations/0069_account_ban.py). With explicit user approval,
+the migration was created and applied only to disposable local PostgreSQL
+databases. Replay from `0068` preserved an existing synthetic account unchanged
+and verified the case-insensitive email uniqueness constraint.
+
+A ban sets `User.is_active=false`, increments `auth_version`, revokes Chat
+access/refresh/bootstrap credentials and pending password reset challenges, and
+pauses Slack imports. Django session hashes also include the authentication
+version, so lifting a ban cannot revive old browser sessions. Magic-link
+verification explicitly rejects banned accounts. The user save boundary
+prevents stale profile/Slack updates from reactivating the account, replacing its
+email or reducing the authentication version.
+
+The existing device-revocation service cancels bound invitations, removes relay
+memberships and fences private mirror registrations for every owned device.
+Historical keys reassigned to another account are protected. The bridge worker's
+maintenance turn retries pending revocations; failures preserve the ban and are
+reported as pending rather than falsely confirming full revocation. Both ban and
+unban actions use Django's administrator audit log. Django Admin also exposes
+these service-backed actions; retained ban records cannot be deleted there.
+
+Eight database-backed account-ban tests passed, covering every-device revocation,
+retry after an adapter outage, preserved email, blocked case-variant signup,
+magic-link denial, stale JWT/Chat credentials after ban and unban, the admin API,
+member/moderator denial, and the database email constraint. Database-free
+regressions also cover directory and ban guards.
+
+The related PostgreSQL regression run passed all 112 tests across account bans,
+Chat permissions/sessions, Slack mentions, authentication contracts, JWT sessions
+and password APIs. Django system checks and migration drift checks passed. The
+new ban and directory regression modules are included in the main CI test list.
+
+`scripts/test_account_bans_disposable.py` replays the migration and runs these
+tests using a fresh socket-only PostgreSQL cluster, synthetic settings, no `.env`
+loading and no external network access. The runner also accepts specific related
+test-module labels. It removes the cluster and its data after each run.
+Production migration and deployment have not been performed.

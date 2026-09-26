@@ -121,6 +121,34 @@ Normal production deployment is owned by the reviewed GitHub workflow and
 deployment scripts. New engineers should not deploy during onboarding. Consult
 the relevant runbook in `docs/` for subsystem operations.
 
+Main-branch deploys run one at a time. For a code-only release, `deploy.sh`
+checks the migration graph without applying it and keeps the current web and
+workers serving through deployment checks. An unexpected pending migration
+stops the release before runtime is paused unless the host has a matching
+`APPROVED_MIGRATION_PLAN_SHA256` for that exact reviewed plan. This gate does
+not replace the specific user approval required above. If a code-only release
+fails after replacing containers, deployment recovery restores the recorded
+previous images.
+
+If a reviewed main commit does not start its push-triggered release, an
+operator can manually run **Deploy to Digital Ocean** from the `main` branch in
+GitHub Actions. Manual runs share the main release lock and must pass the full
+validation suite before deployment. Running that workflow from another branch
+performs validation only.
+
+The deploy script rejects a queued release if its full commit SHA is no longer
+the head of `main`. It checks before syncing files and again on the host before
+building images, pausing for an approved migration, or replacing containers.
+If `main` advances after a migration has begun, the current release completes
+the schema transition before the next queued release runs.
+
+For code-only releases, the origin API uses a [two-slot web handoff](docs/backend-api-web-handoff.md).
+The deployment verifies a candidate web process before changing the host
+Nginx route, waits for in-flight requests to drain before replacing either
+slot, and keeps the candidate available through release checks. The first
+adoption of Nginx on port 80 requires one controlled port-owner cutover.
+Approved schema migrations still pause writers and may interrupt API traffic.
+
 ## Documentation status
 
 Architecture and operational documents describe current behavior. Files under
@@ -131,6 +159,8 @@ The [14 September 2026 refactor audit](docs/backend-refactor-audit-2026-09-14.md
 records source findings and a staged refactor backlog.
 The [implementation status](docs/backend-refactor-implementation-2026-09-14.md)
 records completed code changes, validation and the approved migration scope.
+The [26 September integration](docs/backend-refactor-release-2026-09-26.md)
+records reconciliation with newer main and remaining release validation.
 See the [runtime contract](docs/backend-runtime.md) for worker ownership,
 dependency lock regeneration and CI test assignment.
 

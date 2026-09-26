@@ -172,12 +172,12 @@ def _build_run_report_body(spec: dict[str, Any], start_date: str, end_date: str)
     return body
 
 
-def _fetch_run_report(access_token: str, property_id: str, body: dict[str, Any]) -> dict[str, Any]:
+def _fetch_run_report(access_token: str, property_id: str, body: dict[str, Any], *, timeout: tuple[float, float] = (3, 30)) -> dict[str, Any]:
     response = requests.post(
         f"{GA4_DATA_API_BASE}/properties/{property_id}:runReport",
         headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json"},
         json=body,
-        timeout=(3, 30),
+        timeout=timeout,
     )
     if getattr(response, "status_code", 200) == 429:
         raise ConnectorRateLimitError(_retry_after_seconds(response))
@@ -206,12 +206,22 @@ def _extract_totals(report: dict[str, Any]) -> dict[str, Optional[float]]:
             value = metric_values[index].get("value") if index < len(metric_values) else None
             totals[header] = _to_number(value)
         return totals
-    # Fallback: sum additive metrics across rows when GA omits totals.
+    # A single dimensionless row is already the requested aggregate. Never
+    # sum rates, averages or distinct users across breakdown rows, nor sum a
+    # truncated top-pages/events response and label it a total.
+    rows = report.get("rows") or []
+    if len(rows) == 1 and not report.get("dimensionHeaders") and not rows[0].get("dimensionValues"):
+        values = rows[0].get("metricValues") or []
+        return {header: _to_number(values[index].get("value")) if index < len(values) else None for index, header in enumerate(headers)}
+    additive = {"sessions", "screenPageViews", "keyEvents", "eventCount", "engagedSessions", "userEngagementDuration"}
+    complete = int(report.get("rowCount") or len(rows)) <= len(rows)
     for header in headers:
         totals[header] = None
     for row in report.get("rows") or []:
         metric_values = row.get("metricValues") or []
         for index, header in enumerate(headers):
+            if header not in additive or not complete:
+                continue
             value = _to_number(metric_values[index].get("value")) if index < len(metric_values) else None
             if value is None:
                 continue
@@ -266,7 +276,7 @@ def _build_metric_summary(
                 "prior_value": _format_number(prior_value),
                 "delta": _format_number(delta),
                 "delta_pct": delta_pct,
-                "unit": "",
+                "unit": "ratio" if metric == "engagementRate" else "seconds" if metric in {"averageSessionDuration", "userEngagementDuration"} else "count",
             }
         )
     return summary

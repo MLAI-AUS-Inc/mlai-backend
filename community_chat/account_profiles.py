@@ -6,7 +6,7 @@ from datetime import timedelta
 from django.contrib.auth import get_user_model
 from django.db import transaction
 from django.utils import timezone
-from rest_framework.exceptions import AuthenticationFailed
+from rest_framework.exceptions import AuthenticationFailed, ValidationError
 
 from .models import CommunityChatAccountSession
 from .serializers import profile_version_for_user
@@ -52,6 +52,9 @@ def update_account_profile(*, authenticated_session, values):
 
         changes = {}
         if "display_name" in values:
+            from .onboarding import name_review_reasons
+            if name_review_reasons(values["display_name"]):
+                raise ValidationError({"display_name": "This name needs committee review. Contact hi@mlai.au for help."})
             user.full_name = values["display_name"]
             changes.update(first_name=user.first_name, last_name=user.last_name)
         for field in ("about", "avatar_url"):

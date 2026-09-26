@@ -30,3 +30,18 @@ class SlackCatalogQueryTests(unittest.TestCase):
             self.assertIn("grant_id", sql)
             self.assertEqual(query._prefetch_related_lookups, ("grant__connection",))
             self.assertEqual(query.query.where, source.query.where)
+
+    def test_pending_import_ignores_only_cancelled_old_room_tombstones(self):
+        from integrations.models import SlackDmMirrorConversation
+        from integrations.services.slack_chat_catalog import catalog_conversations
+
+        with patch(
+            "django.db.backends.base.base.BaseDatabaseWrapper.ensure_connection",
+            side_effect=AssertionError("Query tests must not open a database"),
+        ):
+            query = catalog_conversations(SlackDmMirrorConversation.objects.all())
+            sql, params = query.query.sql_with_params()
+            self.assertIn("Private conversation participants changed", params)
+            self.assertIn("dead", params)
+            self.assertIn("NOT", sql)
+            self.assertIn("last_error", sql)

@@ -46,19 +46,27 @@ The backend dispatches `/api/runs/island-research`, a paid, service-authenticate
 variant of the `island_refresh` workflow. Scheduled `/api/runs/island-refresh`
 remains free and scheduler-only. No database schema changes are required.
 
-1. Derive at most four short search seeds from the topic brief.
-2. Fetch DataForSEO Labs keyword suggestions and related keywords (Australia,
-   English, matching current island research defaults), then hydrate missing
-   difficulty from its bulk difficulty endpoint.
-3. Deduplicate and retain positive measured volume and measured difficulty.
-   Apply provider intent when present and a bounded semantic relevance check
-   against the brief, audience and intent. There is no fallback to company
-   competitors, unrelated saved topics or synthetic metrics.
-4. Run the existing island embeddings, clustering, naming and opportunity
-   scoring on this scoped pool. Apply declined-keyword feedback and require at
-   least three measured keywords per proposed island.
-5. Return up to five proposals ranked by the existing opportunity score, with
-   monthly search estimates, average difficulty and underlying keywords.
+1. Explore up to eight short initial seeds: the subject, synonyms, expanded
+   abbreviations and direct applications. Always perform a follow-up search;
+   sparse results get a third pass, with up to six new seeds per pass.
+2. Query DataForSEO suggestions (up to 500 per seed), related searches (depth 3,
+   up to 300 per seed), and semantic keyword ideas (500 per group of four seeds).
+   Keep Australia/English consistent. Calls have bounded concurrency and transient
+   provider failures are retried; errors are never interpreted as no demand.
+3. Deduplicate positive-volume candidates and check all of them for strict topical
+   relevance before ranking. Audience need not appear literally in the query.
+   Search intent prioritises compatible themes rather than rejecting every query
+   whose provider label differs. Explicit exclusions still apply. Hydrate missing
+   difficulty for all relevant candidates in provider-sized batches.
+4. Run the normal embeddings, clustering, naming and opportunity scoring on up to
+   1,000 relevant measured keywords, preserving declined-topic exclusions. When
+   fewer than five normal clusters form, recover smaller coherent groups and
+   individual measured starting points. Options with fewer than three queries
+   carry `limited_data: true`; the UI explains their narrower evidence.
+5. Return up to five proposals: established clusters first, then intent-compatible
+   options and opportunity score. Each includes actual monthly search estimates,
+   difficulty and underlying keywords. Adoption accepts even a single measured
+   keyword but rejects empty, zero-demand or missing-difficulty evidence.
 
 The LLM only derives seeds, checks relevance and names measured clusters. Search
 volume and difficulty always come from DataForSEO; no-data responses never turn
@@ -71,20 +79,59 @@ worker's normal run-sync callback performs this even after the browser closes;
 status polling also reconciles it. The existing ledger refund idempotency key is
 used. A new deliberate attempt after a terminal result uses a new request ID.
 
-### Add a measured result
+### Select several measured themes
+
+The results screen has individual checkboxes, Select all/Clear selection, and a
+review step before the free batch save. Selection survives closing the dialog or
+refreshing the page. Already-added themes are labelled and cannot be duplicated.
+The success screen can return to remaining results without another research fee.
 
 `POST /api/v1/vibe-marketing/islands/research/<runId>/adopt` accepts `companyId`
-and `proposalId`. The server verifies the run belongs to the authorised company
-and is complete, and loads the proposal from its stored result. Client-supplied
-names, metrics or keywords have no authority. No payment occurs here.
+and `proposalIds` (1–5 stored proposal identifiers). With `preview: true` it
+returns `groups` (names, proposal IDs and deduplicated metrics) and `already_added`
+without writing. Without preview it atomically saves and returns `islands`.
+The legacy singular `proposalId` request remains supported.
 
-An exact existing theme is reused. New themes use a deterministic keyword-based
-slug and the existing manual-island origin so they remain on the founder's map.
-Their measured keywords, centroid, metrics and snapshot are persisted atomically;
-related edges are rebuilt. The original brief and intent guide subsequent article
-idea research. No unrelated islands are renamed, missed, archived or removed.
-Retries return the same island. Legacy manual islands without research can acquire
-the first measurements through this path.
+Only stored, completed, company-owned research is authoritative. Compatible
+search intents and complete-link centroid similarity of at least 0.90 group
+closely related selections; a chain of loosely related themes cannot bridge
+otherwise distant islands. Keyword metrics are deduplicated. Existing exact
+islands are reused. Requests and concurrent retries serialize on the organisation
+and research run, recording adopted IDs in `result.island_research_selection`.
+No extra payment or research dispatch occurs during review or adoption.
+
+### Daily growth, merging and splitting
+
+Founder-selected measured islands join the existing daily refresh and rotating
+DataForSEO expansion. `GET /api/seo/islands/` includes service-only
+`dynamic_scopes`: the saved brief, selected seed centroids, existing memberships,
+and a revision. Written keyword associations remain available to evolution.
+These members bypass the normal global opportunity-ranked keyword cap, so a
+smaller selected theme cannot disappear just because other keywords rank higher.
+
+The worker assigns new keywords to the closest selected scope with similarity
+at least 0.80. Separate research briefs remain boundaries in this first version.
+It clusters that scope's measured keywords, preserves sparse selected themes,
+and proposes merges using stricter complete-link centroid similarity of 0.90.
+Declined topics remain excluded. The normal unselected company pool follows its
+existing lifecycle independently.
+
+Bulk sync applies those partitions under the same organisation lock as adoption.
+Membership/metric growth keeps island identities. A structural merge or split
+needs the same topology on two distinct increasing research dates. Duplicate
+callbacks, old dates and stale selection revisions cannot confirm or overwrite
+newer choices. Missing evidence does not retire an island. The largest membership
+overlap keeps its stable slug; additional split branches receive durable slugs.
+Merged records and their snapshots are archived, never deleted; their retained
+memberships preserve article history. Old island discovery links resolve to the
+current survivor. The run records redirects and the last 100 topology changes.
+The compact browser run exposes only adopted proposal IDs, not this internal
+state. Worker callbacks preserve this Django-owned state.
+
+This uses the existing run JSON, island membership and snapshot models; no schema
+migration is required. Existing manual islands do not change behavior unless a
+founder selects their measured theme through the batch flow. A theme already
+managed by another research brief is reused without transferring ownership.
 
 ## Existing manual islands and older clients
 

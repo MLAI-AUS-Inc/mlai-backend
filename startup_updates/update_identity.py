@@ -50,6 +50,27 @@ def run_update(run, month, *, create=False):
     return query.monthly_slots().get_or_create(organization_id=organization_id, month=month)[0] if create else query.monthly_slots().filter(month=month).first()
 
 
+def parse_generation_date(data, *, update_id):
+    """Require a valid explicit date; only an existing update may omit it."""
+    if update_id and "updateDate" not in data:
+        return None
+    try:
+        return date.fromisoformat(str(data.get("updateDate")))
+    except (ValueError, TypeError) as exc:
+        raise ValidationError({"updateDate": "Choose a valid update date."}) from exc
+
+
+def default_generation_date(draft, *, today):
+    """Choose a date for an existing update when an older client omits one."""
+    if draft.update_date:
+        return draft.update_date
+    month = draft.month
+    if today < month:
+        raise ValidationError({"updateDate": "Choose today or an earlier reporting month."})
+    next_month = date(month.year + 1, 1, 1) if month.month == 12 else date(month.year, month.month + 1, 1)
+    return min(next_month - timedelta(days=1), today)
+
+
 def previous_publications(organization, update_id, update_date):
     """Chronology comes from the published revision, even while its date is edited."""
     publications = []

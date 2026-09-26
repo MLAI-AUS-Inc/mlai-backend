@@ -176,6 +176,9 @@ class PromotionScopeTests(EditorialLearningLoopBase):
 
 
 class AcceptRevisionLearningTests(EditorialLearningLoopBase):
+    preview_url = "https://preview.example/articles/revision-run-learning"
+    preview_sha = "a" * 40
+
     def _revision_run(self, batch_id="batch-1"):
         return ContentFactoryRun.objects.create(
             run_id="revision-run-learning",
@@ -184,8 +187,33 @@ class AcceptRevisionLearningTests(EditorialLearningLoopBase):
             github_repo="MLAI-AUS-Inc/mlai-au",
             status=ContentFactoryRunStatus.COMPLETED,
             run_request={"source_run_id": self.run.run_id, "feedback_batch_id": batch_id},
-            result={"source_run_id": self.run.run_id, "feedback_batch_id": batch_id},
+            result={
+                "source_run_id": self.run.run_id,
+                "feedback_batch_id": batch_id,
+                "live_preview": {
+                    "available": True,
+                    "exactRender": True,
+                    "previewUrl": self.preview_url,
+                    "proof": {"commitSha": self.preview_sha},
+                    "resume_generation": 0,
+                },
+                "article_preview_quality": {
+                    "status": "passed",
+                    "preview_url": self.preview_url,
+                    "resume_generation": 0,
+                    "inputs_sha256": "b" * 64,
+                },
+            },
         )
+
+    def _accept_payload(self):
+        return {
+            "sourceRunId": self.run.run_id,
+            "batchId": "batch-1",
+            "reviewedRunId": "revision-run-learning",
+            "reviewedPreviewUrl": self.preview_url,
+            "reviewedPreviewRevision": self.preview_sha,
+        }
 
     def test_accept_revision_promotes_archives_and_requests_fold(self):
         durable_comment = self._comment(body="Use warmer CTA copy.")
@@ -209,7 +237,7 @@ class AcceptRevisionLearningTests(EditorialLearningLoopBase):
         ) as fold_call:
             response = self.client.post(
                 f"/api/v1/vibe-marketing/runs/{revision_run.run_id}/comments/accept-revision",
-                {"sourceRunId": self.run.run_id, "batchId": "batch-1"},
+                self._accept_payload(),
                 format="json",
             )
 
@@ -250,12 +278,69 @@ class AcceptRevisionLearningTests(EditorialLearningLoopBase):
         ) as fold_call:
             response = self.client.post(
                 f"/api/v1/vibe-marketing/runs/{revision_run.run_id}/comments/accept-revision",
-                {"sourceRunId": self.run.run_id, "batchId": "batch-1"},
+                self._accept_payload(),
                 format="json",
             )
 
         self.assertEqual(response.status_code, 200, response.data)
         fold_call.assert_not_called()
+
+    def test_accept_revision_rejects_missing_queued_or_stale_quality_before_feedback_promotion(self):
+        comment = self._comment(body="Use warmer CTA copy.")
+        comment.status = VibeMarketingComponentCommentStatus.SUBMITTED
+        comment.batch_id = "batch-1"
+        comment.save(update_fields=["status", "batch_id", "updated_at"])
+        candidate = self._candidate_for(comment)
+        self._distill(candidate, scope="durable_preference", rule="Use warm CTA copy.")
+        revision_run = self._revision_run()
+        original_result = revision_run.result
+        for quality in (
+            None,
+            {**original_result["article_preview_quality"], "status": "queued"},
+            {**original_result["article_preview_quality"], "preview_url": "https://preview.example/articles/old"},
+            {**original_result["article_preview_quality"], "resume_generation": 1},
+            {**original_result["article_preview_quality"], "status": "passed", "inputs_sha256": ""},
+        ):
+            revision_run.result = {**original_result, **({} if quality is None else {"article_preview_quality": quality})}
+            if quality is None:
+                revision_run.result.pop("article_preview_quality", None)
+            revision_run.save(update_fields=["result", "updated_at"])
+            with patch("content_factory.vibe_marketing_views._call_content_factory_editorial_learnings_apply") as fold_call:
+                response = self.client.post(
+                    f"/api/v1/vibe-marketing/runs/{revision_run.run_id}/comments/accept-revision",
+                    self._accept_payload(),
+                    format="json",
+                )
+            self.assertEqual(response.status_code, 409, response.data)
+            fold_call.assert_not_called()
+            comment.refresh_from_db()
+            candidate.refresh_from_db()
+            self.assertEqual(comment.status, VibeMarketingComponentCommentStatus.SUBMITTED)
+            self.assertEqual(candidate.promotion_state, ContentFactoryHealingPromotionState.CANDIDATE)
+
+    def test_accept_revision_uses_exact_preview_identity_and_accepts_baseline_free_quality(self):
+        revision_run = self._revision_run()
+        revision_run.result["article_preview_quality"]["status"] = "passed_no_baseline"
+        revision_run.save(update_fields=["result", "updated_at"])
+        for key, wrong_value in (
+            ("reviewedRunId", "older-revision"),
+            ("reviewedPreviewUrl", "https://preview.example/articles/old"),
+            ("reviewedPreviewRevision", "c" * 40),
+        ):
+            response = self.client.post(
+                f"/api/v1/vibe-marketing/runs/{revision_run.run_id}/comments/accept-revision",
+                {**self._accept_payload(), key: wrong_value},
+                format="json",
+            )
+            self.assertEqual(response.status_code, 409, response.data)
+        response = self.client.post(
+            f"/api/v1/vibe-marketing/runs/{revision_run.run_id}/comments/accept-revision",
+            self._accept_payload(),
+            format="json",
+        )
+        self.assertEqual(response.status_code, 200, response.data)
+        revision_run.refresh_from_db()
+        self.assertFalse(revision_run.approval_state == "approved")
 
 
 class LearnedRulesEndpointTests(EditorialLearningLoopBase):

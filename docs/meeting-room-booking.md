@@ -7,6 +7,22 @@ The default `rooms/` list contains active `small-meeting-room` and
 `big-meeting-room` records only. The distinct `conference-room` resource is
 accessed by an explicit room slug and is never included in the default list.
 
+## Booking duration
+
+New bookings must be exactly **1 or 2 elapsed hours**, costing 1 or 2 Roo Points.
+Starts and ends can still be on the hour or half-hour. Ninety-minute bookings,
+including old previews confirmed after rollout, are rejected before any debit
+or reservation creation. Availability can inspect broader intervals, but marks
+anything other than a one- or two-hour interval `bookable: false` with no price.
+The configured maximum can narrow this policy, not permit fractional or longer
+bookings.
+
+Already confirmed 90-minute bookings remain valid, visible and cancellable.
+Replaying their completed requests returns the original result without another
+charge. No schema or data migration is required. Deploy the backend guard before
+the companion Roo change for enforcement on stale confirmations and direct API
+requests; merging this backend PR triggers the existing backend deployment.
+
 ## Conference Room access
 
 The booking member must have **strictly more than 100 lifetime-earned Roo

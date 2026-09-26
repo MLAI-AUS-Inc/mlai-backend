@@ -12,7 +12,7 @@ from rest_framework import status
 from rest_framework.test import APIClient, APITestCase
 
 from community_chat.adapter import RelayMembership
-from community_chat.models import CommunityChatBootstrapToken, CommunityChatDevice
+from community_chat.models import CommunityChatBootstrapToken, CommunityChatDevice, CommunityChatAccountSession, CommunityMemberProfile
 
 
 ORIGIN = 'https://chat.mlai.au'
@@ -71,7 +71,7 @@ class CommunityChatPasswordAuthTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
         self.assertEqual(response.data, {'error': 'password_auth_disabled'})
 
-    def test_success_issues_only_scoped_bootstrap_and_safe_own_profile(self):
+    def test_success_issues_scoped_bootstrap_and_cookie_account_session(self):
         response = self.login()
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
@@ -96,6 +96,52 @@ class CommunityChatPasswordAuthTests(APITestCase):
         self.assertEqual(response.data['profile']['display_name'], 'MLAI Member')
         self.assertNotIn('phone', response.data['profile'])
         self.assertNotIn('slack_id', response.data['profile'])
+
+    def test_web_password_session_uses_secure_cookies_not_response_tokens(self):
+        response = self.login()
+        session = CommunityChatAccountSession.objects.get()
+        self.assertEqual(response.data['session']['id'], str(session.pk))
+        self.assertEqual(session.user_id, self.user.pk)
+        self.assertEqual(session.installation_id, self.installation_id)
+        self.assertNotIn('access_token', response.data['session'])
+        self.assertNotIn('refresh_token', response.data['session'])
+        self.assertTrue(response.cookies)
+        for cookie in response.cookies.values():
+            self.assertTrue(cookie['httponly'])
+            self.assertTrue(cookie['secure'])
+
+    def test_ios_password_session_returns_installation_bound_credentials(self):
+        response = self.login(
+            request_origin=None, client_id='mlai-chat-ios',
+            device={'installation_id': str(self.installation_id),
+                    'public_key': self.public_key, 'platform': 'ios'},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data['session']['access_token'].startswith('mlai_session_access_'))
+        self.assertTrue(response.data['session']['refresh_token'].startswith('mlai_session_refresh_'))
+        self.assertFalse(response.cookies)
+        row = CommunityChatAccountSession.objects.get()
+        self.assertEqual(row.public_key, self.public_key)
+        self.assertEqual(row.origin, 'mlaichat://callback')
+
+    @override_settings(COMMUNITY_CHAT_SIGNUP_ENABLED=True)
+    def test_password_login_does_not_bypass_member_admission(self):
+        response = self.login()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['status'], 'onboarding_required')
+        self.assertTrue(response.data['onboarding']['required'])
+        self.assertEqual(response.data['bootstrap_token'], '')
+        self.assertFalse(CommunityChatBootstrapToken.objects.exists())
+        self.assertTrue(CommunityChatAccountSession.objects.filter(user=self.user).exists())
+        self.assertEqual(CommunityMemberProfile.objects.get(user=self.user).status, 'incomplete')
+
+    def test_password_reauthentication_revokes_the_previous_installation_session(self):
+        first = self.login()
+        second = self.login()
+        self.assertNotEqual(first.data['session']['id'], second.data['session']['id'])
+        self.assertIsNotNone(CommunityChatAccountSession.objects.get(
+            pk=first.data['session']['id']).revoked_at)
+        self.assertEqual(CommunityChatAccountSession.objects.filter(revoked_at__isnull=True).count(), 1)
 
     def test_all_account_failures_share_one_response(self):
         cases = [

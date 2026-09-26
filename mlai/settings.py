@@ -30,6 +30,9 @@ from django.core.exceptions import ImproperlyConfigured
 from django.db.backends.signals import connection_created
 load_dotenv()
 
+# Roll out the private Progress dashboard independently of existing updates.
+STARTUP_PROGRESS_ENABLED = os.getenv("STARTUP_PROGRESS_ENABLED", "0").lower() in {"1", "true"}
+
 
 def _env_is_true(name: str, default: bool) -> bool:
     raw = os.getenv(name)
@@ -337,7 +340,7 @@ for _operations_origin in ('https://ops.mlai.au',):
         CSRF_TRUSTED_ORIGINS.append(_operations_origin)
 CORS_ALLOW_CREDENTIALS = True
 CORS_ALLOW_HEADERS = (*default_headers, "x-request-id")
-CORS_EXPOSE_HEADERS = ["X-Request-ID"]
+CORS_EXPOSE_HEADERS = ["X-Request-ID", "Retry-After"]
 
 # Bound request buffering before application-specific parsers run. Larger
 # uploads use the dedicated streaming/media paths rather than unbounded Django
@@ -500,6 +503,10 @@ REST_FRAMEWORK = {
         'auth_magic_link': None if _RUNNING_TESTS else os.getenv('AUTH_MAGIC_LINK_RATE', '5/minute'),
         'community_chat_session': os.getenv('COMMUNITY_CHAT_SESSION_RATE', '120/minute'),
         'community_chat_link_preview': os.getenv('COMMUNITY_CHAT_LINK_PREVIEW_RATE', '300/minute'),
+        'community_chat_slack_snapshot_device': os.getenv('COMMUNITY_CHAT_SLACK_SNAPSHOT_DEVICE_RATE', '120/minute'),
+        'community_chat_slack_snapshot_account': os.getenv('COMMUNITY_CHAT_SLACK_SNAPSHOT_ACCOUNT_RATE', '600/minute'),
+        'community_chat_slack_open': os.getenv('COMMUNITY_CHAT_SLACK_OPEN_RATE', '60/minute'),
+        'community_chat_slack_read_receipt': os.getenv('COMMUNITY_CHAT_SLACK_READ_RECEIPT_RATE', '60/minute'),
         'community_chat_home': os.getenv('COMMUNITY_CHAT_HOME_RATE', '60/minute'),
         'community_chat_upcoming_events': os.getenv('COMMUNITY_CHAT_UPCOMING_EVENTS_RATE', '60/minute'),
         'community_chat_challenge': os.getenv('COMMUNITY_CHAT_CHALLENGE_RATE', '20/minute'),
@@ -584,10 +591,19 @@ COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED = _env_is_true(
     'COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED',
     False,
 )
+APPLE_IAP_ENABLED = _env_is_true('APPLE_IAP_ENABLED', False)
+APPLE_IAP_SANDBOX_ACCOUNT_TOKENS = tuple(
+    value.strip() for value in os.getenv('APPLE_IAP_SANDBOX_ACCOUNT_TOKENS', '').split(',') if value.strip()
+)
 COMMUNITY_CHAT_DEVICE_AUTH_ENABLED = _env_is_true(
     'COMMUNITY_CHAT_DEVICE_AUTH_ENABLED',
     False,
 )
+COMMUNITY_CHAT_SIGNUP_ENABLED = _env_is_true('COMMUNITY_CHAT_SIGNUP_ENABLED', False)
+COMMUNITY_CHAT_MEMBERSHIP_POLICY_VERSION = os.getenv(
+    'COMMUNITY_CHAT_MEMBERSHIP_POLICY_VERSION', '2026-09-21'
+)
+
 COMMUNITY_CHAT_EMAIL_CODE_AUTH_ENABLED = _env_is_true(
     'COMMUNITY_CHAT_EMAIL_CODE_AUTH_ENABLED',
     True,
@@ -813,6 +829,11 @@ LOGGING = {
         },
     },
     'loggers': {
+        'jobs': {
+            'handlers': ['console'],
+            'level': DJANGO_LOG_LEVEL,
+            'propagate': False,
+        },
         'core': {
             'handlers': ['console'],
             'level': DJANGO_LOG_LEVEL,
@@ -988,8 +1009,6 @@ if not 1 <= KIMI_ROO_POINTS_PER_PROMPT <= 100:
 # MLAI Coding uses short-lived, device-scoped Ed25519 tickets.  Keys remain
 # optional at process startup so non-Coding environments can run normally; the
 # Coding endpoints fail closed with 503 until a valid signing key is supplied.
-MLAI_CODING_PILOT_USER_IDS = _env_list('MLAI_CODING_PILOT_USER_IDS', [])
-MLAI_CODING_PILOT_EMAILS = _env_list('MLAI_CODING_PILOT_EMAILS', [])
 MLAI_CODING_PRICING_VERSION = os.getenv(
     'MLAI_CODING_PRICING_VERSION',
     'do-kimi-k3-2026-08',
@@ -1142,7 +1161,7 @@ JOBS_NOTION_TOP_PICK_LIMIT = int(os.getenv('JOBS_NOTION_TOP_PICK_LIMIT', '7'))
 JOBS_NOTION_API_TOKEN = os.getenv('JOBS_NOTION_API_TOKEN', '')
 JOBS_NOTION_PARENT_PAGE_ID = os.getenv('JOBS_NOTION_PARENT_PAGE_ID', '')
 JOBS_NOTION_API_VERSION = os.getenv('JOBS_NOTION_API_VERSION', '2022-06-28')
-JOBS_SLACK_CHANNEL = os.getenv('JOBS_SLACK_CHANNEL', '#jobs')
+JOBS_SLACK_CHANNEL = os.getenv('JOBS_SLACK_CHANNEL', 'C05QE82M2KE')
 JOBS_SLACK_WEBHOOK_URL = os.getenv('JOBS_SLACK_WEBHOOK_URL', '')
 SLACK_BOT_TOKEN = os.getenv('SLACK_BOT_TOKEN', '')
 COMMITTEE_REMUNERATION_ENABLED = _env_is_true('COMMITTEE_REMUNERATION_ENABLED', False)
@@ -1166,6 +1185,12 @@ VALLEY_HARNESS_URL = os.getenv('VALLEY_HARNESS_URL', '')
 VALLEY_HARNESS_API_KEY = os.getenv('VALLEY_HARNESS_API_KEY', '')
 # Enable after integrations.0047 and the new worker are deployed together.
 MESSAGE_SYNC_ENABLED = os.getenv('MESSAGE_SYNC_ENABLED', 'false').lower() == 'true'
+# Enable only after integrations.0048 has been applied to every backend instance.
+SLACK_OWNER_INVENTORY_ENABLED = os.getenv('SLACK_OWNER_INVENTORY_ENABLED', 'false').lower() == 'true'
+# Deploy relay 0031 and its adapter audience command before enabling this backend.
+MESSAGE_SYNC_STABLE_PRIVATE_ROOMS = os.getenv(
+    'MESSAGE_SYNC_STABLE_PRIVATE_ROOMS', str(MESSAGE_SYNC_ENABLED)
+).lower() == 'true'
 MESSAGE_SYNC_SLACK_APP_ID = os.getenv('MESSAGE_SYNC_SLACK_APP_ID', '')
 MESSAGE_SYNC_SLACK_APP_TOKEN = os.getenv('MESSAGE_SYNC_SLACK_APP_TOKEN', '')
 MESSAGE_SYNC_SLACK_USER_APP_ID = os.getenv('MESSAGE_SYNC_SLACK_USER_APP_ID', '')
@@ -2139,6 +2164,13 @@ HUMANITIX_API_BASE_URL = os.environ.get(
 
 # Public identity of the deployed MLAI Chat Roo assistant (not a signing key).
 COMMUNITY_CHAT_ROO_PUBLIC_KEY = os.getenv("COMMUNITY_CHAT_ROO_PUBLIC_KEY", "")
+# Public disclosures must name the providers actually used by the deployed Roo.
+# Empty configuration disables consent grants; never substitute guessed names.
+COMMUNITY_CHAT_AI_DISCLOSURE_VERSION = os.getenv("COMMUNITY_CHAT_AI_DISCLOSURE_VERSION", "")
+COMMUNITY_CHAT_AI_PROVIDERS = json.loads(os.getenv("COMMUNITY_CHAT_AI_PROVIDERS", "[]"))
+COMMUNITY_CHAT_AI_CONSENT_REQUIRED = _env_is_true("COMMUNITY_CHAT_AI_CONSENT_REQUIRED", True)
+COMMUNITY_CHAT_DELETION_TIMEFRAME = os.getenv("COMMUNITY_CHAT_DELETION_TIMEFRAME", "")
+COMMUNITY_CHAT_DELETION_CONTACT = os.getenv("COMMUNITY_CHAT_DELETION_CONTACT", "")
 # Public Roo's identity verified in the MLAI Slack workspace. Empty values pause
 # the first-party DM connection; no other bot is enabled by this setting.
 COMMUNITY_CHAT_ROO_SLACK_WORKSPACE_ID = os.getenv("COMMUNITY_CHAT_ROO_SLACK_WORKSPACE_ID", "T05N9C1QSJC")
@@ -2147,3 +2179,12 @@ COMMUNITY_CHAT_ROO_SLACK_USER_ID = os.getenv("COMMUNITY_CHAT_ROO_SLACK_USER_ID",
 # Optional startup-update editorial covers; all generation runs server-side.
 STARTUP_UPDATE_COVER_IMAGE_MODEL = os.getenv("STARTUP_UPDATE_COVER_IMAGE_MODEL", "gpt-image-2.5-flare")
 STARTUP_UPDATE_COVER_PROMPT_MODEL = os.getenv("STARTUP_UPDATE_COVER_PROMPT_MODEL", "gpt-6-astra")
+
+# Enable after Chat startup routes and Roo link-origin configuration are deployed.
+ROO_FOUNDER_LINK_CHAT_ENABLED = _env_is_true("ROO_FOUNDER_LINK_CHAT_ENABLED", False)
+
+# Enable only after the Chat frontend/API pilot passes. No data is moved.
+MY_STARTUP_DELIVERY_LINKS_ENABLED = os.environ.get("MY_STARTUP_DELIVERY_LINKS_ENABLED", "false").lower() == "true"
+
+# Pilot gate for the Chat startup/update workspace.
+COMMUNITY_CHAT_STARTUP_UPDATES_ENABLED = os.environ.get("COMMUNITY_CHAT_STARTUP_UPDATES_ENABLED", "false").lower() == "true"

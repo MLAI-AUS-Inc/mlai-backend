@@ -56,6 +56,15 @@ class ContentIslandResearchAdoptView(APIView):
         run = ContentFactoryRun.objects.filter(run_id=run_id).first()
         if run is None or not _run_belongs_to_context(run, context):
             return Response({"detail": "Research not found."}, status=404)
+        if "proposalIds" in request.data:
+            from .island_selection import selection_preview, adopt_selection
+            try:
+                if request.data.get("preview") is True:
+                    return Response(selection_preview(run, request.data["proposalIds"]))
+                islands = adopt_selection(context.organization, run, request.data["proposalIds"])
+            except ValueError as exc:
+                return Response({"detail": str(exc)}, status=400)
+            return Response({"islands": [custom_island_pillar(island) for island in islands]}, status=200)
         try:
             proposal = proposal_for_adoption(run, request.data.get("proposalId"))
         except ValueError as exc:

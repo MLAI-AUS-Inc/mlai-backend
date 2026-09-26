@@ -226,13 +226,18 @@ class WrittenArticleSerializer(serializers.ModelSerializer):
             'id', 'analytics_id', 'title', 'slug', 'category', 'article_url', 'pr_url',
             'canonical_url', 'canonical_path',
             'publish_status', 'pr_number', 'pr_merged_at', 'live_url', 'live_verified_at',
-            'primary_keyword', 'published_at', 'created_at'
+            'primary_keyword', 'published_at', 'created_at',
+            'source_run_id', 'editorial_snapshot', 'original_editorial_snapshot',
+            'audience_id', 'audience_version', 'offer_id', 'offer_version',
+            'conversion_intent', 'editorial_provenance_status'
         ]
         read_only_fields = ['id', 'created_at']
 
 
 class WrittenArticleCreateSerializer(serializers.Serializer):
     """Serializer for creating written article records from content-factory."""
+    source_run_id = serializers.CharField(required=False, max_length=100)
+    editorial_admission = serializers.JSONField(required=False)
     domain = serializers.CharField()
     title = serializers.CharField()
     slug = serializers.CharField()

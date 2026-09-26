@@ -1,7 +1,10 @@
 from pathlib import Path
+import importlib.util
 import re
 import subprocess
 import tempfile
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from django.test import SimpleTestCase
 
@@ -43,9 +46,11 @@ class RuntimeHardeningConfigTests(SimpleTestCase):
                 return stripped.removeprefix("test:").strip()
         self.fail(f"Missing web healthcheck test in {compose_filename}")
 
-    def test_production_gunicorn_config_uses_sync_workers_and_short_timeouts(self):
+    def test_production_gunicorn_config_warms_routes_after_fork(self):
         compose = (ROOT / "docker-compose.yml").read_text()
         start_script = (ROOT / "scripts" / "start-web.sh").read_text()
+        gunicorn_config = (ROOT / "scripts" / "gunicorn.conf.py").read_text()
+        deploy = (ROOT / "deploy.sh").read_text()
 
         self.assertIn("--worker-class", start_script)
         self.assertIn("sync", start_script)
@@ -53,13 +58,37 @@ class RuntimeHardeningConfigTests(SimpleTestCase):
         self.assertIn("--timeout", start_script)
         self.assertIn("--graceful-timeout", start_script)
         self.assertIn("--max-requests", start_script)
+        self.assertNotIn("--preload", start_script)
+        self.assertIn("--config /app/scripts/gunicorn.conf.py", start_script)
+        self.assertIn("def post_worker_init(worker):", gunicorn_config)
+        self.assertIn("get_resolver().url_patterns", gunicorn_config)
+        self.assertNotIn("def when_ready", gunicorn_config)
         self.assertNotIn("--threads", start_script)
 
         self.assertIn("${GUNICORN_WORKERS:-3}", start_script)
-        self.assertIn("${GUNICORN_TIMEOUT:-30}", start_script)
+        self.assertIn("${GUNICORN_TIMEOUT:-90}", start_script)
+        self.assertIn('upsert_env_value GUNICORN_WORKERS "4"', deploy)
+        self.assertIn('upsert_env_value GUNICORN_TIMEOUT "90"', deploy)
         self.assertIn("${GUNICORN_GRACEFUL_TIMEOUT:-30}", start_script)
         self.assertIn("${GUNICORN_MAX_REQUESTS:-300}", start_script)
         self.assertIn('RUN_MIGRATIONS_ON_START: "0"', compose)
+
+        spec = importlib.util.spec_from_file_location(
+            "mlai_gunicorn_config", ROOT / "scripts" / "gunicorn.conf.py"
+        )
+        config_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(config_module)
+        accessed = []
+
+        class Resolver:
+            @property
+            def url_patterns(self):
+                accessed.append(True)
+                return []
+
+        with patch("django.urls.get_resolver", return_value=Resolver()):
+            config_module.post_worker_init(SimpleNamespace(log=SimpleNamespace(info=lambda *args: None)))
+        self.assertEqual(accessed, [True])
 
     def test_web_runtime_does_not_mutate_schema_or_collect_static(self):
         production_compose = (ROOT / "docker-compose.yml").read_text()
@@ -250,7 +279,7 @@ class RuntimeHardeningConfigTests(SimpleTestCase):
         self.assertLess(
             deploy.index('docker compose stop "\\${all_runtime_writer_services[@]}"'),
             deploy.index(
-                'docker compose up -d --force-recreate "\\${runtime_services[@]}"'
+                'docker compose up -d --no-deps --force-recreate "\\${runtime_services[@]}"'
             ),
         )
 
@@ -272,7 +301,7 @@ class RuntimeHardeningConfigTests(SimpleTestCase):
         )
         self.assertIn('docker image tag "\\$image_id" "\\$image_ref"', deploy)
         self.assertIn(
-            'docker compose up -d --force-recreate "\\${restored_services[@]}"',
+            'docker compose up -d --no-deps --force-recreate "\\${restored_services[@]}"',
             deploy,
         )
         failure_trap = re.search(r"^    trap .* ERR$", deploy, re.MULTILINE)
@@ -300,7 +329,7 @@ class RuntimeHardeningConfigTests(SimpleTestCase):
         deploy = (ROOT / "deploy.sh").read_text()
         function_start = deploy.index("    restore_runtime_on_error() {")
         function_end = deploy.index(
-            '\n    }\n\n    echo "⏸️ Pausing',
+            "\n    }\n\n    # A code-only release",
             function_start,
         ) + len("\n    }")
         recovery_function = deploy[function_start:function_end].replace("\\$", "$")
@@ -310,6 +339,7 @@ class RuntimeHardeningConfigTests(SimpleTestCase):
 runtime_restore_attempted=0
 migration_started=1
 schema_transition_completed=0
+runtime_pause_started=1
 source scripts/runtime-services.sh
 rollback_manifest="$1"
 docker() {
@@ -337,6 +367,38 @@ printf 'unexpected-continuation\n'
         self.assertIn("docker:compose stop web scheduler jobs-worker", completed.stdout)
         self.assertIn("committee-remuneration", completed.stdout)
         self.assertNotIn("unexpected-continuation", completed.stdout)
+
+    def test_code_only_health_failure_rolls_back_after_replacement(self):
+        deploy = (ROOT / "deploy.sh").read_text()
+        function_start = deploy.index("    restore_runtime_on_error() {")
+        function_end = deploy.index(
+            "\n    }\n\n    # A code-only release", function_start
+        ) + len("\n    }")
+        recovery_function = deploy[function_start:function_end].replace("\\$", "$")
+        probe = recovery_function + r"""
+runtime_restore_attempted=0
+runtime_pause_started=0
+new_runtime_replacement_started=1
+migration_started=0
+previous_scheduler_container_id=""
+previous_runtime_container_ids=()
+runtime_services=(web scheduler)
+rollback_manifest="$(mktemp)"
+docker_log="$(mktemp)"
+printf 'web|old-image-id|mlai-backend-web|rollback-tag\n' > "$rollback_manifest"
+upsert_env_value() { :; }
+docker() { printf '%s\n' "$*" >> "$docker_log"; }
+restore_runtime_on_error
+cat "$docker_log"
+rm -f "$rollback_manifest" "$docker_log"
+"""
+        completed = subprocess.run(
+            ["bash", "-c", probe], check=False, capture_output=True, text=True
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("image tag old-image-id mlai-backend-web", completed.stdout)
+        self.assertIn("compose up -d --no-deps --force-recreate web", completed.stdout)
+        self.assertNotIn("compose up -d --no-deps --force-recreate web scheduler", completed.stdout)
 
     def test_bridge_deploy_validation_requires_explicit_production_activation(self):
         workflow = (ROOT / ".github" / "workflows" / "deploy.yml").read_text()

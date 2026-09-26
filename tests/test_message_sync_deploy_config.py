@@ -7,6 +7,15 @@ class MessageSyncDeployConfigTests(unittest.TestCase):
     def test_disabled_needs_no_new_credentials(self):
         validate({})
 
+    def test_inventory_requires_explicit_boolean_and_durable_sync(self):
+        validate({"SLACK_OWNER_INVENTORY_ENABLED": "false"})
+        with self.assertRaisesRegex(ValueError, "SLACK_OWNER_INVENTORY_ENABLED must be true or false"):
+            validate({"SLACK_OWNER_INVENTORY_ENABLED": "yes"})
+        with self.assertRaisesRegex(ValueError, "requires MESSAGE_SYNC_ENABLED=true"):
+            validate({"SLACK_OWNER_INVENTORY_ENABLED": "true"})
+        with self.assertRaisesRegex(ValueError, "requires MESSAGE_SYNC_ENABLED=true"):
+            validate({"SLACK_OWNER_INVENTORY_ENABLED": "true", "MESSAGE_SYNC_ENABLED": "false"})
+
     def test_staged_private_callback_requires_secret_before_enabling_sync(self):
         valid = {"MESSAGE_SYNC_SLACK_USER_APP_ID": "APRIVATE",
                  "MESSAGE_SYNC_SLACK_USER_SIGNING_SECRET": "a" * 32}
@@ -25,6 +34,7 @@ class MessageSyncDeployConfigTests(unittest.TestCase):
             "MESSAGE_SYNC_SLACK_DISTRIBUTION": "restricted",
         }
         validate(valid)
+        validate({**valid, "SLACK_OWNER_INVENTORY_ENABLED": "true"})
         private = {**valid, "MESSAGE_SYNC_SLACK_USER_APP_ID": "APRIVATE",
                    "MESSAGE_SYNC_SLACK_USER_SIGNING_SECRET": "a" * 32,
                    "MESSAGE_SYNC_SLACK_USER_APP_TOKEN": "xapp-private-synthetic"}

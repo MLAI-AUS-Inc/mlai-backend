@@ -1,6 +1,7 @@
 """Brief-led island research: validated input, payment recovery and adoption."""
 import hashlib
 import json
+import math
 
 
 def validate_research_brief(data):
@@ -55,6 +56,7 @@ def refund_empty_or_failed_research(run):
         return
     PointsService.refund(
         user=charge.user, delta=-charge.delta, source=charge.source,
+        original_spend_key=charge.idempotency_key,
         description=f"Island research refund: no usable islands for {run.domain}",
         created_by_slack_id=charge.created_by_slack_id,
         idempotency_key=f"content_factory:topic_generation:refund:{key}",
@@ -71,12 +73,20 @@ def proposal_for_adoption(run, proposal_id):
         raise ValueError("Wait for island research to finish before adding a result.")
     proposal = next((item for item in result.get("suggested_islands", [])
                      if isinstance(item, dict) and item.get("id") == proposal_id), None)
-    if not proposal or len(proposal.get("keywords") or []) < 3 or not proposal.get("centroid_embedding"):
+    evidence = proposal.get("keywords") if proposal else None
+    if not isinstance(evidence, list) or not evidence or not proposal.get("centroid_embedding"):
+        raise ValueError("Choose one of this research run’s measured islands.")
+    # A small measured starting point is useful too. Keep genuine evidence as
+    # the gate, rather than rejecting every cluster with fewer than 3 queries.
+    if any(not isinstance(row, dict) or not isinstance(row.get("keyword"), str) or not row["keyword"].strip()
+           or type(row.get("volume")) not in (int, float) or not math.isfinite(row["volume"]) or row["volume"] <= 0
+           or type(row.get("difficulty")) not in (int, float) or not 0 <= row["difficulty"] <= 100
+           for row in evidence):
         raise ValueError("Choose one of this research run’s measured islands.")
     return proposal
 
 
-def adopt_researched_island(organization, run, proposal):
+def adopt_researched_island(organization, run, proposal, *, merge_evidence=False, preserve_positioning=False):
     from django.db import transaction
     from django.utils import timezone
     from django.utils.text import slugify
@@ -97,7 +107,7 @@ def adopt_researched_island(organization, run, proposal):
             seed_islands_from_bootstrap_pillars(org)
         # An existing measured theme is reused; its members and positioning stay intact.
         existing = ContentIsland.objects.filter(organization=org, pillar_keyword__iexact=keyword).first()
-        if existing and existing.keyword_count > 0:
+        if existing and existing.keyword_count > 0 and not merge_evidence:
             if existing.status != "visible":
                 existing.status, existing.promoted_at = "visible", now
                 existing.archived_at = None
@@ -119,7 +129,7 @@ def adopt_researched_island(organization, run, proposal):
         else:
             island, created = ContentIsland.objects.get_or_create(organization=org, slug=slug, defaults=defaults)
         if not created:
-            if island.keyword_count > 0 and island.status == "visible":
+            if island.keyword_count > 0 and island.status == "visible" and not merge_evidence:
                 return island, False
             for field in ("status", "promoted_at", "last_matched_at", "last_refreshed_at", "centroid_embedding", *proposal["metrics"]):
                 setattr(island, field, defaults[field])
@@ -140,7 +150,18 @@ def adopt_researched_island(organization, run, proposal):
             member = members.get(normalized, {})
             ContentIslandKeyword.objects.update_or_create(island=island, keyword=researched, defaults={
                 "similarity_score": member.get("similarity_score", 0), "is_centroid": member.get("is_centroid", False)})
+        if merge_evidence:
+            from django.db.models import Sum, Avg, Count
+            measured = ResearchedKeyword.objects.filter(island_memberships__island=island)
+            metrics = measured.aggregate(keyword_count=Count("id"), total_volume=Sum("volume"),
+                avg_difficulty=Avg("difficulty"), opportunity_score=Sum("opportunity_index"), ai_search_volume=Sum("ai_search_volume"))
+            for field, value in metrics.items():
+                setattr(island, field, value or 0)
+            if not preserve_positioning:
+                island.name = defaults["name"]
+                island.description = defaults["description"]
+            island.save()
         ContentIslandSnapshot.objects.update_or_create(island=island, captured_on=now.date(),
-            defaults={**proposal["metrics"], "status": island.status})
+            defaults={**{key: getattr(island, key) for key in proposal["metrics"]}, "status": island.status})
         rebuild_island_edges(org)
     return island, created

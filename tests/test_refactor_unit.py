@@ -1,7 +1,10 @@
 import ast
+import hashlib
 from pathlib import Path
 import re
+import shlex
 import subprocess
+import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
@@ -42,49 +45,81 @@ class SchedulerResultTests(unittest.TestCase):
 
 class RuntimeInventoryTests(unittest.TestCase):
     def test_deployment_failures_exit_after_the_appropriate_recovery(self):
-        # Execute the actual error handler and migration boundary. Only Docker
-        # and the management-command transport are replaced by shell stubs.
+        # Execute the actual error handler and complete schema decision block.
+        # Docker and management commands are stubs; no database is constructed.
         deploy = (ROOT / "deploy.sh").read_text()
         start = deploy.index("    runtime_restore_attempted=0")
-        command = "compose_run_web python manage.py migrate --noinput"
-        end = deploy.index(command, start) + len(command)
+        end = deploy.index('    echo "🧬 Re-auditing Office Manager provenance', start)
         boundary = deploy[start:end].replace("\\$", "$")
-        script = '''set -eu
+        plan = "Apply app.0001_example"
+        approved_hash = hashlib.sha256(plan.encode()).hexdigest()
+        script = r'''set -euo pipefail
 source scripts/runtime-services.sh
 rollback_manifest="$1"
 previous_runtime_container_ids=()
 previous_scheduler_container_id=""
+previous_app_release=previous
+web_proxy_preexisting=1
+web_candidate_started=0
+migration_applied=0
 upsert_env_value() { :; }
 verify_scheduler_recovery_tick() { :; }
+verify_current_main_release_on_host() { :; }
 docker() {
-    printf 'docker:%s\\n' "$*"
+    printf 'docker:%s\n' "$*"
     if [ "$1 $2" = 'compose stop' ]; then return "$STOP_STATUS"; fi
 }
-compose_run_web() { printf 'migrate:%s\\n' "$*"; return "$MIGRATE_STATUS"; }
+compose_run_web() {
+    case " $* " in
+        *' --plan '*) printf '%s\n' 'Apply app.0001_example'; return 0 ;;
+        *' --check '*)
+            if [ "$PENDING" = 0 ] || [ "$migration_applied" = 1 ]; then
+                return 0
+            fi
+            return 1 ;;
+    esac
+    printf 'migrate:%s\n' "$*"
+    migration_applied=1
+    return "$MIGRATE_STATUS"
+}
 '''
-        for stop_status, migrate_status in ((0, 0), (42, 0), (0, 43)):
-            with self.subTest(stop=stop_status, migrate=migrate_status), tempfile.TemporaryDirectory() as directory:
+        # The deployed host has GNU sha256sum. Keep this shell harness portable
+        # to developer macOS without changing the deployment command.
+        script += (
+            'sha256sum() { ' + shlex.quote(sys.executable)
+            + ' -c "import hashlib,sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())"; }\n'
+            + f"read_env_value() {{ printf '%s' '{approved_hash}'; }}\n"
+        )
+        for pending, stop_status, migrate_status in (
+            (1, 0, 0), (1, 42, 0), (1, 0, 43), (0, 42, 0),
+        ):
+            with self.subTest(pending=pending, stop=stop_status, migrate=migrate_status), tempfile.TemporaryDirectory() as directory:
                 manifest = Path(directory) / "rollback-manifest"
                 manifest.write_text("web|old-image|image-ref|rollback-tag\n")
                 result = subprocess.run(
                     ["bash", "-c",
-                     f"STOP_STATUS={stop_status}\nMIGRATE_STATUS={migrate_status}\n"
+                     f"PENDING={pending}\nSTOP_STATUS={stop_status}\nMIGRATE_STATUS={migrate_status}\n"
                      + script + boundary + "\nprintf 'boundary-complete\\n'\n",
                      "deployment-boundary-test", str(manifest)],
-                    cwd=ROOT, text=True, capture_output=True,
+                    cwd=ROOT, text=True, capture_output=True, timeout=5,
                 )
-                self.assertIn("docker:compose stop web scheduler jobs-worker", result.stdout)
-                self.assertIn("committee-remuneration", result.stdout)
-                self.assertEqual(result.returncode, stop_status or migrate_status, result.stderr)
-                if stop_status:
-                    self.assertIn("docker:compose up -d --force-recreate web", result.stdout)
+                expected_status = (stop_status or migrate_status) if pending else 0
+                self.assertEqual(result.returncode, expected_status, result.stderr)
+                if not pending:
+                    self.assertNotIn("docker:", result.stdout)
                     self.assertNotIn("migrate:", result.stdout)
-                elif migrate_status:
-                    self.assertIn("keeping all runtime writers safely disabled", result.stdout)
-                    self.assertNotIn("docker:compose up", result.stdout)
                 else:
-                    self.assertIn("migrate:python manage.py migrate --noinput", result.stdout)
-                self.assertEqual("boundary-complete" in result.stdout, not (stop_status or migrate_status))
+                    self.assertIn("docker:compose stop web scheduler jobs-worker", result.stdout)
+                    self.assertIn("committee-remuneration web-candidate", result.stdout)
+                    if stop_status:
+                        self.assertIn("docker:compose up -d --no-deps --force-recreate web", result.stdout)
+                        self.assertNotIn("migrate:", result.stdout)
+                    elif migrate_status:
+                        self.assertIn("keeping all runtime writers safely disabled", result.stdout)
+                        self.assertNotIn("docker:compose up", result.stdout)
+                    else:
+                        self.assertIn("migrate:python manage.py migrate --noinput", result.stdout)
+                self.assertEqual("boundary-complete" in result.stdout, expected_status == 0)
 
     def test_manifest_covers_every_compose_application_writer(self):
         output = subprocess.check_output(
@@ -107,6 +142,36 @@ compose_run_web() { printf 'migrate:%s\\n' "$*"; return "$MIGRATE_STATUS"; }
         self.assertIn("password-email-worker", output.splitlines())
         self.assertIn("jobs-worker", output.splitlines())
         self.assertNotIn("committee-remuneration", output.splitlines())
+        self.assertNotIn("web-candidate", output.splitlines())
+
+    def test_committee_worker_is_opt_in_and_disabled_service_is_stopped(self):
+        deploy = (ROOT / "deploy.sh").read_text()
+        start = deploy.index("    committee_remuneration_enabled=0")
+        end = deploy.index("    docker network inspect", start)
+        selection = deploy[start:end].replace("\\$", "$")
+        start = deploy.index('    if [ "\\$committee_remuneration_enabled" != "1" ]; then')
+        end = deploy.index('    echo "🔁 Verifying the running web container picked up APP_RELEASE', start)
+        cleanup = deploy[start:end].replace("\\$", "$")
+        for configured, enabled in (("true", True), ("1", True), ("false", False), ("", False)):
+            with self.subTest(configured=configured):
+                result = subprocess.run(
+                    ["bash", "-c", "\n".join([
+                        "set -eu",
+                        "source scripts/runtime-services.sh",
+                        "read_env_value() { printf '%s' " + shlex.quote(configured) + "; }",
+                        'docker() { printf "docker:%s\\n" "$*"; }',
+                        selection,
+                        'printf "runtime:%s\\n" "${runtime_services[*]}"',
+                        cleanup,
+                    ])],
+                    cwd=ROOT, text=True, capture_output=True, timeout=5,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                runtime = next(line for line in result.stdout.splitlines() if line.startswith("runtime:"))
+                self.assertEqual("committee-remuneration" in runtime, enabled)
+                self.assertEqual("docker:compose stop committee-remuneration" in result.stdout, not enabled)
+                self.assertEqual("docker:compose rm -f committee-remuneration" in result.stdout, not enabled)
+                self.assertNotIn("web-candidate", result.stdout)
 
     def test_community_routes_have_no_duplicate_literal_paths_or_names(self):
         tree = ast.parse((ROOT / "community_chat/urls.py").read_text())

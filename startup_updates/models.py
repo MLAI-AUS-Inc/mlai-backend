@@ -103,6 +103,9 @@ class StartupProfile(models.Model):
     default_currency = models.CharField(max_length=12, default="USD")
     reporting_timezone = models.CharField(max_length=64, default="UTC")
     reporting_config_version = models.PositiveIntegerField(default=1)
+    # Dashboard choices and custom metric definitions are separate from the
+    # reporting configuration and from each update's frozen chart selections.
+    progress_configuration = models.JSONField(default=dict, blank=True)
     stage = models.CharField(max_length=64, blank=True, default="")
     organization_kind = models.CharField(max_length=32, blank=True, default="")
     short_description = models.TextField(blank=True, default="")

@@ -77,6 +77,9 @@ cookies.txt
 /*.md
 /docs/*.md
 /docs/**/*.md
+!/docs/backend-api-web-handoff.md
+!/docs/apple-iap-and-deletion-migrations.md
+!/docs/apple-app-review-operations.md
 !/docs/content-islands.md
 !/docs/content-factory-editorial-contract.md
 !/docs/mlai-coding-billing-contract.md
@@ -235,3 +238,14 @@ medhack_backend/hospital/Eval_Labels.csv
 !/docs/backend-refactor-implementation-2026-09-14.md
 !/docs/backend-refactor-migration-proposal-2026-09-14.md
 !/docs/backend-refactor-release-2026-09-15.md
+
+!/docs/daily-research.md
+
+!/docs/startup-progress.md
+
+!/docs/my-startup-api.md
+
+!/docs/community-chat-startup-updates.md
+
+!/docs/backend-refactor-migration-proposal-2026-09-26.md
+!/docs/backend-refactor-release-2026-09-26.md

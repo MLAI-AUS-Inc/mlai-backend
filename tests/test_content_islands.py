@@ -1035,3 +1035,21 @@ class ManageContentIslandsCommandTests(ContentIslandAPITestCase):
             self._call("--domain", "nope.example.com", "--list")
         with self.assertRaises(CommandError):
             self._call("--domain", self.org.domain, "--archive-island", "not-an-island")
+
+
+class SelectedIslandExpansionCursorTests(ContentIslandAPITestCase):
+    def test_managed_theme_advances_cursor_without_normal_entry_and_old_replays_cannot_reverse_it(self):
+        from workflow_runs.models import ContentFactoryRun
+        island = ContentIsland.objects.create(organization=self.org, slug='selected-theme', name='Selected theme',
+            pillar_keyword='selected topic', status='visible', origin='manual', centroid_embedding=[1, 0])
+        ContentFactoryRun.objects.create(run_id='selected-research-cursor', domain=self.org.domain,
+            organization=self.org, workflow='island_refresh', status='completed',
+            result={'island_research_selection': {'managed_slugs': [island.slug]}})
+        response = self.sync([], captured_on='2026-09-16', expanded=[island.slug])
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data['expanded'], [island.slug])
+        island.refresh_from_db()
+        self.assertEqual(island.last_expanded_on, date(2026, 9, 16))
+        self.sync([], captured_on='2026-09-15', expanded=[island.slug])
+        island.refresh_from_db()
+        self.assertEqual(island.last_expanded_on, date(2026, 9, 16))

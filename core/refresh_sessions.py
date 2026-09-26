@@ -60,6 +60,8 @@ def ensure_token_auth_version(token, user=None):
             user = User.objects.get(**{api_settings.USER_ID_FIELD: identifier})
         except User.DoesNotExist as exc:
             raise TokenError('Token user no longer exists') from exc
+    if not user.is_active:
+        raise TokenError('Account is inactive')
     presented = token.payload.get(AUTH_VERSION_CLAIM)
     expected = int(user.auth_version)
     # Tokens created before the migration remain valid only while the account

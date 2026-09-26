@@ -264,6 +264,7 @@ def _allowed_frontend_origins() -> set:
         if normalized:
             origins.add(normalized)
     for candidate in (
+        getattr(settings, "COMMUNITY_CHAT_FRONTEND_URL", ""),
         getattr(settings, "CONTENT_FACTORY_FRONTEND_URL", ""),
         getattr(settings, "DEFAULT_FRONTEND_URL", ""),
     ):

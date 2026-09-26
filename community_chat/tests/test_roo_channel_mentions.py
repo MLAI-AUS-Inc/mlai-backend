@@ -7,6 +7,7 @@ from django.test import SimpleTestCase, TestCase, override_settings
 from django.utils import timezone
 
 from community_chat.tests import test_slack_dm_mirror as fixtures
+from community_chat.tests.privacy_fixtures import PROVIDERS, grant_test_ai_consent
 from integrations.models import CommunityBridgeDeliveryStatus, CommunityBridgePlatform
 from integrations.services import slack_dm_mirror as mirror
 from integrations.services.slack_channel_mentions import (
@@ -21,6 +22,8 @@ from integrations.services.slack_chat_catalog import (
 )
 
 SETTINGS = dict(
+    COMMUNITY_CHAT_AI_PROVIDERS=PROVIDERS,
+    COMMUNITY_CHAT_AI_DISCLOSURE_VERSION="test-v1",
     COMMUNITY_CHAT_RELAY_URL="wss://chat.mlai.au",
     COMMUNITY_CHAT_ROO_SLACK_WORKSPACE_ID="TMLAI",
     COMMUNITY_CHAT_ROO_SLACK_USER_ID="UROO",
@@ -43,8 +46,15 @@ def conversation_fixture():
         },
         participant_buzz_pubkeys=["1" * 64],
         mlai_channel_id="private-mirror",
+        status="live",
+        history_backfilled_at=None,
         grant=SimpleNamespace(
             slack_user_id="UONE",
+            status="active",
+            revoked_at=None,
+            consented_at=timezone.now(),
+            history_days=30,
+            consent_version=PRIVATE_CHANNEL_CONSENT,
             connection=SimpleNamespace(
                 provider_metadata={
                     CATALOG_KEY: {"CMASTER": {"kind": "private_channel"}}
@@ -207,6 +217,7 @@ class RooChannelMentionTests(SimpleTestCase):
 class RooChannelDeliveryTests(TestCase):
     def setUp(self):
         fixtures.SlackDmMirrorOwnerTests.setUp(self)
+        grant_test_ai_consent(self.first)
         self.grant, self.conversation = (
             fixtures.SlackDmMirrorOwnerTests._live_conversation(
                 self,
@@ -280,10 +291,10 @@ class RooChannelDeliveryTests(TestCase):
         client.conversations_invite.assert_not_called()
 
     @patch("integrations.services.slack_dm_mirror.WebClient")
-    def test_removed_membership_prevents_post_even_after_message_was_queued(
+    def test_removed_owner_prevents_post_even_after_message_was_queued(
         self, web_client
     ):
-        client = self.slack_client(web_client, members=["UONE", "UTWO"])
+        client = self.slack_client(web_client, members=["UROO", "UTWO"])
         self.assertEqual(
             mirror.ingest_mlai_dm_event(self.payload())["status"], "enqueued"
         )
@@ -296,7 +307,7 @@ class RooChannelDeliveryTests(TestCase):
         )
         self.assertEqual(
             mirror.ingest_mlai_dm_event(
-                self.payload(tags=[["slack-mention", "UOTHER", "Roo"]])
+                self.payload(tags=[["slack-mention", "invalid", "Roo"]])
             )["status"],
             "rejected",
         )

@@ -6,9 +6,10 @@ request runs while claiming; every later provider call/write checks this lease.
 import uuid
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import timedelta
 
+from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.db import transaction
 from django.db.models import F, FloatField, Max, Q
@@ -16,10 +17,17 @@ from django.db.models.functions import Cast
 from django.utils import timezone
 
 from integrations.models import ExternalServiceConnection, SlackDmMirrorGrant
-from .scheduler import LeaseLost
+from .scheduler import BudgetDeferred, LeaseLost
 
 KEY = "message_sync_discovery"
+DURABLE_POLL_SECONDS = 1.0
+LEGACY_POLL_SECONDS = 5.0
 _claim = ContextVar("message_sync_discovery_claim", default=None)
+
+
+def discovery_poll_seconds():
+    """Bound idle polling without adding five seconds to every durable turn."""
+    return DURABLE_POLL_SECONDS if getattr(settings, "MESSAGE_SYNC_ENABLED", False) else LEGACY_POLL_SECONDS
 
 
 @dataclass(frozen=True)
@@ -28,6 +36,7 @@ class DiscoveryLease:
     connection_id: int
     user_id: int
     token: str
+    previous_served: float | None = None
 
 
 @contextmanager
@@ -98,6 +107,7 @@ def claim_discovery(interval_seconds, *, lease_seconds=120):
                     continue
                 if grant.last_discovery_at is not None and grant.last_discovery_at >= now - timedelta(seconds=interval_seconds):
                     continue
+                lease = replace(lease, previous_served=previous.get("served"))
                 connection.sync_cursor = {**(connection.sync_cursor or {}), KEY: {
                     "token": lease.token, "expires": clock + lease_seconds,
                     "served": clock, "due": clock,
@@ -107,7 +117,7 @@ def claim_discovery(interval_seconds, *, lease_seconds=120):
     return None
 
 
-def finish_discovery(lease, *, delay_seconds=5, error_code=""):
+def finish_discovery(lease, *, delay_seconds=DURABLE_POLL_SECONDS, error_code="", return_turn=False):
     """Release only this claim; preserve list cursor and other integration state."""
     with transaction.atomic(), discovery_context(lease):
         grant, connection = _lock(lease)
@@ -116,6 +126,14 @@ def finish_discovery(lease, *, delay_seconds=5, error_code=""):
         guard_discovery(grant, connection)
         value = dict((connection.sync_cursor or {}).get(KEY) or {})
         value.update(token="", expires=0, due=timezone.now().timestamp() + max(1, delay_seconds), error=error_code[:100])
+        if return_turn:
+            # Initial list admission lost to another owner/worker. No source
+            # request ran, so keep this owner's place rather than phase-locking
+            # the same winner to a shared provider interval.
+            if lease.previous_served is None:
+                value.pop("served", None)
+            else:
+                value["served"] = lease.previous_served
         connection.sync_cursor = {**(connection.sync_cursor or {}), KEY: value}
         connection.save(update_fields=["sync_cursor", "updated_at"])
 
@@ -126,13 +144,21 @@ def discover_once(interval_seconds):
     lease = claim_discovery(interval_seconds)
     if lease is None:
         return False
-    delay, error = 5, ""
+    delay, error, return_turn = DURABLE_POLL_SECONDS, "", False
     try:
         grant = SlackDmMirrorGrant.objects.select_related("connection").get(pk=lease.grant_id)
         with discovery_context(lease):
             dm.discover_conversations(grant)
     except LeaseLost:
         return False
+    except BudgetDeferred as exc:
+        # Local admission pacing is not a provider failure. Keep the exact
+        # shared-budget delay instead of adding thirty seconds to every page.
+        error, delay = type(exc).__name__, exc.retry_after
+        # Initial directory or device-recovery admission can return an unused
+        # turn. Nested deferrals and actual provider 429s consume their turn.
+        return_turn = (exc.before_request_method == "users.conversations"
+                       or getattr(exc, "discovery_admission_deferred", False))
     except Exception as exc:
         error = type(exc).__name__
         delay = max(30, dm._slack_retry_after_seconds(exc))
@@ -142,7 +168,7 @@ def discover_once(interval_seconds):
                 dm.revoke_user_grant(user)
     finally:
         try:
-            finish_discovery(lease, delay_seconds=delay, error_code=error)
+            finish_discovery(lease, delay_seconds=delay, error_code=error, return_turn=return_turn)
         except LeaseLost:
             pass
     return not error

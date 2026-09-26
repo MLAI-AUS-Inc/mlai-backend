@@ -499,26 +499,9 @@ def issue_turn_ticket(turn: CodingTurn) -> IssuedTicket:
     return IssuedTicket(token=token, expires_at=expires_at)
 
 
-def user_has_pilot_access(user) -> bool:
-    if not user or not getattr(user, "is_authenticated", False) or not user.is_active:
-        return False
-    if getattr(user, "is_superuser", False):
-        return True
-    user_ids = {
-        str(item).strip().lower()
-        for item in getattr(settings, "MLAI_CODING_PILOT_USER_IDS", [])
-        if str(item).strip()
-    }
-    emails = {
-        str(item).strip().lower()
-        for item in getattr(settings, "MLAI_CODING_PILOT_EMAILS", [])
-        if str(item).strip()
-    }
-    return (
-        str(user.community_chat_profile_id).lower() in user_ids
-        or str(user.id).lower() in user_ids
-        or str(user.email).lower() in emails
-    )
+def user_can_use_coding(user) -> bool:
+    """Allow active authenticated accounts to use Roo-funded Coding turns."""
+    return bool(user and getattr(user, "is_authenticated", False) and user.is_active)
 
 
 def _turn_outstanding_microroo(turn: CodingTurn, *, exclude_call_id=None) -> int:
@@ -622,14 +605,14 @@ def _expire_active_turn(turn: CodingTurn, *, now) -> bool:
 
 @transaction.atomic
 def create_turn(*, user, account_session, idempotency_key, local_session_id, model) -> tuple[CodingTurn, bool]:
-    if not user_has_pilot_access(user):
+    if not user_can_use_coding(user):
         raise CodingError(
-            "pilot_access_required",
-            "MLAI Coding is currently available to pilot members only.",
+            "coding_access_required",
+            "An active MLAI account is required to use Coding.",
             http_status=403,
         )
     if model != "kimi-k3":
-        raise CodingError("unsupported_model", "Only kimi-k3 is available during the pilot.")
+        raise CodingError("unsupported_model", "Only kimi-k3 is available for Coding.")
     idem = _uuid(idempotency_key, "idempotency_key")
     local_id = _uuid(local_session_id, "local_session_id")
     if account_session is None or account_session.user_id != user.id:
@@ -689,7 +672,8 @@ def create_turn(*, user, account_session, idempotency_key, local_session_id, mod
         account = PointsAccount.objects.create(user=user)
         account = PointsAccount.objects.select_for_update().get(user=user)
     PointsService._ensure_microroo_account(account)
-    available = account.balance_microroo
+    from .digital_points import spendable_balance
+    available = spendable_balance(account)
     if available <= 0:
         raise CodingError(
             "insufficient_points",
@@ -959,7 +943,7 @@ def settle_call(
                 "That call was already settled with different usage.",
                 http_status=409,
             )
-        balance = PointsService.get_balance(turn.user)["balance_microroo"]
+        balance = PointsService.get_balance(turn.user)["digital_service_balance_microroo"]
         return call, False, balance, turn_remaining_microroo(turn)
     if call.status == CodingModelCall.Status.RELEASED:
         _record_released_settlement_audit(
@@ -973,7 +957,7 @@ def settle_call(
         # The 24-hour release is authoritative. A delayed durable outbox
         # report is acknowledged for audit only and can never charge, settle,
         # or reopen this call.
-        balance = PointsService.get_balance(turn.user)["balance_microroo"]
+        balance = PointsService.get_balance(turn.user)["digital_service_balance_microroo"]
         return call, False, balance, turn_remaining_microroo(turn)
     same_rejected_report = (
         call.status == CodingModelCall.Status.AMBIGUOUS
@@ -988,7 +972,7 @@ def settle_call(
         # Reconciliation may have released the hold before a delayed gateway
         # outbox replay arrives. The identical rejected report is still a
         # terminal acknowledgement and must not become an immortal outbox job.
-        balance = PointsService.get_balance(turn.user)["balance_microroo"]
+        balance = PointsService.get_balance(turn.user)["digital_service_balance_microroo"]
         return call, False, balance, turn_remaining_microroo(turn)
     # The gateway admits a padded estimate of the normalized request, including
     # chat/tool framing and image overhead, and clamps output against both Roo
@@ -1034,7 +1018,7 @@ def settle_call(
                 "updated_at",
             )
         )
-        balance = PointsService.get_balance(turn.user)["balance_microroo"]
+        balance = PointsService.get_balance(turn.user)["digital_service_balance_microroo"]
         return call, True, balance, turn_remaining_microroo(turn)
 
     calculated = calculate_charge_microroo(
@@ -1051,7 +1035,8 @@ def settle_call(
         - _turn_outstanding_microroo(turn, exclude_call_id=call.id),
         0,
     )
-    charge = min(calculated, capacity, account.balance_microroo)
+    from .digital_points import spendable_balance
+    charge = min(calculated, capacity, spendable_balance(account))
     if charge <= 0 and calculated > 0:
         raise CodingError(
             "reservation_exhausted",
@@ -1103,7 +1088,7 @@ def settle_call(
     turn.save(update_fields=("settled_microroo", "updated_at"))
     _complete_reconciling_turn_if_ready(turn, now=now)
     account.refresh_from_db()
-    return call, True, account.balance_microroo, turn_remaining_microroo(turn)
+    return call, True, spendable_balance(account), turn_remaining_microroo(turn)
 
 
 @transaction.atomic

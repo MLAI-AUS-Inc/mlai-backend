@@ -15,6 +15,14 @@ services so adding a service without including it in stop/rollback handling fail
 | Bridge | bridge-worker, bridge-reconciler, bridge-retention | Existing bridge enablement and adapter credential checks |
 | Analytics | analytics-sync | Existing complete analytics configuration checks |
 | Committee | committee-remuneration | COMMITTEE_REMUNERATION_ENABLED evaluates to true |
+| Handoff | web-candidate | Explicitly managed during code-only web handoff |
+
+Code-only releases keep writers serving during checks and use the
+[two-slot web handoff](backend-api-web-handoff.md) for replacement. The candidate
+is not part of normal runtime startup. Disabled committee remuneration is
+stopped and removed even during a code-only release. On code-only rollback,
+newly introduced writers with no prior image are stopped before restoring the
+previous runtime.
 
 All application writers participate in deployment's stop and rollback inventory,
 including optional services that were running before a configuration change.
@@ -108,12 +116,19 @@ Tests requiring their own standalone settings should use their documented
 runner, as the editorial unit lane does. Database-backed tests still require
 specific migration approval before local execution.
 
-For the migration set explicitly approved on 14 September 2026,
-`scripts/test_refactor_database.py` verifies every historical migration hash
-before applying anything. It creates its own temporary PostgreSQL cluster with
-Unix-socket access only, or a new temporary SQLite database, with synthetic
-settings and dotenv disabled. `--replay` additionally seeds historical plaintext
-at content_factory.0038 and advances through the two approved credential
-migrations. It never accepts a database URL and removes its temporary database
-files after stopping the cluster. This is a scoped validation tool, not standing
-approval for future migrations or any existing database.
+The proposed [26 September disposable-test inventory](refactor-release-test-migrations-2026-09-26.json)
+is enforced by `scripts/test_refactor_database.py`. The harness requires recorded
+approval, an exact file set and SHA-256 match (including the new migrations), and
+a graph without conflicting leaves. Until the proposed scope is approved, the
+harness refuses replay. The previous September inventories remain historical
+records; they do not cover the current integrated graph.
+
+After that scope is approved, the harness creates its own temporary PostgreSQL
+cluster with Unix-socket access only, or a fresh temporary SQLite database, with
+synthetic settings, dotenv disabled and external networking blocked. `--replay`
+seeds plaintext at Content Factory 0038; `--replay-from-main` instead seeds an
+existing 0041 editorial record, preserves that branch while applying credential
+compatibility, and verifies the final merge leaves both editorial content and
+encrypted credentials intact. Run the two modes in separate invocations. The
+harness rejects existing database URLs and removes its database files after
+stopping the cluster. This remains scoped test approval, not production approval.

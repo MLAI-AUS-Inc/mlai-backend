@@ -46,7 +46,7 @@ def founder_metric_changes(incoming, snapshot_metrics, previous=None):
     changes = {}
     for key, value in incoming.items():
         metric = by_key.get(key, {})
-        locked = key in FINANCIAL_KEYS or metric.get("source_provider") in FINANCIAL_PROVIDERS
+        locked = key in FINANCIAL_KEYS or metric.get("source_provider") in FINANCIAL_PROVIDERS | {"google_analytics", "luma"}
         if locked:
             if _same_value(value, metric):
                 continue
@@ -56,7 +56,7 @@ def founder_metric_changes(incoming, snapshot_metrics, previous=None):
                 source = "a financial connection"
             label = metric.get("label") or key
             raise FinancialMetricEditError(
-                f"{label} is read-only. Update {source} and refresh the draft to change financial figures."
+                f"{label} is read-only. Update {source} and refresh the draft to change imported figures."
             )
         if not _same_value(value, metric) and (previous or {}).get(key) != value:
             changes[key] = value

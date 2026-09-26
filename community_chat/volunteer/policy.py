@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal, DecimalException
 from zoneinfo import ZoneInfo
 
-VERSION = "mlai-volunteer-v3"
+VERSION = "mlai-volunteer-v4"
 MICROROO = 1_000_000
 MELBOURNE = ZoneInfo("Australia/Melbourne")
 LEVELS = (
@@ -151,7 +151,7 @@ def period_bounds(occurred_at, period):
 
 
 def catalogue(monthly_reward=20):
-    """Return all 17 templates; configured monthly reward remains authoritative."""
+    """Return current templates; configured monthly reward remains authoritative."""
     rows = (
         (
             "introduce_yourself",
@@ -323,19 +323,6 @@ def catalogue(monthly_reward=20):
             None,
         ),
         (
-            "proofread",
-            "Proofread a short page or announcement",
-            "Give the owner a useful review or corrections.",
-            3,
-            3,
-            True,
-            "deliverable",
-            1,
-            "proofread",
-            "human",
-            None,
-        ),
-        (
             "event_recap",
             "Write an event recap",
             "Create a short, useful recap accepted by the content lead.",
@@ -349,15 +336,17 @@ def catalogue(monthly_reward=20):
             None,
         ),
         (
-            "test_ai_tutorial",
-            "Test a beginner AI tutorial",
-            "Complete the tutorial and share an accepted test log.",
-            6,
-            6,
-            True,
+            "newsletter_article",
+            "Write an article for the MLAI newsletter",
+            "Submit a funny or interesting article for the MLAI newsletter. "
+            "Earn 12 Roo Points if your article is published in the newsletter. "
+            "The team confirms publication before awarding points.",
+            12,
+            12,
+            False,
             "deliverable",
             1,
-            "tutorial",
+            "newsletter_article",
             "human",
             None,
         ),

@@ -92,7 +92,7 @@ class VolunteerPolicyTests(unittest.TestCase):
 
     def test_catalogue_and_verified_checklist(self):
         actions = catalogue(20)
-        self.assertEqual(len(actions), 17)
+        self.assertEqual(len(actions), 16)
         self.assertEqual(actions["monthly_learning_update"]["reward_roo"], "20")
         self.assertEqual(actions["buy_merch"]["reward_roo"], "0")
         self.assertEqual(
@@ -110,3 +110,16 @@ class VolunteerPolicyTests(unittest.TestCase):
         self.assertNotIn(
             "introduce_yourself", [item["key"] for item in next_actions(candidates)]
         )
+
+    def test_newsletter_publication_replaces_retired_activities(self):
+        actions = catalogue()
+        self.assertNotIn("proofread", actions)
+        self.assertNotIn("test_ai_tutorial", actions)
+        article = actions["newsletter_article"]
+        self.assertEqual(article["reward_roo"], "12")
+        self.assertEqual(article["reward_max_roo"], "12")
+        self.assertEqual(article["verification"], "human")
+        self.assertEqual(article["period"], "deliverable")
+        self.assertEqual(article["cap"], 1)
+        self.assertFalse(article["requires_attendance"])
+        self.assertIn("published in the newsletter", article["description"])

@@ -7,6 +7,11 @@ def validate(env):
     enabled = env.get("MESSAGE_SYNC_ENABLED", "false").lower()
     if enabled not in {"true", "false"}:
         raise ValueError("MESSAGE_SYNC_ENABLED must be true or false")
+    inventory_enabled = env.get("SLACK_OWNER_INVENTORY_ENABLED", "false").lower()
+    if inventory_enabled not in {"true", "false"}:
+        raise ValueError("SLACK_OWNER_INVENTORY_ENABLED must be true or false")
+    if inventory_enabled == "true" and enabled != "true":
+        raise ValueError("SLACK_OWNER_INVENTORY_ENABLED requires MESSAGE_SYNC_ENABLED=true")
     user_app = env.get("MESSAGE_SYNC_SLACK_USER_APP_ID", "")
     if user_app:
         if not re.fullmatch(r"A[A-Z0-9]+", user_app) or not re.fullmatch(r"[0-9a-f]{32}", env.get("MESSAGE_SYNC_SLACK_USER_SIGNING_SECRET", "")):

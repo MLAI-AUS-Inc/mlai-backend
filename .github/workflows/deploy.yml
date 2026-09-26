@@ -5,11 +5,19 @@ on:
     branches: [ main ]
   push:
     branches: [ main ]
+  workflow_dispatch:
 
 permissions:
   actions: read
   contents: read
   pull-requests: read
+
+# Main push and manual releases share one concurrency group so they cannot
+# mutate the droplet together. PR checks use their commit SHA so an obsolete
+# run cannot block validation of a newer patch on the same PR.
+concurrency:
+  group: mlai-backend-deploy-${{ github.event_name == 'pull_request' && github.sha || github.ref }}
+  cancel-in-progress: false
 
 jobs:
   # Pull requests run the configured regression lanes and record the exact Git tree that
@@ -43,14 +51,27 @@ jobs:
     - uses: actions/checkout@v6
 
     - name: Validate deployment shell syntax
-      run: bash -n deploy.sh
+      run: |
+        bash -n deploy.sh
+        bash -n ops/backend-api/switch-web-upstream.sh
 
     - uses: actions/setup-python@v6
       with:
         python-version: "3.11"
 
+    - name: Install Nginx for isolated web handoff test
+      run: |
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq --no-install-recommends nginx
+
+    - name: Verify release freshness and live web route flip
+      run: python -m unittest tests.test_deploy_release_freshness tests.test_backend_web_handoff -v
+
     - name: Test deployment failure handling and live contract
-      run: python -m unittest tests.test_deploy_runtime_checks tests.test_message_sync_deploy_config -v
+      run: python -m unittest tests.test_deploy_runtime_checks tests.test_message_sync_deploy_config tests.test_slack_owner_inventory_deploy_config tests.test_tech_volunteers_bridge_workflow tests.test_victor_ai_founder_games_bridge_workflow -v
+
+    - name: Check jobs delivery contracts without database access
+      run: python -m unittest tests.test_jobs_delivery_unit -v
 
     - name: Install dependencies
       run: |
@@ -62,7 +83,26 @@ jobs:
       run: python scripts/check_test_assignment.py
 
     - name: Run isolated refactor checks without database access
-      run: python scripts/test_without_database.py tests.test_refactor_unit tests.test_refactor_django_unit roo.test_event_ticket_price
+      run: python scripts/test_without_database.py tests.test_refactor_unit tests.test_refactor_django_unit tests.test_refactor_migration_inventory roo.test_event_ticket_price
+
+    - name: Check unified DM directory without database access
+      run: python scripts/test_without_database.py community_chat.tests.test_unified_dm_directory_unit
+
+    - name: Check Slack conversation opening without database access
+      run: python scripts/test_without_database.py community_chat.tests.test_slack_inventory_openable community_chat.tests.test_slack_open_requests
+
+    - name: Run no-database editorial contract checks
+      run: |
+        python -m unittest \
+          content_factory.tests_customer_profile_flow_unit \
+          content_factory.tests_editorial_catalog_unit \
+          content_factory.tests_editorial_catalog_api_unit \
+          content_factory.tests_editorial_dispatch_unit \
+          content_factory.tests_editorial_snapshot_unit \
+          content_factory.tests_editorial_revision_unit \
+          content_factory.tests_article_admission_notice_unit \
+          content_factory.test_reliability_contract \
+          content_factory.tests_hosted_quality_issues_unit
 
     - name: Check migrations are committed
       run: python manage.py makemigrations --check --dry-run
@@ -127,7 +167,7 @@ jobs:
         COMMUNITY_CHAT_RELAY_URL: wss://chat.mlai.au
         COMMUNITY_CHAT_ADAPTER_URL: http://10.126.0.9:3100
         COMMUNITY_CHAT_EMAIL_CODE_AUTH_ENABLED: "true"
-        COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED: "false"
+        COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED: "true"
         COMMUNITY_CHAT_DEVICE_AUTH_ENABLED: "true"
         CUSTOMERIO_COMMUNITY_CHAT_CODE_MESSAGE_ID: mlai_chat_sign_in_code
         CUSTOMERIO_API_KEY: ci-customerio-api-key-placeholder
@@ -161,14 +201,29 @@ jobs:
     - name: Verify private Slack delivery payloads without database access
       run: python -m unittest integrations.tests_slack_dm_payload_contract integrations.tests_slack_catalog_queries integrations.tests_slack_history_scheduling integrations.tests_slack_recent_activity -v
 
+    - name: Check My startup account contracts without database access
+      run: python scripts/test_without_database.py founder_tools.my_startup.tests
+
+    - name: Check message coverage and content workflow contracts without database access
+      run: |
+        python scripts/test_without_database.py \
+          integrations.tests_read_coverage \
+          integrations.tests_slack_shared_conversation_policy \
+          tests.test_daily_research_policy_unit \
+          tests.test_vibe_marketing_bootstrap_performance
+
     - name: Run targeted Django tests
       run: |
         python manage.py test \
+          founder_tools.my_startup.test_database \
           roo.tests_office_manager_channel \
           roo.tests_api.TaskViewSetTests \
           roo.tests_api.CoworkingViewSetTests \
+          tests.test_coworking_snapshot \
           roo.tests.CoworkingBookingAdminSafetyTests \
           roo.tests_kimi_usage \
+          roo.tests_apple_iap \
+          roo.test_apple_verification \
           roo.tests_meeting_rooms \
           core.tests.test_auth_contract \
           core.tests.test_auth_session \
@@ -207,10 +262,31 @@ jobs:
           tests.test_content_factory_callback_idempotency \
           tests.test_content_factory_reconciliation \
           tests.test_content_factory_status_contract \
+          content_factory.tests_section_issues_unit \
+          content_factory.tests_article_publish_approval_unit \
+          tests.test_vibe_marketing_component_comments.VibeMarketingComponentCommentTests.test_failed_package_review_draft_can_submit_section_deletion \
+          tests.test_vibe_marketing_component_comments.VibeMarketingComponentCommentTests.test_approve_preview_ready_article_creates_local_publish_child_run \
+          tests.test_vibe_marketing_component_comments.VibeMarketingComponentCommentTests.test_approve_propagates_content_factory_conflict_and_keeps_review_state \
+          tests.test_vibe_marketing_component_comments.VibeMarketingComponentCommentTests.test_unapproved_article_cannot_promote_or_publish_pr_directly \
+          tests.test_vibe_marketing_component_comments.VibeMarketingComponentCommentTests.test_proofless_approval_and_forged_receipt_cannot_publish \
+          tests.test_vibe_marketing_component_comments.VibeMarketingComponentCommentTests.test_approve_article_records_receipt_for_exact_review \
+          tests.test_vibe_marketing_component_comments.VibeMarketingComponentCommentTests.test_failed_article_approval_does_not_record_receipt \
+          tests.test_vibe_marketing_component_comments.VibeMarketingComponentCommentTests.test_older_approved_run_cannot_promote_unapproved_latest_revision \
+          tests.test_vibe_marketing_component_comments.VibeMarketingComponentCommentTests.test_older_source_cannot_approve_newer_review_ready_revision \
+          tests.test_vibe_marketing_component_comments.VibeMarketingComponentCommentTests.test_failed_intermediate_does_not_hide_newest_revision_from_approve \
+          tests.test_vibe_marketing_component_comments.VibeMarketingComponentCommentTests.test_failed_intermediate_does_not_allow_stale_promote_retry \
+          tests.test_vibe_marketing_component_comments.VibeMarketingComponentCommentTests.test_existing_publish_child_approval_does_not_need_article_preview_proof \
+          tests.test_vibe_marketing_component_comments.VibeMarketingComponentCommentTests.test_changed_preview_commit_invalidates_promotion_receipt \
+          tests.test_vibe_marketing_component_comments.VibeMarketingComponentCommentTests.test_regressed_preview_quality_blocks_receipt_based_promote_retry \
+          tests.test_vibe_marketing_workflow_progress_unit \
           content_factory.tests_admin_metrics \
           tests.test_community_bridge_adapter_url \
           community_chat.tests.test_account_sessions \
+          community_chat.tests.test_session_device_binding \
           community_chat.tests.test_account_profiles.AccountProfileTests \
+          community_chat.tests.test_account_privacy.AccountPrivacyTests \
+          community_chat.tests.test_deletion_tasks \
+          community_chat.tests.test_onboarding.MemberOnboardingTests \
           community_chat.tests.test_adapter \
           community_chat.tests.test_api \
           community_chat.tests.test_device_auth \
@@ -219,11 +295,17 @@ jobs:
           community_chat.tests.test_message_references \
           community_chat.tests.test_preview_image_negotiation \
           community_chat.tests.test_slack_read_state \
+          community_chat.tests.test_slack_owner_inventory \
+          community_chat.tests.test_slack_open_requests \
+          community_chat.tests.test_slack_channel_refresh \
           community_chat.tests.test_token_usage \
           community_chat.tests.test_tokenmaxer_federation \
           community_chat.tests.test_home \
           community_chat.tests.test_roo_slack_dm \
           community_chat.tests.test_roo_channel_mentions \
+          community_chat.tests.test_slack_mentions \
+          community_chat.tests.test_workspace_mentions_unit \
+          community_chat.tests.test_account_bans \
           community_chat.tests.test_password_auth \
           community_chat.tests.test_slack_dm_ineligible_retirement \
           community_chat.tests.test_slack_dm_io_authority \
@@ -245,10 +327,12 @@ jobs:
           integrations.tests_slack_emoji \
           integrations.tests_community_bridge \
           integrations.tests_coworking_handoff \
+          integrations.tests_public_bridge_consent \
           integrations.tests_community_bridge_avatar_backfill \
           integrations.tests_community_bridge_mention_backfill \
           integrations.tests_community_bridge_contracts \
           core.tests.test_auth_contract \
+          core.tests.test_account_ban_guards \
           tests.test_runtime_hardening \
           tests.test_scheduled_discovery_operability \
           tests.test_ci_reuse_pr_checks \
@@ -256,6 +340,8 @@ jobs:
           integrations.tests_github_installation_reconciliation \
           integrations.tests_github_app_probe \
           integrations.tests_connectors \
+          vibe_raising.tests_progress_contract \
+          vibe_raising.tests_progress_api \
           integrations.tests_slack_connector_authority \
           integrations.tests_startup_updates.StartupUpdateSlackBackfillViewTest \
           vibe_raising.tests.VibeRaisingApiTests.test_startup_update_run_maps_create_authority_error_to_connector_auth_response \
@@ -271,6 +357,8 @@ jobs:
           tests.test_teardown_company \
           tests.test_editorial_learning_loop \
           startup_updates.tests_monthly_update_reminders \
+          community_chat.tests.test_startup_updates \
+          community_chat.tests.test_startup_updates_database \
           startup_updates.tests_evidence_contract \
           startup_updates.tests_source_evidence \
           startup_updates.tests_reporting_canaries \
@@ -384,11 +472,23 @@ jobs:
       run: |
         python manage.py test \
           integrations.tests_message_sync_unit \
+          integrations.tests_message_sync_throughput \
+          integrations.tests_message_sync_capacity \
           integrations.tests_message_sync_configuration \
           integrations.tests_message_sync_transactions \
           integrations.tests_message_sync_scheduler \
           integrations.tests_message_sync_discovery \
+          integrations.tests_message_sync_discovery_worker \
+          integrations.tests_message_sync_read_state \
+          integrations.tests_message_sync_read_priority \
+          integrations.tests_slack_discovery_progress \
+          integrations.tests_slack_discovery_progress_authority \
           integrations.tests_message_sync_history \
+          integrations.tests_message_sync_recovery \
+          integrations.tests_message_sync_device_recovery \
+          integrations.tests_message_sync_device_audience \
+          integrations.tests_slack_private_target_boundaries \
+          integrations.tests_slack_import_readiness \
           integrations.tests_message_sync_public_repair \
           --verbosity 2
 
@@ -400,6 +500,11 @@ jobs:
         python manage.py test \
           community_chat.tests.test_api.CommunityChatDeviceAuthorityTransactionTests \
           community_chat.tests.test_account_profiles.AccountProfileConcurrencyTests \
+          community_chat.tests.test_account_privacy.AccountPrivacyConcurrencyTests \
+          roo.tests_apple_iap.AppleConcurrencyTests \
+          community_chat.tests.test_onboarding.MemberOnboardingConcurrencyTests \
+          integrations.tests_coworking_handoff.CoworkingConsentConcurrencyTests \
+          integrations.tests_public_bridge_consent.PublicBridgeConsentConcurrencyTests \
           community_chat.tests.test_volunteer_backfill.HistoricalBonusBackfillTests \
           community_chat.tests.test_volunteer_concurrency \
           roo.tests_api.FirstChannelPostAwardConcurrencyTests \
@@ -464,10 +569,14 @@ jobs:
           org_memory.tests.test_migrations \
           content_factory.tests_github_credential_migrations \
           integrations.tests_financial_record_ownership \
+          content_factory.tests_customer_profile_persistence \
+          content_factory.tests_article_publish_status \
+          content_factory.tests_written_article_discard \
+          roo.tests_apple_migrations \
           --verbosity 2
 
   deploy:
-    if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.validation-route.result == 'success' && (needs.validation-route.outputs.reuse_pr_checks == 'true' || (needs.checks.result == 'success' && needs.postgres-search.result == 'success' && needs.migration-tests.result == 'success')) }}
+    if: ${{ always() && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main' && needs.validation-route.result == 'success' && (needs.validation-route.outputs.reuse_pr_checks == 'true' || (needs.checks.result == 'success' && needs.postgres-search.result == 'success' && needs.migration-tests.result == 'success')) }}
     runs-on: ubuntu-latest
     needs: [validation-route, checks, postgres-search, migration-tests]
     steps:
@@ -506,7 +615,9 @@ jobs:
         COMMUNITY_CHAT_EMAIL_CODE_DELIVERY_SECRET: ${{ secrets.COMMUNITY_CHAT_EMAIL_CODE_DELIVERY_SECRET }}
         COMMUNITY_CHAT_ADAPTER_TOKEN: ${{ secrets.COMMUNITY_CHAT_ADAPTER_TOKEN }}
         COMMUNITY_CHAT_ADAPTER_URL: ${{ vars.COMMUNITY_CHAT_ADAPTER_URL }}
+        COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED: ${{ vars.COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED || 'false' }}
         MESSAGE_SYNC_ENABLED: ${{ vars.MESSAGE_SYNC_ENABLED || 'false' }}
+        SLACK_OWNER_INVENTORY_ENABLED: ${{ vars.SLACK_OWNER_INVENTORY_ENABLED || 'false' }}
         MESSAGE_SYNC_SLACK_APP_ID: ${{ vars.MESSAGE_SYNC_SLACK_APP_ID }}
         MESSAGE_SYNC_SLACK_APP_TOKEN: ${{ secrets.MESSAGE_SYNC_SLACK_APP_TOKEN }}
         MESSAGE_SYNC_SLACK_USER_APP_ID: ${{ vars.MESSAGE_SYNC_SLACK_USER_APP_ID }}

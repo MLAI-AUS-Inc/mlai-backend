@@ -1,5 +1,6 @@
 from django.urls import path
 
+from .my_startup.handoff import CreateStartupHandoffView
 from .views import (
     FounderToolsActiveCompanyView,
     FounderToolsBootstrapView,
@@ -11,6 +12,7 @@ from .views import (
 
 
 urlpatterns = [
+    path("my-startup-handoff/", CreateStartupHandoffView.as_view(), name="my-startup-handoff"),
     path("bootstrap/", FounderToolsBootstrapView.as_view(), name="founder-tools-bootstrap"),
     path("profile/", FounderToolsProfileView.as_view(), name="founder-tools-profile"),
     path("companies/", FounderToolsCompanyView.as_view(), name="founder-tools-companies"),

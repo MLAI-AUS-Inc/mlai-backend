@@ -301,6 +301,9 @@ def configure_storage_cors(origins=None):
     allowed_origins = origins or [
         "https://mlai.au",
         "https://www.mlai.au",
+        "https://chat.mlai.au",
+        "tauri://localhost",
+        "http://tauri.localhost",
         "http://localhost:3000",
         "http://localhost:5173",
     ]

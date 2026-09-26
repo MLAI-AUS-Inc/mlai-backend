@@ -55,6 +55,99 @@ from integrations.services.research_automations import (
 from organizations.models import Organization
 
 
+class DailyResearchPolicyTests(TestCase):
+    def setUp(self):
+        self.now = timezone.now()
+        self.org = Organization.objects.create(name="Daily", domain="daily-policy.test")
+        self.config = OrganizationContentConfig.objects.create(organization=self.org, daily_discovery_enabled=True)
+        self.channel = NotificationChannel.objects.create(organization=self.org, channel_type="whatsapp", route_id="+61400000001", consent_state="active")
+        self.automation = ResearchAutomation.objects.create(organization=self.org, notification_channel=self.channel,
+            timezone="Australia/Melbourne", metadata={"daily_research": {"last_engaged_at": (self.now - timedelta(days=10)).isoformat()}})
+        ResearchAutomation.objects.filter(pk=self.automation.pk).update(created_at=self.now - timedelta(days=10))
+        self.automation.refresh_from_db()
+
+    def sent(self, days_ago, *, slot=0, sent=True, preference_ids=None):
+        when = self.now - timedelta(days=days_ago)
+        run = AutomationRun.objects.create(automation=self.automation, scheduled_for_at=when, local_date=when.date(),
+            slot_index=slot, idempotency_key=f"{days_ago}:{slot}", status="topic_selection_sent")
+        NotificationDelivery.objects.create(automation_run=run, channel=self.channel, event_type="topic_selection",
+            idempotency_key=f"delivery:{days_ago}:{slot}", status="sent" if sent else "failed", delivered_at=when if sent else None,
+            request_payload={"options": [{"keyword": "compost"}], "daily_preference_ids": preference_ids or []})
+        return run
+
+    def test_three_delivered_days_pause_research_and_late_callback_before_fourth_send(self):
+        from integrations.services.daily_research_policy import pause_if_unanswered
+        for day in [1, 2, 3]: self.sent(day)
+        queued = AutomationRun.objects.create(automation=self.automation, scheduled_for_at=self.now, local_date=self.now.date(), idempotency_key="today")
+        self.assertTrue(pause_if_unanswered(self.org, now=self.now))
+        self.automation.refresh_from_db(); self.config.refresh_from_db(); queued.refresh_from_db()
+        self.assertEqual(self.automation.status, "paused")
+        self.assertFalse(self.config.daily_discovery_enabled)
+        self.assertEqual(queued.status, "cancelled")
+        with patch("integrations.services.notification_adapters._fan_out_event") as send:
+            self.assertEqual(send_topic_selection({"notification_context": notification_context_for_run(queued), "selection": {"options": [{"keyword": "new"}]}}), [])
+            send.assert_not_called()
+        self.assertEqual(ensure_due_automation_runs(now=self.now), [])
+
+    def test_failed_manual_and_same_day_deliveries_do_not_inflate_missed_days(self):
+        from integrations.services.daily_research_policy import pause_if_unanswered
+        self.sent(1); self.sent(1, slot=1); self.sent(2, sent=False); self.sent(3, slot=100)
+        self.assertFalse(pause_if_unanswered(self.org, now=self.now))
+
+    def test_response_resets_window_and_resumes_auto_pause_but_not_manual_pause(self):
+        from integrations.services.daily_research_policy import pause_if_unanswered, record_engagement, record_manual_pause
+        for day in [1, 2, 3]: self.sent(day)
+        self.assertTrue(pause_if_unanswered(self.org, now=self.now))
+        record_engagement(self.org, resume=True, now=self.now)
+        self.automation.refresh_from_db()
+        self.assertEqual(self.automation.status, "active")
+        self.assertFalse(pause_if_unanswered(self.org, now=self.now + timedelta(hours=1)))
+        record_manual_pause(self.org)
+        record_engagement(self.org, resume=True, now=self.now + timedelta(hours=2))
+        self.automation.refresh_from_db()
+        self.assertEqual(self.automation.status, "paused")
+
+    def test_only_successful_delivery_consumes_preference_and_cooldown_expires(self):
+        from integrations.services.daily_research_policy import daily_topic_policy
+        from workflow_runs.models import ContentFactoryRun
+        ContentFactoryRun.objects.create(run_id="my-island", organization=self.org, workflow="island_refresh", status="completed",
+            result={"island_research_selection": {"daily_priority_events": [{"id": "new-island", "created_at": self.now.isoformat(), "keywords": ["compost"]}]}})
+        current = self.sent(0, sent=False, preference_ids=["new-island"])
+        policy = daily_topic_policy(current, now=self.now)
+        self.assertEqual(policy["recent_topics"], [])
+        self.assertEqual([p["id"] for p in policy["preferences"]], ["new-island"])
+        NotificationDelivery.objects.filter(automation_run=current).update(status="sent", delivered_at=self.now)
+        policy = daily_topic_policy(current, now=self.now)
+        self.assertEqual(policy["preferences"], [])
+        self.assertEqual(policy["recent_topics"][0]["keyword"], "compost")
+        self.assertEqual(daily_topic_policy(current, now=self.now + timedelta(days=8))["recent_topics"], [])
+
+    def test_custom_topics_and_existing_selections_exclude_unchosen_and_other_startups(self):
+        from integrations.services.daily_research_policy import daily_topic_policy
+        from workflow_runs.models import ContentFactoryRun
+        ContentFactoryRun.objects.create(run_id="custom-seed", organization=self.org, workflow="auto_discovery", status="completed",
+            run_request={"custom_topic_keyword": "balcony gardens"})
+        ContentFactoryRun.objects.create(run_id="existing-selection", organization=self.org, workflow="island_refresh", status="completed",
+            result={"island_research_selection": {"selected_ids": ["chosen"]}, "suggested_islands": [
+                {"id": "chosen", "keywords": [{"keyword": "compost"}]}, {"id": "unchosen", "keywords": [{"keyword": "cars"}]}]})
+        other = Organization.objects.create(name="Other", domain="other-policy.test")
+        ContentFactoryRun.objects.create(run_id="other-seed", organization=other, workflow="auto_discovery", status="completed",
+            run_request={"custom_topic_keyword": "cars"})
+        preferences = daily_topic_policy(self.sent(0, sent=False), now=self.now)["preferences"]
+        self.assertEqual({k for p in preferences for k in p["keywords"]}, {"balcony gardens", "compost"})
+
+    def test_direct_custom_island_gets_one_preference_without_double_counting_managed_islands(self):
+        from integrations.services.daily_research_policy import daily_topic_policy
+        from content_factory.models import ContentIsland
+        from workflow_runs.models import ContentFactoryRun
+        ContentIsland.objects.create(organization=self.org, slug="direct", name="Direct", pillar_keyword="gardening", origin="manual", status="visible")
+        ContentIsland.objects.create(organization=self.org, slug="managed", name="Managed", pillar_keyword="compost", origin="manual", status="visible")
+        ContentFactoryRun.objects.create(run_id="managed-owner", organization=self.org, workflow="island_refresh", status="completed",
+            result={"island_research_selection": {"managed_slugs": ["managed"]}})
+        policy = daily_topic_policy(self.sent(0, sent=False), now=self.now)
+        self.assertEqual([p["keywords"] for p in policy["preferences"]], [["gardening"]])
+
+
 class _Response:
     def __init__(self, status_code=202, payload=None):
         self.status_code = status_code

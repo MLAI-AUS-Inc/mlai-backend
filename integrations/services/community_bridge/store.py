@@ -178,6 +178,13 @@ def ingest_inbound_event(
 
     target_platform = _target_platform(channel=channel, source_platform=source_platform)
     if (
+        source_platform == CommunityBridgePlatform.SLACK
+        and target_platform == CommunityBridgePlatform.BUZZ
+        and normalized_event["delivery_type"] == CommunityBridgeDeliveryType.CREATE
+        and _public_source_already_created(channel, normalized_event)
+    ):
+        return _mark_receipt_ignored(receipt, reason="duplicate_source_message")
+    if (
         normalized_event["delivery_type"]
         in {
             CommunityBridgeDeliveryType.REACTION_ADD,
@@ -724,6 +731,38 @@ def _normalize_slack_reaction(event: dict, *, event_type: str) -> Optional[dict]
     }
 
 
+def _public_source_already_created(channel, event):
+    """Deduplicate callbacks and history by source identity, under the mapping lock.
+
+    Delivery status is deliberately irrelevant: retries must reuse the original
+    frozen envelope, and a deleted source must never be resurrected by history.
+    Explicit operator repair commands enqueue their replacements separately.
+    """
+    source = dict(
+        channel=channel, source_platform=CommunityBridgePlatform.SLACK,
+        source_channel_id=channel.slack_channel_id,
+        source_message_id=event["source_message_id"],
+    )
+    deliveries = CommunityBridgeDelivery.objects.filter(
+        **source, target_platform=CommunityBridgePlatform.BUZZ,
+        target_channel_id=channel.destination_channel_id,
+    )
+    links = CommunityBridgeMessageLink.objects.filter(
+        **source, destination_platform=CommunityBridgePlatform.BUZZ,
+        destination_channel_id=channel.destination_channel_id,
+    )
+    # Slack can promote a previously delivered reply into the channel. Preserve
+    # that explicit broadcast representation, but allow it only once as well.
+    if event.get("source_parent_message_id") and (event.get("metadata") or {}).get("broadcast"):
+        if (deliveries.filter(delivery_type=CommunityBridgeDeliveryType.DELETE).exists()
+                or links.filter(Q(source_deleted_at__isnull=False) | Q(destination_deleted_at__isnull=False)).exists()):
+            return True
+        deliveries = deliveries.filter(payload__metadata__broadcast=True)
+        links = links.filter(source_payload__metadata__broadcast=True)
+    return (deliveries.filter(delivery_type__in=[CommunityBridgeDeliveryType.CREATE,
+                CommunityBridgeDeliveryType.DELETE]).exists() or links.exists())
+
+
 def _get_enabled_channel(*, source_platform: str, channel_id: str) -> Optional[CommunityBridgeChannel]:
     normalized_channel_id = str(channel_id or "").strip()
     if not normalized_channel_id:
@@ -734,7 +773,9 @@ def _get_enabled_channel(*, source_platform: str, channel_id: str) -> Optional[C
     else:
         filters["destination_platform"] = source_platform
         filters["destination_channel_id"] = normalized_channel_id
-    return CommunityBridgeChannel.objects.filter(**filters).first()
+    # Both live callbacks and public history enter the same transaction fence.
+    # A receipt ID alone cannot deduplicate their different IDs for one source.
+    return CommunityBridgeChannel.objects.select_for_update().filter(**filters).first()
 
 
 def _target_platform(*, channel: CommunityBridgeChannel, source_platform: str) -> str:

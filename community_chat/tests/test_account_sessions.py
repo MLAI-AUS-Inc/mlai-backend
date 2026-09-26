@@ -189,6 +189,7 @@ class CommunityChatAccountSessionTests(TestCase):
                 "about",
                 "role",
                 "profile_version",
+                "mentionable",
             },
         )
         self.assertEqual(
@@ -206,6 +207,12 @@ class CommunityChatAccountSessionTests(TestCase):
         self.assertEqual(
             response.data["missing"],
             [pending_key, revoked_unverified_key, inactive_key, unknown_key],
+        )
+        self.assertIs(response.data["profiles"][verified_key]["mentionable"], True)
+        self.assertIs(response.data["profiles"][revoked_verified_key]["mentionable"], False)
+        self.assertEqual(
+            response.data["profiles"][verified_key]["public_id"],
+            response.data["profiles"][revoked_verified_key]["public_id"],
         )
 
     def test_public_profile_batch_requires_an_account_session(self):

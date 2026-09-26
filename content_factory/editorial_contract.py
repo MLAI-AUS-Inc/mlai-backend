@@ -5,10 +5,10 @@ an approval record is not proof of source checking or commercial fulfilment.
 """
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any, Literal, ClassVar
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator, model_serializer
 
 
 def destination(value: str) -> str:
@@ -23,13 +23,43 @@ def destination(value: str) -> str:
     raise ValueError("CTA destination must be a site-relative path or HTTP(S) URL, not a fragment or executable URL")
 
 
-class CTAOptionModel(BaseModel):
+class VersionedEditorialRecord(BaseModel):
+    """V1 serializes byte-equivalently to historical records, including nested dumps.
+
+    Enriched definitions explicitly opt into v2. Never insert new defaults into
+    v1 receipt/admission hashes, or permit enrichment hidden under a v1 hash.
+    """
+    catalog_schema_version: Literal[1, 2] = 1
+    enrichment_fields: ClassVar[set[str]] = set()
+
+    @model_validator(mode="after")
+    def require_enriched_version(self):
+        if self.catalog_schema_version == 1 and any(
+            getattr(self, key) not in (None, "", [], "unspecified", "custom")
+            for key in self.enrichment_fields
+        ):
+            raise ValueError("Customer profile and action details require catalog_schema_version=2")
+        return self
+
+    @model_serializer(mode="wrap")
+    def serialize_version(self, handler):
+        data = handler(self)
+        if self.catalog_schema_version == 1:
+            for key in self.enrichment_fields | {"catalog_schema_version"}:
+                data.pop(key, None)
+        return data
+
+
+class CTAOptionModel(VersionedEditorialRecord):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
     id: str = Field(min_length=1, max_length=100, pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
     title: str = Field(min_length=1)
     body: str = Field(min_length=1)
     button_text: str = Field(min_length=1)
     button_href: str
+    enrichment_fields: ClassVar[set[str]] = {"action_type", "action_description"}
+    action_type: Literal["book_demo", "start_trial", "sign_up", "contact", "buy", "download", "attend", "apply", "custom"] = "custom"
+    action_description: str = Field(default="", max_length=1000)
     audience: str = "general"  # Retained legacy display label; not an approved ICP.
     use_when: str = ""
     cta_component: str = "ArticleCompanyCTA"
@@ -65,9 +95,15 @@ def normalize_cta_options(value: Any) -> list[CTAOptionModel]:
     return result
 
 
-class AudienceOption(BaseModel):
+class AudienceOption(VersionedEditorialRecord):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
     id: str = Field(min_length=1)
+    enrichment_fields: ClassVar[set[str]] = {"name", "description", "pain_points", "desired_outcomes", "knowledge_level"}
+    name: str = Field(default="", max_length=160)
+    description: str = Field(default="", max_length=2000)
+    pain_points: list[str] = Field(default_factory=list, max_length=12)
+    desired_outcomes: list[str] = Field(default_factory=list, max_length=12)
+    knowledge_level: Literal["beginner", "intermediate", "specialist", "unspecified"] = "unspecified"
     reader_task: str = Field(min_length=1)
     constraints: list[str] = Field(default_factory=list)
     exclusions: list[str] = Field(default_factory=list)
@@ -76,6 +112,13 @@ class AudienceOption(BaseModel):
     approved_by: str | None = None
     approved_at: str | None = None
     allow_no_offer: bool = False
+
+
+    @model_validator(mode="after")
+    def complete_customer_definition(self):
+        if self.catalog_schema_version == 2 and (not self.name or not self.description):
+            raise ValueError("Customer profiles require a name and description")
+        return self
 
 
 class ArticleEditorialBrief(BaseModel):
@@ -110,6 +153,59 @@ class ArticleEditorialBrief(BaseModel):
         if any(not item.strip() for item in value):
             raise ValueError("Acceptance criteria cannot be blank")
         return [item.strip() for item in value]
+
+
+class ArticleEditorialAdmission(BaseModel):
+    """An immutable policy observation, never a publication lease or new approval."""
+    model_config = ConfigDict(extra="forbid", revalidate_instances="always")
+    schema_version: Literal["2026-09-11.1", "2026-09-16.1"]
+    checked_at: str
+    domain: str = Field(min_length=1)
+    github_repo: str | None = None
+    brief: ArticleEditorialBrief
+    audience: AudienceOption
+    offer: CTAOptionModel | None
+    selection_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @staticmethod
+    def normalized_domain(value):
+        parts = urlsplit(value if "://" in value else "https://" + value)
+        if (parts.scheme not in {"http", "https"} or not parts.hostname
+                or parts.username or parts.password or parts.port
+                or any(ord(c) < 33 for c in value) or "\\" in value):
+            raise ValueError("Admission requires an exact safe organization domain")
+        host = parts.hostname.lower()
+        return host[4:] if host.startswith("www.") else host
+
+    @model_validator(mode="after")
+    def validate_observation(self):
+        from datetime import datetime
+        import hashlib
+        import json
+        self.normalized_domain(self.domain)
+        if self.schema_version == "2026-09-11.1" and any(
+            item and item.catalog_schema_version != 1 for item in (self.audience, self.offer)
+        ):
+            raise ValueError("Enriched selection requires the v2 admission schema")
+        stamp = datetime.fromisoformat(self.checked_at.replace("Z", "+00:00"))
+        if stamp.tzinfo is None or stamp.utcoffset() is None:
+            raise ValueError("Admission timestamp must include its timezone")
+        resolve_editorial_brief(self.brief, [self.audience], [self.offer] if self.offer else [])
+        selected = {"brief": self.brief.model_dump(mode="json"),
+                    "audience": self.audience.model_dump(mode="json"),
+                    "offer": self.offer.model_dump(mode="json") if self.offer else None}
+        digest = hashlib.sha256(json.dumps(selected, sort_keys=True, ensure_ascii=False, allow_nan=False).encode()).hexdigest()
+        if digest != self.selection_sha256:
+            raise ValueError("Admission selection hash does not match its saved records")
+        return self
+
+    def assert_request(self, brief, domain, github_repo=None):
+        candidate = ArticleEditorialBrief.model_validate(
+            brief.model_dump(mode="json") if hasattr(brief, "model_dump") else brief)
+        if candidate != self.brief or self.normalized_domain(domain) != self.normalized_domain(self.domain):
+            raise ValueError("Admission and original article request disagree")
+        if github_repo and str(github_repo).casefold() != str(self.github_repo or "").casefold():
+            raise ValueError("Admission and article repository disagree")
 
 
 def resolve_editorial_brief(
@@ -180,3 +276,43 @@ def editorial_delivery_metadata(
     ):
         raise ValueError("Delivery CTA does not match the approved offer")
     return {"editorial_brief": brief.model_dump(mode="json")}
+
+
+def resolved_editorial_context(context: Any) -> dict[str, Any]:
+    """One private prompt projection of the selected records, never the catalogue."""
+    def get(key, default=None):
+        return context.get(key, default) if isinstance(context, dict) else getattr(context, key, default)
+    brief = get("editorial_brief")
+    if not brief:
+        return {}
+    brief = ArticleEditorialBrief.model_validate(_editorial_dump(brief))
+    audiences = [AudienceOption.model_validate(_editorial_dump(a)) for a in get("audience_options", [])]
+    offers = normalize_cta_options([_editorial_dump(o) for o in get("cta_options", [])])
+    audience, offer = resolve_editorial_brief(brief, audiences, offers)
+    return {
+        "audience": audience.model_dump(mode="json", exclude={"approved_by", "approved_at", "status"}),
+        "brief": brief.model_dump(mode="json"),
+        "action": offer.model_dump(mode="json", exclude={"approved_by", "approved_at", "status"}) if offer else None,
+        "writing_guidance": "Write for this one reader: match knowledge, terminology, examples, constraints and objections. Complete the reader task before a natural transition to the exact approved action. Do not invent claims or force a sales pitch into every section. No-offer suppresses the company CTA, not useful ungated resources.",
+    }
+
+
+def _editorial_dump(value):
+    return value.model_dump(mode="json") if hasattr(value, "model_dump") else value
+
+
+def editorial_selection_fingerprint(context: Any) -> str:
+    import hashlib
+    import json
+    resolved = resolved_editorial_context(context)
+    return hashlib.sha256(json.dumps(resolved, sort_keys=True, ensure_ascii=False).encode()).hexdigest() if resolved else ""
+
+
+def public_editorial_metadata(brief: Any) -> dict[str, Any]:
+    """Public-safe attribution only; private tasks and approval identities stay internal."""
+    if not brief:
+        return {}
+    brief = ArticleEditorialBrief.model_validate(_editorial_dump(brief))
+    return {"schemaVersion": 2, "audienceId": brief.audience_id,
+            "audienceVersion": brief.audience_version, "actionId": brief.offer_id,
+            "actionVersion": brief.offer_version, "conversionIntent": brief.conversion_intent}

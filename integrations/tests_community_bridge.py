@@ -18,6 +18,7 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 
 from community_chat.models import CommunityChatDevice, DeviceBindingStatus
+from community_chat.tests.privacy_fixtures import PROVIDERS, grant_test_ai_consent
 from integrations.models import (
     CommunityBridgeChannel,
     CommunityBridgeDelivery,
@@ -1105,6 +1106,15 @@ class BuzzCommunityBridgeEventViewTests(TestCase):
         self.assertEqual(delivery.target_platform, CommunityBridgePlatform.SLACK)
         self.assertEqual(delivery.target_channel_id, self.channel.slack_channel_id)
 
+    def test_explicit_slack_mentions_survive_callback_normalization(self):
+        payload = self._message_payload()
+        payload["raw_payload"]["tags"].append(["slack-mention", "UROO", "Roo"])
+        payload["normalized_event"]["text"] = "Hi @Roo"
+        response = self._post(payload)
+        self.assertEqual(response.status_code, 200)
+        delivery = CommunityBridgeDelivery.objects.get()
+        self.assertEqual(delivery.payload["metadata"]["slack_mention_tags"], [["slack-mention", "UROO", "Roo"]])
+
     def test_callback_receipt_is_idempotent(self):
         first = self._post(self._message_payload())
         second = self._post(self._message_payload())
@@ -1792,12 +1802,19 @@ class CommunityBridgeSlackThreadRepairTests(TestCase):
 )
 class BuzzCommunityBridgeWorkerTests(TransactionTestCase):
     def setUp(self):
+        self.ai_settings = override_settings(
+            COMMUNITY_CHAT_AI_PROVIDERS=PROVIDERS,
+            COMMUNITY_CHAT_AI_DISCLOSURE_VERSION="bridge-test-v1",
+        )
+        self.ai_settings.enable()
+        self.addCleanup(self.ai_settings.disable)
         self.user = User.objects.create_user(
             email="alice.bridge@example.com",
             password="Correct-Horse-Bridge-9!",
             slack_id="U123",
             first_name="Alice",
         )
+        grant_test_ai_consent(self.user)
         self.device = CommunityChatDevice.objects.create(
             user=self.user,
             public_key="9" * 64,
@@ -2266,7 +2283,7 @@ class BuzzCommunityBridgeWorkerTests(TransactionTestCase):
             source_message_id=reaction_event_id,
             source_parent_message_id=original_event_id,
             target_channel_id=self.channel.slack_channel_id,
-            payload={"source_author_id": "c" * 64, "text": "👍", "attachments": []},
+            payload={"source_author_id": self.device.public_key, "text": "👍", "attachments": []},
             available_at=timezone.now(),
         )
 
@@ -2289,7 +2306,7 @@ class BuzzCommunityBridgeWorkerTests(TransactionTestCase):
             source_message_id=reaction_event_id,
             source_parent_message_id=original_event_id,
             target_channel_id=self.channel.slack_channel_id,
-            payload={"source_author_id": "c" * 64, "text": "👍", "attachments": []},
+            payload={"source_author_id": self.device.public_key, "text": "👍", "attachments": []},
             available_at=timezone.now(),
         )
         asyncio.run(self.client.process_pending_deliveries_once(limit=5))
@@ -2331,7 +2348,8 @@ class BuzzCommunityBridgeWorkerTests(TransactionTestCase):
 
         delivery.refresh_from_db()
         self.assertEqual(delivery.status, CommunityBridgeDeliveryStatus.COMPLETED)
-        self.assertIn("Alice (MLAI Chat)", mock_post.call_args.kwargs["text"])
+        self.assertIn("*Alice (<", mock_post.call_args.kwargs["text"])
+        self.assertIn("|MLAI Chat>)*", mock_post.call_args.kwargs["text"])
         self.assertRegex(
             mock_post.call_args.kwargs["client_msg_id"],
             r"^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",

@@ -2,7 +2,7 @@
 
 import asyncio
 from copy import deepcopy
-from unittest import IsolatedAsyncioTestCase
+from unittest import IsolatedAsyncioTestCase, TestCase
 from unittest.mock import patch
 
 from integrations.services.community_bridge.worker import (
@@ -158,3 +158,34 @@ class MessageSyncWorkerUnitTests(IsolatedAsyncioTestCase):
         self.assertLessEqual(peak, 4)
         self.assertEqual(run.call_count, 8)
         seeder.assert_called_once()
+
+    async def test_read_state_lane_warms_cache_and_reports_independent_health(self):
+        with patch(f"{WORKER}.message_sync_enabled", return_value=True), patch(
+            f"{WORKER}.refresh_read_state_once", return_value=1
+        ) as refresh, patch(f"{WORKER}.heartbeat") as heartbeat:
+            await self.client.process_read_state_once()
+        refresh.assert_called_once_with()
+        self.assertEqual(heartbeat.call_args.args[1], "read_state")
+        self.assertEqual(heartbeat.call_args.kwargs["completed"], 1)
+
+    async def test_disabled_sync_does_not_start_unread_provider_work(self):
+        with patch(f"{WORKER}.message_sync_enabled", return_value=False), patch(
+            f"{WORKER}.refresh_read_state_once"
+        ) as refresh:
+            await self.client.process_read_state_once()
+        refresh.assert_not_called()
+
+
+class SlackMetadataBudgetTests(TestCase):
+    def test_documented_metadata_tier_does_not_change_restricted_history(self):
+        from django.test import override_settings
+        from integrations.services.message_sync.slack_client import provider_interval
+        with override_settings(MESSAGE_SYNC_SLACK_DISTRIBUTION='restricted'):
+            self.assertEqual(provider_interval('conversations.info'), 1.2)
+            self.assertEqual(provider_interval('users.conversations'), 1.2)
+            self.assertEqual(provider_interval('conversations.history'), 60)
+            self.assertEqual(provider_interval('conversations.replies'), 60)
+            self.assertEqual(provider_interval('conversations.members'), 0.6)
+            self.assertEqual(provider_interval('users.info'), 0.6)
+            self.assertEqual(provider_interval('conversations.mark'), 1.2)
+            self.assertEqual(provider_interval('users.list'), 3)

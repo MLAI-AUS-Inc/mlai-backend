@@ -3,13 +3,44 @@ from types import SimpleNamespace
 from uuid import uuid4
 from unittest.mock import patch
 
-from django.test import TestCase
+from django.test import SimpleTestCase, TestCase
 from rest_framework.exceptions import NotFound, ValidationError
 
 from organizations.models import Organization
 from startup_updates.models import MonthlyUpdateDraft, StartupProfile
 from startup_updates.revisions import RevisionConflict
-from startup_updates.update_identity import resolve_update, run_update, narrative_window, identity_payload
+from startup_updates.update_identity import (
+    default_generation_date, identity_payload, narrative_window,
+    parse_generation_date, resolve_update, run_update,
+)
+
+
+class GenerationDateCompatibilityTests(SimpleTestCase):
+    def test_saved_date_is_used_when_request_omits_it(self):
+        self.assertIsNone(parse_generation_date({"updateId": 7}, update_id=7))
+        draft = SimpleNamespace(month=date(2026, 3, 1), update_date=date(2026, 3, 14))
+        self.assertEqual(default_generation_date(draft, today=date(2026, 9, 24)), date(2026, 3, 14))
+
+    def test_month_only_draft_uses_period_end_or_today(self):
+        draft = SimpleNamespace(month=date(2026, 3, 1), update_date=None)
+        self.assertEqual(default_generation_date(draft, today=date(2026, 9, 24)), date(2026, 3, 31))
+        draft.month = date(2026, 9, 1)
+        self.assertEqual(default_generation_date(draft, today=date(2026, 9, 24)), date(2026, 9, 24))
+        draft.month = date(2025, 12, 1)
+        self.assertEqual(default_generation_date(draft, today=date(2026, 9, 24)), date(2025, 12, 31))
+
+    def test_explicit_invalid_date_and_new_update_without_date_are_rejected(self):
+        for data, update_id in (({"updateDate": ""}, 7), ({"updateDate": "not-a-date"}, 7), ({}, None)):
+            with self.subTest(data=data, update_id=update_id), self.assertRaises(ValidationError):
+                parse_generation_date(data, update_id=update_id)
+        self.assertEqual(
+            parse_generation_date({"updateDate": "2026-03-15"}, update_id=7), date(2026, 3, 15),
+        )
+
+    def test_future_month_only_draft_cannot_default_to_an_earlier_day(self):
+        draft = SimpleNamespace(month=date(2026, 10, 1), update_date=None)
+        with self.assertRaises(ValidationError):
+            default_generation_date(draft, today=date(2026, 9, 24))
 
 
 class IndependentUpdateIdentityTests(TestCase):

@@ -71,6 +71,37 @@ class OperationsOriginSettingsTests(SimpleTestCase):
             self.assertNotIn('Access-Control-Allow-Origin', unrelated.headers)
             self.assertNotIn('Access-Control-Allow-Credentials', unrelated.headers)
 
+    def test_startup_desktop_preflight_supports_account_reads_and_catalogue_saves(self):
+        for origin in TAURI_ORIGINS:
+            for method in ('GET', 'POST', 'PUT', 'PATCH', 'DELETE'):
+                with self.subTest(origin=origin, method=method):
+                    response = self.client.options(
+                        '/api/v1/my-startup/vibe-marketing/editorial-catalog/',
+                        HTTP_ORIGIN=origin,
+                        HTTP_ACCESS_CONTROL_REQUEST_METHOD=method,
+                        HTTP_ACCESS_CONTROL_REQUEST_HEADERS='authorization, content-type, x-request-id',
+                    )
+                    self.assertEqual(response.status_code, 204)
+                    self.assertEqual(response.headers.get('Access-Control-Allow-Origin'), origin)
+                    self.assertNotIn('Access-Control-Allow-Credentials', response.headers)
+
+    def test_startup_desktop_cors_keeps_other_paths_origins_and_cookie_headers_denied(self):
+        for path, origin, headers in (
+            ('/api/v1/my-startup-other/', TAURI_ORIGINS[0], 'authorization'),
+            ('/api/v1/founder-tools/profile/', TAURI_ORIGINS[0], 'authorization'),
+            ('/api/v1/my-startup/auth/me/', 'tauri://localhost.attacker.example', 'authorization'),
+            ('/api/v1/my-startup/auth/me/', 'null', 'authorization'),
+            ('/api/v1/my-startup/auth/me/', TAURI_ORIGINS[0], 'cookie'),
+        ):
+            with self.subTest(path=path, origin=origin, headers=headers):
+                response = self.client.options(
+                    path, HTTP_ORIGIN=origin,
+                    HTTP_ACCESS_CONTROL_REQUEST_METHOD='GET',
+                    HTTP_ACCESS_CONTROL_REQUEST_HEADERS=headers,
+                )
+                self.assertNotIn('Access-Control-Allow-Origin', response.headers)
+                self.assertNotIn('Access-Control-Allow-Credentials', response.headers)
+
     def test_desktop_cors_rejects_unknown_headers_and_methods(self):
         for method, headers in (
             ('CONNECT', 'content-type'),

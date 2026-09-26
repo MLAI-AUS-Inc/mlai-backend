@@ -530,6 +530,7 @@ def registration_request(row: SlackDmMirrorDelivery) -> dict[str, Any]:
             for value in metadata.get("callback_author_pubkeys") or []
         ],
         "conversation_name": str(metadata.get("conversation_name") or ""),
+        **({"private_audience": metadata["private_audience"]} if metadata.get("private_audience") else {}),
     }
 
 
@@ -624,6 +625,28 @@ def _registration_cleanup_disposition_locked(
     return "delete", None
 
 
+def _preserve_recovering_room(grant, conversation) -> bool:
+    """Keep a stable room pointer while its old device authority is retired.
+
+    A pointer is not membership: the room remains unpublished until a fresh
+    registration passes the existing consent, participant and relay CAS checks.
+    Source membership changes and explicit retirement clear their pointer before
+    cleanup; inactive consent must never acquire this recovery behavior.
+    """
+    from .message_sync.device_audience import enabled as stable_private_rooms
+
+    return bool(
+        stable_private_rooms()
+        and grant.status == SlackDmMirrorGrantStatus.ACTIVE
+        and grant.revoked_at is None
+        and conversation.status in (
+            SlackDmMirrorConversationStatus.PROVISIONING,
+            SlackDmMirrorConversationStatus.ERROR,
+        )
+        and conversation.mlai_channel_id
+    )
+
+
 def _mark_channel_registration_cleaned_locked(
     grant: SlackDmMirrorGrant,
     *,
@@ -662,7 +685,7 @@ def _mark_channel_registration_cleaned_locked(
         )
     )
     for conversation in conversations:
-        if (
+        if not _preserve_recovering_room(grant, conversation) and (
             grant.status != SlackDmMirrorGrantStatus.ACTIVE
             or conversation.status != SlackDmMirrorConversationStatus.LIVE
         ):
@@ -800,6 +823,7 @@ def _execute_registration_cleanup(claim: dict[str, Any]) -> str:
                     request["participant_pubkeys"],
                     callback_author_pubkeys=request["callback_author_pubkeys"],
                     conversation_name=request["conversation_name"],
+                    **({"private_audience": request["private_audience"]} if request.get("private_audience") else {}),
                 )
                 channel_id = str(provisioned["channel_id"])
             disposition, authority = _registration_cleanup_disposition_locked(
@@ -861,7 +885,8 @@ def _execute_registration_cleanup(claim: dict[str, Any]) -> str:
                             available_at=timezone.now(),
                         )
                     conversation.status = SlackDmMirrorConversationStatus.PROVISIONING
-                    conversation.mlai_channel_id = None
+                    if not _preserve_recovering_room(grant, conversation):
+                        conversation.mlai_channel_id = None
                     conversation.save(
                         update_fields=(
                             "status",
@@ -881,6 +906,7 @@ def _execute_registration_cleanup(claim: dict[str, Any]) -> str:
                     authority_request["participant_pubkeys"],
                     callback_author_pubkeys=callback_author_pubkeys,
                     conversation_name=authority_request["conversation_name"],
+                    **({"private_audience": authority_request["private_audience"]} if authority_request.get("private_audience") else {}),
                 )
                 restored_channel_id = str(provisioned["channel_id"])
                 if restored_channel_id != channel_id:
@@ -1065,6 +1091,9 @@ def finalize_registration_attempt(attempt_id: int, *, channel_id: str) -> bool:
                     "updated_at",
                 )
             )
+            if (attempt.metadata or {}).get("private_audience", {}).get("channel_id") == channel_id:
+                from .message_sync.device_audience import rebind_history
+                rebind_history(conversation, attempt)
             for row in rows:
                 if row.pk == attempt.pk:
                     continue

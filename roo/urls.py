@@ -93,6 +93,7 @@ urlpatterns = [
     # Coworking
     # ============================================================
     path('coworking/availability/', CoworkingViewSet.as_view({'get': 'availability'}), name='coworking-availability'),
+    path('coworking/bookings-for-date/', CoworkingViewSet.as_view({'get': 'bookings_for_date'}), name='coworking-bookings-for-date'),
     path('coworking/report/', CoworkingViewSet.as_view({'get': 'report'}), name='coworking-report'),
     path('coworking/book/', CoworkingViewSet.as_view({'post': 'book'}), name='coworking-book'),
     path('coworking/book-many/', CoworkingViewSet.as_view({'post': 'book_many'}), name='coworking-book-many'),

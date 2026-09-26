@@ -39,6 +39,8 @@ Candidate auto-selection is not publication approval. Generated revisions start 
 
 Published reads use `published_revision`; editing updates `current_revision`. A cancelled worker cannot remove an approved publication or a later founder edit. Source erasure examines historical evidence revisions too; copied Slack evidence is removed even when the current memo no longer cites it. Community output includes selected metric values and safe quality annotations; it omits private evidence and private financial charts. It is the founder-selected disclosure of the same evidence base, not a separate unconstrained LLM draft.
 
+MLAI Chat's saved-update review applies an explicit `displayConfig.fullMetricKeys` selection to KPI cards, metric evidence and history, including existing revisions. An empty list displays no figures in those fields; aggregate financial, analysis and chart fields are omitted from Chat review when a selection exists because they cannot be filtered by KPI key. A revision with no selection keeps its historical display. The frozen evidence snapshot remains intact for the owner's editor and audit; community previews never include it.
+
 Existing updates without revisions remain labelled `legacy_unverified`; reading does not recalculate their historical values or pretend they were newly approved. They must be saved and reviewed under the new contract before republishing.
 
 ## Startup identity and browser behavior

@@ -79,7 +79,27 @@ class User(AbstractBaseUser, PermissionsMixin):
 
     def save(self, *args, **kwargs):
         self.email = type(self).objects.normalize_email(self.email)
-        super().save(*args, **kwargs)
+        from .account_bans import guard_account_save
+        from django.db import transaction
+
+        # Ban and account updates share a user-first boundary, so an in-flight
+        # magic link or Slack profile refresh cannot undo a completed ban.
+        with transaction.atomic(using=kwargs.get('using')):
+            if self.pk:
+                current = type(self).objects.select_for_update().filter(pk=self.pk).only('auth_version').first()
+                if current:
+                    self.auth_version = max(self.auth_version, current.auth_version)
+            guard_account_save(self)
+            super().save(*args, **kwargs)
+
+    def _get_session_auth_hash(self, secret=None):
+        if self.auth_version == 1:
+            return super()._get_session_auth_hash(secret)
+        from django.utils.crypto import salted_hmac
+        return salted_hmac(
+            'core.User.session_auth_version',
+            f'{self.password}:{self.auth_version}', secret=secret, algorithm='sha256',
+        ).hexdigest()
 
     def set_password(self, raw_password):
         super().set_password(raw_password)
@@ -87,6 +107,23 @@ class User(AbstractBaseUser, PermissionsMixin):
 
     def __str__(self):
         return self.email
+
+
+class AccountBan(models.Model):
+    """Retained account/email denial; lifting a ban never restores credentials."""
+
+    user = models.OneToOneField(User, on_delete=models.PROTECT, related_name='account_ban')
+    email = models.EmailField(unique=True)
+    reason = models.TextField(blank=True)
+    banned_by = models.ForeignKey(User, null=True, on_delete=models.SET_NULL, related_name='issued_account_bans')
+    created_at = models.DateTimeField(default=timezone.now)
+    updated_at = models.DateTimeField(auto_now=True)
+    revoked_at = models.DateTimeField(null=True, blank=True)
+    revoked_by = models.ForeignKey(User, null=True, blank=True, on_delete=models.SET_NULL, related_name='lifted_account_bans')
+    revocation_pending = models.BooleanField(default=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(Lower('email'), name='core_account_ban_email_ci_unique')]
 
 
 class PasswordResetChallenge(models.Model):

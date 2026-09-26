@@ -5,12 +5,14 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
-from django.test import SimpleTestCase
+from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 from rest_framework.exceptions import NotFound, ValidationError
 
 from integrations.services import slack_chat_refresh as refresh
 from integrations.services import slack_dm_mirror as mirror
+from integrations.models import BridgeSyncState, SlackDmMirrorDelivery
+from community_chat.tests.test_slack_dm_io_authority import SlackDmIoAuthorityFixture
 
 
 class SlackChannelRefreshTests(SimpleTestCase):
@@ -25,6 +27,7 @@ class SlackChannelRefreshTests(SimpleTestCase):
             ),
             deliveries=MagicMock(),
             last_error="",
+            participant_hash="a" * 64,
         )
 
     def test_invalid_channel_is_rejected_before_database_access(self):
@@ -117,7 +120,9 @@ class SlackChannelRefreshTests(SimpleTestCase):
             )
             rows.filter.return_value.exclude.return_value.delete.assert_called_once()
 
-    def test_complete_waits_for_message_delivery_and_reports_failure(self):
+    @patch.object(BridgeSyncState, "objects")
+    def test_complete_waits_for_message_delivery_and_reports_failure(self, states):
+        states.filter.return_value.first.return_value = None
         for backfilled, pending, failed, expected in [
             (None, False, False, "syncing"),
             (timezone.now(), True, False, "syncing"),
@@ -140,3 +145,38 @@ class SlackChannelRefreshTests(SimpleTestCase):
                 self.assertEqual(
                     refresh._refresh_status(conversation)["status"], expected
                 )
+
+
+class SlackCurrentRoomRefreshTests(SlackDmIoAuthorityFixture, TestCase):
+    def setUp(self):
+        super().setUp()
+        self.conversation.history_backfilled_at = timezone.now()
+        self.conversation.save()
+
+    def row(self, source, *, audience=None, status="dead", error="Delivery failed"):
+        return SlackDmMirrorDelivery.objects.create(
+            conversation=self.conversation, source_platform="slack",
+            source_message_id=source, source_author_id="UOTHER", operation="reaction_add",
+            metadata={"participant_hash": audience or self.conversation.participant_hash},
+            status=status, last_error=error, available_at=timezone.now(),
+        )
+
+    def test_old_room_reactions_do_not_poison_a_successful_current_import(self):
+        old = self.row("old-reaction", audience="b" * 64)
+        retired = self.row("retired-reaction", error="Private conversation participants changed")
+        result = refresh._refresh_status(self.conversation)
+        self.assertEqual(result["status"], "complete")
+        self.assertEqual(result["failed_messages"], 0)
+        self.assertEqual(SlackDmMirrorDelivery.objects.filter(pk__in=[old.pk, retired.pk], status="dead").count(), 2)
+
+    def test_current_room_failure_is_not_hidden(self):
+        self.row("current-failure")
+        result = refresh._refresh_status(self.conversation)
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(result["failed_messages"], 1)
+
+    def test_current_room_pending_work_keeps_syncing(self):
+        self.row("pending-reaction", status="pending", error="Waiting for parent")
+        result = refresh._refresh_status(self.conversation)
+        self.assertEqual(result["status"], "syncing")
+        self.assertEqual(result["queued_messages"], 1)

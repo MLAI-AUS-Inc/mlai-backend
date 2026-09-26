@@ -1,7 +1,7 @@
 """Synthetic database regressions for the expanded Slack import."""
 
 import uuid
-from datetime import timedelta
+from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 from django.utils import timezone
@@ -51,7 +51,7 @@ class SlackChatImportTests(APITestCase):
 
     @patch.object(mirror.BuzzBridgeClient, "provision_private_conversation")
     @patch.object(mirror, "WebClient")
-    def test_large_private_channel_is_named_and_visible_before_history_finishes(
+    def test_large_private_channel_is_named_but_pending_before_history_finishes(
         self, client_type, provision
     ):
         grant = self.enable_private_channels()
@@ -74,7 +74,8 @@ class SlackChatImportTests(APITestCase):
         client.users_info.side_effect = lambda *, user: {
             "user": {"id": user, "name": user, "profile": {}}
         }
-        message_at = timezone.now().replace(microsecond=0) - timedelta(minutes=1)
+        now = timezone.now().replace(microsecond=0)
+        message_at = now - timedelta(minutes=1)
         client.conversations_history.return_value = {
             "messages": [
                 {
@@ -103,7 +104,13 @@ class SlackChatImportTests(APITestCase):
         self.assertEqual(len(conversation.participant_buzz_pubkeys), 2)
         self.assertNotIn("2" * 64, conversation.participant_buzz_pubkeys)
         self.assertIsNone(conversation.history_backfilled_at)
-        payload = mirror.status_payload(self.first, authenticated_public_key="1" * 64)
+        with patch(
+            "integrations.services.slack_chat_catalog.datetime", wraps=datetime
+        ) as catalog_clock:
+            catalog_clock.now.return_value = now
+            payload = mirror.status_payload(
+                self.first, authenticated_public_key="1" * 64
+            )
         self.assertEqual(
             payload["channel_catalog"],
             [
@@ -111,6 +118,10 @@ class SlackChatImportTests(APITestCase):
                     "channel_id": str(conversation.mlai_channel_id),
                     "kind": "private_channel",
                     "last_message_at": message_at.isoformat(),
+                    "ready_for_display": False,
+                    "history_oldest_ts": str(
+                        int((now - timedelta(days=30)).timestamp())
+                    ),
                     "source_archived": False,
                 }
             ],

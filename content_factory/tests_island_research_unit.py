@@ -100,10 +100,17 @@ class IslandResearchTests(unittest.TestCase):
         self.queue.assert_not_called()
 
     def test_adoption_uses_stored_proposal_and_checks_organization(self):
-        proposal = {"id": "proposal-one", "name": "Measured theme", "keywords": [1, 2, 3], "centroid_embedding": [1, 0]}
+        proposal = {"id": "proposal-one", "name": "Measured theme",
+                    "keywords": [{"keyword": "ai consulting", "volume": 100, "difficulty": 20}], "centroid_embedding": [1, 0]}
         run = SimpleNamespace(status="completed", run_request={"island_research_brief": BRIEF},
             result={"island_research": True, "suggested_islands": [proposal]})
         self.assertIs(proposal_for_adoption(run, "proposal-one"), proposal)
+        for bad in ([], [1], [{"keyword": "guess", "volume": 0, "difficulty": 20}],
+                    [{"keyword": "guess", "volume": 100, "difficulty": None}],
+                    [{"keyword": "guess", "volume": float("inf"), "difficulty": 20}]):
+            with self.subTest(evidence=bad), self.assertRaises(ValueError):
+                proposal_for_adoption(SimpleNamespace(status="completed", run_request=run.run_request,
+                    result={"island_research": True, "suggested_islands": [{**proposal, "keywords": bad}]}), "proposal-one")
         for invalid in ["made-up", None, {"id": "proposal-one"}]:
             with self.assertRaises(ValueError): proposal_for_adoption(run, invalid)
         run.status = "queued"
@@ -114,7 +121,7 @@ class IslandResearchTests(unittest.TestCase):
 
     def test_terminal_failure_or_empty_result_refunds_actual_payer_once(self):
         payer = SimpleNamespace(pk="original-payer")
-        ledger = SimpleNamespace(user=payer, delta=-1, source="CONTENT_FACTORY", created_by_slack_id="web:payer", reference_id="key")
+        ledger = SimpleNamespace(idempotency_key="content_factory:topic_generation:charge:key", user=payer, delta=-1, source="CONTENT_FACTORY", created_by_slack_id="web:payer", reference_id="key")
         ledgers, points = Mock(), Mock()
         ledgers.select_related.return_value.filter.return_value.first.return_value = ledger
         run = SimpleNamespace(status="completed", domain="example.test", save=Mock(),
@@ -128,6 +135,7 @@ class IslandResearchTests(unittest.TestCase):
         points.refund.assert_called_once()
         self.assertIs(points.refund.call_args.kwargs["user"], payer)
         self.assertEqual(points.refund.call_args.kwargs["delta"], 1)
+        self.assertEqual(points.refund.call_args.kwargs["original_spend_key"], ledger.idempotency_key)
         self.assertTrue(run.result["island_research_refunded"])
 
     def test_ambiguous_dispatch_and_successful_research_are_never_refunded(self):
@@ -142,3 +150,47 @@ class IslandResearchTests(unittest.TestCase):
             ]:
                 refund_empty_or_failed_research(SimpleNamespace(status=status, run_request=request, result=result))
         points.refund.assert_not_called()
+
+class SelectionPlanningTests(unittest.TestCase):
+    def proposal(self, key, vector, intent="informational", keyword=None):
+        return {"id": key, "name": key, "description": key, "pillar_keyword": keyword or key,
+            "centroid_embedding": vector, "keywords": [{"keyword": keyword or key, "volume": 100,
+                "difficulty": 10, "opportunity_index": 3, "intent": intent}],
+            "metrics": {"total_volume": 100}}
+
+    def test_grouping_requires_every_pair_and_matching_intent(self):
+        import math
+        from .island_selection import group_proposals
+        p = lambda key, angle: self.proposal(key, [math.cos(angle), math.sin(angle)])
+        groups = group_proposals([p("a", 0), p("b", .4), p("c", .8)])
+        self.assertEqual(sorted(map(len, groups)), [1, 2])
+        self.assertEqual(len(group_proposals([self.proposal("a", [1, 0]),
+            self.proposal("b", [1, 0], "transactional")])), 2)
+        self.assertEqual(len(group_proposals([self.proposal("a", [1, 0]), self.proposal("b", [0, 1])])), 2)
+
+    def test_shared_keywords_are_not_double_counted(self):
+        from .island_selection import combine_proposals
+        merged = combine_proposals([self.proposal("a", [1, 0], keyword="same"), self.proposal("b", [1, 0], keyword="same")])
+        self.assertEqual(merged["metrics"]["keyword_count"], 1)
+        self.assertEqual(merged["metrics"]["total_volume"], 100)
+        self.assertEqual(merged["metrics"]["opportunity_score"], 3)
+
+    def test_topology_confirmation_needs_two_increasing_dates(self):
+        from .island_selection import confirm_topology
+        state = {}
+        self.assertFalse(confirm_topology(state, "merge", "2026-09-16"))
+        self.assertFalse(confirm_topology(state, "merge", "2026-09-16"))
+        self.assertFalse(confirm_topology(state, "merge", "2026-09-15"))
+        self.assertTrue(confirm_topology(state, "merge", "2026-09-17"))
+        self.assertFalse(confirm_topology(state, "split", "2026-09-17"))
+
+    def test_preview_rejects_forgery_and_excludes_already_saved_choices(self):
+        from .island_selection import selection_preview, STATE_KEY
+        p = self.proposal("a", [1, 0])
+        run = SimpleNamespace(status="completed", run_request={"island_research_brief": BRIEF},
+            result={"island_research": True, "suggested_islands": [p]})
+        for ids in ([], "a", ["fake"], [None], ["a"] * 6):
+            with self.assertRaises(ValueError): selection_preview(run, ids)
+        self.assertEqual(len(selection_preview(run, ["a"])["groups"]), 1)
+        run.result[STATE_KEY] = {"selected_ids": ["a"]}
+        self.assertEqual(selection_preview(run, ["a"]), {"groups": [], "already_added": ["a"]})

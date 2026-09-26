@@ -52,6 +52,14 @@ the registered `mlaichat://callback` application origin. That mobile origin is
 an API enrollment boundary, not a browser CORS origin. All clients enter the
 same membership request flow below.
 
+Account access and refresh also reject an existing session if its relay public
+key is actively bound to another MLAI account. Older clients could leave this
+mixed state after switching accounts: the relay showed the original account's
+chats while Slack controls used the second account. Rejected credentials return
+the normal 401 sign-in response; they never transfer the device, Slack grant or
+history between accounts. A new installation without a binding can still finish
+onboarding, and a mismatched session can still be signed out explicitly.
+
 ## Request flow
 
 1. `GET /api/v1/community-chat/session/` returns account eligibility and the
@@ -69,7 +77,9 @@ same membership request flow below.
    `member` invite ID is audited under the same lock; the invite code is not.
 5. The client claims the invite directly against `chat.mlai.au`, then calls
    `POST .../bootstrap/confirm/`. Only a relay role of exactly `member` is
-   accepted.
+   accepted. With stable private rooms enabled, confirmation atomically queues
+   the newly verified key for owner-scoped Slack history recovery. This records
+   a bounded hint and wakes discovery; it does not call Slack from the request.
 6. `DELETE .../devices/{pubkey}/` first cancels every unconfirmed audited invite,
    then asks the adapter to remove exactly a `member` and advance that key's
    durable enrollment generation. It marks the binding revoked while retaining
@@ -87,6 +97,41 @@ per-key generation before it returns. An older invite mint that finishes later
 cannot bind or redeem in that newer generation; an explicit later enrollment
 starts from the new generation. Generic operator-created relay invites are not
 bound to this device fence and are not deleted by these endpoints.
+
+## Message history after device changes
+
+The account-owned Slack conversation and its relay room outlive any individual
+device key. In stable-room mode, device-registration cleanup preserves a room
+that is provisioning or retrying under active consent. It must not erase the
+room ID, completed delivery receipts or history checkpoints merely because the
+previous device audience is being retired. Explicit consent revocation and
+source-ineligibility retain their existing cleanup behavior.
+
+Enrollment recovery prioritizes recent imported conversations before the
+historical directory scan. Existing live rooms remain usable by their current
+audience while the new device waits. Each fair worker turn checks one room's
+current Slack membership and updates its relay audience through the existing
+generation-checked protocol. A latest-device hint is bounded to one key per
+owner; other verified devices remain eligible within the normal audience limit.
+Revoked keys cannot use a queued hint. A later enrollment supersedes an earlier
+hint without resetting discovery cursors or history.
+
+Published history is tracked separately from current synchronization progress.
+The existing sync-state JSON records exact owner, consent, room, source-member,
+device-audience and history-window evidence only after a complete source scan
+and its required deliveries have drained. Empty completed scans can also
+qualify. Catalogue reads inspect this durable record without writing it, so
+server cache expiry and routine rescans do not hide previously available
+history. A successful generation-checked device audience update can carry the
+unchanged proof forward. Consent changes, source retirement and explicit
+history resets invalidate it; an in-flight update cannot restore an invalidated
+proof. This adds no table or migration.
+
+This prevents future broken room links. Already-null room IDs require a separate
+scoped recovery: historical registration rows can refer to multiple rooms, so
+an operator must establish current consent, source membership and delivery
+evidence before selecting one. Merely assigning an old UUID is not authority
+to publish it. No new schema migration is part of this change.
 
 The intent phase creates no invite or membership capability. If it times out
 and reaches the adapter only after a delete, its caller has no mint response and

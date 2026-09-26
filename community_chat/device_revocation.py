@@ -307,7 +307,10 @@ def revoke_device_authority(
                 )
             )
         ]
-        affected_ids = [conversation.pk for conversation in affected_conversations]
+        from integrations.services.message_sync.device_audience import enabled as stable_private_rooms
+        preserved_ids = {conversation.pk for conversation in affected_conversations
+                         if stable_private_rooms() and conversation.mlai_channel_id}
+        affected_ids = [conversation.pk for conversation in affected_conversations if conversation.pk not in preserved_ids]
         touched_grants: set[int] = set()
         for conversation in affected_conversations:
             grant = grant_by_id[conversation.grant_id]
@@ -344,10 +347,11 @@ def revoke_device_authority(
                 and grant.revoked_at is None
                 else SlackDmMirrorConversationStatus.PAUSED
             )
-            conversation.mlai_channel_id = None
-            conversation.history_backfilled_at = None
-            conversation.oldest_synced_ts = ""
-            conversation.latest_synced_ts = ""
+            if conversation.pk not in preserved_ids:
+                conversation.mlai_channel_id = None
+                conversation.history_backfilled_at = None
+                conversation.oldest_synced_ts = ""
+                conversation.latest_synced_ts = ""
             conversation.last_error = ""
             conversation.save(
                 update_fields=(

@@ -155,7 +155,8 @@ class PrivateSlackMentionTests(SimpleTestCase):
             self.assertEqual(delivery.metadata["mention_format_version"], 1)
             authorized.assert_called_once_with(delivery)
 
-    def test_batch_delivery_resolves_names_and_preserves_authorization_checks(self):
+    @patch("integrations.services.message_sync.publication.record_publication_locked")
+    def test_batch_delivery_resolves_names_and_preserves_authorization_checks(self, publish):
         grant, conversation, delivery = self.fixture()
         with ExitStack() as stack:
             stack.enter_context(patch.object(mirror.transaction, "atomic"))
@@ -201,6 +202,7 @@ class PrivateSlackMentionTests(SimpleTestCase):
         self.assertEqual(delivery.encrypted_text, "")
         self.assertEqual(delivery.metadata["mention_format_version"], 1)
         self.assertEqual(authorized.call_count, 2)
+        publish.assert_called_once_with(conversation)
 
     def test_history_refresh_queues_targeted_repair_without_recreating_message(self):
         _, conversation, _ = self.fixture()
@@ -214,7 +216,7 @@ class PrivateSlackMentionTests(SimpleTestCase):
         ), patch.object(
             mirror, "_upsert_history_delivery", return_value=original
         ) as upsert:
-            rows.select_for_update.return_value.filter.return_value.filter.return_value.order_by.return_value.first.return_value = (
+            rows.filter.return_value.select_for_update.return_value.filter.return_value.filter.return_value.order_by.return_value.first.return_value = (
                 None
             )
             mirror._enqueue_history_message(

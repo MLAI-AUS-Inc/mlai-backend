@@ -6,6 +6,7 @@ Founders create individual publications. Calendar months organise the archive an
 
 - New founder saves send a UUID `creationKey` and an `updateDate` (`YYYY-MM-DD`). Reusing that creation key resolves the same startup-scoped draft. An exact first-save retry returns its existing revision; a changed or stale request returns 409.
 - Subsequent saves and AI requests send `updateId` and `expectedRevision`. IDs are scoped to the selected company. A deliberate New update uses a new creation key, even on the same day.
+- An AI request for an existing update may omit `updateDate`. The backend uses that update's saved date, or the last day of its reporting month capped at today in the startup's reporting timezone for a month-only draft. An explicitly supplied invalid date still fails validation.
 - `month`/`year` remain on the save API for compatibility. A new draft's financial month comes from its initial date. Moving an existing publication's date preserves its financial month and frozen evidence.
 - Publication responses expose `updateDate`, `datePrecision`, `firstPublishedAt`, `creationKey` and `narrativePeriod`. Published dates come from the approved revision while a replacement is edited. Month-only archives keep null dates; no import date is fabricated.
 - The updates endpoint returns published records only. Drafts continue through the drafts endpoint. Audience filtering occurs before the UI computes month counts and titles.

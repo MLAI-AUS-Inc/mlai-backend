@@ -16,6 +16,7 @@ from rest_framework import status
 from rest_framework.test import APITestCase
 
 from integrations.services.luma import (
+    LumaAPIError,
     LumaAttendeeReportService,
     LumaConfigurationError,
 )
@@ -159,7 +160,9 @@ class LumaAttendeeReportServiceTests(SimpleTestCase):
 
     def test_lists_only_allowlisted_public_upcoming_events(self):
         def handler(path, params):
-            self.assertEqual(path, "/v1/calendar/list-events")
+            self.assertEqual(path, "/v1/calendars/events/list")
+            self.assertEqual(params["access"], ["manage", "view"])
+            self.assertEqual(params["platforms"], ["luma", "external"])
             if params.get("pagination_cursor") == "page-2":
                 return {
                     "entries": [
@@ -251,6 +254,46 @@ class LumaAttendeeReportServiceTests(SimpleTestCase):
         self.assertEqual(session.calls[0]["params"]["status"], "approved")
         self.assertIn("after", session.calls[0]["params"])
         self.assertEqual(session.calls[1]["params"]["pagination_cursor"], "page-2")
+
+    def test_complete_calendar_includes_listed_and_external_events_beyond_ten(self):
+        now = datetime(2026, 9, 1, tzinfo=ZoneInfo("UTC"))
+        def event(index, **extra):
+            return {"id": f"evt-{index}", "name": f"Community event {index}",
+                    "url": f"https://events.example/{index}", "timezone": "Australia/Melbourne",
+                    "start_at": f"2026-10-{index:02}T00:00:00Z", "end_at": f"2026-10-{index:02}T02:00:00Z",
+                    "visibility": "public", "access": "view", "platform": "external", **extra}
+        def handler(path, params):
+            self.assertEqual(path, "/v1/calendars/events/list")
+            self.assertEqual(params["access"], ["manage", "view"])
+            self.assertEqual(params["platforms"], ["luma", "external"])
+            if not params.get("pagination_cursor"):
+                return {"entries": [event(i, access="manage", platform="luma") for i in range(1, 11)],
+                        "has_more": True, "next_cursor": "remaining"}
+            return {"entries": [event(10), event(11), event(12), event(13, visibility="private"),
+                                event(14, visibility="members-only"), event(15, visibility=None)], "has_more": False}
+        session = FakeSession(handler)
+        events = LumaAttendeeReportService(api_key="test", session=session).list_upcoming_events(now=now)
+        self.assertEqual([e["id"] for e in events], [f"evt-{i}" for i in range(1, 13)])
+        self.assertEqual(len(session.calls), 2)
+        self.assertNotIn("access", events[-1])
+
+    def test_incomplete_calendar_pagination_is_not_returned_as_complete(self):
+        for page in ({}, {"entries": [], "has_more": True},
+                     {"entries": [], "has_more": True, "next_cursor": "repeated"}):
+            with self.subTest(page=page):
+                service = LumaAttendeeReportService(api_key="test", session=FakeSession(lambda *_: page))
+                with self.assertRaises(LumaAPIError):
+                    service.list_upcoming_events()
+
+    def test_calendar_page_budget_fails_instead_of_silently_truncating(self):
+        calls = []
+        def handler(*_):
+            calls.append(True)
+            return {"entries": [], "has_more": True, "next_cursor": str(len(calls))}
+        service = LumaAttendeeReportService(api_key="test", session=FakeSession(handler))
+        with self.assertRaisesRegex(LumaAPIError, "budget"):
+            service.list_upcoming_events()
+        self.assertEqual(len(calls), 10)
 
     def test_upcoming_events_requires_a_configured_key(self):
         service = LumaAttendeeReportService(api_key="")

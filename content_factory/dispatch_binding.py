@@ -13,10 +13,12 @@ record to the real run so the two never diverge into a ghost pair.
 rename that keeps steps, pk, and history intact.
 """
 import logging
+from copy import deepcopy
 
 from django.db import transaction
 
 from workflow_runs.models import ContentFactoryRun, ContentFactoryRunStatus
+from content_factory.editorial_run_state import BRIEF_KEYS, merge_editorial_run_snapshot
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +40,9 @@ def bind_dispatch_token_run(*, client_request_id, remote_run_id):
     row for the real id already exists (a callback materialized it before the
     bind), the provisional placeholder's request payload (billing lineage,
     client_request_id) is merged into it and the placeholder is deleted —
-    keeping exactly one local record per remote run.
+    keeping exactly one local record per remote run. Conflicting editorial
+    identity leaves both records intact and returns None; callers retain their
+    existing best-effort callback/poll behavior, not new publication authority.
     """
     token = str(client_request_id or "").strip()
     real = str(remote_run_id or "").strip()
@@ -51,7 +55,7 @@ def bind_dispatch_token_run(*, client_request_id, remote_run_id):
             )
             if token_run is None or not run_is_dispatch_token_keyed(token_run):
                 return None
-            existing_real = ContentFactoryRun.objects.filter(run_id=real).first()
+            existing_real = ContentFactoryRun.objects.select_for_update().filter(run_id=real).first()
             if existing_real is not None:
                 _merge_provisional_into_real(token_run, existing_real)
                 token_run.delete()
@@ -95,8 +99,27 @@ def _merge_provisional_into_real(token_run, real_run) -> None:
     its billing lineage) onto the callback-materialized run, without touching
     remote-authoritative fields."""
     update_fields = []
-    if not real_run.run_request and token_run.run_request:
-        real_run.run_request = token_run.run_request
+    token_request = token_run.run_request if isinstance(token_run.run_request, dict) else {}
+    real_request = real_run.run_request if isinstance(real_run.run_request, dict) else {}
+    has_editorial_decision = any(
+        key in request and request[key] is not None
+        for request in (token_request, real_request) for key in BRIEF_KEYS
+    )
+    if has_editorial_decision:
+        snapshot = merge_editorial_run_snapshot(
+            {"workflow": token_run.workflow, "domain": token_run.domain, "run_request": token_request},
+            {"workflow": real_run.workflow or token_run.workflow,
+             "domain": real_run.domain or token_run.domain, "run_request": real_request},
+        )
+        # Preserve token-only dispatch/billing context as well as remote-only
+        # fields, after checking the immutable brief and key for conflicts.
+        merged_request = {**deepcopy(token_request), **snapshot["run_request"]}
+        merged_request.pop("editorialBrief", None)
+        if merged_request != real_run.run_request:
+            real_run.run_request = merged_request
+            update_fields.append("run_request")
+    elif not real_run.run_request and token_run.run_request:
+        real_run.run_request = deepcopy(token_run.run_request)
         update_fields.append("run_request")
     for field in ("workflow", "domain", "github_repo", "slack_user_id"):
         if not getattr(real_run, field) and getattr(token_run, field):

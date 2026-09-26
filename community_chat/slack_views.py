@@ -6,7 +6,7 @@ from django.conf import settings
 from django.db import DatabaseError
 from django.urls import reverse
 from rest_framework import status
-from rest_framework.exceptions import ValidationError
+from rest_framework.exceptions import AuthenticationFailed, NotAuthenticated, Throttled, ValidationError
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -14,10 +14,14 @@ from slack_sdk.errors import SlackApiError, SlackClientError
 
 from core.authentication import CustomJWTAuthentication
 from integrations.models import SlackDmMirrorGrant
+from community_chat.models import CommunityChatDevice
 from integrations.services.slack_dm_mirror import (
+    PUBLIC_UNREAD_SCOPES,
     REQUIRED_SCOPES,
     SlackDmMirrorCredentialError,
     SlackDmMirrorError,
+    SlackDmMirrorAuthorizationError,
+    SlackDmMirrorRateLimited,
     SlackDmMirrorUpstreamError,
     activate_connection,
     active_grant_for_user,
@@ -31,6 +35,7 @@ from integrations.services.slack_dm_mirror import (
     status_payload,
 )
 from integrations.views import mint_connector_connect_ticket
+from integrations.services.message_sync.scheduler import BudgetDeferred
 
 from integrations.services.slack_chat_catalog import (
     ALL_HISTORY_CONSENT,
@@ -42,7 +47,11 @@ from .authentication import (
     CommunityChatAccountAuthentication,
     CommunityChatBootstrapAuthentication,
 )
-from .throttles import CommunityChatScopedThrottle
+from .throttles import (
+    CommunityChatScopedThrottle,
+    SlackSnapshotAccountThrottle,
+    SlackSnapshotDeviceThrottle,
+)
 
 
 def _import_history_days(data, *, default=30):
@@ -103,6 +112,14 @@ def _slack_endpoint_error_response(exc: Exception) -> Response:
             {"error": "slack_storage_unavailable"},
             status=status.HTTP_503_SERVICE_UNAVAILABLE,
         )
+    if isinstance(exc, (BudgetDeferred, SlackDmMirrorRateLimited)):
+        seconds = max(1, int(getattr(exc, "retry_after", 5) or 5))
+        response = Response(
+            {"error": "slack_rate_limited", "retry_after_seconds": seconds},
+            status=status.HTTP_429_TOO_MANY_REQUESTS,
+        )
+        response["Retry-After"] = str(seconds)
+        return response
     if isinstance(exc, SlackDmMirrorCredentialError):
         return Response(
             {"error": "slack_reauthorization_required"},
@@ -150,8 +167,145 @@ class SlackDmMirrorApiView(APIView):
     community_chat_throttle_scope = "community_chat_home"
 
 
+class SlackOwnerInventoryApiView(SlackDmMirrorApiView):
+    """Keep inventory errors content-free even before method dispatch."""
+
+    def handle_exception(self, exc):
+        if isinstance(exc, Throttled):
+            seconds = max(1, int(exc.wait or 1))
+            response = Response(
+                {"error": "inventory_rate_limited", "retry_after_seconds": seconds},
+                status=429,
+            )
+            response["Retry-After"] = str(seconds)
+            response["Cache-Control"] = "private, no-store"
+            return response
+        if isinstance(exc, (NotAuthenticated, AuthenticationFailed)):
+            response = Response({"error": "authentication_required"}, status=401)
+            response["Cache-Control"] = "private, no-store"
+            return response
+        return super().handle_exception(exc)
+
+    @staticmethod
+    def inventory_error_response(exc):
+        payload = {"error": exc.code}
+        if exc.status_code == 429:
+            seconds = max(1, exc.retry_after_seconds or 5)
+            payload["retry_after_seconds"] = seconds
+        response = Response(payload, status=exc.status_code)
+        if exc.status_code == 429:
+            response["Retry-After"] = str(payload["retry_after_seconds"])
+        return response
+
+
+class SlackOwnerConversationView(SlackOwnerInventoryApiView):
+    """Page only the requesting owner's explicitly consented Slack metadata."""
+
+    slack_snapshot_account_throttle_scope = "community_chat_slack_snapshot_account"
+
+    def get_throttles(self):
+        if self.request.method == "PATCH":
+            self.community_chat_throttle_scope = "community_chat_slack_read_receipt"
+            return [CommunityChatScopedThrottle()]
+        self.community_chat_throttle_scope = "community_chat_slack_snapshot_device"
+        return [SlackSnapshotDeviceThrottle(), SlackSnapshotAccountThrottle()]
+
+    def patch(self, request):
+        from integrations.services.slack_owner_inventory_api import (
+            InventoryError, mark_inventory_read, mark_inventory_unread,
+        )
+
+        action = request.data.get("action")
+        if action not in {"mark_read", "mark_unread"}:
+            return Response({"error": "inventory_action_invalid"}, status=400)
+        try:
+            operation = mark_inventory_read if action == "mark_read" else mark_inventory_unread
+            response = Response(operation(
+                request.user,
+                public_key=getattr(request, "community_chat_public_key", None),
+                slack_conversation_id=request.data.get("slack_conversation_id"),
+            ))
+        except InventoryError as exc:
+            response = self.inventory_error_response(exc)
+        except (SlackDmMirrorCredentialError, SlackDmMirrorUpstreamError,
+                SlackClientError, DatabaseError, BudgetDeferred,
+                SlackDmMirrorRateLimited) as exc:
+            response = _slack_endpoint_error_response(exc)
+        except SlackDmMirrorAuthorizationError:
+            response = Response({"error": "slack_authority_changed"}, status=403)
+        except SlackDmMirrorError as exc:
+            response = Response({"error": "slack_conversation_unavailable"}, status=409)
+        response["Cache-Control"] = "private, no-store"
+        return response
+
+    def get(self, request):
+        from integrations.services.slack_owner_inventory_api import InventoryError, conversation_page
+
+        unread = request.query_params.get("unread_only", "0")
+        if unread not in {"0", "1"}:
+            return Response({"error": "inventory_filter_invalid"}, status=400)
+        try:
+            payload = conversation_page(
+                request.user,
+                public_key=getattr(request, "community_chat_public_key", None),
+                limit=request.query_params.get("limit", "50"),
+                cursor=request.query_params.get("cursor", ""),
+                unread_only=unread == "1",
+            )
+        except InventoryError as exc:
+            response = self.inventory_error_response(exc)
+        except SlackDmMirrorCredentialError:
+            response = Response({"error": "slack_reauthorization_required"}, status=401)
+        except SlackDmMirrorAuthorizationError:
+            response = Response({"error": "slack_authority_changed"}, status=403)
+        except DatabaseError:
+            response = Response({"error": "slack_storage_unavailable"}, status=503)
+        else:
+            response = Response(payload)
+        response["Cache-Control"] = "private, no-store"
+        return response
+
+
+class SlackOwnerConversationOpenView(SlackOwnerInventoryApiView):
+    """Resolve a cached mirror or enqueue one consented source conversation."""
+
+    community_chat_throttle_scope = "community_chat_slack_open"
+
+    def post(self, request):
+        from integrations.services.slack_owner_inventory_api import InventoryError, request_open
+
+        try:
+            status_code, payload = request_open(
+                request.user,
+                public_key=getattr(request, "community_chat_public_key", None),
+                slack_conversation_id=request.data.get("slack_conversation_id"),
+            )
+            response = Response(payload, status=status_code)
+        except InventoryError as exc:
+            response = self.inventory_error_response(exc)
+        except SlackDmMirrorCredentialError:
+            response = Response({"error": "slack_reauthorization_required"}, status=401)
+        except SlackDmMirrorAuthorizationError:
+            response = Response({"error": "slack_authority_changed"}, status=403)
+        except DatabaseError:
+            response = Response({"error": "slack_storage_unavailable"}, status=503)
+        response["Cache-Control"] = "private, no-store"
+        return response
+
+
 class SlackDmMirrorView(SlackDmMirrorApiView):
     """Inspect, connect, pause, resume, or disconnect Slack DM mirroring."""
+
+    slack_snapshot_account_throttle_scope = "community_chat_slack_snapshot_account"
+
+    def get_throttles(self):
+        if self.request.method == "GET":
+            self.community_chat_throttle_scope = "community_chat_slack_snapshot_device"
+            return [SlackSnapshotDeviceThrottle(), SlackSnapshotAccountThrottle()]
+        if self.request.method == "PATCH" and self.request.data.get("action") in {"mark_read", "mark_unread"}:
+            # Background polling must not consume the user's acknowledgement budget.
+            self.community_chat_throttle_scope = "community_chat_slack_read_receipt"
+        return super().get_throttles()
 
     def get(self, request):
         if request.query_params.get("read_state") == "1":
@@ -199,17 +353,49 @@ class SlackDmMirrorView(SlackDmMirrorApiView):
         )
 
     def post(self, request):
+        include_inventory = request.data.get("include_inventory_metadata") is True
+        if include_inventory:
+            from integrations.services.slack_owner_inventory import enabled as inventory_enabled
+
+            if not inventory_enabled():
+                return Response({"error": "slack_inventory_unavailable"}, status=404)
+        if include_inventory and "history_days" not in request.data:
+            if request.data.get("refresh_permissions") is True:
+                return Response({"error": "history_days_required"}, status=400)
+            grant = SlackDmMirrorGrant.objects.select_related("connection").filter(
+                user=request.user, status="active", revoked_at__isnull=True,
+            ).first()
+            if grant is None:
+                return Response({"error": "slack_inventory_unavailable"}, status=404)
+            public_key = str(getattr(request, "community_chat_public_key", "") or "").lower()
+            if not CommunityChatDevice.objects.filter(
+                user=request.user, public_key=public_key,
+                status="verified", revoked_at__isnull=True,
+            ).exists():
+                return Response({"error": "device_unverified"}, status=403)
+            from integrations.services.slack_owner_inventory import grant_metadata_consent
+
+            try:
+                grant_metadata_consent(grant)
+            except SlackDmMirrorError as exc:
+                raise ValidationError({"slack": str(exc)}) from exc
+            return Response(status_payload(request.user, authenticated_public_key=public_key))
         history_days = _import_history_days(request.data)
         connection = slack_connection_for_user(request.user)
         if (
             request.data.get("refresh_permissions") is not True
             and connection is not None
-            and REQUIRED_SCOPES.issubset(set(connection.scopes or []))
+            and (REQUIRED_SCOPES | PUBLIC_UNREAD_SCOPES).issubset(
+                set(connection.scopes or [])
+            )
         ):
             try:
-                activate_connection(
+                grant = activate_connection(
                     connection, history_days=history_days, include_private_channels=True
                 )
+                if include_inventory:
+                    from integrations.services.slack_owner_inventory import grant_metadata_consent
+                    grant_metadata_consent(grant)
             except SlackDmMirrorError as exc:
                 raise ValidationError({"slack": str(exc)}) from exc
             return Response(
@@ -222,7 +408,9 @@ class SlackDmMirrorView(SlackDmMirrorApiView):
                 status=status.HTTP_200_OK,
             )
 
-        connect_url = self._authorization_url(request, history_days=history_days)
+        connect_url = self._authorization_url(
+            request, history_days=history_days, include_inventory=include_inventory,
+        )
         payload = status_payload(
             request.user,
             authenticated_public_key=getattr(
@@ -245,16 +433,20 @@ class SlackDmMirrorView(SlackDmMirrorApiView):
                     else f"The last {history_days} days are imported. "
                 )
                 + "Private messages are "
-                "excluded from Roo, organization memory, public search, and analytics."
+                "excluded from Roo, organization memory, public search, and analytics. "
+                "If you choose the Slack conversation inventory, its names and unread "
+                "metadata may include conversations older than the selected message window."
             ),
         }
         return Response(payload, status=status.HTTP_200_OK)
 
     @staticmethod
-    def _authorization_url(request, *, history_days=30):
+    def _authorization_url(request, *, history_days=30, include_inventory=False):
         ticket = mint_connector_connect_ticket(request.user, "slack")
         frontend = str(settings.COMMUNITY_CHAT_FRONTEND_URL).strip().rstrip("/")
         next_url = f"{frontend}/home?slack=connected&slack_history_days={history_days}&slack_private_channels=1"
+        if include_inventory:
+            next_url += "&slack_inventory=1"
         path = reverse("connector_connect", kwargs={"provider": "slack"})
         return request.build_absolute_uri(
             f"{path}?{urlencode({'ticket': ticket, 'next': next_url})}"
@@ -279,6 +471,21 @@ class SlackDmMirrorView(SlackDmMirrorApiView):
                 raise ValidationError({"slack": str(exc)}) from exc
             except (SlackClientError, DatabaseError) as exc:
                 return _slack_endpoint_error_response(exc)
+        if request.data.get("action") == "mark_unread":
+            from integrations.services.slack_chat_read_state import mark_unread
+
+            try:
+                return Response(mark_unread(
+                    request.user,
+                    public_key=getattr(request, "community_chat_public_key", None),
+                    channel_id=request.data.get("channel_id"),
+                ))
+            except (SlackDmMirrorCredentialError, SlackDmMirrorUpstreamError,
+                    SlackClientError, DatabaseError, BudgetDeferred,
+                    SlackDmMirrorRateLimited) as exc:
+                return _slack_endpoint_error_response(exc)
+            except SlackDmMirrorError as exc:
+                raise ValidationError({"slack": str(exc)}) from exc
         if request.data.get("action") == "refresh_channel":
             from integrations.services.slack_chat_refresh import (
                 request_conversation_refresh,
@@ -361,9 +568,15 @@ class SlackUserDirectoryView(SlackDmMirrorApiView):
         except (TypeError, ValueError) as exc:
             raise ValidationError({"limit": "Use a number between 1 and 50."}) from exc
         try:
-            grant = active_grant_for_user(request.user)
+            if request.query_params.get("channel_id"):
+                from integrations.services.slack_mention_directory import search_workspace_mentions
+                return Response(search_workspace_mentions(
+                    request.user, channel_id=request.query_params["channel_id"],
+                    query=request.query_params.get("q", ""), limit=limit,
+                    cursor=request.query_params.get("cursor", ""),
+                ))
             payload = search_slack_users(
-                grant,
+                active_grant_for_user(request.user),
                 query=request.query_params.get("q", ""),
                 limit=limit,
                 cursor=request.query_params.get("cursor", ""),
@@ -375,6 +588,23 @@ class SlackUserDirectoryView(SlackDmMirrorApiView):
         except (SlackClientError, DatabaseError) as exc:
             return _slack_endpoint_error_response(exc)
         return Response(payload)
+
+    def post(self, request):
+        """Explicitly invite selected people after their message was sent."""
+        from integrations.services.slack_mentions import invite_mentions
+        from integrations.services.message_sync.scheduler import BudgetDeferred
+        try:
+            return Response(invite_mentions(
+                active_grant_for_user(request.user),
+                channel_id=request.data.get("channel_id", ""),
+                user_ids=request.data.get("slack_user_ids"),
+            ))
+        except BudgetDeferred as exc:
+            return Response({"error": "slack_rate_limited", "retry_after_seconds": exc.retry_after}, status=429, headers={"Retry-After": str(exc.retry_after)})
+        except (SlackDmMirrorCredentialError, SlackDmMirrorUpstreamError, SlackClientError, DatabaseError) as exc:
+            return _slack_endpoint_error_response(exc)
+        except SlackDmMirrorError as exc:
+            raise ValidationError({"slack": str(exc)}) from exc
 
 
 class SlackDmStartView(SlackDmMirrorApiView):

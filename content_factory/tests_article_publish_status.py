@@ -3,13 +3,14 @@ from unittest import mock
 
 from django.core.cache import cache
 from django.core.management import call_command
-from django.test import TestCase
+from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 
 from content_factory.article_publish_status import (
     advance_publish_status,
     article_bucket,
     derive_publish_status_from_evidence,
+    latest_live_observation,
     refresh_publish_statuses,
 )
 from content_factory.models import ArticlePublishStatus, OrganizationContentConfig, WrittenArticle
@@ -39,6 +40,24 @@ def _mock_response(status_code=200, content=b"", json_payload=None):
     response.content = content
     response.json.return_value = json_payload if json_payload is not None else {}
     return response
+
+
+class MissingSourceLiveObservationTest(SimpleTestCase):
+    @mock.patch("content_factory.article_publish_status._source_run_for_article", return_value=None)
+    def test_missing_source_run_stays_unverified(self, source_run):
+        for source_run_id in (None, "deleted-run"):
+            with self.subTest(source_run_id=source_run_id):
+                article = WrittenArticle(source_run_id=source_run_id, pr_url=None)
+                self.assertEqual(latest_live_observation(article), {
+                    "state": "unverified", "reason": "source_run_unavailable",
+                })
+
+    @mock.patch("content_factory.article_publish_status._source_run_for_article")
+    def test_cached_observation_does_not_require_source_lookup(self, source_run):
+        article = WrittenArticle()
+        article._live_observation = {"state": "unverified", "reason": "capture_budget_deferred"}
+        self.assertEqual(latest_live_observation(article), article._live_observation)
+        source_run.assert_not_called()
 
 
 class DerivePublishStatusFromEvidenceTest(TestCase):
@@ -160,6 +179,8 @@ class PersistArticleMemoryStatusTest(TestCase):
             "run-revision",
             {"delivery_package": {"title": "My Article", "slug": "my-article", "target_keyword": "my keyword"}},
         )
+        run_revision.run_request = {"revision_source_run_id": run_with_pr.run_id}
+        run_revision.save(update_fields=["run_request"])
         article = _persist_article_memory_from_run(organization=self.organization, run=run_revision)
         self.assertEqual(article.publish_status, ArticlePublishStatus.LIVE)
         self.assertEqual(article.pr_url, "https://github.com/MLAI-AUS-Inc/mlai-au/pull/990")
@@ -219,16 +240,47 @@ class RefreshPublishStatusesTest(TestCase):
         fields.update(overrides)
         return WrittenArticle.objects.create(**fields)
 
-    def test_sitemap_match_marks_article_live(self):
+    def test_live_body_receipt_is_version_bound_and_rechecked(self):
+        body = "<article><h1>Live article</h1><p>" + "The stated cost is AUD 50 and is not guaranteed. " * 5 + "</p></article>"
+        source = ContentFactoryRun.objects.create(run_id="live-source", workflow="direct_generate",
+            domain="mlai.au", result={"content_package": {"article_html": body}})
+        url = "https://mlai.au/articles/featured/live-article"
+        article = self._article("live-article", source_run_id=source.run_id,
+            pr_url="https://github.com/MLAI-AUS-Inc/mlai-au/pull/990")
+        response = mock.Mock(status_code=200)
+        response.iter_content.return_value = [('<link rel="canonical" href="' + url + '">' + body).encode()]
+        pr = {"status": ArticlePublishStatus.MERGED, "number": 990, "merge_commit_sha": "a" * 40, "base_ref": "main"}
+        with mock.patch("content_factory.article_publish_status._site_article_urls", return_value=[url]), \
+             mock.patch("content_factory.article_publish_status._github_pr_state", return_value=pr), \
+             mock.patch("content_factory.article_live_evidence.public_article_url", return_value=url), \
+             mock.patch("content_factory.article_publish_status.http_requests.get", return_value=response):
+            refresh_publish_statuses(self.organization, self.config, force=True)
+            article.refresh_from_db()
+            self.assertEqual(article.publish_status, ArticlePublishStatus.LIVE)
+            source.refresh_from_db()
+            receipt = source.result["release_observations"][str(article.id)]
+            self.assertEqual(receipt["state"], "verified")
+            self.assertEqual(receipt["expected_body_sha256"], receipt["observed_body_sha256"])
+            self.assertEqual(receipt["merge_commit_sha"], "a" * 40)
+            response.status_code = 404
+            refresh_publish_statuses(self.organization, self.config, force=True)
+        source.refresh_from_db()
+        receipt = source.result["release_observations"][str(article.id)]
+        self.assertEqual(receipt["state"], "unverified")
+        self.assertEqual(receipt["last_verified"]["state"], "verified")
+        article.refresh_from_db()
+        self.assertIsNotNone(article.on_main_verified_at)
+
+    def test_sitemap_match_alone_cannot_mark_article_live(self):
         article = self._article("live-article")
         with mock.patch("content_factory.article_publish_status.http_requests.get") as get:
             get.return_value = _mock_response(200, content=SITEMAP_XML)
             refreshed = refresh_publish_statuses(self.organization, self.config)
         article.refresh_from_db()
         self.assertEqual(len(refreshed), 1)
-        self.assertEqual(article.publish_status, ArticlePublishStatus.LIVE)
-        self.assertEqual(article.live_url, "https://mlai.au/articles/featured/live-article")
-        self.assertIsNotNone(article.live_verified_at)
+        self.assertEqual(article.publish_status, ArticlePublishStatus.WRITTEN)
+        self.assertIsNone(article.live_url)
+        self.assertIsNone(article.live_verified_at)
         self.assertIsNotNone(article.live_checked_at)
 
     def test_open_pr_confirmed_merged_via_github(self):
@@ -268,12 +320,15 @@ class RefreshPublishStatusesTest(TestCase):
         self.assertEqual(refreshed, [])
         get.assert_not_called()
 
-    def test_live_articles_are_not_rechecked(self):
-        self._article("done-article", publish_status=ArticlePublishStatus.LIVE)
+    def test_historical_live_articles_are_rechecked_without_erasing_history(self):
+        article = self._article("done-article", publish_status=ArticlePublishStatus.LIVE)
         with mock.patch("content_factory.article_publish_status.http_requests.get") as get:
+            get.return_value = _mock_response(200, content=SITEMAP_XML)
             refreshed = refresh_publish_statuses(self.organization, self.config)
-        self.assertEqual(refreshed, [])
-        get.assert_not_called()
+        self.assertEqual(len(refreshed), 1)
+        article.refresh_from_db()
+        self.assertEqual(article.publish_status, ArticlePublishStatus.LIVE)
+        self.assertEqual(refreshed[0]._live_observation["state"], "unverified")
 
     def test_sitemap_failure_is_best_effort(self):
         article = self._article("unreachable-article")
@@ -417,6 +472,23 @@ class OnMainVerificationTest(TestCase):
 class WrittenArticleSerializerBucketTest(TestCase):
     def setUp(self):
         self.organization = Organization.objects.create(domain="mlai.au", name="MLAI")
+
+    def test_missing_or_foreign_source_run_is_unverified_without_crashing(self):
+        other = Organization.objects.create(domain="other.example", name="Other")
+        ContentFactoryRun.objects.create(
+            run_id="foreign-run", organization=other, workflow="article_generation",
+            domain=other.domain, status=ContentFactoryRunStatus.COMPLETED,
+        )
+        for index, source_run_id in enumerate(("", "missing-run", "foreign-run")):
+            with self.subTest(source_run_id=source_run_id):
+                article = WrittenArticle.objects.create(
+                    organization=self.organization, title="Article", slug=f"article-{index}",
+                    category="featured", primary_keyword="article", source_run_id=source_run_id,
+                )
+                payload = _serialize_written_article(article)
+                self.assertEqual(payload["liveVerification"], {
+                    "state": "unverified", "reason": "source_run_unavailable",
+                })
 
     def test_serializer_exposes_bucket_and_on_main_facts(self):
         article = WrittenArticle.objects.create(
@@ -660,8 +732,8 @@ class WrittenTopicCollapseTest(TestCase):
         fields.update(overrides)
         return WrittenArticle.objects.create(**fields)
 
-    def test_live_row_wins_over_newer_stale_pr_open(self):
-        # The live row must win even though the stale duplicate was created later.
+    def test_shared_keyword_keeps_distinct_live_and_pending_articles(self):
+        # A shared keyword is not proof that two stable article IDs are duplicates.
         self._article("meetup-and", "ai meetup sydney", publish_status=ArticlePublishStatus.LIVE)
         self._article(
             "meetup-or",
@@ -670,9 +742,8 @@ class WrittenTopicCollapseTest(TestCase):
             pr_url="https://github.com/o/r/pull/1",
         )
         topics = _recent_written_topics(self.organization)
-        self.assertEqual(len(topics), 1)
-        self.assertEqual(topics[0]["slug"], "meetup-and")
-        self.assertEqual(topics[0]["bucket"], "published")
+        self.assertEqual({topic["slug"] for topic in topics}, {"meetup-and", "meetup-or"})
+        self.assertEqual(next(t for t in topics if t["slug"] == "meetup-and")["bucket"], "published")
 
     def test_distinct_topics_are_both_kept(self):
         self._article("a", "keyword a", publish_status=ArticlePublishStatus.LIVE)
@@ -680,9 +751,8 @@ class WrittenTopicCollapseTest(TestCase):
         slugs = {topic["slug"] for topic in _recent_written_topics(self.organization)}
         self.assertEqual(slugs, {"a", "b"})
 
-    def test_same_topic_both_in_flight_collapses_to_most_recent(self):
+    def test_shared_keyword_keeps_distinct_drafts(self):
         self._article("draft-old", "same topic", publish_status=ArticlePublishStatus.WRITTEN)
         self._article("draft-new", "same topic", publish_status=ArticlePublishStatus.PR_OPEN)
         topics = _recent_written_topics(self.organization)
-        self.assertEqual(len(topics), 1)
-        self.assertEqual(topics[0]["slug"], "draft-new")
+        self.assertEqual([t["slug"] for t in topics], ["draft-new", "draft-old"])

@@ -1,0 +1,1792 @@
+{
+  "purpose": "Approval inventory for disposable local regression databases only",
+  "django_version": "4.2.16",
+  "migration_count": 339,
+  "leaf_nodes": [
+    [
+      "admin",
+      "0003_logentry_add_action_flag_choices"
+    ],
+    [
+      "auth",
+      "0012_alter_user_first_name_max_length"
+    ],
+    [
+      "community_chat",
+      "0010_moderator"
+    ],
+    [
+      "content_analytics",
+      "0003_articleperformancereport_and_more"
+    ],
+    [
+      "content_factory",
+      "0041_writtenarticle_editorial_attribution"
+    ],
+    [
+      "contenttypes",
+      "0002_remove_content_type_name"
+    ],
+    [
+      "core",
+      "0068_merge_0059_purge_stale_content_types_0067_merge_0058_drop_orphan_tables_from_removed_apps_0066_guard_orphaned_actor_migration_history"
+    ],
+    [
+      "esafety",
+      "0008_alter_submission_logs"
+    ],
+    [
+      "founder_tools",
+      "0010_company_default_audience_visibility"
+    ],
+    [
+      "generic_hackathons",
+      "0007_alter_generichackathonteam_eval_team_uuid_and_more"
+    ],
+    [
+      "hospital",
+      "0017_delete_medhack_game_and_prediction"
+    ],
+    [
+      "integrations",
+      "0046_communitybridgedeletionrequest"
+    ],
+    [
+      "jobs",
+      "0002_jobrun_execution_config"
+    ],
+    [
+      "mlai_studio",
+      "0001_initial"
+    ],
+    [
+      "org_memory",
+      "0025_delete_selector_shadow"
+    ],
+    [
+      "organizations",
+      "0002_organization_company_linkedin_url"
+    ],
+    [
+      "roo",
+      "0036_sanitize_coworking_operation_receipts"
+    ],
+    [
+      "sessions",
+      "0001_initial"
+    ],
+    [
+      "startup_updates",
+      "0022_reporting_evidence_revisions"
+    ],
+    [
+      "vibe_raising",
+      "0002_move_founder_tools_models"
+    ],
+    [
+      "victor_ai",
+      "0004_victor_roo_access"
+    ],
+    [
+      "workflow_runs",
+      "0005_contentfactoryrun_reconciled_at"
+    ]
+  ],
+  "migrations": [
+    {
+      "app": "admin",
+      "name": "0001_initial",
+      "sha256": "f4716989d9815b6231f0d7291754835e008c96818447fe57984bbf8985883335"
+    },
+    {
+      "app": "admin",
+      "name": "0002_logentry_remove_auto_add",
+      "sha256": "2c127e659a2236edea0ed57eccd38786ae84e365790a80b96b758c617f50be43"
+    },
+    {
+      "app": "admin",
+      "name": "0003_logentry_add_action_flag_choices",
+      "sha256": "02700a827190720e5c417495a395071b6baa28a34e74bc8f90824afaafc01841"
+    },
+    {
+      "app": "auth",
+      "name": "0001_initial",
+      "sha256": "845cff319606332f49ef20ce165d1a17e522c426c5e56d7616133e9e4eaba5ef"
+    },
+    {
+      "app": "auth",
+      "name": "0002_alter_permission_name_max_length",
+      "sha256": "feaf97e0e8f7d148bec3db9bab2349c5e15888117c1ff2829deff63ef9e16cff"
+    },
+    {
+      "app": "auth",
+      "name": "0003_alter_user_email_max_length",
+      "sha256": "9d5657b4db9872dc26c2d634c2f5911a3d69ab1d8552af4c6d633bc4001dfabf"
+    },
+    {
+      "app": "auth",
+      "name": "0004_alter_user_username_opts",
+      "sha256": "9538db342c9a9bec4ca12b3137fb80772c4ea4afb861e8647a2962b1ea58344a"
+    },
+    {
+      "app": "auth",
+      "name": "0005_alter_user_last_login_null",
+      "sha256": "79f60a35dc000fdd427bc05c85233ae5b9c4ada078ff0688fc9f78604bf7eaee"
+    },
+    {
+      "app": "auth",
+      "name": "0006_require_contenttypes_0002",
+      "sha256": "00cb16e3405f14b62dbeffa15c68c9030291e4ddd513d733648ba460d6c5e781"
+    },
+    {
+      "app": "auth",
+      "name": "0007_alter_validators_add_error_messages",
+      "sha256": "115db87dc327530fb5e1964ba3d03f9746492f90600406947be39f54f6cc042f"
+    },
+    {
+      "app": "auth",
+      "name": "0008_alter_user_username_max_length",
+      "sha256": "02857f65f7d648147a5d12596b200a83e29145391d3f986ceb84b3b865a2c351"
+    },
+    {
+      "app": "auth",
+      "name": "0009_alter_user_last_name_max_length",
+      "sha256": "19a89500e7f108a7397da9b1733181f92105f758663b3685b60f5c2da384d76e"
+    },
+    {
+      "app": "auth",
+      "name": "0010_alter_group_name_max_length",
+      "sha256": "0963ed6498ac0b3a8430b6ca34c1b4a4b1d5f55b43d3db902f15a03ff74b14cd"
+    },
+    {
+      "app": "auth",
+      "name": "0011_update_proxy_permissions",
+      "sha256": "85a5dde708dc4b6111e1bc71ce723ecfba7b1f8aedecfd130900ff7782765436"
+    },
+    {
+      "app": "auth",
+      "name": "0012_alter_user_first_name_max_length",
+      "sha256": "6cefbc9f80903763ff8492a537a22836ef69f2227e19d402509b8099d2baecb0"
+    },
+    {
+      "app": "community_chat",
+      "name": "0001_initial",
+      "sha256": "0144732d86dc1288bb455cc40493a2c0898e715cbbf38cec003c394f15e24efa"
+    },
+    {
+      "app": "community_chat",
+      "name": "0002_device_auth",
+      "sha256": "c977ec4185c23f63e0563c15aa018d23d52d6aab0480f757a53e414f2b5a4755"
+    },
+    {
+      "app": "community_chat",
+      "name": "0003_device_installation_metadata",
+      "sha256": "067d1c66828550f1a346c5775e108156bbe42395a09a7123c8c1255bc33c2d01"
+    },
+    {
+      "app": "community_chat",
+      "name": "0004_bootstrap_token_origin",
+      "sha256": "c046e266ec521ba611157b849f17f03a460f770e452f450e08d070374a50804b"
+    },
+    {
+      "app": "community_chat",
+      "name": "0005_email_code_challenges",
+      "sha256": "2ce9393cf2ba5d139c3825f6113f45e3f319a6ea85fc2f9cc65a569081079beb"
+    },
+    {
+      "app": "community_chat",
+      "name": "0006_account_sessions",
+      "sha256": "ecdf07529bb0ffbbf71f0335f3b19ccf5063dbbc86d0806215ef1e5794d49fd6"
+    },
+    {
+      "app": "community_chat",
+      "name": "0007_active_installation_constraint",
+      "sha256": "57e47612bccd085260e50f21bca432f2fc1fab38c4d29af98b63e24fbc28d568"
+    },
+    {
+      "app": "community_chat",
+      "name": "0008_token_usage",
+      "sha256": "180da533e391708ee488e5f33bab619ce81a8fcccbcfeff59f34824deb2ebee0"
+    },
+    {
+      "app": "community_chat",
+      "name": "0009_volunteer",
+      "sha256": "776c2e7e0ffa285c0fb734d8fe7434dede8da1fc8e96a09d130efaeeef3fa404"
+    },
+    {
+      "app": "community_chat",
+      "name": "0010_moderator",
+      "sha256": "606b27960e62c2a751fc129c397f31a230eadb23ec2409c0db803742a3c6fa6e"
+    },
+    {
+      "app": "content_analytics",
+      "name": "0001_initial",
+      "sha256": "1d0999a346f3332608dc7343e2b33438757611c9179521d6b4e96ad547bdc7bf"
+    },
+    {
+      "app": "content_analytics",
+      "name": "0002_article_analytics_location_history",
+      "sha256": "d4a24e5907d888dbdf993f89fa493c1587ca9e31b9c650be202df33462e56fa0"
+    },
+    {
+      "app": "content_analytics",
+      "name": "0003_articleperformancereport_and_more",
+      "sha256": "7f8911df9197c478cbc7ce94aac09e59a5a0afd237ec54c131d90e5da99e726e"
+    },
+    {
+      "app": "content_factory",
+      "name": "0001_split_content_factory_apps",
+      "sha256": "ae965dc873081d7eb84d84b5e0a38e187f5ceed6a547494240f5f70f1a2134ed"
+    },
+    {
+      "app": "content_factory",
+      "name": "0002_move_legacy_contenttypes",
+      "sha256": "ade62a7e7d54cfbed44129282c12c3542db17763283bb0042037572b309230d2"
+    },
+    {
+      "app": "content_factory",
+      "name": "0003_website_baseline_snapshot",
+      "sha256": "72a1e820c35837570be3b0d541e3f2eb6ccecf7e496a01bd59c7f688531fa08e"
+    },
+    {
+      "app": "content_factory",
+      "name": "0004_vibe_marketing_component_comment",
+      "sha256": "cd5973103145359ea49b218cdf5aeeb1eca8fcb8d940d36cd1a8a567b60b29d3"
+    },
+    {
+      "app": "content_factory",
+      "name": "0005_vibe_marketing_component_comment_anchor",
+      "sha256": "737b8ff16720f9835cb29ce08c37470910e831564bf8824b42e2137d643eb53f"
+    },
+    {
+      "app": "content_factory",
+      "name": "0006_topic_feedback",
+      "sha256": "fc147abf0d9fca53da30c67e0fda37b8b559637630a25e11af542f240cc51a0e"
+    },
+    {
+      "app": "content_factory",
+      "name": "0007_backfill_topic_coverage_memory",
+      "sha256": "9b0cc9e7c0d3749f7614da0ec5066c28d8633b7274207624b31eb2e16abdf673"
+    },
+    {
+      "app": "content_factory",
+      "name": "0008_researchedkeyword_difficulty_source",
+      "sha256": "91b7f7eb4161aed97028c82df447a81cd56328d40c5405dbc79be712d4b7078b"
+    },
+    {
+      "app": "content_factory",
+      "name": "0009_researchedkeyword_topic_picker_metrics",
+      "sha256": "087b7c6b55f5155dc7193dca4c7fd9243f17a4c3f6ac840f8fc69534a685b92e"
+    },
+    {
+      "app": "content_factory",
+      "name": "0010_backfill_review_draft_delivery_mode",
+      "sha256": "6037163744b933c251e9454ef319fed64168a9a7173ded364ca6fd3d1ff2fb57"
+    },
+    {
+      "app": "content_factory",
+      "name": "0011_vibe_marketing_component_comment_context",
+      "sha256": "f8508aec178073f6532a6ac24eb9d21d669604f09313780e39a1717cafa9177f"
+    },
+    {
+      "app": "content_factory",
+      "name": "0012_research_automations",
+      "sha256": "1404f54c5af22fc7a0e2940f3488f01344d9e6505da4cb7307eeea01ab60357d"
+    },
+    {
+      "app": "content_factory",
+      "name": "0013_writtenarticle_wa_org_created_idx",
+      "sha256": "4102a1786824c7b835ce02434b427c3b3dfcada14783c0940ac914ddef07e7f5"
+    },
+    {
+      "app": "content_factory",
+      "name": "0014_contentfactorycallbackevent",
+      "sha256": "c400db0a281251212f70b1fc34d10f826ce47a3e218f0712b3170774fc67cde6"
+    },
+    {
+      "app": "content_factory",
+      "name": "0014_writtenarticle_publish_status",
+      "sha256": "f976e45c80865574798e8ba153418cf4d77228fe159866a468cdc1463a8a1e2e"
+    },
+    {
+      "app": "content_factory",
+      "name": "0015_merge_20260610_0823",
+      "sha256": "8a834cc77c5d9975799064db5420e87f736d52e96a3e65a4da83718616763ddb"
+    },
+    {
+      "app": "content_factory",
+      "name": "0016_writtenarticle_source_run_id",
+      "sha256": "d3d96547ae9a10cfbe49d5a1621fb3bb5ad014bc0df9ac5ead0a0f8ee841c8f2"
+    },
+    {
+      "app": "content_factory",
+      "name": "0017_backfill_writtenarticle_source_run_id",
+      "sha256": "87816717a2e2773e4b3414db57b475599faddb46c38e0609e2250c5ab221baae"
+    },
+    {
+      "app": "content_factory",
+      "name": "0018_notification_channel_verification",
+      "sha256": "1e1f2c58236781f21358ffcc2d984f8c0b0fd0196bc858a722b76d5464ecfaf6"
+    },
+    {
+      "app": "content_factory",
+      "name": "0019_notification_delivery_per_channel_keys",
+      "sha256": "362bed34e6cacea0f7bcb9ffa23ce71c628a4e78dd14646efc8c04edacb4fff1"
+    },
+    {
+      "app": "content_factory",
+      "name": "0020_organizationcontentconfig_article_system_setup_cache_and_more",
+      "sha256": "91a0af2b80d35c7d5b6cc4b994fbc6d11017031c5174af84765c06f0cb7e759b"
+    },
+    {
+      "app": "content_factory",
+      "name": "0021_organizationcontentconfig_auto_publish_requires_review",
+      "sha256": "e67169dd81c610e599ce63cce60ca97565d0e1ec7ebfd46225174a90eb21605b"
+    },
+    {
+      "app": "content_factory",
+      "name": "0022_writtenarticle_content_path_and_more",
+      "sha256": "d795802ce8dcc38d20c194f24c2a07c1151568d0289eb8948701e05fdbe8850f"
+    },
+    {
+      "app": "content_factory",
+      "name": "0023_design_snapshot",
+      "sha256": "31250fd160b8fd3ec4343ceef2009d25bc9210c880e31c1e882c9c712d331b93"
+    },
+    {
+      "app": "content_factory",
+      "name": "0024_generatedcomponent_import_statement_metadata",
+      "sha256": "028bba5d8081e80f23d5d994a3daa1f39c04835f6c50dbe6eada38fb66fd0be0"
+    },
+    {
+      "app": "content_factory",
+      "name": "0025_orgconfig_use_component_library",
+      "sha256": "358c7381740a7924fbad9f04462c1e33c6998e36e62abd602318015e7cfc6dcb"
+    },
+    {
+      "app": "content_factory",
+      "name": "0026_organizationcontentconfig_authors_and_more",
+      "sha256": "24b0054309fae3116430135c7d7ffc48686a775733e9b0319c8c1c663f6655e9"
+    },
+    {
+      "app": "content_factory",
+      "name": "0027_healing_record_archived_state",
+      "sha256": "a261573a1432272ce0f063d63054450b06a33f00c961fc2d14de3d55cef1efed"
+    },
+    {
+      "app": "content_factory",
+      "name": "0028_organizationcontentconfig_scan_artifact_cache",
+      "sha256": "50579e6628290a495ee1f2afb86ecfacc946cc7e5a6e46ef0c8df36d657b9abb"
+    },
+    {
+      "app": "content_factory",
+      "name": "0029_notificationchannel_delivery_enabled",
+      "sha256": "85b07a7cdfda2ac8b1a0de198b138ef8ac31874b019e8156a1ec89d928e67a45"
+    },
+    {
+      "app": "content_factory",
+      "name": "0030_callback_event_lease",
+      "sha256": "eaa794e6f83385f5c9a0f3adfa1ece404cd8097b214c8421ca5b491e746e7388"
+    },
+    {
+      "app": "content_factory",
+      "name": "0030_learning_entries_and_healing_framework",
+      "sha256": "00132e81da3872c89cdf5d2ab9169bda2d46c70351f8dafd4952f8cec7616ae3"
+    },
+    {
+      "app": "content_factory",
+      "name": "0031_merge_callback_lease_learning_entries",
+      "sha256": "9fb31f1a6269b45da9a30c2897fb607295e072cbb994de5f16c6b6901266663d"
+    },
+    {
+      "app": "content_factory",
+      "name": "0032_writtenarticle_analytics_identity",
+      "sha256": "aded080fc0bc20a03c5dcd3a69af95d1e12c444106c797e310a3e8108f92e146"
+    },
+    {
+      "app": "content_factory",
+      "name": "0033_activate_account_email_notification_channels",
+      "sha256": "83f5ab4f63289e94ae7594b98ee8c113f98d188e6d7a7500359e7396f0c5d1ac"
+    },
+    {
+      "app": "content_factory",
+      "name": "0034_keywordvelocity_trend_provenance",
+      "sha256": "f3656a9a79acce5abb00c9b06b2b9e16218123fc124acac840949da6c15e1859"
+    },
+    {
+      "app": "content_factory",
+      "name": "0035_notificationdelivery_performance_report_and_more",
+      "sha256": "69bedcc6d6b9ca530dd8fbaad5ac5b576c92c2117d931062a2393a868ee9ffbd"
+    },
+    {
+      "app": "content_factory",
+      "name": "0036_researched_keyword_ai_search_metrics",
+      "sha256": "302b88451b51c7102778bfa383fd3a3823e96d7f6478a113005dfd8e94ac97ad"
+    },
+    {
+      "app": "content_factory",
+      "name": "0037_content_islands",
+      "sha256": "acd0f1952639381b4b7986e15d9a451683c689732550557a5b70f0388532e359"
+    },
+    {
+      "app": "content_factory",
+      "name": "0038_delete_seo_topicmap_researchsession",
+      "sha256": "6bb32980b45ae3984390447d1a61f9d244516fe5187436db332ac6c915640069"
+    },
+    {
+      "app": "content_factory",
+      "name": "0039_encrypt_github_credentials",
+      "sha256": "14d4e578e7368777e88a59a7f81024bd9ba4bf2286166f590f01bc3cf59801ce"
+    },
+    {
+      "app": "content_factory",
+      "name": "0040_backfill_github_credential_envelopes",
+      "sha256": "daf309dbe2febeb7da00aa569383bf0281b4fd5cb91e4696b9a4e4e872c7bc60"
+    },
+    {
+      "app": "content_factory",
+      "name": "0041_writtenarticle_editorial_attribution",
+      "sha256": "0fca7258dbbd401b306122fd0bd4ceeea1256879efb4b0770dd2756e16597380"
+    },
+    {
+      "app": "contenttypes",
+      "name": "0001_initial",
+      "sha256": "35ed8489a147e0b42a15c21b5d4f0e8940de6f73fb326e9d6dea91b4d0b953cc"
+    },
+    {
+      "app": "contenttypes",
+      "name": "0002_remove_content_type_name",
+      "sha256": "7d36494075750f0ed3c0f68d0cb1548eba59cc593f52f691f6cc37a043083766"
+    },
+    {
+      "app": "core",
+      "name": "0001_initial",
+      "sha256": "1bde9820443d37f9e3ab44ba7369cb001ffcd9a61551821a391366ca831f52d7"
+    },
+    {
+      "app": "core",
+      "name": "0002_hackathon",
+      "sha256": "33ff7b8672cd69d11f6164dd92df6a692371a076fe380b8fc87c5588bbdef41c"
+    },
+    {
+      "app": "core",
+      "name": "0003_user_avatar_url",
+      "sha256": "d91281437549cb179ed4610426f79277b062e0a89ea788ecc53a0bf292ee2778"
+    },
+    {
+      "app": "core",
+      "name": "0004_user_about_user_phone",
+      "sha256": "1269073915d486b1fd206206528b49afd029ea8d9bc07f9ef9821d79eebaa266"
+    },
+    {
+      "app": "core",
+      "name": "0005_user_first_name_user_last_name",
+      "sha256": "281ed82f34822c09c815d0874c628260995b6904c774998fc9ad69e2b1f91272"
+    },
+    {
+      "app": "core",
+      "name": "0006_split_full_name",
+      "sha256": "ddf497ca5de6548ad24e8c88d7f20dabc9985418947220d2e7146797c3e2e154"
+    },
+    {
+      "app": "core",
+      "name": "0007_remove_user_full_name",
+      "sha256": "13e7b25b2254266b0346b611b08ed4c7b7fb8fcbaef9ea0d07703465656d56f1"
+    },
+    {
+      "app": "core",
+      "name": "0008_user_personas",
+      "sha256": "764a48d6b8ca59a95a2cf80a8cdd32549d168f0bd7b3cde03b853314760ae079"
+    },
+    {
+      "app": "core",
+      "name": "0009_globalsettings",
+      "sha256": "6050c4c74ecf8e311bfa87d35619f2d9f305ce39889a9c1a45c94298f3af91ea"
+    },
+    {
+      "app": "core",
+      "name": "0010_user_slack_id_alter_globalsettings_is_obscured",
+      "sha256": "e803ca9a22ed7d57cc81718836d60c236fef21594fb523b6976a535c76c0cc18"
+    },
+    {
+      "app": "core",
+      "name": "0011_organization_organizationcontentconfig",
+      "sha256": "9c97b948c66c1caa5fbb012185003bf98419f33039def40ff096741b9b29eafc"
+    },
+    {
+      "app": "core",
+      "name": "0012_organizationcontentconfig_scan_summary_and_more",
+      "sha256": "b4b6a3c542ad3e42a814b8ab5309b0f766609bc2dd9301053b4cce4f9ba069f0"
+    },
+    {
+      "app": "core",
+      "name": "0013_organizationcontentconfig_resource_prompt",
+      "sha256": "f202373f5685a5e3974bb5b7ffde853475324e3f288bf67502814e00f83988bf"
+    },
+    {
+      "app": "core",
+      "name": "0014_add_component_library_storage",
+      "sha256": "7748589fb6bd37bd6283ada7e455d6020410c730136db917bb94950d06470d0c"
+    },
+    {
+      "app": "core",
+      "name": "0015_add_company_context",
+      "sha256": "adeff48d8b568d7c96550062bca7ffa9ae90540c341b0df6393de82145af7d02"
+    },
+    {
+      "app": "core",
+      "name": "0016_organization_competitors",
+      "sha256": "4effdd754efd95a78a3c61353c3eec5b8edf30c3a7a4d83934eb72d150781562"
+    },
+    {
+      "app": "core",
+      "name": "0017_add_seed_keywords_to_organization",
+      "sha256": "e21de61c17163b453f76fe76ed8fa000d0cbc6196d82c9fbd88dfce6373d05a3"
+    },
+    {
+      "app": "core",
+      "name": "0018_add_content_factory_job",
+      "sha256": "2c7d49fb5d5df19e4a0eb9283552988ccc26a33741992f805ac119e3c55958bf"
+    },
+    {
+      "app": "core",
+      "name": "0019_contentfactoryjob_request_meta_and_more",
+      "sha256": "1876f76dc085ddf530960ec625b9ddcfb0939a7355350c6ac0cb21f943c1e936"
+    },
+    {
+      "app": "core",
+      "name": "0020_add_installed_packages_to_orgconfig",
+      "sha256": "96a9f30098bada048e713285d4d99e7ab9b48dd6b1f2bfbe89e7bd4107993dd6"
+    },
+    {
+      "app": "core",
+      "name": "0021_add_org_github_credentials",
+      "sha256": "ff17118acd48fa33aac21a309897552bd2533c708e169bcaef4f118aae55c747"
+    },
+    {
+      "app": "core",
+      "name": "0022_add_articles_scaffolded",
+      "sha256": "98f7ec7607825071e5b3f29eedcd483338e3db85dc2e750c80f7117dfb32b996"
+    },
+    {
+      "app": "core",
+      "name": "0023_add_domain_to_paa_and_aisaturation",
+      "sha256": "307be53c93cf95cf812f65e03c6ad12bdc7fdfc357753c7a636c26a6ad9169f7"
+    },
+    {
+      "app": "core",
+      "name": "0024_add_thread_context_to_contentfactoryjob",
+      "sha256": "3103ce4b86106b07dbd8776e6751d805fff67ff6e66f18642b2f54e6d4248207"
+    },
+    {
+      "app": "core",
+      "name": "0025_backfill_domain_on_paa_and_aisaturation",
+      "sha256": "e6cf4a23a4459770be87400664a9d82fe1e5e8e171033255ab52e1018de86c23"
+    },
+    {
+      "app": "core",
+      "name": "0026_add_scaffold_preview_url",
+      "sha256": "a55518e97e85c7afb01701966dfe218fa5a5c38c87a58ff996c7028a2224fd3f"
+    },
+    {
+      "app": "core",
+      "name": "0027_seed_default_hackathons",
+      "sha256": "325d933494627f8c8747615bf1fa19c50523b689d1f5cfaa2480a78f12e7e3c1"
+    },
+    {
+      "app": "core",
+      "name": "0028_update_hospital_hackathon_metadata",
+      "sha256": "b6931a8ca2a339d9773c3f6c66cd8eed5e6118d7715169645a1bcd8e4bd0ad15"
+    },
+    {
+      "app": "core",
+      "name": "0029_add_research_memory_fields",
+      "sha256": "8999ef857174f63c944e80cc4c315cf051bdd2233583366647ea41ffd1da7f6c"
+    },
+    {
+      "app": "core",
+      "name": "0030_add_content_factory_runs",
+      "sha256": "ae6b6f352b67c4e3ee36a04893c6d3f8b69c61c90dd4a55d16c2d5edeacd2e04"
+    },
+    {
+      "app": "core",
+      "name": "0031_add_article_system_to_org_config",
+      "sha256": "54f740b4e41367b192009936e13dc9465caa825b310ad2e532d4119151d308fe"
+    },
+    {
+      "app": "core",
+      "name": "0032_update_content_factory_status_choices",
+      "sha256": "03c9d516899d063b23bd56c70e0c4877a98d634cb4049fa319a56a1514b78ba9"
+    },
+    {
+      "app": "core",
+      "name": "0033_add_content_factory_progress_tracking",
+      "sha256": "4ee72b5ba0f63da04ea97032cc4b9808ee85ecdf3314fa77eb55de8499e9edce"
+    },
+    {
+      "app": "core",
+      "name": "0034_add_content_factory_billing_fields",
+      "sha256": "a3de7725083df1ce2b00db45f09609e4492aced496fd48b5c900ff8b4c41a0a0"
+    },
+    {
+      "app": "core",
+      "name": "0035_add_content_factory_progress_message_tracking",
+      "sha256": "dc160a789db6036f5d6b4a76997057a8bdf533498e184cc2ff0c17d18fb8f549"
+    },
+    {
+      "app": "core",
+      "name": "0035_add_publish_targets_to_org_config",
+      "sha256": "ad8fdd91860b7e0a693c106c4470a61a7893ff1d6bb9db3cadcb005f3b4aada2"
+    },
+    {
+      "app": "core",
+      "name": "0035_rename_cf_run_workflow_status_idx_content_fac_workflo_10aee3_idx_and_more",
+      "sha256": "966b49bed7d983b956eb6e164903124cd540a675ea29cd1956af739efb73439b"
+    },
+    {
+      "app": "core",
+      "name": "0036_merge_content_factory_progress_and_publish_targets",
+      "sha256": "881d7e52a07ce05f421b2d61041e178cf852dc554ed7f89e40ae54e8501d8812"
+    },
+    {
+      "app": "core",
+      "name": "0037_alter_organizationcontentconfig_article_system",
+      "sha256": "78cb29a37e703d3426e6a1d422062b3db7b49339d27fad90c68a2be1ecab02d7"
+    },
+    {
+      "app": "core",
+      "name": "0038_merge_content_factory_schema_branches",
+      "sha256": "3add58a8353420bf02f465de4b66efdd118c267f55b8cbe9d4c50d0d67761eab"
+    },
+    {
+      "app": "core",
+      "name": "0039_scheduled_discovery_dispatch",
+      "sha256": "535bc7a090841c219142d05eb329f2928c4937eea191ce12207f4b345120d20e"
+    },
+    {
+      "app": "core",
+      "name": "0040_alter_contentfactoryjob_status",
+      "sha256": "01e2e3e057245a98b7cd732a8a9e7a8a79508b1a2a8159b8aed5ed856311a0ea"
+    },
+    {
+      "app": "core",
+      "name": "0041_organizationcontentconfig_connected_slack_user_id",
+      "sha256": "cc4ec69b9f65bcd80dcab0191edf79e327105e7ff1f033922674fa9a3e837187"
+    },
+    {
+      "app": "core",
+      "name": "0042_add_article_delivery_mode_to_org_config",
+      "sha256": "b0d310bc46e3ca4bb2821bd460eaf63921cc624927cfbeada2fb2403b971bb4c"
+    },
+    {
+      "app": "core",
+      "name": "0043_add_content_factory_healing_records",
+      "sha256": "9dba2a0a8174706d104498e6a787f82ff35479624f52eb8d54d74b61d441a989"
+    },
+    {
+      "app": "core",
+      "name": "0044_alter_contentfactoryjob_status_blocked",
+      "sha256": "de640b697118a5f3c60a5e980e6e61a3dd278095193e2ca4bc6e2811171d3a7b"
+    },
+    {
+      "app": "core",
+      "name": "0045_org_config_repo_execution_contract_and_job_pr_statuses",
+      "sha256": "e518086e4c88757d5fe92678035ad3b81506d74fa93e32ea85d19cc7ca80289e"
+    },
+    {
+      "app": "core",
+      "name": "0046_alter_contentfactoryrun_status_and_more",
+      "sha256": "cf524f12c4a13173664b7b88b23b6238f34091f3867550e68be9897f82400bad"
+    },
+    {
+      "app": "core",
+      "name": "0047_organizationcontentconfig_daily_discovery_fields",
+      "sha256": "1a6bcfcddb2f299abd08205508ae2f985ce746a0c37706df5936a4ca9a1c5ca1"
+    },
+    {
+      "app": "core",
+      "name": "0049_viberaisingpendingsignup",
+      "sha256": "a0ee2f05eb4dbf7e8bee6b28f2f770c16ea6b9b89058677a876b32944672385f"
+    },
+    {
+      "app": "core",
+      "name": "0050_delete_viberaisingpendingsignup",
+      "sha256": "04d97364042d66810337cbdf107beb51772051997de1b339e47d9d56cacd2515"
+    },
+    {
+      "app": "core",
+      "name": "0051_split_content_factory_apps",
+      "sha256": "9ba71c0a1f83ac457c00ef892b8f99b8438bdc585c548f7d42a08d0eddebc09a"
+    },
+    {
+      "app": "core",
+      "name": "0052_remove_user_role_has_team",
+      "sha256": "6cfbf6fba76d4ae1e177d09b99532471f2db80183ef6d7fb4ec5664a15709779"
+    },
+    {
+      "app": "core",
+      "name": "0053_user_updated_at",
+      "sha256": "5f7a3baf5aacf37ec9241430b7458e3cd5ed8bec64b7c4a0927fbc7b11f35228"
+    },
+    {
+      "app": "core",
+      "name": "0054_rebrand_hospital_as_healthhack",
+      "sha256": "2573a929b98a4df3d0fff5dc3cd8f086044f95759588ea3f5b9dba858defa5ca"
+    },
+    {
+      "app": "core",
+      "name": "0055_passwordresetchallenge_user_auth_version_and_more",
+      "sha256": "b19003b2a2c462d070c1e66c29ca21ac02e00c64ecb1c7ef7adcdaa6209a65d9"
+    },
+    {
+      "app": "core",
+      "name": "0056_user_community_chat_profile_id",
+      "sha256": "4325a92d3ab2c608cdba9ee42b98164badc41df4cbb5d221d7c4904b1c317066"
+    },
+    {
+      "app": "core",
+      "name": "0057_passwordresetemaildelivery",
+      "sha256": "18a8e9c2565233a170e33155461ee842b9dd641671886f766c04f33ab9b0384d"
+    },
+    {
+      "app": "core",
+      "name": "0058_drop_orphan_tables_from_removed_apps",
+      "sha256": "c61e6fa728525e52cf2133a9577cf5fe7ef68539ff6bc1bf36db794199f7ba53"
+    },
+    {
+      "app": "core",
+      "name": "0058_slackfounderaccountlink_slackfounderlinkrequest",
+      "sha256": "b9ff00342fef94b77579dea8a1bb6563c2c30e9d1b7ad7b984400b6216f1383d"
+    },
+    {
+      "app": "core",
+      "name": "0059_purge_stale_content_types",
+      "sha256": "b2749d9011c73fff465f070330f8db03c5dd790c22a5143ddf9155ed3b5ab2a8"
+    },
+    {
+      "app": "core",
+      "name": "0059_slackfounderaccountlink_distinct_users",
+      "sha256": "902cad71e85ea06d05f46f617df7af96d70d51bc4b2197493a8fb21fc58dc4b4"
+    },
+    {
+      "app": "core",
+      "name": "0060_slackfounderlinkrequest_consumed_by_user",
+      "sha256": "394b022a9654ef08f4a848fd4bdd92045c4c40b0e70a4a365f4e8f0bb052f5f0"
+    },
+    {
+      "app": "core",
+      "name": "0061_clear_synthetic_web_slack_ids",
+      "sha256": "6b98d341ebfe1a8bced6e17514085aacba8ab86bdd2c9766580bfc163f1141d0"
+    },
+    {
+      "app": "core",
+      "name": "0062_slackfounderlinkrequest_created_index",
+      "sha256": "cf54da04ba25b8e115b0939e542edb6a90a6a891b51711e7f2a9b523fdf9f46f"
+    },
+    {
+      "app": "core",
+      "name": "0063_canonicalize_legacy_content_factory_actor_ids",
+      "sha256": "38b2522bedefe7b7848f9403ec176a00dd249b89b1a254ddf7b35cff5be5e235"
+    },
+    {
+      "app": "core",
+      "name": "0064_guard_legacy_actor_migration_history",
+      "sha256": "a5ad86554ccc89287c10da16e9f38543786c9c2b77e0bc7d4a752b225421c5a6"
+    },
+    {
+      "app": "core",
+      "name": "0065_recheck_legacy_actor_migration_attestation",
+      "sha256": "bc6c8e7bbadb66d7c77bbf52f38a0847a0b6927be0f5b27a61ae5fe73426352a"
+    },
+    {
+      "app": "core",
+      "name": "0066_guard_orphaned_actor_migration_history",
+      "sha256": "f3b29b2c83e7467427efdd98e696801bc84dbba80cb93936a38f91e6748bc418"
+    },
+    {
+      "app": "core",
+      "name": "0067_merge_0058_drop_orphan_tables_from_removed_apps_0066_guard_orphaned_actor_migration_history",
+      "sha256": "27c335326863002034b2f711ba08e5ae29e8fba074c712fc9ffc4e31e90c986c"
+    },
+    {
+      "app": "core",
+      "name": "0068_merge_0059_purge_stale_content_types_0067_merge_0058_drop_orphan_tables_from_removed_apps_0066_guard_orphaned_actor_migration_history",
+      "sha256": "f3094d6ebf781a956f3a055ee13d2f1dbafc2ba2ba6c2cf5744abe1c5b68701e"
+    },
+    {
+      "app": "esafety",
+      "name": "0001_initial",
+      "sha256": "fb1dd57056a75c6c659f5230c084f23b4bf8a3d46a4f7b1d12196bd9f15b3b7b"
+    },
+    {
+      "app": "esafety",
+      "name": "0002_submission",
+      "sha256": "22c6f72f1f2d66bea42b67408c733706f44b6c408233dfe828f8d1023c4292d5"
+    },
+    {
+      "app": "esafety",
+      "name": "0003_announcement",
+      "sha256": "bb15e93c70222ee0d21215ac30cce7ec647aa22eb6bd7b750fe430d19cb83c87"
+    },
+    {
+      "app": "esafety",
+      "name": "0004_team_avatar_url",
+      "sha256": "730402ad8fdf3b621678437e0810619f678e93e8940e64e07e51a0837146f836"
+    },
+    {
+      "app": "esafety",
+      "name": "0005_alter_announcement_body",
+      "sha256": "1180d19f58fbc969537b438d07f1e1d8aad977d7832f8c6bfa4b22bd7e2ccf8a"
+    },
+    {
+      "app": "esafety",
+      "name": "0006_submission_coarse_score_submission_fine_score_and_more",
+      "sha256": "afe0425cc2d1665fb9b998126b3513b601a7440ef84af0731a4a891273775b4a"
+    },
+    {
+      "app": "esafety",
+      "name": "0007_submission_logs",
+      "sha256": "813eec2c0b0bcb0ba9e39bce480ac846b538ca075b4c3955866a78f117a07302"
+    },
+    {
+      "app": "esafety",
+      "name": "0008_alter_submission_logs",
+      "sha256": "d94557c64458d627ba893be297a2116d774c82be031e53dd4825188a109f6e1e"
+    },
+    {
+      "app": "founder_tools",
+      "name": "0001_move_vibe_raising_models",
+      "sha256": "135fa3753cf29bf98af2e5ae35b2a1b1a99517d60c74ae3de12effa22943677b"
+    },
+    {
+      "app": "founder_tools",
+      "name": "0002_company_organization",
+      "sha256": "37c3421af3c176cb5db697a5080983e0ee8addb9595b1ae4cd0ec8ba987411c9"
+    },
+    {
+      "app": "founder_tools",
+      "name": "0003_backfill_company_organizations",
+      "sha256": "2cf186c422662f7bd6005e13584f78f9082ffdea8e514da3546f1d3d165f6633"
+    },
+    {
+      "app": "founder_tools",
+      "name": "0004_move_legacy_contenttypes",
+      "sha256": "2c9456d4adcdcf50bb7e3a9ee0d68764c6e7083364c7aabf922e83df3f7b387d"
+    },
+    {
+      "app": "founder_tools",
+      "name": "0005_viberaisingcompany_location",
+      "sha256": "88ca6647d221c50af264e498e0f51020a3ff9a5e24d7547f1457fe2b85033ded"
+    },
+    {
+      "app": "founder_tools",
+      "name": "0006_repair_company_organization_column",
+      "sha256": "ad6d3841f51ffc37d5a4e0bcce6493c9c98490bda3ba83cd194e312f6266ca2b"
+    },
+    {
+      "app": "founder_tools",
+      "name": "0007_viberaisingcompany_avatar_url",
+      "sha256": "e50aaef4a0c2048bfdcfc9b796a82d70899637fb7690387727e9c751d3cca3db"
+    },
+    {
+      "app": "founder_tools",
+      "name": "0008_viberaisingcompany_abr_verified_at_and_more",
+      "sha256": "8fc808f1ae63cc3be20b1c9887538bba4ad5ef60e0032af9a4d6e58ccfdbfc1f"
+    },
+    {
+      "app": "founder_tools",
+      "name": "0008_viberaisingcompany_uniq_profile_domain",
+      "sha256": "a999d130b5f5845474f50b7656948242b1033eb367f14dc6f5f270af712ed73f"
+    },
+    {
+      "app": "founder_tools",
+      "name": "0009_merge_20260701_0348",
+      "sha256": "c0b92e6220aeed5eb9ade37725fbd36ee2ea8de3464ca3f7a27cba9c2c04e346"
+    },
+    {
+      "app": "founder_tools",
+      "name": "0010_company_default_audience_visibility",
+      "sha256": "992cc29949f0f6999d5a9658066be6e46158d0612187f4c2f7dac80b7d6a4ebc"
+    },
+    {
+      "app": "generic_hackathons",
+      "name": "0001_initial",
+      "sha256": "b49ee697aa9f7ec94aea33e3b7a06e452c5994cdafafe6c06345215ae2c5f534"
+    },
+    {
+      "app": "generic_hackathons",
+      "name": "0002_wattthehacksettings",
+      "sha256": "236c239ebc6ed0b12a4ce5a15b2bbb3f44c18712b10a229c1ad074451ca9b500"
+    },
+    {
+      "app": "generic_hackathons",
+      "name": "0003_generichackathonteam_leader",
+      "sha256": "f3eb21b4e26f165c3512402a8b9be1031662ae4aa6788f69b0d81f2e23098ac4"
+    },
+    {
+      "app": "generic_hackathons",
+      "name": "0004_generichackathonjoinrequest_and_more",
+      "sha256": "cc3d24c5d51a180a06681a02876d4d30c68499006e90b196a7bc83df2daa6fc7"
+    },
+    {
+      "app": "generic_hackathons",
+      "name": "0005_generichackathonteam_eval_token",
+      "sha256": "e1dd379df4b2cc0567e1c3564f4946467087864a0170d83757dab7f77d526ffa"
+    },
+    {
+      "app": "generic_hackathons",
+      "name": "0005_watt_session_cache_table",
+      "sha256": "65c9ae7c206eacb9dd1a6fb65aca4e909d523218c3cfe904a0cecf9833a37e4c"
+    },
+    {
+      "app": "generic_hackathons",
+      "name": "0006_merge_20260604_0238",
+      "sha256": "a5bc076fe58fae7891081e313878c5a025088811fa25e605bb9f0816845ea2b8"
+    },
+    {
+      "app": "generic_hackathons",
+      "name": "0007_alter_generichackathonteam_eval_team_uuid_and_more",
+      "sha256": "55ac7b420b068a14e950b03c5aeef48cb13013064fd6634d3448546bcaf52c66"
+    },
+    {
+      "app": "hospital",
+      "name": "0001_initial",
+      "sha256": "33b622ca559e9fc4f6f1aa1d267e69e650690895b999958e11a360b4c2ec5c0b"
+    },
+    {
+      "app": "hospital",
+      "name": "0002_alter_team_members",
+      "sha256": "d65141c7320d901e5f371fb7fcb44e128e9d45aefd3621a5e0f7599eb43d5500"
+    },
+    {
+      "app": "hospital",
+      "name": "0003_alter_submission_user",
+      "sha256": "f7fa63cd1f47b049b94d410622112e0383a51336800490eaf7b95f74143c23e9"
+    },
+    {
+      "app": "hospital",
+      "name": "0004_announcement",
+      "sha256": "74f2da51cd85a4fa8b6df5adef915e4b763f2db9301335dd55fdacbf09d444e0"
+    },
+    {
+      "app": "hospital",
+      "name": "0005_medhack_from_roo",
+      "sha256": "75f39673358b528162efa0474411e8d93098ebaed64c3b875667d5eb75a81432"
+    },
+    {
+      "app": "hospital",
+      "name": "0006_team_avatar_url",
+      "sha256": "f22540fa2585bcd9c5deace3d18aa2db651155a650a98b3ecf04280cc704c9eb"
+    },
+    {
+      "app": "hospital",
+      "name": "0007_add_feedback_to_submission",
+      "sha256": "5061a84dfada72e2cfdccba11e78a628681a6fa2f663f4aa42130134dad293ef"
+    },
+    {
+      "app": "hospital",
+      "name": "0008_simcasewinner_simdiagnosisguess_and_more",
+      "sha256": "b6a36411bfb73e295e3f2724837ca9da329bb00d4ae27d739d0cbb356a8db2f1"
+    },
+    {
+      "app": "hospital",
+      "name": "0009_sim_observability_and_prizes",
+      "sha256": "86f655122cae13ea4bf2299d28ab12588e25835f85fe30ef032c965e0c249da6"
+    },
+    {
+      "app": "hospital",
+      "name": "0010_sim_ai_npc_tools",
+      "sha256": "599e625385a5284cb93fd70946b76bf9661015f30d300a189459902c5bfa8adf"
+    },
+    {
+      "app": "hospital",
+      "name": "0011_sim_prize_registration",
+      "sha256": "12ccfe9711064e55fa965547a9ee932e84401e77f43ef29c789c488ea52b036a"
+    },
+    {
+      "app": "hospital",
+      "name": "0012_sim_turn_idempotency",
+      "sha256": "eb42bc76c4e3a87a21cafd2b249b0a693b756138adc5ca4e7705ca4f04aca431"
+    },
+    {
+      "app": "hospital",
+      "name": "0013_rebrand_announcements_for_healthhack",
+      "sha256": "aa96e42aba76dbddbc7d1a141ea01626d1a09470af1de39c3c5848fad9117661"
+    },
+    {
+      "app": "hospital",
+      "name": "0014_announcement_slack_provenance",
+      "sha256": "b74cc864336bc8e44b9a79a3a85b18991acceb6e619ef55501f13649d607876b"
+    },
+    {
+      "app": "hospital",
+      "name": "0015_hospital_competition_round",
+      "sha256": "6b252e8c3e9736cb7bfe05818dd0a7ee781a9f1a561fb562c0e54d65c9af0742"
+    },
+    {
+      "app": "hospital",
+      "name": "0016_announcement_round_and_activate_healthhack",
+      "sha256": "622cc05d5396f6459f5c6264c19ec9ad48d830ac9676221f1fcfcbad068ea96c"
+    },
+    {
+      "app": "hospital",
+      "name": "0017_delete_medhack_game_and_prediction",
+      "sha256": "968c8ea80acd1b29fb1371b65aaea8fa20cf0692a032c40f844403404eecfbe9"
+    },
+    {
+      "app": "integrations",
+      "name": "0001_initial",
+      "sha256": "0516196b79bd2cd8d470add5e6fc05fc295c18b9ccf693ffc548cb712c8a50d2"
+    },
+    {
+      "app": "integrations",
+      "name": "0002_userintegration",
+      "sha256": "d877cae1a7a1bb319d64ed97f36dc333987dd931a0745b746f8cf094f3e5c79a"
+    },
+    {
+      "app": "integrations",
+      "name": "0003_add_github_repo_field",
+      "sha256": "7dd45bf4f47f9725998dfe345f9e3ed882960ab2431387cc5a8aab9b3e165021"
+    },
+    {
+      "app": "integrations",
+      "name": "0004_userintegration_last_scanned_at_and_more",
+      "sha256": "87a9bbf7fe3db6ff3dc3e19f29edb8992151c64b65f5def9d50a4046fe2243e2"
+    },
+    {
+      "app": "integrations",
+      "name": "0005_add_github_refresh_token_fields",
+      "sha256": "abac15feefac49be2628246f2a656a9438264d4482af2becc4dcb7ad585915ba"
+    },
+    {
+      "app": "integrations",
+      "name": "0006_gmailthreadartifact_startupprofile_gmailsynccursor_and_more",
+      "sha256": "149a89a5338d885f8bdfffdd77c6a8fb62eca5ec1b5c737660be1eaafc4f3c55"
+    },
+    {
+      "app": "integrations",
+      "name": "0007_startupprofile_stage",
+      "sha256": "42aad13070c494580293f67955bdcd1dbf52e41ffb43dce238b2d2834d87675b"
+    },
+    {
+      "app": "integrations",
+      "name": "0008_alter_gmailattachmentartifact_content_disposition_and_more",
+      "sha256": "824c82dd5888fe3f680512332b699d7c2fdcd94d979255073d849cd008c60af3"
+    },
+    {
+      "app": "integrations",
+      "name": "0009_communitybridgechannel_communitybridgereceipt_and_more",
+      "sha256": "2086cd5f8e2a1a319ebc15ae166b69212afa2e0cc297350bd8febc667da5cc03"
+    },
+    {
+      "app": "integrations",
+      "name": "0010_external_service_connection",
+      "sha256": "97d174c5d2f8390d58600ace6e990141c5aac5f95160598210d204b52e87594e"
+    },
+    {
+      "app": "integrations",
+      "name": "0011_split_content_factory_apps",
+      "sha256": "dbe4672b4b529bfdc4c50ec630ecacbf6d442580b3e9cb756aea935e5a98ae85"
+    },
+    {
+      "app": "integrations",
+      "name": "0012_financial_account_external_record",
+      "sha256": "12fd149232c605b13557ce47bfff9b1dac86287d04eb620fb1e078290a66b2c6"
+    },
+    {
+      "app": "integrations",
+      "name": "0013_xero_financial_record_types",
+      "sha256": "6b9088b95d1a314b20a14583ce5b084b1e718c5a02bf2bbd70a6a6398a255884"
+    },
+    {
+      "app": "integrations",
+      "name": "0014_startup_metric_source_provenance",
+      "sha256": "90f65531f62f3b0fdf620f8c8bbdc95a21f4e57f207fe8018e768c07f60809af"
+    },
+    {
+      "app": "integrations",
+      "name": "0015_slack_artifacts",
+      "sha256": "637384f9d1c1a899f7832607606fd75a77d935fde73754a5d211b2498ffc5535"
+    },
+    {
+      "app": "integrations",
+      "name": "0016_split_startup_updates_app",
+      "sha256": "521288fef579064c3e04ffdcbd4e64c915af11f924e096a8cf21e8189ff95027"
+    },
+    {
+      "app": "integrations",
+      "name": "0017_alter_external_service_provider_choices",
+      "sha256": "9c1cbf04d6082f9f211c19709a26b0df18d8b8e9c28da30dbbb6c6b953da4733"
+    },
+    {
+      "app": "integrations",
+      "name": "0018_google_analytics_provider_choice",
+      "sha256": "df3e7c8417909c27633a0378e3f6a3b45c85d01586f72d02a2cdadb035db661b"
+    },
+    {
+      "app": "integrations",
+      "name": "0019_luma_provider_choice",
+      "sha256": "049ef55bc5d67c7b643d74784f24653b4dec75e3da304927fd039501e9ebf570"
+    },
+    {
+      "app": "integrations",
+      "name": "0020_externalserviceconnection_uniq_user_org_provider_account",
+      "sha256": "22a409c2ef16114555b81cd63e3dbe0c4d95b32bf44ae8affb15b522da7c9baf"
+    },
+    {
+      "app": "integrations",
+      "name": "0021_googleconnection_organization_and_more",
+      "sha256": "84c2d963056f44426087fc63e5bc932609e7789415dbec6ad10aa6e424abe24d"
+    },
+    {
+      "app": "integrations",
+      "name": "0022_githubinstallation",
+      "sha256": "21f6b21da7d843579bd3de3212a2e305bbb6a39407821681573daa3cb2c13a40"
+    },
+    {
+      "app": "integrations",
+      "name": "0023_githubinstallation_liveness_checked_at",
+      "sha256": "275fe1c1e2fb0c181ef0a1d7146ac4809030c3ab67b0b0c16d7bd01a7e643e69"
+    },
+    {
+      "app": "integrations",
+      "name": "0024_stripe_xero_reconciliation",
+      "sha256": "ab6a5173743064c79ac52fa05fec0e9db7ae49b23fd8b96f241901a70ead3265"
+    },
+    {
+      "app": "integrations",
+      "name": "0025_reconciliation_context_suggestions",
+      "sha256": "128fdefce6ca30d9df4dd950a9c965f056b4e813b6d2385a3716fb0fbeee3b0f"
+    },
+    {
+      "app": "integrations",
+      "name": "0026_xero_statement_reconciliation",
+      "sha256": "0a70680cb3f39028887cb97291b1301f8b2dbe0b128677daf674d1e8c1e28a49"
+    },
+    {
+      "app": "integrations",
+      "name": "0027_linear_issue_creation_receipt",
+      "sha256": "49b1c9dc230a2a0b7f5108e07bca33d3389a3489c711de1d6caf09a2d37fbfb1"
+    },
+    {
+      "app": "integrations",
+      "name": "0028_xero_statement_posting",
+      "sha256": "87f1f685411dc1173d4a1e7eb61187c88e6fa13275c70cb527d8d8e18438fad4"
+    },
+    {
+      "app": "integrations",
+      "name": "0029_humanitix_reconciliation_foundation",
+      "sha256": "23e7db9ed7a7925ac8023f0b554cf12789ede36d74eba94353136a2d9d3a3f4f"
+    },
+    {
+      "app": "integrations",
+      "name": "0030_xero_statement_scan_and_confidence",
+      "sha256": "318c2fdff107f48e580dfba2a37751eac7633bfdeba0d7ea00910a79d3ff3d33"
+    },
+    {
+      "app": "integrations",
+      "name": "0031_reconciliation_rules_and_decisions",
+      "sha256": "298a9b7e779317fa95d9c59d704234405808ab8acc3fbbb0d2afef156339c526"
+    },
+    {
+      "app": "integrations",
+      "name": "0032_reconciliation_decision_approval_types",
+      "sha256": "35873641a5525023b0d0e8e06e18596a355749467ff2998e569f195872197c7d"
+    },
+    {
+      "app": "integrations",
+      "name": "0033_xero_statement_reconciliation_outcomes",
+      "sha256": "cf973aaf665534ddb185ebed19a886970240e85dc9db72416d7e5751fc4096a1"
+    },
+    {
+      "app": "integrations",
+      "name": "0034_reconciliation_learning_decisions",
+      "sha256": "1da3b9a29c10c07108984c643c65faac82773109fad151b96f1587a512720cac"
+    },
+    {
+      "app": "integrations",
+      "name": "0035_event_source_provenance",
+      "sha256": "b8fe08f7f4432edddb0b9f74ca0e9ecde40369804cf870eeba7ae45e463f0025"
+    },
+    {
+      "app": "integrations",
+      "name": "0035_generic_community_bridge_destination",
+      "sha256": "864edb4b4fee80528b8a3b02b514e94940c5564324d67be75f1d271d246a702e"
+    },
+    {
+      "app": "integrations",
+      "name": "0036_community_bridge_identity_links",
+      "sha256": "3b3f372411d5eb3117eec3d1b62f0f77c99e667c78812d5107a0ae60ede29367"
+    },
+    {
+      "app": "integrations",
+      "name": "0036_xero_statement_scan_capture_metadata",
+      "sha256": "eb38ebe8a3009601c0e581ecd2842936e64d5d0c75e4fc30bc4dd86f83bf7624"
+    },
+    {
+      "app": "integrations",
+      "name": "0037_community_bridge_reaction_delivery_types",
+      "sha256": "75078660fdb56236977dbac131c662ee8d7621c7319a13af96079ba453efba61"
+    },
+    {
+      "app": "integrations",
+      "name": "0037_reconciliation_profitability_policy",
+      "sha256": "78fbae04c0b16d8f0441cc5bc67ff7af97e3ef2b804cd53f704218f6458ffce5"
+    },
+    {
+      "app": "integrations",
+      "name": "0038_account_backed_bridge_identity",
+      "sha256": "7f3015ce3e5dc5226b771318cbe46974321600df3eb7eb210f979d3d2dea2a87"
+    },
+    {
+      "app": "integrations",
+      "name": "0039_merge_20260802_1530",
+      "sha256": "3b0be3f79c31e7d4955e765b0e2d5163b6322680c874d1eb0eab1882a87dcb8d"
+    },
+    {
+      "app": "integrations",
+      "name": "0040_mandatory_reconciliation_tracking",
+      "sha256": "11cbab1a05a07f9b44bc98feae4118bc15c99b473c86f62c92796f3a7210c7ee"
+    },
+    {
+      "app": "integrations",
+      "name": "0041_linear_project_sizing_runs",
+      "sha256": "0f63808957e1a6747633aaf2083fa24ae2a250c6f960a73fc6e2487cd4a8f2e6"
+    },
+    {
+      "app": "integrations",
+      "name": "0042_linear_meeting_action_batches",
+      "sha256": "e2f0430e4dba55bcab108c610ffd4f431ce35f0995c31f7adad64e45b7f46cb4"
+    },
+    {
+      "app": "integrations",
+      "name": "0043_slack_dm_mirroring",
+      "sha256": "08f23643e161b8bf244201e70b5ea9a970c0b0fcfd6a8b6fb8396d3b7298616d"
+    },
+    {
+      "app": "integrations",
+      "name": "0044_slack_dm_group_history_backfill",
+      "sha256": "815dbb20a92f75703691b0ea839698ea23f29f937e3098e139f0340372ab02eb"
+    },
+    {
+      "app": "integrations",
+      "name": "0045_communitybridgedelivery_parent_dependency",
+      "sha256": "72d20afabe76fc572e6812a745660ece65532a77d20cb70d5ff747dd71c40abb"
+    },
+    {
+      "app": "integrations",
+      "name": "0046_communitybridgedeletionrequest",
+      "sha256": "272fccfb6928d5459d6576643664f9a54f2df2fc7c298ea4cc2acb838cc93b46"
+    },
+    {
+      "app": "jobs",
+      "name": "0001_initial",
+      "sha256": "74d3ea570d3a163947bcac0464718458a9149acfd0eee3798bc5deb658ec506e"
+    },
+    {
+      "app": "jobs",
+      "name": "0002_jobrun_execution_config",
+      "sha256": "dd264e4ab76821c63174560faf9ce2a3f3e9a7f5bf9e98204e171c50df0c3abd"
+    },
+    {
+      "app": "mlai_studio",
+      "name": "0001_initial",
+      "sha256": "34b83c994119529a7939a2cf00157de74a6cb82608717866a0a88abeba5efa7e"
+    },
+    {
+      "app": "org_memory",
+      "name": "0001_service_identity",
+      "sha256": "ad6b27f72912377043765729778469866762e0121857b0b66fdc2c997a281b64"
+    },
+    {
+      "app": "org_memory",
+      "name": "0002_organization_authorization",
+      "sha256": "ea7f1e1de160e0473704975901459d37cb40469e1fc48efbe80eb59482c8379c"
+    },
+    {
+      "app": "org_memory",
+      "name": "0003_source_control_plane",
+      "sha256": "9554a4bd30eae0b3f91bc797e0e7e00ba45850966befd1e1af403cf5712cc3c4"
+    },
+    {
+      "app": "org_memory",
+      "name": "0004_evidence_kernel",
+      "sha256": "02daf3f0ca53ecd485ab56cdf7a916918cf7d88ee9ee58892f4ca2dbb5eba86a"
+    },
+    {
+      "app": "org_memory",
+      "name": "0005_memoryconnectionconfiguration_next_scheduled_sync_at_and_more",
+      "sha256": "955302e5c21eac2b9b82dbd9be7814a9cb92dc87de3985cfa13fe49798cdded8"
+    },
+    {
+      "app": "org_memory",
+      "name": "0006_memorychunkembedding_memorychunk_search_vector_and_more",
+      "sha256": "21b9ed69c6fdc942f8d6b5c6ea1670f958c95ba1e553ff0a4e8475147e81a892"
+    },
+    {
+      "app": "org_memory",
+      "name": "0007_drivedocumentartifact_drivedocumentartifactversion_and_more",
+      "sha256": "131f43b9a6f95c62f1bb8b715ce68b5b5d8da6c260e93fc75f7b869318e0031a"
+    },
+    {
+      "app": "org_memory",
+      "name": "0008_drivemeeting_and_more",
+      "sha256": "ef4f8a6912bec5ef92248354e414af891dbf75ef570da81675de207f69f4a546"
+    },
+    {
+      "app": "org_memory",
+      "name": "0009_alter_driveinventorymanifest_counts_and_more",
+      "sha256": "688dfbe1d3c3363473f67d4aff2c598b8f9ddb9f93eafcaaeb89ba2297b2c173"
+    },
+    {
+      "app": "org_memory",
+      "name": "0010_memoryclaim_memoryextractionrun_memoryevidence_and_more",
+      "sha256": "bc7b77fd0aafbffec15e22e7be178300b909fd580ba48502b7abbd5da2c93fe9"
+    },
+    {
+      "app": "org_memory",
+      "name": "0011_memoryentity_merged_at_memoryentity_merged_into_and_more",
+      "sha256": "b5be123bffdb19a0e111073c48b50eeeadca104ee6060ad23ced5d6e9112c36f"
+    },
+    {
+      "app": "org_memory",
+      "name": "0012_memoryquerylog_memoryfeedback_and_more",
+      "sha256": "e433779f992b24315a9861b2a4668bf255a110087e0b12ce81bf89492800a2f4"
+    },
+    {
+      "app": "org_memory",
+      "name": "0013_provider_event_receipts",
+      "sha256": "64110cf1d8ecd260085fa11382ca10705f644091d5ace2fa038f0cdd96fe2ee4"
+    },
+    {
+      "app": "org_memory",
+      "name": "0014_notion_artifacts",
+      "sha256": "bfb87830d0645e70815aac8bc5642c87f179539efc0f2f18cb8494cd8b110e54"
+    },
+    {
+      "app": "org_memory",
+      "name": "0015_gmail_scoped_artifacts",
+      "sha256": "7afa7aa99735f29489ef29898797a216296c27c42641e666e5462f5cdfac2331"
+    },
+    {
+      "app": "org_memory",
+      "name": "0016_structured_aggregate_artifact",
+      "sha256": "dd0812491ac5cc91379423129d154a6bf128ab27bb875caaedce6a75da84c920"
+    },
+    {
+      "app": "org_memory",
+      "name": "0017_memorydailyreconciliationreport_and_more",
+      "sha256": "3da542d5ba3177031238157a910f59a92261da5633556c2b5a2f8d3cc822d3b9"
+    },
+    {
+      "app": "org_memory",
+      "name": "0018_review_summaries_digests",
+      "sha256": "2a6db3b855ca8084365a8b16ec626dff1b4747afda4c8999cee1d24dfb0b50e1"
+    },
+    {
+      "app": "org_memory",
+      "name": "0019_memorypublication_publicknowledgeitem_and_more",
+      "sha256": "0fbcd0c514999d30e665eb0744f3aacdc6265a3eddb1eb13f5e26fc12407a3ae"
+    },
+    {
+      "app": "org_memory",
+      "name": "0020_agentactionproposal_agentactionevent_and_more",
+      "sha256": "ed69f62681663d9e0c17c076184a2c99bfade232d4dd5505649b941ae6f452e0"
+    },
+    {
+      "app": "org_memory",
+      "name": "0021_memory_selector_shadow",
+      "sha256": "081ecd3d570eb529a4dbd1561bbc5705b32999728eebd670804692f5f8d0adc2"
+    },
+    {
+      "app": "org_memory",
+      "name": "0022_memory_pilot_query_audit",
+      "sha256": "37feca8985291857432fa57592cf75997bbdb3ce7ebaa00773be0657b4448b9f"
+    },
+    {
+      "app": "org_memory",
+      "name": "0023_memory_pilot_deployment",
+      "sha256": "b5eca63817b6e77971a4fdf7b2d14f054cd25acd44b3bd86bcd0caec100cd73c"
+    },
+    {
+      "app": "org_memory",
+      "name": "0024_alter_memoryoutboxevent_event_type",
+      "sha256": "f726d80cac48451f822875b45a53b656c5b622dd37c87634d2a0d53bce0a2f9e"
+    },
+    {
+      "app": "org_memory",
+      "name": "0025_delete_selector_shadow",
+      "sha256": "673c1e41f03bb610ca1cc5b46cfaa38fb351f1557b1e215f358df6daa699300d"
+    },
+    {
+      "app": "organizations",
+      "name": "0001_split_content_factory_apps",
+      "sha256": "bad0d5e02cc6c14f7d495e508ec5b1f4f8aa5f5d2c5046415ae08fedf88c09b5"
+    },
+    {
+      "app": "organizations",
+      "name": "0002_organization_company_linkedin_url",
+      "sha256": "8726ece74f9f1ef7d0a90ea67ed265fecf5846621d412e6b93fef12a3db1d42f"
+    },
+    {
+      "app": "roo",
+      "name": "0001_initial",
+      "sha256": "c639050dd2ee0a062a2acc1d7f6e5ae77857d785d45bf6bf9b943af24440c530"
+    },
+    {
+      "app": "roo",
+      "name": "0002_points_system_v2",
+      "sha256": "c42c874c8b3b6dba56de66d70ec0b7f30d5dd4cebf7611bc3f324d8cd4891d0f"
+    },
+    {
+      "app": "roo",
+      "name": "0003_remove_pointsadmin_name",
+      "sha256": "13d8a74a729a940ceb6c8b8c36a4fa7b345fe2dfb88fcf6d801f834ae5c5af8b"
+    },
+    {
+      "app": "roo",
+      "name": "0004_seed_rewards",
+      "sha256": "f1671065d4527858e0e6d399cefc1f9d0e1d2d964bc3807e0f19c8af1e05eae6"
+    },
+    {
+      "app": "roo",
+      "name": "0005_tasktemplate",
+      "sha256": "86997f8313f3268e0f83bea67b2ebfd4ad28f6bc27e42af5b4e823fa7506347d"
+    },
+    {
+      "app": "roo",
+      "name": "0006_rewardscatalog_stock_remaining",
+      "sha256": "6004fdeef581fcf9d7d848d96a2a31fe9a4a237bfc670fd1b8330af375f6e689"
+    },
+    {
+      "app": "roo",
+      "name": "0007_populate_pilot_rules",
+      "sha256": "52d9a10e14a64e6398a844aa7aab289aad2e5ea383a616d02150eb5467fdd609"
+    },
+    {
+      "app": "roo",
+      "name": "0008_populate_comprehensive_rate_card",
+      "sha256": "9a51bfd487ae14ccc1bded0890c2f36f21508655130aeb4107a688acba47d05b"
+    },
+    {
+      "app": "roo",
+      "name": "0009_add_weekly_allowance",
+      "sha256": "86a7398a3dfa54cb0f28a2e384d41d607ff6cff543b9294fe9b2a3773b6b8c3e"
+    },
+    {
+      "app": "roo",
+      "name": "0010_channelfirstpost",
+      "sha256": "27551f3f03f02892f6af2b7c0899537a4987e5253c51726311715815ccf6832b"
+    },
+    {
+      "app": "roo",
+      "name": "0011_questprogress",
+      "sha256": "1a5d2a58eceafa7c537891e99a5b61c6f713f070fd08685e584b11ed5d8d4ec4"
+    },
+    {
+      "app": "roo",
+      "name": "0012_medhack_game_models",
+      "sha256": "50e77e152177c849538c40182b53c48f4e0e6051c855a082f0d0387528142c02"
+    },
+    {
+      "app": "roo",
+      "name": "0013_move_medhack_to_hospital",
+      "sha256": "6b65cd41011a72fc5684659f265a9d74cb5a219557af50afd5a8bed829070250"
+    },
+    {
+      "app": "roo",
+      "name": "0014_add_content_factory_ledger_source",
+      "sha256": "b0a4e16d768dd62886fb61b9a8f4838f833cc4372fe4b3a48c58aaf0b77a3882"
+    },
+    {
+      "app": "roo",
+      "name": "0015_pointsrequest",
+      "sha256": "d25562eff5404b270ff4ad1282bc697b0a5e5fee771222890d9f163680a3ee57"
+    },
+    {
+      "app": "roo",
+      "name": "0016_rename_roo_pointsr_status_8f1eab_idx_roo_pointsr_status_1880e1_idx_and_more",
+      "sha256": "b4a32a22cae3706fc587278021b4093d7f20e8bd84ba6c98d52514aadbdf0632"
+    },
+    {
+      "app": "roo",
+      "name": "0017_points_health_indexes",
+      "sha256": "b7203b5bc1645b9760b53b0322de62181af9c3b2da41b0cc9955c10b60fb237c"
+    },
+    {
+      "app": "roo",
+      "name": "0018_ensure_coworking_unique_active_booking",
+      "sha256": "a4ee47e921f071e200ad269afa4ed3edb040969bb3e258c6c42ae9a25f72e8a9"
+    },
+    {
+      "app": "roo",
+      "name": "0019_structured_task_engine",
+      "sha256": "183f5d7664e671b0620c92a8b3443a0b9b5dd439978b5b85fc21611d303f0add"
+    },
+    {
+      "app": "roo",
+      "name": "0020_taskassignment_claimed_points_snapshot",
+      "sha256": "bffb377e7a7453a9220cd21c5d5d315d2c69c41151e125e5743b1f35e712db20"
+    },
+    {
+      "app": "roo",
+      "name": "0021_alter_taskactivity_event_type",
+      "sha256": "a1f219529e866ec5667ae9e6c0abf4bae22cf3de32afc50b28d647d628db71e5"
+    },
+    {
+      "app": "roo",
+      "name": "0022_add_partner_points_admin_role",
+      "sha256": "2aa704a9fe967fff7ff2cab211e803e4540e5f356e9652c2d21a76f4ee61bd57"
+    },
+    {
+      "app": "roo",
+      "name": "0023_pointsaccount_earned_balance_and_more",
+      "sha256": "9a48450685aeab639cc971559383208eccebbdc722603b0cb48a7c6f1f701c83"
+    },
+    {
+      "app": "roo",
+      "name": "0024_pointspurchase",
+      "sha256": "430fce6744a1a4dd3ec7da02305351e59680f56b7df082f2036c56705abd26eb"
+    },
+    {
+      "app": "roo",
+      "name": "0025_update_rewards_pricing_and_hide_coffee",
+      "sha256": "52f3cae8820bedd446b1cf028052c478760f0d3bab8409d4a93a5b507aa7b3c9"
+    },
+    {
+      "app": "roo",
+      "name": "0026_coworking_day_cost_eight",
+      "sha256": "df7c3e161843d25749bab8979ac4fa1833990e41bf2d904183b118500f630870"
+    },
+    {
+      "app": "roo",
+      "name": "0027_alter_ledger_source",
+      "sha256": "429a9478d9fc655168cc4a65a852fc62b4572281ae5d6201152638508ee15bf1"
+    },
+    {
+      "app": "roo",
+      "name": "0028_pointspurchase_checkout_sessions",
+      "sha256": "665292de603c0e0eecafdb8d14eb5483d9d12b7e31d2ee0fab14014db8aee060"
+    },
+    {
+      "app": "roo",
+      "name": "0029_boostpostadmission_and_more",
+      "sha256": "00d06fe704bcf90bf5d0411e8612a2ce3a88ea53452a9a8a8474c4acf8e9f992"
+    },
+    {
+      "app": "roo",
+      "name": "0030_microroo_and_coding_billing",
+      "sha256": "d9c19edf5faf05155c0654937d211ca3c6d4d42e9aa27aba66fb615762e52b94"
+    },
+    {
+      "app": "roo",
+      "name": "0031_meeting_room_booking",
+      "sha256": "4706c08b4a150aa0b300654681c031460c89acbe3ca79863b5dd6b8068643043"
+    },
+    {
+      "app": "roo",
+      "name": "0032_small_and_big_meeting_rooms",
+      "sha256": "ad6a0d60b2eec547ac022b33958351be175031390bae0872a2fe488cfbc2d2f5"
+    },
+    {
+      "app": "roo",
+      "name": "0033_meeting_room_purchased_cost_microroo",
+      "sha256": "9737b78a7a457b22dda7c5434215e864410a158e35413516e3fcbe33b8bd662a"
+    },
+    {
+      "app": "roo",
+      "name": "0034_coworkingbookingoperation",
+      "sha256": "af9a0eeaacce87d69b9178e99ba92add5a495767fa3679ab22d0b9a788c83165"
+    },
+    {
+      "app": "roo",
+      "name": "0035_coworkingbookingoperation_subjects",
+      "sha256": "f91eb8a8afb6ce70607a7e880f9df30ef02aab9f0f0d0c28771b11f2b8fc324f"
+    },
+    {
+      "app": "roo",
+      "name": "0036_sanitize_coworking_operation_receipts",
+      "sha256": "c4e4ffd956d7a1edc2d57ae342ef0c4f8d0102a29a17c164c92ac03183d963fd"
+    },
+    {
+      "app": "sessions",
+      "name": "0001_initial",
+      "sha256": "2aa438e2393ee5135c4dda94bfde65fd49e8300f1c3f93bed25ae3a09f2f69b9"
+    },
+    {
+      "app": "startup_updates",
+      "name": "0001_split_startup_updates_app",
+      "sha256": "ad4c8daed00ebe4c7f5ed662b714fcd9dab3f489b14f5075703af7306e924891"
+    },
+    {
+      "app": "startup_updates",
+      "name": "0002_move_legacy_contenttypes",
+      "sha256": "4ef4593598a051cecfa180a6290328db6403bfb0618122eba830ddd46400db0e"
+    },
+    {
+      "app": "startup_updates",
+      "name": "0003_gmailattachmentartifact_last_error",
+      "sha256": "a616d8a9534948aaa354624186275d58322c3f42e0ad9b45550a9f35a9cc047c"
+    },
+    {
+      "app": "startup_updates",
+      "name": "0003_slackthreadartifact_relevance_fields",
+      "sha256": "2f2048b72007d40758c1c561b5e2b851b8925236a283ece60e9b91000716fca5"
+    },
+    {
+      "app": "startup_updates",
+      "name": "0004_linear_artifacts",
+      "sha256": "111edb57351a6a4fc6ebfbc05c21e0e1b37c140608f076bc1d6e6c6f95570e17"
+    },
+    {
+      "app": "startup_updates",
+      "name": "0005_merge_linear_gmail_attachment",
+      "sha256": "2eda66874d9cd6fb3842bf15ff639420ba484d09c037b92ab859fd450e70f2e2"
+    },
+    {
+      "app": "startup_updates",
+      "name": "0006_repair_slack_thread_relevance_columns",
+      "sha256": "92d5eac6f2251ae64ea8734b6489acd9f6f0a59f971353f463dc513e705e43c2"
+    },
+    {
+      "app": "startup_updates",
+      "name": "0007_startupprofile_organization_kind",
+      "sha256": "100251fdcfbd5e03ae1e5b2ea601b58806b2c8b1575976c618b1f7132a13bd4e"
+    },
+    {
+      "app": "startup_updates",
+      "name": "0008_alter_gmailmessageartifact_relevance_label_and_more",
+      "sha256": "5d51dd13275727178140645fce6366fb19c9b04819b4676ca431ee6287975ee8"
+    },
+    {
+      "app": "startup_updates",
+      "name": "0009_startup_data_deletion_request",
+      "sha256": "482d27ce868959fcd3bcf803dd3612aabfd6a0b8c572a2ed3fcb3c8f73f32cdd"
+    },
+    {
+      "app": "startup_updates",
+      "name": "0010_startup_manual_document",
+      "sha256": "95973ca2ffa17b56ae4625588e055feb6d1aee31d5191eab5e3dcb6243c2a624"
+    },
+    {
+      "app": "startup_updates",
+      "name": "0011_startupprofile_company_detail_fields",
+      "sha256": "184a6deaf39c7dcdb5ab7da258b644620a3264a3772992ae3a9ab096ef15f39f"
+    },
+    {
+      "app": "startup_updates",
+      "name": "0012_googleanalyticspropertyselection_and_more",
+      "sha256": "414ace737d03d7c26975f4ebc0c530e14564707a923b81bbb3c371567129d390"
+    },
+    {
+      "app": "startup_updates",
+      "name": "0013_luma_event_selection",
+      "sha256": "071cffce0be154a6c7710d8a16d3ebaac0ddb381afa8250181ab86b9b37777bf"
+    },
+    {
+      "app": "startup_updates",
+      "name": "0014_monthlyupdatedraft_ready_at",
+      "sha256": "9057ba015d2c643ff2d18abec0b6e5b6af673bb2a0d28deb25641ee02678bcdb"
+    },
+    {
+      "app": "startup_updates",
+      "name": "0015_backfill_monthly_update_ready_at",
+      "sha256": "069f777db8a71a65bdb5a507c01f9439b9a8f1369715a7fcccd909c22334b663"
+    },
+    {
+      "app": "startup_updates",
+      "name": "0016_userstartupbinding_monthly_updates_enabled",
+      "sha256": "33caa2d267fa8428512afd15225c3db699cab218e87c798b5ffe6e99e4c88172"
+    },
+    {
+      "app": "startup_updates",
+      "name": "0017_monthly_update_visibility_publish_state",
+      "sha256": "9703b461b9f06d9e4549419029c13d8067e22b844d534c73c925efa339e602de"
+    },
+    {
+      "app": "startup_updates",
+      "name": "0017_userstartupbinding_coworking_discount_eligible",
+      "sha256": "aa8d14f9bf237c133998130b388ae360ff9bab06de57b564fd0015fd9b097aaa"
+    },
+    {
+      "app": "startup_updates",
+      "name": "0018_monthlyupdatereminderdelivery",
+      "sha256": "76ab1a1e3e37b7ae27b6359f62b38c44051ee04768163daa6524284ff7b1f97d"
+    },
+    {
+      "app": "startup_updates",
+      "name": "0019_merge_20260723_0335",
+      "sha256": "3af558aeeec0a04e0c790ce65cdde42b0ea6cf9f462e699442443ce4b3b855bf"
+    },
+    {
+      "app": "startup_updates",
+      "name": "0020_luma_event_attendance_counts",
+      "sha256": "db4e4d3273f70f6363500a8c2ad5edcd81eeaa15c29b758ce3b7dc9caa037630"
+    },
+    {
+      "app": "startup_updates",
+      "name": "0021_linear_project_member_artifact",
+      "sha256": "64175f767fae6d837f01680db62ec53ab029bb0e7b903b214ab94260a7958a97"
+    },
+    {
+      "app": "startup_updates",
+      "name": "0022_reporting_evidence_revisions",
+      "sha256": "80559a742f997e979e37791bb65c7f693d0cbfb5d8cb62291b24823772c1622a"
+    },
+    {
+      "app": "vibe_raising",
+      "name": "0001_initial",
+      "sha256": "916ad264e5bf66195d33006d52c8708bd777483a6e324963e391f2c7e46bd89f"
+    },
+    {
+      "app": "vibe_raising",
+      "name": "0002_move_founder_tools_models",
+      "sha256": "b570084e3273d312c19b149b4062afb9daa3fe98776f1ba333673727d0326f38"
+    },
+    {
+      "app": "victor_ai",
+      "name": "0001_initial",
+      "sha256": "1c1c7589fd89271bc7aabb0e5ff9c2a73eb2c3e4136867e565a6c5bd455ddacf"
+    },
+    {
+      "app": "victor_ai",
+      "name": "0002_victorapplication_revenue_last_3_months_and_more",
+      "sha256": "3f86c630447990f96ba23fc58627aad193d93efbfd03ebb03477df3f1b8facfb"
+    },
+    {
+      "app": "victor_ai",
+      "name": "0003_victorapplication_linkedin",
+      "sha256": "75e0268675b6bb5b8df08679b94bf53019f07365f1f1891bce3eb1a6fe72d432"
+    },
+    {
+      "app": "victor_ai",
+      "name": "0004_victor_roo_access",
+      "sha256": "e4ab18eabf3a4a36d46378cabe5c43a8df1b0a4e90786068c3f628245e60ea3e"
+    },
+    {
+      "app": "workflow_runs",
+      "name": "0001_split_content_factory_apps",
+      "sha256": "ebf5c07a61bd02336d69e463e715731f37612f3f0b7b1ae9a9b80bb6e4da5f92"
+    },
+    {
+      "app": "workflow_runs",
+      "name": "0002_contentfactoryrun_cf_run_domain_wf_updated_idx",
+      "sha256": "ec36b907fda122bc2daff4433acf2f81d7c5ab08424e6fd9f3a37c7169148d12"
+    },
+    {
+      "app": "workflow_runs",
+      "name": "0003_contentfactoryrun_last_event_emitted_at",
+      "sha256": "61c02e83577299d72a94d83b6d4edcbb4384b94c444cefe23608de3fb0db8f1c"
+    },
+    {
+      "app": "workflow_runs",
+      "name": "0004_contentfactoryrun_organization_and_more",
+      "sha256": "41fded394594934ea5f44972124e66005b116be6d43c074f5b855d4fa172db7d"
+    },
+    {
+      "app": "workflow_runs",
+      "name": "0005_contentfactoryrun_reconciled_at",
+      "sha256": "bb41f031b87f2abf119250e62bad76c11766882ad8fb01789e6426322f3bf608"
+    }
+  ]
+}
