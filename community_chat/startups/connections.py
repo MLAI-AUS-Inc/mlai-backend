@@ -15,11 +15,17 @@ from rest_framework.exceptions import ValidationError
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from founder_tools.models import VibeRaisingCompany
+from integrations.api_views_connectors import HumanitixConnectView, LumaConnectView
+from integrations.models import ExternalServiceConnection
+from integrations.services.external_connectors import disconnect_external_connection
 from integrations.views import connector_connect
+from startup_updates.data_deletion import disconnect_gmail_for_user
+from .lifecycle import OAUTH_PROVIDERS, UPDATE_PROVIDERS
+from .source_preferences import set_source_preference
 from .views import ChatStartupAccess, enabled
 
 SALT = "chat-startup-source-v1"
-PROVIDERS = {"gmail", "notion", "slack", "linear", "google_analytics", "xero", "stripe"}
+PROVIDERS = OAUTH_PROVIDERS | {"google"}  # Website/Search Console consent is separate from Gmail input.
 
 
 def consume_ticket(ticket):
@@ -33,12 +39,36 @@ def consume_ticket(ticket):
 
 class ConnectView(ChatStartupAccess, APIView):
     def post(self, request, provider):
+        if provider in {"luma", "humanitix"}:
+            view = LumaConnectView if provider == "luma" else HumanitixConnectView
+            return view().post(request)
         if provider not in PROVIDERS:
             raise ValidationError("This source does not support browser connection.")
         ticket = signing.dumps({"uid": request.user.pk, "company": str(self.company.pk),
             "session": str(request.auth.pk), "provider": provider, "nonce": secrets.token_urlsafe(24)}, salt=SALT)
         url = request.build_absolute_uri(reverse("chat_startups_connect_browser"))
         return Response({"authorizationUrl": f"{url}?{urlencode({'ticket': ticket})}"})
+
+
+class DisconnectView(ChatStartupAccess, APIView):
+    """Disconnect only the explicitly selected startup's own provider account."""
+    def post(self, request, provider):
+        return Response(set_source_preference(self.company, provider, request.data.get("enabled")))
+
+    def delete(self, request, provider):
+        if provider not in UPDATE_PROVIDERS:
+            raise ValidationError("Choose a supported connection.")
+        if self.company.organization is None:
+            return Response({"status": "not_connected"})
+        if provider == "gmail":
+            return Response(disconnect_gmail_for_user(request.user,
+                organization=self.company.organization, delete_derived_data=False))
+        connection_ids = list(ExternalServiceConnection.objects.filter(
+            user=request.user, organization=self.company.organization, provider=provider,
+        ).exclude(status="disconnected").values_list("pk", flat=True))
+        for connection_id in connection_ids:
+            disconnect_external_connection(request.user, connection_id)
+        return Response({"status": "disconnected"})
 
 
 def connect_browser(request):
@@ -62,9 +92,12 @@ def connect_browser(request):
     request.user = user
     query = QueryDict(mutable=True)
     frontend = settings.COMMUNITY_CHAT_FRONTEND_URL.rstrip("/")
-    query.update({"company_id": str(company.pk), "next": f"{frontend}/pulse?startup={company.pk}&connected=1"})
+    return_query = urlencode({"company_id": str(company.pk), "connected": provider})
+    query.update({"company_id": str(company.pk), "next": f"{frontend}/my-startup/connections?{return_query}"})
     if provider == "gmail":
         query["scope"] = "gmail"
+    elif provider == "google":
+        query["scope"] = "website_baseline"
     request.GET = query
     response = connector_connect(request, provider)
     response["Cache-Control"] = "no-store"

@@ -8743,6 +8743,7 @@ def _is_retryable_sqlite_lock(exc: Exception) -> bool:
 
 _DJANGO_OWNED_RUN_RESULT_KEYS = frozenset(
     {
+        "startup_update_completion",
         "release_observations",
         "island_research_refunded",
         "island_research_selection",
@@ -9117,8 +9118,10 @@ class ContentFactoryRunView(APIView):
         )
         if run.status == ContentFactoryRunStatus.COMPLETED:
             from content_factory.vibe_marketing_views import _persist_completed_article_memory_if_possible
+            from startup_updates.completion import record_completion
 
             _persist_completed_article_memory_if_possible(run)
+            record_completion(run)
         return Response(
             response_payload,
             status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,

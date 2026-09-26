@@ -15,10 +15,13 @@ from founder_tools.serializers import FounderProfileSerializer
 from founder_tools.services import get_or_create_founder_profile
 from founder_tools.views import FounderToolsCompanyView, FounderToolsActiveCompanyView
 from integrations.api_views_connectors import ConnectorSourcesStatusView
+from integrations.services.external_connectors import ConnectorConfigurationError
 from startup_updates.models import MonthlyUpdateDraft
 from vibe_raising import views as founder
 from workflow_runs.models import ContentFactoryRun
 from .presentation import update_payload
+from .lifecycle import delete_update, source_capabilities, validate_generation_sources
+from .source_preferences import ACTIVITY_WINDOW_DAYS, source_preferences
 
 
 def enabled():
@@ -70,7 +73,8 @@ class BootstrapView(ChatStartupAccess, APIView):
             "enabled": True, "accountId": str(request.user.community_chat_profile_id),
             "relayUrl": settings.COMMUNITY_CHAT_RELAY_URL,
             "profile": FounderProfileSerializer(profile).data,
-            "capabilities": {"manual": True, "generation": True, "community": True},
+            "capabilities": {"manual": True, "generation": True, "community": True,
+                "delete": True, "draftReadyPush": False},
         })
 
 
@@ -103,6 +107,11 @@ class UpdatesView(ChatStartupAccess, founder.VibeRaisingMonthlyUpdateView):
 
 
 class UpdateView(ChatStartupAccess, APIView):
+    def delete(self, request, update_id):
+        delete_update(organization=self.company.organization, update_id=update_id,
+            revision_id=request.data.get("revisionId"), revision_hash=request.data.get("revisionHash"))
+        return Response({"deleted": True, "updateId": update_id})
+
     def get(self, request, update_id):
         draft = get_object_or_404(MonthlyUpdateDraft.objects.select_related(
             "organization", "current_revision__snapshot", "published_revision__snapshot"
@@ -148,11 +157,24 @@ class SettingsView(ChatStartupAccess, founder.VibeRaisingBusinessHealthView):
 
 
 class SourcesView(ChatStartupAccess, ConnectorSourcesStatusView):
-    pass
+    def get(self, request):
+        response = super().get(request)
+        if response.status_code == 200:
+            preferences = source_preferences(self.company)
+            sources = [source_capabilities(source, preferences=preferences) for source in response.data.get("sources", [])]
+            response.data = {**response.data, "sources": sources, "connections": sources}
+        return response
 
 
 class GenerateView(ChatStartupAccess, founder.VibeRaisingEmailDraftStartView):
-    pass
+    activity_window_days = ACTIVITY_WINDOW_DAYS
+
+    def post(self, request):
+        validate_generation_sources(request.data)
+        try:
+            return super().post(request)
+        except ConnectorConfigurationError as exc:
+            raise ValidationError({"sources": str(exc)}) from exc
 
 
 class ActiveRunView(ChatStartupAccess, founder.VibeRaisingEmailDraftActiveRunView):

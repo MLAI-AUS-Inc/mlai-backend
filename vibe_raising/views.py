@@ -210,7 +210,7 @@ def _connector_oauth_guarded(callback):
     return wrapped
 
 
-def _sync_selected_connector_sources_for_draft(user, input_sources: list[str], *, organization=None) -> dict[str, list[str]]:
+def _sync_selected_connector_sources_for_draft(user, input_sources: list[str], *, organization=None, automatic_scope=False) -> dict[str, list[str]]:
     warnings: dict[str, list[str]] = {}
     selected = set(input_sources or [])
     organization = organization or active_organization_for_user(user)
@@ -242,6 +242,8 @@ def _sync_selected_connector_sources_for_draft(user, input_sources: list[str], *
         # connector can make dozens of upstream requests and cause the browser
         # connection to close before the run is even created.
         if provider == ExternalServiceProvider.LINEAR:
+            if automatic_scope:
+                continue  # The run discovers its own catalog without changing manual selections.
             try:
                 refresh_linear_activity_selections(connection)
             except Exception as exc:
@@ -932,6 +934,10 @@ def _build_manual_structured_memo(payload):
         "kpi_snapshot": _build_manual_kpi_snapshot(payload.get("metrics") or {}),
         "metric_suggestions": list(payload.get("metricSuggestions") or []),
     }
+
+    if "inputSources" in payload:
+        # A future-generation preference is distinct from historical evidence.
+        memo["selected_input_sources"] = list(dict.fromkeys(payload["inputSources"]))
 
     if "coverImage" in payload:
         memo["cover_image"] = payload["coverImage"]
@@ -2002,6 +2008,7 @@ def _build_email_draft_payload(
         "status": run_payload["status"] if run_payload else None,
         "currentStep": run_payload["currentStep"] if run_payload else None,
         "stepStates": (run_payload or {}).get("stepStates", {}),
+        "inputSources": (run_payload or {}).get("inputSources", []),
         "completedSteps": progress_payload["completedSteps"] if progress_payload else 0,
         "totalSteps": progress_payload["totalSteps"] if progress_payload else len(RUN_STEP_ORDER),
         "displayStage": progress_payload["displayStage"] if progress_payload else _get_email_draft_display_stage(None),
@@ -2676,6 +2683,8 @@ class VibeRaisingMonthlyUpdateView(APIView):
         if draft.current_revision_id:
             # Only the server's frozen chart is eligible for reuse.
             old = draft.current_revision.structured_memo
+            if "inputSources" not in serializer.validated_data and "selected_input_sources" in old:
+                memo["selected_input_sources"] = list(old["selected_input_sources"])
             if "financial_snapshot" in old and not changed_metrics:
                 memo["financial_snapshot"] = old["financial_snapshot"]
             else:
@@ -2876,7 +2885,7 @@ class VibeRaisingStartupUpdateRunView(APIView):
             google_connection,
         )
         source_warnings = merge_source_warnings(
-            _sync_selected_connector_sources_for_draft(request.user, input_sources, organization=organization),
+            _sync_selected_connector_sources_for_draft(request.user, input_sources, organization=organization, automatic_scope=bool(getattr(self, "activity_window_days", None))),
             gmail_scope_warnings,
         )
         if gmail_required_for_sources(input_sources) and (
@@ -3033,7 +3042,7 @@ class VibeRaisingEmailDraftStartView(APIView):
             google_connection,
         )
         source_warnings = merge_source_warnings(
-            _sync_selected_connector_sources_for_draft(request.user, input_sources, organization=organization),
+            _sync_selected_connector_sources_for_draft(request.user, input_sources, organization=organization, automatic_scope=bool(getattr(self, "activity_window_days", None))),
             gmail_scope_warnings,
         )
         if gmail_required_for_sources(input_sources) and (
@@ -3079,7 +3088,8 @@ class VibeRaisingEmailDraftStartView(APIView):
                     )
                 target_month = draft.month
                 period = narrative_window(organization, draft, requested_date,
-                    requested_start=request.data.get("narrativeStart"), requested_end=request.data.get("narrativeEnd"))
+                    requested_start=request.data.get("narrativeStart"), requested_end=request.data.get("narrativeEnd"),
+                    default_days=getattr(self, "activity_window_days", None))
                 existing_run = get_open_startup_update_run(organization=organization)
                 if existing_run and str((existing_run.run_request or {}).get("update_id")) != str(draft.pk):
                     raise RevisionConflict("Another update is being drafted. Finish or cancel that run first.")
@@ -3096,7 +3106,8 @@ class VibeRaisingEmailDraftStartView(APIView):
                 run = existing_run or create_startup_update_run(organization=organization, binding=binding,
                     input_sources=input_sources, source_warnings=source_warnings, target_month=target_month,
                     manual_document_ids=manual_document_ids, manual_summary=manual_summary,
-                    force_regenerate=force, update_draft=draft, narrative_period=period)
+                    force_regenerate=force, update_draft=draft, narrative_period=period,
+                    automatic_source_scope=bool(getattr(self, "activity_window_days", None)))
             if not existing_run or _should_dispatch_existing_run(run):
                 dispatch_result = _dispatch_run_to_valley(run)
                 if not dispatch_result:
