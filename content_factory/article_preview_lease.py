@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from urllib.parse import quote
 
 from django.core import signing
+from django.http import HttpResponse
 from django.utils.decorators import method_decorator
 from django.views.decorators.clickjacking import xframe_options_exempt
 from rest_framework.permissions import AllowAny

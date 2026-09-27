@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from django.core import signing
+from django.http import HttpResponse
 from django.test import SimpleTestCase, RequestFactory
 from rest_framework.response import Response
 
@@ -83,6 +84,32 @@ class ArticleReviewTests(SimpleTestCase):
         with patch('django.core.signing.time.time', return_value=LIFETIME + 5):
             self.assertEqual(view._resolve_run(request, 'article-1')[2].status_code, 401)
         lookup.assert_not_called()
+
+    @patch.object(ArticlePreviewLeaseProxyView, '_proxy')
+    def test_preview_response_rewrites_links_and_restricts_headers(self, proxy):
+        original = '/api/v1/vibe-marketing/runs/article-1/live-preview/'
+        response = HttpResponse(
+            f'<a href="{original}proxy/next">Next</a>'
+            f'<img src="{original}resource?url=https%3A%2F%2Fexample.test%2Fimage.png">',
+            content_type='text/html',
+        )
+        response['Set-Cookie'] = 'session=secret'
+        response['Location'] = 'https://example.test'
+        response['Content-Length'] = str(len(response.content))
+        proxy.return_value = response
+
+        result = ArticlePreviewLeaseProxyView().get(
+            RequestFactory().get('/preview'), 'article-1', token='preview-grant',
+        )
+
+        self.assertIs(result, response)
+        self.assertIn(b'/article-preview/preview-grant/article-1/next', result.content)
+        self.assertIn(b'/article-preview/preview-grant/article-1/__resource?url=', result.content)
+        self.assertNotIn(original.encode(), result.content)
+        self.assertEqual(result['Referrer-Policy'], 'no-referrer')
+        self.assertEqual(result['Cache-Control'], 'private, no-store')
+        for header in ('Set-Cookie', 'Location', 'Content-Length'):
+            self.assertNotIn(header, result)
 
 
 class FeedbackOutcomeTests(SimpleTestCase):
