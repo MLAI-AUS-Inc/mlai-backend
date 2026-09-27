@@ -16,7 +16,7 @@ class Command(BaseCommand):
         parser.add_argument(
             "--send",
             action="store_true",
-            help="Actually enqueue Customer.io messages. The default is a no-write dry run.",
+            help="Send enabled email and Roo chat reminders. The default is a no-write dry run.",
         )
 
     def handle(self, *args, **options):

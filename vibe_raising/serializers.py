@@ -83,6 +83,7 @@ class VibeRaisingCompanySerializer(serializers.ModelSerializer):
     organizationDomain = serializers.SerializerMethodField()
     entityTypeName = serializers.SerializerMethodField()
     abrVerifiedAt = serializers.DateTimeField(source="abr_verified_at", read_only=True)
+    registrationVerification = serializers.SerializerMethodField()
     audienceVisibility = AudienceVisibilityField(source="default_audience_visibility", read_only=True)
 
     class Meta:
@@ -97,6 +98,7 @@ class VibeRaisingCompanySerializer(serializers.ModelSerializer):
             "audienceVisibility",
             "entityTypeName",
             "abrVerifiedAt",
+            "registrationVerification",
             "organizationId",
             "organizationDomain",
         ]
@@ -105,6 +107,11 @@ class VibeRaisingCompanySerializer(serializers.ModelSerializer):
         from vibe_raising.validators import entity_type_display
 
         return entity_type_display(obj.entity_type_code)
+
+    def get_registrationVerification(self, obj):
+        from vibe_raising.registration import company_registration_status
+
+        return company_registration_status(obj)
 
     def get_organizationId(self, obj):
         return obj.organization_id
@@ -334,7 +341,7 @@ class VibeRaisingMonthlyUpdateUpsertSerializer(AliasInputSerializer):
             if not metric_key:
                 raise serializers.ValidationError({"metrics": "Metric keys must be short identifiers."})
             normalized_value = _blank_to_none(value)
-            # Explicit blanks clear editable metrics; omitted keys retain evidence.
+            # An explicit blank clears a frozen metric; omission preserves it.
             normalized_metrics[metric_key] = normalized_value
 
         attrs["metrics"] = normalized_metrics

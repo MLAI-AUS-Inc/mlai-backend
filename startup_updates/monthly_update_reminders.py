@@ -1,4 +1,4 @@
-"""Idempotent Customer.io reminders for monthly-update discount renewal."""
+"""Audited email and Roo chat reminders for monthly-update benefit renewal."""
 
 from __future__ import annotations
 
@@ -13,14 +13,17 @@ from zoneinfo import ZoneInfo
 
 from django.conf import settings
 from django.db import transaction
+from django.db.models import Min
 from django.utils import timezone
 
 from founder_tools.models import VibeRaisingCompany
 from integrations.services.notification_adapters import _customerio_client
+from roo.services import CoworkingService
+from vibe_raising.registration import company_is_verified
 
+from .benefits import approved_update_at
 from .models import (
     MonthlyUpdateDraft,
-    MonthlyUpdateDraftStatus,
     MonthlyUpdateReminderDelivery,
     MonthlyUpdateReminderKind,
     MonthlyUpdateReminderStatus,
@@ -29,7 +32,6 @@ from .models import (
 
 logger = logging.getLogger(__name__)
 
-DISCOUNT_WINDOW_DAYS = 28
 REMINDER_DAY_OFFSETS = {
     MonthlyUpdateReminderKind.SEVEN_DAY: 7,
     MonthlyUpdateReminderKind.ONE_DAY: 1,
@@ -57,6 +59,7 @@ class MonthlyUpdateReminderTarget:
     ready_date: date
     valid_through: date
     expires_on: date
+    expires_at: datetime
     reminder_kind: str
     reminder_date: date
     update_url: str
@@ -98,12 +101,11 @@ def collect_monthly_update_reminder_targets(reminder_date: date) -> list[Monthly
             registered=True,
             abr_verified_at__isnull=False,
         )
-        .exclude(acn__isnull=True)
-        .exclude(acn="")
         .exclude(profile__user__email="")
         .select_related("profile__user", "organization")
         .order_by("profile__user_id", "organization_id", "created_at")
     )
+    companies = [company for company in companies if company_is_verified(company)]
     if not companies:
         return []
 
@@ -121,14 +123,20 @@ def collect_monthly_update_reminder_targets(reminder_date: date) -> list[Monthly
         return []
 
     organization_ids = {organization_id for _, organization_id in owned_eligible_pairs}
-    latest_ready_by_org: dict[int, MonthlyUpdateDraft] = {}
+    latest_ready_by_org: dict[int, tuple[datetime, MonthlyUpdateDraft]] = {}
     ready_updates = MonthlyUpdateDraft.objects.filter(
         organization_id__in=organization_ids,
-        status=MonthlyUpdateDraftStatus.READY,
-        ready_at__isnull=False,
-    ).order_by("organization_id", "-ready_at", "-id")
+        published_at__isnull=False,
+    ).annotate(
+        first_approved_at=Min("revisions__approval__approved_at"),
+    ).order_by("organization_id", "-id")
     for update in ready_updates:
-        latest_ready_by_org.setdefault(update.organization_id, update)
+        anchor = approved_update_at(update)
+        previous = latest_ready_by_org.get(update.organization_id)
+        if anchor is not None and (previous is None or anchor > previous[0]):
+            # Generated READY stamps and recreated drafts must not determine
+            # which approved monthly benefit actually expires last.
+            latest_ready_by_org[update.organization_id] = (anchor, update)
 
     targets: list[MonthlyUpdateReminderTarget] = []
     seen_pairs: set[tuple[Any, int]] = set()
@@ -137,13 +145,20 @@ def collect_monthly_update_reminder_targets(reminder_date: date) -> list[Monthly
         if pair in seen_pairs or pair not in owned_eligible_pairs:
             continue
         seen_pairs.add(pair)
-        update = latest_ready_by_org.get(company.organization_id)
-        if update is None or update.ready_at is None:
+        latest = latest_ready_by_org.get(company.organization_id)
+        if latest is None:
             continue
+        approved_at, update = latest
 
-        ready_date = update.ready_at.date()
-        valid_through = ready_date + timedelta(days=DISCOUNT_WINDOW_DAYS)
-        expires_on = valid_through + timedelta(days=1)
+        zone = ZoneInfo(str(getattr(settings, "MONTHLY_UPDATE_REMINDER_TIMEZONE", "Australia/Melbourne")))
+        ready_date = approved_at.astimezone(zone).date()
+        expires_at = (approved_at + timedelta(
+            days=CoworkingService.MONTHLY_UPDATE_DISCOUNT_WINDOW_DAYS
+        )).astimezone(zone)
+        expires_on = expires_at.date()
+        # Legacy date-only payload: the last date with any eligible time, not
+        # a promise of all-day eligibility. Render exact expires_at in copy.
+        valid_through = (expires_at - timedelta(microseconds=1)).date()
         due_kinds = [
             reminder_kind
             for reminder_kind, days_before in REMINDER_DAY_OFFSETS.items()
@@ -165,6 +180,7 @@ def collect_monthly_update_reminder_targets(reminder_date: date) -> list[Monthly
                     ready_date=ready_date,
                     valid_through=valid_through,
                     expires_on=expires_on,
+                    expires_at=expires_at,
                     reminder_kind=reminder_kind,
                     reminder_date=reminder_date,
                     update_url=_update_url(str(company.pk), reminder_kind),
@@ -197,6 +213,8 @@ def _message_data(targets: list[MonthlyUpdateReminderTarget]) -> dict[str, Any]:
                 "valid_through_display": _display_date(target.valid_through),
                 "expires_on": target.expires_on.isoformat(),
                 "expires_on_display": _display_date(target.expires_on),
+                "expires_at": target.expires_at.isoformat(),
+                "expires_at_display": target.expires_at.strftime("%d %B %Y at %I:%M %p %Z"),
                 "update_url": target.update_url,
             }
             for target in targets
@@ -289,12 +307,21 @@ def _dispatch_group(targets: list[MonthlyUpdateReminderTarget]) -> dict[str, Any
     queued_as_draft = bool(getattr(settings, "MONTHLY_UPDATE_REMINDERS_QUEUE_DRAFT", True))
     final_status = MonthlyUpdateReminderStatus.DRAFTED if queued_as_draft else MonthlyUpdateReminderStatus.SENT
     provider_delivery_id = str(response_payload.get("delivery_id") or "")
-    MonthlyUpdateReminderDelivery.objects.filter(pk=delivery.pk).update(
-        status=final_status,
-        customerio_delivery_id=provider_delivery_id,
-        provider_response=response_payload,
-        dispatched_at=timezone.now(),
-    )
+    with transaction.atomic():
+        delivery = MonthlyUpdateReminderDelivery.objects.select_for_update().get(pk=delivery.pk)
+        # Chat delivery has an independent state in this same existing ledger.
+        # Preserve it when an email completes concurrently.
+        provider_response = {**delivery.provider_response, **response_payload}
+        if "roo_chat" in delivery.provider_response:
+            # This namespace belongs to us, not the email provider.
+            provider_response["roo_chat"] = delivery.provider_response["roo_chat"]
+        delivery.status = final_status
+        delivery.customerio_delivery_id = provider_delivery_id
+        delivery.provider_response = provider_response
+        delivery.dispatched_at = timezone.now()
+        delivery.save(update_fields=[
+            "status", "customerio_delivery_id", "provider_response", "dispatched_at", "updated_at",
+        ])
     return {"status": final_status, "delivery_id": delivery.pk, "customerio_delivery_id": provider_delivery_id}
 
 
@@ -303,7 +330,9 @@ def run_monthly_update_reminder_scheduler(
     now: datetime | None = None,
     dry_run: bool = False,
 ) -> dict[str, Any]:
-    if not dry_run and not bool(getattr(settings, "MONTHLY_UPDATE_REMINDERS_ENABLED", False)):
+    email_enabled = bool(getattr(settings, "MONTHLY_UPDATE_REMINDERS_ENABLED", False))
+    chat_enabled = bool(getattr(settings, "MONTHLY_UPDATE_ROO_REMINDERS_ENABLED", False))
+    if not dry_run and not (email_enabled or chat_enabled):
         return {"status": "skipped", "reason": "disabled"}
 
     timezone_name = str(getattr(settings, "MONTHLY_UPDATE_REMINDER_TIMEZONE", "Australia/Melbourne"))
@@ -333,17 +362,26 @@ def run_monthly_update_reminder_scheduler(
             ],
         }
 
-    missing_templates = sorted({kind for _, kind in groups if not _template_id(kind)})
-    if groups and missing_templates:
-        return {"status": "failed", "reason": "missing_template_ids", "reminder_kinds": missing_templates}
-    if groups and not str(getattr(settings, "CUSTOMERIO_API_KEY", "") or "").strip():
-        return {"status": "failed", "reason": "missing_customerio_api_key"}
+    from .roo_update_reminders import dispatch_roo_reminder
 
-    outcomes = [_dispatch_group(group) for group in groups.values()]
+    chat_outcomes = [
+        dispatch_roo_reminder(group, now=local_now)
+        for (_, kind), group in groups.items()
+        if chat_enabled and kind == MonthlyUpdateReminderKind.ONE_DAY
+    ]
+    email_groups = groups if email_enabled else {}
+    missing_templates = sorted({kind for _, kind in email_groups if not _template_id(kind)})
+    if email_groups and missing_templates:
+        return {"status": "failed", "reason": "missing_template_ids", "reminder_kinds": missing_templates, "chat_outcomes": chat_outcomes}
+    if email_groups and not str(getattr(settings, "CUSTOMERIO_API_KEY", "") or "").strip():
+        return {"status": "failed", "reason": "missing_customerio_api_key", "chat_outcomes": chat_outcomes}
+
+    outcomes = [_dispatch_group(group) for group in email_groups.values()]
     return {
         "status": "completed",
         "local_date": local_now.date().isoformat(),
         "recipient_count": len(groups),
         "target_count": len(targets),
         "outcomes": outcomes,
+        "chat_outcomes": chat_outcomes,
     }

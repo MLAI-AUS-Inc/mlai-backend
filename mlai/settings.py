@@ -1084,6 +1084,7 @@ CUSTOMERIO_TOPIC_TEMPLATE_ID = os.getenv('CUSTOMERIO_TOPIC_TEMPLATE_ID', '3')
 # Friendly monthly-update renewal reminders. Production delivery stays off
 # until both Customer.io templates have been reviewed and their ids configured.
 MONTHLY_UPDATE_REMINDERS_ENABLED = _env_is_true('MONTHLY_UPDATE_REMINDERS_ENABLED', False)
+MONTHLY_UPDATE_ROO_REMINDERS_ENABLED = _env_is_true('MONTHLY_UPDATE_ROO_REMINDERS_ENABLED', False)
 MONTHLY_UPDATE_REMINDER_TIMEZONE = os.getenv(
     'MONTHLY_UPDATE_REMINDER_TIMEZONE', 'Australia/Melbourne'
 )

@@ -444,8 +444,8 @@ def _mirror_monthly_receipt(receipt, user):
 
 
 @transaction.atomic
-def award_startup_update(user, company, month_bucket, draft=None):
-    """Extend the existing company/month award with a shared member/month cap.
+def award_startup_update(user, company, month_bucket, draft=None, *, idempotency_key=None):
+    """Credit each startup/month while capping Volunteer recognition per member.
 
     Called only behind the award flag. The parent service already verifies the
     company. Locking the company retains its independent global uniqueness.
@@ -455,14 +455,22 @@ def award_startup_update(user, company, month_bucket, draft=None):
     company.__class__.objects.select_for_update().get(pk=company.pk)
     action = active_policy()["monthly_startup_update"]
     when = datetime(month_bucket.year, month_bucket.month, 1, tzinfo=MELBOURNE)
-    if when > timezone.now():
-        raise VolunteerError("invalid_occurrence")
-    key = f"monthly_update_reward:{company.pk}:{month_bucket:%Y-%m}"
+    # The parent service has checked the frozen reporting timezone; the
+    # Melbourne month boundary below is only the Volunteer ranking bucket.
+    key = idempotency_key or f"monthly_update_reward:{company.pk}:{month_bucket:%Y-%m}"
     existing = Ledger.objects.filter(idempotency_key=key).first()
     if existing is not None and existing.user_id != user.pk:
         return False
+    recognition_capped = False
     if existing is None:
-        enforce_cap(user, action, when)
+        try:
+            enforce_cap(user, action, when)
+        except VolunteerError as exc:
+            if exc.code != "cap_reached":
+                raise
+            # The personal ranking slot must not suppress another startup's
+            # independent monthly completion payment.
+            recognition_capped = True
     amount = int(getattr(settings, "ROO_POINTS_MONTHLY_UPDATE_REWARD", 20))
     if existing is not None:
         ledger, created = existing, False
@@ -490,7 +498,22 @@ def award_startup_update(user, company, month_bucket, draft=None):
             occurred_at=when,
         ),
     )
-    _mirror_monthly_receipt(receipt, user)
+    if recognition_capped:
+        receipt.status, receipt.error = "recorded", "monthly_recognition_cap"
+        receipt.save(update_fields=("status", "error", "updated_at"))
+        return created
+    if receipt.status == "recorded" and receipt.error == "monthly_recognition_cap":
+        return created
+    try:
+        with transaction.atomic():
+            _mirror_monthly_receipt(receipt, user)
+    except VolunteerError as exc:
+        if exc.code != "monthly_award_conflict":
+            raise
+        # Historical credits may predate receipts. Keep their paid ledger and
+        # record the personal ranking cap on reconciliation, too.
+        receipt.status, receipt.error = "recorded", "monthly_recognition_cap"
+        receipt.save(update_fields=("status", "error", "updated_at"))
     return created
 
 

@@ -783,11 +783,11 @@ class VolunteerTests(TestCase):
             name=f"Synthetic {suffix} Pty Ltd",
             registered=True,
             abn="89000000019",
-            acn="000000019",
+            acn="000000019", entity_type_code="PRV",
             abr_verified_at=timezone.now(),
         )
 
-    def test_startup_update_keeps_twenty_and_shared_personal_slot(self):
+    def test_each_startup_gets_twenty_with_one_shared_personal_ranking_slot(self):
         from roo.services import StartupUpdateRewardService
         from community_chat.volunteer.policy import MELBOURNE
 
@@ -803,17 +803,17 @@ class VolunteerTests(TestCase):
                 self.member, company, month
             )
         )
-        self.assertFalse(
+        self.assertTrue(
             StartupUpdateRewardService.award_monthly_update_completion(
                 self.member, self.company("two"), month
             )
         )
         self.assertEqual(
-            Ledger.objects.filter(user=self.member, source="STARTUP_UPDATE").count(), 1
+            Ledger.objects.filter(user=self.member, source="STARTUP_UPDATE").count(), 2
         )
         self.assertEqual(contribution_total(self.member), microroo("20"))
         self.assertEqual(
-            PointsService.get_available_microroo(self.member), microroo("29")
+            PointsService.get_available_microroo(self.member), microroo("49")
         )
 
     def test_pending_learning_request_converges_with_verified_startup_update(self):

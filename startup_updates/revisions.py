@@ -332,6 +332,11 @@ def approve_and_publish(draft, *, actor, revision_id, revision_hash, audience_vi
         raise RevisionConflict("Disclosure changed. Save and review a new revision.")
     if revision.validation.get("groundedness_status") not in {"passed", "founder_asserted"}:
         raise ValidationError("Resolve the evidence review before publishing.")
+    period = (revision.snapshot.payload or {}).get("period") or {}
+    try:
+        reporting_period(draft.month, period.get("timezone") or "UTC", as_of=timezone.now())
+    except (ValueError, KeyError) as exc:
+        raise ValidationError(str(exc)) from exc
     approval, created = MonthlyUpdateApproval.objects.get_or_create(
         revision=revision,
         defaults={"actor": actor, "content_hash": revision_hash, "audience_visibility": audience_visibility},
@@ -339,11 +344,18 @@ def approve_and_publish(draft, *, actor, revision_id, revision_hash, audience_vi
     if not created and (approval.content_hash != revision_hash or approval.audience_visibility != audience_visibility):
         raise RevisionConflict("Disclosure changed. Create and review a new revision.")
     previous_published_id = draft.published_revision_id
+    previous_published_at = draft.published_at
+    first_approved_at = timezone.now()
+    if not draft.published_at:
+        # Generation can mark a draft READY before the founder approves it.
+        draft.ready_at = first_approved_at
+    elif draft.ready_at is None:
+        draft.ready_at = draft.first_published_at or draft.published_at
     draft.published_revision = revision
     draft.audience_visibility = audience_visibility
-    draft.published_at = timezone.now() if previous_published_id != revision.pk or not draft.published_at else draft.published_at
-    draft.first_published_at = draft.first_published_at or draft.published_at
+    draft.published_at = first_approved_at if previous_published_id != revision.pk or not draft.published_at else draft.published_at
+    draft.first_published_at = draft.first_published_at or previous_published_at or draft.published_at
     draft.status = "ready"
     draft.run = None  # A cancelled worker cannot delete an explicitly approved publication.
-    draft.save(update_fields=["published_revision", "audience_visibility", "published_at", "first_published_at", "status", "run", "updated_at"])
+    draft.save(update_fields=["published_revision", "audience_visibility", "published_at", "first_published_at", "ready_at", "status", "run", "updated_at"])
     return draft

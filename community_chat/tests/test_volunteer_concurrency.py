@@ -271,7 +271,7 @@ class VolunteerConcurrencyTests(TransactionTestCase):
             PointsService.get_available_microroo(self.member), microroo("23")
         )
 
-    def test_two_companies_cannot_bypass_shared_monthly_cap(self):
+    def test_two_startups_are_paid_once_each_but_share_monthly_ranking_cap(self):
         from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
         from organizations.models import Organization
 
@@ -290,7 +290,7 @@ class VolunteerConcurrencyTests(TransactionTestCase):
                     name=f"Synthetic {name} Pty Ltd",
                     registered=True,
                     abn="89000000019",
-                    acn="000000019",
+                    acn="000000019", entity_type_code="PRV",
                     abr_verified_at=timezone.now(),
                 ).pk
             )
@@ -306,9 +306,9 @@ class VolunteerConcurrencyTests(TransactionTestCase):
             return perform
 
         outcomes = self.race(award(company_ids[0]), award(company_ids[1]))
-        self.assertEqual(sum(outcomes), 1)
+        self.assertEqual(sum(outcomes), 2)
         self.assertEqual(
-            Ledger.objects.filter(user=self.member, source="STARTUP_UPDATE").count(), 1
+            Ledger.objects.filter(user=self.member, source="STARTUP_UPDATE").count(), 2
         )
         self.assertEqual(
             VolunteerRecognition.objects.filter(
@@ -318,7 +318,7 @@ class VolunteerConcurrencyTests(TransactionTestCase):
         )
         self.assertEqual(contribution_total(self.member), microroo("20"))
         self.assertEqual(
-            PointsService.get_available_microroo(self.member), microroo("29")
+            PointsService.get_available_microroo(self.member), microroo("49")
         )
 
     def test_historical_approval_race_credits_each_level_once(self):

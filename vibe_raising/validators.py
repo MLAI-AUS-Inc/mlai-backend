@@ -1,20 +1,7 @@
-"""Validation helpers for gating vibe-raising to registered Australian companies.
+"""Dependency-free ABN/ACN validation helpers.
 
-A vibe-raising founder company must be a *registered Australian company* (Pty Ltd /
-Ltd) before it can proceed to investor updates. The gate hangs off the ACN:
-
-* An **ABN** (11 digits) can belong to any entity — sole trader, trust, partnership
-  or company.
-* An **ACN** (9 digits) is issued by ASIC *only* to registered companies. Requiring a
-  valid ACN is therefore the company gate.
-* A company's ABN is mathematically ``2 check digits + its 9-digit ACN``, so for a
-  company the ACN can be derived from the ABN — see :func:`acn_from_abn`.
-
-These helpers are intentionally dependency-free (no Django, no network) so they can be
-unit-tested in isolation and reused from every save path. The authoritative
-"is this an active, registered company" decision additionally relies on an Australian
-Business Register (ABR) lookup; the entity-type helpers here support that check but do
-not replace it.
+Checksum validation is only an input check; active registration requires an ABR
+lookup. An ACN is optional for entities such as incorporated associations.
 """
 
 from __future__ import annotations
@@ -44,6 +31,8 @@ COMPANY_ENTITY_TYPE_CODES = frozenset(
 ENTITY_TYPE_NAMES = {
     "PRV": "Australian Private Company",
     "PUB": "Australian Public Company",
+    "OIE": "Other Incorporated Entity",
+    "UIE": "Other Unincorporated Entity",
 }
 
 
@@ -55,11 +44,14 @@ def entity_type_display(entity_type_code: str | None) -> str:
 
 
 def _digits(value: str | None) -> str:
-    """Return only the decimal digits in ``value`` (drops spaces, hyphens, etc.)."""
+    """Normalize ordinary display separators without accepting embedded junk."""
 
     if not value:
         return ""
-    return re.sub(r"\D", "", str(value))
+    text = str(value).strip()
+    if not re.fullmatch(r"[0-9\s-]+", text):
+        return ""
+    return re.sub(r"[\s-]", "", text)
 
 
 def validate_abn_checksum(value: str | None) -> bool:

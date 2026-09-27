@@ -18,6 +18,7 @@ from django.urls import reverse
 from django.utils import timezone
 from django.utils.text import slugify
 from rest_framework import permissions, status
+from rest_framework.exceptions import APIException
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -1996,7 +1997,6 @@ def _build_email_draft_payload(
         "authUrl": auth_url,
         "run": run_payload,
         "progress": progress_payload,
-        "sourceWarnings": (run_payload or {}).get("sourceWarnings", {}),
         "draft": draft_payload,
         "runId": run_payload["runId"] if run_payload else None,
         "status": run_payload["status"] if run_payload else None,
@@ -2636,14 +2636,6 @@ class VibeRaisingMonthlyUpdateView(APIView):
             audience_visibility = normalize_audience_visibility(
                 getattr(company, "default_audience_visibility", None)
             )
-        is_existing_published = bool(existing_draft and existing_draft.published_at)
-        save_mode = serializer.validated_data.get("saveMode") or "ready"
-        draft_status = (
-            MonthlyUpdateDraftStatus.DRAFT
-            if save_mode == "draft" and not is_existing_published
-            else MonthlyUpdateDraftStatus.READY
-        )
-
         structured_payload = {
             **serializer.validated_data,
             "displayConfig": display_config,
@@ -2700,15 +2692,6 @@ class VibeRaisingMonthlyUpdateView(APIView):
         # Disclosure is part of the reviewed revision, not a mutable publication flag.
         draft.save(update_fields=["title", "status", "run", "updated_at"])
 
-        # Reward verified-company founders for completing the month's update (once per
-        # company per month; best-effort, never blocks the save).
-        from roo.services import StartupUpdateRewardService
-
-        if save_mode != "draft" and draft_status == MonthlyUpdateDraftStatus.READY:
-            StartupUpdateRewardService.award_monthly_update_completion(
-                user=request.user, company=company, month_bucket=month_bucket, draft=draft,
-            )
-
         return Response(
             {"update": _serialize_monthly_update(draft)},
             status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
@@ -2740,9 +2723,18 @@ class VibeRaisingDraftView(APIView):
         return Response({"drafts": drafts}, status=status.HTTP_200_OK)
 
 
+class MonthlyUpdateRewardUnavailable(APIException):
+    """An approval can be retried after its points credit could not be saved."""
+
+    status_code = 503
+    default_code = "monthly_update_reward_unavailable"
+    default_detail = "We couldn't credit your update points. Your approval was not saved; please try again."
+
+
 class VibeRaisingMonthlyUpdatePublishView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
+    @transaction.atomic
     def post(self, request, update_id):
         context, error_response = _get_founder_company_context_or_response(request)
         if error_response:
@@ -2765,7 +2757,6 @@ class VibeRaisingMonthlyUpdatePublishView(APIView):
             organization=organization,
         )
         from startup_updates.revisions import approve_and_publish
-        was_unpublished = draft.published_revision_id is None
         revision_id = request.data.get("revisionId")
         revision_hash = request.data.get("revisionHash")
         if not revision_id or not revision_hash:
@@ -2779,15 +2770,20 @@ class VibeRaisingMonthlyUpdatePublishView(APIView):
         draft = approve_and_publish(draft, actor=request.user, revision_id=revision_id,
             revision_hash=revision_hash, audience_visibility=visibility)
 
-        if was_unpublished:
-            from roo.services import StartupUpdateRewardService
+        from roo.services import StartupUpdateRewardService
 
+        # Retry every approval safely: a previous transient award failure or
+        # later ABR verification must not permanently lose this month's reward.
+        try:
             StartupUpdateRewardService.award_monthly_update_completion(
                 user=request.user,
                 company=context["company"],
                 month_bucket=draft.month,
                 draft=draft,
+                strict=True,
             )
+        except Exception as exc:
+            raise MonthlyUpdateRewardUnavailable() from exc
         return Response({"update": _serialize_monthly_update(draft)}, status=status.HTTP_200_OK)
 
 

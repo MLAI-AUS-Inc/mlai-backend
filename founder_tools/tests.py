@@ -16,6 +16,8 @@ def _abr_company(abn):
         "configured": True,
         "reachable": True,
         "found": True,
+        "active": True,
+        "abn": abn,
         "is_company": True,
         "acn": _VERIFIED_ACN,
         "entity_type_code": "PRV",

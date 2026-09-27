@@ -145,7 +145,7 @@ from vibe_raising.validators import (
     normalize_acn,
     validate_acn_checksum,
 )
-from vibe_raising.registration import set_unverified_company_abn
+from vibe_raising.registration import company_registration_status, set_unverified_company_abn
 from integrations import http_client
 from integrations.models import UserIntegration
 from integrations.services.article_generation import ArticleGenerationError, ensure_valid_org_token
@@ -11196,6 +11196,9 @@ def _compute_bootstrap_payload(context, request=None, *, view="full", config=Non
             "domain": context.company.domain,
             "location": context.company.location,
             "abn": context.company.abn,
+            "acn": getattr(context.company, "acn", None),
+            "abrVerifiedAt": context.company.abr_verified_at.isoformat() if getattr(context.company, "abr_verified_at", None) else None,
+            "registrationVerification": company_registration_status(context.company),
             "avatarUrl": context.company.avatar_url,
             "avatar_url": context.company.avatar_url,
             "organizationId": context.organization.id,
@@ -11289,6 +11292,9 @@ def _serialize_bootstrap_without_domain(company):
             "domain": company.domain,
             "location": company.location,
             "abn": company.abn,
+            "acn": getattr(company, "acn", None),
+            "abrVerifiedAt": company.abr_verified_at.isoformat() if getattr(company, "abr_verified_at", None) else None,
+            "registrationVerification": company_registration_status(company),
             "avatarUrl": company.avatar_url,
             "avatar_url": company.avatar_url,
             "organizationId": None,
@@ -13685,8 +13691,8 @@ def _abn_records_from_xml(xml_text: str) -> list[dict]:
         if not abn or abn in seen:
             continue
         seen.add(abn)
-        # ASICNumber is the ACN — present only for registered companies, which is the
-        # signal vibe-raising uses to gate company-ness downstream.
+        # ASICNumber can be an ACN or another ASIC registration number. Entity type
+        # determines whether company-specific ACN checks apply downstream.
         acn = format_acn(_xml_text(node, "ASICNumber", "ACN", "acn"))
         results.append(
             {
@@ -13707,10 +13713,11 @@ def _abn_records_from_xml(xml_text: str) -> list[dict]:
 # ABR endpoint for an exact-ABN lookup. Shared by the type-ahead suggestion view and
 # the registration-gate verification helper so they hit the same authoritative record.
 ABR_SEARCH_BY_ABN_ENDPOINT = "https://abr.business.gov.au/abrxmlsearch/AbrXmlSearch.asmx/SearchByABNv202001"
+ABR_SEARCH_BY_ACN_ENDPOINT = "https://abr.business.gov.au/abrxmlsearch/AbrXmlSearch.asmx/SearchByASICv201408"
 
 
 def verify_company_with_abr(abn) -> dict:
-    """Look an ABN up on the Australian Business Register and report company status.
+    """Look an ABN or ACN up on the ABR and return authoritative entity status.
 
     Returns a structured dict the registration gate can act on without re-parsing XML::
 
@@ -13724,7 +13731,7 @@ def verify_company_with_abr(abn) -> dict:
             "entity_type_name": str,
             "status": str,        # ABR entity status code, e.g. "Active"
             "active": bool,
-            "is_company": bool,   # active AND (has a valid ACN OR a company entity type)
+            "is_company": bool,   # active Australian company (not required for perks)
         }
 
     Network/parse failures degrade to ``reachable=False`` rather than raising, so the
@@ -13744,7 +13751,8 @@ def verify_company_with_abr(abn) -> dict:
         "is_company": False,
     }
 
-    if not result["abn"]:
+    lookup_acn = normalize_acn(abn) if not result["abn"] else None
+    if not result["abn"] and not lookup_acn:
         return result
 
     auth_guid = getattr(settings, "ABR_LOOKUP_AUTHENTICATION_GUID", "")
@@ -13753,14 +13761,18 @@ def verify_company_with_abr(abn) -> dict:
         return result
 
     params = {
-        "searchString": result["abn"],
+        "searchString": result["abn"] or lookup_acn,
         "includeHistoricalDetails": "N",
         "authenticationGuid": auth_guid,
     }
     try:
-        response = http_client.get(ABR_SEARCH_BY_ABN_ENDPOINT, params=params, timeout=(2, 6))
+        endpoint = ABR_SEARCH_BY_ACN_ENDPOINT if lookup_acn else ABR_SEARCH_BY_ABN_ENDPOINT
+        response = http_client.get(endpoint, params=params, timeout=(2, 6))
         if getattr(response, "status_code", 200) >= 400:
             raise http_client.RequestException(f"ABN Lookup returned {response.status_code}.")
+        root = ElementTree.fromstring(response.text)
+        if any(_local_xml_name(node.tag).lower() in {"exception", "exceptiondescription"} for node in root.iter()):
+            return result
     except Exception:
         return result
 
@@ -13769,18 +13781,27 @@ def verify_company_with_abr(abn) -> dict:
     if not records:
         return result
 
-    record = records[0]
+    record = next((row for row in records if (
+        normalize_acn(row.get("acn")) == lookup_acn
+        and is_registered_company_entity_type(row.get("entityTypeCode"))
+        if lookup_acn else normalize_abn(row.get("abn")) == result["abn"]
+    )), None)
+    if record is None:
+        return result
     result["found"] = True
+    result["abn"] = normalize_abn(record.get("abn"))
     result["acn"] = normalize_acn(record.get("acn"))
     result["entity_type_code"] = (record.get("entityTypeCode") or "").strip()
+    if (is_registered_company_entity_type(result["entity_type_code"])
+            and record.get("acn") and not validate_acn_checksum(record["acn"])):
+        result["reachable"] = False
+        result["found"] = False
+        return result
     result["entity_type_name"] = (record.get("entityTypeName") or "").strip()
     result["status"] = (record.get("status") or "").strip()
     result["active"] = result["status"].lower() == "active"
 
-    has_company_acn = bool(result["acn"]) and validate_acn_checksum(result["acn"])
-    result["is_company"] = result["active"] and (
-        has_company_acn or is_registered_company_entity_type(result["entity_type_code"])
-    )
+    result["is_company"] = result["active"] and is_registered_company_entity_type(result["entity_type_code"])
     return result
 
 
@@ -13798,9 +13819,9 @@ class VibeMarketingAbnLookupView(APIView):
             return Response({"configured": False, "suggestions": []}, status=status.HTTP_200_OK)
 
         digits = re.sub(r"\D", "", query)
-        is_numeric_lookup = bool(digits) and len(digits) >= 9 and re.fullmatch(r"[\d\s]+", query)
+        is_numeric_lookup = bool(digits) and len(digits) >= 9 and re.fullmatch(r"[0-9\s-]+", query)
         if is_numeric_lookup:
-            endpoint = "https://abr.business.gov.au/abrxmlsearch/AbrXmlSearch.asmx/SearchByABNv202001"
+            endpoint = ABR_SEARCH_BY_ACN_ENDPOINT if len(digits) == 9 else ABR_SEARCH_BY_ABN_ENDPOINT
             params = {"searchString": digits, "includeHistoricalDetails": "N", "authenticationGuid": auth_guid}
         else:
             endpoint = "https://abr.business.gov.au/abrxmlsearch/AbrXmlSearch.asmx/ABRSearchByNameAdvancedSimpleProtocol2017"

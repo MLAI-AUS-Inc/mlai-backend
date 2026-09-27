@@ -11,8 +11,9 @@ import re
 import time
 import uuid
 from collections import OrderedDict
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone as datetime_timezone
 from typing import Optional, Tuple
+from zoneinfo import ZoneInfo
 import requests
 from django.conf import settings
 from django.db import (
@@ -22,7 +23,7 @@ from django.db import (
     models,
     transaction,
 )
-from django.db.models import Count, Q
+from django.db.models import Count, Min, Q
 from django.utils import timezone
 
 from .models import (
@@ -1417,28 +1418,19 @@ class CoworkingService:
         except RewardsCatalog.DoesNotExist:
             return getattr(settings, 'COWORKING_DAY_COST_POINTS', 8)
 
-    # A 'ready' monthly update grants the coworking discount for this many days
-    # from the moment it first became ready.
-    MONTHLY_UPDATE_DISCOUNT_WINDOW_DAYS = 28
+    # Approval grants a fixed window; edits/reapproval never renew it.
+    MONTHLY_UPDATE_DISCOUNT_WINDOW_DAYS = 30
     BOOKING_DATE_LOCK_NAMESPACE = 1380929347
 
     @staticmethod
     def _has_ready_monthly_update(user: User, booking_date: date) -> bool:
         """
-        Return whether any ABR-verified Australian company the user is bound to
-        has a monthly update that is 'ready' and became ready within the last
-        28 days (relative to ``booking_date``).
+        Return whether a bound founder has an approved update's 30-day benefit.
 
-        The coworking discount rewards founders who run a verified registered
-        Australian company and keep their monthly update current. Company
-        eligibility mirrors ``vibe_raising.registration.company_is_verified``:
-        ``registered`` with an ACN and an ABR-verified stamp.
-
-        The window is time-based rather than calendar-month based: an update
-        that reaches 'ready' grants the discount for the next 28 days
-        regardless of month boundaries, so there is no start-of-month cliff.
-        ``ready_at`` is stamped once, the first time a draft becomes ready, so
-        re-approving an old draft cannot renew the window.
+        Require authoritative ABR verification, including eligible nonprofits
+        without an ACN. The benefit survives edits to the working draft and
+        expires exactly 30 days after first approval. Advance bookings must also
+        fall inside the benefit window, using Melbourne booking dates.
         """
         # Imported lazily to avoid hard app dependencies at module load time.
         # A verified explicit link selects the Founder Tools identity whose
@@ -1448,44 +1440,60 @@ class CoworkingService:
         from founder_tools.models import VibeRaisingCompany
         from startup_updates.models import (
             MonthlyUpdateDraft,
-            MonthlyUpdateDraftStatus,
             UserStartupBinding,
         )
+        from vibe_raising.registration import company_is_verified
+        from startup_updates.benefits import approved_update_at
 
         eligibility_user_ids = coworking_eligibility_user_ids(user)
         org_ids = list(
             UserStartupBinding.objects.filter(
                 user_id__in=eligibility_user_ids,
                 coworking_discount_eligible=True,
+            ).filter(
+                models.Q(role__iexact="founder")
+                | models.Q(role__iexact="director")
+                | models.Q(organization__founder_companies__profile__user_id__in=eligibility_user_ids)
             ).values_list('organization_id', flat=True)
         )
         if not org_ids:
             return False
 
-        # Only organisations backed by an ABR-verified company qualify. This is
-        # the ORM form of vibe_raising.registration.company_is_verified().
-        eligible_org_ids = set(
-            VibeRaisingCompany.objects.filter(
+        # Use the shared verification predicate so nonprofit eligibility and
+        # malformed/stale identifiers cannot diverge from the registration gate.
+        eligible_org_ids = {
+            company.organization_id
+            for company in VibeRaisingCompany.objects.filter(
                 organization_id__in=org_ids,
                 registered=True,
                 abr_verified_at__isnull=False,
             )
-            .exclude(acn__isnull=True)
-            .exclude(acn='')
-            .values_list('organization_id', flat=True)
-        )
+            if company_is_verified(company)
+        }
         if not eligible_org_ids:
             return False
 
-        window_start = booking_date - timedelta(
+        now = timezone.now()
+        melbourne = ZoneInfo("Australia/Melbourne")
+        if booking_date < timezone.localdate(now, melbourne):
+            return False
+        booking_start = datetime.combine(booking_date, datetime.min.time(), tzinfo=melbourne)
+        benefit_time = max(now, booking_start).astimezone(datetime_timezone.utc)
+        window_start = benefit_time - timedelta(
             days=CoworkingService.MONTHLY_UPDATE_DISCOUNT_WINDOW_DAYS
         )
-        return MonthlyUpdateDraft.objects.filter(
+        candidates = MonthlyUpdateDraft.objects.filter(
             organization_id__in=eligible_org_ids,
-            status=MonthlyUpdateDraftStatus.READY,
-            ready_at__isnull=False,
-            ready_at__date__gte=window_start,
-        ).exists()
+            published_at__isnull=False,
+        ).annotate(first_approved_at=Min("revisions__approval__approved_at")).filter(
+            models.Q(first_approved_at__gt=window_start, first_approved_at__lte=now)
+            | models.Q(first_published_at__gt=window_start, first_published_at__lte=now)
+            | models.Q(first_approved_at__isnull=True, ready_at__gt=window_start, ready_at__lte=now)
+        )
+        return any(
+            anchor is not None and window_start < anchor <= now
+            for anchor in (approved_update_at(draft) for draft in candidates)
+        )
 
     @staticmethod
     def get_coworking_cost(
@@ -1497,7 +1505,7 @@ class CoworkingService:
 
         Defaults to the standard cost (from catalog/settings). When both
         ``user`` and ``booking_date`` are supplied and the user's ABR-verified
-        startup has a monthly update that became 'ready' within the last 28
+        startup has a monthly update first approved within the last 30
         days, the discounted cost applies instead — rewarding founders who keep
         their monthly update current.
         """
@@ -1743,8 +1751,7 @@ class CoworkingService:
         if available <= 0:
             raise ValueError(f"No availability for {booking_date} (capacity: {capacity})")
         
-        # Get cost (discounted when the user's startup has a 'ready' monthly
-        # update for the booking's month)
+        # The approved-update benefit must cover both now and the booking date.
         cost = CoworkingService.get_coworking_cost(user=user, booking_date=booking_date)
 
         account = PointsAccount.objects.select_for_update().filter(
@@ -2345,14 +2352,15 @@ class StartupUpdateRewardService:
         return int(getattr(settings, 'ROO_POINTS_MONTHLY_UPDATE_REWARD', 20))
 
     @staticmethod
-    def award_monthly_update_completion(user, company, month_bucket, draft=None) -> bool:
-        """Award points the first time a *verified registered company* (valid ACN)
+    def award_monthly_update_completion(user, company, month_bucket, draft=None, *, strict=False) -> bool:
+        """Award points the first time an ABR-verified Australian startup
         completes a monthly update for ``month_bucket`` (a date on the first of the
         month).
 
-        Idempotent per company + month — re-saving the same month's update never awards
-        twice. Best-effort: returns False (and never raises) if the company isn't
-        eligible or the award can't be made, so it can't break the update flow.
+        Idempotent per startup + month — re-saving the same month's update never awards
+        twice. An optional draft must belong to the company/month and already
+        be approved. Approval endpoints use ``strict=True`` in their transaction
+        so a failed credit rolls back approval and can be safely retried.
         """
         # Imported lazily to avoid a load-order dependency between roo and vibe_raising.
         from vibe_raising.registration import company_is_verified
@@ -2361,6 +2369,21 @@ class StartupUpdateRewardService:
             return False
         if not company_is_verified(company):
             return False
+        if not isinstance(month_bucket, date) or month_bucket.day != 1:
+            return False
+        # Match the approval period's timezone in both legacy and Volunteer
+        # award paths; turning a feature flag on must not change eligibility.
+        revision = getattr(draft, "current_revision", None) if draft is not None else None
+        period = ((revision.snapshot.payload or {}).get("period") or {}) if revision else {}
+        reporting_zone = ZoneInfo(period.get("timezone") or "Australia/Melbourne")
+        if datetime.combine(month_bucket, datetime.min.time(), tzinfo=reporting_zone) > timezone.now():
+            return False
+        if draft is not None and (
+            draft.organization_id != company.organization_id
+            or draft.month != month_bucket
+            or not draft.published_at
+        ):
+            return False
 
         amount = StartupUpdateRewardService.reward_amount()
         if amount <= 0:
@@ -2368,23 +2391,45 @@ class StartupUpdateRewardService:
 
         month_key = month_bucket.strftime('%Y-%m')
         try:
-            if (getattr(settings, "COMMUNITY_CHAT_VOLUNTEER_ENABLED", False)
-                    and getattr(settings, "COMMUNITY_CHAT_VOLUNTEER_AWARDS_ENABLED", False)):
-                from community_chat.volunteer.receipts import award_startup_update
-                return award_startup_update(user, company, month_bucket, draft)
-            _ledger, created = PointsService.award(
-                user=user,
-                delta=amount,
-                source=StartupUpdateRewardService.REWARD_SOURCE,
-                description=f"Monthly update completed — {month_bucket.strftime('%B %Y')}",
-                created_by_slack_id=getattr(user, 'slack_id', '') or 'system',
-                idempotency_key=f"monthly_update_reward:{company.id}:{month_key}",
-                reference_type='MONTHLY_UPDATE_DRAFT',
-                reference_id=str(draft.id) if draft is not None else None,
-            )
-            return created
+            with transaction.atomic():
+                key = f"monthly_update_reward:{company.id}:{month_key}"
+                if draft is not None:
+                    from startup_updates.models import MonthlyUpdateDraft
+                    from startup_updates.benefits import monthly_reward_history, monthly_reward_key
+
+                    # The draft is unique per organisation/month. Lock it before
+                    # checking ledger history so a second company wrapper or
+                    # founder account cannot pay the same startup update again.
+                    MonthlyUpdateDraft.objects.select_for_update().get(pk=draft.pk)
+                    key = monthly_reward_key(draft.organization_id, month_bucket)
+                    existing = monthly_reward_history(draft.organization_id, month_bucket).first()
+                    if existing is not None:
+                        key = existing.idempotency_key
+                        if existing.reference_id != str(draft.pk):
+                            draft.ready_at = min(draft.ready_at or draft.published_at, existing.created_at)
+                            draft.save(update_fields=["ready_at"])
+                            return False
+                        if existing.user_id != user.pk:
+                            return False
+                if (getattr(settings, "COMMUNITY_CHAT_VOLUNTEER_ENABLED", False)
+                        and getattr(settings, "COMMUNITY_CHAT_VOLUNTEER_AWARDS_ENABLED", False)):
+                    from community_chat.volunteer.receipts import award_startup_update
+                    return award_startup_update(user, company, month_bucket, draft, idempotency_key=key)
+                _ledger, created = PointsService.award(
+                    user=user,
+                    delta=amount,
+                    source=StartupUpdateRewardService.REWARD_SOURCE,
+                    description=f"Monthly update completed — {month_bucket.strftime('%B %Y')}",
+                    created_by_slack_id=getattr(user, 'slack_id', '') or 'system',
+                    idempotency_key=key,
+                    reference_type='MONTHLY_UPDATE_DRAFT',
+                    reference_id=str(draft.id) if draft is not None else None,
+                )
+                return created
         except Exception:
             logger.exception("Failed to award monthly-update points to user %s", getattr(user, 'id', None))
+            if strict:
+                raise
             return False
 
 
