@@ -348,3 +348,126 @@ class EditorialCatalogAPIUnitTests(unittest.TestCase):
         self.assertEqual(record['source_catalog_version'],0)
         self.assertEqual(record['suggestion']['rationale'],'Website evidence')
         self.assertEqual(record['reviewed_by'],'user:owner-1')
+
+    def test_owner_save_activates_a_suggestion_and_retains_its_evidence(self):
+        envelope = {'domain': 'example.com', 'researchRunId': 'scan-1', 'profiles': [
+            {'id': 'p1', 'name': 'Owners', 'rationale': 'Website evidence',
+             'source_urls': ['https://example.com/']},
+        ]}
+        run = SimpleNamespace(run_id='scan-1', run_request={'editorial_catalog_version': 0},
+                              result={'autofill': {'editorialSuggestions': envelope}})
+        model = SimpleNamespace(objects=Mock())
+        model.objects.filter.return_value.first.return_value = run
+        module = ModuleType('workflow_runs.models')
+        module.ContentFactoryRun = model
+        edit = edit_payload(self.state)
+        entry = edit['audience_options'][0]
+        edit['activate_entries'] = [{'kind': 'audience', 'id': entry['id'], 'version': entry['version']}]
+        edit['suggestion_reference'] = {
+            'research_run_id': 'scan-1', 'suggestion_id': 'p1', 'kind': 'audience',
+            'entry_id': entry['id'], 'entry_version': entry['version'],
+        }
+        with patch.dict(sys.modules, {'workflow_runs.models': module}):
+            result = self.request('put', edit)
+        self.assertEqual(result.status_code, 200, result.data)
+        self.assertEqual(result.data['audience_options'][0]['status'], 'approved')
+        self.assertEqual(self.state['editorial_suggestion_reviews'][0]['suggestion']['rationale'], 'Website evidence')
+        self.config_model.objects.update_or_create.assert_called_once()
+
+    def test_owner_save_makes_profile_and_cta_usable_in_one_write_and_revision(self):
+        from .editorial_catalog import article_brief_for_catalog
+        self.state = {}
+        edit = edit_payload(draft_catalog())
+        edit['expected_editorial_catalog_version'] = 0
+        edit['activate_entries'] = [
+            {'kind': 'audience', 'id': 'BUILDER', 'version': 1},
+            {'kind': 'offer', 'id': 'studio', 'version': 1},
+        ]
+        result = self.request('put', edit)
+        self.assertEqual(result.status_code, 200, result.data)
+        self.assertEqual(result.data['editorial_catalog_version'], 1)
+        self.assertEqual(self.calls.count('write'), 1)
+        for field in ('audience_options', 'cta_options'):
+            self.assertEqual(result.data[field][0]['status'], 'approved')
+            self.assertEqual(result.data[field][0]['approved_by'], 'user:owner-1')
+        brief = {'audience_id': 'BUILDER', 'audience_version': 1, 'country': 'AU',
+                 'conversion_intent': 'offer', 'offer_id': 'studio', 'offer_version': 1,
+                 'reader_task': 'Show tested work', 'distinct_contribution': 'A practical tested example',
+                 'acceptance_criteria': ['Include reproducible evidence']}
+        self.assertEqual(article_brief_for_catalog(self.state, {'editorial_brief': brief})['offer_id'], 'studio')
+
+    def test_saving_one_existing_entry_does_not_activate_unrelated_drafts(self):
+        edit = edit_payload(self.state)
+        edit['activate_entries'] = [{'kind': 'audience', 'id': 'BUILDER', 'version': 1}]
+        result = self.request('put', edit)
+        self.assertEqual(result.status_code, 200, result.data)
+        self.assertEqual(result.data['audience_options'][0]['status'], 'approved')
+        self.assertEqual(result.data['cta_options'][0]['status'], 'draft')
+
+    def test_profile_save_keeps_unchanged_linked_ctas_usable(self):
+        self.state = approved_catalog()
+        edit = edit_payload(self.state)
+        previous_revision = edit['expected_editorial_catalog_version']
+        for field in ('audience_options', 'cta_options'):
+            entry = edit[field][0]
+            entry.update(version=2, status='draft', approved_by=None, approved_at=None)
+        edit['audience_options'][0]['reader_task'] = 'Build a working prototype'
+        edit['activate_entries'] = [{'kind': 'audience', 'id': 'BUILDER', 'version': 2}]
+        result = self.request('put', edit)
+        self.assertEqual(result.status_code, 200, result.data)
+        self.assertEqual(result.data['editorial_catalog_version'], previous_revision + 1)
+        self.assertEqual(result.data['cta_options'][0]['status'], 'approved')
+        self.assertEqual(result.data['cta_options'][0]['version'], 2)
+        self.assertEqual(len(self.state['editorial_catalog']['approval_history']), 4)
+
+    def test_profile_save_does_not_activate_a_separately_changed_cta(self):
+        self.state = approved_catalog()
+        edit = edit_payload(self.state)
+        for field in ('audience_options', 'cta_options'):
+            edit[field][0].update(version=2, status='draft', approved_by=None, approved_at=None)
+        edit['audience_options'][0]['reader_task'] = 'Build a working prototype'
+        edit['cta_options'][0]['body'] = 'A different promise'
+        edit['activate_entries'] = [{'kind': 'audience', 'id': 'BUILDER', 'version': 2}]
+        result = self.request('put', edit)
+        self.assertEqual(result.status_code, 200, result.data)
+        self.assertEqual(result.data['cta_options'][0]['status'], 'draft')
+
+    def test_failed_activation_does_not_persist_an_intermediate_draft(self):
+        self.state = approved_catalog()
+        original = deepcopy(self.state)
+        edit = edit_payload(self.state)
+        edit['cta_options'][0].update(version=2, status='draft', approved_by=None, approved_at=None, countries=[])
+        edit['activate_entries'] = [{'kind': 'offer', 'id': 'studio', 'version': 2}]
+        result = self.request('put', edit)
+        self.assertEqual(result.status_code, 400, result.data)
+        self.assertEqual(self.state, original)
+        self.config_model.objects.update_or_create.assert_not_called()
+
+    def test_save_rejects_stale_activation_and_malformed_selections(self):
+        original = deepcopy(self.state)
+        for selection, code in ((None, 400), ([], 400),
+                ([{'kind': 'audience', 'id': 'BUILDER', 'version': 9}], 409),
+                ([{'kind': 'audience', 'id': 'BUILDER', 'version': True}], 409),
+                ([{'kind': 'audience', 'id': 'BUILDER', 'version': 1, 'approved_by': 'fake'}], 400)):
+            with self.subTest(selection=selection):
+                result = self.request('put', {**edit_payload(self.state), 'activate_entries': selection})
+                self.assertEqual(result.status_code, code, result.data)
+                self.assertEqual(self.state, original)
+        self.config_model.objects.update_or_create.assert_not_called()
+
+    def test_service_and_unowned_calls_cannot_activate_saved_entries(self):
+        edit = {**edit_payload(self.state), 'activate_entries': [{'kind': 'audience', 'id': 'BUILDER', 'version': 1}]}
+        self.assertEqual(self.views.service_catalog_update('example.com', {'domain': 'example.com', **edit}).status_code, 400)
+        self.assertEqual(self.views.mutate_catalog_response({'pk': 'org-1'}, edit).status_code, 400)
+        self.before_transaction = lambda: setattr(self.profile, 'role', 'mentor')
+        self.assertEqual(self.request('put', edit).status_code, 403)
+        self.config_model.objects.update_or_create.assert_not_called()
+
+    def test_saved_entry_noop_keeps_original_receipt(self):
+        self.state = approved_catalog()
+        original = deepcopy(self.state)
+        edit = {**edit_payload(self.state), 'activate_entries': [{'kind': 'audience', 'id': 'BUILDER', 'version': 1}]}
+        result = self.request('put', edit)
+        self.assertEqual(result.status_code, 200, result.data)
+        self.assertEqual(self.state, original)
+        self.config_model.objects.update_or_create.assert_not_called()

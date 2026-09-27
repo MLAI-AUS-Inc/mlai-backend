@@ -13,6 +13,7 @@ from .models import OrganizationContentConfig
 from .editorial_catalog import (
     EDIT_FIELDS, CatalogConflict, approve_catalog, review_payload, update_catalog,
 )
+from .editorial_catalog_save import activate_saved_entries
 
 
 def _lock_catalog_owner(context, user_id, organization):
@@ -53,12 +54,21 @@ def mutate_catalog_response(
             strategy = config.pillar_strategy if config else {}
             if not approving:
                 payload = dict(payload)
+                activating = "activate_entries" in payload
+                selections = payload.pop("activate_entries", None)
+                if activating and owner_context is None:
+                    raise ValueError("Only the company owner may save usable catalogue entries")
                 reference = payload.pop("suggestion_reference", None)
                 updated = update_catalog(strategy, payload)
                 if reference is not None:
                     if owner_context is None:
                         raise ValueError("Only the company owner may accept research suggestions")
                     updated = record_suggestion_review(updated, reference, org, owner_user_id)
+                if activating:
+                    updated = activate_saved_entries(
+                        strategy, updated, selections,
+                        actor_id=f"user:{owner_user_id}", saved_at=timezone.now(),
+                    )
             else:
                 updated = approve_catalog(
                     strategy, payload, actor_id=f"user:{owner_user_id}", approved_at=timezone.now(),
