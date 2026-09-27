@@ -61,6 +61,6 @@ def update_payload(draft, *, published=False, community=False):
         frozen_manual = (revision.snapshot.payload.get("manual_sources") or {}) if revision else {}
         value["manualSummary"] = memo.get("manual_summary") or frozen_manual.get("summary", "")
         value["manualDocumentIds"] = [str(item["id"]) for item in (memo.get("manual_documents") or frozen_manual.get("documents") or []) if item.get("id")]
-        value["inputSources"] = (revision.snapshot.payload.get("source_providers") or []) if revision else []
+        value["inputSources"] = list(memo["selected_input_sources"]) if "selected_input_sources" in memo else ((revision.snapshot.payload.get("source_providers") or []) if revision else [])
     value["startup"] = {"name": draft.organization.name}
     return value
