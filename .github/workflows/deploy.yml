@@ -84,11 +84,13 @@ jobs:
     - name: Check Slack conversation opening without database access
       run: python scripts/test_without_database.py community_chat.tests.test_slack_inventory_openable community_chat.tests.test_slack_open_requests
 
-    - name: Check startup connection lifecycle and activity defaults without database access
+    - name: Check startup connections and reporting months without database access
       run: |
         python scripts/test_without_database.py \
           community_chat.tests.test_startup_activity_defaults \
           community_chat.tests.test_startup_lifecycle \
+          startup_updates.tests_month_scope \
+          startup_updates.tests_monthly_groups \
           startup_updates.tests_update_identity.GenerationDateCompatibilityTests
 
     - name: Run no-database editorial contract checks
@@ -343,6 +345,7 @@ jobs:
           startup_updates.tests_source_evidence \
           startup_updates.tests_reporting_canaries \
           startup_updates.tests_revisions \
+          startup_updates.tests_update_identity \
           hospital.test_sim_contest \
           hospital.test_sim_guess_proxy \
           hospital.test_sim_patient_proxy \

@@ -91,6 +91,7 @@ from integrations.services.gmail_scopes import (
     gmail_scope_status_payload,
     has_gmail_read_scope,
 )
+from startup_updates.activity_scope import run_activity_period, activity_window, message_in_activity_window, require_month_source_contract
 from startup_updates.services import (
     DEFAULT_BACKFILL_MONTHS,
     OPEN_RUN_STATUSES,
@@ -816,6 +817,10 @@ def _get_run_or_404(run_id: str) -> ContentFactoryRun:
 
 
 def _get_run_window_bounds(run: ContentFactoryRun) -> Tuple[Optional[datetime], Optional[datetime]]:
+    period = run_activity_period(run.run_request or {})
+    window = activity_window(period)
+    if window:
+        return window[0], window[1] - timedelta(microseconds=1)
     request_payload = run.run_request or {}
     start = parse_datetime(str(request_payload.get("backfill_window_start") or "").strip() or "")
     end = parse_datetime(str(request_payload.get("backfill_window_end") or "").strip() or "")
@@ -2138,7 +2143,7 @@ class StartupUpdateSlackBackfillView(APIView):
                     )
                 run_request = dict(run.run_request or {})
                 run_request["slack_channel_ids"] = channel_ids
-                if run_request.get("activity_window_days") and not sync_result.get("has_more"):
+                if run_request.get("narrative_period") and not sync_result.get("has_more"):
                     from startup_updates.activity_scope import prepare_activity_classification
                     artifacts = SlackThreadArtifact.objects.filter(connection=locked_connection, channel_id__in=channel_ids)
                     artifacts = _slack_threads_in_run_window(artifacts, run, locked_connection)
@@ -2166,7 +2171,7 @@ class StartupUpdateSlackBackfillView(APIView):
 
 def _slack_threads_in_run_window(queryset, run, connection):
     """Historical membership comes from in-range messages, not the latest reply."""
-    if not (run.run_request or {}).get("activity_window_days"):
+    if not run_activity_period(run.run_request or {}):
         return _apply_run_window(queryset, run, "latest_message_at")
     messages = SlackMessageArtifact.objects.filter(
         connection=connection, channel_id=OuterRef("channel_id"),
@@ -2187,7 +2192,7 @@ def _update_slack_filtering_summary(
         organization=organization,
         connection=connection,
     )
-    if channel_ids or (run.run_request or {}).get("activity_window_days"):
+    if channel_ids or "automatic_source_scope" in (run.run_request or {}) or (run.run_request or {}).get("activity_window_days"):
         queryset = queryset.filter(channel_id__in=channel_ids)
     queryset = _slack_threads_in_run_window(queryset, run, connection)
     summary = {
@@ -2246,7 +2251,7 @@ class StartupUpdateSlackClassificationBatchView(APIView):
             relevance_label__in=[GmailRelevanceLabel.PENDING, GmailRelevanceLabel.AMBIGUOUS],
             classified_at__isnull=True,
         )
-        if channel_ids or (run.run_request or {}).get("activity_window_days"):
+        if channel_ids or "automatic_source_scope" in (run.run_request or {}) or (run.run_request or {}).get("activity_window_days"):
             queryset = queryset.filter(channel_id__in=channel_ids)
         queryset = _slack_threads_in_run_window(
             queryset.order_by("-heuristic_score", "-latest_message_at", "-updated_at"),
@@ -2265,7 +2270,7 @@ class StartupUpdateSlackClassificationBatchView(APIView):
                 compact_slack_thread_bundle(
                     thread,
                     slack_thread_id=_slack_thread_public_id(thread, authority),
-                activity_period=(run.run_request or {}).get("narrative_period") if (run.run_request or {}).get("activity_window_days") else None,
+                    activity_period=run_activity_period(run.run_request or {}),
                 )
             )
             if len(bundles) >= limit:
@@ -2427,7 +2432,7 @@ class StartupUpdateSlackExtractionBatchView(APIView):
             relevance_label__in=EXTRACTABLE_RELEVANCE_LABELS,
             needs_extraction=True,
         )
-        if channel_ids or (run.run_request or {}).get("activity_window_days"):
+        if channel_ids or "automatic_source_scope" in (run.run_request or {}) or (run.run_request or {}).get("activity_window_days"):
             queryset = queryset.filter(channel_id__in=channel_ids)
         queryset = _slack_threads_in_run_window(
             queryset.order_by("-relevance_score", "-heuristic_score", "-latest_message_at", "-updated_at"),
@@ -2439,7 +2444,7 @@ class StartupUpdateSlackExtractionBatchView(APIView):
             compact_slack_thread_bundle(
                 thread,
                 slack_thread_id=_slack_thread_public_id(thread, authority),
-                activity_period=(run.run_request or {}).get("narrative_period") if (run.run_request or {}).get("activity_window_days") else None,
+                activity_period=run_activity_period(run.run_request or {}),
             )
             for thread in queryset
         ]
@@ -2743,7 +2748,7 @@ class StartupUpdateLinearBackfillView(APIView):
 
         run_request = dict(run.run_request or {})
         run_request["linear_project_ids"] = project_ids
-        if run_request.get("activity_window_days") and not sync_result.get("has_more") and "linear" not in run_request.get("activity_prepared_sources", []):
+        if run_request.get("narrative_period") and not sync_result.get("has_more") and "linear" not in run_request.get("activity_prepared_sources", []):
             from startup_updates.activity_scope import linear_project_has_activity, prepare_activity_classification
             artifacts = LinearProjectArtifact.objects.filter(connection=connection, linear_project_id__in=project_ids)
             recent_ids = [project.pk for project in artifacts if linear_project_has_activity(project, run_request.get("narrative_period"))]
@@ -2793,13 +2798,13 @@ class StartupUpdateLinearClassificationBatchView(APIView):
             relevance_label__in=[GmailRelevanceLabel.PENDING, GmailRelevanceLabel.AMBIGUOUS],
             classified_at__isnull=True,
         )
-        if project_ids or (run.run_request or {}).get("activity_window_days"):
+        if project_ids or "automatic_source_scope" in (run.run_request or {}) or (run.run_request or {}).get("activity_window_days"):
             queryset = queryset.filter(linear_project_id__in=project_ids)
         queryset = queryset.order_by("-updated_at", "name")
 
         bundles = []
         for project in queryset.iterator(chunk_size=200):
-            bundle = compact_linear_project_bundle(project, activity_period=(run.run_request or {}).get("narrative_period") if (run.run_request or {}).get("activity_window_days") else None)
+            bundle = compact_linear_project_bundle(project, activity_period=run_activity_period(run.run_request or {}))
             if bundle.get("has_period_activity", True):
                 bundles.append(bundle)
             if len(bundles) >= limit:
@@ -2922,13 +2927,13 @@ class StartupUpdateLinearExtractionBatchView(APIView):
             relevance_label__in=EXTRACTABLE_RELEVANCE_LABELS,
             needs_extraction=True,
         )
-        if project_ids or (run.run_request or {}).get("activity_window_days"):
+        if project_ids or "automatic_source_scope" in (run.run_request or {}) or (run.run_request or {}).get("activity_window_days"):
             queryset = queryset.filter(linear_project_id__in=project_ids)
         queryset = queryset.order_by("-relevance_score", "-updated_at", "name")
 
         bundles = []
         for project in queryset.iterator(chunk_size=200):
-            bundle = compact_linear_project_bundle(project, activity_period=(run.run_request or {}).get("narrative_period") if (run.run_request or {}).get("activity_window_days") else None)
+            bundle = compact_linear_project_bundle(project, activity_period=run_activity_period(run.run_request or {}))
             if bundle.get("has_period_activity", True):
                 bundles.append(bundle)
             if len(bundles) >= limit:
@@ -3309,23 +3314,28 @@ class StartupUpdateNotionBackfillView(APIView):
         existing_by_chunk = {
             str(page.get("notion_chunk_id") or ""): page
             for page in store.get("pages", [])
-            if isinstance(page, dict)
+            if isinstance(page, dict) and message_in_activity_window(page, run_activity_period(run.run_request or {}))
         }
         pages_synced = 0
         warnings: list[str] = []
         for page in payload.get("results") or []:
             if not isinstance(page, dict):
                 continue
-            if (run.run_request or {}).get("activity_window_days"):
-                period_start, period_end = _get_run_window_bounds(run)
-                edited_at = parse_datetime(str(page.get("last_edited_time") or ""))
-                if edited_at is None or timezone.is_naive(edited_at) or (period_start and edited_at < period_start) or (period_end and edited_at > period_end):
+            from startup_updates.activity_scope import cached_notion_month_version
+            period = run_activity_period(run.run_request or {})
+            cached_pages = (connection.sync_cursor or {}).get("reporting_page_versions", {})
+            historical_bundle = None
+            if not message_in_activity_window(page, period):
+                historical_bundle = cached_notion_month_version(page, cached_pages, period)
+                if historical_bundle is None:
                     continue
             try:
                 from startup_updates.evidence_contract import content_hash
                 version_key = content_hash({"page": page, "extractor": "notion-block-tree-v2"})
                 cached_pages = (connection.sync_cursor or {}).get("reporting_page_versions", {})
-                bundle = cached_pages.get(version_key) or _build_notion_page_bundle(connection, page)
+                bundle = historical_bundle or cached_pages.get(version_key) or _build_notion_page_bundle(connection, page)
+                if historical_bundle is not None:
+                    version_key = content_hash({"retained_period_bundle": historical_bundle})
                 if version_key not in cached_pages:
                     connection.sync_cursor = {**(connection.sync_cursor or {}), "reporting_page_versions": {**cached_pages, version_key: bundle}}
                 bundle = {**bundle, "source_version": version_key}
@@ -3380,8 +3390,8 @@ class StartupUpdateNotionBackfillView(APIView):
             {
                 "connection_id": connection.id,
                 "workspace": connection.account_label,
-                "scope": "recent_activity" if run_request.get("activity_window_days") else "whole_accessible_workspace",
-                "activity_window_days": run_request.get("activity_window_days"),
+                "scope": "selected_month",
+                "source_period": run_activity_period(run_request),
                 "index_partial": bool(store.get("index_partial")),
                 "pages_indexed": len(store.get("pages") or []),
                 "warnings": warnings,
@@ -3435,7 +3445,7 @@ class StartupUpdateNotionClassificationBatchView(APIView):
         pages = [
             page
             for page in store.get("pages", [])
-            if isinstance(page, dict) and page.get("notion_chunk_id") not in classifications
+            if isinstance(page, dict) and message_in_activity_window(page, run_activity_period(run.run_request or {})) and page.get("notion_chunk_id") not in classifications
         ][:limit]
         return Response({"run": _serialize_run(run, request), "count": len(pages), "pages": pages}, status=status.HTTP_200_OK)
 
@@ -3503,7 +3513,7 @@ class StartupUpdateNotionExtractionBatchView(APIView):
         extracted = set(store.get("extracted_chunk_ids") or [])
         pages = []
         for page in store.get("pages", []):
-            if not isinstance(page, dict):
+            if not isinstance(page, dict) or not message_in_activity_window(page, run_activity_period(run.run_request or {})):
                 continue
             chunk_id = page.get("notion_chunk_id")
             classification = classifications.get(chunk_id) or {}
@@ -4188,6 +4198,7 @@ class StartupUpdateDraftResultsView(APIView):
         cancelled_response = _reject_if_run_cancelled(run)
         if cancelled_response is not None:
             return cancelled_response
+        require_month_source_contract(run.run_request or {})
         drafts = list(run.monthly_update_drafts.order_by("-month", "-updated_at"))
         payload = _serialize_draft_results_bundle(drafts)
         if payload is None:
@@ -4215,6 +4226,7 @@ class StartupUpdateDraftResultsView(APIView):
         cancelled_response = _reject_if_run_cancelled(run)
         if cancelled_response is not None:
             return cancelled_response
+        require_month_source_contract(run.run_request or {})
         serializer = DraftResultsSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         _update_run_step(run, step_key="draft_generation")
@@ -4235,6 +4247,7 @@ class StartupUpdateDraftResultsView(APIView):
                 if not pin or pin["snapshot_id"] != item["snapshot_id"]:
                     raise RevisionConflict("Capture this run's evidence before generation.")
                 snapshot = get_object_or_404(MonthlyEvidenceSnapshot, pk=item["snapshot_id"], organization=organization)
+                require_month_source_contract(run.run_request or {}, snapshot=snapshot)
                 Organization.objects.select_for_update().get(pk=organization.pk)
                 draft = run_update(run, item["month"], create=True)
                 draft = MonthlyUpdateDraft.objects.select_for_update().get(pk=draft.pk)
@@ -4432,6 +4445,7 @@ class StartupUpdateEvidenceSnapshotView(APIView):
         if cancelled is not None:
             return cancelled
         run_request = dict(run.run_request or {})
+        require_month_source_contract(run_request)
         pinned = run_request.get("evidence_snapshots")
         if pinned is None:
             if "source_evidence_refresh" in (run.step_order or []) and not run_request.get("source_evidence_refreshed"):
@@ -4454,6 +4468,7 @@ class StartupUpdateEvidenceSnapshotView(APIView):
         snapshots = {}
         for month, item in pinned.items():
             snapshot = get_object_or_404(MonthlyEvidenceSnapshot, pk=item["snapshot_id"], organization=organization)
+            require_month_source_contract(run_request, snapshot=snapshot)
             snapshots[month] = {**item, "payload": snapshot.payload}
         return Response({"snapshots": snapshots})
 

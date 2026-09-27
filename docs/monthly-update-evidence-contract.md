@@ -78,3 +78,33 @@ Deployment requires explicit authorization. For subsequent contract changes, use
 - Cross-repository test results are recorded in Valley's dated implementation report.
 
 Stripe field semantics: [Invoice object](https://docs.stripe.com/api/invoices/object).
+
+## Calendar-month source boundaries (27 September 2026)
+
+Each generation run now pins a `calendar_month_v1` source period for the monthly
+update. Its start is midnight on the first day in the startup's reporting
+timezone; its exclusive end is the next month's midnight, capped at the current
+instant for the current month. Repeating generation includes earlier activity in
+that month. Editing September in a later month still reads September sources.
+An old per-publication date or rolling-30-day preference cannot widen this range.
+Existing runs captured under the previous contract must be cancelled and started
+again rather than silently reusing immutable evidence from a different range.
+The worker snapshot/read/result boundaries also enforce this contract, so a worker
+already running during rollout cannot finish by submitting an older pinned
+snapshot. Those pins remain unchanged; the response explains how to restart.
+
+Slack messages, Notion page versions, Linear issues/project updates, event
+curation, and frozen event snapshots all use that range. Gmail already filters
+individual messages and attachments within the run window. Luma's surrounding
+month context buffer is removed. Analytics current values cover the selected
+calendar month (or month to date); the separately labelled comparison covers the
+preceding calendar month. Financial source fetching starts in the represented
+month. Previously recorded chart history remains separately dated historical
+context.
+
+Provider edits after the reporting month are not historical evidence. A retained
+in-month Notion page version can be reused after a later edit; without one, that
+page is omitted. Later Linear project status/description is omitted while any
+available in-month issue or project-update evidence remains usable. This does
+not reconstruct provider history that was never retained. No new database
+schema or migration is needed for these boundaries.

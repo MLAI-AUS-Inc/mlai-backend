@@ -139,22 +139,20 @@ def _prior_month_start(month_start: date) -> date:
 
 
 def period_bounds_for_run(run_request: dict[str, Any]) -> tuple[str, str, str, str]:
-    if run_request.get("activity_window_days"):
-        from startup_updates.activity_scope import activity_window
-        window = activity_window(run_request.get("narrative_period"))
-        if window:
-            start, end = window
-            # GA reports are day-granular. Include the update day and the
-            # preceding 29 calendar days; compare with the preceding 30 days.
-            cur_end = (end - timedelta(microseconds=1)).date()
-            cur_start = cur_end - timedelta(days=29)
-            prev_end = cur_start - timedelta(days=1)
-            prev_start = prev_end - timedelta(days=29)
-            return tuple(value.isoformat() for value in (cur_start, cur_end, prev_start, prev_end))
-    current_start = _parse_month_start(run_request.get("current_month"))
+    from startup_updates.activity_scope import activity_window, run_activity_period
+    from zoneinfo import ZoneInfo
+    period = run_activity_period(run_request)
+    window = activity_window(period)
+    current_start = _parse_month_start(run_request.get("target_month") or run_request.get("current_month"))
     cur_start, cur_end = _month_bounds(current_start)
+    if window:
+        zone = ZoneInfo(period["timezone"])
+        cur_start = window[0].astimezone(zone).date()
+        cur_end = (window[1] - timedelta(microseconds=1)).astimezone(zone).date()
+    # The comparison is the preceding calendar month, never a rolling window
+    # leaking August activity into September's reported current values.
     prev_start, prev_end = _month_bounds(_prior_month_start(current_start))
-    return (cur_start.isoformat(), cur_end.isoformat(), prev_start.isoformat(), prev_end.isoformat())
+    return tuple(value.isoformat() for value in (cur_start, cur_end, prev_start, prev_end))
 
 
 # ---------------------------------------------------------------------------

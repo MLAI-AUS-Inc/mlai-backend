@@ -2,6 +2,9 @@
 
 Implemented locally on 20 September 2026. This is a gated integration, not evidence of deployment. It reuses the existing Founder Tools companies, reporting configuration, evidence snapshots, revisions and approvals. Valley remains an internal generation worker; Chat never receives service or provider credentials.
 
+See [One update per reporting month](startup-monthly-groups.md) for the current
+monthly identity, archive pagination, preserved versions and connector boundaries.
+
 ## Experience and scope
 
 The React desktop/browser Pulse screen now opens **Startups**. `/pulse` remains the route so existing profile-panel links continue to work. Flutter is unchanged. The default journey is My startup → Add/select startup → Write or generate → Save and review → Approve privately or publish to Community updates. Monthly periods default to the last completed month in the startup's timezone. The setup form includes timezone and currency; website is optional. Separate staff review, weekly scheduling, notification delivery, and a mobile port are outside this increment.
@@ -95,7 +98,7 @@ These mocks and synthetic databases do not prove a live Django/Valley/provider r
 ## Recent activity and persistent source defaults — 26 September 2026
 
 `GET sources/` now adds `enabled`, `selectionMode: recent_activity`, and
-`activityWindowDays: 30`. `enabled` represents inclusion in new drafts, separate
+`activityWindowDays: null`, and `activityPeriod: reporting_month`. `enabled` represents inclusion in new drafts, separate
 from account connection. `POST sources/<provider>/` with `enabled: true|false`
 and an explicit owned company stores that company's default. It does not revoke
 credentials, disconnect the account, delete data, or rewrite an existing draft.
@@ -103,11 +106,10 @@ Defaults live under the existing StartupProfile `progress_configuration` JSON,
 keyed by company ID; no schema migration is needed. Clients use saved defaults
 only when opening a new draft and continue sending the explicit draft allowlist.
 
-Chat's independent-update generation defaults to a half-open narrative window
-ending at the end of `updateDate` in the reporting timezone, capped at now, and
-beginning 30 days earlier. Historical update dates retain their chosen endpoint.
-Financial reports and stored metric observations keep their reporting-month
-semantics; they are not relabeled as rolling totals.
+Chat generation uses the selected calendar month in the reporting timezone,
+ending at the next month's boundary and capped at now for the current month.
+Editing an older month does not import later activity. Financial reports and
+stored metric observations retain that same reporting-month identity.
 
 - Slack, Analytics, and Linear catalogs are discovered automatically and pinned
   on the run. This does not overwrite legacy manual resource selections. Slack
@@ -120,11 +122,10 @@ semantics; they are not relabeled as rolling totals.
 - Notion pages must have a last-edited timestamp inside the activity window
   before their contents are hydrated. Gmail uses its existing period-bounded
   message and attachment evidence path.
-- Luma event context uses the exact recent range rather than the prior month
-  plus a two-week buffer. It continues to read cached connector data; this change
+- Luma event context uses the selected month without adjacent-month events. It continues to read cached connector data; this change
   does not introduce a fresh attendance sync during generation.
-- Analytics uses the update day and preceding 29 days (its reports are
-  day-granular), compared with the preceding 30 days.
+- Analytics uses the selected reporting month (its reports are day-granular),
+  with separately labeled prior-month comparison data.
 - Google Drive remains connectable but is explicitly unavailable as an update
   input because this workflow has no Drive importer. The catalog says so instead
   of claiming its data will be included.
@@ -136,7 +137,7 @@ This keeps discovery scoped and avoids silently truncating a startup's resources
 Validation: 83 database-free tests cover facade/lifecycle contracts, persistent
 company inclusion, recent date boundaries, resource paging, historical Slack
 membership, cached-message exclusion, Luma and Analytics ranges, and the existing
-date identity and source-evidence contracts. Cached Slack/Linear classification is reset once per run, only for captured resources with in-window activity, so a new rolling draft can reuse recent inputs without deleting prior evidence or content. No migrations or database-backed suites were run for this
+date identity and source-evidence contracts. Cached Slack/Linear classification is reset once per run, only for captured resources with in-window activity, so a new monthly revision can reuse in-month inputs without deleting prior evidence or content. No migrations or database-backed suites were run for this
 change. Real provider consent, fresh-data latency, and Django/Valley round trips
 remain release acceptance checks; these edits are not evidence of deployment.
 
