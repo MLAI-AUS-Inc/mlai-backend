@@ -4771,7 +4771,7 @@ def _component_feedback_from_run(run):
             "revisionRunId": latest_batch.get("revisionRunId") or run.run_id,
             "status": batch_status,
         }
-    from .article_review_feedback import inherited_feedback
+    from content_factory.article_review_feedback import inherited_feedback
     inherited_comments = [record for _, record in inherited_feedback(run, comments)]
     return {
         "comments": [_serialize_component_comment(comment) for comment in comments] + inherited_comments,
@@ -16550,7 +16550,7 @@ class VibeMarketingRunCommentDetailView(VibeMarketingRunCommentsMixin, APIView):
         if comment is None:
             comment = VibeMarketingComponentComment.objects.filter(run=run, context__sourceCommentId=str(comment_id)).first()
         if comment is None:
-            from .article_review_feedback import materialize_feedback
+            from content_factory.article_review_feedback import materialize_feedback
             copies = materialize_feedback(run, list(VibeMarketingComponentComment.objects.filter(run=run)), comment_id)
             if not copies:
                 return Response({"detail": "Comment not found."}, status=404)
@@ -16602,7 +16602,7 @@ class VibeMarketingRunCommentDetailView(VibeMarketingRunCommentsMixin, APIView):
         if comment is None:
             comment = VibeMarketingComponentComment.objects.filter(run=run, context__sourceCommentId=str(comment_id)).first()
         if comment is None:
-            from .article_review_feedback import materialize_feedback
+            from content_factory.article_review_feedback import materialize_feedback
             copies = materialize_feedback(run, list(VibeMarketingComponentComment.objects.filter(run=run)), comment_id)
             if not copies:
                 return Response({"detail": "Comment not found."}, status=404)
@@ -16627,7 +16627,7 @@ class VibeMarketingRunCommentsSubmitView(VibeMarketingRunCommentsMixin, APIView)
         source_run = run
         run_request = run.run_request if isinstance(run.run_request, dict) else {}
         run_result = run.result if isinstance(run.result, dict) else {}
-        from .article_review_feedback import materialize_feedback
+        from content_factory.article_review_feedback import materialize_feedback
         materialize_feedback(run, list(VibeMarketingComponentComment.objects.filter(run=run)))
         draft_comments = list(
             VibeMarketingComponentComment.objects.filter(
@@ -16842,7 +16842,7 @@ class VibeMarketingRunCommentsAcceptRevisionView(VibeMarketingRunCommentsMixin, 
         comment_error = check_approval_comments(run, request.data)
         if comment_error is not None:
             return comment_error
-        from .article_review_feedback import accept_addressed_feedback
+        from content_factory.article_review_feedback import accept_addressed_feedback
         promoted_count, archived_count = accept_addressed_feedback(run, source_run, batch_id)
         if promoted_count:
             # Fold the newly promoted preferences into the site's article-kit specs so the next

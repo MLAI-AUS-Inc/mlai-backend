@@ -1,5 +1,14 @@
 """Carry unresolved feedback into a revision without rewriting its history."""
-from . import vibe_marketing_views as views
+
+
+class _ViewsProxy:
+    def __getattr__(self, name):
+        from content_factory import vibe_marketing_views
+
+        return getattr(vibe_marketing_views, name)
+
+
+views = _ViewsProxy()
 
 
 def inherited_feedback(run, own_comments):
