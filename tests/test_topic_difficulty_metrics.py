@@ -22,6 +22,10 @@ class TopicDifficultyMetricsTests(TestCase):
         self.org = Organization.objects.create(name="Acme", domain="acme.example.com")
 
     def test_bulk_upsert_stores_verified_difficulty_source(self):
+        history = [
+            {"year": 2026, "month": month, "search_volume": volume}
+            for month, volume in zip((3, 4, 5, 6), (120, 160, 220, 320))
+        ]
         response = self.client.post(
             "/api/seo/keywords/bulk/",
             {
@@ -33,14 +37,14 @@ class TopicDifficultyMetricsTests(TestCase):
                         "difficulty": 31,
                         "difficulty_source": "dataforseo_bulk",
                         "related_keywords": ["startup equity guide"],
-                        "monthly_searches": [120, 160, 220, 320],
+                        "monthly_searches": history,
                         "velocity_data": {
                             "absolute_volume": 320,
                             "velocity_score": 0.35,
                             "trend_status": "rising",
-                            "daily_volumes": [120, 160, 220, 320],
-                            "source": "dataforseo_ai",
-                            "basis": "ai_search_volume",
+                            "daily_volumes": history,
+                            "source": "dataforseo_labs",
+                            "basis": "search_volume",
                             "period_label": "past 4 months",
                             "is_estimated": False,
                         },
@@ -55,16 +59,16 @@ class TopicDifficultyMetricsTests(TestCase):
         self.assertEqual(keyword.difficulty, 31)
         self.assertEqual(keyword.difficulty_source, "dataforseo_bulk")
         self.assertEqual(keyword.related_keywords, ["startup equity guide"])
-        self.assertEqual(keyword.monthly_searches, [120, 160, 220, 320])
+        self.assertEqual(keyword.monthly_searches, history)
         velocity = KeywordVelocity.objects.get(keyword=keyword)
-        self.assertEqual(velocity.source, "dataforseo_ai")
-        self.assertEqual(velocity.basis, "ai_search_volume")
-        self.assertEqual(velocity.period_label, "past 4 months")
+        self.assertEqual(velocity.source, "dataforseo_labs")
+        self.assertEqual(velocity.basis, "search_volume")
+        self.assertEqual(velocity.period_label, "Mar 2026 – Jun 2026")
         self.assertFalse(velocity.is_estimated)
         candidate = _topic_candidate_from_keyword(keyword)
-        self.assertEqual(candidate["trendSource"], "dataforseo_ai")
-        self.assertEqual(candidate["trendBasis"], "ai_search_volume")
-        self.assertEqual(candidate["trendPeriodLabel"], "past 4 months")
+        self.assertEqual(candidate["trendSource"], "dataforseo_labs")
+        self.assertEqual(candidate["trendBasis"], "search_volume")
+        self.assertEqual(candidate["trendPeriodLabel"], "Mar 2026 – Jun 2026")
         self.assertFalse(candidate["trendIsEstimated"])
 
     def test_bulk_upsert_marks_missing_source_as_legacy_default(self):
@@ -81,7 +85,7 @@ class TopicDifficultyMetricsTests(TestCase):
         keyword = ResearchedKeyword.objects.get(organization=self.org, keyword_normalized="legacy topic")
         self.assertEqual(keyword.difficulty_source, "legacy_default")
 
-    def test_topic_candidate_marks_legacy_default_difficulty_as_pending(self):
+    def test_topic_candidate_marks_legacy_default_difficulty_as_unavailable(self):
         keyword = ResearchedKeyword.objects.create(
             organization=self.org,
             keyword="legacy difficulty",
@@ -94,7 +98,9 @@ class TopicDifficultyMetricsTests(TestCase):
         candidate = _topic_candidate_from_keyword(keyword)
 
         self.assertEqual(candidate["difficultySource"], "legacy_default")
-        self.assertIn("difficulty pending", candidate["reason"])
+        self.assertIn("difficulty unavailable", candidate["reason"])
+        self.assertIsNone(candidate["difficulty"])
+        self.assertEqual(candidate["difficultyStatus"], "unavailable")
         self.assertNotIn("difficulty 50/100", candidate["reason"])
 
     def test_topic_candidate_keeps_verified_true_50_difficulty(self):
@@ -114,4 +120,5 @@ class TopicDifficultyMetricsTests(TestCase):
         self.assertEqual(candidate["difficultySource"], "dataforseo_labs")
         self.assertIn("difficulty 50/100", candidate["reason"])
         self.assertEqual(candidate["relatedKeywords"], ["verified difficulty examples"])
-        self.assertEqual(candidate["monthlySearches"], [80, 90, 100])
+        self.assertEqual(candidate["monthlySearches"], [])
+        self.assertEqual(candidate["trendStatus"], "unknown")
