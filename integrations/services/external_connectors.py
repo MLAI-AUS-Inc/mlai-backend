@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import hashlib
 import re
 import secrets
 import urllib.parse
@@ -12,6 +13,7 @@ from typing import Any, Iterable, Optional
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.core import signing
+from django.core.cache import cache
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
 from django.utils.dateparse import parse_date, parse_datetime
@@ -275,6 +277,10 @@ def _known_frontend_origins() -> set[str]:
 
 
 def normalize_connector_next(next_url: Optional[str]) -> str:
+    from integrations.services.chat_oauth_return import native_chat_connection_return_url
+    native_return = native_chat_connection_return_url(next_url)
+    if native_return:
+        return native_return
     frontend_base = _frontend_base_url()
     default_next = f"{frontend_base}{DEFAULT_CONNECTOR_NEXT_PATH}"
     raw_next = str(next_url or "").strip()
@@ -769,6 +775,7 @@ def _save_state(request, provider: str, next_url: str, extra: Optional[dict[str,
         "user_id": request.user.id,
         "nonce": secrets.token_urlsafe(24),
         "next": next_url,
+        **getattr(request, "chat_oauth_context", {}),
         **(extra or {}),
     }
     state = signing.dumps(
@@ -790,14 +797,14 @@ def _save_state(request, provider: str, next_url: str, extra: Optional[dict[str,
 def _consume_state(request, provider: str, state: str) -> dict[str, Any]:
     store = _state_store(request)
     payload = store.get(provider)
-    if payload and state and secrets.compare_digest(str(payload.get("state") or ""), state):
+    session_matches = bool(payload and state and secrets.compare_digest(str(payload.get("state") or ""), state))
+    if session_matches:
         store.pop(provider, None)
         if store:
             request.session[CONNECTOR_OAUTH_STATE_SESSION_KEY] = store
         else:
             request.session.pop(CONNECTOR_OAUTH_STATE_SESSION_KEY, None)
         request.session.modified = True
-        return payload
 
     if not state:
         raise ConnectorOAuthError("Invalid connector OAuth state.")
@@ -811,6 +818,9 @@ def _consume_state(request, provider: str, state: str) -> dict[str, Any]:
     except signing.SignatureExpired as exc:
         raise ConnectorOAuthError("Expired connector OAuth state. Please try connecting again.") from exc
     except signing.BadSignature as exc:
+        # In-flight legacy session-bound states remain valid during rollout.
+        if session_matches and ":" not in state:
+            return payload
         raise ConnectorOAuthError("Invalid connector OAuth state.") from exc
 
     if not isinstance(signed_payload, dict):
@@ -819,7 +829,12 @@ def _consume_state(request, provider: str, state: str) -> dict[str, Any]:
         raise ConnectorOAuthError("Invalid connector OAuth state.")
     if str(signed_payload.get("user_id") or "") != str(request.user.id):
         raise ConnectorOAuthError("Invalid connector OAuth state.")
-
+    from community_chat.startups.oauth_context import valid_chat_oauth_context
+    if not valid_chat_oauth_context(signed_payload, request.user.id):
+        raise ConnectorOAuthError("This connection session expired. Start again in MLAI Chat.")
+    key = "connector-oauth-used:" + hashlib.sha256(state.encode()).hexdigest()
+    if not cache.add(key, True, timeout=CONNECTOR_OAUTH_STATE_MAX_AGE_SECONDS + 1):
+        raise ConnectorOAuthError("This connection link was already used. Start again in MLAI Chat.")
     return signed_payload
 
 

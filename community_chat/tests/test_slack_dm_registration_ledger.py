@@ -14,6 +14,7 @@ from django.utils import timezone
 from rest_framework.test import APIClient, APITestCase
 
 from community_chat.models import CommunityChatDevice, DeviceBindingStatus
+from community_chat.tests.slack_fixture_time import recent_slack_ts
 from integrations.models import (
     CommunityBridgeDeliveryStatus,
     CommunityBridgeDeliveryType,
@@ -766,7 +767,7 @@ class SlackDmRegistrationLedgerTests(APITestCase):
                         "authorizations": [{"user_id": "UOWNER"}],
                         "event": {
                             "channel": "DLEDGER",
-                            "ts": "1787900003.000100",
+                            "ts": recent_slack_ts("1787900003.000100"),
                             "user": "UNEW",
                             "text": "must not enter the old private channel",
                         },
@@ -836,7 +837,7 @@ class SlackDmRegistrationLedgerTests(APITestCase):
                         "authorizations": [{"user_id": "UOWNER"}],
                         "event": {
                             "channel": "DLEDGER",
-                            "ts": "1787900003.000100",
+                            "ts": recent_slack_ts("1787900003.000100"),
                             "user": "UNEW",
                             "text": "must not enter the old private channel",
                         },
@@ -1384,7 +1385,7 @@ class SlackDmRegistrationLedgerTests(APITestCase):
                     "team_id": "TLEDGER",
                     "event": {
                         "channel": "DLEDGER",
-                        "ts": "1787900000.000100",
+                        "ts": recent_slack_ts("1787900000.000100"),
                         "user": "UOTHER",
                         "text": "must not persist after revoke wins",
                     },
@@ -1456,7 +1457,7 @@ class SlackDmRegistrationLedgerTests(APITestCase):
             return {
                 "messages": [
                     {
-                        "ts": "1787900000.000100",
+                        "ts": recent_slack_ts("1787900000.000100"),
                         "user": "UOTHER",
                         "text": "must not persist after revoke wins",
                     }
@@ -1470,7 +1471,7 @@ class SlackDmRegistrationLedgerTests(APITestCase):
 
         self.assertEqual(slack_dm_mirror.process_due_history_backfills(), 0)
         self.assertFalse(
-            self._message_rows().filter(source_message_id="1787900000.000100").exists()
+            self._message_rows().filter(source_message_id=recent_slack_ts("1787900000.000100")).exists()
         )
         self.assertTrue(
             all(row.encrypted_text == "" for row in SlackDmMirrorDelivery.objects.all())
@@ -1491,7 +1492,7 @@ class SlackDmRegistrationLedgerTests(APITestCase):
         delivery = SlackDmMirrorDelivery.objects.create(
             conversation=self.conversation,
             source_platform=CommunityBridgePlatform.SLACK,
-            source_message_id="1787900001.000100",
+            source_message_id=recent_slack_ts("1787900001.000100"),
             source_author_id="UOTHER",
             operation=CommunityBridgeDeliveryType.CREATE,
             encrypted_text="must stay erased after revoke",
@@ -1992,7 +1993,7 @@ class SlackDmDeliveryLeaseTransactionTests(TransactionTestCase):
             send_started.set()
             if not allow_send_to_finish.wait(timeout=5):
                 raise RuntimeError("test timed out waiting to release Slack send")
-            return {"ts": "1787900002.000100"}
+            return {"ts": recent_slack_ts("1787900002.000100")}
 
         slack_client.chat_postMessage.side_effect = blocked_post
         web_client.return_value = slack_client
@@ -2061,7 +2062,7 @@ class SlackDmDeliveryLeaseTransactionTests(TransactionTestCase):
             send_started.set()
             if not allow_send_to_finish.wait(timeout=5):
                 raise RuntimeError("test timed out waiting to release Slack send")
-            return {"ts": "1787900004.000100"}
+            return {"ts": recent_slack_ts("1787900004.000100")}
 
         slack_client.chat_postMessage.side_effect = blocked_post
         web_client.return_value = slack_client

@@ -177,6 +177,8 @@ class SourcesView(ChatStartupAccess, ConnectorSourcesStatusView):
         if response.status_code == 200:
             preferences = source_preferences(self.company)
             sources = [source_capabilities(source, preferences=preferences) for source in response.data.get("sources", [])]
+            from .website_connections import website_connection_sources
+            sources.extend(website_connection_sources(request.user, self.company))
             response.data = {**response.data, "sources": sources, "connections": sources}
         return response
 
