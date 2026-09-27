@@ -760,7 +760,7 @@ def build_startup_update_target_windows(
     narrative_start = datetime.combine(month, time.min, tzinfo=zone)
     narrative_month_end = datetime.combine(month_end, time.max, tzinfo=zone)
     narrative_end = min(now, narrative_month_end)
-    financial_start = _previous_month_start(month)
+    financial_start = month
     return {
         "target_month": month,
         "narrative_start": narrative_start,
@@ -816,6 +816,10 @@ def set_startup_update_run_target_month(
     run_request["draft_months"] = [month.isoformat()]
     run_request["backfill_window_start"] = windows["narrative_start"].isoformat()
     run_request["backfill_window_end"] = windows["narrative_end"].isoformat()
+    from startup_updates.activity_scope import monthly_source_period
+    run_request["narrative_period"] = monthly_source_period(month,
+        timezone_name=run_request.get("reporting_timezone", "UTC"), as_of=reference or timezone.now())
+    run_request["source_period_contract"] = "calendar_month_v1"
     run.run_request = run_request
     run.save(update_fields=["run_request", "updated_at"])
     return run
@@ -2424,26 +2428,18 @@ def build_luma_run_context(
     warnings: Optional[list[str]] = None,
     activity_period=None,
 ) -> dict:
-    """Use a rolling Chat activity window, or the legacy monthly context window."""
-
+    """Include event evidence only from the update's represented calendar month."""
     month = _month_start(target_month)
     month_end = _month_end(month)
-    context_start = month - timedelta(days=LUMA_EVENT_CONTEXT_DAYS)
-    context_end = month_end + timedelta(days=LUMA_EVENT_CONTEXT_DAYS)
     local_tz = ZoneInfo(LUMA_EVENT_TIMEZONE)
-    context_start_at = datetime.combine(context_start, time.min, tzinfo=local_tz).astimezone(
-        dt_timezone.utc
-    )
-    context_end_at = datetime.combine(context_end, time.max, tzinfo=local_tz).astimezone(
-        dt_timezone.utc
-    )
-
-    from startup_updates.activity_scope import activity_window
-    recent_window = activity_window(activity_period)
-    if recent_window:
-        context_start_at, context_end_at = recent_window
-        context_end_at -= timedelta(microseconds=1)
-        context_start, context_end = context_start_at.date(), context_end_at.date()
+    from startup_updates.activity_scope import activity_window, monthly_source_period
+    month_period = monthly_source_period(month, timezone_name=LUMA_EVENT_TIMEZONE)
+    month_start_at, month_end_at = activity_window(month_period)
+    selected_window = activity_window(activity_period) or (month_start_at, month_end_at)
+    context_start_at = max(month_start_at, selected_window[0])
+    context_end_at = min(month_end_at, selected_window[1])
+    context_start = context_start_at.astimezone(local_tz).date()
+    context_end = (context_end_at - timedelta(microseconds=1)).astimezone(local_tz).date()
 
     connection = (
         ExternalServiceConnection.objects.filter(
@@ -2459,7 +2455,7 @@ def build_luma_run_context(
         event_rows = LumaEventSelection.objects.filter(
             connection=connection,
             start_at__gte=context_start_at,
-            start_at__lte=context_end_at,
+            start_at__lt=context_end_at,
         ).order_by("start_at", "event_name", "event_id")
     events = []
     for row in event_rows:
@@ -2477,7 +2473,7 @@ def build_luma_run_context(
                 "url": row.event_url,
                 "start_at": row.start_at.isoformat() if row.start_at else None,
                 "local_date": local_date.isoformat() if local_date else None,
-                "context_role": "recent_activity" if recent_window else context_role,
+                "context_role": context_role,
                 "counted_in_selected_month_metrics": in_target_month,
                 "registration_count": int(row.registration_count or 0),
                 "checked_in_count": int(row.checked_in_count or 0),
@@ -2504,17 +2500,14 @@ def build_luma_run_context(
     return {
         "source": "luma",
         "purpose": "automatic_target_month_event_context",
-        "event_selection_mode": "recent_activity" if recent_window else "target_month",
-        "activity_window_days": 30 if recent_window else None,
+        "event_selection_mode": "target_month",
+        "activity_window_days": (context_end - context_start).days + 1,
         "target_month": month.isoformat(),
-        "context_days_each_side": 0 if recent_window else LUMA_EVENT_CONTEXT_DAYS,
+        "context_days_each_side": 0,
         "context_start": context_start.isoformat(),
         "context_end": context_end.isoformat(),
         "counting_rule": (
-            "Event activity is limited to the recent window; stored metric observations retain their reporting-month scope."
-            if recent_window else
-            "Only selected_month events contribute to the target month's metrics; "
-            "before_month and after_month events are narrative context only."
+            "Only events within the selected calendar month contribute to this update."
         ),
         "events": events,
         "metrics": metrics,
@@ -2588,6 +2581,12 @@ def build_external_context_for_sources(
             "needs_reconnect": True,
             "warnings": list(warnings_by_source["gmail"]),
         }
+    if activity_period:
+        for provider, details in context.items():
+            if provider != MANUAL_DOCUMENTS_SOURCE and isinstance(details, dict):
+                details["source_period"] = dict(activity_period)
+                details["scope"] = "selected_month"
+                details.pop("activity_window_days", None)
     return context
 
 
@@ -2822,7 +2821,7 @@ def refresh_startup_update_run_source_context(
         manual_document_ids=run_request.get("manual_document_ids"),
         manual_summary=run_request.get("manual_summary"),
         slack_connection=None,
-        activity_period=run_request.get("narrative_period") if run_request.get("activity_window_days") else None,
+        activity_period=run_request.get("narrative_period"),
         resource_scope=run_request.get("automatic_source_scope"),
     )
     if ExternalServiceProvider.XERO in set(selected_input_sources or []):
@@ -3503,11 +3502,13 @@ def create_startup_update_run(
     now = timezone.now()
     profile = getattr(organization, "startup_profile", None)
     reporting_timezone = profile.reporting_timezone if profile else "UTC"
-    financial_reference = now
-    if update_draft and update_draft.update_date and update_draft.update_date.replace(day=1) == update_draft.month:
-        from zoneinfo import ZoneInfo
-        financial_reference = min(now, datetime.combine(update_draft.update_date, time.max, ZoneInfo(reporting_timezone)))
-    windows = build_startup_update_target_windows(target_month, reference=financial_reference, timezone_name=reporting_timezone)
+    windows = build_startup_update_target_windows(target_month, reference=now, timezone_name=reporting_timezone)
+    from startup_updates.activity_scope import monthly_source_period
+    # Repeated generation includes the whole represented month, including earlier
+    # source activity. A later edit never widens into the regeneration month.
+    narrative_period = narrative_period or monthly_source_period(
+        windows["target_month"], timezone_name=reporting_timezone, as_of=now,
+    )
     selected_target_month = windows["target_month"]
     selected_input_sources = normalize_startup_update_input_sources(input_sources)
     from integrations.services.external_connectors import google_connection_for_org
@@ -3533,6 +3534,11 @@ def create_startup_update_run(
     if existing and str((existing.run_request or {}).get("update_id") or "") != str(update_draft.pk if update_draft else ""):
         from startup_updates.revisions import RevisionConflict
         raise RevisionConflict("Another update is being drafted. Finish or cancel that run first.")
+    if existing:
+        from startup_updates.activity_scope import run_uses_month_scope
+        if not run_uses_month_scope(existing.run_request or {}):
+            from startup_updates.revisions import RevisionConflict
+            raise RevisionConflict("This run used an older source range. Cancel it and draft this month again.")
     if existing and update_draft:
         return existing
     if existing:
@@ -3594,14 +3600,15 @@ def create_startup_update_run(
         "target_month": current_month.isoformat(),
         "draft_months": [item.isoformat() for item in months],
         "current_month": current_month.isoformat(),
-        "backfill_window_start": backfill_start.isoformat(),
-        "backfill_window_end": backfill_end.isoformat(),
+        "backfill_window_start": narrative_period["start"],
+        "backfill_window_end": (parse_datetime(narrative_period["end"]) - timedelta(microseconds=1)).isoformat(),
+        "narrative_period": narrative_period,
+        "source_period_contract": "calendar_month_v1",
         "startup_context": startup_context,
     }
     if automatic_source_scope:
         from startup_updates.activity_scope import discover_activity_resources
         run_request["automatic_source_scope"] = discover_activity_resources(binding.user, organization, selected_input_sources)
-        run_request["activity_window_days"] = 30
     if update_draft:
         run_request["update_id"] = update_draft.pk
         run_request["creation_key"] = str(update_draft.creation_key) if update_draft.creation_key else None
@@ -3610,7 +3617,6 @@ def create_startup_update_run(
         run_request["narrative_period"] = narrative_period
         run_request["backfill_window_start"] = narrative_period["start"]
         # Connector windows historically include the final instant.
-        from django.utils.dateparse import parse_datetime
         run_request["backfill_window_end"] = (parse_datetime(narrative_period["end"]) - timedelta(microseconds=1)).isoformat()
         run_request["financial_cutoff"] = windows["narrative_end"].isoformat()
     run_request["input_sources"] = list(selected_input_sources)
@@ -3677,7 +3683,7 @@ def create_startup_update_run(
         manual_document_ids=run_request.get("manual_document_ids"),
         manual_summary=run_request.get("manual_summary"),
         slack_connection=None,
-        activity_period=run_request.get("narrative_period") if run_request.get("activity_window_days") else None,
+        activity_period=run_request.get("narrative_period"),
         resource_scope=run_request.get("automatic_source_scope"),
     )
     if external_context:
@@ -5432,7 +5438,9 @@ def compact_linear_project_bundle(project: LinearProjectArtifact, *, activity_pe
         )
         used_chars += len(body)
 
-    source_record_ids = [_linear_project_public_id(project)]
+    project_updated = parse_datetime(str((project.raw_payload or {}).get("updatedAt") or ""))
+    project_in_period = not window or bool(project_updated and timezone.is_aware(project_updated) and window[0] <= project_updated < window[1])
+    source_record_ids = [_linear_project_public_id(project)] if project_in_period else []
     source_record_ids.extend(item["update_id"] for item in updates)
     source_record_ids.extend(item["issue_id"] for item in issues)
     compression_notes = []
@@ -5450,23 +5458,23 @@ def compact_linear_project_bundle(project: LinearProjectArtifact, *, activity_pe
         ),
         "project_id": project.linear_project_id,
         "project_name": project.name,
-        "description": project.description[:1500],
-        "status_name": project.status_name,
-        "status_type": project.status_type,
-        "health": project.health,
-        "progress": project.progress,
-        "scope": project.scope,
-        "priority": project.priority,
-        "lead_name": project.lead_name,
-        "team_names": project.team_names or [],
-        "start_date": project.start_date.isoformat() if project.start_date else None,
-        "target_date": project.target_date.isoformat() if project.target_date else None,
+        "description": (project.description[:1500]) if project_in_period else None,
+        "status_name": (project.status_name) if project_in_period else None,
+        "status_type": (project.status_type) if project_in_period else None,
+        "health": (project.health) if project_in_period else None,
+        "progress": (project.progress) if project_in_period else None,
+        "scope": (project.scope) if project_in_period else None,
+        "priority": (project.priority) if project_in_period else None,
+        "lead_name": (project.lead_name) if project_in_period else None,
+        "team_names": (project.team_names or []) if project_in_period else None,
+        "start_date": (project.start_date.isoformat() if project.start_date else None) if project_in_period else None,
+        "target_date": (project.target_date.isoformat() if project.target_date else None) if project_in_period else None,
         "url": project.url,
         "source_record_ids": source_record_ids,
         "issues": issues,
         "updates": updates,
-        "issue_count": project.issues.count(),
-        "update_count": project.project_updates.count(),
+        "issue_count": issue_queryset.count(),
+        "update_count": update_queryset.count(),
         "heuristic_score": project.heuristic_score,
         "heuristic_reasons": project.heuristic_reasons or [],
         "relevance_score": project.relevance_score,
@@ -5483,10 +5491,10 @@ def build_timeline_payload(*, organization: Organization, requested_months=None,
     event_queryset = organization.startup_events.order_by("month_bucket", "-investor_importance", "title")
     metric_queryset = organization.startup_metric_observations.order_by("period_month", "metric_key")
 
-    narrative = (run.run_request or {}).get("narrative_period") if run else None
+    from startup_updates.activity_scope import run_activity_period
+    narrative = run_activity_period(run.run_request or {}) if run else None
     if requested_months:
-        if not narrative:
-            event_queryset = event_queryset.filter(month_bucket__in=requested_months)
+        event_queryset = event_queryset.filter(month_bucket__in=requested_months)
         metric_queryset = metric_queryset.filter(period_month__in=requested_months)
         months = [date.fromisoformat(str(item)) for item in requested_months]
     if narrative:
@@ -5884,6 +5892,7 @@ def merge_monthly_update_structured_memo(existing_memo: dict, incoming_memo: dic
     return merged, stats
 
 
+@transaction.atomic
 def upsert_monthly_update_draft(
     *,
     organization: Organization,
@@ -5904,10 +5913,11 @@ def upsert_monthly_update_draft(
         from startup_updates.revisions import RevisionConflict
         raise RevisionConflict("Independent updates must be saved through the revision-aware draft results endpoint.")
     month_start = _month_start(month)
-    existing_draft = MonthlyUpdateDraft.objects.monthly_slots().filter(
-        organization=organization,
-        month=month_start,
-    ).first()
+    from startup_updates.update_identity import resolve_update
+    from startup_updates.revisions import RevisionConflict
+    existing_draft, _ = resolve_update(organization, month=month_start)
+    if existing_draft.current_revision_id or existing_draft.published_at:
+        raise RevisionConflict("Saved monthly updates must use the revision-aware draft results endpoint.")
     # On an explicit "Run again" regenerate we replace the previous run's draft
     # outright instead of merging, so stale dot points and metrics don't linger.
     # Writes that belong to the *same* run (e.g. investor + community drafts
@@ -5943,9 +5953,8 @@ def upsert_monthly_update_draft(
 
     rendered_markdown = render_monthly_update_markdown(structured_memo)
     title = str((structured_memo or {}).get("title") or "").strip()
-    draft, _ = MonthlyUpdateDraft.objects.monthly_slots().update_or_create(
-        organization=organization,
-        month=month_start,
+    draft, _ = MonthlyUpdateDraft.objects.update_or_create(
+        pk=existing_draft.pk,
         defaults={
             "run": run,
             "status": status,

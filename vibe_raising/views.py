@@ -1772,7 +1772,8 @@ def _serialize_run_progress(run):
 def _get_recent_drafts_for_organization(organization):
     if organization is None:
         return []
-    return list(organization.monthly_update_drafts.order_by("-month", "-updated_at")[:3])
+    from startup_updates.monthly_groups import monthly_representatives
+    return list(monthly_representatives(organization.monthly_update_drafts.all()).order_by("-month", "-updated_at")[:3])
 
 
 def _get_drafts_for_run(run):
@@ -2532,6 +2533,8 @@ class VibeRaisingMonthlyUpdateView(APIView):
                 )
 
         from startup_updates.revisions import frozen_memo
+        from startup_updates.monthly_groups import monthly_representatives
+        draft_queryset = monthly_representatives(draft_queryset, published=True)
         draft_memo_pairs = [
             (draft, frozen_memo(draft, published=bool(draft.published_revision_id)))
             for draft in draft_queryset.order_by("-month", "-updated_at")
@@ -2599,6 +2602,9 @@ class VibeRaisingMonthlyUpdateView(APIView):
         is_creation_request = bool(serializer.validated_data.get("creationKey") and not serializer.validated_data.get("updateId") and not serializer.validated_data.get("expectedRevision"))
         if is_creation_request and draft.current_revision_id and draft.current_revision.structured_memo.get("_creation_request_hash") == creation_request_hash:
             return Response({"update": _serialize_monthly_update(draft)}, status=status.HTTP_200_OK)
+        if str(serializer.validated_data.get("expectedRevision") or "") != str(draft.current_revision_id or ""):
+            from startup_updates.revisions import RevisionConflict
+            raise RevisionConflict("This month already has a saved update. Reopen the month to edit its latest version.")
         # Dates organise publications; existing financial evidence keeps its month.
         month_bucket = draft.month
         if "updateDate" in serializer.validated_data:
@@ -2611,6 +2617,9 @@ class VibeRaisingMonthlyUpdateView(APIView):
             if candidate_date and candidate_date > timezone.now().astimezone(zone).date():
                 from rest_framework.exceptions import ValidationError
                 raise ValidationError({"updateDate": "Choose today or an earlier date."})
+            if candidate_date and candidate_date.replace(day=1) != draft.month:
+                from rest_framework.exceptions import ValidationError
+                raise ValidationError({"updateDate": "Keep the date within this update's reporting month."})
             draft.update_date = candidate_date
             draft.save(update_fields=["update_date"])
 
@@ -2703,7 +2712,7 @@ class VibeRaisingMonthlyUpdateView(APIView):
             audience="community" if "community" in audience_visibility else "private",
             validation=validation)
         draft.refresh_from_db()
-        draft.title = f"{company.name} {serializer.validated_data['month']} {serializer.validated_data['year']} Update"
+        draft.title = f"{company.name} {calendar.month_name[draft.month.month]} {draft.month.year} Update"
         draft.status = MonthlyUpdateDraftStatus.DRAFT
         draft.run = None
         # Disclosure is part of the reviewed revision, not a mutable publication flag.
@@ -2740,9 +2749,11 @@ class VibeRaisingDraftView(APIView):
         if organization is None:
             return Response({"drafts": []}, status=status.HTTP_200_OK)
 
+        from startup_updates.monthly_groups import monthly_representatives
+        monthly_drafts = monthly_representatives(organization.monthly_update_drafts.all())
         drafts = [
             _serialize_monthly_update(draft)
-            for draft in organization.monthly_update_drafts.filter(
+            for draft in monthly_drafts.filter(
                 Q(published_at__isnull=True) | Q(status__in=["draft", "needs_review"])
             ).order_by("-month", "-updated_at")
         ]
@@ -2752,6 +2763,7 @@ class VibeRaisingDraftView(APIView):
 class VibeRaisingMonthlyUpdatePublishView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
+    @transaction.atomic
     def post(self, request, update_id):
         context, error_response = _get_founder_company_context_or_response(request)
         if error_response:
@@ -2773,6 +2785,8 @@ class VibeRaisingMonthlyUpdatePublishView(APIView):
             pk=update_id,
             organization=organization,
         )
+        from startup_updates.update_identity import resolve_update
+        draft, _ = resolve_update(organization, month=draft.month, update_id=draft.pk)
         from startup_updates.revisions import approve_and_publish
         was_unpublished = draft.published_revision_id is None
         revision_id = request.data.get("revisionId")
@@ -2885,7 +2899,7 @@ class VibeRaisingStartupUpdateRunView(APIView):
             google_connection,
         )
         source_warnings = merge_source_warnings(
-            _sync_selected_connector_sources_for_draft(request.user, input_sources, organization=organization, automatic_scope=bool(getattr(self, "activity_window_days", None))),
+            _sync_selected_connector_sources_for_draft(request.user, input_sources, organization=organization, automatic_scope=bool(getattr(self, "automatic_source_scope", False))),
             gmail_scope_warnings,
         )
         if gmail_required_for_sources(input_sources) and (
@@ -3042,7 +3056,7 @@ class VibeRaisingEmailDraftStartView(APIView):
             google_connection,
         )
         source_warnings = merge_source_warnings(
-            _sync_selected_connector_sources_for_draft(request.user, input_sources, organization=organization, automatic_scope=bool(getattr(self, "activity_window_days", None))),
+            _sync_selected_connector_sources_for_draft(request.user, input_sources, organization=organization, automatic_scope=bool(getattr(self, "automatic_source_scope", False))),
             gmail_scope_warnings,
         )
         if gmail_required_for_sources(input_sources) and (
@@ -3063,194 +3077,48 @@ class VibeRaisingEmailDraftStartView(APIView):
             binding.google_connection = google_connection
             binding.save(update_fields=["google_connection", "updated_at"])
 
-        if request.data.get("updateId") or request.data.get("creationKey"):
-            from startup_updates.update_identity import (
-                default_generation_date, identity_payload, narrative_window,
-                parse_generation_date, resolve_update,
-            )
-            from startup_updates.revisions import RevisionConflict
-            from rest_framework.exceptions import ValidationError
-            try:
-                requested_id = int(request.data["updateId"]) if request.data.get("updateId") else None
-            except (ValueError, TypeError):
-                raise ValidationError({"updateId": "Choose a valid update."})
-            requested_date = parse_generation_date(request.data, update_id=requested_id)
-            with transaction.atomic():
-                draft, _ = resolve_update(organization, month=target_month, update_id=requested_id,
-                    creation_key=request.data.get("creationKey"), update_date=requested_date)
-                if str(request.data.get("expectedRevision") or "") != str(draft.current_revision_id or ""):
-                    raise RevisionConflict()
-                if requested_date is None:
-                    from zoneinfo import ZoneInfo
-                    reporting_zone = ZoneInfo(_startup_profile.reporting_timezone or "UTC")
-                    requested_date = default_generation_date(
-                        draft, today=timezone.now().astimezone(reporting_zone).date(),
-                    )
-                target_month = draft.month
-                period = narrative_window(organization, draft, requested_date,
-                    requested_start=request.data.get("narrativeStart"), requested_end=request.data.get("narrativeEnd"),
-                    default_days=getattr(self, "activity_window_days", None))
-                existing_run = get_open_startup_update_run(organization=organization)
-                if existing_run and str((existing_run.run_request or {}).get("update_id")) != str(draft.pk):
-                    raise RevisionConflict("Another update is being drafted. Finish or cancel that run first.")
-                force = str(request.data.get("forceRegenerate") or request.data.get("force_regenerate") or "").strip().lower() in {"1", "true", "yes"}
-                if existing_run and force:
-                    cancel_startup_update_run(run_id=existing_run.run_id, organization=organization,
-                        binding_id=binding.id, google_connection_id=google_connection.id if google_connection else None,
-                        cancelled_by_user_id=request.user.id)
-                    existing_run = None
-                    draft.refresh_from_db()
-                if not existing_run:
-                    draft.update_date = requested_date
-                    draft.save(update_fields=["update_date"])
-                run = existing_run or create_startup_update_run(organization=organization, binding=binding,
-                    input_sources=input_sources, source_warnings=source_warnings, target_month=target_month,
-                    manual_document_ids=manual_document_ids, manual_summary=manual_summary,
-                    force_regenerate=force, update_draft=draft, narrative_period=period,
-                    automatic_source_scope=bool(getattr(self, "activity_window_days", None)))
-            if not existing_run or _should_dispatch_existing_run(run):
-                dispatch_result = _dispatch_run_to_valley(run)
-                if not dispatch_result:
-                    return Response(_valley_dispatch_failure_payload(run, dispatch_result), status=503)
-            payload = _build_email_draft_payload(request=request, user=request.user, company=company,
-                domain=domain, run_id=run.run_id, target_month=target_month)
-            payload.update(identity_payload(draft))
-            payload["narrativePeriod"] = (run.run_request or {}).get("narrative_period")
-            return Response(payload, status=200 if existing_run else 201)
-
-        raw_force_regenerate = request.data.get("force_regenerate") or request.data.get("forceRegenerate")
-        force_regenerate = str(raw_force_regenerate or "").strip().lower() in {
-            "1",
-            "true",
-            "yes",
-            "on",
-        }
-        existing_run = get_open_startup_update_run(
-            organization=organization,
-            google_connection_id=google_connection.id if google_connection else None,
-            target_month=target_month,
-            input_sources=input_sources,
+        from startup_updates.update_identity import (
+            default_generation_date, identity_payload, narrative_window,
+            parse_generation_date, resolve_update,
         )
-        conflicting_run = get_open_startup_update_run(
-            organization=organization,
-            google_connection_id=google_connection.id if google_connection else None,
-            input_sources=input_sources,
-        )
-        if (
-            existing_run is None
-            and conflicting_run is not None
-            and not startup_update_run_matches_target_month(conflicting_run, target_month)
-        ):
-            payload = _build_email_draft_payload(
-                request=request,
-                user=request.user,
-                company=company,
-                domain=domain,
-                run_id=conflicting_run.run_id,
-                target_month=target_month,
-            )
-            payload["reusedExistingRun"] = True
-            payload.update(_target_month_conflict_payload(
-                requested_target_month=target_month,
-                active_run=conflicting_run,
-            ))
-            return Response(payload, status=status.HTTP_200_OK)
-
-        if force_regenerate and existing_run is not None:
-            # "Run again": supersede the in-flight run so a brand-new run
-            # re-pulls the latest source data instead of resuming stale work.
-            try:
-                cancel_result = cancel_startup_update_run(
-                    run_id=existing_run.run_id,
-                    organization=organization,
-                    binding_id=binding.id,
-                    google_connection_id=google_connection.id if google_connection else None,
-                    cancelled_by_user_id=request.user.id,
+        from startup_updates.revisions import RevisionConflict
+        from rest_framework.exceptions import ValidationError
+        try:
+            requested_id = int(request.data["updateId"]) if request.data.get("updateId") else None
+        except (ValueError, TypeError):
+            raise ValidationError({"updateId": "Choose a valid update."})
+        requested_date = parse_generation_date(request.data, update_id=requested_id)
+        with transaction.atomic():
+            draft, _ = resolve_update(organization, month=target_month, update_id=requested_id,
+                creation_key=request.data.get("creationKey"), update_date=requested_date)
+            if str(request.data.get("expectedRevision") or "") != str(draft.current_revision_id or ""):
+                raise RevisionConflict()
+            if requested_date is None:
+                from zoneinfo import ZoneInfo
+                reporting_zone = ZoneInfo(_startup_profile.reporting_timezone or "UTC")
+                requested_date = default_generation_date(
+                    draft, today=timezone.now().astimezone(reporting_zone).date(),
                 )
-            except (ContentFactoryRun.DoesNotExist, PermissionError):
-                cancel_result = None
-            if cancel_result and cancel_result.get("cancel_applied"):
-                try:
-                    cancel_valley_run(existing_run.run_id)
-                except Exception:  # noqa: BLE001 - best-effort revoke of the superseded worker
-                    logger.warning(
-                        "Failed to revoke superseded valley run during forced regenerate",
-                        extra={"run_id": existing_run.run_id, "organization_id": organization.id},
-                    )
-            existing_run = None
-
-        reusable_drafts_cover_input_sources = _monthly_update_drafts_cover_input_sources(
-            organization,
-            input_sources,
-            target_month=target_month,
-        )
-
-        created = False
-        if existing_run is None and reusable_drafts_cover_input_sources and not force_regenerate:
-            _refresh_reusable_xero_metrics_for_drafts(
-                organization=organization,
-                input_sources=input_sources,
-                source_warnings=source_warnings,
-                target_month=target_month,
-            )
-            latest_draft = organization.monthly_update_drafts.monthly_slots().filter(month=target_month).order_by("-updated_at").first()
-            logger.info(
-                "Skipping Valley dispatch for Vibe Raising email draft start because reusable drafts already exist",
-                extra={
-                    "user_id": request.user.id,
-                    "organization_id": organization.id,
-                    "organization_domain": organization.domain,
-                    "google_connection_id": google_connection.id if google_connection else None,
-                    "force_regenerate": force_regenerate,
-                    "draft_count": organization.monthly_update_drafts.count(),
-                    "latest_draft_month": latest_draft.month.isoformat() if latest_draft else None,
-                    "input_sources": input_sources,
-                    "skip_reason": "reusable_drafts_available",
-                },
-            )
-            payload = _build_email_draft_payload(
-                request=request,
-                user=request.user,
-                company=company,
-                domain=domain,
-                target_month=target_month,
-            )
-            payload["reusedExistingRun"] = False
-            return Response(payload, status=status.HTTP_200_OK)
-
-        run = existing_run
-        if run is None:
-            run = create_startup_update_run(
-                organization=organization,
-                binding=binding,
-                window_months=DEFAULT_BACKFILL_MONTHS,
-                input_sources=input_sources,
-                source_warnings=source_warnings,
-                target_month=target_month,
-                manual_document_ids=manual_document_ids,
-                manual_summary=manual_summary,
-                force_regenerate=force_regenerate,
-            )
-            created = True
-            dispatch_result = _dispatch_run_to_valley(run)
-            if not dispatch_result:
-                payload = _build_email_draft_payload(
-                    request=request,
-                    user=request.user,
-                    company=company,
-                    domain=domain,
-                    run_id=run.run_id,
-                    target_month=target_month,
-                )
-                payload["reusedExistingRun"] = False
-                payload.update(_valley_dispatch_failure_payload(run, dispatch_result))
-                return Response(payload, status=status.HTTP_503_SERVICE_UNAVAILABLE)
-        elif _should_dispatch_existing_run(run):
-            set_startup_update_run_target_month(run, target_month)
-            if input_sources:
+            target_month = draft.month
+            period = narrative_window(organization, draft, requested_date,
+                requested_start=request.data.get("narrativeStart"), requested_end=request.data.get("narrativeEnd"))
+            existing_run = get_open_startup_update_run(organization=organization)
+            if existing_run and str((existing_run.run_request or {}).get("update_id")) != str(draft.pk):
+                raise RevisionConflict("Another update is being drafted. Finish or cancel that run first.")
+            force = str(request.data.get("forceRegenerate") or request.data.get("force_regenerate") or "").strip().lower() in {"1", "true", "yes"}
+            if existing_run and force:
+                cancel_startup_update_run(run_id=existing_run.run_id, organization=organization,
+                    binding_id=binding.id, google_connection_id=google_connection.id if google_connection else None,
+                    cancelled_by_user_id=request.user.id)
+                existing_run = None
+                draft.refresh_from_db()
+            if existing_run:
+                from startup_updates.activity_scope import run_uses_month_scope
+                if not run_uses_month_scope(existing_run.run_request or {}):
+                    raise RevisionConflict("This draft was started with an older source period. Cancel it and generate the monthly update again.")
                 windows = build_startup_update_target_windows(target_month)
                 refresh_startup_update_run_source_context(
-                    run=run,
+                    run=existing_run,
                     organization=organization,
                     input_sources=input_sources,
                     start_date=windows["financial_start_date"],
@@ -3259,61 +3127,24 @@ class VibeRaisingEmailDraftStartView(APIView):
                     manual_document_ids=manual_document_ids,
                     manual_summary=manual_summary,
                 )
-            logger.info(
-                "Re-dispatching queued email draft run to Valley",
-                extra={"run_id": run.run_id, "organization_id": organization.id},
-            )
+            if not existing_run:
+                draft.update_date = requested_date
+                draft.save(update_fields=["update_date"])
+            run = existing_run or create_startup_update_run(organization=organization, binding=binding,
+                input_sources=input_sources, source_warnings=source_warnings, target_month=target_month,
+                manual_document_ids=manual_document_ids, manual_summary=manual_summary,
+                force_regenerate=force, update_draft=draft, narrative_period=period,
+                automatic_source_scope=bool(getattr(self, "automatic_source_scope", False)))
+        if not existing_run or _should_dispatch_existing_run(run):
             dispatch_result = _dispatch_run_to_valley(run)
             if not dispatch_result:
-                payload = _build_email_draft_payload(
-                    request=request,
-                    user=request.user,
-                    company=company,
-                    domain=domain,
-                    run_id=run.run_id,
-                    target_month=target_month,
-                )
-                payload["reusedExistingRun"] = True
-                payload.update(_valley_dispatch_failure_payload(run, dispatch_result))
-                return Response(payload, status=status.HTTP_503_SERVICE_UNAVAILABLE)
-        else:
-            set_startup_update_run_target_month(run, target_month)
-            if input_sources:
-                windows = build_startup_update_target_windows(target_month)
-                refresh_startup_update_run_source_context(
-                    run=run,
-                    organization=organization,
-                    input_sources=input_sources,
-                    start_date=windows["financial_start_date"],
-                    end_date=windows["financial_end_date"],
-                    source_warnings=source_warnings,
-                    manual_document_ids=manual_document_ids,
-                    manual_summary=manual_summary,
-                )
-            logger.info(
-                "Skipping Valley dispatch for Vibe Raising email draft start because an open run is already active",
-                extra={
-                    "user_id": request.user.id,
-                    "organization_id": organization.id,
-                    "organization_domain": organization.domain,
-                    "google_connection_id": google_connection.id if google_connection else None,
-                    "run_id": run.run_id,
-                    "run_status": run.status,
-                    "run_updated_at": run.updated_at.isoformat() if run.updated_at else None,
-                    "skip_reason": "active_run_reused",
-                },
-            )
+                return Response(_valley_dispatch_failure_payload(run, dispatch_result), status=503)
+        payload = _build_email_draft_payload(request=request, user=request.user, company=company,
+            domain=domain, run_id=run.run_id, target_month=target_month)
+        payload.update(identity_payload(draft))
+        payload["narrativePeriod"] = (run.run_request or {}).get("narrative_period")
+        return Response(payload, status=200 if existing_run else 201)
 
-        payload = _build_email_draft_payload(
-            request=request,
-            user=request.user,
-            company=company,
-            domain=domain,
-            run_id=run.run_id,
-            target_month=target_month,
-        )
-        payload["reusedExistingRun"] = not created
-        return Response(payload, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
 
 
 class VibeRaisingEmailDraftStatusView(APIView):

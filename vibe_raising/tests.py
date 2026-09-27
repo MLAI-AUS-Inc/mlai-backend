@@ -127,10 +127,15 @@ class VibeRaisingApiTests(TestCase):
             channel_name="wins",
             selected=True,
         )
+        draft = MonthlyUpdateDraft.objects.create(
+            organization=organization,
+            month=timezone.localdate().replace(day=1),
+        )
         run = create_startup_update_run(
             organization=organization,
             binding=binding,
             input_sources=["gmail"],
+            update_draft=draft,
         )
         run.steps.update(
             status=ContentFactoryStepStatus.COMPLETED,

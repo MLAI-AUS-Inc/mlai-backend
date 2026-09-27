@@ -1,4 +1,9 @@
-# Independent dated startup updates
+# Independent dated startup updates (historical contract)
+
+The [monthly group contract](startup-monthly-groups.md) supersedes independent
+creation and rolling source periods. The schema remains in place to preserve
+existing records, revisions and publication links. The details below describe
+the earlier implementation, not the new monthly behavior.
 
 Founders create individual publications. Calendar months organise the archive and retain their existing role as financial reporting periods. A publication date is not a new accounting period.
 

@@ -93,8 +93,7 @@ class MonthlyEvidencePipelineTests(StartupUpdateApiTestCase):
         super().setUp()
         StartupProfile.objects.create(organization=self.organization, default_currency="AUD")
         binding = UserStartupBinding.objects.create(user=self.user, organization=self.organization, google_connection=self.google_connection)
-        self.run = create_startup_update_run(organization=self.organization, binding=binding)
-        self.run.run_request["draft_months"] = ["2026-03-01"]
+        self.run = create_startup_update_run(organization=self.organization, binding=binding, target_month=date(2026, 3, 1))
         self.run.run_request["input_sources"] = ["gmail", "xero"]
         self.run.save(update_fields=["run_request"])
         from integrations.tests_connectors import _xero_profit_and_loss_report

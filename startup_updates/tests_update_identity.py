@@ -4,6 +4,7 @@ from uuid import uuid4
 from unittest.mock import patch
 
 from django.test import SimpleTestCase, TestCase
+from django.urls import reverse
 from rest_framework.exceptions import NotFound, ValidationError
 
 from organizations.models import Organization
@@ -16,10 +17,10 @@ from startup_updates.update_identity import (
 
 
 class GenerationDateCompatibilityTests(SimpleTestCase):
-    def test_saved_date_is_used_when_request_omits_it(self):
+    def test_historical_month_uses_full_month_when_request_omits_date(self):
         self.assertIsNone(parse_generation_date({"updateId": 7}, update_id=7))
         draft = SimpleNamespace(month=date(2026, 3, 1), update_date=date(2026, 3, 14))
-        self.assertEqual(default_generation_date(draft, today=date(2026, 9, 24)), date(2026, 3, 14))
+        self.assertEqual(default_generation_date(draft, today=date(2026, 9, 24)), date(2026, 3, 31))
 
     def test_month_only_draft_uses_period_end_or_today(self):
         draft = SimpleNamespace(month=date(2026, 3, 1), update_date=None)
@@ -29,10 +30,11 @@ class GenerationDateCompatibilityTests(SimpleTestCase):
         draft.month = date(2025, 12, 1)
         self.assertEqual(default_generation_date(draft, today=date(2026, 9, 24)), date(2025, 12, 31))
 
-    def test_explicit_invalid_date_and_new_update_without_date_are_rejected(self):
-        for data, update_id in (({"updateDate": ""}, 7), ({"updateDate": "not-a-date"}, 7), ({}, None)):
+    def test_invalid_explicit_date_is_rejected_but_monthly_requests_can_omit_date(self):
+        for data, update_id in (({"updateDate": ""}, 7), ({"updateDate": "not-a-date"}, 7)):
             with self.subTest(data=data, update_id=update_id), self.assertRaises(ValidationError):
                 parse_generation_date(data, update_id=update_id)
+        self.assertIsNone(parse_generation_date({}, update_id=None))
         self.assertEqual(
             parse_generation_date({"updateDate": "2026-03-15"}, update_id=7), date(2026, 3, 15),
         )
@@ -43,7 +45,7 @@ class GenerationDateCompatibilityTests(SimpleTestCase):
             default_generation_date(draft, today=date(2026, 9, 24))
 
 
-class IndependentUpdateIdentityTests(TestCase):
+class MonthlyUpdateIdentityTests(TestCase):
     def setUp(self):
         self.org = Organization.objects.create(name="Example", domain="identity.example.invalid")
         StartupProfile.objects.create(organization=self.org, reporting_timezone="Australia/Melbourne")
@@ -52,10 +54,10 @@ class IndependentUpdateIdentityTests(TestCase):
     def create(self, key=None, day=15):
         return resolve_update(self.org, month=self.month, creation_key=key or uuid4(), update_date=date(2026, 9, day))[0]
 
-    def test_two_same_day_posts_and_a_legacy_slot_are_independent(self):
+    def test_repeated_creation_resumes_existing_month(self):
         old = MonthlyUpdateDraft.objects.create(organization=self.org, month=self.month)
         first, second = self.create(), self.create()
-        self.assertEqual(len({old.pk, first.pk, second.pk}), 3)
+        self.assertEqual(len({old.pk, first.pk, second.pk}), 1)
         self.assertEqual(MonthlyUpdateDraft.objects.monthly_slots().get(organization=self.org, month=self.month), old)
 
     def test_creation_retry_returns_exact_draft(self):
@@ -65,10 +67,9 @@ class IndependentUpdateIdentityTests(TestCase):
         self.assertEqual(first.pk, second.pk)
         self.assertEqual(second.update_date, first.update_date)
 
-    def test_month_only_old_clients_cannot_choose_an_independent_update(self):
-        self.create()
-        with self.assertRaises(RevisionConflict):
-            resolve_update(self.org, month=self.month)
+    def test_month_only_clients_resume_current_month(self):
+        draft = self.create()
+        self.assertEqual(resolve_update(self.org, month=self.month)[0].pk, draft.pk)
 
     def test_identity_is_company_scoped(self):
         draft = self.create()
@@ -83,7 +84,8 @@ class IndependentUpdateIdentityTests(TestCase):
         self.assertEqual(result.month, self.month)
 
     def test_worker_resolves_only_its_target(self):
-        first, second = self.create(), self.create()
+        first = MonthlyUpdateDraft.objects.create(organization=self.org, month=self.month, creation_key=uuid4())
+        second = MonthlyUpdateDraft.objects.create(organization=self.org, month=self.month, creation_key=uuid4())
         run = SimpleNamespace(run_request={"organization_id": self.org.pk, "update_id": second.pk})
         self.assertEqual(run_update(run, self.month, create=True).pk, second.pk)
         with self.assertRaises(RevisionConflict):
@@ -97,6 +99,7 @@ class IndependentUpdateIdentityTests(TestCase):
 
     def test_published_date_comes_from_reviewed_content(self):
         draft = self.create(day=15)
+        draft.update_date = date(2026, 9, 15)
         self.assertEqual(identity_payload(draft, {"update_date": "2026-09-08"})["updateDate"], "2026-09-08")
         self.assertIsNone(identity_payload(draft, {"update_date": None})["updateDate"])
 
@@ -120,7 +123,7 @@ class IndependentUpdateIdentityTests(TestCase):
         self.assertEqual(history["revenue"]["points"][0]["value"], 20)
 
     @patch("startup_updates.update_identity.timezone.now", return_value=datetime(2026, 9, 15, 6, tzinfo=dt_timezone.utc))
-    def test_first_window_and_same_day_predecessor_use_exact_cutoffs(self, now):
+    def test_prior_publication_does_not_truncate_month_window(self, now):
         draft = self.create()
         first = narrative_window(self.org, draft, date(2026, 9, 15))
         self.assertEqual(first["start"], "2026-09-01T00:00:00+10:00")
@@ -130,17 +133,20 @@ class IndependentUpdateIdentityTests(TestCase):
         prior.structured_memo = {"update_date": "2026-09-15", "narrative_period": {"end": "2026-09-15T02:00:00+00:00"}}
         prior.save()
         second = narrative_window(self.org, draft, date(2026, 9, 15))
-        self.assertEqual(second["start"], "2026-09-15T02:00:00+00:00")
+        self.assertEqual(second["start"], "2026-09-01T00:00:00+10:00")
 
     @patch("startup_updates.update_identity.timezone.now", return_value=datetime(2026, 11, 1, tzinfo=dt_timezone.utc))
     def test_dst_end_boundary_uses_reporting_timezone(self, now):
-        window = narrative_window(self.org, self.create(), date(2026, 10, 4))
-        self.assertEqual(window["end"], "2026-10-05T00:00:00+11:00")
+        draft = self.create()
+        draft.month = date(2026, 10, 1)
+        window = narrative_window(self.org, draft, date(2026, 10, 4))
+        self.assertEqual(window["start"], "2026-10-01T00:00:00+10:00")
+        self.assertEqual(window["end"], "2026-11-01T00:00:00+11:00")
         with self.assertRaises(ValidationError):
             narrative_window(self.org, self.create(), date(2026, 10, 4), requested_start="2026-10-05T00:00:00+11:00")
 
 
-class IndependentFounderSaveTests(TestCase):
+class MonthlyFounderSaveTests(TestCase):
     def setUp(self):
         from django.contrib.auth import get_user_model
         from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
@@ -161,16 +167,16 @@ class IndependentFounderSaveTests(TestCase):
         }, format="json")
 
     def test_save_edit_publish_and_archive_visibility(self):
-        a, b = self.save(), self.save()
+        a = self.save()
         self.assertIn(a.status_code, (200, 201), a.data)
-        self.assertIn(b.status_code, (200, 201), b.data)
-        first, second = a.data["update"], b.data["update"]
-        self.assertNotEqual(first["id"], second["id"])
+        first = a.data["update"]
+        b = self.save()
+        self.assertEqual(b.status_code, 409, b.data)
+        self.assertEqual(MonthlyUpdateDraft.objects.count(), 1)
         self.assertEqual(self.client.get(f"/api/v1/vibe-raising/updates/?company_id={self.company.pk}").data["updates"], [])
         edited = self.save(updateId=first["id"], creationKey=first["creationKey"], expectedRevision=first["revisionId"], highlights="Only this entry changed.")
         self.assertIn(edited.status_code, (200, 201), edited.data)
-        untouched = MonthlyUpdateDraft.objects.get(pk=second["id"])
-        self.assertEqual(untouched.current_revision_id, second["revisionId"])
+        self.assertEqual(edited.data["update"]["id"], first["id"])
         saved = edited.data["update"]
         receipt = self.client.post(f"/api/v1/vibe-raising/updates/{saved['id']}/publish/", {
             "companyId": str(self.company.pk), "revisionId": saved["revisionId"], "revisionHash": saved["revisionHash"], "audienceVisibility": ["just_me"],
@@ -210,7 +216,7 @@ class IndependentFounderSaveTests(TestCase):
     @patch("vibe_raising.views._dispatch_run_to_valley", return_value=True)
     def test_ai_start_targets_one_draft_and_freezes_a_backdated_window(self, dispatch):
         first = self.save().data["update"]
-        second = self.save().data["update"]
+        second = first
         response = self.client.post("/api/v1/vibe-raising/email-draft/start/", {
             "companyId": str(self.company.pk), "inputSources": ["manual_documents"], "manualSummary": "We shipped our release.",
             "targetMonth": "2026-03-01", "updateDate": "2026-03-14", "updateId": second["id"],
@@ -220,8 +226,8 @@ class IndependentFounderSaveTests(TestCase):
         from workflow_runs.models import ContentFactoryRun
         run = ContentFactoryRun.objects.get(run_id=response.data["runId"])
         self.assertEqual(run.run_request["update_id"], int(second["id"]))
-        self.assertEqual(run.run_request["narrative_period"]["end"][:10], "2026-03-15")
-        self.assertEqual(run.run_request["financial_cutoff"][:10], "2026-03-14")
+        self.assertEqual(run.run_request["narrative_period"]["end"][:10], "2026-04-01")
+        self.assertEqual(run.run_request["financial_cutoff"][:10], "2026-03-31")
         self.assertEqual(MonthlyUpdateDraft.objects.get(pk=first["id"]).current_revision_id, first["revisionId"])
 
 
@@ -240,10 +246,11 @@ class IndependentPipelineTests(StartupUpdateApiTestCase):
         StartupProfile.objects.create(organization=self.organization, default_currency="AUD", reporting_timezone="Australia/Melbourne")
         self.binding = UserStartupBinding.objects.create(user=self.user, organization=self.organization, google_connection=self.google_connection)
         self.run = create_startup_update_run(organization=self.organization, binding=self.binding, target_month=date(2026, 3, 1), input_sources=["gmail"])
-        self.first, _ = resolve_update(self.organization, month=date(2026, 3, 1), creation_key=uuid4(), update_date=date(2026, 3, 8))
-        self.target, _ = resolve_update(self.organization, month=date(2026, 3, 1), creation_key=uuid4(), update_date=date(2026, 3, 15))
+        # Retain pre-existing independent records as history during rollout.
+        self.first = MonthlyUpdateDraft.objects.create(organization=self.organization, month=date(2026, 3, 1), creation_key=uuid4(), update_date=date(2026, 3, 8))
+        self.target = MonthlyUpdateDraft.objects.create(organization=self.organization, month=date(2026, 3, 1), creation_key=uuid4(), update_date=date(2026, 3, 15))
         self.run.run_request.update({"update_id": self.target.pk, "creation_key": str(self.target.creation_key), "base_revision": None,
-            "narrative_period": {"start": "2026-03-08T00:00:00+11:00", "end": "2026-03-16T00:00:00+11:00", "timezone": "Australia/Melbourne", "end_exclusive": True}})
+            "narrative_period": {"start": "2026-03-01T00:00:00+11:00", "end": "2026-04-01T00:00:00+11:00", "timezone": "Australia/Melbourne", "end_exclusive": True}})
         self.run.save(update_fields=["run_request"])
 
     def generate(self):
@@ -286,16 +293,18 @@ class IndependentPipelineTests(StartupUpdateApiTestCase):
             response = self.client.post(reverse("startup_updates_evidence_snapshot", args=[self.run.run_id]), {}, format="json", **self.headers)
         self.assertEqual(response.status_code, 409, response.data)
 
-    def test_source_window_can_cross_months_without_changing_accounting_month(self):
+    def test_old_cross_month_source_window_is_clamped_and_cannot_pin_evidence(self):
         from startup_updates.models import StartupEvent
         from startup_updates.services import build_timeline_payload
         self.run.run_request["narrative_period"]["start"] = "2026-02-26T00:00:00+11:00"
         self.run.save(update_fields=["run_request"])
-        for day, month, title in [(date(2026, 2, 27), date(2026, 2, 1), "Included"), (date(2026, 2, 20), date(2026, 2, 1), "Too early"), (date(2026, 3, 17), date(2026, 3, 1), "Too late")]:
+        for day, month, title in [(date(2026, 2, 27), date(2026, 2, 1), "Prior month"), (date(2026, 2, 20), date(2026, 2, 1), "Too early"), (date(2026, 3, 17), date(2026, 3, 1), "Included")]:
             StartupEvent.objects.create(organization=self.organization, run=self.run, canonical_key=title, event_type="product", title=title, event_date=day, month_bucket=month)
         timeline = build_timeline_payload(organization=self.organization, requested_months=["2026-03-01"], run=self.run)
         self.assertEqual(list(timeline["months"]), ["2026-03-01"])
         self.assertEqual([event["title"] for event in timeline["months"]["2026-03-01"]["events"]], ["Included"])
-        snapshot = self.pin()["payload"]
-        self.assertEqual([event["title"] for event in snapshot["events"]], ["Included"])
-        self.assertEqual(snapshot["period"]["month"], "2026-03-01")
+        with self._with_key():
+            response = self.client.post(reverse("startup_updates_evidence_snapshot", args=[self.run.run_id]),
+                {}, format="json", **self.headers)
+        self.assertEqual(response.status_code, 409, response.data)
+        self.assertIn("older source range", response.data["detail"])

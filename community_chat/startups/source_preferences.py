@@ -6,7 +6,6 @@ from organizations.models import Organization
 from startup_updates.models import StartupProfile
 from .lifecycle import UPDATE_PROVIDERS
 
-ACTIVITY_WINDOW_DAYS = 30
 PREFERENCE_KEY = "chat_source_preferences"
 
 
@@ -39,4 +38,4 @@ def set_source_preference(company, provider, value):
     configuration[PREFERENCE_KEY] = companies
     profile.progress_configuration = configuration
     profile.save(update_fields=["progress_configuration", "updated_at"])
-    return {"provider": provider, "enabled": value, "activityWindowDays": ACTIVITY_WINDOW_DAYS}
+    return {"provider": provider, "enabled": value, "activityWindowDays": None, "activityPeriod": "reporting_month"}

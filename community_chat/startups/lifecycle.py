@@ -33,7 +33,8 @@ def source_capabilities(source, *, preferences=None):
     if provider == "google_drive" and connected:
         source["warning"] = "Google Drive is connected. Update imports are not available yet."
     source["enabled"] = bool(source["usableForUpdates"] and (preferences or {}).get(provider, True))
-    source["activityWindowDays"] = 30
+    source["activityWindowDays"] = None
+    source["activityPeriod"] = "reporting_month"
     source["selectionMode"] = "recent_activity"
     if source.get("warning") in {
         "Select Slack channels before using Slack in a monthly update.",
