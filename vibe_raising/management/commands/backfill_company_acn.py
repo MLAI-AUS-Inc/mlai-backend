@@ -1,9 +1,9 @@
-"""Backfill verified ACNs onto already-registered vibe-raising companies.
+"""Backfill ABR verification onto already-registered vibe-raising startups.
 
 Existing companies were marked ``registered=True`` before the ACN gate existed, so they
 carry no ``acn``/``abr_verified_at``. This command re-verifies each one against the ABR
-and, on success, persists the resolved ACN. Companies that fail verification (sole
-traders, trusts, cancelled ABNs) are reported for manual review and left untouched —
+and, on success, persists the verified ABN and optional ACN. Cancelled or otherwise
+unverifiable ABNs are reported for manual review and left untouched —
 the command never flips ``registered`` off, so it can't silently lock anyone out; the
 update guard re-checks at point of use.
 
@@ -23,7 +23,7 @@ from vibe_raising.registration import (
 
 
 class Command(BaseCommand):
-    help = "Verify and backfill ACNs for registered companies that predate the ACN gate."
+    help = "Backfill ABR verification and optional ACNs for registered startups."
 
     def add_arguments(self, parser):
         parser.add_argument(
@@ -43,11 +43,11 @@ class Command(BaseCommand):
         sleep_seconds = max(0.0, options["sleep"])
 
         companies = VibeRaisingCompany.objects.filter(registered=True).filter(
-            Q(acn__isnull=True) | Q(acn="")
+            Q(abr_verified_at__isnull=True) | Q(entity_type_code=""),
         ).select_related("profile").order_by("created_at")
 
         total = companies.count()
-        self.stdout.write(f"Backfilling ACNs for {total} registered company(ies) (commit={commit})")
+        self.stdout.write(f"Backfilling ABR verification for {total} registered startup(s) (commit={commit})")
 
         verified = 0
         failures = {}  # error code -> count
@@ -65,7 +65,7 @@ class Command(BaseCommand):
                 self.stdout.write(f"  FLAG  {label}: {exc.code}")
             else:
                 verified += 1
-                self.stdout.write(f"  OK    {label}: ACN {company.acn}")
+                self.stdout.write(f"  OK    {label}: ABN {company.abn}, ACN {company.acn or 'not applicable'}")
 
             # Pause between live ABR calls (skip the wait after the last one).
             if sleep_seconds and index < total - 1:

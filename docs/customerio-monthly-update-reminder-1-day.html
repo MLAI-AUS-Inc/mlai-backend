@@ -33,7 +33,7 @@
                 <td style="padding:20px;">
                   <h2 style="margin:0;font-size:18px;line-height:1.4;color:#111827;">{{ startup.name }}</h2>
                   {% if startup.domain != blank %}<p style="margin:3px 0 0;font-size:13px;color:#6b7280;">{{ startup.domain }}</p>{% endif %}
-                  <p style="margin:12px 0 0;font-size:14px;line-height:1.5;color:#4b5563;">Your current rate is active through <strong>{{ startup.valid_through_display }}</strong> and expires on {{ startup.expires_on_display }}.</p>
+                  <p style="margin:12px 0 0;font-size:14px;line-height:1.5;color:#4b5563;">Your current rate expires <strong>{{ startup.expires_at_display }}</strong>.</p>
                   <table role="presentation" cellpadding="0" cellspacing="0" style="margin:18px 0 0;">
                     <tr><td bgcolor="#2563eb" style="border-radius:8px;"><a href="{{ startup.update_url }}" style="display:inline-block;padding:13px 22px;color:#ffffff;text-decoration:none;font-size:15px;font-weight:700;">Add a monthly update</a></td></tr>
                   </table>
@@ -45,8 +45,8 @@
         {% endfor %}
         <tr>
           <td style="padding:4px 32px 32px;">
-            <p style="margin:0;font-size:14px;line-height:1.6;color:#6b7280;">No pressure if now is not the right time. Your standard rate will apply after expiry, and an eligible update later will restart the discount once it is ready.</p>
-            <p style="margin:20px 0 0;font-size:12px;line-height:1.5;color:#9ca3af;">You are receiving this service reminder because a ready monthly update currently gives your registered company the Roo coworking rate.</p>
+            <p style="margin:0;font-size:14px;line-height:1.6;color:#6b7280;">No pressure if now is not the right time. Your standard rate will apply after expiry, and an eligible update later will restart the discount once it is approved.</p>
+            <p style="margin:20px 0 0;font-size:12px;line-height:1.5;color:#9ca3af;">You are receiving this service reminder because an approved monthly update currently gives your registered company the Roo coworking rate.</p>
           </td>
         </tr>
       </table>

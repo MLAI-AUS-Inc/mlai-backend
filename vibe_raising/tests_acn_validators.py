@@ -43,6 +43,8 @@ class ValidateAbnChecksumTests(SimpleTestCase):
     def test_rejects_none_and_non_numeric(self):
         self.assertFalse(validate_abn_checksum(None))
         self.assertFalse(validate_abn_checksum("abcdefghijk"))
+        self.assertFalse(validate_abn_checksum("abc94807394137"))
+        self.assertFalse(validate_abn_checksum("９４８０７３９４１３７"))
 
 
 class ValidateAcnChecksumTests(SimpleTestCase):

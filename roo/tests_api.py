@@ -2026,6 +2026,7 @@ class CoworkingViewSetTests(APITestCase):
         VibeRaisingCompany.objects.create(
             profile=profile, organization=org, name='Acme Pty Ltd',
             registered=True, abn='89000000019', acn='000000019',
+            entity_type_code='PRV',
             abr_verified_at=dj_timezone.now(),
         )
 
@@ -2042,10 +2043,14 @@ class CoworkingViewSetTests(APITestCase):
         org = Organization.objects.create(name=f'{user.slack_id} Co', domain=domain)
         UserStartupBinding.objects.create(user=user, organization=org)
         self._verify_company_for(org, user=user)
+        approved_at = timezone.now()
         draft = MonthlyUpdateDraft.objects.create(
             organization=org,
-            month=booking_date.replace(day=1),
+            month=timezone.localdate().replace(day=1),
             status=update_status,
+            published_at=approved_at,
+            first_published_at=approved_at,
+            ready_at=approved_at,
         )
         return draft
 
@@ -2069,10 +2074,14 @@ class CoworkingViewSetTests(APITestCase):
         org = Organization.objects.create(name='Acme', domain='acme.coworking.example')
         UserStartupBinding.objects.create(user=self.user, organization=org)
         self._verify_company_for(org)
+        approved_at = timezone.now()
         MonthlyUpdateDraft.objects.create(
             organization=org,
-            month=date.today().replace(day=1),
+            month=timezone.localdate().replace(day=1),
             status=MonthlyUpdateDraftStatus.READY,
+            published_at=approved_at,
+            first_published_at=approved_at,
+            ready_at=approved_at,
         )
 
         url = reverse('coworking-availability')
@@ -2438,10 +2447,14 @@ class CoworkingViewSetTests(APITestCase):
         org = Organization.objects.create(name='Acme', domain='acme.book.example')
         UserStartupBinding.objects.create(user=self.user, organization=org)
         self._verify_company_for(org)
+        approved_at = timezone.now()
         MonthlyUpdateDraft.objects.create(
             organization=org,
-            month=booking_date.replace(day=1),
+            month=timezone.localdate().replace(day=1),
             status=MonthlyUpdateDraftStatus.READY,
+            published_at=approved_at,
+            first_published_at=approved_at,
+            ready_at=approved_at,
         )
 
         response = self.client.post(

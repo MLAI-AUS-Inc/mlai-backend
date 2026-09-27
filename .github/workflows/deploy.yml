@@ -336,6 +336,9 @@ jobs:
           tests.test_teardown_company \
           tests.test_editorial_learning_loop \
           startup_updates.tests_monthly_update_reminders \
+          startup_updates.tests_roo_update_reminders_unit \
+          roo.tests_startup_update_benefits_unit \
+          vibe_raising.tests_company_registration \
           community_chat.tests.test_startup_updates \
           community_chat.tests.test_startup_updates_database \
           startup_updates.tests_evidence_contract \

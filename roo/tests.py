@@ -899,8 +899,8 @@ class CoworkingServiceTests(TestCase):
 
 class CoworkingMonthlyUpdateDiscountTests(TestCase):
     """The coworking cost drops to 4 when the user's startup is an ABR-verified
-    Australian company (registered + ACN + ABR-verified stamp) AND has a
-    monthly update that became 'ready' within the last 28 days; otherwise it is
+    Australian organisation (registered + active ABR verification) AND has a
+    monthly update approved within the last 30 days; otherwise it is
     the standard 8."""
 
     VALID_ABN = '89000000019'
@@ -943,6 +943,7 @@ class CoworkingMonthlyUpdateDiscountTests(TestCase):
             registered=True,
             abn=abn,
             acn='000000019' if verified else None,
+            entity_type_code='PRV' if verified else '',
             abr_verified_at=timezone.now() if verified else None,
         )
 
@@ -954,6 +955,7 @@ class CoworkingMonthlyUpdateDiscountTests(TestCase):
             organization=self.org,
             month=booking_date.replace(day=1),
             status=status,
+            published_at=timezone.now() if status == "ready" else None,
         )
         if ready_days_ago is not None:
             MonthlyUpdateDraft.objects.filter(pk=draft.pk).update(
@@ -1062,6 +1064,7 @@ class CoworkingMonthlyUpdateDiscountTests(TestCase):
             organization=second_org,
             month=today.replace(day=1),
             status=MonthlyUpdateDraftStatus.READY,
+            published_at=timezone.now(),
         )
 
         self.assertEqual(
@@ -1090,10 +1093,10 @@ class CoworkingMonthlyUpdateDiscountTests(TestCase):
             4,
         )
 
-    def test_update_ready_29_days_ago_does_not_discount(self):
+    def test_update_ready_31_days_ago_does_not_discount(self):
         from startup_updates.models import MonthlyUpdateDraftStatus
         today = date.today()
-        self._make_update(today, MonthlyUpdateDraftStatus.READY, ready_days_ago=29)
+        self._make_update(today, MonthlyUpdateDraftStatus.READY, ready_days_ago=31)
         self.assertEqual(
             CoworkingService.get_coworking_cost(user=self.user, booking_date=today),
             8,
@@ -1151,6 +1154,7 @@ class CoworkingMonthlyUpdateDiscountTests(TestCase):
             organization=second_org,
             month=today.replace(day=1),
             status=MonthlyUpdateDraftStatus.READY,
+            published_at=timezone.now(),
         )
         self.assertEqual(
             CoworkingService.get_coworking_cost(user=self.user, booking_date=today),
@@ -1171,6 +1175,7 @@ class CoworkingMonthlyUpdateDiscountTests(TestCase):
         today = date.today()
         MonthlyUpdateDraft.objects.create(
             organization=org, month=today.replace(day=1), status=MonthlyUpdateDraftStatus.READY,
+            published_at=timezone.now(),
         )
         self.assertEqual(
             CoworkingService.get_coworking_cost(user=other, booking_date=today),
@@ -1191,6 +1196,7 @@ class CoworkingMonthlyUpdateDiscountTests(TestCase):
         from startup_updates.models import MonthlyUpdateDraft
         MonthlyUpdateDraft.objects.create(
             organization=org, month=today.replace(day=1), status=MonthlyUpdateDraftStatus.READY,
+            published_at=timezone.now(),
         )
         self.assertEqual(
             CoworkingService.get_coworking_cost(user=other, booking_date=today),
@@ -1253,7 +1259,7 @@ class StartupUpdateRewardServiceTests(TestCase):
         )
         return VibeRaisingCompany.objects.create(
             profile=profile, organization=org, name=name,
-            registered=True, abn='89000000019', acn='000000019',
+            registered=True, abn='89000000019', acn='000000019', entity_type_code='PRV',
             abr_verified_at=timezone.now(),
         )
 

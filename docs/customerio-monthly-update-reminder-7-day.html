@@ -15,10 +15,12 @@
     "startups": [{
       "name": "Example Co",
       "domain": "example.com",
-      "valid_through": "2026-07-29",
-      "valid_through_display": "29 July 2026",
-      "expires_on": "2026-07-30",
-      "expires_on_display": "30 July 2026",
+      "valid_through": "2026-07-31",
+      "valid_through_display": "31 July 2026",
+      "expires_on": "2026-07-31",
+      "expires_on_display": "31 July 2026",
+      "expires_at": "2026-07-31T12:00:00+10:00",
+      "expires_at_display": "31 July 2026 at 12:00 PM AEST",
       "update_url": "https://mlai.au/platform/login?..."
     }]
   }
@@ -46,7 +48,7 @@
                 <td style="padding:20px;">
                   <h2 style="margin:0;font-size:18px;line-height:1.4;color:#111827;">{{ startup.name }}</h2>
                   {% if startup.domain != blank %}<p style="margin:3px 0 0;font-size:13px;color:#6b7280;">{{ startup.domain }}</p>{% endif %}
-                  <p style="margin:12px 0 0;font-size:14px;line-height:1.5;color:#4b5563;">Your current rate is active through <strong>{{ startup.valid_through_display }}</strong>.</p>
+                  <p style="margin:12px 0 0;font-size:14px;line-height:1.5;color:#4b5563;">Your current rate expires <strong>{{ startup.expires_at_display }}</strong>.</p>
                   <table role="presentation" cellpadding="0" cellspacing="0" style="margin:18px 0 0;">
                     <tr><td bgcolor="#2563eb" style="border-radius:8px;"><a href="{{ startup.update_url }}" style="display:inline-block;padding:13px 22px;color:#ffffff;text-decoration:none;font-size:15px;font-weight:700;">Add a monthly update</a></td></tr>
                   </table>
@@ -58,8 +60,8 @@
         {% endfor %}
         <tr>
           <td style="padding:4px 32px 32px;">
-            <p style="margin:0;font-size:14px;line-height:1.6;color:#6b7280;">Not planning to use coworking right now? No action is needed. You can submit an update later and your eligible rate will restart once the update is ready.</p>
-            <p style="margin:20px 0 0;font-size:12px;line-height:1.5;color:#9ca3af;">You are receiving this service reminder because a ready monthly update currently gives your registered company the Roo coworking rate.</p>
+            <p style="margin:0;font-size:14px;line-height:1.6;color:#6b7280;">Not planning to use coworking right now? No action is needed. You can submit an update later and your eligible rate will restart once the update is approved.</p>
+            <p style="margin:20px 0 0;font-size:12px;line-height:1.5;color:#9ca3af;">You are receiving this service reminder because an approved monthly update currently gives your registered company the Roo coworking rate.</p>
           </td>
         </tr>
       </table>

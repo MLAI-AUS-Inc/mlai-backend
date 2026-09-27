@@ -1,24 +1,18 @@
-"""The single chokepoint that gates vibe-raising to registered Australian companies.
+"""Verify Australian startup ABNs before granting founder benefits.
 
-Every path that marks a founder company as ``registered`` must route through
-:func:`verify_and_persist_company_registration`. It runs three layers of checks —
-ABN checksum, an authoritative Australian Business Register (ABR) lookup, and the ACN
-checksum — and only flips ``registered`` (and stamps ``abr_verified_at``) when the
-entity is an *active registered company*. Anything else raises
-:class:`CompanyRegistrationError`, which callers translate to a structured HTTP 422.
+An active ABR registration is required; incorporation as a company is not. This
+includes not-for-profits such as incorporated associations without an ACN.
 """
 
 from __future__ import annotations
 
-import re
-
-from django.conf import settings
 from django.utils import timezone
 
 from vibe_raising.validators import (
     acn_from_abn,
     normalize_abn,
     normalize_acn,
+    is_registered_company_entity_type,
     validate_abn_checksum,
     validate_acn_checksum,
 )
@@ -40,8 +34,8 @@ _DEFAULT_MESSAGES = {
     ACN_INVALID: "That ACN doesn't look right — check the digits.",
     ACN_MISMATCH: "The ACN doesn't match this ABN. Check the details and try again.",
     NOT_A_REGISTERED_COMPANY: (
-        "Vibe-raising is for registered Australian companies (Pty Ltd / Ltd). "
-        "We couldn't find a company registered to this ABN."
+        "We couldn't find an active Australian business registration for this ABN. "
+        "Not-for-profits and incorporated associations can qualify without an ACN."
     ),
     ABR_UNVERIFIABLE: (
         "We couldn't verify with the Australian Business Register just now. "
@@ -53,7 +47,7 @@ _ACN_FIELD_CODES = {ACN_REQUIRED, ACN_INVALID, ACN_MISMATCH}
 
 
 class CompanyRegistrationError(Exception):
-    """Raised when a company fails the registered-Australian-company gate."""
+    """Raised when a startup's ABR registration cannot be verified."""
 
     def __init__(self, code: str, message: str | None = None, field: str | None = None):
         self.code = code
@@ -99,14 +93,27 @@ def set_unverified_company_abn(company, abn) -> None:
 
 
 def company_is_verified(company) -> bool:
-    """True when a company is a confirmed registered Australian company."""
+    """True when a startup has a valid ABN and a successful ABR verification."""
 
     return bool(
         company is not None
-        and company.registered
-        and company.acn
-        and company.abr_verified_at
+        and getattr(company, "registered", False)
+        and validate_abn_checksum(getattr(company, "abn", None))
+        and str(getattr(company, "entity_type_code", "") or "").strip()
+        and getattr(company, "abr_verified_at", None)
     )
+
+
+def company_registration_status(company) -> dict:
+    """Expose verification status and the latest save's safe validation error."""
+
+    if company_is_verified(company):
+        return {"verified": True, "code": None, "detail": None, "field": None}
+    error = getattr(company, "_registration_error", None)
+    if error is None:
+        code = ABN_REQUIRED if not getattr(company, "abn", None) else ABR_UNVERIFIABLE
+        error = CompanyRegistrationError(code).to_payload()
+    return {"verified": False, **error}
 
 
 def company_registration_blocker(company) -> dict | None:
@@ -118,9 +125,9 @@ def company_registration_blocker(company) -> dict | None:
     if company_is_verified(company):
         return None
     return {
-        "code": ACN_REQUIRED,
+        "code": ABN_REQUIRED,
         "detail": (
-            "Verify your company's ACN as a registered Australian company "
+            "Verify your startup's active Australian ABN "
             "before creating an update."
         ),
         "field": "abn",
@@ -130,7 +137,7 @@ def company_registration_blocker(company) -> dict | None:
 
 def attempt_company_verification(company, *, abn=None, acn=None, save: bool = True) -> bool:
     """Best-effort verification: stamp the company as verified when its ABN/ACN check
-    out, otherwise leave it usable and unverified. Never raises.
+    out, otherwise leave it usable and unverified.
 
     Used where being a verified company *unlocks perks* (e.g. the coworking discount)
     but is not required to use the product — so an invalid or missing ABN must not block
@@ -138,18 +145,18 @@ def attempt_company_verification(company, *, abn=None, acn=None, save: bool = Tr
     """
 
     target_abn = abn if abn is not None else company.abn
+    company._registration_error = None
     try:
         verify_and_persist_company_registration(
             company, abn=target_abn, acn=acn, save=save
         )
         return True
-    except CompanyRegistrationError:
+    except CompanyRegistrationError as exc:
         # Not verifiable — drop any stale verification but keep the company as-is.
-        company.acn = None
-        company.entity_type_code = ""
-        company.abr_verified_at = None
+        invalidate_company_registration(company)
+        company._registration_error = exc.to_payload()
         if save and getattr(company, "pk", None):
-            company.save(update_fields=["acn", "entity_type_code", "abr_verified_at", "updated_at"])
+            company.save(update_fields=[*REGISTRATION_FIELDS, "updated_at"])
         return False
 
 
@@ -170,7 +177,7 @@ def verify_and_persist_company_registration(
     save: bool = True,
     abr_verifier=None,
 ):
-    """Verify ``company`` is an active registered Australian company and persist it.
+    """Verify ``company`` has an active Australian ABN and persist the result.
 
     On success, mutates ``company`` (``abn``, ``acn``, ``entity_type_code``,
     ``abr_verified_at``, ``registered=True``) and writes the row when ``save`` is True.
@@ -181,49 +188,54 @@ def verify_and_persist_company_registration(
     """
 
     # --- Layer 1: ABN presence + checksum -------------------------------------
-    raw_digits = re.sub(r"\D", "", str(abn or ""))
-    if not raw_digits:
+    has_abn = bool(str(abn or "").strip())
+    has_acn = bool(str(acn or "").strip())
+    if not has_abn and not has_acn:
         raise CompanyRegistrationError(ABN_REQUIRED)
-    if not validate_abn_checksum(abn):
+    if has_abn and not validate_abn_checksum(abn):
         raise CompanyRegistrationError(ABN_INVALID)
+    if has_acn and not validate_acn_checksum(acn):
+        raise CompanyRegistrationError(ACN_INVALID)
     normalized_abn = normalize_abn(abn)
+    supplied_acn = normalize_acn(acn)
 
-    # --- Layer 2: authoritative ABR company check -----------------------------
-    skip_abr = bool(getattr(settings, "VIBE_RAISING_SKIP_ABR_VERIFICATION", False))
-    if skip_abr:
-        # Dev/local escape hatch when no ABR credentials are configured: trust the ABN
-        # and derive the ACN, but still enforce both checksums below.
-        abr = {
-            "reachable": True,
-            "found": True,
-            "is_company": True,
-            "acn": None,
-            "entity_type_code": "",
-        }
-    else:
-        verifier = abr_verifier or _abr_verifier()
-        abr = verifier(normalized_abn)
-        if not abr.get("reachable") or not abr.get("configured", True):
-            raise CompanyRegistrationError(ABR_UNVERIFIABLE)
-        if not abr.get("found") or not abr.get("is_company"):
-            raise CompanyRegistrationError(NOT_A_REGISTERED_COMPANY)
+    # --- Layer 2: authoritative ABR registration check ------------------------
+    # No configuration flag may manufacture a verification timestamp. Tests can
+    # inject the verifier; benefits always require a successful register lookup.
+    verifier = abr_verifier or _abr_verifier()
+    try:
+        abr = verifier(normalized_abn or supplied_acn)
+    except Exception as exc:
+        raise CompanyRegistrationError(ABR_UNVERIFIABLE) from exc
+    if not isinstance(abr, dict) or not abr.get("reachable") or not abr.get("configured"):
+        raise CompanyRegistrationError(ABR_UNVERIFIABLE)
+    resolved_abn = normalize_abn(abr.get("abn"))
+    if (
+        not abr.get("found")
+        or not abr.get("active")
+        or not str(abr.get("entity_type_code") or "").strip()
+        or not validate_abn_checksum(resolved_abn)
+        or (normalized_abn and resolved_abn != normalized_abn)
+    ):
+        raise CompanyRegistrationError(NOT_A_REGISTERED_COMPANY)
+    normalized_abn = resolved_abn
 
     # --- Layer 3: resolve + validate the ACN ----------------------------------
-    abr_acn = normalize_acn(abr.get("acn"))
-    derived_acn = acn_from_abn(normalized_abn)
-    supplied_acn = normalize_acn(acn) if acn else None
-
-    resolved_acn = abr_acn or derived_acn
-    if not resolved_acn:
-        raise CompanyRegistrationError(ACN_REQUIRED)
-
-    # Every ACN we can resolve must agree — a mismatch means the inputs are inconsistent.
-    for candidate in (derived_acn, supplied_acn):
-        if candidate and candidate != resolved_acn:
+    # ASICNumber may also describe an ARBN/ARSN, so only treat it as an ACN for
+    # Australian company entity types. Associations do not need a company ACN.
+    resolved_acn = None
+    if is_registered_company_entity_type(abr.get("entity_type_code")):
+        raw_abr_acn = abr.get("acn")
+        if raw_abr_acn and not validate_acn_checksum(raw_abr_acn):
+            raise CompanyRegistrationError(ACN_INVALID)
+        derived_acn = acn_from_abn(normalized_abn)
+        resolved_acn = normalize_acn(raw_abr_acn) or derived_acn
+        if not resolved_acn or not validate_acn_checksum(resolved_acn):
+            raise CompanyRegistrationError(ACN_INVALID)
+        if derived_acn != resolved_acn:
             raise CompanyRegistrationError(ACN_MISMATCH)
-
-    if not validate_acn_checksum(resolved_acn):
-        raise CompanyRegistrationError(ACN_INVALID)
+    if supplied_acn and supplied_acn != resolved_acn:
+        raise CompanyRegistrationError(ACN_MISMATCH)
 
     # --- Persist --------------------------------------------------------------
     company.abn = normalized_abn
@@ -231,6 +243,7 @@ def verify_and_persist_company_registration(
     company.entity_type_code = abr.get("entity_type_code") or ""
     company.abr_verified_at = timezone.now()
     company.registered = True
+    company._registration_error = None
     if save:
         company.save()
 

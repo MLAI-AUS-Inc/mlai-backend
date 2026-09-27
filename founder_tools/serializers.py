@@ -36,6 +36,7 @@ class FounderCompanySerializer(serializers.ModelSerializer):
     avatarUrl = serializers.SerializerMethodField()
     entityTypeName = serializers.SerializerMethodField()
     abrVerifiedAt = serializers.DateTimeField(source="abr_verified_at", read_only=True)
+    registrationVerification = serializers.SerializerMethodField()
     monthlyUpdatesEnabled = serializers.SerializerMethodField()
     audienceVisibility = AudienceVisibilityField(source="default_audience_visibility", read_only=True)
 
@@ -54,6 +55,7 @@ class FounderCompanySerializer(serializers.ModelSerializer):
             "audienceVisibility",
             "entityTypeName",
             "abrVerifiedAt",
+            "registrationVerification",
             "organizationId",
             "organizationDomain",
             "companyLinkedInUrl",
@@ -64,6 +66,11 @@ class FounderCompanySerializer(serializers.ModelSerializer):
         from vibe_raising.validators import entity_type_display
 
         return entity_type_display(obj.entity_type_code)
+
+    def get_registrationVerification(self, obj):
+        from vibe_raising.registration import company_registration_status
+
+        return company_registration_status(obj)
 
     def get_organizationId(self, obj):
         return obj.organization_id

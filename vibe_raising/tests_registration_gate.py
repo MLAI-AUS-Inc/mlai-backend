@@ -28,6 +28,8 @@ def _abr(**overrides):
         "configured": True,
         "reachable": True,
         "found": True,
+        "active": True,
+        "abn": COMPANY_ABN,
         "is_company": True,
         "acn": COMPANY_ACN,
         "entity_type_code": "PRV",
@@ -59,17 +61,17 @@ class NonBlockingCompanySaveTests(TestCase):
         self.assertEqual(company.acn, COMPANY_ACN)
         self.assertIsNotNone(company.abr_verified_at)
 
-    def test_non_company_abn_is_saved_but_unverified(self):
-        # A non-company ABN no longer blocks — the company saves, just unverified.
-        with patch(_ABR_PATH, side_effect=_abr(is_company=False, acn=None)):
+    def test_nonprofit_abn_is_saved_and_verified_without_acn(self):
+        with patch(_ABR_PATH, side_effect=_abr(abn=NON_COMPANY_ABN, is_company=False, acn=None, entity_type_code="OIE")):
             response = self._post(
-                {"name": "Jane Sole Trader", "domain": "jane.com", "abn": NON_COMPANY_ABN, "registered": True}
+                {"name": "MLAI Aus Inc", "domain": "mlai.example", "abn": NON_COMPANY_ABN, "registered": True}
             )
         self.assertEqual(response.status_code, 200)
-        company = VibeRaisingCompany.objects.get(name="Jane Sole Trader")
+        company = VibeRaisingCompany.objects.get(name="MLAI Aus Inc")
         self.assertTrue(company.registered)
         self.assertIsNone(company.acn)
-        self.assertIsNone(company.abr_verified_at)
+        self.assertIsNotNone(company.abr_verified_at)
+        self.assertTrue(response.data["registrationVerification"]["verified"])
 
     def test_invalid_abn_is_saved_but_unverified(self):
         # Invalid checksum short-circuits before the ABR is consulted; still no block.
@@ -79,8 +81,9 @@ class NonBlockingCompanySaveTests(TestCase):
             )
         self.assertEqual(response.status_code, 200)
         company = VibeRaisingCompany.objects.get(name="Typo Co")
-        self.assertTrue(company.registered)
+        self.assertFalse(company.registered)
         self.assertIsNone(company.acn)
+        self.assertEqual(response.data["registrationVerification"]["code"], "ABN_INVALID")
 
     def test_missing_abn_is_saved_but_unverified(self):
         with patch(_ABR_PATH, side_effect=AssertionError("ABR must not be called")):
@@ -110,6 +113,7 @@ class UpdateNotBlockedTests(TestCase):
             registered=True,
             abn=COMPANY_ABN,
             acn=COMPANY_ACN if verified else None,
+            entity_type_code="PRV" if verified else "",
             abr_verified_at=timezone.now() if verified else None,
         )
         self.profile.active_company = company

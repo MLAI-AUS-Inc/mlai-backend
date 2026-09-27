@@ -6,6 +6,7 @@ from unittest.mock import patch
 from django.contrib.auth import get_user_model
 from django.core.management import call_command
 from django.test import TestCase
+from django.utils import timezone
 
 from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
 
@@ -25,6 +26,8 @@ def _abr(abn):
             "configured": True,
             "reachable": True,
             "found": True,
+            "active": True,
+            "abn": abn,
             "is_company": True,
             "acn": COMPANY_ACN,
             "entity_type_code": "PRV",
@@ -33,6 +36,8 @@ def _abr(abn):
         "configured": True,
         "reachable": True,
         "found": True,
+        "active": False,
+        "abn": abn,
         "is_company": False,
         "acn": None,
         "entity_type_code": "OIE",
@@ -76,7 +81,7 @@ class BackfillCompanyAcnTests(TestCase):
         self.assertEqual(company.acn, COMPANY_ACN)
         self.assertIsNotNone(company.abr_verified_at)
 
-    def test_non_company_is_flagged_and_left_registered(self):
+    def test_inactive_registration_is_flagged_and_left_registered(self):
         company = self._company(name="janetrader", abn=NON_COMPANY_ABN)
         output = self._run("--commit")
         self.assertIn("NOT_A_REGISTERED_COMPANY", output)
@@ -86,10 +91,12 @@ class BackfillCompanyAcnTests(TestCase):
         self.assertTrue(company.registered)
         self.assertIsNone(company.acn)
 
-    def test_only_targets_registered_companies_missing_acn(self):
+    def test_only_targets_registered_companies_missing_verification(self):
         already = self._company(name="already", abn=COMPANY_ABN)
         already.acn = COMPANY_ACN
-        already.save(update_fields=["acn"])
+        already.abr_verified_at = timezone.now()
+        already.entity_type_code = "PRV"
+        already.save(update_fields=["acn", "abr_verified_at", "entity_type_code"])
         VibeRaisingCompany.objects.create(
             profile=self.profile, name="draft", domain="draft.com", registered=False, abn=COMPANY_ABN
         )

@@ -114,11 +114,28 @@ def contribution_total(user, state=None):
     known_ledger = VolunteerRecognition.objects.filter(
         community=community_id(), user=user, ledger__isnull=False
     ).values("ledger_id")
+    # A second startup can receive its monthly payment after this member uses
+    # the single ranking slot. The durable cap receipt classifies that ledger
+    # without turning it into a second contribution.
+    capped_monthly_ledger_ids = [
+        ledger_id
+        for ledger_id in VolunteerSourceReceipt.objects.filter(
+            community=community_id(),
+            actor=user,
+            origin="startup_updates",
+            kind="monthly_update",
+            status="recorded",
+            error="monthly_recognition_cap",
+            source_key__startswith="startup_updates:monthly_update_reward:",
+        ).values_list("metadata__ledger_id", flat=True)
+        if type(ledger_id) is int
+    ]
     unknown = (
         Ledger.objects.filter(user=user, pk__gt=state.historical_ledger_cutoff)
         .exclude(source="purchased_topup")
         .exclude(reference_type__in=("VOLUNTEER_LEVEL_BONUS", "VOLUNTEER_CORRECTION"))
         .exclude(pk__in=known_ledger)
+        .exclude(pk__in=capped_monthly_ledger_ids, source="STARTUP_UPDATE", kind="EARN")
         .filter(Q(kind="EARN") | Q(kind__isnull=True, delta__gt=0))
     )
     if unknown.exists():
