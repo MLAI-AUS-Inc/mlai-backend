@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import calendar
 import logging
-from datetime import date
+from datetime import date, timedelta
 from typing import Any, Optional
 
 from django.utils import timezone
@@ -139,6 +139,18 @@ def _prior_month_start(month_start: date) -> date:
 
 
 def period_bounds_for_run(run_request: dict[str, Any]) -> tuple[str, str, str, str]:
+    if run_request.get("activity_window_days"):
+        from startup_updates.activity_scope import activity_window
+        window = activity_window(run_request.get("narrative_period"))
+        if window:
+            start, end = window
+            # GA reports are day-granular. Include the update day and the
+            # preceding 29 calendar days; compare with the preceding 30 days.
+            cur_end = (end - timedelta(microseconds=1)).date()
+            cur_start = cur_end - timedelta(days=29)
+            prev_end = cur_start - timedelta(days=1)
+            prev_start = prev_end - timedelta(days=29)
+            return tuple(value.isoformat() for value in (cur_start, cur_end, prev_start, prev_end))
     current_start = _parse_month_start(run_request.get("current_month"))
     cur_start, cur_end = _month_bounds(current_start)
     prev_start, prev_end = _month_bounds(_prior_month_start(current_start))

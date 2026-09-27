@@ -12,6 +12,7 @@ from rest_framework.test import APITestCase
 from slack_sdk.errors import SlackApiError
 
 from community_chat.account_sessions import issue_account_session
+from community_chat.tests.slack_fixture_time import recent_slack_ts
 from community_chat.tests.privacy_fixtures import PROVIDERS, grant_test_ai_consent
 from community_chat.models import (
     CommunityChatDevice,
@@ -738,7 +739,7 @@ class SlackDmMirrorApiTests(APITestCase):
             mlai_channel_id=uuid.uuid4(),
             status=SlackDmMirrorConversationStatus.LIVE,
             history_backfilled_at=timezone.now(),
-            oldest_synced_ts="1787900000.000100",
+            oldest_synced_ts=recent_slack_ts("1787900000.000100"),
         )
 
         response = self.client.patch(
@@ -903,7 +904,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
                 "user": "UROO",
                 "bot_id": "BROO",
                 "subtype": "bot_message",
-                "ts": "1788800000.000001",
+                "ts": recent_slack_ts("1788800000.000001"),
                 "text": "How can I help?",
             },
         }
@@ -917,7 +918,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
         self.assertEqual(self._message_deliveries(conversation).count(), 1)
         conversation.participant_slack_ids = ["UONE", "UTWO"]
         conversation.save(update_fields=("participant_slack_ids",))
-        payload["event"]["ts"] = "1788800001.000001"
+        payload["event"]["ts"] = recent_slack_ts("1788800001.000001")
         ingest_slack_dm_event(payload)
         self.assertEqual(self._message_deliveries(conversation).count(), 1)
 
@@ -1318,13 +1319,13 @@ class SlackDmMirrorOwnerTests(APITestCase):
         for offset in range(3):
             conversation.deliveries.create(
                 source_platform=CommunityBridgePlatform.SLACK,
-                source_message_id=f"178790000{offset}.000100",
+                source_message_id=recent_slack_ts(f"178790000{offset}.000100"),
                 source_author_id="UTWO",
                 operation=CommunityBridgeDeliveryType.CREATE,
                 encrypted_text=f"message {offset}",
                 metadata={
                     "backfill": True,
-                    "event_ts": f"178790000{offset}.000100",
+                    "event_ts": recent_slack_ts(f"178790000{offset}.000100"),
                     "participant_hash": conversation.participant_hash,
                 },
                 available_at=timezone.now() + timedelta(microseconds=offset),
@@ -1688,7 +1689,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
         }
         client.conversations_history.return_value = {
             "messages": [
-                {"ts": "1787900300.000100", "user": "UTHREE", "text": "group history"},
+                {"ts": recent_slack_ts("1787900300.000100"), "user": "UTHREE", "text": "group history"},
             ],
             "response_metadata": {"next_cursor": ""},
         }
@@ -1760,7 +1761,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
         }
         client.conversations_history.return_value = {
             "messages": [
-                {"ts": "1787900400.000100", "user": "UTWO", "text": "recovered"},
+                {"ts": recent_slack_ts("1787900400.000100"), "user": "UTWO", "text": "recovered"},
             ],
             "response_metadata": {"next_cursor": ""},
         }
@@ -1857,7 +1858,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
                 "event": {
                     "channel": "GPRIVATE",
                     "channel_type": "group",
-                    "ts": "1787900500.000100",
+                    "ts": recent_slack_ts("1787900500.000100"),
                     "user": "UTWO",
                     "text": "private channel message",
                 },
@@ -1904,7 +1905,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
                 "authorizations": [{"user_id": "UONE"}],
                 "event": {
                     "channel": "DONE",
-                    "ts": "1787900100.000100",
+                    "ts": recent_slack_ts("1787900100.000100"),
                     "user": "UONE",
                     "text": "visible only in the authorized owner's private copy",
                 },
@@ -1945,7 +1946,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
                 "authorizations": [{"user_id": "UONE"}],
                 "event": {
                     "channel": "DNEW",
-                    "ts": "1787900200.000100",
+                    "ts": recent_slack_ts("1787900200.000100"),
                     "user": "UTWO",
                     "text": "first message in a newly opened DM",
                 },
@@ -2067,7 +2068,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
         deliver_private,
     ):
         self._live_conversation()
-        source_ts = "1787900599.000100"
+        source_ts = recent_slack_ts("1787900599.000100")
         deliver_private.side_effect = [
             {"message_id": "a" * 64},
             {"message_id": "b" * 64},
@@ -2095,7 +2096,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
                     "subtype": "message_deleted",
                     "channel": "DONE",
                     "deleted_ts": source_ts,
-                    "event_ts": "1787900600.000100",
+                    "event_ts": recent_slack_ts("1787900600.000100"),
                 },
             }
         )
@@ -2119,7 +2120,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
         deliver_private,
     ):
         self._live_conversation()
-        source_ts = "1787900600.000100"
+        source_ts = recent_slack_ts("1787900600.000100")
         deliver_private.side_effect = [
             {"message_id": "a" * 64, "parent_message_id": ""},
             {"message_id": "b" * 64, "parent_message_id": ""},
@@ -2166,7 +2167,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
                     "type": "message",
                     "subtype": "message_changed",
                     "channel": "DONE",
-                    "event_ts": "1787900601.000100",
+                    "event_ts": recent_slack_ts("1787900601.000100"),
                     "message": {
                         "ts": source_ts,
                         "user": "UTWO",
@@ -2191,7 +2192,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
                     "type": "message",
                     "subtype": "message_deleted",
                     "channel": "DONE",
-                    "event_ts": "1787900602.000100",
+                    "event_ts": recent_slack_ts("1787900602.000100"),
                     "deleted_ts": source_ts,
                     "previous_message": {"ts": source_ts, "user": "UTWO"},
                 },
@@ -2212,7 +2213,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
         deliver_private,
     ):
         _, conversation = self._live_conversation()
-        source_ts = "1787900700.000100"
+        source_ts = recent_slack_ts("1787900700.000100")
         conversation.deliveries.create(
             source_platform=CommunityBridgePlatform.SLACK,
             source_message_id=source_ts,
@@ -2238,7 +2239,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
                     "team_id": "TMLAI",
                     "event": {
                         "type": "reaction_added",
-                        "event_ts": "1787900701.000100",
+                        "event_ts": recent_slack_ts("1787900701.000100"),
                         "user": actor,
                         "reaction": "heart",
                         "item": {
@@ -2272,7 +2273,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
                 "team_id": "TMLAI",
                 "event": {
                     "type": "reaction_removed",
-                    "event_ts": "1787900702.000100",
+                    "event_ts": recent_slack_ts("1787900702.000100"),
                     "user": "UTWO",
                     "reaction": "heart",
                     "item": {
@@ -2299,9 +2300,9 @@ class SlackDmMirrorOwnerTests(APITestCase):
     @patch("integrations.services.slack_dm_mirror.WebClient")
     def test_history_scans_thread_replies_one_page_per_tick(self, web_client):
         _, conversation = self._live_conversation()
-        root_ts = "1787900800.000100"
-        reply_ts = "1787900801.000100"
-        second_reply_ts = "1787900802.000100"
+        root_ts = recent_slack_ts("1787900800.000100")
+        reply_ts = recent_slack_ts("1787900801.000100")
+        second_reply_ts = recent_slack_ts("1787900802.000100")
         web_client.return_value.conversations_history.return_value = {
             "messages": [
                 {
@@ -2419,8 +2420,8 @@ class SlackDmMirrorOwnerTests(APITestCase):
         web_client,
     ):
         _, conversation = self._live_conversation()
-        parent_ts = "1787900800.000100"
-        child_ts = "1787900801.000100"
+        parent_ts = recent_slack_ts("1787900800.000100")
+        child_ts = recent_slack_ts("1787900801.000100")
         web_client.return_value.conversations_history.return_value = {
             "messages": [
                 {
@@ -2497,7 +2498,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
     ):
         _, conversation = self._live_conversation()
         old_parent_ts = "1700000000.000100"
-        recent_child_ts = "1787900801.000100"
+        recent_child_ts = recent_slack_ts("1787900801.000100")
         web_client.return_value.conversations_history.return_value = {
             "messages": [
                 {
@@ -2592,7 +2593,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
         web_client.return_value.conversations_history.side_effect = [
             {
                 "messages": [
-                    {"ts": "1787901000.000100", "user": "UTWO", "text": "new"}
+                    {"ts": recent_slack_ts("1787901000.000100"), "user": "UTWO", "text": "new"}
                 ],
                 "has_more": True,
                 "response_metadata": {"next_cursor": "next"},
@@ -2631,7 +2632,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
             return {
                 "messages": [
                     {
-                        "ts": "1787901000.000100",
+                        "ts": recent_slack_ts("1787901000.000100"),
                         "user": "UTWO",
                         "text": "stale bounded body",
                     }
@@ -2650,7 +2651,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
         self.assertIsNone(conversation.history_backfilled_at)
         self.assertFalse(
             conversation.deliveries.filter(
-                source_message_id="1787901000.000100"
+                source_message_id=recent_slack_ts("1787901000.000100")
             ).exists()
         )
 
@@ -2676,7 +2677,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
             {
                 "messages": [
                     {
-                        "ts": "1787901300.000100",
+                        "ts": recent_slack_ts("1787901300.000100"),
                         "user": "UTWO",
                         "text": "first consent page",
                     }
@@ -2687,7 +2688,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
             {
                 "messages": [
                     {
-                        "ts": "1787901300.000100",
+                        "ts": recent_slack_ts("1787901300.000100"),
                         "user": "UTWO",
                         "text": "re-read under renewed consent",
                     }
@@ -2709,7 +2710,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
         activate_connection(self.first_connection)
 
         conversation.refresh_from_db()
-        self.assertEqual(conversation.oldest_synced_ts, "1787901300.000100")
+        self.assertEqual(conversation.oldest_synced_ts, recent_slack_ts("1787901300.000100"))
         self.assertTrue(
             conversation.deliveries.filter(
                 source_message_id__startswith=slack_dm_mirror.HISTORY_STATE_PREFIX
@@ -2721,7 +2722,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
         conversation.refresh_from_db()
         self.assertIsNotNone(conversation.history_backfilled_at)
         refreshed = conversation.deliveries.get(
-            source_message_id="1787901300.000100",
+            source_message_id=recent_slack_ts("1787901300.000100"),
             operation=CommunityBridgeDeliveryType.CREATE,
         )
         self.assertEqual(refreshed.encrypted_text, "re-read under renewed consent")
@@ -2732,8 +2733,8 @@ class SlackDmMirrorOwnerTests(APITestCase):
         deliver_private,
     ):
         _, conversation = self._live_conversation()
-        parent_ts = "1787901100.000100"
-        child_ts = "1787901101.000100"
+        parent_ts = recent_slack_ts("1787901100.000100")
+        child_ts = recent_slack_ts("1787901101.000100")
         parent = SlackDmMirrorDelivery.objects.create(
             conversation=conversation,
             source_platform=CommunityBridgePlatform.SLACK,
@@ -2803,8 +2804,8 @@ class SlackDmMirrorOwnerTests(APITestCase):
         deliver_private,
     ):
         _, conversation = self._live_conversation()
-        parent_ts = "1787901399.000100"
-        child_ts = "1787901400.000100"
+        parent_ts = recent_slack_ts("1787901399.000100")
+        child_ts = recent_slack_ts("1787901400.000100")
         deliver_private.side_effect = [
             {"message_id": "a" * 64},
             {"message_id": "b" * 64},
@@ -2857,7 +2858,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
         deliver_private,
     ):
         self._live_conversation()
-        target_ts = "1787901402.000100"
+        target_ts = recent_slack_ts("1787901402.000100")
         deliver_private.side_effect = [
             {"message_id": "a" * 64},
             {"message_id": "b" * 64},
@@ -2870,7 +2871,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
                     "type": "message",
                     "subtype": "message_changed",
                     "channel": "DONE",
-                    "event_ts": "1787901403.000100",
+                    "event_ts": recent_slack_ts("1787901403.000100"),
                     "message": {
                         "ts": target_ts,
                         "user": "UTWO",
@@ -2911,7 +2912,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
         deliver_private,
     ):
         _, conversation = self._live_conversation()
-        target_ts = "1787901404.000100"
+        target_ts = recent_slack_ts("1787901404.000100")
         SlackDmMirrorDelivery.objects.create(
             conversation=conversation,
             source_platform=CommunityBridgePlatform.SLACK,
@@ -2935,7 +2936,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
                     "type": "message",
                     "subtype": "message_changed",
                     "channel": "DONE",
-                    "event_ts": "1787901406.000100",
+                    "event_ts": recent_slack_ts("1787901406.000100"),
                     "message": {
                         "ts": target_ts,
                         "user": "UTWO",
@@ -2953,7 +2954,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
                     "type": "message",
                     "subtype": "message_changed",
                     "channel": "DONE",
-                    "event_ts": "1787901405.000100",
+                    "event_ts": recent_slack_ts("1787901405.000100"),
                     "message": {
                         "ts": target_ts,
                         "user": "UTWO",
@@ -2978,7 +2979,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
         child = SlackDmMirrorDelivery.objects.create(
             conversation=conversation,
             source_platform=CommunityBridgePlatform.SLACK,
-            source_message_id="1787901401.000100",
+            source_message_id=recent_slack_ts("1787901401.000100"),
             source_author_id="UTWO",
             operation=CommunityBridgeDeliveryType.CREATE,
             encrypted_text="live reply",
@@ -3045,7 +3046,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
     ):
         _, conversation = self._live_conversation()
         web_client.return_value.chat_postMessage.return_value = {
-            "ts": "1787901500.000100"
+            "ts": recent_slack_ts("1787901500.000100")
         }
         result = ingest_mlai_dm_event(
             {
@@ -3085,7 +3086,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
         _, conversation = self._live_conversation()
         conversation.history_backfilled_at = timezone.now()
         conversation.save(update_fields=("history_backfilled_at", "updated_at"))
-        source_ts = "1787901200.000100"
+        source_ts = recent_slack_ts("1787901200.000100")
         dead = SlackDmMirrorDelivery.objects.create(
             conversation=conversation,
             source_platform=CommunityBridgePlatform.SLACK,
@@ -3138,7 +3139,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
         delivery = SlackDmMirrorDelivery.objects.create(
             conversation=conversation,
             source_platform=CommunityBridgePlatform.SLACK,
-            source_message_id="1787901000.000100",
+            source_message_id=recent_slack_ts("1787901000.000100"),
             source_author_id="UTWO",
             operation=CommunityBridgeDeliveryType.CREATE,
             metadata={"backfill": True},
@@ -3196,7 +3197,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
         held = SlackDmMirrorDelivery.objects.create(
             conversation=conversation,
             source_platform=CommunityBridgePlatform.SLACK,
-            source_message_id="1787900999.000100",
+            source_message_id=recent_slack_ts("1787900999.000100"),
             source_author_id="UTWO",
             operation=CommunityBridgeDeliveryType.CREATE,
             encrypted_text="held until the scan commits",
@@ -3243,7 +3244,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
         dead = SlackDmMirrorDelivery.objects.create(
             conversation=conversation,
             source_platform=CommunityBridgePlatform.SLACK,
-            source_message_id="1787900900.000100",
+            source_message_id=recent_slack_ts("1787900900.000100"),
             source_author_id="UTWO",
             operation=CommunityBridgeDeliveryType.CREATE,
             status=CommunityBridgeDeliveryStatus.DEAD,
@@ -3253,12 +3254,12 @@ class SlackDmMirrorOwnerTests(APITestCase):
             {
                 "messages": [
                     {
-                        "ts": "1787901000.000100",
+                        "ts": recent_slack_ts("1787901000.000100"),
                         "user": "UONE",
                         "text": "newer",
                     },
                     {
-                        "ts": "1787900900.000100",
+                        "ts": recent_slack_ts("1787900900.000100"),
                         "user": "UTWO",
                         "text": "recovered",
                     },
@@ -3269,7 +3270,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
             {
                 "messages": [
                     {
-                        "ts": "1787900800.000100",
+                        "ts": recent_slack_ts("1787900800.000100"),
                         "user": "UTWO",
                         "text": "oldest",
                     }
@@ -3282,7 +3283,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
         self.assertEqual(process_due_history_backfills(), 1)
         conversation.refresh_from_db()
         self.assertIsNone(conversation.history_backfilled_at)
-        self.assertEqual(conversation.oldest_synced_ts, "1787900900.000100")
+        self.assertEqual(conversation.oldest_synced_ts, recent_slack_ts("1787900900.000100"))
         dead.refresh_from_db()
         self.assertEqual(dead.status, CommunityBridgeDeliveryStatus.PENDING)
         self.assertEqual(dead.encrypted_text, "recovered")
@@ -3301,7 +3302,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
         self.assertEqual(grant.history_days, 30)
         self.assertIn("oldest", first_kwargs)
         self.assertEqual(second_kwargs["oldest"], first_kwargs["oldest"])
-        self.assertEqual(second_kwargs["latest"], "1787900900.000100")
+        self.assertEqual(second_kwargs["latest"], recent_slack_ts("1787900900.000100"))
         self.assertFalse(second_kwargs["inclusive"])
 
     def test_history_rate_limit_honors_the_full_retry_after_value(self):
@@ -3422,7 +3423,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
                         "event": {
                             "type": "message",
                             "channel": "DONE",
-                            "ts": "1787901200.000100",
+                            "ts": recent_slack_ts("1787901200.000100"),
                             "user": "UONE",
                             "text": "from MLAI",
                             "client_msg_id": kwargs["client_msg_id"],
@@ -3439,7 +3440,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
             create_attempts += 1
             if create_attempts == 1:
                 return accepted_then_timeout(**kwargs)
-            return {"ts": "1787901200.000100"}
+            return {"ts": recent_slack_ts("1787901200.000100")}
 
         web_client.return_value.chat_postMessage.side_effect = create_side_effect
         payload = {
@@ -3488,7 +3489,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
         web_client,
     ):
         grant, conversation = self._live_conversation()
-        slack_ts = "1787901240.000100"
+        slack_ts = recent_slack_ts("1787901240.000100")
         echo_key = slack_dm_mirror._slack_echo_key(
             operation=CommunityBridgeDeliveryType.EDIT,
             target_message_id=slack_ts,
@@ -3519,7 +3520,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
                     "type": "message",
                     "subtype": "message_changed",
                     "channel": "DONE",
-                    "event_ts": "1787901241.000100",
+                    "event_ts": recent_slack_ts("1787901241.000100"),
                     "message": {
                         "ts": slack_ts,
                         "user": grant.slack_user_id,
@@ -3542,7 +3543,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
     def test_ambiguous_outbound_edit_echo_is_ignored_before_retry(self, web_client):
         _, conversation = self._live_conversation()
         source_event_id = "a" * 64
-        slack_ts = "1787901250.000100"
+        slack_ts = recent_slack_ts("1787901250.000100")
         SlackDmMirrorDelivery.objects.create(
             conversation=conversation,
             source_platform=CommunityBridgePlatform.BUZZ,
@@ -3569,7 +3570,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
                             "type": "message",
                             "subtype": "message_changed",
                             "channel": "DONE",
-                            "event_ts": "1787901251.000100",
+                            "event_ts": recent_slack_ts("1787901251.000100"),
                             "message": {
                                 "ts": slack_ts,
                                 "user": "UONE",
@@ -3629,7 +3630,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
     ):
         _, conversation = self._live_conversation()
         root_event_id = "a" * 64
-        root_slack_ts = "1787901300.000100"
+        root_slack_ts = recent_slack_ts("1787901300.000100")
         conversation.deliveries.create(
             source_platform=CommunityBridgePlatform.BUZZ,
             source_message_id=root_event_id,
@@ -3645,7 +3646,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
             completed_at=timezone.now(),
         )
         client = web_client.return_value
-        client.chat_postMessage.return_value = {"ts": "1787901301.000100"}
+        client.chat_postMessage.return_value = {"ts": recent_slack_ts("1787901301.000100")}
         client.chat_update.return_value = {"ts": root_slack_ts}
 
         reply_event_id = "b" * 64
@@ -3751,7 +3752,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
                     "type": "message",
                     "subtype": "message_changed",
                     "channel": "DONE",
-                    "event_ts": "1787901302.000100",
+                    "event_ts": recent_slack_ts("1787901302.000100"),
                     "message": {
                         "ts": root_slack_ts,
                         "user": "UONE",
@@ -3873,7 +3874,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
         delivery = SlackDmMirrorDelivery.objects.create(
             conversation=conversation,
             source_platform=CommunityBridgePlatform.SLACK,
-            source_message_id="1787901303.000100",
+            source_message_id=recent_slack_ts("1787901303.000100"),
             source_author_id="UTWO",
             operation=CommunityBridgeDeliveryType.CREATE,
             encrypted_text="must not leave after revocation",
@@ -3924,7 +3925,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
             mlai_channel_id=uuid.uuid4(),
             status=SlackDmMirrorConversationStatus.LIVE,
         )
-        parent_source_id = "1787901400.000100"
+        parent_source_id = recent_slack_ts("1787901400.000100")
         parent_destination_id = "a" * 64
         SlackDmMirrorDelivery.objects.create(
             conversation=conversation,
@@ -3940,7 +3941,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
             available_at=timezone.now(),
             completed_at=timezone.now(),
         )
-        reply_source_id = "1787901401.000100"
+        reply_source_id = recent_slack_ts("1787901401.000100")
         SlackDmMirrorDelivery.objects.create(
             conversation=conversation,
             source_platform=CommunityBridgePlatform.SLACK,
@@ -4087,7 +4088,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
         delivery = SlackDmMirrorDelivery.objects.create(
             conversation=conversation,
             source_platform=CommunityBridgePlatform.SLACK,
-            source_message_id="1787901300.000100",
+            source_message_id=recent_slack_ts("1787901300.000100"),
             source_author_id="UTWO",
             operation=CommunityBridgeDeliveryType.CREATE,
             status=CommunityBridgeDeliveryStatus.COMPLETED,
@@ -4298,11 +4299,11 @@ class SlackDmMirrorOwnerTests(APITestCase):
         child = SlackDmMirrorDelivery.objects.create(
             conversation=conversation,
             source_platform=CommunityBridgePlatform.SLACK,
-            source_message_id="1787902001.000100",
+            source_message_id=recent_slack_ts("1787902001.000100"),
             source_author_id="UTWO",
             operation=CommunityBridgeDeliveryType.CREATE,
             encrypted_text="late reply",
-            metadata={"thread_ts": "1787902000.000100"},
+            metadata={"thread_ts": recent_slack_ts("1787902000.000100")},
             available_at=timezone.now(),
         )
 
@@ -4329,11 +4330,11 @@ class SlackDmMirrorOwnerTests(APITestCase):
         deliver_private,
     ):
         _, conversation = self._live_conversation()
-        parent_ts = "1787902010.000100"
+        parent_ts = recent_slack_ts("1787902010.000100")
         child = SlackDmMirrorDelivery.objects.create(
             conversation=conversation,
             source_platform=CommunityBridgePlatform.SLACK,
-            source_message_id="1787902011.000100",
+            source_message_id=recent_slack_ts("1787902011.000100"),
             source_author_id="UTWO",
             operation=CommunityBridgeDeliveryType.CREATE,
             encrypted_text="eventually threaded",
@@ -4378,7 +4379,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
     @patch("integrations.services.slack_dm_mirror.BuzzBridgeClient.deliver_private")
     def test_delete_waits_for_a_late_create_target(self, deliver_private):
         _, conversation = self._live_conversation()
-        target_ts = "1787902015.000100"
+        target_ts = recent_slack_ts("1787902015.000100")
         deletion = SlackDmMirrorDelivery.objects.create(
             conversation=conversation,
             source_platform=CommunityBridgePlatform.SLACK,
@@ -4430,7 +4431,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
         grant, conversation = self._live_conversation()
         grant.history_days = 0
         grant.save(update_fields=("history_days", "updated_at"))
-        slack_ts = "1787902020.000100"
+        slack_ts = recent_slack_ts("1787902020.000100")
         outbound_create = SlackDmMirrorDelivery.objects.create(
             conversation=conversation,
             source_platform=CommunityBridgePlatform.BUZZ,
@@ -4508,7 +4509,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
             ).exists()
         )
 
-        deleted_slack_ts = "1787902021.000100"
+        deleted_slack_ts = recent_slack_ts("1787902021.000100")
         SlackDmMirrorDelivery.objects.create(
             conversation=conversation,
             source_platform=CommunityBridgePlatform.BUZZ,
@@ -4578,7 +4579,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
 
     def test_history_completes_ambiguous_outbound_create_edit_and_reaction(self):
         grant, conversation = self._live_conversation()
-        slack_ts = "1787902025.000100"
+        slack_ts = recent_slack_ts("1787902025.000100")
         client_message_id = str(uuid.uuid4())
         outbound_create = SlackDmMirrorDelivery.objects.create(
             conversation=conversation,
@@ -4650,7 +4651,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
                 "client_msg_id": client_message_id,
                 "user": grant.slack_user_id,
                 "text": "edited in MLAI",
-                "edited": {"ts": "1787902026.000100"},
+                "edited": {"ts": recent_slack_ts("1787902026.000100")},
                 "reactions": [
                     {"name": "thumbsup", "users": [grant.slack_user_id]}
                 ],
@@ -4744,7 +4745,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
         delivery = SlackDmMirrorDelivery.objects.create(
             conversation=conversation,
             source_platform=CommunityBridgePlatform.SLACK,
-            source_message_id="1787902030.000100",
+            source_message_id=recent_slack_ts("1787902030.000100"),
             source_author_id="UTWO",
             operation=CommunityBridgeDeliveryType.CREATE,
             encrypted_text="private body",
@@ -4793,7 +4794,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
             rows.append(SlackDmMirrorDelivery.objects.create(
                 conversation=conversation,
                 source_platform=CommunityBridgePlatform.SLACK,
-                source_message_id=f"178790203{index}.000100",
+                source_message_id=recent_slack_ts(f"178790203{index}.000100"),
                 source_author_id="UTWO",
                 operation=CommunityBridgeDeliveryType.CREATE,
                 encrypted_text="",
@@ -4819,7 +4820,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
         current = SlackDmMirrorDelivery.objects.create(
             conversation=conversation,
             source_platform=CommunityBridgePlatform.SLACK,
-            source_message_id="1787902040.000100",
+            source_message_id=recent_slack_ts("1787902040.000100"),
             source_author_id="UTWO",
             operation=CommunityBridgeDeliveryType.CREATE,
             encrypted_text="",
@@ -4830,7 +4831,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
         permanent = SlackDmMirrorDelivery.objects.create(
             conversation=conversation,
             source_platform=CommunityBridgePlatform.SLACK,
-            source_message_id="1787902041.000100",
+            source_message_id=recent_slack_ts("1787902041.000100"),
             source_author_id="UTWO",
             operation=CommunityBridgeDeliveryType.CREATE,
             encrypted_text="",
@@ -4861,7 +4862,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
 
     def test_completed_mutation_echo_survives_slack_final_retry_jitter(self):
         grant, conversation = self._live_conversation()
-        slack_ts = "1787902050.000100"
+        slack_ts = recent_slack_ts("1787902050.000100")
         echo_key = slack_dm_mirror._slack_echo_key(
             operation=CommunityBridgeDeliveryType.EDIT,
             target_message_id=slack_ts,
@@ -4892,7 +4893,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
                     "type": "message",
                     "subtype": "message_changed",
                     "channel": "DONE",
-                    "event_ts": "1787902051.000100",
+                    "event_ts": recent_slack_ts("1787902051.000100"),
                     "message": {
                         "ts": slack_ts,
                         "user": grant.slack_user_id,
@@ -4915,7 +4916,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
         delivery = SlackDmMirrorDelivery.objects.create(
             conversation=conversation,
             source_platform=CommunityBridgePlatform.SLACK,
-            source_message_id="1787902060.000100",
+            source_message_id=recent_slack_ts("1787902060.000100"),
             source_author_id="UTWO",
             operation=CommunityBridgeDeliveryType.CREATE,
             encrypted_text="in flight",
