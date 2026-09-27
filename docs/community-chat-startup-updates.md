@@ -139,3 +139,72 @@ membership, cached-message exclusion, Luma and Analytics ranges, and the existin
 date identity and source-evidence contracts. Cached Slack/Linear classification is reset once per run, only for captured resources with in-window activity, so a new rolling draft can reuse recent inputs without deleting prior evidence or content. No migrations or database-backed suites were run for this
 change. Real provider consent, fresh-data latency, and Django/Valley round trips
 remain release acceptance checks; these edits are not evidence of deployment.
+
+## Native connection completion — 27 September 2026
+
+The Chat sources catalog now includes `google_search_console` and `github` as
+website authorizations. Both explicitly set `usableForUpdates: false` and
+`enabled: false`; they are not accepted as update-generation input sources.
+They reuse the existing organization-scoped Google and GitHub credential stores.
+Google Search Console requests the website baseline scope, separately from Gmail.
+Disconnect is not advertised for these cards because Google shares its credential
+row with Gmail and GitHub website setup owns repository binding.
+
+`POST /api/v1/community-chat/startups/connect/<provider>/` accepts the selected
+owned `companyId` and returns `authorizationUrl`. The canonical providers are
+Gmail, Stripe, Xero, Bank Feed, Notion, Google Drive, Slack, Linear, Google
+Analytics, Google Search Console and GitHub, using their snake-case keys. The
+legacy `google` key and hyphenated Drive/Analytics/Bank Feed/Search Console keys
+remain accepted. Humanitix and Luma use `apiKey` instead; a successful Chat
+response includes `connected`, derived from their provider's persisted catalog
+status rather than merely returning HTTP 200.
+
+Browser callers omit `returnTo`. Completion goes to the trusted Chat frontend's
+`/my-startup/connections?company_id=<id>&connected=<provider>`. Native production
+clients send `returnTo: "mobile"` (desktop uses the same value) to receive
+`mlaichat://connections?company_id=<id>&provider=<provider>`. The desktop
+development application sends `returnTo: "desktop-dev"` for the identical
+callback on `mlaichat-dev`. These are fixed allowlisted destinations; arbitrary
+caller-supplied return URLs are not accepted. No tokens, email addresses,
+repository names or authorization codes are sent back through the native URI.
+Clients refresh the company-scoped catalog to determine actual success.
+
+OAuth states are signed, short-lived and consumed once through the shared
+cache. Gmail and the external connector callbacks recover the initiating
+account from state without requiring a browser login cookie, including when
+the browser happens to be logged into a different MLAI account. Chat sessions
+and company ownership are checked again before the token exchange. GitHub
+also checks that the selected company's website has not changed. Native
+redirects use a dedicated response class after complete URI validation, since
+Django's ordinary redirect rejects custom schemes. Provider errors do not
+manufacture a successful source state; users can return to Chat and retry.
+
+The GitHub installation flow still requires repository access selection and,
+when multiple repositories are granted, website setup must choose the publishing
+repository. A website domain is required. New Chat connections do not send
+legacy Slack notifications or start website scans as a side effect.
+
+Humanitix and Luma require a key from the user's provider dashboard; this code
+does not offer OAuth for them. Bank Feed requires configured Basiq credentials
+and the provider's bank consent journey; Notion requires configured OAuth plus
+page access approval. Stripe honors the existing registered OAuth scope: its
+default is read-only, but a Platform registration may require read/write and
+cannot safely be changed to an Extension by altering this endpoint alone.
+Google Drive authorization remains separate from the unimplemented update
+importer.
+
+Database-free regression validation uses synthetic OAuth responses and blocks
+database and network access, with no migrations:
+
+```sh
+python scripts/test_without_database.py \
+  community_chat.tests.test_connection_oauth_handoffs \
+  community_chat.tests.test_startup_lifecycle \
+  community_chat.tests.test_startup_activity_defaults
+```
+
+The tests exercise provider authorization URLs, account/organization-bound token
+storage adapters, Google and GitHub native HTTP redirects, missing cookies,
+unrelated browser accounts, state expiry/replay, revoked sessions, return-URI
+allowlisting and API-key confirmation. This is not evidence of deployed
+provider approval, live credential persistence or native OS callback delivery.
