@@ -17,11 +17,12 @@ from founder_tools.views import FounderToolsCompanyView, FounderToolsActiveCompa
 from integrations.api_views_connectors import ConnectorSourcesStatusView
 from integrations.services.external_connectors import ConnectorConfigurationError
 from startup_updates.models import MonthlyUpdateDraft
+from startup_updates.monthly_groups import latest_monthly_draft, monthly_representatives, requested_month
 from vibe_raising import views as founder
 from workflow_runs.models import ContentFactoryRun
 from .presentation import update_payload
 from .lifecycle import delete_update, source_capabilities, validate_generation_sources
-from .source_preferences import ACTIVITY_WINDOW_DAYS, source_preferences
+from .source_preferences import source_preferences
 
 
 def enabled():
@@ -90,7 +91,11 @@ class UpdatesView(ChatStartupAccess, founder.VibeRaisingMonthlyUpdateView):
     def get(self, request):
         drafts = MonthlyUpdateDraft.objects.filter(organization=self.company.organization).select_related(
             "organization", "current_revision__snapshot", "published_revision__snapshot"
-        ).order_by("-month", "-id")
+        )
+        month = requested_month(request.query_params.get("month"))
+        if month:
+            drafts = drafts.filter(month=month)
+        drafts = monthly_representatives(drafts).order_by("-month", "-id")
         try:
             offset = max(0, int(request.query_params.get("offset", 0)))
         except (ValueError, TypeError, DjangoValidationError):
@@ -117,10 +122,20 @@ class UpdateView(ChatStartupAccess, APIView):
             "organization", "current_revision__snapshot", "published_revision__snapshot"
         ), pk=update_id, organization=self.company.organization)
         published = request.query_params.get("version") == "published"
+        siblings = MonthlyUpdateDraft.objects.filter(
+            organization=self.company.organization, month=draft.month,
+        ).select_related("organization", "current_revision__snapshot", "published_revision__snapshot")
+        if not published:
+            # Old owner links open the monthly working copy. Retain every earlier
+            # saved record below it; do not concatenate private and approved text.
+            draft = latest_monthly_draft(siblings, draft.month)
         if published and not draft.published_revision_id:
             raise NotFound("No approved version exists yet.")
         return Response({"update": update_payload(draft, published=published),
-            "communityPreview": update_payload(draft, published=published, community=True)})
+            "communityPreview": update_payload(draft, published=published, community=True),
+            "previousUpdates": [] if published else [
+                update_payload(row) for row in siblings.exclude(pk=draft.pk).order_by("-updated_at", "-pk")
+            ]})
 
 
 class PublishView(ChatStartupAccess, founder.VibeRaisingMonthlyUpdatePublishView):
@@ -147,7 +162,7 @@ class CommunityView(ChatStartupAccess, APIView):
             published_revision__approval__audience_visibility=["community"],
             published_revision__approval__content_hash=F("published_revision__content_hash"),
         ).select_related("organization", "published_revision__snapshot").order_by("-published_at", "-id")
-        page = list(rows[offset:offset + 51])
+        page = list(monthly_representatives(rows, published=True)[offset:offset + 51])
         return Response({"updates": [update_payload(row, published=True, community=True) for row in page[:50]],
             "nextOffset": offset + 50 if len(page) > 50 else None})
 
@@ -167,7 +182,7 @@ class SourcesView(ChatStartupAccess, ConnectorSourcesStatusView):
 
 
 class GenerateView(ChatStartupAccess, founder.VibeRaisingEmailDraftStartView):
-    activity_window_days = ACTIVITY_WINDOW_DAYS
+    automatic_source_scope = True
 
     def post(self, request):
         validate_generation_sources(request.data)

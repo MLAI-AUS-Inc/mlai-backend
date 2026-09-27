@@ -1,7 +1,6 @@
-"""Independent founder publications; month-keyed callers have a separate legacy slot."""
-from datetime import date, datetime, time, timedelta
+"""One working update per startup/month, retaining older dated records as history."""
+from datetime import date, timedelta
 from uuid import UUID
-from zoneinfo import ZoneInfo
 
 from django.db import transaction
 from django.utils import timezone
@@ -11,33 +10,40 @@ from rest_framework.exceptions import NotFound, ValidationError
 from organizations.models import Organization
 from startup_updates.models import MonthlyUpdateDraft
 from startup_updates.revisions import RevisionConflict
+from startup_updates.monthly_groups import latest_monthly_draft
 
 
 @transaction.atomic
 def resolve_update(organization, *, month, update_id=None, creation_key=None, update_date=None):
+    """Serialize month creation and resume its existing copy across all clients."""
     Organization.objects.select_for_update().get(pk=organization.pk)
     drafts = MonthlyUpdateDraft.objects.filter(organization=organization)
+    month = month.replace(day=1)
+    requested = None
     if update_id:
-        draft = drafts.filter(pk=update_id).first()
-        if draft is None:
+        requested = drafts.filter(pk=update_id).first()
+        if requested is None:
             raise NotFound("This update does not belong to the selected startup.")
-        if creation_key and draft.creation_key and str(draft.creation_key) != str(creation_key):
-            raise RevisionConflict("The draft identity changed. Reopen this update.")
-        return draft, False
+        # An old link still belongs to its original reporting month.
+        month = requested.month.replace(day=1)
     if creation_key:
         try:
-            key = UUID(str(creation_key))
+            UUID(str(creation_key))
         except (ValueError, TypeError, AttributeError):
             raise ValidationError({"creationKey": "Use a valid draft creation key."})
-        month = update_date.replace(day=1) if update_date else month
-        return drafts.get_or_create(organization=organization, creation_key=key, defaults={"month": month, "update_date": update_date})
-    # An older client must never overwrite an arbitrary independent publication.
-    if drafts.filter(month=month, creation_key__isnull=False).exists():
-        raise RevisionConflict("Choose an update to edit, or reopen New update to create a separate draft.")
+    draft = latest_monthly_draft(drafts, month)
+    if draft is not None:
+        if requested is not None and draft.pk != requested.pk:
+            raise RevisionConflict("This saved version is part of a monthly update. Reopen the month to edit its latest version.")
+        return draft, False
+    # The existing nullable-key monthly constraint protects new months too.
+    # Compatibility creation keys can no longer allocate additional same-month rows.
     return drafts.monthly_slots().get_or_create(organization=organization, month=month)
 
 
+@transaction.atomic
 def run_update(run, month, *, create=False):
+    """Resolve worker writes to the same month identity as founder saves."""
     # ContentFactoryRun keeps organization in its request, not necessarily a FK.
     organization_id = (run.run_request or {}).get("organization_id")
     query = MonthlyUpdateDraft.objects.filter(organization_id=organization_id)
@@ -46,13 +52,21 @@ def run_update(run, month, *, create=False):
         draft = query.filter(pk=update_id).first()
         if draft is None or draft.month != month:
             raise RevisionConflict("This run targets a different update or reporting period.")
+        current = latest_monthly_draft(query, month)
+        if current is not None and current.pk != draft.pk:
+            raise RevisionConflict("A newer monthly update exists. Reopen the month before generating again.")
         return draft
-    return query.monthly_slots().get_or_create(organization_id=organization_id, month=month)[0] if create else query.monthly_slots().filter(month=month).first()
+    if create:
+        Organization.objects.select_for_update().get(pk=organization_id)
+    current = latest_monthly_draft(query, month)
+    if current is not None or not create:
+        return current
+    return query.monthly_slots().get_or_create(organization_id=organization_id, month=month)[0]
 
 
 def parse_generation_date(data, *, update_id):
-    """Require a valid explicit date; only an existing update may omit it."""
-    if update_id and "updateDate" not in data:
+    """Accept old clients' explicit dates; monthly clients need only a period."""
+    if "updateDate" not in data:
         return None
     try:
         return date.fromisoformat(str(data.get("updateDate")))
@@ -61,9 +75,7 @@ def parse_generation_date(data, *, update_id):
 
 
 def default_generation_date(draft, *, today):
-    """Choose a date for an existing update when an older client omits one."""
-    if draft.update_date:
-        return draft.update_date
+    """Use today's cutoff, or the end of the monthly update's historical month."""
     month = draft.month
     if today < month:
         raise ValidationError({"updateDate": "Choose today or an earlier reporting month."})
@@ -73,8 +85,12 @@ def default_generation_date(draft, *, today):
 
 def previous_publications(organization, update_id, update_date):
     """Chronology comes from the published revision, even while its date is edited."""
+    from startup_updates.monthly_groups import monthly_representatives
     publications = []
-    for item in MonthlyUpdateDraft.objects.filter(organization=organization, published_at__isnull=False).exclude(pk=update_id).select_related("published_revision"):
+    rows = MonthlyUpdateDraft.objects.filter(organization=organization,
+        month__lt=update_date.replace(day=1), published_at__isnull=False)
+    rows = monthly_representatives(rows, published=True).exclude(pk=update_id).select_related("published_revision")
+    for item in rows:
         memo = item.published_revision.structured_memo if item.published_revision_id else item.structured_memo
         value = memo.get("update_date") or (None if item.published_revision_id else (item.update_date.isoformat() if item.update_date else None))
         key = value or item.month.isoformat()[:7]
@@ -84,36 +100,28 @@ def previous_publications(organization, update_id, update_date):
 
 
 def narrative_window(organization, draft, update_date, *, requested_start=None, requested_end=None, default_days=None):
+    """Pin connector evidence to the update's calendar month, even on later edits."""
+    from startup_updates.activity_scope import monthly_source_period
     zone_name = getattr(getattr(organization, "startup_profile", None), "reporting_timezone", "UTC")
-    zone = ZoneInfo(zone_name)
-    now = timezone.now()
-    if update_date > now.astimezone(zone).date():
-        raise ValidationError({"updateDate": "Choose today or an earlier date."})
-    end = min(datetime.combine(update_date + timedelta(days=1), time.min, zone), now).astimezone(zone)
-    start = end - timedelta(days=default_days) if default_days else datetime.combine(update_date.replace(day=1), time.min, zone)
-    publications = [] if default_days else previous_publications(organization, draft.pk, update_date)
-    for item, memo, prior_date in publications:
-        cutoff = (memo.get("narrative_period") or {}).get("end")
-        if not cutoff or len(prior_date) != 10:
-            continue
-        candidate = parse_datetime(str(cutoff))
-        if candidate and timezone.is_aware(candidate) and candidate < end:
-            start = candidate
-            break
+    if update_date.replace(day=1) != draft.month:
+        raise ValidationError({"updateDate": "Keep the date within this update's reporting month."})
+    try:
+        period = monthly_source_period(draft.month, timezone_name=zone_name, as_of=timezone.now())
+    except ValueError as exc:
+        raise ValidationError({"updateDate": str(exc)}) from exc
+    start, end = parse_datetime(period["start"]), parse_datetime(period["end"])
     for value, field in ((requested_start, "start"), (requested_end, "end")):
         if not value:
             continue
         parsed = parse_datetime(str(value))
         if parsed is None or timezone.is_naive(parsed):
             raise ValidationError({"narrativePeriod": "Use timestamps with an explicit timezone."})
-        if field == "start":
-            start = parsed
-        else:
-            end = parsed
-    limit = min(datetime.combine(update_date + timedelta(days=1), time.min, zone), now)
-    if start >= end or end > limit:
-        raise ValidationError({"narrativePeriod": "Choose a source range ending on or before the update date and current time."})
-    return {"start": start.isoformat(), "end": end.isoformat(), "timezone": zone_name, "end_exclusive": True}
+        if parsed < start or parsed > end:
+            raise ValidationError({"narrativePeriod": "Keep connector sources within this update's month."})
+        period[field] = parsed.isoformat()
+    if parse_datetime(period["start"]) >= parse_datetime(period["end"]):
+        raise ValidationError({"narrativePeriod": "Choose a source range with an end after its start."})
+    return period
 
 
 def identity_payload(draft, memo=None):

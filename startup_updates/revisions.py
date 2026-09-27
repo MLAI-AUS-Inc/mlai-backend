@@ -134,9 +134,12 @@ def capture_snapshot(organization, month, *, run=None, manual_metrics=None, base
                 amount = decimal_value(net.get("value")) if net else None
                 point["net"] = float(amount) if amount is not None and not ({"revenue", "monthlyCosts", "netProfitLoss"} & set(manual_metrics or {})) else None
                 point["is_partial"] = period["is_partial"]
-    narrative = (run.run_request or {}).get("narrative_period") if run else None
+    from startup_updates.activity_scope import run_activity_period
+    narrative = run_activity_period(run.run_request or {}) if run else None
     payload["narrative_period"] = copy.deepcopy(narrative)
-    events = StartupEvent.objects.filter(organization=organization)
+    if run:
+        payload["source_period_contract"] = (run.run_request or {}).get("source_period_contract")
+    events = StartupEvent.objects.filter(organization=organization, month_bucket=month)
     if narrative:
         zone = __import__("zoneinfo").ZoneInfo(narrative["timezone"])
         start = parse_datetime(narrative["start"]).astimezone(zone)
