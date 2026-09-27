@@ -25,8 +25,11 @@ from integrations.services.external_connectors import (
     connector_oauth_state_user_id,
     complete_oauth_callback,
     normalize_provider,
+    _save_state,
+    _consume_state,
 )
 from integrations import http_client as requests
+from integrations.services.chat_oauth_return import oauth_return_redirect
 
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 USERINFO_URL = "https://openidconnect.googleapis.com/v1/userinfo"
@@ -133,6 +136,10 @@ def _known_frontend_origins() -> Set[str]:
 
 
 def _normalize_google_next(next_url: Optional[str]) -> Optional[str]:
+    from integrations.services.chat_oauth_return import native_chat_connection_return_url
+    native_return = native_chat_connection_return_url(next_url)
+    if native_return:
+        return native_return
     if not next_url:
         return None
 
@@ -255,9 +262,6 @@ def google_connect(request):
 
     _ensure_django_session_for_user(request, user)
 
-    state = secrets.token_urlsafe(32)
-    request.session[GOOGLE_OAUTH_STATE_SESSION_KEY] = state
-
     # Attach the connection to the founder's chosen startup (?company_id=,
     # validated as their own) or the active one. resolve_connector_organization
     # also creates the org + binding if needed. Carry it through the OAuth
@@ -273,8 +277,10 @@ def google_connect(request):
 
     try:
         organization = resolve_connector_organization(user, company=company)
-    except Exception:  # pragma: no cover - never block connect on org resolution
-        organization = None
+    except Exception:
+        # Do not silently turn a selected startup into an unscoped credential.
+        logger.exception("Unable to resolve Google OAuth startup for user %s", user.pk)
+        return HttpResponseBadRequest("This startup could not be connected. Please try again.")
     if organization is not None:
         request.session[GOOGLE_OAUTH_ORG_SESSION_KEY] = organization.id
     else:
@@ -287,6 +293,10 @@ def google_connect(request):
         request.session.pop(GOOGLE_OAUTH_NEXT_SESSION_KEY, None)
 
     scopes = _google_oauth_scopes_for_request(request)
+    state = _save_state(request, "gmail", next_url or _default_google_success_url(), {
+        "organization_id": organization.id if organization else None,
+    })
+    request.session[GOOGLE_OAUTH_STATE_SESSION_KEY] = state
 
     params = {
         "client_id": settings.GOOGLE_OAUTH_CLIENT_ID,
@@ -308,20 +318,37 @@ def google_callback(request):
     Handles the callback from Google.
     """
     user = _resolve_google_oauth_user(request)
+    user_id = connector_oauth_state_user_id(provider="gmail", state=request.GET.get("state", ""))
+    if user_id is not None and str(getattr(user, "pk", "")) != str(user_id):
+        from django.contrib.auth import get_user_model
+        user = get_user_model().objects.filter(pk=user_id, is_active=True).first()
     if user is None:
         return redirect(_vibe_raising_login_url(None))
+    request.user = user
 
     # 1) Validate state
     state = request.GET.get("state")
-    if not state or state != request.session.get(GOOGLE_OAUTH_STATE_SESSION_KEY):
-        return HttpResponseBadRequest("Invalid state")
-
+    legacy_session_match = bool(state and state == request.session.get(GOOGLE_OAUTH_STATE_SESSION_KEY))
+    if legacy_session_match and ":" not in state:
+        state_payload = {
+            "next": request.session.get(GOOGLE_OAUTH_NEXT_SESSION_KEY),
+            "organization_id": request.session.get(GOOGLE_OAUTH_ORG_SESSION_KEY),
+        }
+    else:
+        try:
+            state_payload = _consume_state(request, "gmail", state)
+        except ConnectorOAuthError:
+            return HttpResponseBadRequest("Invalid state. Start again in MLAI Chat.")
     request.session.pop(GOOGLE_OAUTH_STATE_SESSION_KEY, None)
-    success_url = _normalize_google_next(request.session.pop(GOOGLE_OAUTH_NEXT_SESSION_KEY, None))
-    org_id = request.session.pop(GOOGLE_OAUTH_ORG_SESSION_KEY, None)
+    request.session.pop(GOOGLE_OAUTH_NEXT_SESSION_KEY, None)
+    request.session.pop(GOOGLE_OAUTH_ORG_SESSION_KEY, None)
+    success_url = _normalize_google_next(state_payload.get("next"))
+    org_id = state_payload.get("organization_id")
     from organizations.models import Organization
 
     organization = Organization.objects.filter(id=org_id).first() if org_id else None
+    if org_id and organization is None:
+        return HttpResponseBadRequest("The startup selected for this connection no longer exists.")
 
     # 2) Handle errors
     if request.GET.get("error"):
@@ -393,7 +420,7 @@ def google_callback(request):
     )
 
     # Redirect to frontend
-    return redirect(success_url or _default_google_success_url())
+    return oauth_return_redirect(success_url or _default_google_success_url())
 
 
 def connector_connect(request, provider):
@@ -441,22 +468,17 @@ def connector_callback(request, provider):
         return google_callback(request)
 
     user = _resolve_google_oauth_user(request)
-    if user is None and normalized_provider == "slack":
+    user_id = connector_oauth_state_user_id(provider=normalized_provider, state=str(request.GET.get("state") or ""))
+    if user_id is not None and str(getattr(user, "pk", "")) != str(user_id):
         from django.contrib.auth import get_user_model
-
-        user_id = connector_oauth_state_user_id(
-            provider=normalized_provider,
-            state=str(request.GET.get("state") or ""),
-        )
-        if user_id is not None:
-            user = get_user_model().objects.filter(id=user_id, is_active=True).first()
+        user = get_user_model().objects.filter(pk=user_id, is_active=True).first()
     if user is None:
         return redirect(_vibe_raising_login_url(None))
 
     request.user = user
 
     try:
-        return redirect(complete_oauth_callback(request, normalized_provider))
+        return oauth_return_redirect(complete_oauth_callback(request, normalized_provider))
     except ConnectorOAuthError as exc:
         return HttpResponseBadRequest(str(exc))
 
@@ -527,25 +549,37 @@ def github_callback(request):
     slack_user_id = oauth_state.slack_user_id
     job_id = oauth_state.job_id
     normalized_domain = oauth_state.domain
+    chat_company = None
+    if oauth_state.chat_context:
+        from founder_tools.models import VibeRaisingCompany
+        chat_company = VibeRaisingCompany.objects.select_related("organization").filter(
+            pk=oauth_state.chat_context["chat_company_id"],
+            profile__user_id=oauth_state.chat_context["user_id"],
+            organization__domain=normalized_domain,
+        ).first()
+        if chat_company is None:
+            return HttpResponseBadRequest("The startup selected for this connection changed. Start again in MLAI Chat.")
 
     # Exchange code for user access token
-    token_resp = requests.post(
-        "https://github.com/login/oauth/access_token",
-        headers={"Accept": "application/json"},
-        data={
-            "client_id": settings.GITHUB_OAUTH_CLIENT_ID,
-            "client_secret": settings.GITHUB_OAUTH_CLIENT_SECRET,
-            "code": code,
-        },
-        timeout=(3, 20),
-    )
-    token_resp.raise_for_status()
-    token_data = token_resp.json()
+    try:
+        token_resp = requests.post(
+            "https://github.com/login/oauth/access_token",
+            headers={"Accept": "application/json"},
+            data={"client_id": settings.GITHUB_OAUTH_CLIENT_ID,
+                "client_secret": settings.GITHUB_OAUTH_CLIENT_SECRET, "code": code},
+            timeout=(3, 20),
+        )
+        token_resp.raise_for_status()
+        token_data = token_resp.json()
+    except requests.RequestException:
+        return HttpResponseBadRequest("GitHub could not complete authorization. Please connect again.")
 
     if "error" in token_data:
         return HttpResponseBadRequest(f"GitHub Error: {token_data.get('error_description')}")
 
     access_token = token_data.get("access_token")
+    if not access_token:
+        return HttpResponseBadRequest("GitHub did not return an access token. Please connect again.")
     refresh_token = token_data.get("refresh_token")
     expires_in = token_data.get("expires_in")  # seconds until expiry (8 hours = 28800)
 
@@ -555,16 +589,16 @@ def github_callback(request):
         token_expires_at = timezone.now() + timedelta(seconds=expires_in)
     
     # Fetch GitHub user info
-    user_resp = requests.get(
-        "https://api.github.com/user",
-        headers={
-            "Authorization": f"Bearer {access_token}",
-            "Accept": "application/vnd.github.v3+json",
-        },
-        timeout=(3, 20),
-    )
-    user_resp.raise_for_status()
-    github_user = user_resp.json()
+    try:
+        user_resp = requests.get(
+            "https://api.github.com/user",
+            headers={"Authorization": f"Bearer {access_token}", "Accept": "application/vnd.github.v3+json"},
+            timeout=(3, 20),
+        )
+        user_resp.raise_for_status()
+        github_user = user_resp.json()
+    except requests.RequestException:
+        return HttpResponseBadRequest("GitHub account details could not be verified. Please connect again.")
     github_login = github_user.get("login")
 
     # Fetch repositories accessible via this installation
@@ -581,8 +615,12 @@ def github_callback(request):
         repos_resp.raise_for_status()
         repos_data = repos_resp.json()
         repos = repos_data.get("repositories", [])
+        if not isinstance(repos, list):
+            return HttpResponseBadRequest("GitHub repository access could not be verified. Please connect again.")
     except Exception:
-        repos = []
+        # The installation ID comes from the callback URL, not signed state.
+        # Never persist it unless GitHub confirms this user's access.
+        return HttpResponseBadRequest("GitHub repository access could not be verified. Please connect again.")
 
     repo_names = [str(repo.get("full_name") or "").strip() for repo in repos if repo.get("full_name")]
     selected_repo = repo_names[0] if len(repo_names) == 1 else None
@@ -630,10 +668,12 @@ def github_callback(request):
             return HttpResponseBadRequest("Missing domain in state")
 
         # Get or create organization
-        org, _ = Organization.objects.get_or_create(
-            domain=normalized_domain,
-            defaults={'name': normalized_domain}
-        )
+        if chat_company:
+            org = chat_company.organization
+        else:
+            org, _ = Organization.objects.get_or_create(
+                domain=normalized_domain, defaults={'name': normalized_domain}
+            )
 
         # Get or create config and update GitHub credentials
         config, _ = OrganizationContentConfig.objects.get_or_create(organization=org)
@@ -712,7 +752,7 @@ def github_callback(request):
             # unusable for both installations.
 
         # Notify via Slack and auto-trigger scan only when the installation is bound to one repo.
-        if slack_user_id and selected_repo:
+        if slack_user_id and selected_repo and not chat_company:
             try:
                 from integrations.services.slack import SlackService
                 SlackService.send_dm(
@@ -728,7 +768,7 @@ def github_callback(request):
                 trigger_scan_async(slack_user_id, domain=normalized_domain)
             except Exception as e:
                 logger.warning(f"Failed to auto-trigger scan for {normalized_domain}: {e}")
-        elif slack_user_id:
+        elif slack_user_id and not chat_company:
             try:
                 from integrations.services.slack import SlackService
                 SlackService.send_dm(
@@ -790,7 +830,7 @@ def github_callback(request):
     else:
         connection_status = "no_repo"
 
-    return redirect(
+    return oauth_return_redirect(
         build_post_install_redirect_url(
             oauth_state.return_url,
             github=connection_status,

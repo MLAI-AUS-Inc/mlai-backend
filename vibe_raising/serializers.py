@@ -222,6 +222,12 @@ class VibeRaisingActiveCompanySerializer(AliasInputSerializer):
 
 
 class VibeRaisingMonthlyUpdateUpsertSerializer(AliasInputSerializer):
+    inputSources = serializers.ListField(
+        child=serializers.ChoiceField(choices=(
+            "gmail", "stripe", "humanitix", "xero", "bank_feed", "notion",
+            "google_drive", "slack", "linear", "google_analytics", "luma", "manual_documents",
+        )), required=False, allow_empty=True,
+    )
     updateId = serializers.IntegerField(required=False, min_value=1, allow_null=True)
     creationKey = serializers.UUIDField(required=False, allow_null=True)
     updateDate = serializers.DateField(required=False, allow_null=True)

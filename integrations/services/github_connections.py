@@ -1,4 +1,5 @@
 import secrets
+import hashlib
 import urllib.parse
 from dataclasses import dataclass
 from typing import Optional
@@ -24,6 +25,7 @@ class GitHubOAuthState:
     job_id: Optional[str]
     is_org_oauth: bool
     return_url: Optional[str] = None
+    chat_context: Optional[dict] = None
 
 
 def _cache_key(nonce: str) -> str:
@@ -38,6 +40,7 @@ def _serialize_oauth_state(
     job_id: Optional[str],
     is_org_oauth: bool,
     return_url: Optional[str] = None,
+    chat_context: Optional[dict] = None,
 ) -> str:
     return signing.dumps(
         {
@@ -47,6 +50,7 @@ def _serialize_oauth_state(
             "job_id": job_id,
             "type": "org" if is_org_oauth else "user",
             "return_url": return_url,
+            "chat_context": chat_context,
         },
         salt=GITHUB_OAUTH_STATE_SALT,
         compress=True,
@@ -62,6 +66,7 @@ def _build_state(
     job_id: Optional[str],
     is_org_oauth: bool,
     return_url: Optional[str] = None,
+    chat_context: Optional[dict] = None,
 ) -> GitHubOAuthState:
     return GitHubOAuthState(
         raw=raw,
@@ -71,6 +76,7 @@ def _build_state(
         job_id=job_id,
         is_org_oauth=is_org_oauth,
         return_url=return_url,
+        chat_context=chat_context,
     )
 
 
@@ -80,6 +86,7 @@ def build_github_oauth_state(
     slack_user_id: str = "",
     job_id: Optional[str] = None,
     return_url: Optional[str] = None,
+    chat_context: Optional[dict] = None,
 ) -> GitHubOAuthState:
     normalized_domain = normalize_domain(domain or "") or None
     normalized_slack_user_id = (slack_user_id or "").strip()
@@ -94,6 +101,7 @@ def build_github_oauth_state(
         job_id=normalized_job_id,
         is_org_oauth=is_org_oauth,
         return_url=normalized_return_url,
+        chat_context=chat_context,
     )
     return _build_state(
         raw=raw,
@@ -103,6 +111,7 @@ def build_github_oauth_state(
         job_id=normalized_job_id,
         is_org_oauth=is_org_oauth,
         return_url=normalized_return_url,
+        chat_context=chat_context,
     )
 
 def _parse_signed_github_oauth_state(raw_state: str) -> GitHubOAuthState:
@@ -137,6 +146,7 @@ def _parse_signed_github_oauth_state(raw_state: str) -> GitHubOAuthState:
         job_id=job_id,
         is_org_oauth=is_org_oauth,
         return_url=return_url,
+        chat_context=payload.get("chat_context"),
     )
 
 
@@ -195,6 +205,14 @@ def validate_github_oauth_state(raw_state: str, request=None) -> GitHubOAuthStat
     except (signing.BadSignature, ValueError, TypeError):
         parsed_state = _parse_legacy_github_oauth_state(raw_state)
     else:
+        if parsed_state.chat_context:
+            from community_chat.startups.oauth_context import valid_chat_oauth_context
+            context = parsed_state.chat_context
+            if not isinstance(context, dict) or not valid_chat_oauth_context(context, context.get("user_id")):
+                raise ValueError("Invalid or expired Chat session")
+        used_key = "github-oauth-used:" + hashlib.sha256(raw_state.encode()).hexdigest()
+        if not cache.add(used_key, True, timeout=GITHUB_OAUTH_STATE_TIMEOUT_SECONDS + 1):
+            raise ValueError("OAuth state already used")
         if request is not None and request.session.get("github_oauth_state") == raw_state:
             request.session.pop("github_oauth_state", None)
         return parsed_state
@@ -280,6 +298,9 @@ def is_allowed_return_url(url: Optional[str]) -> bool:
     Guards against open-redirect abuse: the ``return_url`` round-trips through
     GitHub as part of ``state``, so it must be re-validated on the way back in.
     """
+    from integrations.services.chat_oauth_return import native_chat_connection_return_url
+    if native_chat_connection_return_url(url):
+        return True
     origin = _origin_of(url or "")
     if not origin:
         return False
@@ -302,6 +323,10 @@ def build_post_install_redirect_url(return_url: Optional[str], **params) -> str:
     app home. Status fields (e.g. ``github=connected``) are merged into the
     query string without clobbering any params the caller already included.
     """
+    from integrations.services.chat_oauth_return import native_chat_connection_return_url
+    native_return = native_chat_connection_return_url(return_url)
+    if native_return:
+        return native_return
     base = return_url if is_allowed_return_url(return_url) else default_frontend_url()
     parts = urllib.parse.urlsplit(base)
     query = dict(urllib.parse.parse_qsl(parts.query, keep_blank_values=True))
