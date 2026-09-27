@@ -199,7 +199,7 @@ class ReviewPolicyTests(SimpleTestCase):
         self.assertEqual(serializer.validated_data['metrics'], {'revenue': '0', 'monthlyCosts': None})
 
     def approve(self, revision, **overrides):
-        draft = Obj(current_revision=revision, pk=1, published_revision_id=4, published_at=timezone.now(), first_published_at=None, save=MagicMock())
+        draft = Obj(current_revision=revision, pk=1, month=timezone.localdate().replace(day=1), published_revision_id=4, published_at=timezone.now(), first_published_at=None, ready_at=None, save=MagicMock())
         body = dict(actor=Obj(pk=7), revision_id=revision.pk, revision_hash=revision.content_hash, audience_visibility=['community'])
         body.update(overrides)
         with patch.object(revisions.MonthlyUpdateDraft, 'objects') as drafts, patch.object(revisions.MonthlyUpdateApproval, 'objects') as approvals:
@@ -209,7 +209,7 @@ class ReviewPolicyTests(SimpleTestCase):
         return result
 
     def revision(self, status='passed'):
-        return Obj(pk=5, content_hash='exact-hash', structured_memo={'_audience_visibility': ['community']}, validation={'groundedness_status': status})
+        return Obj(pk=5, content_hash='exact-hash', structured_memo={'_audience_visibility': ['community']}, validation={'groundedness_status': status}, snapshot=Obj(payload={'period': {'timezone': 'UTC'}}))
 
     def test_stale_receipt_cannot_publish(self):
         for override in ({'revision_id': 4}, {'revision_hash': 'stale'}, {'audience_visibility': ['just_me']}):

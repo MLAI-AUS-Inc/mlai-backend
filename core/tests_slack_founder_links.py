@@ -3045,6 +3045,7 @@ class LinkedCoworkingEligibilityTests(APITestCase):
             registered=True,
             abn="89000000019",
             acn="000000019",
+            entity_type_code="PRV",
             abr_verified_at=timezone.now(),
         )
         UserStartupBinding.objects.create(
@@ -3053,10 +3054,14 @@ class LinkedCoworkingEligibilityTests(APITestCase):
             coworking_discount_eligible=True,
         )
         self.booking_date = date.today() + timedelta(days=1)
+        approved_at = timezone.now()
         MonthlyUpdateDraft.objects.create(
             organization=organization,
-            month=self.booking_date.replace(day=1),
+            month=timezone.localdate().replace(day=1),
             status=MonthlyUpdateDraftStatus.READY,
+            published_at=approved_at,
+            first_published_at=approved_at,
+            ready_at=approved_at,
         )
         SlackFounderAccountLink.objects.create(
             slack_user=self.slack_user,
@@ -3085,8 +3090,9 @@ class LinkedCoworkingEligibilityTests(APITestCase):
             organization=organization,
             name=f"Slack Account Founder {suffix}",
             registered=True,
-            abn="89000000020",
-            acn="000000020",
+            abn="89000000791",
+            acn="000000791",
+            entity_type_code="PRV",
             abr_verified_at=timezone.now(),
         )
         UserStartupBinding.objects.create(
@@ -3094,10 +3100,14 @@ class LinkedCoworkingEligibilityTests(APITestCase):
             organization=organization,
             coworking_discount_eligible=True,
         )
+        approved_at = timezone.now()
         MonthlyUpdateDraft.objects.create(
             organization=organization,
-            month=self.booking_date.replace(day=1),
+            month=timezone.localdate().replace(day=1),
             status=MonthlyUpdateDraftStatus.READY,
+            published_at=approved_at,
+            first_published_at=approved_at,
+            ready_at=approved_at,
         )
 
     def test_linked_founder_eligibility_discounts_without_moving_points(self):
