@@ -1,0 +1,82 @@
+"""Short-lived read-only preview grants for clients without browser cookies."""
+from types import SimpleNamespace
+from urllib.parse import quote
+
+from django.core import signing
+from django.utils.decorators import method_decorator
+from django.views.decorators.clickjacking import xframe_options_exempt
+from rest_framework.permissions import AllowAny
+from rest_framework.response import Response
+from rest_framework.views import APIView
+
+from . import vibe_marketing_views as views
+
+SALT = "article-preview-read-only-v1"
+LIFETIME = 900
+
+
+class ArticlePreviewLeaseView(APIView):
+    """Mint a grant only after the existing company/run authorization check."""
+
+    def post(self, request, run_id):
+        context, error = views._resolve_context_or_response(request, require_domain=False)
+        if error is not None:
+            return error
+        run = views.get_object_or_404(views.ContentFactoryRun, run_id=run_id)
+        if not views._run_belongs_to_context(run, context):
+            return Response({"detail": "Run not found."}, status=404)
+        token = signing.dumps({"run": run.run_id, "organization": context.organization.id,
+                               "domain": context.organization.domain}, salt=SALT, compress=True)
+        prefix = f"/api/v1/vibe-marketing/article-preview/{quote(token, safe='')}/{quote(run.run_id, safe='')}/"
+        return Response({"url": request.build_absolute_uri(prefix), "expiresIn": LIFETIME},
+                        headers={"Cache-Control": "no-store"})
+
+
+@method_decorator(xframe_options_exempt, name="dispatch")
+class ArticlePreviewLeaseProxyView(views.VibeMarketingRunLivePreviewProxyView):
+    """GET-only capability; it never authenticates the holder to other APIs."""
+    authentication_classes = []
+    permission_classes = [AllowAny]
+    http_method_names = ["get", "head"]
+
+    def _resolve_run(self, request, run_id):
+        try:
+            grant = signing.loads(self.kwargs["token"], salt=SALT, max_age=LIFETIME)
+        except signing.BadSignature:
+            return None, None, Response({"detail": "Preview access expired. Reload the preview."}, status=401)
+        if grant.get("run") != run_id:
+            return None, None, Response({"detail": "Preview not found."}, status=404)
+        run = views.get_object_or_404(views.ContentFactoryRun, run_id=run_id)
+        context = SimpleNamespace(organization=SimpleNamespace(id=grant["organization"], domain=grant["domain"]))
+        if not views._run_belongs_to_context(run, context):
+            return None, None, Response({"detail": "Preview not found."}, status=404)
+        return context, run, None
+
+    def get(self, request, run_id, token, proxy_path=""):
+        response = (views.VibeMarketingRunLivePreviewResourceView._proxy(self, request, run_id)
+                    if proxy_path == "__resource" else self._proxy(request, run_id, proxy_path))
+        if isinstance(response, HttpResponse):
+            content_type = response.get("Content-Type", "")
+            if any(kind in content_type for kind in ("text/", "javascript", "json")):
+                prefix = f"/api/v1/vibe-marketing/article-preview/{quote(token, safe='')}/{quote(run_id, safe='')}/"
+                body = response.content
+                for original in (f"/api/v1/vibe-marketing/runs/{run_id}/live-preview/proxy/",
+                                 f"/api/v1/my-startup/vibe-marketing/runs/{run_id}/live-preview/proxy/"):
+                    body = body.replace(original.encode(), prefix.encode())
+                for original in (f"/api/v1/vibe-marketing/runs/{run_id}/live-preview/resource",
+                                 f"/api/v1/my-startup/vibe-marketing/runs/{run_id}/live-preview/resource"):
+                    body = body.replace(original.encode(), (prefix + "__resource").encode())
+                response.content = body
+            # Grants must never leak to remote images, analytics or navigations.
+            response["Referrer-Policy"] = "no-referrer"
+            response["Cache-Control"] = "private, no-store"
+            response["Access-Control-Allow-Origin"] = "*"
+            response["Cross-Origin-Resource-Policy"] = "cross-origin"
+            response["Content-Security-Policy"] = "frame-ancestors 'self' https://chat.mlai.au https://mlai.au https://www.mlai.au tauri: http://tauri.localhost https://tauri.localhost; object-src 'none'; base-uri 'self'; sandbox allow-scripts"
+            for header in ("Set-Cookie", "Location", "Content-Length"):
+                if header in response:
+                    del response[header]
+        return response
+
+    def head(self, request, run_id, token, proxy_path=""):
+        return self.get(request, run_id, token, proxy_path)

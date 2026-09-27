@@ -1,3 +1,5 @@
+from .article_preview_lease import ArticlePreviewLeaseView, ArticlePreviewLeaseProxyView
+from .article_review_views import VibeMarketingArticleReviewView
 from django.urls import include, path
 
 from .custom_island_views import CustomContentIslandView
@@ -56,6 +58,11 @@ from .vibe_marketing_views import (
 
 
 urlpatterns = [
+    path("runs/<str:run_id>/article-review/preview-lease", ArticlePreviewLeaseView.as_view()),
+    path("article-preview/<str:token>/<str:run_id>/", ArticlePreviewLeaseProxyView.as_view()),
+    path("article-preview/<str:token>/<str:run_id>/<path:proxy_path>", ArticlePreviewLeaseProxyView.as_view()),
+    path("runs/<str:run_id>/article-review", VibeMarketingArticleReviewView.as_view(), name="vibe-article-review"),
+    path("runs/<str:run_id>/article-review/", VibeMarketingArticleReviewView.as_view(), name="vibe-article-review-slash"),
     path("islands/research", ContentIslandResearchView.as_view(), name="vibe-marketing-island-research-no-slash"),
     path("islands/research/", ContentIslandResearchView.as_view(), name="vibe-marketing-island-research"),
     path("islands/research/<str:run_id>/adopt", ContentIslandResearchAdoptView.as_view(), name="vibe-marketing-island-research-adopt"),

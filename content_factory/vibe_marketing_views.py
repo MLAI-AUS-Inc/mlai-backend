@@ -4703,7 +4703,7 @@ def _serialize_component_comment(comment):
         "context": comment.context or None,
         "body": comment.body,
         "requestedAction": (comment.context or {}).get("requestedAction") or None,
-        "status": comment.status,
+        "status": "resolved" if (comment.context or {}).get("manuallyResolved") else comment.status,
         "batchId": comment.batch_id or None,
         "createdAt": comment.created_at.isoformat() if comment.created_at else None,
         "updatedAt": comment.updated_at.isoformat() if comment.updated_at else None,
@@ -4771,8 +4771,10 @@ def _component_feedback_from_run(run):
             "revisionRunId": latest_batch.get("revisionRunId") or run.run_id,
             "status": batch_status,
         }
+    from .article_review_feedback import inherited_feedback
+    inherited_comments = [record for _, record in inherited_feedback(run, comments)]
     return {
-        "comments": [_serialize_component_comment(comment) for comment in comments],
+        "comments": [_serialize_component_comment(comment) for comment in comments] + inherited_comments,
         "latestBatch": latest_batch,
     }
 
@@ -16485,12 +16487,20 @@ class VibeMarketingRunCommentsMixin:
         context, error_response = _resolve_context_or_response(request, require_domain=False)
         if error_response:
             return None, None, error_response
-        run = get_object_or_404(ContentFactoryRun.objects.prefetch_related("steps"), run_id=run_id)
+        queryset = ContentFactoryRun.objects.prefetch_related("steps")
+        if request.method not in {"GET", "HEAD"}:
+            queryset = queryset.select_for_update()
+        run = get_object_or_404(queryset, run_id=run_id)
         if not _run_belongs_to_context(run, context):
             return None, None, Response({"detail": "Run not found."}, status=status.HTTP_404_NOT_FOUND)
+        if request.method not in {"GET", "HEAD"} and ((run.result or {}).get("article_review_approval") or _run_has_external_publish_evidence(run)):
+            return None, None, Response({"detail": "This article is already approved. Create a new revision to change it."}, status=409)
+        if request.method not in {"GET", "HEAD"} and _latest_review_ready_component_revision(run, context) is not None:
+            return None, None, Response({"detail": "A newer draft is ready. Open that revision before adding feedback."}, status=409)
         return context, run, None
 
 
+@method_decorator(transaction.atomic, name="dispatch")
 class VibeMarketingRunCommentsView(VibeMarketingRunCommentsMixin, APIView):
     def get(self, request, run_id):
         _context, run, error_response = self._resolve_run(request, run_id)
@@ -16510,6 +16520,18 @@ class VibeMarketingRunCommentsView(VibeMarketingRunCommentsMixin, APIView):
             return Response({"detail": "Choose an article component before adding a comment."}, status=status.HTTP_400_BAD_REQUEST)
         if not payload["body"]:
             return Response({"detail": "Comment text is required."}, status=status.HTTP_400_BAD_REQUEST)
+        operation_id = str(request.data.get("operationId") or "")
+        if operation_id:
+            if len(operation_id) > 100:
+                return Response({"detail": "Invalid operation identity."}, status=400)
+            existing = VibeMarketingComponentComment.objects.filter(run=run, context__operationId=operation_id).first()
+            if existing:
+                if existing.body != payload["body"] or existing.component_id != payload["component_id"]:
+                    return Response({"detail": "This operation was already used for a different comment."}, status=409)
+                return Response(_serialize_component_comment(existing))
+            payload["context"] = {**payload.get("context", {}), "operationId": operation_id}
+        if (run.result or {}).get("article_review_approval") or _run_has_external_publish_evidence(run):
+            return Response({"detail": "This article is already approved. Start a new revision to comment."}, status=409)
         comment = VibeMarketingComponentComment.objects.create(
             run=run,
             actor=request.user if request.user and request.user.is_authenticated else None,
@@ -16518,12 +16540,30 @@ class VibeMarketingRunCommentsView(VibeMarketingRunCommentsMixin, APIView):
         return Response(_serialize_component_comment(comment), status=status.HTTP_201_CREATED)
 
 
+@method_decorator(transaction.atomic, name="dispatch")
 class VibeMarketingRunCommentDetailView(VibeMarketingRunCommentsMixin, APIView):
     def patch(self, request, run_id, comment_id):
         _context, run, error_response = self._resolve_run(request, run_id)
         if error_response is not None:
             return error_response
-        comment = get_object_or_404(VibeMarketingComponentComment, id=comment_id, run=run)
+        comment = VibeMarketingComponentComment.objects.filter(id=comment_id, run=run).first()
+        if comment is None:
+            comment = VibeMarketingComponentComment.objects.filter(run=run, context__sourceCommentId=str(comment_id)).first()
+        if comment is None:
+            from .article_review_feedback import materialize_feedback
+            copies = materialize_feedback(run, list(VibeMarketingComponentComment.objects.filter(run=run)), comment_id)
+            if not copies:
+                return Response({"detail": "Comment not found."}, status=404)
+            comment = copies[0]
+        action = request.data.get("action")
+        if action in {"resolve", "reopen"}:
+            manual = bool((comment.context or {}).get("manuallyResolved"))
+            if comment.status != VibeMarketingComponentCommentStatus.DRAFT and not manual:
+                return Response({"detail": "Submitted feedback is retained as history. Add a new comment instead."}, status=409)
+            comment.context = {**(comment.context or {}), "manuallyResolved": action == "resolve"}
+            comment.status = VibeMarketingComponentCommentStatus.SUPERSEDED if action == "resolve" else VibeMarketingComponentCommentStatus.DRAFT
+            comment.save(update_fields=["context", "status", "updated_at"])
+            return Response(_serialize_component_comment(comment))
         if comment.status != VibeMarketingComponentCommentStatus.DRAFT:
             return Response({"detail": "Only draft comments can be updated."}, status=status.HTTP_400_BAD_REQUEST)
         payload = _comment_payload_from_request(request.data or {})
@@ -16536,6 +16576,9 @@ class VibeMarketingRunCommentDetailView(VibeMarketingRunCommentsMixin, APIView):
             payload["context"] = comment.context or {}
         if not payload["body"]:
             return Response({"detail": "Comment text is required."}, status=status.HTTP_400_BAD_REQUEST)
+        for key in ("operationId", "sourceCommentId", "manuallyResolved"):
+            if key in (comment.context or {}):
+                payload["context"][key] = comment.context[key]
         for key, value in payload.items():
             setattr(comment, key, value)
         comment.save(update_fields=[
@@ -16555,13 +16598,27 @@ class VibeMarketingRunCommentDetailView(VibeMarketingRunCommentsMixin, APIView):
         _context, run, error_response = self._resolve_run(request, run_id)
         if error_response is not None:
             return error_response
-        comment = get_object_or_404(VibeMarketingComponentComment, id=comment_id, run=run)
+        comment = VibeMarketingComponentComment.objects.filter(id=comment_id, run=run).first()
+        if comment is None:
+            comment = VibeMarketingComponentComment.objects.filter(run=run, context__sourceCommentId=str(comment_id)).first()
+        if comment is None:
+            from .article_review_feedback import materialize_feedback
+            copies = materialize_feedback(run, list(VibeMarketingComponentComment.objects.filter(run=run)), comment_id)
+            if not copies:
+                return Response({"detail": "Comment not found."}, status=404)
+            comment = copies[0]
         if comment.status != VibeMarketingComponentCommentStatus.DRAFT:
             return Response({"detail": "Only draft comments can be deleted."}, status=status.HTTP_400_BAD_REQUEST)
-        comment.delete()
+        if (comment.context or {}).get("sourceCommentId"):
+            comment.status = VibeMarketingComponentCommentStatus.SUPERSEDED
+            comment.context = {**comment.context, "manuallyResolved": True}
+            comment.save(update_fields=["status", "context", "updated_at"])
+        else:
+            comment.delete()
         return Response(_component_feedback_from_run(run), status=status.HTTP_200_OK)
 
 
+@method_decorator(transaction.atomic, name="dispatch")
 class VibeMarketingRunCommentsSubmitView(VibeMarketingRunCommentsMixin, APIView):
     def post(self, request, run_id):
         context, run, error_response = self._resolve_run(request, run_id)
@@ -16570,6 +16627,8 @@ class VibeMarketingRunCommentsSubmitView(VibeMarketingRunCommentsMixin, APIView)
         source_run = run
         run_request = run.run_request if isinstance(run.run_request, dict) else {}
         run_result = run.result if isinstance(run.result, dict) else {}
+        from .article_review_feedback import materialize_feedback
+        materialize_feedback(run, list(VibeMarketingComponentComment.objects.filter(run=run)))
         draft_comments = list(
             VibeMarketingComponentComment.objects.filter(
                 run=source_run,
@@ -16736,6 +16795,7 @@ class VibeMarketingRunCommentsSubmitView(VibeMarketingRunCommentsMixin, APIView)
         return Response(_serialize_run(revision_run, context=context), status=status.HTTP_202_ACCEPTED)
 
 
+@method_decorator(transaction.atomic, name="dispatch")
 class VibeMarketingRunCommentsAcceptRevisionView(VibeMarketingRunCommentsMixin, APIView):
     def post(self, request, run_id):
         context, run, error_response = self._resolve_run(request, run_id)
@@ -16778,13 +16838,12 @@ class VibeMarketingRunCommentsAcceptRevisionView(VibeMarketingRunCommentsMixin, 
                 status=status.HTTP_409_CONFLICT,
             )
 
-        promoted_count, archived_count = _promote_editorial_feedback_batch(
-            run=source_run, batch_id=batch_id, revision_run_id=run.run_id
-        )
-        VibeMarketingComponentComment.objects.filter(run=source_run, batch_id=batch_id).update(
-            status=VibeMarketingComponentCommentStatus.APPLIED,
-            updated_at=timezone.now(),
-        )
+        from .article_review_views import check_approval_comments
+        comment_error = check_approval_comments(run, request.data)
+        if comment_error is not None:
+            return comment_error
+        from .article_review_feedback import accept_addressed_feedback
+        promoted_count, archived_count = accept_addressed_feedback(run, source_run, batch_id)
         if promoted_count:
             # Fold the newly promoted preferences into the site's article-kit specs so the next
             # article is generated from components that already honour them.
@@ -17101,12 +17160,13 @@ def _article_publish_approval_receipt_failure(run):
     )
 
 
+@method_decorator(transaction.atomic, name="dispatch")
 class VibeMarketingRunControlView(APIView):
     def post(self, request, run_id, action):
         context, error_response = _resolve_context_or_response(request, require_domain=False)
         if error_response:
             return error_response
-        run = get_object_or_404(ContentFactoryRun, run_id=run_id)
+        run = get_object_or_404(ContentFactoryRun.objects.select_for_update(), run_id=run_id)
         if not _run_belongs_to_context(run, context):
             return Response({"detail": "Run not found."}, status=status.HTTP_404_NOT_FOUND)
 
@@ -17116,6 +17176,10 @@ class VibeMarketingRunControlView(APIView):
             and not _is_publish_child_run(run)
         )
         if approval_requires_receipt:
+            from .article_review_views import check_approval_comments
+            comment_error = check_approval_comments(run, request.data)
+            if comment_error is not None:
+                return comment_error
             latest_revision = _latest_review_ready_component_revision(run, context)
             if latest_revision is not None:
                 return Response(
@@ -17581,6 +17645,9 @@ class VibeMarketingRunControlView(APIView):
                     expected_identity=approval_review_identity,
                 ):
                     return _article_publish_approval_receipt_failure(run)
+                if approval_requires_receipt:
+                    from .article_review_views import record_review_approval
+                    record_review_approval(run, context, payload)
                 return Response(_serialize_run(publish_run, context=context), status=status.HTTP_202_ACCEPTED)
 
         if action == "approve":
@@ -17832,6 +17899,9 @@ class VibeMarketingRunControlView(APIView):
             expected_identity=approval_review_identity,
         ):
             return _article_publish_approval_receipt_failure(run)
+        if approval_requires_receipt:
+            from .article_review_views import record_review_approval
+            record_review_approval(run, context, payload)
         return Response(_serialize_run(run, context=context), status=status.HTTP_200_OK)
 
 

@@ -1,0 +1,126 @@
+"""Draft review authorization and approval tests; storage and network are mocked."""
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
+
+from django.core import signing
+from django.test import SimpleTestCase, RequestFactory
+from rest_framework.response import Response
+
+from .article_review_views import check_approval_comments, remote_review, VibeMarketingArticleReviewView
+from .article_preview_lease import ArticlePreviewLeaseProxyView, SALT, LIFETIME
+
+
+class ArticleReviewTests(SimpleTestCase):
+    def setUp(self):
+        self.run = SimpleNamespace(run_id='article-1', workflow='article_generation', result={}, organization_id=7, domain='company.test')
+
+    @patch('content_factory.article_review_views.views.VibeMarketingComponentComment')
+    def test_comments_require_exact_waiver_including_body(self, model):
+        model.objects.filter.return_value.order_by.return_value = [SimpleNamespace(id='comment-1', body='Please revise')]
+        self.assertEqual(check_approval_comments(self.run, {}) .status_code, 409)
+        self.assertEqual(check_approval_comments(self.run, {'waivedComments': [{'id': 'comment-1', 'body': 'Old text'}]}).status_code, 409)
+        self.assertIsNone(check_approval_comments(self.run, {'waivedComments': [{'id': 'comment-1', 'body': 'Please revise'}]}))
+
+    @patch('content_factory.article_review_views.views.VibeMarketingComponentComment')
+    def test_comment_added_after_dialog_and_inflight_revision_reject_approval(self, model):
+        model.objects.filter.return_value.order_by.return_value = []
+        self.assertIsNone(check_approval_comments(self.run, {}))
+        self.run.result = {'component_feedback_latest_batch': {'status': 'running'}}
+        self.assertEqual(check_approval_comments(self.run, {}).status_code, 409)
+
+    @patch('content_factory.article_review_views.remote_review')
+    def test_failed_ownership_never_calls_remote(self, remote):
+        view = VibeMarketingArticleReviewView()
+        view._resolve_run = MagicMock(return_value=(None, None, Response({'detail': 'Run not found.'}, status=404)))
+        result = view.post(SimpleNamespace(data={'action': 'editText'}), 'foreign-run')
+        self.assertEqual(result.status_code, 404)
+        remote.assert_not_called()
+
+    @patch('content_factory.article_review_views.views._latest_review_ready_component_revision')
+    @patch('content_factory.article_review_views.views._run_has_external_publish_evidence', return_value=False)
+    @patch('content_factory.article_review_views.remote_review')
+    def test_superseded_run_cannot_be_edited(self, remote, published, latest):
+        latest.return_value = SimpleNamespace(run_id='revision-2')
+        view = VibeMarketingArticleReviewView()
+        view._resolve_run = MagicMock(return_value=(object(), self.run, None))
+        result = view.post(SimpleNamespace(data={'action': 'editText'}), self.run.run_id)
+        self.assertEqual(result.status_code, 409)
+        self.assertEqual(result.data['latestRunId'], 'revision-2')
+        remote.assert_not_called()
+
+    @patch('content_factory.article_review_views.views._content_factory_headers', return_value={'X-API-Key': 'service-only'})
+    @patch('content_factory.article_review_views.views._content_factory_remote_config', return_value={'enabled': True, 'base_url': 'https://factory.test'})
+    @patch('content_factory.article_review_views.views.http_client.request')
+    def test_revision_conflict_survives_facade(self, request, config, headers):
+        request.return_value.status_code = 409
+        request.return_value.json.return_value = {'detail': 'The article changed.'}
+        result = remote_review(self.run, payload={'action': 'editText'})
+        self.assertEqual(result.status_code, 409)
+        self.assertEqual(result.data['detail'], 'The article changed.')
+        self.assertEqual(request.call_args.kwargs['headers'], {'X-API-Key': 'service-only'})
+
+    @patch('content_factory.article_preview_lease.views.get_object_or_404')
+    def test_preview_grant_is_scoped_to_run_and_company(self, lookup):
+        token = signing.dumps({'run': 'article-1', 'organization': 7, 'domain': 'company.test'}, salt=SALT)
+        view = ArticlePreviewLeaseProxyView()
+        view.kwargs = {'token': token}
+        request = RequestFactory().get('/preview')
+        lookup.return_value = self.run
+        self.assertIsNone(view._resolve_run(request, 'article-1')[2])
+        self.assertEqual(view._resolve_run(request, 'article-2')[2].status_code, 404)
+        self.run.organization_id = 8
+        self.assertEqual(view._resolve_run(request, 'article-1')[2].status_code, 404)
+
+    @patch('content_factory.article_preview_lease.views.get_object_or_404')
+    def test_expired_or_tampered_grants_never_lookup_article(self, lookup):
+        view = ArticlePreviewLeaseProxyView()
+        request = RequestFactory().get('/preview')
+        view.kwargs = {'token': 'tampered'}
+        self.assertEqual(view._resolve_run(request, 'article-1')[2].status_code, 401)
+        with patch('django.core.signing.time.time', return_value=1):
+            token = signing.dumps({'run': 'article-1', 'organization': 7, 'domain': 'company.test'}, salt=SALT)
+        view.kwargs = {'token': token}
+        with patch('django.core.signing.time.time', return_value=LIFETIME + 5):
+            self.assertEqual(view._resolve_run(request, 'article-1')[2].status_code, 401)
+        lookup.assert_not_called()
+
+
+class FeedbackOutcomeTests(SimpleTestCase):
+    def source_comment(self, **overrides):
+        values = dict(id='one', component_id='paragraph', component_type='text', component_label='Paragraph', source_section_id='', selector='', anchor={}, context={}, body='Change it', status='submitted', batch_id='batch', created_at=None, updated_at=None, actor=None)
+        values.update(overrides)
+        return SimpleNamespace(**values)
+
+    @patch('content_factory.article_review_feedback.views.VibeMarketingComponentComment')
+    @patch('content_factory.article_review_feedback.views.ContentFactoryRun')
+    def test_unaddressed_and_late_comments_carry_forward_without_duplicates(self, runs, comments):
+        from .article_review_feedback import inherited_feedback
+        run = SimpleNamespace(run_id='child', workflow='article_revision', status='completed', organization_id=7, domain='company.test', run_request={'source_run_id':'source', 'feedback_batch_id':'batch'}, result={'comment_outcomes':[{'commentId':'one', 'status':'unaddressed', 'summary':'Saved text preserved'}]})
+        runs.objects.filter.return_value.first.return_value = SimpleNamespace(organization_id=7)
+        comments.objects.filter.return_value.order_by.return_value = [self.source_comment(), self.source_comment(id='late', status='draft', batch_id='')]
+        carried = inherited_feedback(run, [])
+        self.assertEqual([record['id'] for _, record in carried], ['one', 'late'])
+        self.assertEqual(carried[0][1]['status'], 'draft')
+        self.assertEqual(carried[0][1]['outcome'], 'Saved text preserved')
+        self.assertEqual(len(inherited_feedback(run, [self.source_comment(context={'sourceCommentId':'one'})])), 1)
+        runs.objects.filter.return_value.first.return_value.organization_id = 8
+        self.assertEqual(inherited_feedback(run, []), [])
+
+    @patch('content_factory.article_review_feedback.views._promote_editorial_feedback_batch')
+    @patch('content_factory.article_review_feedback.views.VibeMarketingComponentComment')
+    def test_partial_revision_accepts_only_addressed_and_never_learns_unresolved(self, model, promote):
+        from .article_review_feedback import accept_addressed_feedback
+        model.objects.filter.return_value.values_list.return_value = ['one', 'two']
+        run = SimpleNamespace(run_id='child', result={'comment_outcomes':[{'commentId':'one', 'status':'addressed'}, {'commentId':'two', 'status':'unaddressed'}]})
+        self.assertEqual(accept_addressed_feedback(run, object(), 'batch'), (0, 0))
+        model.objects.filter.return_value.filter.assert_called_once_with(id__in=['one'])
+        promote.assert_not_called()
+
+    @patch('content_factory.article_review_feedback.inherited_feedback')
+    @patch('content_factory.article_review_views.views.VibeMarketingComponentComment')
+    def test_approval_requires_exact_waiver_for_inherited_unresolved_comments(self, model, inherited):
+        model.objects.filter.return_value.order_by.return_value = []
+        inherited.return_value = [(None, {'id':'one', 'body':'Preserve it', 'status':'draft'})]
+        run = SimpleNamespace(run_id='child', workflow='article_revision', result={})
+        self.assertEqual(check_approval_comments(run, {}).status_code, 409)
+        self.assertIsNone(check_approval_comments(run, {'waivedComments':[{'id':'one', 'body':'Preserve it'}]}))
