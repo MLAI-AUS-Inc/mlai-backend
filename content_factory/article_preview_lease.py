@@ -58,7 +58,9 @@ class ArticlePreviewLeaseProxyView(views.VibeMarketingRunLivePreviewProxyView):
                     if proxy_path == "__resource" else self._proxy(request, run_id, proxy_path))
         if isinstance(response, HttpResponse):
             content_type = response.get("Content-Type", "")
-            if any(kind in content_type for kind in ("text/", "javascript", "json")):
+            if not isinstance(response, Response) and any(
+                kind in content_type for kind in ("text/", "javascript", "json")
+            ):
                 prefix = f"/api/v1/vibe-marketing/article-preview/{quote(token, safe='')}/{quote(run_id, safe='')}/"
                 body = response.content
                 for original in (f"/api/v1/vibe-marketing/runs/{run_id}/live-preview/proxy/",

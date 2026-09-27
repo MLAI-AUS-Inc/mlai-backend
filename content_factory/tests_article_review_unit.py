@@ -111,6 +111,19 @@ class ArticleReviewTests(SimpleTestCase):
         for header in ('Set-Cookie', 'Location', 'Content-Length'):
             self.assertNotIn(header, result)
 
+    @patch.object(ArticlePreviewLeaseProxyView, '_proxy')
+    def test_preview_error_preserves_unrendered_response(self, proxy):
+        proxy.return_value = Response({'detail': 'Preview access expired.'}, status=401)
+
+        result = ArticlePreviewLeaseProxyView().get(
+            RequestFactory().get('/preview'), 'article-1', token='expired-grant',
+        )
+
+        self.assertIs(result, proxy.return_value)
+        self.assertEqual(result.status_code, 401)
+        self.assertEqual(result['Referrer-Policy'], 'no-referrer')
+        self.assertEqual(result['Cache-Control'], 'private, no-store')
+
 
 class FeedbackOutcomeTests(SimpleTestCase):
     def source_comment(self, **overrides):
