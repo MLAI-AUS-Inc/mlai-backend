@@ -83,15 +83,16 @@ def previous_publications(organization, update_id, update_date):
     return sorted(publications, key=lambda entry: (entry[2], entry[0].first_published_at or entry[0].published_at, entry[0].pk), reverse=True)
 
 
-def narrative_window(organization, draft, update_date, *, requested_start=None, requested_end=None):
+def narrative_window(organization, draft, update_date, *, requested_start=None, requested_end=None, default_days=None):
     zone_name = getattr(getattr(organization, "startup_profile", None), "reporting_timezone", "UTC")
     zone = ZoneInfo(zone_name)
     now = timezone.now()
     if update_date > now.astimezone(zone).date():
         raise ValidationError({"updateDate": "Choose today or an earlier date."})
-    end = min(datetime.combine(update_date + timedelta(days=1), time.min, zone), now)
-    start = datetime.combine(update_date.replace(day=1), time.min, zone)
-    for item, memo, prior_date in previous_publications(organization, draft.pk, update_date):
+    end = min(datetime.combine(update_date + timedelta(days=1), time.min, zone), now).astimezone(zone)
+    start = end - timedelta(days=default_days) if default_days else datetime.combine(update_date.replace(day=1), time.min, zone)
+    publications = [] if default_days else previous_publications(organization, draft.pk, update_date)
+    for item, memo, prior_date in publications:
         cutoff = (memo.get("narrative_period") or {}).get("end")
         if not cutoff or len(prior_date) != 10:
             continue
