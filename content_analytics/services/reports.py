@@ -13,7 +13,7 @@ from datetime import date, timedelta
 
 from django.conf import settings
 from django.db import IntegrityError
-from django.db.models import Max, Sum
+from django.db.models import F, Max, Q, Sum
 
 from content_analytics.models import (
     AnalyticsSite,
@@ -29,12 +29,18 @@ from content_analytics.models import (
 )
 from content_analytics.services.reporting import (
     _behavior_totals,
+    _float,
     _int,
     _metric_payload,
     _rate,
     _search_totals,
 )
-from content_factory.models import ArticlePublishStatus, WrittenArticle
+from content_analytics.services.article_health_evidence import (
+    build_article_health_evidence,
+    research_evidence_bundles,
+)
+from content_factory.models import ArticlePublishStatus, ResearchedKeyword, WrittenArticle
+from workflow_runs.models import ContentFactoryRun
 
 REPORT_SCHEMA_VERSION = 1
 
@@ -182,6 +188,70 @@ def _search_block(organization, windows: ReportWindows) -> dict:
     return block
 
 
+def _article_health_evidence(organization, articles, report_date):
+    """Load existing research in batches, preserving the organization boundary."""
+    article_ids = [article.id for article in articles]
+    keywords = {str(article.primary_keyword or "").strip().lower() for article in articles}
+    keyword_rows = list(ResearchedKeyword.objects.filter(
+        Q(written_article_id__in=article_ids) | Q(keyword_normalized__in=keywords),
+        organization=organization,
+    ).values("written_article_id", "keyword", "keyword_normalized", "competitor_urls"))
+    source_run_ids = [article.source_run_id for article in articles if article.source_run_id]
+    # Latest saved observations augment the original writing run as research is
+    # refreshed. Existing run JSON carries evidence without a schema migration.
+    runs = ContentFactoryRun.objects.filter(
+        Q(run_id__in=source_run_ids)
+        | Q(result__has_key="article_health_evidence")
+        | Q(result__has_key="articleHealthEvidence"),
+        organization=organization,
+    ).order_by("-updated_at").values_list("result", flat=True)[:100]
+    observations = [bundle for result in runs for bundle in research_evidence_bundles(result)]
+    return {
+        article.id: build_article_health_evidence(
+            article,
+            keywords=[
+                row for row in keyword_rows
+                if row["written_article_id"] == article.id
+                or (row["written_article_id"] is None
+                    and row["keyword_normalized"] == str(article.primary_keyword or "").strip().lower())
+            ],
+            observations=observations,
+            as_of=report_date,
+        )
+        for article in articles
+    }
+
+
+def _per_article_search(organization, windows, *, connected):
+    """Keep unavailable and not-yet-synced Google observations distinct from zero."""
+    if not connected:
+        return {}, None
+    state = AnalyticsSyncState.objects.filter(
+        organization=organization, source=AnalyticsSyncSource.SEARCH_CONSOLE,
+    ).first()
+    synced_through = state.synced_through if state else None
+    rows = ArticleSearchDaily.objects.filter(
+        organization=organization,
+        date__range=(windows.window_start, windows.window_end),
+        country="", device="", engine="google", surface="web",
+    ).values("article_id").annotate(
+        clicks=Sum("clicks"), impressions=Sum("impressions"),
+        position_weight=Sum(F("position") * F("impressions")),
+        data_through=Max("date"),
+    ).order_by()
+    return {
+        row["article_id"]: {
+            "searchClicks": _float(row["clicks"], 4),
+            "searchImpressions": _float(row["impressions"], 4),
+            "searchCtr": _rate(row["clicks"], row["impressions"]),
+            "averagePosition": _float(row["position_weight"] / row["impressions"], 4)
+            if row["impressions"] else None,
+            "searchDataThroughDate": _iso(row["data_through"]),
+        }
+        for row in rows
+    }, synced_through
+
+
 def build_article_performance_payload(organization, report_date: date) -> dict:
     """Compute the brief payload. Pure read; JSON-safe (dates are ISO strings)."""
     window_days = max(int(settings.CONTENT_ANALYTICS_REPORT_WINDOW_DAYS), 1)
@@ -220,7 +290,11 @@ def build_article_performance_payload(organization, report_date: date) -> dict:
     )
     traffic_article_ids = set(behavior_window.values_list("article_id", flat=True))
     article_ids = set(live_articles.values_list("id", flat=True)) | traffic_article_ids
-    articles = WrittenArticle.objects.filter(id__in=article_ids)
+    articles = list(WrittenArticle.objects.filter(organization=organization, id__in=article_ids))
+    health_evidence = _article_health_evidence(organization, articles, report_date)
+    search_by_article, search_synced_through = _per_article_search(
+        organization, windows, connected=search_block["connected"],
+    )
 
     window_by_article = {
         row["article_id"]: row
@@ -268,6 +342,13 @@ def build_article_performance_payload(organization, report_date: date) -> dict:
         category_counts[category] += 1
         article_sources = source_visits_by_article.get(article.id, {})
         prior_visits = prior_visits_by_article.get(article.id, 0)
+        article_search = search_by_article.get(article.id)
+        health_evidence[article.id].update({
+            "searchDataThroughDate": article_search.get("searchDataThroughDate") if article_search else None,
+            "searchWindowComplete": bool(
+                article_search and search_synced_through and search_synced_through >= windows.window_end
+            ),
+        })
         article_rows.append(
             {
                 "id": str(article.id),
@@ -277,7 +358,7 @@ def build_article_performance_payload(organization, report_date: date) -> dict:
                 "canonicalUrl": article.canonical_url or article.live_url or "",
                 "canonicalPath": article.canonical_path or "",
                 "publishStatus": article.publish_status,
-                "metrics": _metric_payload(behavior, empty_search),
+                "metrics": _metric_payload(behavior, article_search or empty_search),
                 "priorVisits": prior_visits,
                 "visitsDelta": _delta(behavior["visits"], prior_visits),
                 "searchVisits": _int(article_sources.get("search")),
@@ -285,6 +366,7 @@ def build_article_performance_payload(organization, report_date: date) -> dict:
                 "category": category,
                 "categoryLabel": ArticlePerformanceReportCategory(category).label,
                 "reasons": reasons,
+                "healthEvidence": health_evidence[article.id],
             }
         )
     article_rows.sort(key=lambda row: (-row["metrics"]["visits"], row["title"].lower()))
@@ -338,6 +420,7 @@ def build_article_performance_payload(organization, report_date: date) -> dict:
         "headline": {
             "humanVisits": totals["visits"],
             "engagedReaderRate": totals["engagedReaderRate"],
+            "engagedReaders": totals["engaged30Visits"],
             "ctaClickers": totals["ctaClickVisits"],
             "ctaConversionRate": totals["ctaConversionRate"],
             "visitsDelta": deltas["visits"],
