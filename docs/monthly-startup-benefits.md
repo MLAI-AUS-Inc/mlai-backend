@@ -15,7 +15,9 @@ commit together. A failed credit returns a retryable 503 and rolls back that
 approval; repeating the request cannot credit the same update twice. A second
 company record pointing at the same startup organisation/month cannot claim
 another payment. Volunteer ranking retains its shared personal monthly cap,
-but that cap does not suppress another startup's completion payment.
+but that cap does not suppress another startup's completion payment. The
+second payment's recorded cap receipt keeps the volunteer rank reconciled
+without counting that payment twice.
 New payments use an organisation/month ledger key and also recognise earlier
 company/month keys. Deleting derived report data and recreating the same month
 does not mint more points or restart the paid benefit window.
