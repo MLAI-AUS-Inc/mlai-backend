@@ -18,11 +18,45 @@ Catalogue mutations must be separate from general organisation settings: only `d
 
 The reserved `editorial_catalog` envelope lives in `OrganizationContentConfig.pillar_strategy`, using its existing JSON column. Generated pillar updates cannot replace it. Policy updates and legacy GitHub scan saves acquire the same organisation row lock and refresh the stored catalog before writing. This change introduces no migration.
 
-Ordinary writes cannot create approval, including by copying `approved_by`/`approved_at`. Changed entries require a higher version, draft/retired status and cleared approval fields. Unchanged approved entries can remain approved. Retire entries instead of deleting them so old identifiers/versions cannot be recycled. Changing or retiring an audience also requires explicitly drafting/retiring each dependent approved offer at a higher version in the same save; do not silently carry compatibility approval to a different reader task.
+Ordinary service and legacy draft writes cannot create approval, including by copying `approved_by`/`approved_at`. Changed entries require a higher version, draft/retired status and cleared approval fields. Unchanged approved entries can remain approved. Retire entries instead of deleting them so old identifiers/versions cannot be recycled. Changing or retiring an audience also requires explicitly drafting/retiring each dependent approved offer at a higher version in the same write. The owner Save operation below can renew receipts for unchanged linked offers in the same transaction.
 
 The worker's catalogue and older CTA-only APIs both require the caller's expected revision and confirm content/revision by read-back. They expose backend 400/404/409 responses without fetching a fresh version and retrying a stale request. Failed or uncertain read-back means reload before retrying; it is not a promise that an already accepted write was rolled back.
 
-## Owner approval API
+## Owner Save API
+
+Local update, 27 September 2026: the editor uses **Add/Edit → Save**. There is no
+separate draft, review checkbox or confirmation stage for ICPs and CTAs. The
+underlying `approved` status and content receipts remain wire-compatible with
+article admission; the UI labels these entries “Saved”.
+
+The owner-authenticated catalogue PUT accepts `activate_entries`, a nonempty
+array of `{kind, id, version}` selections matching the submitted entries. Supply
+the expected catalogue revision and the usual full audience/offer arrays. The
+server validates the edit and selected versions, records any suggestion
+provenance, issues receipts from the validated content under the existing owner
+locks, then persists once. Both new and edited entries become available to
+article selectors immediately. There is no persisted intermediate draft, and
+one Save advances the catalogue by one revision (or none for an exact no-op).
+
+Saving an ICP also renews its previously approved, unchanged linked CTAs after
+their required version increments. It does not activate unrelated drafts or
+separately edited CTAs. Missing countries or inactive dependencies reject the
+whole save. Service credentials cannot use `activate_entries`, and caller-supplied
+actors, timestamps or copied approval metadata cannot grant eligibility.
+
+Older clients can still omit `activate_entries` for draft-only writes and use
+the explicit approval endpoint described below. Legacy entries without receipts
+need an owner Save; they are not activated by reading them. Deploy the backend
+contract before the new clients. Clients verify the returned entry/version and
+receipt provenance and must not claim success if an older backend returns a
+draft. No migration or production activation is included.
+
+The focused pure/in-memory API tests cover new ICP/CTA eligibility, linked CTA
+renewal, atomic rejection, stale and malformed selections, ownership loss,
+service denial, unrelated draft preservation and no-op receipts. They do not
+prove real SQL locking or authenticated live persistence.
+
+### Legacy explicit approval API
 
 `GET/PUT /api/v1/vibe-marketing/editorial-catalog/` and `POST /api/v1/vibe-marketing/editorial-catalog/approve/` inherit the product's authenticated JWT and cookie-Origin rules and require a founder-owned **explicit `company_id`**. Both trailing-slash forms are routed. A service API key is not a human approval identity. Domain or actor fields cannot select the approval tenant or approver.
 
@@ -35,9 +69,9 @@ An exact retry with the **current** catalogue revision is a no-op and does not r
 
 The same locked ownership checks apply to draft saves and exact no-op retries. Service catalogue edits remain an independently authenticated draft-only path; the shared helper cannot approve without an owner context. These are catalogue-write guards, not automatic retirement of approvals previously granted by a person whose role later changes. Earlier approval history remains intact; retiring or revising an offer is an explicit policy mutation. GET retains the existing product-context resolution, and this change does not make all onboarding/offboarding operations atomic with catalogue mutations.
 
-### Explicit legacy review requirement
+### Legacy entries without receipts
 
-Catalogue envelope schema 2 adds receipts/history inside the existing JSON column; there is **no database migration**. Reading a legacy `status=approved` entry without a matching server receipt returns it as a draft with cleared current approval fields. A read does not rewrite stored history. Changed/mismatched receipts also fail closed, and an unapproved audience invalidates dependent offer eligibility. Legacy records need explicit owner review/approval, not fabricated backfilled identities or timestamps.
+Catalogue envelope schema 2 adds receipts/history inside the existing JSON column; there is **no database migration**. Reading a legacy `status=approved` entry without a matching server receipt returns it as a draft with cleared current approval fields. A read does not rewrite stored history. Changed/mismatched receipts also fail closed, and an unapproved audience invalidates dependent offer eligibility. Legacy records need an owner Save (or the older explicit approval operation); identities and timestamps are never fabricated during reads.
 
 Deploy this behavior only as a coordinated backend/worker/editor release. The website now contains a catalogue-management UI and article-brief selectors across all three start screens, with controlled local action tests. Real authenticated persistence, worker integration and explicit business approval still need verification before activation. No catalogue has been activated, reapproved or changed in production by this implementation.
 
