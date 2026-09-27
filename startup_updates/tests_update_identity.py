@@ -4,6 +4,7 @@ from uuid import uuid4
 from unittest.mock import patch
 
 from django.test import SimpleTestCase, TestCase
+from django.urls import reverse
 from rest_framework.exceptions import NotFound, ValidationError
 
 from organizations.models import Organization
@@ -292,7 +293,7 @@ class IndependentPipelineTests(StartupUpdateApiTestCase):
             response = self.client.post(reverse("startup_updates_evidence_snapshot", args=[self.run.run_id]), {}, format="json", **self.headers)
         self.assertEqual(response.status_code, 409, response.data)
 
-    def test_old_cross_month_source_window_is_clamped_to_reporting_month(self):
+    def test_old_cross_month_source_window_is_clamped_and_cannot_pin_evidence(self):
         from startup_updates.models import StartupEvent
         from startup_updates.services import build_timeline_payload
         self.run.run_request["narrative_period"]["start"] = "2026-02-26T00:00:00+11:00"
@@ -302,6 +303,8 @@ class IndependentPipelineTests(StartupUpdateApiTestCase):
         timeline = build_timeline_payload(organization=self.organization, requested_months=["2026-03-01"], run=self.run)
         self.assertEqual(list(timeline["months"]), ["2026-03-01"])
         self.assertEqual([event["title"] for event in timeline["months"]["2026-03-01"]["events"]], ["Included"])
-        snapshot = self.pin()["payload"]
-        self.assertEqual([event["title"] for event in snapshot["events"]], ["Included"])
-        self.assertEqual(snapshot["period"]["month"], "2026-03-01")
+        with self._with_key():
+            response = self.client.post(reverse("startup_updates_evidence_snapshot", args=[self.run.run_id]),
+                {}, format="json", **self.headers)
+        self.assertEqual(response.status_code, 409, response.data)
+        self.assertIn("older source range", response.data["detail"])

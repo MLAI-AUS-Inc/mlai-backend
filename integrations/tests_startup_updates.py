@@ -845,6 +845,26 @@ class StartupUpdateSlackBackfillViewTest(StartupUpdateApiTestCase):
             input_sources=["gmail", "slack"],
         )
 
+    def _record_slack_message(self, thread, *, text="Acme signed a $12k MRR pilot.", posted_at=None):
+        """Store the source row required by the calendar-month evidence filter."""
+        SlackMessageArtifact.objects.create(
+            organization=self.organization,
+            connection=thread.connection,
+            channel_id=thread.channel_id,
+            channel_name=thread.channel_name,
+            slack_message_ts=thread.thread_ts,
+            thread_ts=thread.thread_ts,
+            posted_at=posted_at or self._message_time_in_run(),
+            cleaned_text=text,
+            text=text,
+        )
+
+    def _message_time_in_run(self):
+        period = self.run.run_request["narrative_period"]
+        start = datetime.fromisoformat(period["start"])
+        end = datetime.fromisoformat(period["end"])
+        return start + (end - start) / 2
+
     @patch("integrations.services.slack_dm_mirror._revoke_remote_token")
     def test_disconnect_erases_historical_evidence_revisions(self, _mock_remote_revoke):
         from startup_updates.models import MonthlyEvidenceSnapshot
@@ -1028,7 +1048,7 @@ class StartupUpdateSlackBackfillViewTest(StartupUpdateApiTestCase):
         self.assertEqual(self.connection.last_error, "")
 
     def test_slack_classification_batch_hard_filters_noise_and_returns_candidates(self):
-        latest_message_at = timezone.now() - timedelta(minutes=1)
+        latest_message_at = self._message_time_in_run()
         noisy_thread = SlackThreadArtifact.objects.create(
             organization=self.organization,
             connection=self.connection,
@@ -1069,6 +1089,8 @@ class StartupUpdateSlackBackfillViewTest(StartupUpdateApiTestCase):
             latest_message_at=latest_message_at,
             extraction_status=ArtifactProcessingStatus.HYDRATED,
         )
+        self._record_slack_message(noisy_thread, text="daily standup reminder", posted_at=latest_message_at)
+        self._record_slack_message(candidate_thread, posted_at=latest_message_at)
 
         with self.settings(INTERNAL_API_KEY=self.api_key):
             response = self.client.get(
@@ -1088,7 +1110,7 @@ class StartupUpdateSlackBackfillViewTest(StartupUpdateApiTestCase):
         self.assertFalse(noisy_thread.needs_extraction)
 
     def test_slack_classification_results_gate_extraction_batch(self):
-        latest_message_at = timezone.now() - timedelta(minutes=1)
+        latest_message_at = self._message_time_in_run()
         relevant_thread = SlackThreadArtifact.objects.create(
             organization=self.organization,
             connection=self.connection,
@@ -1120,6 +1142,7 @@ class StartupUpdateSlackBackfillViewTest(StartupUpdateApiTestCase):
             latest_message_at=latest_message_at,
             extraction_status=ArtifactProcessingStatus.HYDRATED,
         )
+        self._record_slack_message(relevant_thread, posted_at=latest_message_at)
         SlackThreadArtifact.objects.create(
             organization=self.organization,
             connection=self.connection,
@@ -1186,7 +1209,8 @@ class StartupUpdateSlackBackfillViewTest(StartupUpdateApiTestCase):
         *,
         thread_ts: str = "1770000010.000100",
     ) -> SlackThreadArtifact:
-        return SlackThreadArtifact.objects.create(
+        posted_at = self._message_time_in_run()
+        thread = SlackThreadArtifact.objects.create(
             organization=self.organization,
             connection=self.connection,
             channel_id="C123",
@@ -1199,15 +1223,18 @@ class StartupUpdateSlackBackfillViewTest(StartupUpdateApiTestCase):
                 {
                     "message_id": f"slack:C123:{thread_ts}",
                     "author_name": "Sam",
+                    "posted_at": posted_at.isoformat(),
                     "cleaned_text": "private launch detail",
                 }
             ],
-            latest_message_at=timezone.now() - timedelta(minutes=1),
+            latest_message_at=posted_at,
             relevance_label=GmailRelevanceLabel.RELEVANT,
             relevance_score=0.95,
             needs_extraction=True,
             extraction_status=ArtifactProcessingStatus.HYDRATED,
         )
+        self._record_slack_message(thread, text="private launch detail", posted_at=posted_at)
+        return thread
 
     def _extract_thread(self, thread: SlackThreadArtifact) -> str:
         with self._with_key():

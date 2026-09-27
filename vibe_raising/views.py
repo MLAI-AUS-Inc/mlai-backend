@@ -3116,6 +3116,17 @@ class VibeRaisingEmailDraftStartView(APIView):
                 from startup_updates.activity_scope import run_uses_month_scope
                 if not run_uses_month_scope(existing_run.run_request or {}):
                     raise RevisionConflict("This draft was started with an older source period. Cancel it and generate the monthly update again.")
+                windows = build_startup_update_target_windows(target_month)
+                refresh_startup_update_run_source_context(
+                    run=existing_run,
+                    organization=organization,
+                    input_sources=input_sources,
+                    start_date=windows["financial_start_date"],
+                    end_date=windows["financial_end_date"],
+                    source_warnings=source_warnings,
+                    manual_document_ids=manual_document_ids,
+                    manual_summary=manual_summary,
+                )
             if not existing_run:
                 draft.update_date = requested_date
                 draft.save(update_fields=["update_date"])
