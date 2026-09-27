@@ -107,6 +107,7 @@ from content_factory.models import (
     WrittenArticle,
 )
 from content_factory.serializers import ContentIslandGraphSerializer
+from content_factory.topic_metrics import difficulty_metrics, finite_number, metric_history_recency, topic_metric_payload, value_for
 from content_factory.topic_feedback import (
     list_topic_feedback,
     normalize_topic_feedback_keyword,
@@ -1618,30 +1619,21 @@ def _extract_topic_candidates_from_result(result):
                 "reason": str(reason),
                 "source": str(raw.get("source") or "discovery"),
                 "intent": raw.get("intent"),
-                "difficulty": raw.get("difficulty"),
-                "difficultySource": raw.get("difficulty_source") or raw.get("difficultySource") or "missing",
                 "opportunityScore": opportunity_score,
                 "volume": raw.get("volume"),
                 "volumeDisplay": raw.get("volume_display") or raw.get("volumeDisplay"),
                 "trend": raw.get("trending_status") or raw.get("trend") or raw.get("trend_status"),
-                "trendStatus": raw.get("trend_status") or raw.get("trendStatus") or raw.get("trending_status") or raw.get("trend"),
-                "trendPercent": raw.get("trend_percent") or raw.get("trendPercent"),
-                "trendDescription": raw.get("trend_description") or raw.get("trendDescription") or raw.get("stats_meaning") or raw.get("statsMeaning"),
                 "trendLabel": raw.get("trending_label") or raw.get("trendLabel"),
-                "trendSource": raw.get("trend_source") or raw.get("trendSource"),
                 "trendSourceLabel": raw.get("trend_source_label") or raw.get("trendSourceLabel"),
-                "trendBasis": raw.get("trend_basis") or raw.get("trendBasis"),
-                "trendPeriodLabel": raw.get("trend_period_label") or raw.get("trendPeriodLabel"),
-                "trendIsEstimated": raw.get("trend_is_estimated") if "trend_is_estimated" in raw else raw.get("trendIsEstimated"),
                 "statsMeaning": raw.get("stats_meaning") or raw.get("statsMeaning"),
                 "whyRecommended": raw.get("why_recommended") or raw.get("whyRecommended"),
                 "recommendationReason": raw.get("recommendation_reason") or raw.get("recommendationReason"),
-                "aiSearches": raw.get("ai_search_volume") or raw.get("aiSearches") or raw.get("ai_searches"),
+                "aiSearches": value_for(raw, "ai_search_volume", "aiSearches", "ai_searches"),
                 "aiVolumeDisplay": raw.get("ai_volume_display") or raw.get("aiVolumeDisplay"),
-                "monthlySearches": raw.get("monthly_searches") or raw.get("monthlySearches") or raw.get("daily_volumes") or raw.get("dailyVolumes") or [],
                 "relatedKeywords": raw.get("related_keywords") or raw.get("relatedKeywords") or [],
                 "paaQuestions": raw.get("paa_questions") or raw.get("paaQuestions") or [],
                 "sourceRunId": raw.get("source_run_id") or raw.get("sourceRunId"),
+                **topic_metric_payload(raw),
                 **{key: value for key, value in island_metadata.items() if value},
             }
         )
@@ -1659,31 +1651,6 @@ def _safe_number(value, default=0):
 
 def _json_list(value):
     return value if isinstance(value, list) else []
-
-
-def _trend_percent_from_velocity(velocity):
-    if not velocity:
-        return None
-    score = velocity.get("velocityScore")
-    if score is None:
-        score = velocity.get("velocity_score")
-    if score is None:
-        return None
-    try:
-        return round(float(score) * 100)
-    except (TypeError, ValueError):
-        return None
-
-
-def _trend_description(status):
-    status = str(status or "").lower()
-    if status in {"breakout", "rising", "growing"}:
-        return "Interest is growing and more people are searching for this topic."
-    if status == "declining":
-        return "Interest is declining slightly over recent searches."
-    if status == "stable":
-        return "Steady interest with consistent search volume over time."
-    return "Trend data is not available yet."
 
 
 def _latest_keyword_velocity(keyword):
@@ -1808,19 +1775,17 @@ def _topic_candidate_from_keyword(keyword):
         reason_parts.append(f"Opportunity score {keyword.opportunity_index:g}")
     if keyword.volume:
         reason_parts.append(f"{keyword.volume:,} monthly searches")
-    if keyword.difficulty is not None and difficulty_source in {"dataforseo_labs", "dataforseo_bulk"}:
+    difficulty = difficulty_metrics({"difficulty": keyword.difficulty, "difficulty_source": difficulty_source})
+    if difficulty["difficultyStatus"] == "available":
         reason_parts.append(f"difficulty {keyword.difficulty}/100")
-    elif keyword.difficulty is not None:
-        reason_parts.append("difficulty pending")
+    else:
+        reason_parts.append("difficulty unavailable")
     if intent:
         reason_parts.append(f"{intent} intent")
     reason = ". ".join(reason_parts) or "Recommended from stored topic research."
     written_article = keyword.written_article
     already_written = bool(keyword.status == KeywordStatus.WRITTEN or written_article)
     velocity = _latest_keyword_velocity(keyword)
-    monthly_searches = _json_list(getattr(keyword, "monthly_searches", None)) or (velocity or {}).get("dailyVolumes") or []
-    trend_status = (velocity or {}).get("trendStatus")
-    trend_percent = _trend_percent_from_velocity(velocity)
     pillar_metadata = _keyword_pillar_metadata(keyword)
     return {
         "id": f"keyword:{keyword.id}",
@@ -1829,8 +1794,6 @@ def _topic_candidate_from_keyword(keyword):
         "reason": reason,
         "source": "researched_keyword",
         "intent": keyword.intent,
-        "difficulty": keyword.difficulty,
-        "difficultySource": difficulty_source,
         "opportunityScore": keyword.opportunity_index,
         "volume": keyword.volume,
         "tier": keyword.tier,
@@ -1838,17 +1801,15 @@ def _topic_candidate_from_keyword(keyword):
         "alreadyWritten": already_written,
         "writtenArticle": _serialize_written_article(written_article) if written_article else None,
         "velocity": velocity,
-        "monthlySearches": monthly_searches,
-        "trendStatus": trend_status,
-        "trendPercent": trend_percent,
-        "trendDescription": _trend_description(trend_status),
-        "trendSource": (velocity or {}).get("source"),
-        "trendBasis": (velocity or {}).get("basis"),
-        "trendPeriodLabel": (velocity or {}).get("periodLabel"),
-        "trendIsEstimated": (velocity or {}).get("isEstimated"),
         "aiSaturation": _latest_keyword_saturation(keyword),
         "relatedKeywords": _keyword_related_keywords(keyword),
         "paaQuestions": _keyword_paa_questions(keyword),
+        **topic_metric_payload({
+            "difficulty": keyword.difficulty,
+            "difficulty_source": difficulty_source,
+            "monthly_searches": getattr(keyword, "monthly_searches", None),
+            "velocity": velocity,
+        }),
         **pillar_metadata,
     }
 
@@ -2516,18 +2477,23 @@ def _enrich_topic_candidates(
     return enriched
 
 
-VERIFIED_DIFFICULTY_SOURCES = {"dataforseo_labs", "dataforseo_bulk"}
-
-
 def _prefer_topic_difficulty(existing, candidate):
-    existing_source = existing.get("difficultySource") or existing.get("difficulty_source") or "missing"
-    candidate_source = candidate.get("difficultySource") or candidate.get("difficulty_source") or "missing"
-    if existing_source not in VERIFIED_DIFFICULTY_SOURCES and candidate_source in VERIFIED_DIFFICULTY_SOURCES:
-        return candidate.get("difficulty"), candidate_source
-    return (
-        existing.get("difficulty") if existing.get("difficulty") is not None else candidate.get("difficulty"),
-        existing_source or candidate_source or "missing",
-    )
+    old = difficulty_metrics(existing)
+    new = difficulty_metrics(candidate)
+    preferred = old if old["difficultyStatus"] == "available" else new
+    if old["difficultyStatus"] == new["difficultyStatus"] == "available":
+        checked = []
+        for item in (existing, candidate):
+            try:
+                timestamp = parse_datetime(str(value_for(item, "metricsCheckedAt", "metrics_checked_at", default="")))
+            except (TypeError, ValueError):
+                timestamp = None
+            checked.append(timestamp if timestamp and timezone.is_aware(timestamp) else None)
+        # Search-history observation dates are not difficulty measurement dates.
+        # Without comparable lookup times retain the first verified result.
+        if all(checked) and checked[1] > checked[0]:
+            preferred = new
+    return preferred["difficulty"], preferred["difficultySource"]
 
 
 def _topic_candidate_passes_dashboard_quality(candidate):
@@ -2612,6 +2578,35 @@ def _merge_topic_candidate(existing, candidate):
             "writtenArticle": existing.get("writtenArticle") or candidate.get("writtenArticle"),
         }
     )
+    merged.update(difficulty_metrics(merged))
+    # Preserve each trend as a bundle. Mixing an option's AI trend with a
+    # stored Google-volume chart gives a convincing but incorrect direction.
+    existing_metrics = topic_metric_payload(existing)
+    candidate_metrics = topic_metric_payload(candidate)
+    old_recency = metric_history_recency(existing_metrics)
+    new_recency = metric_history_recency(candidate_metrics)
+    use_candidate_metrics = bool(candidate_metrics["monthlySearches"]) and (
+        new_recency > old_recency or (
+            new_recency == old_recency and candidate.get("source") == "researched_keyword"
+        )
+    )
+    selected_metrics = candidate_metrics if use_candidate_metrics else existing_metrics
+    if selected_metrics["monthlySearches"]:
+        selected_candidate, fallback_candidate = (candidate, existing) if use_candidate_metrics else (existing, candidate)
+        measured_volume = finite_number(selected_candidate.get("volume"))
+        if measured_volume is None or measured_volume < 0:
+            measured_volume = finite_number(fallback_candidate.get("volume"))
+        merged["volume"] = measured_volume if measured_volume is not None and measured_volume >= 0 else None
+    for key, value in selected_metrics.items():
+        if not key.startswith("difficulty"):
+            merged[key] = value
+    if all(existing_metrics[key] == selected_metrics[key] for key in ("monthlySearches", "trendSource", "trendBasis")):
+        # The exact same run observations can supply provenance that the
+        # historical keyword table has no dedicated column for.
+        for key in ("trendCountry", "trendLanguage", "trendReason", "metricsCheckedAt", "trendLastUpdatedAt"):
+            if not merged.get(key):
+                merged[key] = existing_metrics.get(key)
+    merged["velocity"] = candidate.get("velocity") if use_candidate_metrics else existing.get("velocity")
     return merged
 
 

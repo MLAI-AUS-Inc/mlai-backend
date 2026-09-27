@@ -86,6 +86,7 @@ from content_factory.serializers import (
     GeneratedComponentListSerializer,
     GeneratedComponentSerializer,
 )
+from content_factory.topic_metrics import keyword_measurement_defaults, velocity_snapshot_defaults
 from core.permissions import HasRooApiKey
 from integrations.services.github_connections import get_owned_org_configs
 from organizations.models import Organization
@@ -7558,21 +7559,11 @@ class SEOKeywordBulkUpsertView(APIView):
                     continue
 
                 keyword_normalized = keyword_text.lower().strip()
-                velocity = kw_data.get('velocity_data') or kw_data.get('velocity') or {}
                 related_keywords = kw_data.get('related_keywords') or kw_data.get('relatedKeywords') or []
-                monthly_searches = (
-                    kw_data.get('monthly_searches')
-                    or kw_data.get('monthlySearches')
-                    or velocity.get('daily_volumes')
-                    or velocity.get('dailyVolumes')
-                    or []
-                )
 
                 defaults = {
                     'keyword': keyword_text,
                     'volume': kw_data.get('volume', 0),
-                    'difficulty': kw_data.get('difficulty', 50),
-                    'difficulty_source': kw_data.get('difficulty_source') or kw_data.get('difficultySource') or 'legacy_default',
                     'intent': kw_data.get('intent', 'informational'),
                     'tier': kw_data.get('tier', 'tier_4_discard'),
                     'opportunity_index': kw_data.get('opportunity_index', 0.0),
@@ -7580,18 +7571,25 @@ class SEOKeywordBulkUpsertView(APIView):
                     'source_detail': kw_data.get('source_detail'),
                     'competitor_urls': kw_data.get('competitor_urls', []),
                     'related_keywords': related_keywords if isinstance(related_keywords, list) else [],
-                    'monthly_searches': monthly_searches if isinstance(monthly_searches, list) else [],
                     'cluster_fingerprint': kw_data.get('cluster_fingerprint', ''),
                 }
                 # AI-search research is only computed behind the cf GEO flags and
                 # only for the top candidates of a run, so an absent key means
                 # "not measured this time" and must never clobber a stored value.
                 defaults.update(_ai_search_keyword_defaults(kw_data))
+                # Absent/unavailable provider measurements must not overwrite
+                # previously verified difficulty or dated search history.
+                defaults.update(keyword_measurement_defaults(kw_data))
+                create_defaults = {
+                    'difficulty_source': 'missing' if 'difficulty_source' in kw_data or 'difficultySource' in kw_data else 'legacy_default',
+                    **defaults,
+                }
 
                 keyword_obj, created = ResearchedKeyword.objects.update_or_create(
                     organization=org,
                     keyword_normalized=keyword_normalized,
-                    defaults=defaults
+                    defaults=defaults,
+                    create_defaults=create_defaults,
                 )
 
                 if created:
@@ -7600,17 +7598,11 @@ class SEOKeywordBulkUpsertView(APIView):
                     updated_count += 1
 
                 # Create velocity snapshot if provided
+                velocity = velocity_snapshot_defaults(kw_data)
                 if velocity:
                     KeywordVelocity.objects.create(
                         keyword=keyword_obj,
-                        absolute_volume=velocity.get('absolute_volume', 0),
-                        velocity_score=velocity.get('velocity_score', 0.0),
-                        trend_status=velocity.get('trend_status', 'stable'),
-                        daily_volumes=velocity.get('daily_volumes', []),
-                        source=velocity.get('source', 'unknown'),
-                        basis=velocity.get('basis', 'unknown'),
-                        period_label=velocity.get('period_label', ''),
-                        is_estimated=velocity.get('is_estimated', True),
+                        **velocity,
                     )
 
                 # Create AI saturation snapshot if provided

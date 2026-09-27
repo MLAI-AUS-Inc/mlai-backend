@@ -11,6 +11,9 @@ subsystem-specific contracts and runbooks.
 
 ## Content Factory
 
+- [Article performance health evidence](article-performance-health.md) — publication age, scoped competitor observations and report metric provenance
+- [Topic picker research metrics](content-topic-metrics.md) — difficulty provenance, dated trends and sparse research persistence
+
 - [Editorial and onboarding contract](content-factory-editorial-contract.md) — approved audience/offer persistence and drafting during website setup
 
 - [Content islands](content-islands.md) — paid topic research, measured island suggestions and scoped article ideas
