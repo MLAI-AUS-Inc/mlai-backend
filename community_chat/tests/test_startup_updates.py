@@ -265,7 +265,7 @@ class ConnectionHandoffTests(SimpleTestCase):
         ticket = signing.dumps(self.payload, salt=SALT)
         request = APIRequestFactory().get('/', {'ticket': ticket, 'company_id': 'attacker', 'next': 'https://evil.invalid'})
         user = Obj(pk=7, is_active=True, auth_version=2)
-        session = Obj(revoked_at=None, expires_at=timezone.now() + timedelta(days=1), user=user, auth_version=2)
+        session = Obj(pk='session', revoked_at=None, expires_at=timezone.now() + timedelta(days=1), user=user, auth_version=2)
         with patch('community_chat.startups.connections.CommunityChatAccountSession.objects') as sessions, patch('community_chat.startups.connections.VibeRaisingCompany.objects') as companies, patch('community_chat.startups.connections.connector_connect', return_value=HttpResponse()) as connect:
             sessions.select_related.return_value.filter.return_value.first.return_value = session
             companies.get.return_value = Obj(pk='owned')
