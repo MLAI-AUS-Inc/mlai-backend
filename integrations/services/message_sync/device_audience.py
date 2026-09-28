@@ -105,5 +105,7 @@ def rebind_history(conversation, registration):
             state.save(update_fields=["verified_ranges"])
     from .publication import rebind_publication_locked, record_publication_locked
     rebind_publication_locked(conversation, registration)
+    from .presentation import rebind_presentation_locked
+    rebind_presentation_locked(conversation, registration)
     # A prior lost acknowledgement may have been the last undelivered item.
     record_publication_locked(conversation)

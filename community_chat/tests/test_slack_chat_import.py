@@ -116,9 +116,11 @@ class SlackChatImportTests(APITestCase):
             [
                 {
                     "channel_id": str(conversation.mlai_channel_id),
+                    "slack_conversation_id": conversation.slack_conversation_id,
                     "kind": "private_channel",
                     "last_message_at": message_at.isoformat(),
                     "ready_for_display": False,
+                    "history_complete": False,
                     "history_oldest_ts": str(
                         int((now - timedelta(days=30)).timestamp())
                     ),

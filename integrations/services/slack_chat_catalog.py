@@ -69,7 +69,7 @@ def catalog_conversations(conversations):
     Prefetch preserves the caller's owner/status filters and shares FK objects.
     """
     from integrations.models import BridgeSyncState, SlackDmMirrorDelivery
-    from integrations.services.message_sync.private_coverage import current_coverage_rows
+    from integrations.services.message_sync.private_coverage import coverage_attempt_rows, current_coverage_rows
 
     unfinished = SlackDmMirrorDelivery.objects.filter(
         conversation_id=OuterRef("pk"), source_platform="slack",
@@ -92,13 +92,18 @@ def catalog_conversations(conversations):
     ).annotate(
         _import_pending=Exists(unfinished),
         _import_verified=Exists(current_coverage_rows()),
-        _import_limited=Exists(BridgeSyncState.objects.filter(
-            private_conversation_id=OuterRef("pk"),
+        _import_limited=Exists(coverage_attempt_rows().filter(
             verified_ranges__archive__classification="source_limited",
         )),
         _publication_scope=Subquery(BridgeSyncState.objects.filter(
             private_conversation_id=OuterRef("pk"),
         ).values("verified_ranges__publication__scope")[:1]),
+        _presentation_scope=Subquery(BridgeSyncState.objects.filter(
+            private_conversation_id=OuterRef("pk"),
+        ).values("verified_ranges__presentation__scope")[:1]),
+        _presentation_source_ts=Subquery(BridgeSyncState.objects.filter(
+            private_conversation_id=OuterRef("pk"),
+        ).values("verified_ranges__presentation__source_message_ts")[:1]),
     )
 
 
@@ -125,11 +130,48 @@ def owner_open_intent(grant, public_key):
     }
 
 
+def history_complete(conversation):
+    """Certify the selected archive independently of partial display readiness."""
+    completed = conversation.history_backfilled_at
+    return bool(
+        completed is not None and completed >= conversation.grant.consented_at
+        and getattr(conversation, "_import_verified", False)
+        and not getattr(conversation, "_import_pending", True)
+        and not getattr(conversation, "_import_limited", False)
+    )
+
+
+def source_limited_without_pending(grant, source_id):
+    """Identify a completed current-room attempt after receipt recovery is empty."""
+    conversation = catalog_conversations(grant.conversations.filter(
+        slack_conversation_id=source_id, status="live",
+    )).first()
+    completed_limited = bool(
+        conversation is not None and conversation._import_limited
+        and not conversation._import_pending
+        and conversation.history_backfilled_at is not None
+        and conversation.history_backfilled_at >= grant.consented_at
+    )
+    if not completed_limited:
+        return False
+    # A live callback can be delivering the first accessible message while the
+    # older archive is limited. Do not terminate that open ahead of its receipt.
+    return not conversation.deliveries.filter(
+        source_platform="slack", metadata__participant_hash=conversation.participant_hash,
+        status__in=["pending", "processing", "failed", "dead"],
+    ).exclude(source_message_id__startswith="history-state:").filter(
+        Q(metadata__history_outside_window__isnull=True) | Q(metadata__history_outside_window=False),
+    ).filter(
+        Q(metadata__history_recovery_superseded__isnull=True) | Q(metadata__history_recovery_superseded=False),
+    ).exclude(status="dead", last_error="Private conversation participants changed").exists()
+
+
 def ready_for_display(conversation, *, now=None, public_key=None):
-    """Publish a mirror only after its selected source window has been delivered."""
+    """Show acknowledged history immediately while the remaining archive imports."""
+    from integrations.services.message_sync.presentation import presentation_scope
+
     now = now or datetime.now(timezone.utc)
     grant = conversation.grant
-    completed = conversation.history_backfilled_at
     activity = conversation_activity_at(conversation)
     if (
         grant.status != "active" or grant.revoked_at is not None
@@ -137,12 +179,20 @@ def ready_for_display(conversation, *, now=None, public_key=None):
     ):
         return False
     published = getattr(conversation, "_publication_scope", None) == _publication_key(conversation)
-    if not published and (
-        completed is None or completed < grant.consented_at
-        or not getattr(conversation, "_import_verified", False)
-        or getattr(conversation, "_import_pending", True)
-        or getattr(conversation, "_import_limited", False)
-    ):
+    presented = False
+    if getattr(conversation, "_presentation_scope", None):
+        oldest = history_oldest_ts(conversation, now=now)
+        try:
+            delivered = Decimal(str(getattr(conversation, "_presentation_source_ts", "")))
+            presented = bool(
+                conversation._presentation_scope == presentation_scope(conversation)
+                and delivered.is_finite() and delivered > 0
+                and (not oldest or delivered >= Decimal(oldest))
+                and delivered <= Decimal(str(now.timestamp() + 300))
+            )
+        except InvalidOperation:
+            pass
+    if not published and not presented and not history_complete(conversation):
         return False
     if activity is None:
         # A deliberately opened empty DM needs a composer after its first scan.
@@ -189,9 +239,11 @@ def catalog_payload(conversations, public_key):
     return [
         {
             "channel_id": str(conversation.mlai_channel_id),
+            "slack_conversation_id": conversation.slack_conversation_id,
             "kind": conversation_kind(conversation),
             "last_message_at": conversation_activity_at(conversation),
             "ready_for_display": readiness[id(conversation)],
+            "history_complete": history_complete(conversation),
             "history_oldest_ts": history_oldest_ts(conversation),
             "source_archived": bool(
                 conversation_metadata(conversation).get("source_archived")

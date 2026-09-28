@@ -509,7 +509,8 @@ def _validate_open_source(grant, authority, row):
             raise InventoryError("slack_upstream_unavailable", 502)
         if not messages:
             raise InventoryError(
-                "inventory_no_in_window_activity" if days else "inventory_no_messages", 409,
+                "inventory_source_limited" if history.get("is_limited") is True
+                else "inventory_no_in_window_activity" if days else "inventory_no_messages", 409,
             )
         activity = _slack_conversation_activity_seconds({"latest": messages[0]})
         if activity is None:

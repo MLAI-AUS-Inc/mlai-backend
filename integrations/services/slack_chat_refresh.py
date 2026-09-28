@@ -4,7 +4,7 @@ from datetime import timedelta
 from uuid import UUID
 
 from django.db import transaction
-from django.db.models import Count, Exists, OuterRef, Q
+from django.db.models import Count, Exists, Max, OuterRef, Q
 from django.utils import timezone
 from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
 
@@ -111,11 +111,16 @@ def _refresh_status(conversation):
             Q(metadata__history_recovery_superseded__isnull=True)
             | Q(metadata__history_recovery_superseded=False)
         )
+        .filter(
+            Q(metadata__dependency_superseded__isnull=True)
+            | Q(metadata__dependency_superseded=False)
+        )
     )
     counts = rows.aggregate(
         imported_messages=Count("pk", filter=Q(status="completed", operation="create")),
         queued_messages=Count("pk", filter=Q(status__in=("pending", "processing"))),
         failed_messages=Count("pk", filter=Q(status__in=("failed", "dead"))),
+        delivery_revision=Max("updated_at", filter=Q(status="completed")),
     )
     failed = counts["failed_messages"] > 0
     pending = counts["queued_messages"] > 0
@@ -138,6 +143,13 @@ def _refresh_status(conversation):
 
     sync = BridgeSyncState.objects.filter(private_conversation=conversation).first()
     coverage = dict(sync.verified_ranges or {}).get("head", {}) if sync else {}
+    archive = dict(sync.verified_ranges or {}).get("archive", {}) if sync else {}
+    if (archive.get("classification") == "source_limited"
+            and archive.get("participant_hash") == conversation.participant_hash
+            and archive.get("channel_id") == str(conversation.mlai_channel_id)):
+        # Recent history can be accessible while older Slack history is hidden.
+        # Never let a successful head page erase that known source limitation.
+        coverage = archive
     if sync and sync.last_error_code:
         state = "error"
     elif sync and coverage.get("classification") in {None, "incomplete", "unknown"}:

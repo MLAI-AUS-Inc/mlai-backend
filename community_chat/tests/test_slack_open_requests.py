@@ -40,6 +40,8 @@ class SlackOpenRequestsTests(SimpleTestCase):
             ("integrations.services.slack_owner_inventory_api.has_metadata_consent", {"return_value": True}),
             ("integrations.services.slack_owner_inventory_api._grant_history_days", {"return_value": 30}),
             ("integrations.services.slack_discovery_progress.conversation_progress", {"side_effect": lambda *args: nullcontext(self.progress)}),
+            ("integrations.services.message_sync.presentation.recover_presentation", {"return_value": (False, None)}),
+            ("integrations.services.slack_chat_catalog.source_limited_without_pending", {"return_value": False}),
         ):
             patcher = patch(target, **options)
             patcher.start()
@@ -255,3 +257,50 @@ class SlackOpenRequestsTests(SimpleTestCase):
         with patch.object(api, "_validate_open_source") as source:
             self.assertFalse(opens.process_next_open(self.grant, self.authority))
         source.assert_not_called()
+
+    def test_existing_partial_room_recovers_without_waiting_for_slack(self):
+        with patch("integrations.services.message_sync.presentation.recover_presentation", return_value=(True, None)):
+            source, discover, _, update = self.run_worker()
+        source.assert_not_called()
+        discover.assert_not_called()
+        self.assertEqual(update.call_args.kwargs, {"state": "importing"})
+
+    def test_old_receipt_pages_advance_without_revalidating_source(self):
+        with patch("integrations.services.message_sync.presentation.recover_presentation", return_value=(False, 41)):
+            source, discover, _, update = self.run_worker()
+        source.assert_not_called()
+        discover.assert_not_called()
+        self.assertEqual(update.call_args.kwargs, {"receipt_before_id": 41, "due": self.now + 2})
+
+    def test_source_limited_empty_scan_ends_open_instead_of_polling_forever(self):
+        with patch("integrations.services.slack_chat_catalog.source_limited_without_pending", return_value=True):
+            source, discover, _, update = self.run_worker()
+        source.assert_not_called()
+        discover.assert_not_called()
+        self.assertEqual(update.call_args.kwargs["error"], "inventory_source_limited")
+        self.assertEqual(update.call_args.kwargs["status_code"], 409)
+
+    def test_import_poll_becomes_terminal_when_scoped_empty_scan_finishes_limited(self):
+        self.enqueue()
+        next(iter(self.connection.sync_cursor[opens.KEY].values())).update(
+            state="importing", receipt_recovery_complete=True,
+        )
+        with patch("integrations.services.slack_chat_catalog.source_limited_without_pending", return_value=True):
+            with self.assertRaises(api.InventoryError) as caught:
+                self.enqueue()
+        self.assertEqual(caught.exception.code, "inventory_source_limited")
+
+    def test_pre_upgrade_importing_request_gets_receipt_recovery_before_source_limit(self):
+        from integrations.services.message_sync.discovery import KEY
+        self.enqueue()
+        request = next(iter(self.connection.sync_cursor[opens.KEY].values()))
+        request.update(state="importing", due=self.now + 37, receipt_before_id=42)
+        self.connection.sync_cursor[KEY] = {"token": "lease", "served": self.now, "due": self.now + 60}
+        previous = dict(request)
+        with patch("integrations.services.slack_chat_catalog.source_limited_without_pending", return_value=True) as limited:
+            payload = self.enqueue()
+        limited.assert_not_called()
+        current = next(iter(self.connection.sync_cursor[opens.KEY].values()))
+        self.assertEqual(current, {**previous, "state": "pending"})
+        self.assertEqual(payload["retry_after_seconds"], 37)
+        self.assertEqual(self.connection.sync_cursor[KEY]["token"], "lease")

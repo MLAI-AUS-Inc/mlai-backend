@@ -119,6 +119,8 @@ class SlackChatCatalogTests(SimpleTestCase):
         conversation = self.conversation()
         result = catalog_payload([conversation], "owner-device")
         self.assertFalse(result[0].pop("ready_for_display"))
+        self.assertFalse(result[0].pop("history_complete"))
+        self.assertEqual(result[0].pop("slack_conversation_id"), conversation.slack_conversation_id)
         self.assertGreater(int(result[0].pop("history_oldest_ts")), 0)
         self.assertEqual(
             result,
