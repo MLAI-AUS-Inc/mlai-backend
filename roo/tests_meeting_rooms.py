@@ -2,7 +2,7 @@ import json
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, time, timedelta
+from datetime import datetime, time, timedelta, timezone as datetime_timezone
 from unittest import skipUnless
 from zoneinfo import ZoneInfo
 
@@ -756,7 +756,10 @@ class MeetingRoomApiTests(APITestCase):
                 'slack_user_id': self.user.slack_id,
                 'room_slug': self.room.slug,
                 'starts_at': starts_at.isoformat(),
-                'ends_at': (starts_at + timedelta(hours=24, minutes=30)).isoformat(),
+                'ends_at': (
+                    starts_at.astimezone(datetime_timezone.utc)
+                    + timedelta(hours=24, minutes=30)
+                ).isoformat(),
             },
             format='json',
         )
