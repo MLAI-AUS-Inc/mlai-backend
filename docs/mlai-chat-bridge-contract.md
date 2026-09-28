@@ -777,8 +777,9 @@ and [Slack's RTM availability](https://docs.slack.dev/tools/node-slack-sdk/rtm-a
 
 ### Opening owner Slack conversations
 
-`POST slack/conversations/open/` resolves an existing published, device-authorized
-mirror without requesting Slack metadata. Source-only conversations return
+`POST slack/conversations/open/` resolves an existing readable, device-authorized
+mirror without requesting Slack metadata. Acknowledged messages are readable
+while older archive pages continue importing. Source-only conversations return
 `202 {state: "importing", mlai_channel_id: null, retry_after_seconds: 2}` and queue
 one bounded, content-free owner/device intent. Clients open the selected
 conversation view immediately and retry this endpoint after its reported delay;
@@ -816,9 +817,11 @@ full-directory reload. Mobile already uses the same targeted-room approach.
 
 Requested rooms receive first service on import-priority turns within the
 selected owner for five minutes. Ordinary turns retain least-recently-served
-background rotation and workspace/owner fairness. A ready response still requires
-current-room source coverage and delivery publication; an empty or incomplete
-import is never represented as a fully loaded chat. Open requests use their own
+background rotation and workspace/owner fairness. A ready response requires
+current-room delivery evidence or complete source coverage and publication;
+it means the room can be displayed, not that every historical page is loaded.
+The separate `history_complete` catalogue field retains the full archive and
+delivery qualification. Open requests use their own
 `COMMUNITY_CHAT_SLACK_OPEN_RATE` (default 60/minute), independent of Home, snapshot
 polling and read receipts. No new schema migration is needed.
 
@@ -1060,10 +1063,11 @@ bounded. Provider pagination is rechecked before persistence, including after
 restarts and changes to the consent window. Source-limited responses preserve
 unknown absence: they cannot infer deletions or certify a first complete import.
 
-`channel_catalog` now includes `ready_for_display` and `history_oldest_ts` for
+`channel_catalog` includes `ready_for_display`, `history_complete`,
+`slack_conversation_id`, and `history_oldest_ts` for
 each device-authorized mirror. The latter is a numeric Unix-seconds string, or an
 empty string for explicitly authorized all-history. `last_message_at` is source
-activity, never relay arrival time. Initial publication requires a completed
+activity, never relay arrival time. Complete publication requires a completed
 selected-window scan, successful delivery of its relevant backfill, an active
 current grant and a live conversation with activity inside the selected window.
 An explicit open-DM action can qualify an empty conversation after its completed
@@ -1074,7 +1078,8 @@ durable scan, consent, source-limit and delivery prerequisites.
 Cancelled delivery tombstones from a replaced room (`dead` with the exact
 participant-change cancellation reason) do not block the new room's publication,
 matching refresh progress. Genuine current-room delivery failures still do.
-Clients hide unready imports while preserving native chats. They also filter
+Clients display acknowledged partial history immediately and hide imports that
+have neither an acknowledged message nor complete publication. They also filter
 cached Slack bodies by the same source cutoff and use full Slack timestamps to
 order messages sharing a second.
 
@@ -1108,7 +1113,7 @@ mirror, including private channels; it does not change shared public retention.
 
 ### Current-room archive proof
 
-First publication requires archive `import_contract_version=2`, the current
+Complete publication requires archive `import_contract_version=2`, the current
 participant hash and channel ID, and complete unrestricted source coverage.
 The contract version is recorded when the archive starts. Finishing a resumed
 pre-version cursor does not certify pages read under older code. The completed
@@ -1122,6 +1127,38 @@ DM that lacks proof, while preserving any active scan. A source-limited current-
 unqualified without causing an immediate rescan loop. The presentation latch
 uses a versioned namespace and retains an already qualified view only within
 its exact existing owner, consent, device and participant scope.
+
+### Progressive presentation of cached private history
+
+The first successfully acknowledged create in the current private relay room
+records a separate content-free `presentation` receipt. It binds the owner,
+source, consent window, OAuth generation, room and audience. Its source timestamp
+must remain inside the current consent window. `ready_for_display` accepts this
+receipt while `history_complete` stays false until the full source/archive and
+delivery checks succeed. An incomplete or source-limited scan therefore cannot
+hide messages already delivered to the relay or claim complete Slack history.
+The existing encrypted outbox and canonical relay remain the only message stores;
+no additional copy of private message bodies is retained in backend metadata.
+
+Receipt recovery also covers rooms imported before this change. A targeted open
+worker asks the existing relay receipt API about at most 20 completed create IDs
+per turn, holding the current grant, conversation and device authority checks.
+Only a receipt acknowledged for that exact room can qualify cached content.
+Unconfirmed batches advance a saved cursor; retries retain the provider due time,
+and web requests never wait for relay or Slack I/O. Pre-existing `importing`
+intents receive one such recovery pass before a terminal source-limit decision.
+Stable-room device changes carry the frozen receipt only after the relay audience
+update succeeds. Reset, disconnect, source or consent changes invalidate it.
+
+An explicit Slack `is_limited` response with no accessible messages, or a completed
+current-room source-limited scan after delivery and receipt recovery have drained,
+returns `409 inventory_source_limited`. Clients show the Slack history limitation
+instead of polling indefinitely or asserting that the conversation is empty.
+Available cached messages still open normally. Refresh status preserves a
+current-room archive limitation even when the recent head is accessible and
+includes `delivery_revision`, the latest completed delivery update timestamp,
+so clients can fetch new messages, edits, deletions and reactions without
+restarting an archive scan on every open.
 
 ### Bounded source recovery for failed imports
 

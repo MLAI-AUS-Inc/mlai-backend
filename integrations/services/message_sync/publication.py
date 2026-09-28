@@ -83,10 +83,13 @@ def record_publication_locked(conversation):
 def invalidate_publication_locked(conversation):
     """Invalidate an explicit reset or withdrawn source/consent under its locks."""
     state = BridgeSyncState.objects.select_for_update().filter(private_conversation=conversation).first()
-    if state is None or PUBLICATION_KEY not in (state.verified_ranges or {}):
+    from .presentation import PRESENTATION_KEY
+
+    if state is None or not {PUBLICATION_KEY, PRESENTATION_KEY}.intersection(state.verified_ranges or {}):
         return
     ranges = dict(state.verified_ranges)
     ranges.pop(PUBLICATION_KEY, None)
+    ranges.pop(PRESENTATION_KEY, None)
     state.verified_ranges = ranges
     state.save(update_fields=["verified_ranges"])
 

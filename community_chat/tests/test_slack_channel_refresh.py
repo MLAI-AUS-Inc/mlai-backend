@@ -107,7 +107,12 @@ class SlackChannelRefreshTests(SimpleTestCase):
         queryset = refresh.prioritize_open_conversations(
             refresh.SlackDmMirrorConversation.objects.all()
         )
-        sql, params = queryset.query.sql_with_params()
+        # Compile SQL without connecting; the no-database runner deliberately
+        # installs Django's dummy backend to prohibit real queries.
+        from django.db.backends.sqlite3.base import DatabaseWrapper
+        sql, params = queryset.query.get_compiler(
+            connection=DatabaseWrapper({"ENGINE": "django.db.backends.sqlite3", "NAME": ":memory:", "TIME_ZONE": None}),
+        ).as_sql()
         self.assertIn("EXISTS", sql)
         self.assertIn(refresh.FOREGROUND_STATE_ID, params)
         self.assertIn("completed", params)

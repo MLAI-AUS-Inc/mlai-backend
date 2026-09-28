@@ -4993,6 +4993,8 @@ def _prepare_owner_conversation_locked(
         record_publication_locked(conversation)
     coverage_proof = coverage_for_transition(conversation) if preserve_room and needs_provision else None
     publication_proof = publication_for_transition(conversation) if preserve_room and needs_provision else None
+    from .message_sync.presentation import presentation_for_transition
+    presentation_proof = presentation_for_transition(conversation) if preserve_room and needs_provision else None
     if (participant_set_changed and not preserve_room) or reset_history:
         _mark_conversation_history_due(
             conversation,
@@ -5059,6 +5061,8 @@ def _prepare_owner_conversation_locked(
             private_audience["coverage_proof"] = coverage_proof
         if publication_proof:
             private_audience["publication_proof"] = publication_proof
+        if presentation_proof:
+            private_audience["presentation_proof"] = presentation_proof
         attempt.metadata = {**attempt.metadata, "private_audience": private_audience}
         attempt.save(update_fields=["metadata", "updated_at"])
     return (
@@ -7280,6 +7284,8 @@ def _deliver_private(delivery: SlackDmMirrorDelivery) -> None:
         )
         if delivery.source_platform == CommunityBridgePlatform.SLACK:
             _deliver_to_mlai(delivery)
+            from .message_sync.presentation import record_presentation_locked
+            record_presentation_locked(conversation, [delivery])
             from .message_sync.publication import record_publication_locked
             record_publication_locked(conversation)
             return
@@ -7421,6 +7427,7 @@ def _deliver_private_batch(claimed: list[SlackDmMirrorDelivery]) -> None:
             delivery.metadata = {
                 **source_metadata,
                 "participant_hash": conversation.participant_hash,
+                "destination_channel_id": str(conversation.mlai_channel_id),
                 "destination_message_id": str(result.get("message_id") or ""),
                 "destination_parent_message_id": str(
                     result.get("parent_message_id") or ""
@@ -7457,6 +7464,8 @@ def _deliver_private_batch(claimed: list[SlackDmMirrorDelivery]) -> None:
         grant.last_synced_at = now
         grant.save(update_fields=("last_synced_at", "updated_at"))
         from .message_sync.publication import record_publication_locked
+        from .message_sync.presentation import record_presentation_locked
+        record_presentation_locked(conversation, deliveries)
         record_publication_locked(conversation)
 
 
@@ -8175,6 +8184,7 @@ def _deliver_to_mlai(delivery: SlackDmMirrorDelivery) -> None:
         delivery.metadata.update(
             {
                 "destination_message_id": str(result.get("message_id") or ""),
+                "destination_channel_id": str(conversation.mlai_channel_id),
                 "destination_parent_message_id": str(
                     result.get("parent_message_id") or ""
                 ),

@@ -40,11 +40,24 @@ def complete_open_locked(connection, device, source_id):
     connection.save(update_fields=["sync_cursor", "updated_at"])
 
 
+def _schedule_requests_locked(grant, connection, cursor, requests, now):
+    from integrations.services.message_sync.discovery import KEY as DISCOVERY_KEY
+
+    cursor[KEY] = requests
+    discovery = dict(cursor.get(DISCOVERY_KEY) or {})
+    # Preserve an active lease and this owner's fairness position.
+    discovery["due"] = min(float(discovery.get("due") or 0), now)
+    cursor[DISCOVERY_KEY] = discovery
+    connection.sync_cursor = cursor
+    connection.save(update_fields=["sync_cursor", "updated_at"])
+    grant.last_discovery_at = None
+    grant.save(update_fields=["last_discovery_at", "updated_at"])
+
+
 def enqueue_open_locked(grant, connection, authority, device, row):
     """Coalesce opens under the existing authority lock without provider I/O."""
     from integrations.services.slack_owner_inventory import device_epoch, state_for
     from integrations.services.slack_owner_inventory_api import InventoryError
-    from integrations.services.message_sync.discovery import KEY as DISCOVERY_KEY
 
     now = time.time()
     cursor = dict(connection.sync_cursor or {})
@@ -55,6 +68,17 @@ def enqueue_open_locked(grant, connection, authority, device, row):
     if previous and previous.get("epoch") == epoch:
         if previous.get("error"):
             raise InventoryError(previous["error"], previous["status_code"])
+        if previous.get("state") == "importing":
+            if not previous.get("receipt_recovery_complete"):
+                # A pre-upgrade intent already left discovery. Give its cached
+                # room one receipt-recovery pass before considering a terminal
+                # source limit; retain its ID, device epoch and provider due time.
+                requests[key] = {**previous, "state": "pending"}
+                _schedule_requests_locked(grant, connection, cursor, requests, now)
+            else:
+                from integrations.services.slack_chat_catalog import source_limited_without_pending
+                if source_limited_without_pending(grant, row.slack_conversation_id):
+                    raise InventoryError("inventory_source_limited", 409)
         # Polling must not bypass Retry-After or restart successful provisioning.
         return {"state": "importing", "mlai_channel_id": None,
                 "retry_after_seconds": max(2, math.ceil(previous.get("due", now) - now))}
@@ -65,15 +89,7 @@ def enqueue_open_locked(grant, connection, authority, device, row):
         "public_key": device.public_key, "requested_at": now,
         "until": now + REQUEST_TTL, "due": now, "state": "pending",
     }
-    cursor[KEY] = requests
-    discovery = dict(cursor.get(DISCOVERY_KEY) or {})
-    # Preserve an active lease and this owner's fairness position.
-    discovery["due"] = min(float(discovery.get("due") or 0), now)
-    cursor[DISCOVERY_KEY] = discovery
-    connection.sync_cursor = cursor
-    connection.save(update_fields=["sync_cursor", "updated_at"])
-    grant.last_discovery_at = None
-    grant.save(update_fields=["last_discovery_at", "updated_at"])
+    _schedule_requests_locked(grant, connection, cursor, requests, now)
     return {"state": "importing", "mlai_channel_id": None, "retry_after_seconds": 2}
 
 
@@ -193,6 +209,23 @@ def process_next_open(grant, authority):
         ).first()
         if row is None or row.kind == "public_channel":
             raise InventoryError("inventory_conversation_unavailable", 404)
+        from integrations.services.message_sync.presentation import recover_presentation
+
+        if not request.get("receipt_recovery_complete"):
+            recovered, before_id = recover_presentation(
+                current_grant, authority, device, row.slack_conversation_id,
+                before_id=request.get("receipt_before_id"),
+            )
+            if recovered:
+                _update(authority, key, request, state="importing")
+                return True  # The next metadata-only open resolves the ready room.
+            if before_id is not None:
+                _update(authority, key, request, receipt_before_id=before_id, due=time.time() + 2)
+                return True
+            _update(authority, key, request, receipt_recovery_complete=True)
+        from integrations.services.slack_chat_catalog import source_limited_without_pending
+        if source_limited_without_pending(current_grant, row.slack_conversation_id):
+            raise InventoryError("inventory_source_limited", 409)
         started_at = datetime.fromtimestamp(request["requested_at"], tz=dt_timezone.utc)
         with conversation_progress(authority, row.slack_conversation_id, row.kind, started_at) as progress:
             details, activity = _validated_source(current_grant, authority, row, progress)
