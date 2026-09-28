@@ -251,3 +251,36 @@ reporter setup is required. Clients hide the widget when `agents` is absent
 (older backend) and show an empty state for an explicitly empty list. The
 Tokenmaxer cache version is advanced so old cached entries cannot silently omit
 the source breakdown.
+
+### Coding-agent proportional history
+
+Add `history=7d|30d|90d|365d` to `GET usage/leaderboard/` to request the
+additive `agent_history` field. The range is independent of the summary
+`window`, ends at the same validated `date` anchor (today by default), and is
+bounded to 365 days. Existing clients pay no history-query cost when omitted.
+
+`agent_history` contains `scope: "mlai"`, `window`, `timezone`,
+`basis: "session_started_at"`, `date_from`, `date_to`, and a chronological
+`points` array. Each point includes `date`, `grand_total`, and `agents` rows
+containing `source`, `display_name`, and normalized `grand_total`. Shares are
+each agent's tokens divided by **all** agents' tokens for that day. Zero-total
+days have an empty agent list and no percentage; clients must not carry the
+previous day's percentages through missing usage.
+
+The source of truth is the existing durable `TokenUsageSession` table, written
+by authenticated ingest and history uploads, keyed by account/source/session/
+model. Repeated uploads replace or merge the same cumulative baseline rather
+than adding duplicate usage. No page-view writes, scheduler, new model, or
+migration is needed. The series includes backfilled sessions and groups by
+session start date, not report-arrival time. Later session growth can revise
+that day; this is not an immutable snapshot.
+
+Queries exclude private accounts and future sessions. Hiding an account removes
+its contribution from current and historical public views. Summary pagination
+does not limit the history cohort. Calendar boundaries use the configured
+timezone, including daylight saving changes. No session IDs or private content
+appear in the response.
+
+The Australia-wide federation supplies only current totals, so its history
+cannot be reconstructed. Even with `scope=australia`, returned history is
+explicitly `scope=mlai`; clients must label it MLAI-only.

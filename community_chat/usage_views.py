@@ -46,6 +46,7 @@ from .token_usage import (
     parse_sessions,
     upsert_sessions,
 )
+from .token_agent_history import HISTORY_WINDOWS, daily_agent_history
 from .token_agent_leaderboard import agent_leaderboard
 from .tokenmaxer_federation import fetch_public_tokenmaxer_entries
 
@@ -305,6 +306,12 @@ class TokenUsageLeaderboardView(APIView):
                 {"error": "scope must be one of: " + ", ".join(SCOPES)},
                 status=400,
             )
+        history_window = request.query_params.get("history")
+        if history_window is not None and history_window not in HISTORY_WINDOWS:
+            return Response(
+                {"error": "history must be one of: " + ", ".join(HISTORY_WINDOWS)},
+                status=400,
+            )
         try:
             limit = int(request.query_params.get("limit", DEFAULT_LIMIT))
         except (TypeError, ValueError):
@@ -471,23 +478,26 @@ class TokenUsageLeaderboardView(APIView):
             )
             you = hidden_payload
 
-        return Response(
-            {
-                "window": window,
-                "scope": scope,
-                "timezone": settings.TOKEN_USAGE_LEADERBOARD_TIME_ZONE,
-                "window_basis": "session_started_at",
-                "total_basis": "source_normalized",
-                "date_from": date_from.isoformat() if date_from else None,
-                "date_to": date_to.isoformat() if date_to else None,
-                "entries": ranked,
-                "agents": agent_leaderboard(combined),
-                # A member outside the cut still sees where they stand;
-                # otherwise connecting appears to have done nothing.
-                "you": you,
-                "connected": own is not None,
-            }
-        )
+        payload = {
+            "window": window,
+            "scope": scope,
+            "timezone": settings.TOKEN_USAGE_LEADERBOARD_TIME_ZONE,
+            "window_basis": "session_started_at",
+            "total_basis": "source_normalized",
+            "date_from": date_from.isoformat() if date_from else None,
+            "date_to": date_to.isoformat() if date_to else None,
+            "entries": ranked,
+            "agents": agent_leaderboard(combined),
+            # A member outside the cut still sees where they stand;
+            # otherwise connecting appears to have done nothing.
+            "you": you,
+            "connected": own is not None,
+        }
+        if history_window:
+            payload["agent_history"] = daily_agent_history(
+                history_window, anchor, now
+            )
+        return Response(payload)
 
 
 def _public_keys_for(user_ids):
