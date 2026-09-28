@@ -70,7 +70,7 @@ from integrations.services.community_bridge.formatting import (
     normalize_slack_thread_references,
     slack_message_reference,
     reaction_object_id,
-    sanitize_slack_text,
+    sanitize_slack_message,
     slack_reaction_to_emoji,
 )
 from integrations.services.slack_private_mentions import (
@@ -3252,7 +3252,11 @@ def _normalize_private_slack_event(
             _slack_ts_sort_key(source_message_id)
         except SlackDmMirrorError:
             return None
-        text = _slack_message_text(event)
+        text = _slack_message_text(
+            event,
+            workspace_id=str(payload.get("team_id") or ""),
+            channel_id=str(event.get("channel") or ""),
+        )
         return {
             "operation": CommunityBridgeDeliveryType.CREATE,
             "source_message_id": source_message_id,
@@ -3291,7 +3295,11 @@ def _normalize_private_slack_event(
             _slack_ts_sort_key(target_message_id)
         except SlackDmMirrorError:
             return None
-        text = _slack_message_text(message)
+        text = _slack_message_text(
+            message,
+            workspace_id=str(payload.get("team_id") or ""),
+            channel_id=str(event.get("channel") or ""),
+        )
         return {
             "operation": CommunityBridgeDeliveryType.EDIT,
             "source_message_id": _slack_delivery_source_id(
@@ -3398,7 +3406,9 @@ def _buzz_delivery_source_id(
     return f"buzz-event:{hashlib.sha256(receipt_key.encode('utf-8')).hexdigest()}"
 
 
-def _slack_message_text(message: dict[str, Any]) -> str:
+def _slack_message_text(
+    message: dict[str, Any], *, workspace_id: str = "", channel_id: str = ""
+) -> str:
     attachments = list(normalize_slack_files(message.get("files") or []))
     attachments.extend(normalize_slack_thread_references(message.get("attachments") or []))
     for item in message.get("attachments") or []:
@@ -3421,8 +3431,11 @@ def _slack_message_text(message: dict[str, Any]) -> str:
             }
         )
     return _append_attachment_links(
-        sanitize_slack_text(
-            str(message.get("text") or ""), preserve_unresolved_mentions=True
+        sanitize_slack_message(
+            message,
+            workspace_id=workspace_id,
+            channel_id=channel_id,
+            preserve_entities=True,
         ),
         attachments,
     )
@@ -6444,7 +6457,11 @@ def _enqueue_history_message(
 ) -> None:
     message_id = str(message.get("ts") or "").strip()
     author_id = str(message.get("user") or "").strip()
-    text = _slack_message_text(message)
+    text = _slack_message_text(
+        message,
+        workspace_id=str(getattr(conversation.grant, "slack_workspace_id", "") or ""),
+        channel_id=conversation.slack_conversation_id,
+    )
     metadata = {
         "backfill": True,
         "slack_entities_preserved": True,

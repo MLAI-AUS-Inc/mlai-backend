@@ -1307,3 +1307,28 @@ provider failures. Connection retries reuse the original signed event ID.
 Preview clients cap concurrent downloads and retain loading state through bounded
 provider backoff. The backend coalesces concurrent metadata reads for the same
 Slack file, while each request still checks current account/channel authority.
+
+## Rich display content and Roo topic actions (September 2026)
+
+Both public and private/history import paths now prefer visible Slack `blocks`
+over notification fallback text, converting headers, sections, fields, context,
+rich text and labelled links to the clients' Markdown dialect. Public canonical
+metadata retains converted display Markdown for deferred mention resolution,
+not the raw interactive block objects/values. Private display text stays in the
+existing encrypted queue. Code contents are preserved. Creates and edits share
+the same conversion.
+
+Roo topic-choice, cancel and delivery-mode buttons carry source references and a
+content/action digest as ordinary Slack URLs. The account-authenticated
+`GET /api/v1/community-chat/slack/message/` reads the current card; `POST` requests
+one explicitly chosen action. Neither accepts a caller-supplied Slack actor or
+action value. The active owner grant and a live private mirror/enabled public
+mapping are required. Consent is revalidated under its existing lock before the
+Roo call. Ambiguous mutation timeouts retain a short message lock.
+
+The configured Public Roo service exposes `/api/chat-actions`, using the existing
+internal mention service credential. It fetches the current bot-owned Slack
+message, validates the digest/DM counterpart, and invokes the existing Slack
+handler, including requester/delegation checks. Deploy Roo first, then backend
+web and bridge workers, then clients. No migration is required. Existing cards
+can be refreshed on demand; no historical rewrite is performed by this change.
