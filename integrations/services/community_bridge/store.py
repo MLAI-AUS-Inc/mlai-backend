@@ -24,7 +24,7 @@ from integrations.services.community_bridge.formatting import (
     normalize_slack_files,
     normalize_slack_thread_references,
     reaction_object_id,
-    sanitize_slack_text,
+    sanitize_slack_message,
     slack_reaction_to_emoji,
 )
 from integrations.services.community_bridge.contracts import (
@@ -605,6 +605,8 @@ def _normalize_slack_event(payload: dict) -> Optional[dict]:
     if bool(event.get("hidden")) and subtype not in {"message_changed", "message_deleted"}:
         return None
     bridge_bot_user_id = str(getattr(settings, "SLACK_BRIDGE_BOT_USER_ID", "") or "").strip()
+    workspace_id = str(payload.get("team_id") or "")
+    channel_id = str(event.get("channel") or "")
 
     if subtype in {"", "bot_message", "thread_broadcast"}:
         source_message_id = str(event.get("ts") or "").strip()
@@ -623,7 +625,7 @@ def _normalize_slack_event(payload: dict) -> Optional[dict]:
             "source_parent_message_id": source_parent_message_id,
             "source_author_id": user_id,
             "source_author_display_name": "",
-            "text": sanitize_slack_text(raw_text),
+            "text": sanitize_slack_message(event, workspace_id=workspace_id, channel_id=channel_id),
             "attachments": normalize_slack_files(event.get("files") or [])
             + normalize_slack_thread_references(event.get("attachments") or []),
             "metadata": {
@@ -631,6 +633,12 @@ def _normalize_slack_event(payload: dict) -> Optional[dict]:
                 or bool(event.get("reply_broadcast")),
                 "slack_created_at": _slack_timestamp_seconds(source_message_id),
                 "slack_raw_text": raw_text,
+                "slack_display_markdown": sanitize_slack_message(
+                    event,
+                    workspace_id=workspace_id,
+                    channel_id=channel_id,
+                    preserve_entities=True,
+                ),
             },
         }
 
@@ -652,7 +660,7 @@ def _normalize_slack_event(payload: dict) -> Optional[dict]:
             "source_parent_message_id": source_parent_message_id,
             "source_author_id": user_id,
             "source_author_display_name": "",
-            "text": sanitize_slack_text(raw_text),
+            "text": sanitize_slack_message(message, workspace_id=workspace_id, channel_id=channel_id),
             "attachments": normalize_slack_files(message.get("files") or [])
             + normalize_slack_thread_references(message.get("attachments") or []),
             "metadata": {
@@ -661,6 +669,12 @@ def _normalize_slack_event(payload: dict) -> Optional[dict]:
                 or bool(message.get("reply_broadcast")),
                 "slack_created_at": _slack_timestamp_seconds(source_message_id),
                 "slack_raw_text": raw_text,
+                "slack_display_markdown": sanitize_slack_message(
+                    message,
+                    workspace_id=workspace_id,
+                    channel_id=channel_id,
+                    preserve_entities=True,
+                ),
             },
         }
 

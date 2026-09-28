@@ -5,13 +5,13 @@ from typing import Callable, Iterable, Optional
 from urllib.parse import urlsplit
 
 from integrations.models import CommunityBridgePlatform
+from .slack_content import slack_message_markdown, slack_mrkdwn
 from ..slack_emoji import emoji_to_slack_reaction, slack_reaction_to_emoji  # noqa: F401
 
 
-SLACK_USER_MENTION_RE = re.compile(r"<@([^>|]+)(?:\|([^>]*))?>")
-SLACK_CHANNEL_MENTION_RE = re.compile(r"<#([^>|]+)\|?([^>]*)>")
-SLACK_SPECIAL_MENTION_RE = re.compile(r"<!([^>|]+)\|?([^>]*)>")
-SLACK_LINK_RE = re.compile(r"<((?:https?|mailto):[^>|]+)\|?([^>]*)>")
+SLACK_USER_MENTION_RE = re.compile(r"(?<!\\)<@([^>|]+)(?:\|([^>]*))?>")
+SLACK_CHANNEL_MENTION_RE = re.compile(r"(?<!\\)<#([^>|]+)\|?([^>]*)>")
+SLACK_SPECIAL_MENTION_RE = re.compile(r"(?<!\\)<!([^>|]+)\|?([^>]*)>")
 
 DISCORD_USER_MENTION_RE = re.compile(r"<@!?\d+>")
 DISCORD_CHANNEL_MENTION_RE = re.compile(r"<#\d+>")
@@ -60,8 +60,88 @@ def sanitize_slack_text(
     channel_name_resolver: Optional[Callable[[str], str]] = None,
     preserve_unresolved_mentions: bool = False,
 ) -> str:
-    text = html.unescape(str(value or ""))
-    text = SLACK_LINK_RE.sub(_replace_slack_link, text)
+    return _strip_trailing_whitespace(
+        slack_mrkdwn(
+            value,
+            resolve_entities=lambda text: _resolve_slack_entities(
+                text,
+                user_name_resolver=user_name_resolver,
+                channel_name_resolver=channel_name_resolver,
+                preserve_unresolved_mentions=preserve_unresolved_mentions,
+            ),
+        )
+    )
+
+
+def sanitize_slack_message(
+    message: dict,
+    *,
+    user_name_resolver=None,
+    channel_name_resolver=None,
+    workspace_id="",
+    channel_id="",
+    preserve_entities=False,
+) -> str:
+    """Preserve visible blocks for live events and historical imports."""
+    from .slack_actions import message_action_linker
+
+    # Slack's message unfurls may quote a private thread into a public post.
+    # Keep the canonical reference attachment, never copy its quoted body.
+    display_message = {
+        **message,
+        "attachments": [
+            attachment
+            for attachment in message.get("attachments") or []
+            if not isinstance(attachment, dict)
+            or not any(
+                slack_message_reference(attachment.get(field))
+                for field in ("original_url", "from_url", "title_link")
+            )
+        ],
+    }
+    return slack_message_markdown(
+        display_message,
+        resolve_entities=(
+            (lambda text: text)
+            if preserve_entities
+            else lambda text: _resolve_slack_entities(
+                text,
+                user_name_resolver=user_name_resolver,
+                channel_name_resolver=channel_name_resolver,
+            )
+        ),
+        action_link=message_action_linker(
+            message, workspace_id=workspace_id, channel_id=channel_id
+        ),
+    )
+
+
+def resolve_slack_markdown_entities(
+    value, *, user_name_resolver=None, channel_name_resolver=None
+):
+    """Resolve deferred mentions without reinterpreting converted Markdown."""
+    parts = re.split(r"(`+[^`]*`+)", str(value or ""))
+    return "".join(
+        (
+            part
+            if index % 2
+            else _resolve_slack_entities(
+                part,
+                user_name_resolver=user_name_resolver,
+                channel_name_resolver=channel_name_resolver,
+            )
+        )
+        for index, part in enumerate(parts)
+    )
+
+
+def _resolve_slack_entities(
+    text,
+    *,
+    user_name_resolver=None,
+    channel_name_resolver=None,
+    preserve_unresolved_mentions=False,
+):
     text = SLACK_CHANNEL_MENTION_RE.sub(
         lambda match: _replace_slack_channel(
             match,
@@ -78,7 +158,7 @@ def sanitize_slack_text(
         ),
         text,
     )
-    return _strip_trailing_whitespace(text)
+    return text
 
 
 def has_slack_entity_references(value: str) -> bool:
@@ -226,14 +306,6 @@ def _format_attachment_lines(
     if not items:
         return ""
     return "Attachments:\n" + "\n".join(items)
-
-
-def _replace_slack_link(match: re.Match) -> str:
-    url = str(match.group(1) or "").strip()
-    label = str(match.group(2) or "").strip()
-    if not label or label == url:
-        return url
-    return f"{label} ({url})"
 
 
 def _replace_slack_user(

@@ -36,6 +36,7 @@ from .coding_views import (
 )
 from .home_views import CommunityHomeView
 from .coworking_views import CoworkingTodayView
+from .slack_action_views import SlackMessageActionView
 from .slack_views import SlackDmMirrorView, SlackDmStartView, SlackOwnerConversationOpenView, SlackOwnerConversationView, SlackUserDirectoryView
 from .usage_views import (
     TokenUsageHistoryView,
@@ -63,6 +64,7 @@ urlpatterns = [
     path("volunteer/", include("community_chat.volunteer.urls")),
     path("home/", CommunityHomeView.as_view(), name="community_chat_home"),
     path("coworking/today/", CoworkingTodayView.as_view(), name="community_chat_coworking_today"),
+    path("slack/message/", SlackMessageActionView.as_view(), name="community_chat_slack_message"),
     path("slack/", SlackDmMirrorView.as_view(), name="community_chat_slack"),
     path("slack/conversations/", SlackOwnerConversationView.as_view(), name="community_chat_slack_conversations"),
     path("slack/conversations/open/", SlackOwnerConversationOpenView.as_view(), name="community_chat_slack_conversation_open"),

@@ -911,6 +911,11 @@ class CommunityBridgeDiscordClient(discord.Client):
         if source_platform != CommunityBridgePlatform.SLACK:
             return body
         metadata = dict(payload.get("metadata") or {})
+        display_markdown = metadata.get("slack_display_markdown")
+        if isinstance(display_markdown, str):
+            return await asyncio.to_thread(
+                SlackBridgeClient.resolve_markdown_entities, display_markdown
+            )
         raw_text = str(metadata.get("slack_raw_text") or "")
         if not raw_text:
             return body

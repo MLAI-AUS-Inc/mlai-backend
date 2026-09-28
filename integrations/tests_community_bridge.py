@@ -348,7 +348,7 @@ class SlackCommunityBridgeEventViewTests(TestCase):
         self.assertEqual(delivery.target_platform, CommunityBridgePlatform.DISCORD)
         self.assertEqual(delivery.delivery_type, CommunityBridgeDeliveryType.CREATE)
         self.assertEqual(
-            delivery.payload["text"], "Hello @user Example (http://example.com)"
+            delivery.payload["text"], "Hello @user [Example](http://example.com)"
         )
         self.assertEqual(
             delivery.payload["metadata"]["slack_raw_text"],

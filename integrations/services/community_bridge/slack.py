@@ -9,6 +9,7 @@ from integrations.services.message_sync.scheduler import BudgetDeferred
 
 from integrations.services.community_bridge.formatting import (
     approved_slack_avatar_url,
+    resolve_slack_markdown_entities,
     sanitize_slack_text,
 )
 
@@ -123,6 +124,15 @@ class SlackBridgeClient:
     @classmethod
     def resolve_message_text(cls, value: str) -> str:
         return sanitize_slack_text(
+            value,
+            user_name_resolver=cls.get_user_display_name,
+            channel_name_resolver=cls.get_channel_display_name,
+        )
+
+    @classmethod
+    def resolve_markdown_entities(cls, value: str) -> str:
+        """Resolve Slack mentions without converting preserved Markdown again."""
+        return resolve_slack_markdown_entities(
             value,
             user_name_resolver=cls.get_user_display_name,
             channel_name_resolver=cls.get_channel_display_name,
