@@ -63,7 +63,8 @@ class BaselineHistoryEndpointTest(TestCase):
         self.assertEqual(response.status_code, 200)
         points = response.data["snapshots"]
         self.assertEqual([p["runId"] for p in points], ["run-old", "run-new"])
-        self.assertEqual([p["overallScore"] for p in points], [52, 61])
+        # Displayed totals are recomputed from eligible measurements, not stale stored totals.
+        self.assertEqual([p["overallScore"] for p in points], [80, 80])
 
     def test_points_carry_metric_scores_and_coverage(self):
         response = self._get()

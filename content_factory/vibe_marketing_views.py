@@ -6,6 +6,7 @@ import hashlib
 import ipaddress
 import json
 import logging
+import math
 import os
 import re
 import socket
@@ -66,6 +67,7 @@ from content_factory.authors import (
     resolve_default_author,
 )
 from content_factory.contract import CONTENT_FACTORY_REQUEST_SOURCE
+from content_factory.baseline_metrics import baseline_display_metrics
 from content_factory.dispatch_binding import bind_dispatch_token_run, run_is_dispatch_token_keyed
 from content_factory.editorial_catalog import article_brief_for_catalog
 from content_factory.google_baseline import collect_verified_google_metrics, google_baseline_connection_status
@@ -7154,6 +7156,7 @@ BASELINE_SCORE_WEIGHTS = {
 
 
 def _calculate_baseline_overall(metrics):
+    metrics = baseline_display_metrics(metrics)
     weighted_total = 0.0
     used_weight = 0
     for key, weight in BASELINE_SCORE_WEIGHTS.items():
@@ -7170,7 +7173,7 @@ def _calculate_baseline_overall(metrics):
         return {"score": None, "coverage": 0}
     total_weight = sum(BASELINE_SCORE_WEIGHTS.values())
     return {
-        "score": int(round(min(100.0, max(0.0, weighted_total / used_weight)))),
+        "score": math.floor(min(100.0, max(0.0, weighted_total / used_weight)) + 0.5),
         "coverage": int(round(min(100.0, max(0.0, used_weight / total_weight * 100)))),
     }
 
@@ -7193,32 +7196,36 @@ def _baseline_summary_payload(score, source_status):
 
 
 def _baseline_score_coverage(snapshot):
-    raw = (snapshot.raw_payload or {}).get("scoreCoverage")
-    if raw is not None:
-        try:
-            return int(raw)
-        except (TypeError, ValueError):
-            pass
     return _calculate_baseline_overall(snapshot.metrics or {})["coverage"]
 
 
 def _serialize_baseline_history_point(snapshot):
+    metrics = baseline_display_metrics(snapshot.metrics)
     metric_scores = {}
-    for key, metric in (snapshot.metrics or {}).items():
+    metric_methods = {}
+    for key, metric in metrics.items():
         score = None
         if isinstance(metric, dict) and metric.get("status") == "measured":
             raw_score = metric.get("score")
             if isinstance(raw_score, (int, float)):
-                score = round(float(raw_score))
+                score = float(raw_score)
         metric_scores[key] = score
+        if isinstance(metric, dict):
+            metric_methods[key] = metric.get("methodVersion")
+    overall = _calculate_baseline_overall(metrics)
     return {
         "id": snapshot.id,
         "runId": snapshot.run_id,
         "status": snapshot.status,
         "collectedAt": snapshot.collected_at.isoformat(),
-        "overallScore": snapshot.overall_score,
-        "scoreCoverage": _baseline_score_coverage(snapshot),
+        "overallScore": overall["score"],
+        "scoreCoverage": overall["coverage"],
         "metricScores": metric_scores,
+        "metricMethods": metric_methods,
+        "metricContexts": {
+            key: {field: metric.get(field) for field in ("promptSetId", "countryCode", "providerCount", "requestedProviderCount") if field in metric}
+            for key, metric in metrics.items() if isinstance(metric, dict) and key == "aiVisibility"
+        },
     }
 
 
@@ -7233,6 +7240,19 @@ _COMPACT_BASELINE_METRIC_FIELDS = {
     "reasonCode",
     "retryAfterSeconds",
     "metricLabel",
+    "source",
+    "methodVersion",
+    "domainRating",
+    "measurementDate",
+    "responseCount",
+    "mentionCount",
+    "citationCount",
+    "requestedCount",
+    "queryCount",
+    "providerCount",
+    "requestedProviderCount",
+    "countryCode",
+    "promptSetId",
     "authorityScore",
     "backlinks",
     "referringDomains",
@@ -7249,7 +7269,10 @@ _COMPACT_BASELINE_METRIC_FIELDS = {
 
 # Per-provider fields the AI-visibility card renders; drops prompt transcripts,
 # which dominate the payload size.
-_COMPACT_BASELINE_PROVIDER_FIELDS = ("key", "label", "score", "status", "source")
+_COMPACT_BASELINE_PROVIDER_FIELDS = (
+    "key", "label", "score", "status", "source", "methodVersion", "message", "reasonCode",
+    "responseCount", "mentionCount", "citationCount", "requestedCount", "modelName", "countryCode",
+)
 
 
 def _compact_baseline_metric(metric):
@@ -7276,12 +7299,16 @@ def _serialize_baseline_snapshot(snapshot, config=None, *, compact=False):
             "skippedAt": config.baseline_skipped_at.isoformat() if config and config.baseline_skipped_at else None,
             "skipReason": config.baseline_skip_reason if config else "",
         }
-    metrics = snapshot.metrics
+    metrics = baseline_display_metrics(snapshot.metrics)
+    source_status = {**(snapshot.source_status or {}), **{
+        key: value.get("status") for key, value in metrics.items() if isinstance(value, dict)
+    }}
+    overall = _calculate_baseline_overall(metrics)
     recommendations = snapshot.recommendations
     if compact:
         metrics = {
             key: _compact_baseline_metric(value)
-            for key, value in (snapshot.metrics or {}).items()
+            for key, value in metrics.items()
         }
         recommendations = list(snapshot.recommendations or [])[:3]
     return {
@@ -7292,11 +7319,11 @@ def _serialize_baseline_snapshot(snapshot, config=None, *, compact=False):
         "passed": _baseline_requirement_satisfied(config, snapshot) if config else _baseline_is_fresh(snapshot),
         "stale": not _baseline_is_fresh(snapshot),
         "collectedAt": snapshot.collected_at.isoformat(),
-        "overallScore": snapshot.overall_score,
-        "scoreCoverage": _baseline_score_coverage(snapshot),
-        "summary": snapshot.summary,
+        "overallScore": overall["score"],
+        "scoreCoverage": overall["coverage"],
+        "summary": _baseline_summary_payload(overall["score"], source_status),
         "metrics": metrics,
-        "sourceStatus": snapshot.source_status,
+        "sourceStatus": source_status,
         "recommendations": recommendations,
         "skipped": bool(config and config.baseline_skipped_at),
         "skippedAt": config.baseline_skipped_at.isoformat() if config and config.baseline_skipped_at else None,
@@ -7308,8 +7335,9 @@ def _merge_google_metrics_into_baseline(snapshot, google_metrics):
     if not snapshot:
         return None
     payload = dict(snapshot.raw_payload or {})
-    metrics = dict(payload.get("metrics") or snapshot.metrics or {})
+    metrics = baseline_display_metrics(payload.get("metrics") or snapshot.metrics or {})
     source_status = dict(payload.get("sourceStatus") or snapshot.source_status or {})
+    source_status.update({key: metric.get("status") for key, metric in metrics.items() if isinstance(metric, dict)})
     traffic = (google_metrics or {}).get("traffic") or {}
     metrics["traffic"] = traffic
     source_status["traffic"] = traffic.get("status", "unavailable")
@@ -7321,12 +7349,11 @@ def _merge_google_metrics_into_baseline(snapshot, google_metrics):
     # The merge changes the traffic metric, so the collection-time score and
     # summary are stale — recompute them with the producer's weights.
     overall = _calculate_baseline_overall(metrics)
-    if overall["score"] is not None:
-        snapshot.overall_score = overall["score"]
-        payload["overallScore"] = overall["score"]
+    snapshot.overall_score = overall["score"]
+    payload["overallScore"] = overall["score"]
     payload["scoreCoverage"] = overall["coverage"]
     summary = _baseline_summary_payload(
-        overall["score"] if overall["score"] is not None else snapshot.overall_score,
+        overall["score"],
         source_status,
     )
     snapshot.summary = summary
@@ -10844,7 +10871,7 @@ def _profile_checks(organization, config, latest_runs=None, baseline_snapshot=No
             "passed": baseline_ready,
             "runId": baseline_snapshot.run_id if baseline_snapshot else None,
             "collectedAt": baseline_snapshot.collected_at.isoformat() if baseline_snapshot else None,
-            "overallScore": baseline_snapshot.overall_score if baseline_snapshot else None,
+            "overallScore": _calculate_baseline_overall(baseline_snapshot.metrics)["score"] if baseline_snapshot else None,
             "stale": bool(baseline_snapshot and not _baseline_is_fresh(baseline_snapshot)),
             "skipped": bool(config.baseline_skipped_at),
         },
