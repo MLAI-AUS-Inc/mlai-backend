@@ -57,7 +57,7 @@ def role_capabilities(role):
     return {
         "role": role,
         "can_create_channels": role in ("admin", "moderator"),
-        "can_mention_channel": role in ("admin", "moderator"),
+        "can_mention_channel": True,  # Slack default; relay enforces channel-specific restrictions.
         "can_manage_channels": role == "admin",
         "can_manage_members": role == "admin",
         "can_moderate": role == "admin",

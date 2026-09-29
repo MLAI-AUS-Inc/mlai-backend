@@ -42,6 +42,41 @@ MLAI Chat is another client surface, not a one-time data migration.
   [account privacy controls](community-chat-account-privacy.md) for remaining
   downstream context and native-agent gates.
 
+## Public Roo mentions from Chat
+
+Slack attributes a mirrored Chat post to the bridge bot. The visible author
+header is presentation and must never be used to grant that bot the human's
+permissions. Public Roo resolves bot-origin `app_mention` events through
+`GET /api/v1/integrations/bridge/roo/actor`, authenticated exclusively with
+`ROO_API_KEY` (not the general internal key).
+
+Query parameters are `workspace_id`, `channel_id`, `message_id`, `thread_ts`,
+and `bridge_user_id`, taken from the verified Slack event. The sender must
+match `SLACK_BRIDGE_BOT_USER_ID`. The backend finds the exact completed
+Chat-to-Slack message link in that workspace and enabled public channel,
+checks the reply thread and deletion state, and resolves the original signing
+device through the current account identity link. Legacy key-only links,
+revoked devices/accounts, missing AI-sharing consent, and messages without an
+explicit signed Roo mention cannot delegate an actor. Private mirrors are
+outside this endpoint's scope.
+
+The response echoes that scope and returns `user_id`, `source_event_id`, and
+the stored source `text` with signed mention IDs rendered for Slack. Roo uses
+that human actor in its existing permission checks; this does not grant points
+administration or change role policy. Caller-supplied names, text and actor IDs
+are ignored. Successful responses are `Cache-Control: no-store`.
+
+An absent delivery link returns `409 bridge_delivery_pending`: Slack can send
+its callback before the posting worker commits the link. Roo briefly retries
+the read, then leaves its durable event receipt retryable. Unknown senders
+return 404; invalid/revoked delegation returns 400/403. An authentication error
+or unavailable endpoint must also remain retryable, never fall back to the
+bridge bot's identity.
+
+Roll out this backend endpoint before the corresponding Public Roo change.
+Both use the existing Roo API key and bridge configuration; no schema or Slack
+scope changes are required. Do not replay an old points request automatically.
+
 ## Canonical event
 
 Every verified provider event is normalized to:

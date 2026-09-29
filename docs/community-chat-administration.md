@@ -92,3 +92,26 @@ tests using a fresh socket-only PostgreSQL cluster, synthetic settings, no `.env
 loading and no external network access. The runner also accepts specific related
 test-module labels. It removes the cluster and its data after each run.
 Production migration and deployment have not been performed.
+
+## Channel audience mentions
+
+Members and moderators may use `@channel` and `@here` by default, matching
+[Slack's default messaging permissions](https://slack.com/help/articles/115004855143-Manage-who-can-notify-a-channel-or-workspace).
+`@everyone` is limited to general for non-admins; guests cannot use it. Channels
+with 10,000 or more members restrict `@channel` and `@here` to administrators.
+MLAI Chat admins may use all three in any channel they can access. This does not
+add members to a private channel or grant access to it.
+
+The relay checks the signed sender's effective role. The public bridge rechecks
+the active device/account role before posting, reads Slack's `is_general` and
+member count, and emits Slack's required `<!channel>`, `<!here>` or `<!everyone>`
+syntax. Admin `@everyone` outside general maps to `<!channel>` so only that
+channel's audience is notified. Code, escaped text and links remain literal;
+thread replies and edits do not create audience notifications. Mirrored private
+channels use the same conversion through the connected owner's Slack user token,
+so Slack also applies that account's current workspace restrictions. Direct and
+group messages stay silent.
+
+This implements Slack's default permissions, not synchronization of custom
+workspace or Enterprise policy: the current bot integration does not expose
+those settings. No migration or role-promotion sync is required.
