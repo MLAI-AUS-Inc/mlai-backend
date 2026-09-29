@@ -93,6 +93,8 @@ class ArticlePublishApprovalReceiptTests(SimpleTestCase):
                     return current
 
                 with (
+                    patch("content_factory.article_review_views.check_approval_comments", return_value=None),
+                    patch("content_factory.article_review_views.record_review_approval") as accept_feedback,
                     patch("content_factory.vibe_marketing_views._resolve_context_or_response", return_value=(object(), None)),
                     patch("content_factory.vibe_marketing_views.get_object_or_404", return_value=run),
                     patch("content_factory.vibe_marketing_views._run_belongs_to_context", return_value=True),
@@ -110,6 +112,7 @@ class ArticlePublishApprovalReceiptTests(SimpleTestCase):
                     response = VibeMarketingRunControlView().post(request, run.run_id, "approve")
 
                 self.assertEqual(response.status_code, 409)
+                accept_feedback.assert_not_called()
                 self.assertEqual(lock_reads, 2)
                 self.assertIn("reviewed preview changed", response.data["detail"])
                 self.assertEqual(current.result["livePreview"]["resumeGeneration"], 0)

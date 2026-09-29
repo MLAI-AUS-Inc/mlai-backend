@@ -190,6 +190,14 @@ class AcceptRevisionLearningTests(EditorialLearningLoopBase):
             result={
                 "source_run_id": self.run.run_id,
                 "feedback_batch_id": batch_id,
+                "comment_outcomes": [
+                    {"commentId": str(comment.id), "status": "addressed"}
+                    for comment in VibeMarketingComponentComment.objects.filter(
+                        run=self.run,
+                        batch_id=batch_id,
+                        status=VibeMarketingComponentCommentStatus.SUBMITTED,
+                    )
+                ],
                 "live_preview": {
                     "available": True,
                     "exactRender": True,

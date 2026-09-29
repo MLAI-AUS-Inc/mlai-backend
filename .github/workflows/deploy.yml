@@ -207,6 +207,9 @@ jobs:
     - name: Check My startup account contracts without database access
       run: python scripts/test_my_startup.py
 
+    - name: Check article draft review contracts without database access
+      run: python scripts/test_article_review.py
+
     - name: Run targeted Django tests
       run: |
         python manage.py test \
