@@ -18,12 +18,22 @@ def _snapshot_metrics():
         "aiVisibility": {
             "status": "measured",
             "score": 41,
+            "methodVersion": "ai-mentions-v2",
+            "responseCount": 100,
+            "mentionCount": 41,
+            "citationCount": 20,
+            "requestedCount": 100,
             "displayRows": [{"label": "Mentioned queries", "value": 4, "unit": "of 4"}],
             "providers": [
                 {
                     "key": "chatgpt",
                     "label": "ChatGPT",
                     "score": 65,
+                    "methodVersion": "ai-mentions-v2",
+                    "responseCount": 20,
+                    "mentionCount": 13,
+                    "citationCount": 6,
+                    "requestedCount": 20,
                     "status": "measured",
                     "source": "DataForSEO LLM Responses",
                     "prompts": [{"prompt": "long transcript", "responseExcerpt": "x" * 500}],
@@ -32,7 +42,7 @@ def _snapshot_metrics():
             "queries": [{"query": "brand"}],
         },
         "organicSearch": {"status": "measured", "score": 17, "topKeywords": [{"keyword": "the product"}]},
-        "authority": {"status": "measured", "score": 0, "authorityScore": 0, "backlinks": 0, "referringDomains": 0, "raw": {}},
+        "authority": {"status": "measured", "score": 0, "domainRating": 0, "source": "Ahrefs", "methodVersion": "ahrefs-dr-v1", "backlinks": 0, "referringDomains": 0, "raw": {}},
         "lighthouse": {"status": "unavailable", "score": None, "message": "rate limited", "reasonCode": "rate_limited"},
         "coreWebVitals": {"status": "unavailable", "score": None, "message": "rate limited"},
         "traffic": {"status": "needs_connection", "score": None, "verified": False, "message": "Connect GSC"},
@@ -80,9 +90,9 @@ class BaselineCompactSerializationTest(TestCase):
         self.assertNotIn("prompts", ai["providers"][0])
         self.assertNotIn("queries", ai)
 
-    def test_score_coverage_prefers_raw_payload_then_falls_back_to_weights(self):
+    def test_score_coverage_uses_current_measurements_instead_of_stale_raw_payload(self):
         payload = _serialize_baseline_snapshot(self.snapshot, compact=True)
-        self.assertEqual(payload["scoreCoverage"], 60)
+        self.assertEqual(payload["scoreCoverage"], 70)
         self.snapshot.raw_payload = {}
         self.snapshot.save(update_fields=["raw_payload"])
         payload = _serialize_baseline_snapshot(self.snapshot, compact=True)
@@ -99,7 +109,7 @@ class BaselineOverallRecomputeTest(TestCase):
         self.organization = Organization.objects.create(domain="theproductbus.com", name="The Product Bus")
         metrics = {
             "technicalHealth": {"status": "measured", "score": 74},
-            "authority": {"status": "measured", "score": 0},
+            "authority": {"status": "measured", "score": 0, "domainRating": 0, "source": "Ahrefs", "methodVersion": "ahrefs-dr-v1"},
             "traffic": {"status": "needs_connection", "score": None},
         }
         self.snapshot = WebsiteBaselineSnapshot.objects.create(
