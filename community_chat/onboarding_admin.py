@@ -37,7 +37,8 @@ class CommunityMemberProfileAdmin(admin.ModelAdmin):
                     continue
                 if status == CommunityMemberProfile.Status.APPROVED and (
                     not user.is_active or not user.email_verified_at or not profile.adult_confirmed_at
-                    or not profile.first_name or profile.policy_version != settings.COMMUNITY_CHAT_MEMBERSHIP_POLICY_VERSION
+                    or not profile.first_name.strip() or not profile.last_name.strip()
+                    or profile.policy_version != settings.COMMUNITY_CHAT_MEMBERSHIP_POLICY_VERSION
                 ):
                     continue
                 profile.status = status

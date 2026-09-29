@@ -51,7 +51,7 @@ class MemberOnboardingTests(TestCase):
 
     def basics(self, **changes):
         return self.client.put(self.url, {
-            "step": "basics", "first_name": "Alex", "last_name": "",
+            "step": "basics", "first_name": "Alex", "last_name": "Member",
             "adult_confirmed": True, "accept_rules": True, "policy_version": "test-v1", **changes,
         }, format="json")
 
@@ -75,7 +75,8 @@ class MemberOnboardingTests(TestCase):
     def test_required_consents_are_strict_and_cannot_be_injected(self):
         for changes in ({"adult_confirmed": False}, {"adult_confirmed": "true"},
                         {"accept_rules": 1}, {"policy_version": "old"}, {"first_name": ""},
-                        {"first_name": "bad\u0001name"}, {"status": "approved"}, {"user_id": self.user.pk}):
+                        {"first_name": "bad\u0001name"}, {"last_name": ""}, {"last_name": "   "},
+                        {"status": "approved"}, {"user_id": self.user.pk}):
             with self.subTest(changes=changes):
                 self.assertEqual(self.basics(**changes).status_code, 400)
         self.assertFalse(CommunityMemberConsent.objects.exists())
@@ -91,7 +92,7 @@ class MemberOnboardingTests(TestCase):
         self.assertEqual(profile.interests, [])
         self.assertEqual(CommunityMemberConsent.objects.filter(user=self.user).count(), 3)
         self.user.refresh_from_db()
-        self.assertEqual(self.user.full_name, "Alex")
+        self.assertEqual(self.user.full_name, "Alex Member")
         self.assertNotIn("adult_confirmed_at", self.client.get(reverse("community_chat_account")).data["public_profile"])
 
     def test_optional_choices_are_private_limited_and_withdrawable(self):
@@ -123,7 +124,7 @@ class MemberOnboardingTests(TestCase):
         with override_settings(COMMUNITY_CHAT_SIGNUP_ENABLED=False):
             self.assertFalse(has_community_access(self.user))
             self.assertEqual(self.complete().status_code, 403)
-        self.basics(first_name="李", last_name="")
+        self.basics(first_name="明", last_name="李")
         self.assertEqual(self.complete().data["onboarding"]["status"], "approved")
 
     def test_existing_members_keep_access_without_fabricated_age_or_consent(self):
@@ -300,6 +301,7 @@ class MemberOnboardingConcurrencyTests(TransactionTestCase):
         user = get_user_model().objects.create_user(email="concurrent@example.com", email_verified_at=timezone.now())
         credentials = [credentials_for(user) for _ in range(2)]
         save_onboarding(authenticated_session=credentials[0].session, values={"step": "basics", "first_name": "Alex",
+            "last_name": "Member",
             "adult_confirmed": True, "accept_rules": True, "policy_version": "test-v1"})
         barrier = Barrier(2)
 

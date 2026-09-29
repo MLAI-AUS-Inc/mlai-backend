@@ -19,14 +19,22 @@ verifier:
    calls omit ambient cookies and authenticate with installation-scoped bearer
    credentials after this start/exchange flow.
 2. The desktop opens the returned `/auth/desktop?request=...` URL on
-   `chat.mlai.au`. An unauthenticated user first completes the normal MLAI Chat
+   `chat.mlai.au`. Before sign-in, the page checks the request with credential-free
+   `GET /api/v1/community-chat/auth/device/start/?request_id=<UUID>`.
+   The no-store response is either `{"status":"pending","expires_at":"..."}`
+   or `{"status":"unavailable"}` for expired, consumed, absent or disabled
+   requests. It contains no user, device key or authorization data and cannot
+   authorize or consume the handoff. A malformed UUID returns 400; checks are
+   rate-limited. Unavailable links offer browser continuation at `/` without
+   signing out; native clients create a new request before reopening an expired
+   link. A live link lets an unauthenticated user complete the normal MLAI Chat
    email-code sign-in in the browser. The callback then shows an explicit
    approval action and calls `POST .../auth/device/authorize/` with that
    browser's origin-bound MLAI Chat cookie session. The API returns a
    purpose-salted, timestamped authorization code bound to that request and
    browser user; the browser returns it only through
-   `mlaichat://auth/callback` (with a copyable callback URL as a manual
-   fallback).
+   `mlaichat://auth/callback` (with an Open MLAI Chat button as a manual
+   fallback). The browser removes the completed request from its address bar.
 3. After receiving that callback, the desktop calls
    `POST .../auth/device/exchange/` once with the signed authorization code,
    request ID, original state and verifier, plus the same validated device
@@ -59,6 +67,30 @@ chats while Slack controls used the second account. Rejected credentials return
 the normal 401 sign-in response; they never transfer the device, Slack grant or
 history between accounts. A new installation without a binding can still finish
 onboarding, and a mismatched session can still be signed out explicitly.
+
+## Persistent browser sessions
+
+Browser sign-in and the HttpOnly refresh cookie last 30 days by default
+(`COMMUNITY_CHAT_SESSION_REFRESH_TTL_DAYS=30`). Successful refresh rotates the
+refresh credential and slides the expiry forward by another 30 days. Access
+credentials remain short-lived (900 seconds); the browser renews access and
+retries a rejected protected request once, without requesting another email
+code. After the refresh window expires, a new email sign-in is required.
+
+Clients serialize cookie refresh, verification and logout across tabs with Web
+Locks, check whether another tab already renewed access, and discard responses
+from a previous account after an explicit account switch. A rejected refresh
+returns 401 without deleting cookies: a late failed request must not erase
+cookies set by a newer successful refresh or login. Explicit logout still
+revokes the session and clears cookies.
+
+Each browser profile has its own cookie jar and installation identity. Session
+issuance revokes prior sessions only for the same user, client and installation;
+Safari and Chrome can sign in to different accounts independently. Logout in
+one browser does not sign out the other.
+
+Roll out the backend GET capability before the browser preflight UI. These are
+code-only changes; no migration or longer-lived access credential is required.
 
 ## Request flow
 

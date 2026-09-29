@@ -896,7 +896,11 @@ class AccountSessionRefreshView(APIView):
                 {"error": "invalid_session"},
                 status=status.HTTP_401_UNAUTHORIZED,
             )
-            return clear_account_session_cookies(response)
+            # A late request may carry a token another tab already rotated.
+            # Its failure must not erase newer cookies set by that successful
+            # refresh or by a new account sign-in. Explicit logout clears them.
+            response["Cache-Control"] = "no-store"
+            return response
         response = Response(
             {
                 "status": "refreshed",
@@ -1393,10 +1397,44 @@ class SlackOriginMessageDeleteView(APIView):
 
 
 class DeviceAuthStartView(APIView):
-    """Create a desktop-only origin/device/state/PKCE-bound login request."""
+    """Create a bound desktop login request or inspect its public lifecycle."""
 
     authentication_classes = []
     permission_classes = [AllowAny]
+
+    def get(self, request):
+        """Check an opaque handoff before sign-in without revealing its account."""
+        serializer = CommunityChatDeviceAuthAuthorizeSerializer(
+            data=request.query_params,
+        )
+        serializer.is_valid(raise_exception=True)
+        request_id = serializer.validated_data["request_id"]
+        enforce_bootstrap_limits(
+            request,
+            action="auth-status",
+            public_key=str(request_id),
+            user_limit=120,
+            key_limit=120,
+            ip_limit=600,
+        )
+        auth_request = None
+        if settings.COMMUNITY_CHAT_DEVICE_AUTH_ENABLED:
+            auth_request = (
+                CommunityChatDeviceAuthRequest.objects.filter(id=request_id)
+                .only("expires_at", "consumed_at")
+                .first()
+            )
+        data = {"status": "unavailable"}
+        if (
+            auth_request is not None
+            and auth_request.consumed_at is None
+            and auth_request.expires_at > timezone.now()
+        ):
+            data = {"status": "pending", "expires_at": auth_request.expires_at}
+        response = Response(data)
+        response["Cache-Control"] = "no-store"
+        response["Pragma"] = "no-cache"
+        return response
 
     def post(self, request):
         if not settings.COMMUNITY_CHAT_DEVICE_AUTH_ENABLED:
