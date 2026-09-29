@@ -60,6 +60,7 @@ def onboarding_payload(user):
         "required": not allowed,
         "status": profile.status if profile else ("approved" if allowed else "incomplete"),
         "basics_complete": bool(profile and profile.adult_confirmed_at
+                                and profile.first_name.strip() and profile.last_name.strip()
                                 and "correction_requested" not in profile.review_reasons
                                 and profile.policy_version == settings.COMMUNITY_CHAT_MEMBERSHIP_POLICY_VERSION),
         "policy_version": settings.COMMUNITY_CHAT_MEMBERSHIP_POLICY_VERSION,
@@ -151,6 +152,8 @@ def save_onboarding(*, authenticated_session, values):
             last_name = values.get("last_name", "").strip()
             if not first_name:
                 raise ValidationError({"first_name": "Enter the name we should use."})
+            if not last_name:
+                raise ValidationError({"last_name": "Enter your surname."})
             # Existing members manage their public name in Profile Settings.
             if existing_access and (first_name, last_name) != (user.first_name, user.last_name):
                 raise ValidationError({"detail": "Change your public name in Profile Settings."})
@@ -161,7 +164,8 @@ def save_onboarding(*, authenticated_session, values):
             for purpose in ("adult_eligibility", "terms", "code_of_conduct"):
                 _consent(user, purpose, True, version, session.client_id)
         else:
-            if not existing_access and (not profile.adult_confirmed_at or profile.policy_version != version
+            if not existing_access and (not profile.first_name.strip() or not profile.last_name.strip()
+                    or not profile.adult_confirmed_at or profile.policy_version != version
                     or "correction_requested" in profile.review_reasons):
                 raise ValidationError({"detail": "Complete the required details first."})
             skipped = values.get("skip_personalisation", False)

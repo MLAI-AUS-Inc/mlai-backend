@@ -25,7 +25,7 @@ class StrictBooleanField(serializers.BooleanField):
 class MemberOnboardingSerializer(serializers.Serializer):
     step = serializers.ChoiceField(choices=("basics", "complete"))
     first_name = serializers.CharField(max_length=80, required=False)
-    last_name = serializers.CharField(max_length=80, required=False, allow_blank=True)
+    last_name = serializers.CharField(max_length=80, required=False)
     adult_confirmed = StrictBooleanField(required=False)
     accept_rules = StrictBooleanField(required=False)
     policy_version = serializers.CharField(max_length=80, required=False)
@@ -40,6 +40,8 @@ class MemberOnboardingSerializer(serializers.Serializer):
         if set(self.initial_data) - set(self.fields):
             raise serializers.ValidationError("Unknown onboarding fields.")
         for key in ("first_name", "last_name"):
+            if attrs["step"] == "basics" and not attrs.get(key, "").strip():
+                raise serializers.ValidationError({key: "Enter your first name." if key == "first_name" else "Enter your surname."})
             if any(unicodedata.category(char) in {"Cc", "Cs"} for char in attrs.get(key, "")):
                 raise serializers.ValidationError({key: "Remove control characters from your name."})
         if len(attrs.get("interests", [])) != len(set(attrs.get("interests", []))):

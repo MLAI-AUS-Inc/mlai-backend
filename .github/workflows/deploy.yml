@@ -265,6 +265,8 @@ jobs:
           community_chat.tests.test_account_privacy.AccountPrivacyTests \
           community_chat.tests.test_deletion_tasks \
           community_chat.tests.test_onboarding.MemberOnboardingTests \
+          community_chat.tests.test_onboarding_names_unit.RequiredOnboardingNamesTests \
+          community_chat.tests.test_browser_auth_recovery_unit.BrowserAuthRecoveryTests \
           community_chat.tests.test_adapter \
           community_chat.tests.test_api \
           community_chat.tests.test_device_auth \

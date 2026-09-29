@@ -44,10 +44,15 @@ or other applicants' details. Account GET includes the same private state.
 PUT accepts one of two steps:
 
 ```json
-{"step":"basics","first_name":"Alex","last_name":"","adult_confirmed":true,"accept_rules":true,"policy_version":"2026-09-21"}
+{"step":"basics","first_name":"Alex","last_name":"Member","adult_confirmed":true,"accept_rules":true,"policy_version":"2026-09-21"}
 ```
 
-First name is required, surname optional; each is limited to 80 characters.
+First name and surname are required; each is limited to 80 characters and
+must contain non-whitespace text. Incomplete applications saved without either
+name resume the basics step and cannot complete or receive committee approval
+until both are present. Already approved members keep access and can update
+optional preferences without repeating onboarding. This validation change
+requires no database migration.
 Eligibility and agreement must be JSON `true`, and the version must match the
 current policy. Three separate consent-purpose records track adulthood, terms
 and the conduct rules in the canonical terms. No DOB is collected. Repeating
