@@ -284,7 +284,7 @@ def _format_author_line(
     destination_platform: str, author_name: str, source_label: str
 ) -> str:
     if destination_platform == CommunityBridgePlatform.SLACK:
-        return f"*{author_name} ({source_label})*"
+        return f"*{html.escape(author_name, quote=False)} ({source_label})*"
     return f"**{author_name} ({source_label})**"
 
 
@@ -300,7 +300,7 @@ def _format_attachment_lines(
             continue
         title = str(attachment.get("title") or url).strip()
         if destination_platform == CommunityBridgePlatform.SLACK:
-            items.append(f"• <{url}|{title}>")
+            items.append(f"• <{html.escape(url, quote=False)}|{html.escape(title, quote=False)}>")
         else:
             items.append(f"- {title}: {url}")
     if not items:

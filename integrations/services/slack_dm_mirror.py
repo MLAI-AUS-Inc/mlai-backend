@@ -7825,6 +7825,10 @@ def _deliver_to_slack(delivery: SlackDmMirrorDelivery) -> None:
     ), workspace_id=grant.slack_workspace_id, app_id=user_app_id())
     _verify_ai_recipients_before_send(delivery, client)
     _verify_roo_mentions_before_send(delivery, client)
+    outgoing_text = delivery.encrypted_text
+    if operation in {CommunityBridgeDeliveryType.CREATE, CommunityBridgeDeliveryType.EDIT}:
+        from integrations.services.community_bridge.broadcast_mentions import prepare_private_slack_broadcasts
+        outgoing_text = prepare_private_slack_broadcasts(delivery, client)
     client_message_id = ""
     slack_ts = ""
     reaction = ""
@@ -7868,7 +7872,7 @@ def _deliver_to_slack(delivery: SlackDmMirrorDelivery) -> None:
         delivery.save(update_fields=("metadata", "updated_at"))
         request_kwargs = {
             "channel": conversation.slack_conversation_id,
-            "text": delivery.encrypted_text,
+            "text": outgoing_text,
             "client_msg_id": client_message_id,
             "unfurl_links": True,
             "unfurl_media": True,
@@ -7911,7 +7915,7 @@ def _deliver_to_slack(delivery: SlackDmMirrorDelivery) -> None:
             author_id=grant.slack_user_id,
             reaction=reaction,
             text=(
-                delivery.encrypted_text
+                outgoing_text
                 if operation == CommunityBridgeDeliveryType.EDIT
                 else ""
             ),
@@ -7939,7 +7943,7 @@ def _deliver_to_slack(delivery: SlackDmMirrorDelivery) -> None:
                 response = client.chat_update(
                     channel=conversation.slack_conversation_id,
                     ts=slack_ts,
-                    text=delivery.encrypted_text,
+                    text=outgoing_text,
                 )
                 returned_ts = str(response.get("ts") or slack_ts).strip()
                 _slack_ts_sort_key(returned_ts)

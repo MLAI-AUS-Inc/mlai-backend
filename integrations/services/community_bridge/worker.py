@@ -492,6 +492,8 @@ class CommunityBridgeDiscordClient(discord.Client):
         if mention_ids:
             await asyncio.to_thread(validate_mention_users, SlackBridgeClient.get_client(), mention_ids,
                                     (delivery.get("channel") or {}).get("slack_workspace_id", ""), scope="public-bot")
+        from integrations.services.community_bridge.broadcast_mentions import prepare_slack_broadcasts
+        body = await asyncio.to_thread(prepare_slack_broadcasts, delivery, body)
         text = build_mirrored_text(
             destination_platform=CommunityBridgePlatform.SLACK,
             source_platform=delivery["source_platform"],
