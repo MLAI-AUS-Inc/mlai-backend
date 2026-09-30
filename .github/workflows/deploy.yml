@@ -92,6 +92,7 @@ jobs:
         python scripts/test_without_database.py \
           community_chat.tests.test_startup_activity_defaults \
           community_chat.tests.test_startup_lifecycle \
+          community_chat.tests.test_startup_publication \
           startup_updates.tests_month_scope \
           startup_updates.tests_monthly_groups \
           startup_updates.tests_update_identity.GenerationDateCompatibilityTests
