@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ update.startup.name }} · {{ update.month }} · MLAI</title>
+  <style>
+    :root { color-scheme: light dark; font-family: system-ui, sans-serif; color: #334a43; background: #fff9e8; }
+    body { margin: 0; }
+    main { max-width: 46rem; margin: auto; padding: 3rem 1.5rem; }
+    .eyebrow, footer { color: #657269; font-size: .875rem; }
+    h1 { font-size: clamp(1.75rem, 5vw, 2.5rem); line-height: 1.15; margin: .75rem 0; }
+    h2 { font-size: 1.125rem; margin: 2rem 0 .5rem; }
+    li { line-height: 1.7; margin: .5rem 0; overflow-wrap: anywhere; white-space: pre-line; }
+    ul { padding-left: 1.4rem; }
+    dl { display: grid; grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr)); gap: 1rem; }
+    dl div { border: 1px solid #d9ddcf; border-radius: 1rem; padding: 1rem; }
+    dt { font-size: .875rem; } dd { margin: .5rem 0 0; font-size: 1.25rem; font-weight: 600; overflow-wrap: anywhere; }
+    footer { border-top: 1px solid #d9ddcf; margin-top: 3rem; padding-top: 1rem; line-height: 1.6; }
+    @media (prefers-color-scheme: dark) { :root { background: #222922; color: #e7ecdf; } .eyebrow, footer { color: #b8c2b5; } }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <p class="eyebrow">MLAI · Build in public</p>
+      <h1>{{ update.startup.name }}</h1>
+      <p>{{ update.month }} · Public startup update</p>
+    </header>
+    {% if metrics %}<dl>{% for metric in metrics %}<div><dt>{{ metric.label }}</dt><dd>{{ metric.value }}</dd></div>{% endfor %}</dl>{% endif %}
+    {% for section in sections %}
+      <section><h2>{{ section.label }}</h2><ul>{% for point in section.points %}<li>{{ point }}</li>{% endfor %}</ul></section>
+    {% endfor %}
+    <footer>This is the founder's approved public update. Anyone with this link can view it. Comments are available to MLAI members in Community Startup Pulse.</footer>
+  </main>
+</body>
+</html>

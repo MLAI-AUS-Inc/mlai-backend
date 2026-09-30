@@ -1,8 +1,10 @@
 from django.urls import path
 from . import views
+from .public_views import PublicUpdateView
 from .connections import ConnectView, DisconnectView, connect_browser
 
 urlpatterns = [
+    path("public/<int:update_id>/", PublicUpdateView.as_view(), name="chat_startups_public_update"),
     path("connect/browser/", connect_browser, name="chat_startups_connect_browser"),
     path("connect/<str:provider>/", ConnectView.as_view()),
     path("bootstrap/", views.BootstrapView.as_view(), name="chat_startups_bootstrap"),

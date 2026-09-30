@@ -4276,7 +4276,9 @@ class StartupUpdateDraftResultsView(APIView):
                         if draft.current_revision_id != prior["revision_id"] or prior["input_hash"] != content_hash(memo):
                             raise RevisionConflict()
                     else:
-                        revision = save_revision(draft, memo, snapshot=snapshot, audience="private", expected_revision=item.get("expected_revision"))
+                        requested_audience = (run.run_request or {}).get("audience_visibility", ["just_me"])
+                        audience = "public" if requested_audience == ["public"] else "community" if requested_audience == ["community"] else "private"
+                        revision = save_revision(draft, memo, snapshot=snapshot, audience=audience, expected_revision=item.get("expected_revision"))
                         MonthlyUpdateRevision.objects.filter(pk=revision.pk).update(validation={"groundedness_status": "pending", "run_id": run.run_id})
                         run_request = dict(run.run_request or {})
                         from startup_updates.evidence_contract import content_hash
