@@ -7,7 +7,8 @@ from typing import Any
 from integrations.services.community_bridge.formatting import SLACK_USER_MENTION_RE
 
 
-_CODE = re.compile(r"(`{3,}[\s\S]*?(?:`{3,}|$)|`[^`\n]*`)")
+_CODE = re.compile(r"(`{3,}[\s\S]*?(?:`{3,}|$)|`+[^`\n]*`+)")
+_CALLOUT = re.compile(r"(?<!\\)<!(channel|here|everyone)(?:\|[^>\n]*)?>")
 
 
 def render_private_slack_mentions(text: str, profiles: dict[str, Any]) -> str:
@@ -22,7 +23,9 @@ def render_private_slack_mentions(text: str, profiles: dict[str, Any]) -> str:
         return "@" + name.replace(" ", "\u00a0")
 
     return "".join(
-        part if index % 2 else SLACK_USER_MENTION_RE.sub(replace, part)
+        part if index % 2 else SLACK_USER_MENTION_RE.sub(
+            replace, _CALLOUT.sub(lambda match: "@" + match.group(1), part)
+        )
         for index, part in enumerate(_CODE.split(str(text or "")))
     )
 

@@ -161,7 +161,9 @@ def sanitized_directory_page(response, workspace):
 
 def _snapshot_page(snapshot, *, query, start, limit):
     """Search all cached names before returning a bounded, resumable page."""
-    matches = [user for user in snapshot["users"] if query in user["search"]]
+    matches = [
+        user for user in snapshot["users"] if _matches_directory_user(user, query)
+    ]
 
     def rank(user):
         name = user["display_name"].casefold()
@@ -193,6 +195,12 @@ def _snapshot_page(snapshot, *, query, start, limit):
         else ""
     )
     return users, next_cursor
+
+
+def _matches_directory_user(user, query):
+    # Imported messages retain Slack IDs for people outside the channel.
+    # Resolve those references through the same authorized workspace directory.
+    return user["slack_user_id"].casefold() == query or query in user["search"]
 
 
 def _search_directory(
@@ -258,7 +266,9 @@ def _search_directory(
             users = []
             next_cursor = mirror._encode_directory_cursor(slack_cursor, offset)
         else:
-            matches = [user for user in page["users"] if query in user["search"]]
+            matches = [
+                user for user in page["users"] if _matches_directory_user(user, query)
+            ]
             users = matches[offset : offset + limit]
             next_cursor = (
                 mirror._encode_directory_cursor(slack_cursor, offset + limit)
@@ -326,6 +336,7 @@ def _search_directory(
         )
     validate()
     return {
+        "workspace_id": workspace,
         "users": result,
         "next_cursor": next_cursor,
         "retry_after_seconds": retry_after,

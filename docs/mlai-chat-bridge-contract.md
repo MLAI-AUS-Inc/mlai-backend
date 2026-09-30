@@ -1348,6 +1348,14 @@ The bot token is never used to read private messages or invite people. DM direct
 requests without `channel_id`, invitations and DM creation retain their existing
 owner-consent requirements.
 
+Directory queries also match an exact Slack user ID and return `workspace_id`.
+Clients use this existing authenticated read to display imported references to
+people outside the channel. They verify the source workspace and exact user ID,
+retain literal code/examples, and convert `<!channel>`, `<!here>` and
+`<!everyone>` to callout chips. This display recovery applies to existing stored
+messages without reposting, inviting anyone, or adding notification recipients.
+Private deliveries also convert callouts independently of participant profiles.
+
 DM directory reads without `channel_id` also reuse the warmed workspace snapshot
 and its versioned pagination. If no snapshot exists, owner-scoped sanitized pages
 are shared between name searches for ten minutes. Owner consent is checked before

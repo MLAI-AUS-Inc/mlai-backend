@@ -56,6 +56,23 @@ class PrivateSlackMentionTests(SimpleTestCase):
         for text in ("`<@UALICE>`", "```\n<@UALICE>\n```", "```\n<@UALICE>"):
             self.assertEqual(render_private_slack_mentions(text, PROFILES), text)
 
+    def test_callouts_render_even_when_the_mentioned_person_is_not_a_participant(self):
+        self.assertEqual(
+            render_private_slack_mentions("<!channel> Ask <@UNONMEMBER>.", PROFILES),
+            "@channel Ask <@UNONMEMBER>.",
+        )
+        self.assertEqual(
+            render_private_slack_mentions("<!here> <!everyone|everyone>", {}),
+            "@here @everyone",
+        )
+        for text in (
+            "`<!channel>`",
+            "``<!channel>``",
+            "```\n<!here>\n```",
+            r"\<!everyone>",
+        ):
+            self.assertEqual(render_private_slack_mentions(text, {}), text)
+
     def test_repair_is_idempotent_and_preserves_original_edit_revision(self):
         message = {"ts": "1750000000.000001", "edited": {"ts": "1750000090.000002"}}
         args = dict(completed=True, metadata={"destination_message_id": "target"})
