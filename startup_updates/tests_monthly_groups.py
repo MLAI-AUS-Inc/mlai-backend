@@ -103,6 +103,12 @@ class MonthlyOwnerReadTests(SimpleTestCase):
             response = views.CommunityView().get(Obj(query_params={}))
             self.assertEqual(response.status_code, 200)
             filters = drafts.filter.call_args.kwargs
-            self.assertEqual(filters["published_revision__audience"], "community")
-            self.assertEqual(filters["published_revision__approval__audience_visibility"], ["community"])
+            disclosure = drafts.filter.call_args.args[0]
+            clauses = [child.children for child in disclosure.children if hasattr(child, "children")]
+            self.assertEqual(len(clauses), 2)
+            for audience, clause in zip(("community", "public"), clauses):
+                self.assertIn(("published_revision__audience", audience), clause)
+                self.assertIn(("published_revision__approval__audience_visibility", [audience]), clause)
+            self.assertIs(filters["published_at__isnull"], False)
+            self.assertEqual(filters["published_revision__approval__content_hash"].name, "published_revision__content_hash")
             self.assertEqual(group.call_args.kwargs, {"published": True})
