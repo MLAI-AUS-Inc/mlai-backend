@@ -13,7 +13,7 @@ Every request for startup-specific data must carry an explicit owned `company_id
 
 ## API
 
-All paths are under `/api/v1/community-chat/startups/`. Except the signed browser handoff, they accept only `CommunityChatAccountAuthentication` and use the existing account-cookie origin enforcement or native opaque bearer session. Responses use `Cache-Control: private, no-store`.
+All paths are under `/api/v1/community-chat/startups/`. Except the signed browser handoff and read-only public update page, they accept only `CommunityChatAccountAuthentication` and use the existing account-cookie origin enforcement or native opaque bearer session. Responses use `Cache-Control: private, no-store`.
 
 | Path | Method | Contract |
 | --- | --- | --- |
@@ -29,7 +29,8 @@ All paths are under `/api/v1/community-chat/startups/`. Except the signed browse
 | `updates/` | GET/POST | Owner archive (50 per page, `offset`); save requires `saveMode: draft` |
 | `updates/<id>/` | GET | Current owner revision and community preview; `version=published` reads approved revision |
 | `updates/<id>/publish/` | POST | Requires `reviewed: true`, exact revision ID/hash and saved audience |
-| `community/` | GET | Approved community revisions with matching hash/disclosure receipt; 50 per page |
+| `community/` | GET | Approved community and public revisions with matching hash/disclosure receipt; 50 per page |
+| `public/<id>/` | GET/HEAD | Anonymous read-only HTML for the exact approved public revision; private/community/draft updates return 404 |
 | `generate/` | POST | Explicit company, targetMonth, selected inputSources, optional notes/document IDs |
 | `runs/active/`, `runs/<id>/`, `runs/<id>/results/` | GET | Existing persisted run contract, restricted to this company's domain |
 | `runs/<id>/cancel/` | POST | Existing scoped cancellation and cleanup |
@@ -209,3 +210,39 @@ storage adapters, Google and GitHub native HTTP redirects, missing cookies,
 unrelated browser accounts, state expiry/replay, revoked sessions, return-URI
 allowlisting and API-key confirmation. This is not evidence of deployed
 provider approval, live credential persistence or native OS callback delivery.
+
+
+## Three sharing audiences — 30 September 2026
+
+The draft and exact-revision approval APIs accept `audienceVisibility` as
+`public`, `community`, or `just_me` (also their single-item array form). Public
+cannot be combined with another audience. All saves and generation remain
+unpublished working revisions until the founder explicitly reviews and approves
+their revision ID, hash, and audience. Generation pins the selected audience in
+the run request so a completed draft preserves it after navigation or reload.
+
+`public` includes a read-only anonymous HTML page at `public/<id>/` and includes
+the update in the signed-in MLAI community feed. Owner reads with
+`version=published` include `update.publicUrl` only while the published revision
+has a public approval receipt with the same content hash. The page uses the same
+allowlisted narrative and selected-metric projection as the community preview;
+source documents, raw evidence, provider identifiers, and private analysis are
+excluded. Narrative is rendered as escaped text dot points, including multiline
+points; arbitrary HTML is never rendered. Anonymous users cannot comment or
+edit. Existing community comments continue to use the member-authenticated relay.
+
+`community` remains accessible only through MLAI Chat member sessions. `just_me`
+remains owner-scoped. Approving either of these audiences after a public version
+or deleting the update revokes its anonymous link immediately. Merely saving a
+new draft preserves the previous approved version until another approval. Public
+responses are `no-store`, disable indexing, and honor the same rollout flag.
+No schema changes or migrations are required. These are local source changes;
+compatible backend and frontend deployment is required before public links work.
+
+Database-free verification covers the three audience values, exact public
+approval, selective metric disclosure, generation audience persistence, anonymous
+HTML content negotiation, safe narrative escaping, multiline bullet identity,
+read-only methods, and hidden/unavailable public links. Existing facade, review,
+lifecycle, and activity tests are included. Database-backed integration tests
+were not run because this checkout requires explicit approval for their test
+database migrations.

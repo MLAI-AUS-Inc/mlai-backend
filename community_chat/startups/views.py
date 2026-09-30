@@ -1,8 +1,8 @@
 """Narrow Chat-session facade; shared founder views own domain mutations."""
 from django.conf import settings
 from django.core.exceptions import ValidationError as DjangoValidationError
-from django.db.models import F
 from django.shortcuts import get_object_or_404
+from django.urls import reverse
 from rest_framework.exceptions import NotFound, ValidationError
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -21,6 +21,7 @@ from startup_updates.monthly_groups import latest_monthly_draft, monthly_represe
 from vibe_raising import views as founder
 from workflow_runs.models import ContentFactoryRun
 from .presentation import update_payload
+from .publication import approved_updates
 from .lifecycle import delete_update, source_capabilities, validate_generation_sources
 from .source_preferences import source_preferences
 
@@ -74,7 +75,7 @@ class BootstrapView(ChatStartupAccess, APIView):
             "enabled": True, "accountId": str(request.user.community_chat_profile_id),
             "relayUrl": settings.COMMUNITY_CHAT_RELAY_URL,
             "profile": FounderProfileSerializer(profile).data,
-            "capabilities": {"manual": True, "generation": True, "community": True,
+            "capabilities": {"manual": True, "generation": True, "community": True, "public": True,
                 "delete": True, "draftReadyPush": False},
         })
 
@@ -131,7 +132,11 @@ class UpdateView(ChatStartupAccess, APIView):
             draft = latest_monthly_draft(siblings, draft.month)
         if published and not draft.published_revision_id:
             raise NotFound("No approved version exists yet.")
-        return Response({"update": update_payload(draft, published=published),
+        value = update_payload(draft, published=published)
+        # Use the approved receipt, never the working draft's selected audience.
+        if published and approved_updates("public").filter(pk=draft.pk).exists():
+            value["publicUrl"] = request.build_absolute_uri(reverse("chat_startups_public_update", kwargs={"update_id": draft.pk}))
+        return Response({"update": value,
             "communityPreview": update_payload(draft, published=published, community=True),
             "previousUpdates": [] if published else [
                 update_payload(row) for row in siblings.exclude(pk=draft.pk).order_by("-updated_at", "-pk")
@@ -157,11 +162,7 @@ class CommunityView(ChatStartupAccess, APIView):
         except (TypeError, ValueError):
             raise ValidationError({"offset": "Use a nonnegative integer."})
         # Approval must still refer to the same hash and audience as the publication.
-        rows = MonthlyUpdateDraft.objects.filter(
-            published_revision__audience="community",
-            published_revision__approval__audience_visibility=["community"],
-            published_revision__approval__content_hash=F("published_revision__content_hash"),
-        ).select_related("organization", "published_revision__snapshot").order_by("-published_at", "-id")
+        rows = approved_updates("community", "public").order_by("-published_at", "-id")
         page = list(monthly_representatives(rows, published=True)[offset:offset + 51])
         return Response({"updates": [update_payload(row, published=True, community=True) for row in page[:50]],
             "nextOffset": offset + 50 if len(page) > 50 else None})

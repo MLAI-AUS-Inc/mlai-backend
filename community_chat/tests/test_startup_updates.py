@@ -99,14 +99,11 @@ class StartupFacadeTests(SimpleTestCase):
         self.assertIn('reviewed', response.data)
 
     def test_community_only_selects_matching_approved_publications(self):
-        with patch.object(views.MonthlyUpdateDraft, 'objects') as manager:
-            manager.filter.return_value.select_related.return_value.order_by.return_value.__getitem__.return_value = []
+        with patch.object(views, 'approved_updates') as lookup:
+            lookup.return_value.order_by.return_value.__getitem__.return_value = []
             response = self.request(views.CommunityView)
         self.assertEqual(response.status_code, 200)
-        filters = manager.filter.call_args.kwargs
-        self.assertEqual(filters['published_revision__audience'], 'community')
-        self.assertEqual(filters['published_revision__approval__audience_visibility'], ['community'])
-        self.assertEqual(filters['published_revision__approval__content_hash'].name, 'published_revision__content_hash')
+        lookup.assert_called_once_with('community', 'public')
 
     def test_community_projection_strips_private_evidence(self):
         dto = {key: None for key in PUBLIC_FIELDS}

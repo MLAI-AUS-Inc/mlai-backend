@@ -2701,7 +2701,7 @@ class VibeRaisingMonthlyUpdateView(APIView):
         )
         revision = save_revision(draft, memo, snapshot=snapshot,
             expected_revision=serializer.validated_data.get("expectedRevision"),
-            audience="community" if "community" in audience_visibility else "private",
+            audience="public" if "public" in audience_visibility else "community" if "community" in audience_visibility else "private",
             validation=validation)
         draft.refresh_from_db()
         draft.title = f"{company.name} {calendar.month_name[draft.month.month]} {draft.month.year} Update"
@@ -2787,8 +2787,8 @@ class VibeRaisingMonthlyUpdatePublishView(APIView):
             visibility = normalize_audience_visibility(request.data.get("audienceVisibility"))
         except ValueError as exc:
             return Response({"detail": str(exc)}, status=400)
-        if visibility not in (["just_me"], ["community"]):
-            return Response({"detail": "Choose private or community visibility."}, status=400)
+        if visibility not in (["just_me"], ["community"], ["public"]):
+            return Response({"detail": "Choose private, community, or public visibility."}, status=400)
         draft = approve_and_publish(draft, actor=request.user, revision_id=revision_id,
             revision_hash=revision_hash, audience_visibility=visibility)
 
@@ -3097,6 +3097,12 @@ class VibeRaisingEmailDraftStartView(APIView):
             target_month = draft.month
             period = narrative_window(organization, draft, requested_date,
                 requested_start=request.data.get("narrativeStart"), requested_end=request.data.get("narrativeEnd"))
+            try:
+                requested_audience = normalize_audience_visibility(request.data.get("audienceVisibility"))
+            except ValueError as exc:
+                raise ValidationError({"audienceVisibility": str(exc)}) from exc
+            if requested_audience not in (["just_me"], ["community"], ["public"]):
+                raise ValidationError({"audienceVisibility": "Choose private, community, or public visibility."})
             existing_run = get_open_startup_update_run(organization=organization)
             if existing_run and str((existing_run.run_request or {}).get("update_id")) != str(draft.pk):
                 raise RevisionConflict("Another update is being drafted. Finish or cancel that run first.")
@@ -3129,7 +3135,8 @@ class VibeRaisingEmailDraftStartView(APIView):
                 input_sources=input_sources, source_warnings=source_warnings, target_month=target_month,
                 manual_document_ids=manual_document_ids, manual_summary=manual_summary,
                 force_regenerate=force, update_draft=draft, narrative_period=period,
-                automatic_source_scope=bool(getattr(self, "automatic_source_scope", False)))
+                automatic_source_scope=bool(getattr(self, "automatic_source_scope", False)),
+                audience_visibility=requested_audience)
         if not existing_run or _should_dispatch_existing_run(run):
             dispatch_result = _dispatch_run_to_valley(run)
             if not dispatch_result:

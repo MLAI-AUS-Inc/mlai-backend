@@ -3,10 +3,12 @@ from django.db.models import Q
 
 AUDIENCE_JUST_ME = "just_me"
 AUDIENCE_COMMUNITY = "community"
+AUDIENCE_PUBLIC = "public"
 AUDIENCE_INVESTORS = "investors"
 AUDIENCE_VISIBILITY_CHOICES = (
     AUDIENCE_JUST_ME,
     AUDIENCE_COMMUNITY,
+    AUDIENCE_PUBLIC,
     AUDIENCE_INVESTORS,
 )
 DEFAULT_AUDIENCE_VISIBILITY = [AUDIENCE_JUST_ME]
@@ -46,8 +48,13 @@ def normalize_audience_visibility(value, *, default=None):
     if not normalized:
         return list(default)
 
+    if AUDIENCE_PUBLIC in normalized:
+        if len(normalized) != 1:
+            raise ValueError("public cannot be combined with another audience.")
+        return [AUDIENCE_PUBLIC]
+
     if AUDIENCE_JUST_ME in normalized and len(normalized) > 1:
-        raise ValueError("just_me cannot be combined with community or investors.")
+        raise ValueError("just_me cannot be combined with another audience.")
 
     if AUDIENCE_JUST_ME in normalized:
         return [AUDIENCE_JUST_ME]

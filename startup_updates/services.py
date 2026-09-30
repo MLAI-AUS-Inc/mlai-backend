@@ -3498,7 +3498,11 @@ def create_startup_update_run(
     update_draft=None,
     narrative_period=None,
     automatic_source_scope=False,
+    audience_visibility=None,
 ) -> ContentFactoryRun:
+    requested_audience = normalize_audience_visibility(audience_visibility)
+    if requested_audience not in (["just_me"], ["community"], ["public"]):
+        raise ValueError("Choose private, community, or public visibility.")
     now = timezone.now()
     profile = getattr(organization, "startup_profile", None)
     reporting_timezone = profile.reporting_timezone if profile else "UTC"
@@ -3590,6 +3594,7 @@ def create_startup_update_run(
         "organization_id": organization.id,
         "reporting_timezone": reporting_timezone,
         "reporting_contract_version": 1,
+        "audience_visibility": requested_audience,
         "startup_profile_id": profile.id if profile else None,
         "binding_id": binding.id,
         "google_connection_id": google_connection.id if google_connection else None,

@@ -235,6 +235,8 @@ def frozen_memo(draft, *, published=False):
 
 @transaction.atomic
 def save_revision(draft, memo, *, snapshot, audience="private", expected_revision=None, require_match=True, validation=None):
+    if audience not in {"private", "community", "public"}:
+        raise ValidationError("Choose private, community, or public visibility.")
     draft = MonthlyUpdateDraft.objects.select_for_update().get(pk=draft.pk)
     if snapshot.organization_id != draft.organization_id or snapshot.month != draft.month:
         raise ValidationError("The evidence snapshot belongs to a different startup or period.")
@@ -255,7 +257,7 @@ def save_revision(draft, memo, *, snapshot, audience="private", expected_revisio
         legacy_revision = MonthlyUpdateRevision.objects.create(
             draft=draft, snapshot=legacy_snapshot,
             number=(draft.revisions.aggregate(n=Max("number"))["n"] or 0) + 1,
-            audience="community" if "community" in draft.audience_visibility else "private",
+            audience="public" if "public" in draft.audience_visibility else "community" if "community" in draft.audience_visibility else "private",
             structured_memo=legacy_memo, rendered_markdown=draft.rendered_markdown,
             content_hash=content_hash({"legacy_memo": legacy_memo, "snapshot": legacy_snapshot.content_hash}),
             validation={"legacy_unverified": True})
@@ -280,14 +282,14 @@ def save_revision(draft, memo, *, snapshot, audience="private", expected_revisio
         {"metric_key": item["key"], "label": item["label"], "value": item["display_value"], "value_number": item.get("value"), "unit": item.get("unit", ""), "quality": item.get("quality"), "source_provider": item.get("source_provider"), "basis": (item.get("metadata") or {}).get("basis") or (item.get("metadata") or {}).get("source_metric"), "limitations": (item.get("metadata") or {}).get("limitations", []), "snapshot_id": snapshot.pk}
         for item in snapshot.payload["metrics"] if item.get("display_value") is not None
     ]
-    if audience == "community":
+    if audience in {"community", "public"}:
         config = memo.get("display_config") or {}
         if "full_metric_keys" in config:
             selected_keys &= set(config["full_metric_keys"])
         memo["kpi_snapshot"] = [item for item in memo["kpi_snapshot"] if item["metric_key"] in selected_keys]
     memo["metric_history"] = {key: value for key, value in copy.deepcopy(snapshot.payload.get("metric_history", {})).items() if audience == "private" or key in selected_keys}
     memo["financial_snapshot"] = copy.deepcopy(snapshot.payload.get("charts")) if audience == "private" else None
-    memo["_audience_visibility"] = ["community" if audience == "community" else "just_me"]
+    memo["_audience_visibility"] = [audience if audience in {"community", "public"} else "just_me"]
     memo["reporting_period"] = copy.deepcopy(snapshot.payload.get("period"))
     memo["update_date"] = draft.update_date.isoformat() if draft.update_date else None
     memo["narrative_period"] = copy.deepcopy(snapshot.payload.get("narrative_period") or (current.structured_memo.get("narrative_period") if current else None))
