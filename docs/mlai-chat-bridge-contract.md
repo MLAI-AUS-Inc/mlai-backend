@@ -144,10 +144,21 @@ this status check neither replays cancelled deliveries nor changes source reads.
 - Delivery is at least once; adapters must be idempotent for a claimed outbox
   row. Ordering is best effort within one mapped channel.
 - Replies whose parent mapping is not ready are parked without consuming the
-  provider retry budget. Completing the parent wakes its parked children; a
-  bounded age and dependency-attempt limit dead-letters unresolved children
-  instead of flattening them into top-level messages.
+  provider retry budget. Completing the parent wakes its parked children
+  immediately. Parking rechecks the parent mapping under the child's row lock;
+  completion locks matching processing or waiting children before waking only
+  waiting rows, so a concurrent park cannot miss the wake or lose an active claim.
+  Timed recovery checks back off through 10, 30, 120, 300 and 900
+  seconds, then remain capped at 900 seconds; the schedule and attempt count
+  survive worker restarts in the existing outbox. With durable message sync
+  enabled, long-running archive imports retain unresolved children. The legacy
+  worker still applies its bounded age and dependency-attempt limit. Neither
+  mode flattens an unresolved child into a top-level message.
 - Exhausted deliveries enter a dead state for operator inspection and replay.
+- Immutable unsupported operations, such as a reaction outside the supported
+  Slack bridge set, enter the dead state immediately instead of retrying
+  forever under durable sync. Transient provider failures retain their existing
+  retry policy.
 - Public Buzz edits/deletes whose create has not yet been mapped use the
   dependency queue. Completing the create wakes both replies and mutations.
 
@@ -1301,6 +1312,15 @@ Metadata and image caches remain authorization-scoped. Slack-provided PDF/video
 thumbnails can use the image proxy; original document/video playback remains in
 Slack when no supported preview is provided. Non-image files without thumbnails
 produce a usable link card, not a metadata exception.
+
+Failed public-link metadata and image fetches are suppressed for 60 seconds,
+then retried on demand. Slack network timeouts use a 15-second shared cooldown;
+provider deferrals retain their reported retry delay, with cached failure state
+expiring within 60 seconds. Local scheduler admission waits are not negative
+cached. Only failure state is cached, never raw exceptions or provider bodies.
+Private Slack cache scopes include the owner, workspace, grant, consent time
+and connection, and every image request still checks current authorization
+before using either a successful or failed cached result.
 
 Successful Slack-file HTTP responses are also `private, no-store`: clients and
 servers already cache by account/authorization scope, while a browser HTTP cache

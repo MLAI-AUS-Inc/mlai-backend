@@ -18,6 +18,7 @@ IMAGE_LIMIT_BYTES = 2 * 1024 * 1024
 MAX_REDIRECTS = 3
 REQUEST_TIMEOUT = (3, 5)
 USER_AGENT = "MLAI Chat link preview/1.0"
+FAILURE_CACHE_SECONDS = 60
 
 
 class LinkPreviewError(ValueError):
@@ -50,7 +51,20 @@ def fetch_link_preview(raw_url: str) -> LinkPreview:
     cached = cache.get(cache_key)
     if isinstance(cached, dict):
         return LinkPreview(**cached)
+    if cache.get(cache_key + ":failure"):
+        raise LinkPreviewError("The link preview is temporarily unavailable.")
+    try:
+        preview = _fetch_link_preview_uncached(normalized_url)
+    except LinkPreviewError:
+        # Store no exception, URL contents or provider response. A short shared
+        # miss prevents every mounted row/device from repeating a slow fetch.
+        cache.set(cache_key + ":failure", True, timeout=FAILURE_CACHE_SECONDS)
+        raise
+    cache.set(cache_key, preview.as_payload(), timeout=6 * 60 * 60)
+    return preview
 
+
+def _fetch_link_preview_uncached(normalized_url: str) -> LinkPreview:
     final_url, content_type, body = _fetch_limited(
         normalized_url,
         accept="text/html,application/xhtml+xml;q=0.9",
@@ -79,15 +93,13 @@ def fetch_link_preview(raw_url: str) -> LinkPreview:
             image_url = ""
 
     host = (urlparse(final_url).hostname or "Link").removeprefix("www.")
-    preview = LinkPreview(
+    return LinkPreview(
         href=final_url,
         title=_bounded_text(title or host, 220),
         description=_bounded_text(description, 360),
         site_name=_bounded_text(site_name or host, 120),
         image_url=image_url,
     )
-    cache.set(cache_key, preview.as_payload(), timeout=6 * 60 * 60)
-    return preview
 
 
 def fetch_preview_image(raw_url: str) -> tuple[str, bytes]:
@@ -98,7 +110,22 @@ def fetch_preview_image(raw_url: str) -> tuple[str, bytes]:
     cached = cache.get(cache_key)
     if isinstance(cached, dict) and isinstance(cached.get("body"), bytes):
         return str(cached.get("content_type") or "image/jpeg"), cached["body"]
+    if cache.get(cache_key + ":failure"):
+        raise LinkPreviewError("The preview image is temporarily unavailable.")
+    try:
+        normalized_type, body = _fetch_preview_image_uncached(normalized_url)
+    except LinkPreviewError:
+        cache.set(cache_key + ":failure", True, timeout=FAILURE_CACHE_SECONDS)
+        raise
+    cache.set(
+        cache_key,
+        {"body": body, "content_type": normalized_type},
+        timeout=6 * 60 * 60,
+    )
+    return normalized_type, body
 
+
+def _fetch_preview_image_uncached(normalized_url: str) -> tuple[str, bytes]:
     _, content_type, body = _fetch_limited(
         normalized_url,
         accept="image/avif,image/webp,image/png,image/jpeg,image/gif;q=0.8",
@@ -113,11 +140,6 @@ def fetch_preview_image(raw_url: str) -> tuple[str, bytes]:
         "image/webp",
     }:
         raise LinkPreviewError("The preview image used an unsupported content type.")
-    cache.set(
-        cache_key,
-        {"body": body, "content_type": normalized_type},
-        timeout=6 * 60 * 60,
-    )
     return normalized_type, body
 
 

@@ -71,6 +71,12 @@ class ParentMappingPending(Exception):
         super().__init__(f"parent mapping is not ready: {self.parent_message_id}")
 
 
+class UnsupportedDeliveryError(ValueError):
+    """An immutable delivery payload that no retry can make supported."""
+
+    permanent = True
+
+
 class CommunityBridgeDiscordClient(discord.Client):
     def __init__(self):
         intents = discord.Intents.default()
@@ -386,7 +392,7 @@ class CommunityBridgeDiscordClient(discord.Client):
         if delivery["target_platform"] == CommunityBridgePlatform.BUZZ:
             await self._deliver_to_buzz(delivery)
             return
-        raise RuntimeError(f"No community bridge adapter for {delivery['target_platform']}")
+        raise UnsupportedDeliveryError(f"No community bridge adapter for {delivery['target_platform']}")
 
     async def _deliver_to_discord(self, delivery: dict) -> None:
         target_channel = await self._get_channel_or_fetch(delivery["target_channel_id"])
@@ -591,7 +597,7 @@ class CommunityBridgeDiscordClient(discord.Client):
         operation = delivery["delivery_type"]
         reaction = emoji_to_slack_reaction(str(payload.get("text") or ""))
         if not reaction:
-            raise RuntimeError("reaction is not in the approved Slack bridge set")
+            raise UnsupportedDeliveryError("reaction is not in the approved Slack bridge set")
 
         if operation == CommunityBridgeDeliveryType.REACTION_ADD:
             target_message_id = await self._resolve_parent_destination_message(delivery)
@@ -664,7 +670,7 @@ class CommunityBridgeDiscordClient(discord.Client):
         frozen = delivery.get("canonical_envelope") or payload.get("_buzz_envelope_v1")
         if frozen is not None:
             if not isinstance(frozen, dict) or not frozen:
-                raise RuntimeError("Invalid durable Buzz envelope")
+                raise UnsupportedDeliveryError("Invalid durable Buzz envelope")
             await self._send_frozen_buzz_delivery(delivery, frozen)
             return
         operation = delivery["delivery_type"]
@@ -780,7 +786,7 @@ class CommunityBridgeDiscordClient(discord.Client):
             if operation != CommunityBridgeDeliveryType.DELETE or not _is_buzz_event_id(
                 override_target_message_id
             ):
-                raise RuntimeError("Invalid reconciliation destination override")
+                raise UnsupportedDeliveryError("Invalid reconciliation destination override")
             await self._freeze_and_send_buzz_delivery(
                 delivery,
                 delivery_id=str(delivery["id"]),
