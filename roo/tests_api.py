@@ -2063,7 +2063,7 @@ class CoworkingViewSetTests(APITestCase):
 
     @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
     def test_availability_quotes_discounted_cost_for_user_with_ready_update(self, mock_permission):
-        from datetime import date
+        from zoneinfo import ZoneInfo
         from organizations.models import Organization
         from startup_updates.models import (
             MonthlyUpdateDraft,
@@ -2075,6 +2075,7 @@ class CoworkingViewSetTests(APITestCase):
         UserStartupBinding.objects.create(user=self.user, organization=org)
         self._verify_company_for(org)
         approved_at = timezone.now()
+        booking_date = timezone.localdate(approved_at, ZoneInfo('Australia/Melbourne'))
         MonthlyUpdateDraft.objects.create(
             organization=org,
             month=timezone.localdate().replace(day=1),
@@ -2085,7 +2086,11 @@ class CoworkingViewSetTests(APITestCase):
         )
 
         url = reverse('coworking-availability')
-        response = self.client.get(url, {'days': 1, 'slack_user_id': self.user.slack_id})
+        response = self.client.get(url, {
+            'date': booking_date.isoformat(),
+            'days': 1,
+            'slack_user_id': self.user.slack_id,
+        })
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data[0]['cost_points'], 4)
 

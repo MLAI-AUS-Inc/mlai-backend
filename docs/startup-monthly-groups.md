@@ -1,71 +1,74 @@
-# One update per reporting month
+# Monthly updates and additional copies
 
-Implemented locally on 27 September 2026, on top of the queued Startup Pulse
-connections change. This is not a deployment record.
+Implemented locally on 3 October 2026. This is not a deployment record.
+The existing independent-update schema is reused; no migration is required.
 
-## Owner experience
+## Identity and owner experience
 
-The archive and dashboard show one entry per startup/reporting month, newest
-month first, titled `September Update` with month artwork. A record's update or
-publication timestamp does not move it to a different reporting month. Months
-without any saved content are not fabricated.
+An update represents a calendar month in the startup's reporting timezone.
+Clients default to the current month. Before creating another update for a month
+with saved content, the client offers to edit an existing update or create a new
+one. Every saved copy has an independent ID and revision/approval receipts.
 
-Create/update always resolves the selected calendar month. New clients load
-`GET /api/v1/community-chat/startups/updates/?month=YYYY-MM-01` and reopen its
-current receipt before editing. The month filter also accepts `YYYY-MM`.
-Archives apply monthly grouping before their existing 50-item pagination, so
-multiple historical September records cannot crowd August off the first page.
+`creationKey` allocates an independent copy, including within an existing month.
+A retry using the same key returns that exact ID; reusing its key for a different
+month returns 409. `updateId` always edits the requested owned ID, including an
+older sibling. Requests without either field retain compatibility by resolving
+the latest working copy for the specified month. IDs from another startup are
+rejected, and revision conflicts still return 409.
 
-Owner detail responses include `previousUpdates`, the earlier independently
-saved records from that same startup/month. Clients expose these read-only under
-Earlier saved versions. Opening an old owner ID opens the month's latest working
-copy. `version=published` still reads the specifically requested approved record.
-Historic records, revisions, approval receipts, snapshots, and discussion IDs are
-retained; no content is deleted or automatically combined into a new publication.
-The current working copy is the most recently updated record (ID breaks ties).
-Community archives group only after approved-audience filters, selecting the
-latest approved publication; unpublished/private siblings never enter that feed.
+The server assigns `monthSequence` under the existing organization row lock and
+stores it in `_month_sequence` metadata in the existing draft memo. The shared
+owner/community response adds `updateTitle`: `October update`, `October update
+#2`, and so on. New numbers are the highest stored number plus one for that
+startup and year/month. Legacy siblings are numbered in ascending ID order while
+avoiding existing allocated numbers. Editing, generation and retry preserve the
+allocated number. Deleting a lower-numbered copy does not renumber instances
+that already have stored numbers. Until its first allocation, a legacy instance
+uses a display fallback based on surviving IDs. Deleting the highest-numbered
+copy can allow that number to be used again. A
+durable deleted-number ledger is outside this code-only change.
 
-## Writes and concurrency
+Owner and community archives retain every independent copy, with the existing
+50-item pagination. `month=YYYY-MM` or `YYYY-MM-01` filters the owner archive
+before pagination. Owner detail reads open the exact requested ID; `version=
+published` continues to read its approved revision. `previousUpdates` retains
+other same-month records for older clients, without redirecting the selected ID.
+Community archives still filter exact approved audience/hash receipts before
+returning copies; private siblings remain private.
 
-`resolve_update` takes the existing organization row lock before resolving or
-creating a month. New month rows use the existing unique nullable-creation-key
-monthly slot. Compatibility `creationKey` values cannot create additional rows
-in an existing month. An explicit historical ID cannot overwrite a newer sibling.
-Saved revision IDs remain mandatory optimistic concurrency receipts: stale or
-blank writes to an already saved month return 409 instead of silently discarding
-its content. No new database model or migration is needed.
+## Generation and evidence
 
-Founder generation now follows this same identity flow even when callers provide
-only a target month. Worker writes resolve the same current month, and old raw
-memo upserts cannot overwrite revision-backed content. Approved publications
-remain unchanged until the founder reviews and approves the replacement revision.
+Generation pins its exact update ID, creation key and base revision. Worker
+writes and retries continue to use that identity when another same-month copy
+exists. Approval is still bound to exact revision ID/hash and audience. Unapproved
+edits leave approved publications unchanged; raw memo upserts cannot overwrite
+revision-backed updates. Completion rewards remain idempotent per startup/month.
 
-## Source periods
+Connector narrative evidence uses the represented calendar month in the
+startup's timezone, `[month start, next month start)`, capped at now for a current
+month. Editing or creating another copy does not extend the represented period.
+Provider bundle reads, extracted events and frozen evidence retain those bounds.
 
-Connector narrative data uses the represented calendar month in the startup's
-reporting timezone, `[month start, next month start)`, capped at now for a current
-month. Editing an older month includes that whole month, rather than 30 days
-before its old publication date or before today. Out-of-month explicit source
-ranges are rejected. Provider bundle reads, extracted events, and frozen evidence
-are restricted to that month. Financial evidence retains its reporting month;
-unknown historical values are not replaced by current values. Existing frozen
-revisions stay unchanged until regeneration creates a new reviewed revision.
+## Charts and other consumers
 
-Historical records remain grouped for display without a destructive data repair.
-Deploy the compatible backend and clients together; old clients that try to create
-another independent same-month update will receive a conflict and must reopen the
-month. PostgreSQL concurrent-write validation and live connector verification
-remain rollout checks. No migrations, live database writes, or production provider
-calls were performed for this implementation.
+Revenue/cost totals must not be added once per update. The progress dashboard
+continues to select one latest verified observation per metric/scope/month.
+Frozen metric history selects one snapshot per month by latest reporting cutoff,
+with publication order breaking ties. Repeated same-month copies therefore do
+not create extra time points or double financial totals. Each saved update keeps
+its own frozen chart and disclosures; an unapproved copy cannot replace an
+approved chart in community readers.
 
-## Local verification
+`monthly_representatives` remains available for period summaries and prior-month
+generation context. It is no longer used to hide independent copies from the
+owner/community archives. Source selection, chart disclosure and monthly reward
+eligibility keep their existing contracts.
 
-109 database-free backend tests passed, covering month identity and lookup,
-owner history preservation, audience projection, source preferences, provider
-boundaries, source evidence and immutable old-run rejection. Django system checks
-and read-only model/migration drift checks pass (`No changes detected`).
-Compilation and whitespace checks pass. Database-backed tests were updated but
-not executed: repository policy requires separate explicit migration approval
-for the Django database test runner. PostgreSQL lock behavior remains unverified
-by these database-free tests.
+## Validation
+
+Database-free identity/archive/review/source tests, model checks and compilation
+are safe local gates. No schema changes, migrations, database-backed tests, live
+provider calls or deployment are performed as part of this change. PostgreSQL
+concurrent creation and live Django/Valley/client journeys remain acceptance
+checks under the repository's database-test approval policy.

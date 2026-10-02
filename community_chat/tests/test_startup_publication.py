@@ -113,7 +113,7 @@ class PublicReaderTests(SimpleTestCase):
         owner_view.company = Obj(organization=Obj())
         for published, publicly_approved in ((True, True), (True, False), (False, True)):
             request = Request(self.factory.get("/", {"version": "published"} if published else {}))
-            with patch.object(views.MonthlyUpdateDraft, "objects"), patch.object(views, "latest_monthly_draft", return_value=draft), patch.object(views, "get_object_or_404", return_value=draft), patch.object(views, "update_payload", return_value={"id": 7}), patch.object(views, "approved_updates") as lookup:
+            with patch.object(views.MonthlyUpdateDraft, "objects"), patch.object(views, "get_object_or_404", return_value=draft), patch.object(views, "update_payload", return_value={"id": 7}), patch.object(views, "approved_updates") as lookup:
                 lookup.return_value.filter.return_value.exists.return_value = publicly_approved
                 response = owner_view.get(request, update_id=7)
             if published and publicly_approved:

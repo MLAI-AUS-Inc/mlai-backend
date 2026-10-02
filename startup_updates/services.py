@@ -3855,6 +3855,15 @@ def _restore_cancelled_run_drafts(*, organization: Organization, backups: dict) 
         # restore doesn't re-stamp (and thereby extend) time-based perks.
         ready_at_raw = snapshot.get("ready_at")
         ready_at = datetime.fromisoformat(str(ready_at_raw)) if ready_at_raw else None
+        memo = dict(snapshot.get("structured_memo") or {})
+        title = snapshot.get("title", "")
+        if current is not None:
+            from startup_updates.update_identity import saved_month_sequence, monthly_update_title
+            sequence = saved_month_sequence(current)
+            if sequence is not None:
+                # An old backup must not erase identity assigned after it was captured.
+                memo["_month_sequence"] = sequence
+                title = monthly_update_title(month_value, sequence)
         MonthlyUpdateDraft.objects.update_or_create(
             organization=organization,
             **lookup,
@@ -3866,10 +3875,10 @@ def _restore_cancelled_run_drafts(*, organization: Organization, backups: dict) 
                 "published_revision_id": snapshot.get("published_revision_id"),
                 "run": previous_run,
                 "status": snapshot.get("status", MonthlyUpdateDraftStatus.DRAFT),
-                "title": snapshot.get("title", ""),
+                "title": title,
                 "model_name": snapshot.get("model_name", ""),
                 "groundedness_status": snapshot.get("groundedness_status", "pending"),
-                "structured_memo": snapshot.get("structured_memo") or {},
+                "structured_memo": memo,
                 "rendered_markdown": snapshot.get("rendered_markdown", ""),
                 "evidence_event_ids": snapshot.get("evidence_event_ids") or [],
                 "evidence_metric_ids": snapshot.get("evidence_metric_ids") or [],
@@ -5956,8 +5965,10 @@ def upsert_monthly_update_draft(
             run=run,
         )
 
+    from startup_updates.update_identity import memo_with_month_identity
+    structured_memo = memo_with_month_identity(existing_draft, structured_memo)
     rendered_markdown = render_monthly_update_markdown(structured_memo)
-    title = str((structured_memo or {}).get("title") or "").strip()
+    title = existing_draft.title
     draft, _ = MonthlyUpdateDraft.objects.update_or_create(
         pk=existing_draft.pk,
         defaults={

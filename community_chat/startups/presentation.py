@@ -4,7 +4,7 @@ from vibe_raising.views import _serialize_monthly_update
 from vibe_raising.serializers import normalize_vibe_raising_display_config
 
 PUBLIC_FIELDS = (
-    "id", "revisionId", "revisionHash", "isoMonth", "month", "year", "publishedAt",
+    "id", "updateTitle", "monthSequence", "revisionId", "revisionHash", "isoMonth", "month", "year", "publishedAt",
     "summary", "highlights", "challenges", "learnings", "next30Days", "asks",
     "metrics", "metricEvidence", "audienceVisibility", "evidenceStatus",
 )
