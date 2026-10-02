@@ -2,12 +2,12 @@
 
 Implemented locally on 20 September 2026. This is a gated integration, not evidence of deployment. It reuses the existing Founder Tools companies, reporting configuration, evidence snapshots, revisions and approvals. Valley remains an internal generation worker; Chat never receives service or provider credentials.
 
-See [One update per reporting month](startup-monthly-groups.md) for the current
+See [Monthly updates and additional copies](startup-monthly-groups.md) for the current
 monthly identity, archive pagination, preserved versions and connector boundaries.
 
 ## Experience and scope
 
-The React desktop/browser Pulse screen now opens **Startups**. `/pulse` remains the route so existing profile-panel links continue to work. Flutter is unchanged. The default journey is My startup → Add/select startup → Write or generate → Save and review → Approve privately or publish to Community updates. Monthly periods default to the last completed month in the startup's timezone. The setup form includes timezone and currency; website is optional. Separate staff review, weekly scheduling, notification delivery, and a mobile port are outside this increment.
+The React desktop/browser Pulse screen now opens **Startups**. `/pulse` remains the route so existing profile-panel links continue to work. Flutter is unchanged. The default journey is My startup → Add/select startup → Write or generate → Save and review → Approve privately or publish to Community updates. Monthly periods default to the current month in the startup's timezone. The setup form includes timezone and currency; website is optional. Separate staff review, weekly scheduling, notification delivery, and a mobile port are outside this increment.
 
 Every request for startup-specific data must carry an explicit owned `company_id` (query) or `companyId` (JSON). Requests cannot fall back to the account's active startup. Account/community changes discard late client responses, and the backend independently checks ownership. The community reader is available to authenticated MLAI Chat accounts and reads approved community publications only.
 

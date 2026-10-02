@@ -2533,11 +2533,9 @@ class VibeRaisingMonthlyUpdateView(APIView):
                 )
 
         from startup_updates.revisions import frozen_memo
-        from startup_updates.monthly_groups import monthly_representatives
-        draft_queryset = monthly_representatives(draft_queryset, published=True)
         draft_memo_pairs = [
             (draft, frozen_memo(draft, published=bool(draft.published_revision_id)))
-            for draft in draft_queryset.order_by("-month", "-updated_at")
+            for draft in draft_queryset.order_by("-month", "-published_at", "-pk")
         ]
         updates = [
             _serialize_monthly_update(draft, structured_memo=memo, published=bool(draft.published_at))
@@ -2604,7 +2602,7 @@ class VibeRaisingMonthlyUpdateView(APIView):
             return Response({"update": _serialize_monthly_update(draft)}, status=status.HTTP_200_OK)
         if str(serializer.validated_data.get("expectedRevision") or "") != str(draft.current_revision_id or ""):
             from startup_updates.revisions import RevisionConflict
-            raise RevisionConflict("This month already has a saved update. Reopen the month to edit its latest version.")
+            raise RevisionConflict("This update has changed. Reopen it before saving your changes.")
         # Dates organise publications; existing financial evidence keeps its month.
         month_bucket = draft.month
         if "updateDate" in serializer.validated_data:
@@ -2704,11 +2702,10 @@ class VibeRaisingMonthlyUpdateView(APIView):
             audience="public" if "public" in audience_visibility else "community" if "community" in audience_visibility else "private",
             validation=validation)
         draft.refresh_from_db()
-        draft.title = f"{company.name} {calendar.month_name[draft.month.month]} {draft.month.year} Update"
         draft.status = MonthlyUpdateDraftStatus.DRAFT
         draft.run = None
         # Disclosure is part of the reviewed revision, not a mutable publication flag.
-        draft.save(update_fields=["title", "status", "run", "updated_at"])
+        draft.save(update_fields=["status", "run", "updated_at"])
 
         return Response(
             {"update": _serialize_monthly_update(draft)},

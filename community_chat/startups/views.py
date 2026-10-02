@@ -17,7 +17,7 @@ from founder_tools.views import FounderToolsCompanyView, FounderToolsActiveCompa
 from integrations.api_views_connectors import ConnectorSourcesStatusView
 from integrations.services.external_connectors import ConnectorConfigurationError
 from startup_updates.models import MonthlyUpdateDraft
-from startup_updates.monthly_groups import latest_monthly_draft, monthly_representatives, requested_month
+from startup_updates.monthly_groups import requested_month
 from vibe_raising import views as founder
 from workflow_runs.models import ContentFactoryRun
 from .presentation import update_payload
@@ -96,7 +96,7 @@ class UpdatesView(ChatStartupAccess, founder.VibeRaisingMonthlyUpdateView):
         month = requested_month(request.query_params.get("month"))
         if month:
             drafts = drafts.filter(month=month)
-        drafts = monthly_representatives(drafts).order_by("-month", "-id")
+        drafts = drafts.order_by("-month", "-id")
         try:
             offset = max(0, int(request.query_params.get("offset", 0)))
         except (ValueError, TypeError, DjangoValidationError):
@@ -126,10 +126,6 @@ class UpdateView(ChatStartupAccess, APIView):
         siblings = MonthlyUpdateDraft.objects.filter(
             organization=self.company.organization, month=draft.month,
         ).select_related("organization", "current_revision__snapshot", "published_revision__snapshot")
-        if not published:
-            # Old owner links open the monthly working copy. Retain every earlier
-            # saved record below it; do not concatenate private and approved text.
-            draft = latest_monthly_draft(siblings, draft.month)
         if published and not draft.published_revision_id:
             raise NotFound("No approved version exists yet.")
         value = update_payload(draft, published=published)
@@ -163,7 +159,7 @@ class CommunityView(ChatStartupAccess, APIView):
             raise ValidationError({"offset": "Use a nonnegative integer."})
         # Approval must still refer to the same hash and audience as the publication.
         rows = approved_updates("community", "public").order_by("-published_at", "-id")
-        page = list(monthly_representatives(rows, published=True)[offset:offset + 51])
+        page = list(rows[offset:offset + 51])
         return Response({"updates": [update_payload(row, published=True, community=True) for row in page[:50]],
             "nextOffset": offset + 50 if len(page) > 50 else None})
 
