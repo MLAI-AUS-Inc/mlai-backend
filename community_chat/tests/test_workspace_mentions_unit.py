@@ -89,6 +89,27 @@ class WorkspaceMentionTests(SimpleTestCase):
         second = self.search(query="later", cursor=first["next_cursor"])
         self.assertEqual(second["users"][0]["slack_user_id"], "ULATER")
 
+    def test_imported_reference_can_resolve_a_nonmember_by_exact_slack_id(self):
+        result = self.search(query="UBOT")
+        self.assertEqual(result["workspace_id"], "TMLAI")
+        self.assertEqual([u["slack_user_id"] for u in result["users"]], ["UBOT"])
+        self.assertFalse(result["users"][0]["is_member"])
+        # Ordinary name searches remain valid even when they begin with U/W.
+        self.client.users_list.return_value = {
+            "members": [{"id": "UURSULA", "name": "Ursula"}]
+        }
+        cache.clear()
+        self.assertEqual(
+            self.search(query="ursula")["users"][0]["display_name"], "Ursula"
+        )
+
+    def test_snapshot_resolves_an_exact_id_without_provider_reads(self):
+        self.assertEqual(snapshots.warm_workspace_directory_once(), 1)
+        self.client.users_list.reset_mock()
+        result = self.search(query="UBOT")
+        self.assertEqual([u["slack_user_id"] for u in result["users"]], ["UBOT"])
+        self.client.users_list.assert_not_called()
+
     def test_paused_private_import_never_uses_owner_token_or_claims_membership(self):
         self.mocks[
             2
