@@ -1,4 +1,5 @@
-"""One working update per startup/month, retaining older dated records as history."""
+"""Independent monthly updates with stable creation keys and server-owned titles."""
+import calendar
 from datetime import date, timedelta
 from uuid import UUID
 
@@ -13,38 +14,103 @@ from startup_updates.revisions import RevisionConflict
 from startup_updates.monthly_groups import latest_monthly_draft
 
 
+def monthly_update_title(month, sequence):
+    """Return the consistent owner/community label for an update in a month."""
+    suffix = f" #{sequence}" if sequence > 1 else ""
+    return f"{calendar.month_name[month.month]} update{suffix}"
+
+
+def saved_month_sequence(draft):
+    """Read the server-allocated sequence stored in the draft's memo metadata."""
+    value = (getattr(draft, "structured_memo", None) or {}).get("_month_sequence")
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
+
+
+def legacy_month_sequences(siblings):
+    """Assign unnumbered legacy rows by ID without changing allocated numbers."""
+    used = {value for draft in siblings if (value := saved_month_sequence(draft)) is not None}
+    next_number = 1
+    numbers = {}
+    for draft in siblings:
+        value = saved_month_sequence(draft)
+        if value is None:
+            while next_number in used:
+                next_number += 1
+            value = next_number
+            used.add(value)
+        numbers[draft.pk] = value
+    return numbers
+
+
+def monthly_identity(draft):
+    """Read stable numbering, falling back to creation order for legacy entries."""
+    sequence = saved_month_sequence(draft)
+    if sequence is None:
+        siblings = list(MonthlyUpdateDraft.objects.filter(
+            organization_id=draft.organization_id, month=draft.month,
+        ).order_by("pk"))
+        sequence = legacy_month_sequences(siblings).get(draft.pk, 1)
+    return {"monthSequence": sequence, "updateTitle": monthly_update_title(draft.month, sequence)}
+
+
+def memo_with_month_identity(draft, memo):
+    """Overwrite input metadata with the server-owned update identity."""
+    return {**(memo or {}), "_month_sequence": monthly_identity(draft)["monthSequence"]}
+
+
+def allocate_monthly_titles(drafts, month):
+    """Persist legacy identities under the existing organization creation lock."""
+    siblings = list(drafts.filter(month=month).select_for_update().order_by("pk"))
+    numbers = legacy_month_sequences(siblings)
+    for draft in siblings:
+        if saved_month_sequence(draft) is None:
+            draft.structured_memo = {**(draft.structured_memo or {}), "_month_sequence": numbers[draft.pk]}
+            draft.title = monthly_update_title(month, numbers[draft.pk])
+            draft.save(update_fields=["title", "structured_memo"])
+    return max(numbers.values(), default=0)
+
+
 @transaction.atomic
 def resolve_update(organization, *, month, update_id=None, creation_key=None, update_date=None):
-    """Serialize month creation and resume its existing copy across all clients."""
+    """Edit an explicit ID or allocate an independent retry-safe monthly copy."""
     Organization.objects.select_for_update().get(pk=organization.pk)
     drafts = MonthlyUpdateDraft.objects.filter(organization=organization)
     month = month.replace(day=1)
-    requested = None
     if update_id:
-        requested = drafts.filter(pk=update_id).first()
-        if requested is None:
+        draft = drafts.filter(pk=update_id).first()
+        if draft is None:
             raise NotFound("This update does not belong to the selected startup.")
-        # An old link still belongs to its original reporting month.
-        month = requested.month.replace(day=1)
+        allocate_monthly_titles(drafts, draft.month)
+        draft.refresh_from_db(fields=["title", "structured_memo"])
+        return draft, False
+    key = None
     if creation_key:
         try:
-            UUID(str(creation_key))
+            key = UUID(str(creation_key))
         except (ValueError, TypeError, AttributeError):
             raise ValidationError({"creationKey": "Use a valid draft creation key."})
-    draft = latest_monthly_draft(drafts, month)
-    if draft is not None:
-        if requested is not None and draft.pk != requested.pk:
-            raise RevisionConflict("This saved version is part of a monthly update. Reopen the month to edit its latest version.")
-        return draft, False
-    # The existing nullable-key monthly constraint protects new months too.
-    # Compatibility creation keys can no longer allocate additional same-month rows.
-    return drafts.monthly_slots().get_or_create(organization=organization, month=month)
+        draft = drafts.filter(creation_key=key).first()
+        if draft is not None:
+            if draft.month != month:
+                raise RevisionConflict("This creation key belongs to a different reporting month.")
+            allocate_monthly_titles(drafts, month)
+            draft.refresh_from_db(fields=["title", "structured_memo"])
+            return draft, False
+    largest = allocate_monthly_titles(drafts, month)
+    if key is None:
+        draft = latest_monthly_draft(drafts, month)
+        if draft is not None:
+            return draft, False
+    return drafts.create(
+        organization=organization, month=month, creation_key=key,
+        update_date=update_date, title=monthly_update_title(month, largest + 1),
+        structured_memo={"_month_sequence": largest + 1},
+    ), True
 
 
 @transaction.atomic
 def run_update(run, month, *, create=False):
-    """Resolve worker writes to the same month identity as founder saves."""
-    # ContentFactoryRun keeps organization in its request, not necessarily a FK.
+    """Keep worker retries bound to their exact update even when siblings exist."""
     organization_id = (run.run_request or {}).get("organization_id")
     query = MonthlyUpdateDraft.objects.filter(organization_id=organization_id)
     update_id = (run.run_request or {}).get("update_id")
@@ -52,16 +118,11 @@ def run_update(run, month, *, create=False):
         draft = query.filter(pk=update_id).first()
         if draft is None or draft.month != month:
             raise RevisionConflict("This run targets a different update or reporting period.")
-        current = latest_monthly_draft(query, month)
-        if current is not None and current.pk != draft.pk:
-            raise RevisionConflict("A newer monthly update exists. Reopen the month before generating again.")
         return draft
-    if create:
-        Organization.objects.select_for_update().get(pk=organization_id)
-    current = latest_monthly_draft(query, month)
-    if current is not None or not create:
-        return current
-    return query.monthly_slots().get_or_create(organization_id=organization_id, month=month)[0]
+    if not create:
+        return latest_monthly_draft(query, month)
+    organization = Organization.objects.get(pk=organization_id)
+    return resolve_update(organization, month=month)[0]
 
 
 def parse_generation_date(data, *, update_id):
@@ -131,7 +192,7 @@ def identity_payload(draft, memo=None):
     value = memo.get("update_date", draft.update_date.isoformat() if draft.update_date else None)
     if provided_memo and draft.published_at and not draft.published_revision_id and "update_date" not in memo:
         value = None  # A legacy publication has month precision until a dated revision is approved.
-    return {"updateId": draft.pk, "creationKey": str(draft.creation_key) if draft.creation_key else None,
+    return {**monthly_identity(draft), "updateId": draft.pk, "creationKey": str(draft.creation_key) if draft.creation_key else None,
             "updateDate": value, "datePrecision": "day" if value else "month",
             "firstPublishedAt": draft.first_published_at.isoformat() if draft.first_published_at else None,
             "narrativePeriod": memo.get("narrative_period")}

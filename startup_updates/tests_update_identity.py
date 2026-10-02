@@ -54,10 +54,14 @@ class MonthlyUpdateIdentityTests(TestCase):
     def create(self, key=None, day=15):
         return resolve_update(self.org, month=self.month, creation_key=key or uuid4(), update_date=date(2026, 9, day))[0]
 
-    def test_repeated_creation_resumes_existing_month(self):
+    def test_repeated_creation_keeps_independent_numbered_month_entries(self):
         old = MonthlyUpdateDraft.objects.create(organization=self.org, month=self.month)
         first, second = self.create(), self.create()
-        self.assertEqual(len({old.pk, first.pk, second.pk}), 1)
+        self.assertEqual(len({old.pk, first.pk, second.pk}), 3)
+        old.refresh_from_db()
+        self.assertEqual(identity_payload(old)["updateTitle"], "September update")
+        self.assertEqual(identity_payload(first)["updateTitle"], "September update #2")
+        self.assertEqual(identity_payload(second)["monthSequence"], 3)
         self.assertEqual(MonthlyUpdateDraft.objects.monthly_slots().get(organization=self.org, month=self.month), old)
 
     def test_creation_retry_returns_exact_draft(self):
@@ -171,12 +175,18 @@ class MonthlyFounderSaveTests(TestCase):
         self.assertIn(a.status_code, (200, 201), a.data)
         first = a.data["update"]
         b = self.save()
-        self.assertEqual(b.status_code, 409, b.data)
-        self.assertEqual(MonthlyUpdateDraft.objects.count(), 1)
+        self.assertEqual(b.status_code, 201, b.data)
+        second = b.data["update"]
+        self.assertNotEqual(first["id"], second["id"])
+        self.assertEqual(first["updateTitle"], "March update")
+        self.assertEqual(second["updateTitle"], "March update #2")
+        self.assertEqual(MonthlyUpdateDraft.objects.count(), 2)
         self.assertEqual(self.client.get(f"/api/v1/vibe-raising/updates/?company_id={self.company.pk}").data["updates"], [])
         edited = self.save(updateId=first["id"], creationKey=first["creationKey"], expectedRevision=first["revisionId"], highlights="Only this entry changed.")
         self.assertIn(edited.status_code, (200, 201), edited.data)
         self.assertEqual(edited.data["update"]["id"], first["id"])
+        self.assertEqual(edited.data["update"]["monthSequence"], 1)
+        self.assertEqual(MonthlyUpdateDraft.objects.get(pk=second["id"]).current_revision_id, second["revisionId"])
         saved = edited.data["update"]
         receipt = self.client.post(f"/api/v1/vibe-raising/updates/{saved['id']}/publish/", {
             "companyId": str(self.company.pk), "revisionId": saved["revisionId"], "revisionHash": saved["revisionHash"], "audienceVisibility": ["just_me"],
@@ -216,7 +226,7 @@ class MonthlyFounderSaveTests(TestCase):
     @patch("vibe_raising.views._dispatch_run_to_valley", return_value=True)
     def test_ai_start_targets_one_draft_and_freezes_a_backdated_window(self, dispatch):
         first = self.save().data["update"]
-        second = first
+        second = self.save().data["update"]
         response = self.client.post("/api/v1/vibe-raising/email-draft/start/", {
             "companyId": str(self.company.pk), "inputSources": ["manual_documents"], "manualSummary": "We shipped our release.",
             "targetMonth": "2026-03-01", "updateDate": "2026-03-14", "updateId": second["id"],
