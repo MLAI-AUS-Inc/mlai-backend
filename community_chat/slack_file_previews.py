@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import re
+import time
 from dataclasses import dataclass
 from urllib.parse import urlparse
 from urllib.error import URLError
@@ -32,6 +34,8 @@ from integrations.services.message_sync.slack_client import budgeted_client
 SLACK_FILE_ID_RE = re.compile(r"^F[A-Z0-9]+$")
 SLACK_IMAGE_LIMIT_BYTES = 10 * 1024 * 1024
 SLACK_REQUEST_TIMEOUT = (3, 10)
+FAILURE_CACHE_SECONDS = 60
+NETWORK_FAILURE_RETRY_SECONDS = 15
 ALLOWED_IMAGE_TYPES = frozenset(
     {
         "image/avif",
@@ -53,6 +57,25 @@ class SlackFilePreviewDeferred(SlackFilePreviewError):
     def __init__(self, retry_after=1):
         super().__init__("Slack is preparing this preview. It will retry shortly.")
         self.retry_after = max(1, int(retry_after))
+
+
+def _raise_cached_failure(cache_key: str) -> None:
+    failure = cache.get(cache_key + ":failure")
+    if not isinstance(failure, dict):
+        return
+    if failure.get("retry_at"):
+        raise SlackFilePreviewDeferred(math.ceil(failure["retry_at"] - time.time()))
+    raise SlackFilePreviewError("The Slack preview is temporarily unavailable.")
+
+
+def _remember_failure(cache_key: str, error: SlackFilePreviewError) -> None:
+    """Cache only safe failure state in the same scope as the source read."""
+    retry_after = getattr(error, "retry_after", None)
+    cache.set(
+        cache_key + ":failure",
+        {"retry_at": time.time() + retry_after if retry_after else None},
+        timeout=min(FAILURE_CACHE_SECONDS, retry_after or FAILURE_CACHE_SECONDS),
+    )
 
 
 @dataclass(frozen=True)
@@ -177,6 +200,8 @@ def fetch_slack_file_image(
     cached = cache.get(cache_key)
     if isinstance(cached, dict) and isinstance(cached.get("body"), bytes):
         return str(cached.get("content_type") or content_type), cached["body"]
+    # Authorization above still runs on every request, including cache hits.
+    _raise_cached_failure(cache_key)
 
     private_url = slack_image_download_url(file_data, original=original)
     private_host = (urlparse(private_url).hostname or "").lower().rstrip(".")
@@ -217,16 +242,21 @@ def fetch_slack_file_image(
             chunks.append(chunk)
     except requests.RequestException as exc:
         if isinstance(exc, (requests.Timeout, requests.ConnectionError)):
-            raise SlackFilePreviewDeferred(2) from exc
-        response_status = getattr(exc.response, "status_code", None)
-        if response_status == 429 or (
+            error = SlackFilePreviewDeferred(NETWORK_FAILURE_RETRY_SECONDS)
+        elif (response_status := getattr(exc.response, "status_code", None)) == 429 or (
             response_status is not None and response_status >= 500
         ):
             raw_retry = exc.response.headers.get("Retry-After", "2")
-            raise SlackFilePreviewDeferred(
+            error = SlackFilePreviewDeferred(
                 int(raw_retry) if str(raw_retry).isdigit() else 2
-            ) from exc
-        raise SlackFilePreviewError("The Slack image could not be reached.") from exc
+            )
+        else:
+            error = SlackFilePreviewError("The Slack image could not be reached.")
+        _remember_failure(cache_key, error)
+        raise error from exc
+    except SlackFilePreviewError as exc:
+        _remember_failure(cache_key, exc)
+        raise
     finally:
         if "response" in locals():
             response.close()
@@ -234,7 +264,9 @@ def fetch_slack_file_image(
     response_type = str(response.headers.get("Content-Type") or content_type)
     response_type = response_type.split(";", 1)[0].strip().lower()
     if response_type not in ALLOWED_IMAGE_TYPES:
-        raise SlackFilePreviewError("The Slack file is not a supported image.")
+        error = SlackFilePreviewError("The Slack file is not a supported image.")
+        _remember_failure(cache_key, error)
+        raise error
     body = b"".join(chunks)
     cache.set(
         cache_key,
@@ -313,7 +345,10 @@ def _authorized_private_file(file_id: str, *, user=None) -> _AuthorizedSlackFile
     token = str(grant.connection.access_token or "").strip()
     if not token:
         return None
-    private_cache_scope = f"user:{user.pk}:workspace:{grant.slack_workspace_id}"
+    private_cache_scope = (
+        f"user:{user.pk}:workspace:{grant.slack_workspace_id}:grant:{grant.pk}"
+        f":consent:{grant.consented_at.isoformat()}:connection:{grant.connection_id}"
+    )
     file_data = _slack_file_info(
         file_id,
         access_token=token,
@@ -370,6 +405,7 @@ def _slack_file_info(
     cached = cache.get(cache_key)
     if isinstance(cached, dict):
         return cached
+    _raise_cached_failure(cache_key)
     # Concurrent rows/devices requesting the same file share one source read.
     # Authorization still runs for every caller after this metadata lookup.
     lock_key = cache_key + ":loading"
@@ -408,16 +444,25 @@ def _fetch_slack_file_info(file_id, *, access_token, workspace_id, cache_key):
             raw_retry = (getattr(exc.response, "headers", {}) or {}).get(
                 "Retry-After", "2"
             )
-            raise SlackFilePreviewDeferred(
+            error = SlackFilePreviewDeferred(
                 int(raw_retry) if str(raw_retry).isdigit() else 2
-            ) from exc
-        raise SlackFilePreviewError("The Slack file could not be loaded.") from exc
+            )
+        else:
+            error = SlackFilePreviewError("The Slack file could not be loaded.")
+        _remember_failure(cache_key, error)
+        raise error from exc
     except (TimeoutError, ConnectionError, URLError, SlackRequestError) as exc:
-        raise SlackFilePreviewDeferred(2) from exc
+        error = SlackFilePreviewDeferred(NETWORK_FAILURE_RETRY_SECONDS)
+        _remember_failure(cache_key, error)
+        raise error from exc
     except Exception as exc:
-        raise SlackFilePreviewError("The Slack file could not be loaded.") from exc
+        error = SlackFilePreviewError("The Slack file could not be loaded.")
+        _remember_failure(cache_key, error)
+        raise error from exc
     if not response.get("ok") or not isinstance(response.get("file"), dict):
-        raise SlackFilePreviewError("The Slack file could not be loaded.")
+        error = SlackFilePreviewError("The Slack file could not be loaded.")
+        _remember_failure(cache_key, error)
+        raise error
     file_data = dict(response["file"])
     cache.set(cache_key, file_data, timeout=60 * 60)
     return file_data

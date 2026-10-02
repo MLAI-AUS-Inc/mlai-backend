@@ -36,7 +36,7 @@ from integrations.services.community_bridge.contracts import (
 logger = logging.getLogger(__name__)
 
 RETRY_DELAYS_SECONDS = [10, 30, 120, 300, 900]
-PARENT_DEPENDENCY_RETRY_SECONDS = 10
+PARENT_DEPENDENCY_RETRY_SECONDS = (10, 30, 120, 300, 900)
 
 # Slack conversation types that may be mirrored: public channels ("channel")
 # and private channels ("group"). Direct messages ("im") and group DMs
@@ -487,6 +487,28 @@ def mark_delivery_waiting_for_parent(
     guard_delivery(delivery)
 
     now = timezone.now()
+    # The worker's lookup happened before this row lock. Parent completion may
+    # already have skipped the still-processing child, so recheck before parking.
+    parent_link = resolve_mapped_message(
+        source_platform=delivery.source_platform,
+        source_channel_id=delivery.source_channel_id,
+        source_message_id=str(parent_message_id or "").strip(),
+        destination_platform=delivery.target_platform,
+    )
+    if parent_link and str(parent_link.get("destination_message_id") or "").strip():
+        delivery.status = CommunityBridgeDeliveryStatus.PENDING
+        delivery.attempts = max(0, int(delivery.attempts or 0) - 1)
+        delivery.available_at = now
+        delivery.locked_at = None
+        delivery.lease_token = None
+        delivery.lease_expires_at = None
+        delivery.last_error = ""
+        delivery.save(update_fields=[
+            "status", "attempts", "available_at", "locked_at", "lease_token",
+            "lease_expires_at", "last_error", "updated_at",
+        ])
+        return
+
     first_seen = delivery.dependency_first_seen_at or now
     dependency_attempts = min(int(delivery.dependency_attempts or 0) + 1, 32_767)
     max_age_seconds = max(
@@ -524,9 +546,13 @@ def mark_delivery_waiting_for_parent(
     delivery.attempts = max(0, int(delivery.attempts or 0) - 1)
     delivery.dependency_attempts = dependency_attempts
     delivery.dependency_first_seen_at = first_seen
-    delivery.available_at = (
-        now if expired else now + timedelta(seconds=PARENT_DEPENDENCY_RETRY_SECONDS)
-    )
+    # Parent completion wakes these rows immediately. Timed checks are only a
+    # recovery backstop for missing parents; repeated ten-second checks must not
+    # crowd out ready messages.
+    retry_seconds = PARENT_DEPENDENCY_RETRY_SECONDS[
+        min(dependency_attempts - 1, len(PARENT_DEPENDENCY_RETRY_SECONDS) - 1)
+    ]
+    delivery.available_at = now if expired else now + timedelta(seconds=retry_seconds)
     delivery.locked_at = None
     delivery.lease_token = None
     delivery.lease_expires_at = None
@@ -555,18 +581,34 @@ def _wake_waiting_child_deliveries(parent: CommunityBridgeDelivery) -> int:
     """Make children immediately eligible after their parent link is committed."""
 
     now = timezone.now()
-    return CommunityBridgeDelivery.objects.filter(
+    children = CommunityBridgeDelivery.objects.filter(
         channel=parent.channel,
         source_platform=parent.source_platform,
         source_channel_id=parent.source_channel_id,
         target_platform=parent.target_platform,
-        status=CommunityBridgeDeliveryStatus.WAITING_FOR_PARENT,
+        status__in=[
+            CommunityBridgeDeliveryStatus.PROCESSING,
+            CommunityBridgeDeliveryStatus.WAITING_FOR_PARENT,
+        ],
     ).filter(
         Q(source_parent_message_id=parent.source_message_id)
         | Q(source_message_id=parent.source_message_id, delivery_type__in=[
             CommunityBridgeDeliveryType.EDIT, CommunityBridgeDeliveryType.DELETE,
             CommunityBridgeDeliveryType.REACTION_REMOVE,
         ])
+    )
+    # A status-filtered UPDATE can skip a child still visible as processing,
+    # even while that child's transaction is parking it. Lock both states first:
+    # once the park commits, the next statement sees its waiting status. A child
+    # still doing provider work keeps its claim and is never woken prematurely.
+    child_ids = list(
+        children.select_for_update(of=("self",)).order_by("pk").values_list("pk", flat=True)
+    )
+    if not child_ids:
+        return 0
+    return CommunityBridgeDelivery.objects.filter(
+        pk__in=child_ids,
+        status=CommunityBridgeDeliveryStatus.WAITING_FOR_PARENT,
     ).update(
         status=CommunityBridgeDeliveryStatus.PENDING,
         available_at=now,

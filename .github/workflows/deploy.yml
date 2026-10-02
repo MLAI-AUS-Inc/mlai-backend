@@ -208,6 +208,9 @@ jobs:
     - name: Check My startup account contracts without database access
       run: python scripts/test_my_startup.py
 
+    - name: Check chat background retries and preview failure caches without database access
+      run: python scripts/test_without_database.py integrations.tests_community_bridge_backoff community_chat.tests.test_preview_failure_cache
+
     - name: Check article draft review contracts without database access
       run: python scripts/test_article_review.py
 
