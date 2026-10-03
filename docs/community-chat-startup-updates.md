@@ -246,3 +246,11 @@ read-only methods, and hidden/unavailable public links. Existing facade, review,
 lifecycle, and activity tests are included. Database-backed integration tests
 were not run because this checkout requires explicit approval for their test
 database migrations.
+
+## External agent MCP draft handoff — 3 October 2026
+
+The separately gated Valley remote MCP offers a client picker, existing-account
+OAuth resume, one-startup consent, private narrative imports and revocation. It
+keeps Xero/Stripe financial evidence server-owned and requires founder review.
+See [the MCP contract and rollout guide](valley-mcp.md). Local implementation is
+not evidence of deployment or a ChatGPT directory approval.

@@ -331,14 +331,19 @@ def save_revision(draft, memo, *, snapshot, audience="private", expected_revisio
 
 
 @transaction.atomic
-def approve_and_publish(draft, *, actor, revision_id, revision_hash, audience_visibility):
+def approve_and_publish(draft, *, actor, revision_id, revision_hash, audience_visibility, reviewed_agent_claims=False):
     draft = MonthlyUpdateDraft.objects.select_for_update().get(pk=draft.pk)
     revision = draft.current_revision
     if not revision or str(revision.pk) != str(revision_id) or revision.content_hash != revision_hash:
         raise RevisionConflict()
     if audience_visibility != revision.structured_memo.get("_audience_visibility"):
         raise RevisionConflict("Disclosure changed. Save and review a new revision.")
-    if revision.validation.get("groundedness_status") not in {"passed", "founder_asserted"}:
+    agent_reviewed = (reviewed_agent_claims is True
+        and revision.validation.get("groundedness_status") == "needs_review"
+        and revision.validation.get("provenance") == "agent_supplied"
+        and revision.validation.get("source_verification") == "unverified_external_agent"
+        and (revision.structured_memo.get("_agent_provenance") or {}).get("kind") == "agent_supplied")
+    if revision.validation.get("groundedness_status") not in {"passed", "founder_asserted"} and not agent_reviewed:
         raise ValidationError("Resolve the evidence review before publishing.")
     period = (revision.snapshot.payload or {}).get("period") or {}
     try:

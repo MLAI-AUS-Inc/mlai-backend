@@ -2189,3 +2189,12 @@ MY_STARTUP_DELIVERY_LINKS_ENABLED = os.environ.get("MY_STARTUP_DELIVERY_LINKS_EN
 
 # Pilot gate for the Chat startup/update workspace.
 COMMUNITY_CHAT_STARTUP_UPDATES_ENABLED = os.environ.get("COMMUNITY_CHAT_STARTUP_UPDATES_ENABLED", "false").lower() == "true"
+
+# Valley private-draft remote MCP. Requires the existing shared Redis cache.
+VALLEY_MCP_ENABLED = _env_is_true("VALLEY_MCP_ENABLED", False)
+VALLEY_MCP_PUBLIC_BASE_URL = os.getenv("VALLEY_MCP_PUBLIC_BASE_URL", "")
+# Public ownership challenge only; this value is not an OAuth credential.
+VALLEY_MCP_DOMAIN_VERIFICATION_TOKEN = os.getenv("VALLEY_MCP_DOMAIN_VERIFICATION_TOKEN", "")
+VALLEY_MCP_ALLOWED_ORIGINS = _env_list("VALLEY_MCP_ALLOWED_ORIGINS", [])
+VALLEY_MCP_CLIENT_INSTALL_URLS = json.loads(os.getenv("VALLEY_MCP_CLIENT_INSTALL_URLS", "{}"))
+VALLEY_MCP_OAUTH_CLIENTS = json.loads(os.getenv("VALLEY_MCP_OAUTH_CLIENTS", "{}"))
