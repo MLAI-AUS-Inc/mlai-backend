@@ -13,6 +13,7 @@ from uuid import UUID
 from django.core.cache import cache
 from django.test import SimpleTestCase, override_settings
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 from rest_framework.exceptions import AuthenticationFailed, PermissionDenied, ValidationError
 from rest_framework.test import APIRequestFactory
 
@@ -141,6 +142,21 @@ class McpProtocolTests(SimpleTestCase):
         self.assertEqual(response.status_code, 401)
         self.assertIn("/.well-known/oauth-protected-resource/mcp/valley", response["WWW-Authenticate"])
 
+    def test_stream_get_reaches_authentication_and_stateless_method_response(self):
+        request = self.factory.get("/mcp/valley", HTTP_ACCEPT="text/event-stream")
+        response = self.view(request)
+        self.assertEqual(response.status_code, 401)
+        self.assertIn("resource_metadata", response["WWW-Authenticate"])
+        request = self.factory.get("/mcp/valley", HTTP_ACCEPT="text/event-stream",
+            HTTP_AUTHORIZATION="Bearer valley_access_test")
+        with patch.object(oauth, "authenticate_token", return_value=principal()):
+            response = self.view(request)
+        self.assertEqual(response.status_code, 405)
+        self.assertEqual(response["Allow"], "POST")
+        request = self.factory.get("/mcp/valley", HTTP_ACCEPT="text/event-stream",
+            HTTP_ORIGIN="https://attacker.test", HTTP_AUTHORIZATION="Bearer valley_access_test")
+        self.assertEqual(self.view(request).status_code, 403)
+
     def test_read_scope_rechecked_before_tool_call(self):
         with patch.object(tools, "valid_grant", side_effect=PermissionDenied("revoked scope")), patch.object(tools, "company_for") as company:
             with self.assertRaises(PermissionDenied):
@@ -182,6 +198,80 @@ class OAuthTests(SimpleTestCase):
             with self.assertRaises(oauth.OAuthError):
                 oauth.register_client({"redirect_uris": [callback]})
         oauth.register_client({"redirect_uris": ["http://localhost:3210/callback"]})
+
+    def test_cursor_registration_preserves_all_three_host_callbacks(self):
+        callbacks = [
+            "cursor://anysphere.cursor-mcp/oauth/callback",
+            "https://www.cursor.com/agents/mcp/oauth/callback",
+            "http://localhost:8787/callback",
+        ]
+        response = views.RegisterView.as_view(throttle_classes=())(APIRequestFactory().post(
+            "/mcp/oauth/register", {"client_name": "Cursor", "redirect_uris": callbacks,
+                "token_endpoint_auth_method": "none"}, format="json"))
+        self.assertEqual(response.status_code, 201)
+        client = json.loads(response.content)
+        self.assertEqual(client["redirect_uris"], callbacks)
+        self.assertEqual(oauth.client_for(client["client_id"])["redirect_uris"], callbacks)
+
+    def test_cursor_callbacks_preserve_pkce_resource_startup_and_scope_binding(self):
+        callbacks = [
+            "cursor://anysphere.cursor-mcp/oauth/callback",
+            "https://www.cursor.com/agents/mcp/oauth/callback",
+            "http://localhost:8787/callback",
+        ]
+        client = oauth.register_client({"client_name": "Cursor", "redirect_uris": callbacks})
+        user = Obj(pk=7, auth_version=3)
+        session = Obj(pk="session", user_id=7)
+        for callback in callbacks:
+            with self.subTest(callback=callback):
+                query = {**self.query, "client_id": client["client_id"], "redirect_uri": callback,
+                    "scope": "startup:brief:read"}
+                for changes in ({"code_challenge_method": "plain"}, {"scope": "finance:write"},
+                                {"resource": "https://attacker.test/mcp"}, {"redirect_uri": callback + "?other=1"}):
+                    with self.assertRaises(oauth.OAuthError):
+                        oauth.create_intent({**query, **changes})
+                intent = oauth.create_intent(query)
+                self.assertEqual(intent["scopes"], ["startup:brief:read"])
+                self.assertEqual(intent["resource"], config.mcp_url())
+                with patch.object(oauth, "company_for", return_value=Obj(pk=UUID(COMPANY_ID))), patch.object(oauth, "_valid_session", return_value=True), patch.object(oauth, "_validate_device_owner"):
+                    result = oauth.approve_intent(intent["requestId"], user=user, session=session,
+                        company_id=COMPANY_ID, approve=True)
+                self.assertTrue(result.startswith(callback + "?"))
+                returned = parse_qs(urlsplit(result).query)
+                self.assertEqual(returned["state"], [query["state"]])
+                self.assertEqual(returned["iss"], [config.public_base()])
+                code = returned["code"][0]
+                record = cache.get(oauth.key("code", code))
+                saved_grant = cache.get(oauth.key("grant", record["grant_id"]))
+                self.assertEqual(saved_grant["company_id"], COMPANY_ID)
+                self.assertEqual(saved_grant["client_id"], client["client_id"])
+                self.assertEqual(saved_grant["scopes"], ["startup:brief:read"])
+                exchange = {"grant_type": "authorization_code", "code": code, "client_id": client["client_id"],
+                    "redirect_uri": callback, "resource": config.mcp_url(), "code_verifier": self.verifier}
+                with patch.object(oauth, "valid_grant", return_value=oauth.Principal(user=user, grant=saved_grant)):
+                    for changes in ({"code_verifier": "z" * 43}, {"redirect_uri": callbacks[(callbacks.index(callback) + 1) % 3]},
+                                    {"resource": "https://attacker.test/mcp"}):
+                        with self.assertRaises(oauth.OAuthError):
+                            oauth.token_exchange({**exchange, **changes})
+                    self.assertEqual(oauth.token_exchange(exchange)["scope"], "startup:brief:read")
+                    with self.assertRaises(oauth.OAuthError):
+                        oauth.token_exchange(exchange)
+
+    def test_cursor_callback_exception_does_not_admit_other_native_urls(self):
+        for callback in (
+            "cursor://anysphere.cursor-deeplink/oauth/callback",
+            "cursor://anysphere.cursor-mcp/oauth/callback/",
+            "cursor://anysphere.cursor-mcp/other",
+            "cursor://anysphere.cursor-mcp/oauth/callback?next=https://attacker.test",
+            "cursor://anysphere.cursor-mcp/oauth/callback#fragment",
+            "cursor://user@anysphere.cursor-mcp/oauth/callback",
+            "cursor://anysphere.cursor-mcp:8787/oauth/callback",
+            "cursor://anysphere.cursor-mcp.attacker.test/oauth/callback",
+            "cursor://anysphere.cursor-mcp/oauth/%63allback",
+            "other://anysphere.cursor-mcp/oauth/callback",
+        ):
+            with self.subTest(callback=callback), self.assertRaises(oauth.OAuthError):
+                oauth.register_client({"redirect_uris": [callback]})
 
     def test_registration_rejects_malformed_grant_types_and_exposes_callback_origin(self):
         for grants in (3, [{}], "authorization_code"):
@@ -399,6 +489,65 @@ class OAuthTests(SimpleTestCase):
 
 
 @override_settings(**SETTINGS)
+class BriefActivityWindowTests(SimpleTestCase):
+    def setUp(self):
+        self.now = parse_datetime("2026-10-03T04:00:00Z")
+        self.company = Obj(pk=UUID(COMPANY_ID), name="Example", organization=Obj(pk=8, domain="example.test"))
+
+    def brief(self, **changes):
+        arguments = {"companyId": COMPANY_ID, "month": "2026-10", **changes}
+        with patch.object(tools, "valid_grant", return_value=principal()), patch.object(tools, "company_for", return_value=self.company), patch.object(tools.StartupProfile, "objects") as profiles, patch.object(tools.timezone, "now", return_value=self.now):
+            profiles.filter.return_value.first.return_value = Obj(reporting_timezone="Australia/Melbourne")
+            return tools.call_tool(principal(), "get_monthly_update_brief", arguments)
+
+    def test_absent_window_keeps_calendar_month_and_current_cutoff(self):
+        for month, end in (("2026-09", "2026-10-01T00:00:00+10:00"), ("2026-10", self.now.isoformat())):
+            with self.subTest(month=month):
+                brief = self.brief(month=month)
+                self.assertEqual(brief["activityWindow"], {
+                    "startInclusive": month + "-01T00:00:00+10:00", "endExclusive": end})
+                self.assertEqual(brief["reportingPeriod"]["month"], month + "-01")
+
+    def test_last_thirty_days_cross_month_without_changing_financial_period(self):
+        window = {"startInclusive": "2026-09-03T04:00:00Z", "endExclusive": "2026-10-03T14:00:00+10:00"}
+        default = self.brief()
+        brief = self.brief(activityWindow=window)
+        self.assertEqual(brief["activityWindow"], {"startInclusive": "2026-09-03T04:00:00+00:00", "endExclusive": window["endExclusive"]})
+        self.assertEqual(brief["reportingPeriod"], default["reportingPeriod"])
+        self.assertEqual(brief["month"], "2026-10")
+        instructions = " ".join(brief["instructions"])
+        self.assertIn("coverageNotes", instructions)
+        self.assertIn(brief["activityWindow"]["startInclusive"], instructions)
+        self.assertIn(brief["activityWindow"]["endExclusive"], instructions)
+
+    def test_window_requires_exact_shape_aware_dates_and_increasing_bounded_range(self):
+        valid = {"startInclusive": "2026-09-03T04:00:00Z", "endExclusive": "2026-10-03T04:00:00Z"}
+        for window in (None, [], {}, {**valid, "timezone": "UTC"},
+                       {**valid, "startInclusive": "2026-09-03T04:00:00"},
+                       {**valid, "startInclusive": "2026-13-03T04:00:00Z"},
+                       {**valid, "startInclusive": 123},
+                       {**valid, "startInclusive": valid["endExclusive"]},
+                       {**valid, "startInclusive": "2026-10-04T04:00:00Z"},
+                       {**valid, "startInclusive": "2026-09-02T03:59:59Z"},
+                       {**valid, "endExclusive": "2026-10-03T04:05:01Z"}):
+            with self.subTest(window=window), self.assertRaises(ValidationError):
+                self.brief(activityWindow=window)
+
+    def test_window_allows_timezone_offsets_and_small_clock_skew(self):
+        window = {"startInclusive": "2026-09-02T14:05:00+10:00", "endExclusive": "2026-10-03T15:05:00+11:00"}
+        self.assertEqual(self.brief(activityWindow=window)["activityWindow"], window)
+
+    def test_window_cannot_select_a_future_financial_month_or_enter_save_schema(self):
+        window = {"startInclusive": "2026-09-03T04:00:00Z", "endExclusive": "2026-10-03T04:00:00Z"}
+        with self.assertRaises(ValidationError):
+            self.brief(month="2026-11", activityWindow=window)
+        self.assertNotIn("activityWindow", tools.SAVE_FIELDS)
+        definition = next(item for item in tools.TOOLS if item["name"] == "get_monthly_update_brief")
+        self.assertIn("activityWindow", definition["inputSchema"]["properties"])
+        self.assertNotIn("activityWindow", definition["inputSchema"]["required"])
+
+
+@override_settings(**SETTINGS)
 class NarrativeTests(SimpleTestCase):
     def arguments(self, **changes):
         return {"companyId": COMPANY_ID, "month": "2026-09", "requestId": "8ec75f46-340a-46fb-9aa2-b99e8974d99b", "narrative": {"summary": "We shipped a launch."}, **changes}
@@ -469,13 +618,15 @@ class NarrativeTests(SimpleTestCase):
         draft.revisions.filter.return_value.order_by.return_value.first.return_value = None
         with self.assertRaises(RevisionConflict):
             self.save_with_mocks(draft, self.arguments())
-        _, saved, captured = self.save_with_mocks(draft, self.arguments(expectedRevision=5))
+        coverage = "Narrative startInclusive=2026-08-15T00:00:00Z; endExclusive=2026-09-14T00:00:00Z. Slack unavailable."
+        _, saved, captured = self.save_with_mocks(draft, self.arguments(expectedRevision=5, coverageNotes=coverage))
         captured.assert_not_called()
         self.assertIs(saved.call_args.kwargs["snapshot"], snapshot)
         self.assertEqual(saved.call_args.kwargs["audience"], "private")
         self.assertEqual(saved.call_args.kwargs["validation"]["groundedness_status"], "needs_review")
         self.assertEqual(saved.call_args.args[1]["financial_snapshot"], {"income": 123})
         self.assertEqual(saved.call_args.args[1]["_agent_provenance"]["kind"], "agent_supplied")
+        self.assertEqual(saved.call_args.args[1]["_agent_provenance"]["coverage_notes"], coverage)
 
     def test_partial_legacy_edit_preserves_stored_narrative_without_mutating_it(self):
         legacy = {"summary": "Previous summary", "highlights": ["Existing launch"],
@@ -571,8 +722,11 @@ class ConnectionConfigurationTests(SimpleTestCase):
         claude = next(item for item in rows if item["id"] == "claude")
         self.assertIn("connectorUrl=", claude["installUrl"])
         cursor = next(item for item in rows if item["id"] == "cursor")
-        self.assertIn("/link/mcp/install", cursor["installUrl"])
-        encoded = parse_qs(urlsplit(cursor["installUrl"]).query)["config"][0]
+        cursor_url = urlsplit(cursor["installUrl"])
+        self.assertEqual((cursor_url.scheme, cursor_url.netloc, cursor_url.path),
+            ("https", "cursor.com", "/en-US/install-mcp"))
+        self.assertEqual(parse_qs(cursor_url.query)["name"], ["Valley"])
+        encoded = parse_qs(cursor_url.query)["config"][0]
         self.assertEqual(json.loads(base64.b64decode(encoded)), {"url": config.mcp_url()})
         self.assertEqual([item["id"] for item in rows], ["claude", "codex", "cursor"])
         codex = next(item for item in rows if item["id"] == "codex")

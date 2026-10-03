@@ -33,6 +33,7 @@ INTENT_TTL = 600
 GRANT_TTL = 30 * 86400
 ACCESS_TTL = 3600
 PREFIX = "valley-mcp:"
+_CURSOR_OAUTH_REDIRECT_URI = "cursor://anysphere.cursor-mcp/oauth/callback"
 
 
 class OAuthError(ValueError):
@@ -76,8 +77,11 @@ def redirect_uri(value):
     except ValueError as exc:
         raise OAuthError("invalid_client_metadata", "Use a valid callback URL.") from exc
     loopback = parsed.scheme == "http" and parsed.hostname in {"localhost", "127.0.0.1", "::1"}
-    if (parsed.scheme != "https" and not loopback) or not parsed.netloc or parsed.username or parsed.password or parsed.fragment:
-        raise OAuthError("invalid_client_metadata", "Callbacks must use HTTPS or a local loopback URL.")
+    # Cursor registers this native fallback alongside its HTTPS and loopback
+    # callbacks. Keep the exception exact; its install-link handler is different.
+    cursor_callback = value == _CURSOR_OAUTH_REDIRECT_URI
+    if (parsed.scheme != "https" and not loopback and not cursor_callback) or not parsed.netloc or parsed.username or parsed.password or parsed.fragment:
+        raise OAuthError("invalid_client_metadata", "Use HTTPS, a local loopback URL or the supported Cursor OAuth callback.")
     return value
 
 

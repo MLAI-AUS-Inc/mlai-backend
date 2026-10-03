@@ -71,6 +71,10 @@ class McpView(APIView):
     permission_classes = (AllowAny,)
     throttle_classes = (McpRateThrottle,)
 
+    def perform_content_negotiation(self, request, force=False):
+        """Let MCP handle stream Accept headers, auth challenges and JSON replies."""
+        return super().perform_content_negotiation(request, force=True)
+
     def dispatch(self, request, *args, **kwargs):
         # Native/client requests use explicit OAuth Bearer authentication only.
         return super().dispatch(request, *args, **kwargs)
@@ -85,6 +89,7 @@ class McpView(APIView):
             return bearer_failure(exc)
         value = response({"error": "method_not_allowed", "description": "Use POST for stateless JSON Streamable HTTP."}, 405)
         value["Allow"] = "POST"
+        self.headers["Allow"] = "POST"
         return value
 
     def delete(self, request):
