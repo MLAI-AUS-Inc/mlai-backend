@@ -930,8 +930,10 @@ the existing foreground polling cadence. Inventory observations can hand off
 to local rows before the ordinary snapshot arrives; confirmed or newer local
 reads defeat delayed inventory. Authorized unreads without available history
 remain counted with an explicit readiness state. Directory loading never
-starts broad history imports. The mobile Threads card is labelled “MLAI threads”
-because its counter intentionally excludes Slack-imported replies.
+starts broad history imports. The mobile card uses the unified “Threads” label;
+its counter intentionally excludes Slack-imported replies. Background checking
+details and the source directory shortcut stay out of the unread views, and
+ordinary messages use source-neutral presentation.
 
 Every source observation and confirmed write has a monotonically increasing
 `revision`. Full directory responses have a separate `directory_revision` under
