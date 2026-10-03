@@ -1,8 +1,9 @@
 """Synthetic PostgreSQL transaction, fairness and crash-recovery regressions."""
 import json
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from datetime import timedelta
 from threading import Barrier
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from django.db import IntegrityError, connection, connections, transaction
@@ -140,6 +141,117 @@ class SyncSchedulerTests(TransactionTestCase):
         admit_request(**{**kwargs, "workspace_id": "T2"})
         admit_request(**{**kwargs, "method": "conversations.replies"})
         self.assertEqual(BridgeApiBudget.objects.count(), 3)
+
+    def test_priority_callers_contend_on_one_real_provider_gate(self):
+        kwargs = dict(app_id="A1", workspace_id="T1", method="conversations.history", interval_seconds=60)
+
+        def attempt():
+            try:
+                admit_request(**kwargs, priority="foreground")
+                return True
+            except BudgetDeferred:
+                return False
+
+        self.assertEqual(sorted(self.concurrent(attempt)), [False, True])
+        self.assertEqual(BridgeApiBudget.objects.count(), 2)
+        self.assertTrue(BridgeApiBudget.objects.get(method="priority:conversations.history").cooldown_until > timezone.now())
+        with self.assertRaises(BudgetDeferred):
+            admit_request(**kwargs, priority="background")
+
+    def test_deferred_foreground_demand_survives_outer_rollback_and_limits_background(self):
+        scope = dict(app_id="A1", workspace_id="T1", method="conversations.history")
+        admit_request(**scope, interval_seconds=60, priority="background")
+        with self.assertRaises(BudgetDeferred):
+            with transaction.atomic():
+                admit_request(**scope, interval_seconds=60, priority="foreground")
+        demand = BridgeApiBudget.objects.get(method="priority:conversations.history")
+        self.assertGreater(demand.cooldown_until, timezone.now() + timedelta(seconds=110))
+
+        # Advance only the provider gate; do not sleep or mock PostgreSQL time.
+        expired = timezone.now() - timedelta(seconds=1)
+        BridgeApiBudget.objects.filter(**scope).update(next_admitted_at=expired)
+        admit_request(**scope, interval_seconds=60, priority="background")
+        demand.refresh_from_db()
+        background_due = demand.next_admitted_at
+        self.assertGreater(background_due, timezone.now() + timedelta(seconds=110))
+        BridgeApiBudget.objects.filter(**scope).update(next_admitted_at=expired)
+        with self.assertRaises(BudgetDeferred):
+            admit_request(**scope, interval_seconds=60, priority="background")
+        # Foreground can use the free provider turn despite the local BG gate.
+        admit_request(**scope, interval_seconds=60, priority="foreground")
+        demand.refresh_from_db()
+        self.assertEqual(demand.next_admitted_at, background_due)
+
+    def test_priority_upsert_never_shortens_existing_demand_and_idle_budget_is_borrowed(self):
+        scope = dict(app_id="A1", workspace_id="T1", method="conversations.history")
+        admit_request(**scope, interval_seconds=60, priority="foreground")
+        demand = BridgeApiBudget.objects.get(method="priority:conversations.history")
+        later = timezone.now() + timedelta(minutes=10)
+        BridgeApiBudget.objects.filter(pk=demand.pk).update(cooldown_until=later)
+        BridgeApiBudget.objects.filter(**scope).update(next_admitted_at=timezone.now() - timedelta(seconds=1))
+        admit_request(**scope, interval_seconds=60, priority="foreground")
+        demand.refresh_from_db()
+        self.assertEqual(demand.cooldown_until, later)
+
+        expired = timezone.now() - timedelta(seconds=1)
+        BridgeApiBudget.objects.filter(**scope).update(next_admitted_at=expired)
+        BridgeApiBudget.objects.filter(pk=demand.pk).update(cooldown_until=expired, next_admitted_at=later)
+        admit_request(**scope, interval_seconds=60, priority="background")
+
+    def test_provider_cooldown_applies_to_both_priorities_and_preserves_scope(self):
+        scope = dict(app_id="A1", workspace_id="T1", method="conversations.history")
+        record_cooldown(**scope, retry_after=180)
+        until = BridgeApiBudget.objects.get(**scope).cooldown_until
+        record_cooldown(**scope, retry_after=1)
+        for priority in ("foreground", "background"):
+            with self.subTest(priority=priority), self.assertRaises(BudgetDeferred) as deferred:
+                admit_request(**scope, interval_seconds=60, priority=priority)
+            self.assertGreater(deferred.exception.retry_after, 170)
+        self.assertEqual(BridgeApiBudget.objects.get(**scope).cooldown_until, until)
+        for change in ({"app_id": "A2"}, {"workspace_id": "T2"}, {"method": "conversations.replies"}):
+            admit_request(**{**scope, **change}, interval_seconds=60, priority="foreground")
+
+    def test_optional_public_wake_skips_busy_state_and_job_rows(self):
+        from integrations.services.message_sync.head_repair import defer_public_target_wake
+
+        authority = SimpleNamespace(workspace_id="T1", scopes={"channels:history"})
+        for locked_model in (BridgeSyncState, BridgeSyncJob):
+            with self.subTest(locked_model=locked_model.__name__):
+                state = self.state(locked_model.__name__)
+                job = schedule_job(state, "head")
+                original_due = timezone.now() + timedelta(minutes=15)
+                BridgeSyncJob.objects.filter(pk=job.pk).update(due_at=original_due)
+                target = SimpleNamespace(kind="public_channel", slack_id=state.source_channel_id,
+                                         channel_id=state.public_channel.destination_channel_id,
+                                         read_scope="channels:history")
+
+                def foreground_hint():
+                    connections.close_all()
+                    try:
+                        with transaction.atomic():
+                            defer_public_target_wake(authority, [target])
+                    finally:
+                        connections.close_all()
+
+                blocked = False
+                with ThreadPoolExecutor(max_workers=1) as pool, patch(
+                    "integrations.services.message_sync.head_repair.logger.warning"
+                ) as warning:
+                    with transaction.atomic():
+                        locked_id = state.pk if locked_model is BridgeSyncState else job.pk
+                        locked_model.objects.select_for_update().get(pk=locked_id)
+                        pending = pool.submit(foreground_hint)
+                        try:
+                            pending.result(timeout=5)
+                        except TimeoutError:
+                            blocked = True
+                    pending.result(timeout=5)
+                    warning.assert_not_called()
+                self.assertFalse(blocked, "Optional wake waited for a busy database row")
+                job.refresh_from_db()
+                self.assertEqual(job.due_at, original_due)
+                state.refresh_from_db()
+                self.assertEqual("wake_requested_at" in state.head_cursor, locked_model is BridgeSyncJob)
 
 
 class SyncInboxTests(TransactionTestCase):
