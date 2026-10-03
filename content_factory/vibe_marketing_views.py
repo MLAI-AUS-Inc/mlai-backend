@@ -68,6 +68,7 @@ from content_factory.authors import (
 )
 from content_factory.contract import CONTENT_FACTORY_REQUEST_SOURCE
 from content_factory.baseline_metrics import baseline_display_metrics
+from content_factory.baseline_ai_evidence import ai_answer_metadata, compact_ai_providers
 from content_factory.dispatch_binding import bind_dispatch_token_run, run_is_dispatch_token_keyed
 from content_factory.editorial_catalog import article_brief_for_catalog
 from content_factory.google_baseline import collect_verified_google_metrics, google_baseline_connection_status
@@ -7254,6 +7255,10 @@ _COMPACT_BASELINE_METRIC_FIELDS = {
     "providerCount",
     "requestedProviderCount",
     "countryCode",
+    "requestedCountryCode",
+    "measurementType",
+    "evidenceVersion",
+    "locationTargeting",
     "promptSetId",
     "authorityScore",
     "backlinks",
@@ -7269,26 +7274,15 @@ _COMPACT_BASELINE_METRIC_FIELDS = {
     "aiQuotes",
 }
 
-# Per-provider fields the AI-visibility card renders; drops prompt transcripts,
-# which dominate the payload size.
-_COMPACT_BASELINE_PROVIDER_FIELDS = (
-    "key", "label", "score", "status", "source", "methodVersion", "message", "reasonCode",
-    "responseCount", "mentionCount", "citationCount", "requestedCount", "modelName", "countryCode",
-)
-
-
 def _compact_baseline_metric(metric):
     if not isinstance(metric, dict):
         return metric
     compacted = {key: value for key, value in metric.items() if key in _COMPACT_BASELINE_METRIC_FIELDS}
-    providers = compacted.get("providers")
-    if isinstance(providers, list):
-        compacted["providers"] = [
-            {field: provider.get(field) for field in _COMPACT_BASELINE_PROVIDER_FIELDS if field in provider}
-            if isinstance(provider, dict)
-            else provider
-            for provider in providers
-        ]
+    if "providers" in compacted:
+        compacted["providers"] = compact_ai_providers(compacted["providers"])
+        for field in ("countryCode", "requestedCountryCode", "measurementType", "evidenceVersion", "locationTargeting"):
+            compacted.pop(field, None)
+        compacted.update(ai_answer_metadata(metric))
     return compacted
 
 
