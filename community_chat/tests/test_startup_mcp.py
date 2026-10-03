@@ -722,8 +722,11 @@ class ConnectionConfigurationTests(SimpleTestCase):
         claude = next(item for item in rows if item["id"] == "claude")
         self.assertIn("connectorUrl=", claude["installUrl"])
         cursor = next(item for item in rows if item["id"] == "cursor")
-        self.assertIn("/link/mcp/install", cursor["installUrl"])
-        encoded = parse_qs(urlsplit(cursor["installUrl"]).query)["config"][0]
+        cursor_url = urlsplit(cursor["installUrl"])
+        self.assertEqual((cursor_url.scheme, cursor_url.netloc, cursor_url.path),
+            ("https", "cursor.com", "/en-US/install-mcp"))
+        self.assertEqual(parse_qs(cursor_url.query)["name"], ["Valley"])
+        encoded = parse_qs(cursor_url.query)["config"][0]
         self.assertEqual(json.loads(base64.b64decode(encoded)), {"url": config.mcp_url()})
         self.assertEqual([item["id"] for item in rows], ["claude", "codex", "cursor"])
         codex = next(item for item in rows if item["id"] == "codex")

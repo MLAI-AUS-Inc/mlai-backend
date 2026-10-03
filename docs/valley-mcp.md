@@ -12,7 +12,9 @@ credential tools.
 1. MLAI Chat fetches company-scoped `GET agent-connection/` under
    `/api/v1/community-chat/startups/` and displays the returned client catalog.
 2. Claude's documented custom connector URL opens its prefilled add-connector
-   dialog. Cursor's documented HTTPS install wrapper opens its MCP installer.
+   dialog. Cursor's `https://cursor.com/en-US/install-mcp` wrapper opens its MCP
+   installer with the server name and base64-encoded transport configuration,
+   matching the official install-link generator's **Copy web link** output.
    The picker combines the OpenAI clients into one **Codex** option. Codex uses a
    configured published listing when one exists; before
    publication, the UI presents the server URL and platform setup instructions.
@@ -243,7 +245,7 @@ performs Django system and migration-drift checks without a database connection.
 ## Platform references
 
 - [Claude directory versus custom connectors](https://claude.com/docs/connectors/building/directory-vs-custom)
-- [Cursor installation deep links](https://cursor.com/docs/reference/deeplinks)
+- [Cursor installation deep links and web-link generator](https://cursor.com/docs/mcp/install-links)
 - [OpenAI MCP and connectors](https://developers.openai.com/api/docs/guides/tools-connectors-mcp)
 - [Codex MCP setup](https://learn.chatgpt.com/docs/extend/mcp?surface=cli)
 - [MCP authorization specification](https://modelcontextprotocol.io/specification/2025-11-25/basic/authorization)
