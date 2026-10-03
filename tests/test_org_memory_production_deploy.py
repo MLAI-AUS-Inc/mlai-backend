@@ -109,7 +109,7 @@ class OrgMemoryProductionDeployTests(SimpleTestCase):
             self.assertNotIn(flag, deploy)
 
         self.assertIn(
-            "all_runtime_writer_services=(web scheduler memory-worker memory-scheduler community-email-worker bridge-worker bridge-reconciler bridge-retention analytics-sync)",
+            "source scripts/runtime-services.sh",
             deploy,
         )
         self.assertIn(

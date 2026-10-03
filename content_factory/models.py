@@ -5,6 +5,7 @@ from django.db import models
 from django.utils import timezone
 
 from organizations.models import Organization
+from integrations.fields import LegacyPlaintextEncryptedTextField
 
 from .auth import content_factory_github_connection_state
 
@@ -46,10 +47,10 @@ class OrganizationContentConfig(models.Model):
     resource_prompt = models.TextField(blank=True, null=True)
     company_context = models.TextField(blank=True, null=True, help_text="Auto-generated company overview for article generation context")
     github_repo = models.CharField(max_length=255, blank=True, null=True)
-    github_token_encrypted = models.TextField(blank=True, null=True)
+    github_token_encrypted = LegacyPlaintextEncryptedTextField(blank=True, null=True)
 
     # Domain-level GitHub credentials (supports multiple domains with different GitHub accounts)
-    github_refresh_token_encrypted = models.TextField(blank=True, null=True)
+    github_refresh_token_encrypted = LegacyPlaintextEncryptedTextField(blank=True, null=True)
     github_token_expires_at = models.DateTimeField(blank=True, null=True)
     github_user_name = models.CharField(max_length=255, blank=True, null=True)
     github_installation_id = models.CharField(max_length=50, blank=True, null=True)

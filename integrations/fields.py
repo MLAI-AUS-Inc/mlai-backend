@@ -171,3 +171,20 @@ class EncryptedTextField(models.TextField):
 
     def get_prep_value(self, value):
         return encrypt_credential_value(value)
+
+
+class LegacyPlaintextEncryptedTextField(EncryptedTextField):
+    """Compatibility transition for existing GitHub credential columns.
+
+    New writes always use the versioned envelope. Only pre-envelope plaintext
+    reads are tolerated; malformed or unavailable encrypted values fail closed.
+    Do not use this compatibility field for newly introduced credential columns.
+    """
+
+    def from_db_value(self, value, expression, connection):
+        if value in (None, ""):
+            return value
+        raw = str(value)
+        if raw.startswith(("mlai-enc:", "gAAAA")):
+            return decrypt_credential_value(raw)
+        return raw

@@ -586,6 +586,9 @@ class AuthContractTests(TestCase):
             '/updates#https://attacker.example',
         ):
             with self.subTest(target=target):
+                # These are independent input-validation cases; the sixth
+                # request must not merely exercise the five-request throttle.
+                cache.clear()
                 response = self.client.post(
                     '/api/v1/auth/send-magic-link/',
                     {'email': user.email, 'app': 'admin', 'next': target},

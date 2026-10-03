@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 from html import escape
+import secrets
 
+from django.contrib.auth.models import AnonymousUser
 from django.http import Http404, HttpResponse
 from django.utils.decorators import method_decorator
 from django.views.decorators.csrf import csrf_exempt
 from rest_framework import status
+from rest_framework.authentication import BaseAuthentication
+from rest_framework.exceptions import AuthenticationFailed
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -16,6 +20,7 @@ from .conf import settings
 from .models import JobListing, JobRun
 from .serializers import DailyRunRequestSerializer, JobListingSerializer
 from .services.job_pipeline import enqueue_run_from_request, latest_run_for_date, public_daily_jobs_url
+from .services.history import recent_job_runs
 from .services.slack import format_slack_message
 
 VALID_BUCKETS = {"australian_ai", "australian_startup", "remote_ai", "remote_startup"}
@@ -34,9 +39,21 @@ class HasJobsTriggerToken(HasRooApiKey):
         auth_header = request.META.get("HTTP_AUTHORIZATION", "")
         if trigger_token and auth_header.startswith("Bearer "):
             candidate = auth_header.split("Bearer ", 1)[1].strip()
-            if candidate == trigger_token:
+            if secrets.compare_digest(candidate, trigger_token):
                 return True
         return super().has_permission(request, view)
+
+
+class JobsTriggerAuthentication(BaseAuthentication):
+    """Opaque Jobs/Roo service credentials, independent of browser JWTs."""
+
+    def authenticate(self, request):
+        if not HasJobsTriggerToken().has_permission(request, None):
+            raise AuthenticationFailed("A valid Jobs service credential is required.")
+        return AnonymousUser(), None
+
+    def authenticate_header(self, request):
+        return "Bearer"
 
 
 def _bucket_filter(request) -> str | None:
@@ -75,6 +92,9 @@ def _render_job_card(job: JobListing) -> str:
     """
 @method_decorator(csrf_exempt, name="dispatch")
 class DailyRunTriggerView(APIView):
+    # This endpoint authenticates service keys in HasJobsTriggerToken. Letting
+    # the global JWT authenticator parse its opaque Bearer key rejects it first.
+    authentication_classes = [JobsTriggerAuthentication]
     permission_classes = [HasJobsTriggerToken]
 
     def post(self, request):
@@ -158,7 +178,7 @@ class JobsHistoryView(APIView):
             limit = min(max(int(request.query_params.get("limit", 30)), 1), 100)
         except (TypeError, ValueError):
             limit = 30
-        runs = JobRun.objects.filter(run_date__regex=r"^\d{4}-\d{2}-\d{2}$").order_by("-run_date", "-created_at")[:limit]
+        runs = recent_job_runs(limit)
         return Response(
             [
                 {
@@ -182,10 +202,10 @@ class JobsHistoryView(APIView):
                             "source_name": log.source_name,
                             "error_message": log.error_message,
                         }
-                        for log in run.source_logs.filter(status="error")
+                        for log in run.history_source_errors
                     ],
                     "top_jobs": JobListingSerializer(
-                        JobListing.objects.filter(run=run, is_top_pick=True).order_by("rank"),
+                        run.history_top_jobs,
                         many=True,
                     ).data,
                 }
@@ -198,10 +218,10 @@ class JobsHistoryHtmlView(APIView):
     permission_classes = [AllowAny]
 
     def get(self, request):
-        runs = JobRun.objects.filter(run_date__regex=r"^\d{4}-\d{2}-\d{2}$").order_by("-run_date", "-created_at")[:30]
+        runs = recent_job_runs(30)
         run_cards = []
         for run in runs:
-            top_jobs = list(JobListing.objects.filter(run=run, is_top_pick=True).order_by("rank"))
+            top_jobs = list(run.history_top_jobs)
             top_jobs_html = "".join(
                 f"<li>#{job.rank or '-'} {escape(job.title)} - {escape(job.company_name or 'Unknown company')}</li>"
                 for job in top_jobs

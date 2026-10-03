@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections import defaultdict
-from datetime import datetime, time, timedelta
+from datetime import UTC, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 from django.conf import settings
@@ -204,8 +204,8 @@ def _window(report):
     local_start = datetime.combine(report.report_date, time.min, target_timezone)
     local_end = local_start + timedelta(days=1)
     return (
-        local_start.astimezone(timezone.utc),
-        local_end.astimezone(timezone.utc),
+        local_start.astimezone(UTC),
+        local_end.astimezone(UTC),
     )
 
 
@@ -214,7 +214,7 @@ def _week_to_date_window(report):
     week_start_date = report.report_date - timedelta(days=report.report_date.weekday())
     local_start = datetime.combine(week_start_date, time.min, target_timezone)
     _day_start, day_end = _window(report)
-    return local_start.astimezone(timezone.utc), day_end
+    return local_start.astimezone(UTC), day_end
 
 
 def _previous_week_window(report):
@@ -223,8 +223,8 @@ def _previous_week_window(report):
     local_end = datetime.combine(this_week_start, time.min, target_timezone)
     local_start = local_end - timedelta(days=7)
     return (
-        local_start.astimezone(timezone.utc),
-        local_end.astimezone(timezone.utc),
+        local_start.astimezone(UTC),
+        local_end.astimezone(UTC),
     )
 
 

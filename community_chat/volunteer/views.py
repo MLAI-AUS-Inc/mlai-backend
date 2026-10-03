@@ -12,7 +12,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from hospital.authentication import CustomJWTAuthentication
+from core.authentication import CustomJWTAuthentication
 from community_chat.authentication import CommunityChatAccountAuthentication
 from community_chat.models import CommunityChatDevice
 from community_chat.throttles import CommunityChatScopedThrottle

@@ -131,6 +131,30 @@ services:
         aliases:
           - mlai-backend-scheduler
 
+  jobs-worker:
+    build: .
+    logging: *default-logging
+    command: sh -c "until python manage.py migrate --check --noinput; do sleep 5; done; exec python manage.py run_jobs_worker"
+    environment:
+      APP_ENV: ${APP_ENV:-production}
+      JOBS_SCHEDULER_ENABLED: ${JOBS_SCHEDULER_ENABLED:-true}
+      JOBS_SCHEDULE_TIMEZONE: ${JOBS_SCHEDULE_TIMEZONE:-Australia/Melbourne}
+      JOBS_SCHEDULE_HOUR: ${JOBS_SCHEDULE_HOUR:-7}
+      JOBS_SCHEDULE_MINUTE: ${JOBS_SCHEDULE_MINUTE:-0}
+      JOBS_SCHEDULER_POST_TO_SLACK: ${JOBS_SCHEDULER_POST_TO_SLACK:-true}
+      JOBS_TOP_PICK_LIMIT: ${JOBS_TOP_PICK_LIMIT:-3}
+      JOBS_SCRAPE_HEADLESS: ${JOBS_SCRAPE_HEADLESS:-true}
+    env_file:
+      - .env
+    depends_on:
+      - db
+    restart: unless-stopped
+    networks:
+      default:
+      mlai-shared:
+        aliases:
+          - mlai-backend-jobs-worker
+
   committee-remuneration:
     build: .
     command: sh -c "until python manage.py migrate --check --noinput; do echo 'Waiting for migrations to complete...'; sleep 5; done; while true; do python manage.py pay_committee_weekly_points; sleep 3600; done"

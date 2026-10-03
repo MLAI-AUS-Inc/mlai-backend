@@ -84,7 +84,7 @@ class CompanyOffboardingTests(TestCase):
             model_name="test",
         )
 
-    def test_delete_revokes_connections_and_purges_data_and_frees_domain(self):
+    def test_delete_revokes_connections_and_keeps_domain_reserved(self):
         company = self._create_company("Acme Inc.", "acme.com")
         organization = company.organization
         self._add_connection(organization)
@@ -101,21 +101,27 @@ class CompanyOffboardingTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data["offboarding"]["connectionsRemoved"], 1)
         self.assertTrue(response.data["offboarding"]["gmailDisconnected"])
-        self.assertTrue(response.data["offboarding"]["orgDataPurged"])
+        self.assertFalse(response.data["offboarding"]["orgDataPurged"])
+        self.assertTrue(response.data["offboarding"]["targetedPurgeCompleted"])
+        self.assertFalse(response.data["offboarding"]["domainReleased"])
         revoke.assert_called_once()
 
-        # Company gone; domain freed; tokens and data purged.
+        # Company gone; targeted tokens/data purged; domain remains reserved.
         self.assertFalse(VibeRaisingCompany.objects.filter(pk=company.id).exists())
         self.assertFalse(ExternalServiceConnection.objects.filter(organization=organization).exists())
         self.assertFalse(GoogleConnection.objects.filter(organization=organization).exists())
         self.assertFalse(MonthlyUpdateDraft.objects.filter(organization=organization).exists())
         self.assertFalse(OrganizationContentConfig.objects.filter(organization=organization).exists())
-        # Organization shell is retained for re-registration.
+        # Organisation and its domain remain reserved until ownership review.
         self.assertTrue(Organization.objects.filter(pk=organization.pk).exists())
 
-        # The freed domain can be registered again.
-        again = self._create_company("Acme Again", "acme.com")
-        self.assertEqual(again.domain, "acme.com")
+        # An absent company owner does not authorise reuse of retained history.
+        again = self.client.post(
+            "/api/v1/founder-tools/companies/",
+            {"name": "Acme Again", "domain": "acme.com", "registered": True},
+            format="json",
+        )
+        self.assertEqual(again.status_code, 409)
 
     def test_delete_repoints_active_company_to_a_sibling(self):
         company_a = self._create_company("Alpha", "alpha.example")

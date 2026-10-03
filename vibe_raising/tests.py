@@ -102,9 +102,13 @@ class VibeRaisingApiTests(TestCase):
         )
 
     def _create_active_gmail_run_with_slack_selection(self):
-        self._create_founder_company()
+        _profile, company = self._create_founder_company()
         google_connection = self._create_google_connection()
         organization, _profile = resolve_or_create_profile(domain="acme.com")
+        # Establish the tenant owner as real onboarding does. A pre-existing
+        # organisation with no company owner is intentionally not claimable.
+        company.organization = organization
+        company.save(update_fields=["organization", "updated_at"])
         binding = UserStartupBinding.objects.create(
             user=self.user,
             organization=organization,

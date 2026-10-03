@@ -21,6 +21,7 @@ from django.utils import timezone
 
 from organizations.models import Organization
 from integrations import http_client as requests
+from integrations.services.financial_records import upsert_financial_record
 from integrations.models import (
     ExternalServiceConnection,
     ExternalServiceConnectionStatus,
@@ -2256,7 +2257,7 @@ def _upsert_basiq_transactions(
             "class_name": _nested_text(item, "class", "transactionClass"),
             "raw_payload": item,
         }
-        ExternalFinancialRecord.objects.update_or_create(
+        upsert_financial_record(
             provider=ExternalServiceProvider.BANK_FEED,
             external_account_id=external_account_id,
             external_record_id=external_record_id,
@@ -2737,7 +2738,7 @@ def _upsert_xero_repeating_invoices(connection: ExternalServiceConnection, invoi
             "class_name": _nested_text(invoice, "Type", "type"),
             "raw_payload": invoice,
         }
-        ExternalFinancialRecord.objects.update_or_create(
+        upsert_financial_record(
             provider=ExternalServiceProvider.XERO,
             external_account_id=connection.external_account_id,
             external_record_id=external_record_id,
@@ -2778,7 +2779,7 @@ def _upsert_xero_invoices(connection: ExternalServiceConnection, invoices: list[
             "class_name": invoice_type,
             "raw_payload": invoice,
         }
-        ExternalFinancialRecord.objects.update_or_create(
+        upsert_financial_record(
             provider=ExternalServiceProvider.XERO,
             external_account_id=connection.external_account_id,
             external_record_id=external_record_id,
@@ -2821,7 +2822,7 @@ def _upsert_xero_payments(connection: ExternalServiceConnection, payments: list[
             "class_name": invoice_type or "ACCREC",
             "raw_payload": payment,
         }
-        ExternalFinancialRecord.objects.update_or_create(
+        upsert_financial_record(
             provider=ExternalServiceProvider.XERO,
             external_account_id=connection.external_account_id,
             external_record_id=external_record_id,

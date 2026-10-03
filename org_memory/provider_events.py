@@ -164,16 +164,19 @@ def _receipt_key(provider: str, event_id: str, payload_hash: str) -> str:
 def _active_configurations(provider: str, external_account_id: str, external_scope_id: str):
     if not external_account_id:
         return MemoryConnectionConfiguration.objects.none()
-    query = MemoryConnectionConfiguration.objects.select_for_update().filter(
-        provider=provider,
-        lifecycle_state=MemoryConnectionState.ACTIVE,
-        external_connection__external_account_id=external_account_id,
-        source_scopes__selected=True,
-        source_scopes__status=MemoryScopeStatus.SELECTED,
-    )
+    filters = {
+        "provider": provider,
+        "lifecycle_state": MemoryConnectionState.ACTIVE,
+        "external_connection__external_account_id": external_account_id,
+        "source_scopes__selected": True,
+        "source_scopes__status": MemoryScopeStatus.SELECTED,
+    }
     if external_scope_id:
-        query = query.filter(source_scopes__external_id=external_scope_id)
-    return query.distinct()
+        filters["source_scopes__external_id"] = external_scope_id
+    matching = MemoryConnectionConfiguration.objects.filter(**filters).values("pk")
+    # Scope joins can repeat configurations. Deduplicate through an IN
+    # subquery, keeping the locked outer query free of DISTINCT and joins.
+    return MemoryConnectionConfiguration.objects.select_for_update().filter(pk__in=matching)
 
 
 def _schedule_configurations(
@@ -233,17 +236,17 @@ def schedule_artifact_wake(
 def _active_gmail_configurations(email_address: str):
     if not email_address:
         return MemoryConnectionConfiguration.objects.none()
-    return (
-        MemoryConnectionConfiguration.objects.select_for_update()
-        .filter(
+    matching = (
+        MemoryConnectionConfiguration.objects.filter(
             provider=MemoryProvider.GMAIL,
             lifecycle_state=MemoryConnectionState.ACTIVE,
             google_connection__google_email__iexact=email_address,
             source_scopes__selected=True,
             source_scopes__status=MemoryScopeStatus.SELECTED,
         )
-        .distinct()
+        .values("pk")
     )
+    return MemoryConnectionConfiguration.objects.select_for_update().filter(pk__in=matching)
 
 
 def _schedule_gmail_configurations(*, email_address: str, debounce_seconds: int) -> int:

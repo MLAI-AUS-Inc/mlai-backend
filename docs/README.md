@@ -4,6 +4,18 @@ Start with the repository [`README`](../README.md) and
 [`ARCHITECTURE`](../ARCHITECTURE.md). Use this index to find current
 subsystem-specific contracts and runbooks.
 
+## Backend maintenance
+
+- [26 September release integration](backend-refactor-release-2026-09-26.md) — current-main fixes, validation and pending migration approval
+- [26 September migration proposal](backend-refactor-migration-proposal-2026-09-26.md) — empty graph merge and exact disposable-test inventory
+- [15 September release preparation](backend-refactor-release-2026-09-15.md) — historical integration and test scope
+
+- [Runtime and dependency contract](backend-runtime.md)
+- [Feature lifecycle register](feature-lifecycle.md)
+- [14 September refactor audit](backend-refactor-audit-2026-09-14.md)
+- [Refactor implementation status](backend-refactor-implementation-2026-09-14.md)
+- [Credential migration and disposable-test scope](backend-refactor-migration-proposal-2026-09-14.md) — local validation complete; production application of credential migrations 0039/0040 approved, rollout pending
+
 ## Production API
 
 - [Backend API web handoff](backend-api-web-handoff.md) — verified ingress,
@@ -64,8 +76,6 @@ rollout sequence.
 - [`jobs-daily.md`](jobs-daily.md)
 - [`stripe-xero-reconciliation.md`](stripe-xero-reconciliation.md)
 - [`humanitix-xero-reconciliation.md`](humanitix-xero-reconciliation.md)
-- [`reconciliation-bill-binding.md`](reconciliation-bill-binding.md)
-- [`reconciliation-stripe-statement-binding.md`](reconciliation-stripe-statement-binding.md)
 - [`reconciliation-knowledge-export.md`](reconciliation-knowledge-export.md)
 - [`xero-statement-reconciliation.md`](xero-statement-reconciliation.md)
 - [`monthly-update-reminders.md`](monthly-update-reminders.md)

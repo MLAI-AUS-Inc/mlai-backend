@@ -13,15 +13,10 @@ RUN apt-get update && apt-get install -y \
     git \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt /app/
-RUN pip install --no-cache-dir -r requirements.txt
+# One hashed resolution includes both the API and Watt engine requirements.
+COPY requirements.txt requirements-engine.txt requirements.lock /app/
+RUN pip install --no-cache-dir --require-hashes -r requirements.lock
 RUN python -m playwright install --with-deps chromium
-
-# Install the WTH engine LAST, in its own layer. Bumping the engine tag in
-# requirements-engine.txt invalidates only this small layer (not the expensive
-# pip/playwright layers above), so scenario-release redeploys stay fast.
-COPY requirements-engine.txt /app/
-RUN pip install --no-cache-dir -r requirements-engine.txt
 
 COPY . /app/
 

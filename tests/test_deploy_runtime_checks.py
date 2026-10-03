@@ -4,6 +4,7 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import shlex
 import subprocess
 import sys
 import unittest
@@ -73,6 +74,10 @@ class DeploymentRuntimeChecksTests(unittest.TestCase):
                     "    *' --plan '*) printf plan, >> \"$calls_file\"; echo " + plan + "; return " + str(plan_result) + ";;",
                     "  esac",
                     "}",
+                    # Production uses GNU sha256sum; use Python in the shell
+                    # harness so macOS exercises the same hash/approval gate.
+                    'sha256sum() { ' + shlex.quote(sys.executable)
+                    + ' -c "import hashlib,sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())"; }',
                     'read_env_value() { echo "' + approval + '"; }',
                     'trap \'printf "calls=%s\\n" "$(cat "$calls_file")"; rm -f "$calls_file"\' EXIT',
                     decision,
