@@ -140,18 +140,18 @@ def stripe_paid_invoice_sales_minor(payload: dict):
     return excluding_tax
 
 
-def validate_generated_metric_claims(memo: dict):
-    """Numeric financial claims must be tokens, never free-form LLM amounts."""
-    token = re.compile(r"\{\{metric:[A-Za-z0-9_.-]+\}\}")
-    financial_number = re.compile(r"(?:[$€£¥]\s*\d|\b(?:USD|AUD|EUR|GBP|revenue|profit|costs?|MRR|ARR)\s*[:=]?\s*[-(]?\d)", re.I)
+def validate_generated_metric_claims(memo: dict, metrics: list[dict] | None = None):
+    """Financial amounts belong only in charts, never generated narrative."""
+    from startup_updates.disclosure import financial_metric_keys, has_financial_amount
+    metric_keys = financial_metric_keys(metrics)
     def visit(value):
-        if isinstance(value, str) and financial_number.search(token.sub("METRIC", value)):
-            raise ValueError("Financial claims must reference snapshot metric tokens.")
+        if isinstance(value, str) and has_financial_amount(value, metric_keys=metric_keys):
+            raise ValueError("Financial information belongs in the revenue-versus-costs chart. Remove monetary amounts and metric placeholders from narrative.")
         if isinstance(value, list):
             for item in value:
                 visit(item)
         if isinstance(value, dict):
             for key, item in value.items():
-                if key not in {"kpi_snapshot", "source_notes", "metric_suggestions"}:
+                if key not in {"kpi_snapshot", "source_notes", "metric_suggestions", "financial_snapshot", "financialSnapshot"}:
                     visit(item)
     visit(memo)

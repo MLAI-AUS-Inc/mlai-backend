@@ -998,7 +998,7 @@ def _build_manual_structured_memo(payload):
     return memo
 
 
-def _serialize_monthly_update(draft, structured_memo=None, *, published=False):
+def _serialize_monthly_update(draft, structured_memo=None, *, published=False, shared=None):
     from .progress import public_chart_payload
     from startup_updates.revisions import frozen_memo, revision_payload
     revision = draft.published_revision if published and draft.published_revision_id else draft.current_revision
@@ -1006,21 +1006,17 @@ def _serialize_monthly_update(draft, structured_memo=None, *, published=False):
         structured_memo = frozen_memo(draft, published=published and bool(draft.published_revision_id))
     if structured_memo is None:
         structured_memo = _structured_memo_with_xero_metrics(draft)
-    if published and isinstance(structured_memo.get("progress_charts"), list):
-        # Disclosure is explicit. Narrative is reviewed separately by the founder.
-        structured_memo = {**structured_memo, "metrics": {}, "kpi_snapshot": [], "metric_suggestions": [],
-            "metric_history": {}, "financial_snapshot": None, "concise_analysis": None}
     video_metadata = _structured_memo_video_metadata(structured_memo)
     published_at = getattr(draft, "published_at", None)
     if revision and revision.pk != draft.published_revision_id:
         published_at = None
     from startup_updates.update_identity import identity_payload
-    return {
+    value = {
         **identity_payload(draft, structured_memo),
         "id": draft.id,
         **(revision_payload(revision, include_evidence=not published) if revision else {}),
         "evidenceStatus": "snapshot" if revision and not revision.validation.get("legacy_unverified") else "legacy_unverified",
-        "metricEvidence": {item.get("metric_key"): {key: item.get(key) for key in ("quality", "source_provider", "basis", "limitations")} for item in structured_memo.get("kpi_snapshot", []) if isinstance(item, dict)},
+        "metricEvidence": {item.get("metric_key"): {key: item.get(key) for key in ("quality", "label", "unit", "source_provider", "basis", "limitations")} for item in structured_memo.get("kpi_snapshot", []) if isinstance(item, dict)},
         "isoMonth": draft.month.isoformat(),
         "month": f"{calendar.month_name[draft.month.month]} {draft.month.year}",
         "monthName": calendar.month_name[draft.month.month],
@@ -1058,6 +1054,13 @@ def _serialize_monthly_update(draft, structured_memo=None, *, published=False):
         "conciseAnalysis": _structured_memo_concise_analysis(structured_memo),
         "presentationMode": _structured_memo_text(structured_memo, "presentation_mode", "presentationMode"),
     }
+    from startup_updates.disclosure import financial_chart, shared_update
+    value["financialChart"] = financial_chart(value, metric_items=structured_memo.get("kpi_snapshot"))
+    if shared is None:
+        shared = published and any(audience in value["audienceVisibility"] for audience in ("community", "public"))
+    if shared:
+        return shared_update(value, metric_items=structured_memo.get("kpi_snapshot"))
+    return value
 
 
 def _serialize_draft_bundle(drafts):
@@ -2538,10 +2541,10 @@ class VibeRaisingMonthlyUpdateView(APIView):
             for draft in draft_queryset.order_by("-month", "-published_at", "-pk")
         ]
         updates = [
-            _serialize_monthly_update(draft, structured_memo=memo, published=bool(draft.published_at))
+            _serialize_monthly_update(draft, structured_memo=memo, published=bool(draft.published_at), shared=audience in {"community", "public"})
             for draft, memo in draft_memo_pairs
         ]
-        metric_history = build_metric_history(
+        metric_history = {} if audience in {"community", "public"} else build_metric_history(
             [(draft.month, memo) for draft, memo in draft_memo_pairs]
         )
         return Response(
