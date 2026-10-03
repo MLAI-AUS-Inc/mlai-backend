@@ -19,6 +19,7 @@ from .views import health_check, health_live, health_points, health_ready
 from startup_updates import data_views as startup_data_views
 
 urlpatterns = [
+    path('', include('startup_updates.mcp.urls')),
     path('', health_check, name='health_check'),
     path('healthz/live', health_live, name='health_live'),
     path('healthz/points', health_points, name='health_points'),

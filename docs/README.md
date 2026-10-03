@@ -21,6 +21,8 @@ subsystem-specific contracts and runbooks.
 
 ## Community chat APIs
 
+- [Valley remote MCP](valley-mcp.md) — client installation, scoped OAuth consent, private narrative handoff and rollout
+
 - [Private member onboarding](community-chat-onboarding.md) — email signup,
   adults-only admission, private preferences and committee review
 

@@ -2675,6 +2675,13 @@ class VibeRaisingMonthlyUpdateView(APIView):
             from rest_framework.exceptions import ValidationError
             raise ValidationError({"detail": str(exc)}) from exc
         memo = _build_manual_structured_memo(structured_payload)
+        if draft.current_revision_id:
+            # Agent origin, citations and retry receipts are server-owned history.
+            # Presentation-only founder saves must retain them for review/retries.
+            import copy
+            for field in ("_agent_provenance", "_agent_sources", "_agent_requests"):
+                if field in draft.current_revision.structured_memo:
+                    memo[field] = copy.deepcopy(draft.current_revision.structured_memo[field])
         if "chartSelections" in serializer.validated_data:
             memo["_progress_chart_specs"] = serializer.validated_data["chartSelections"]
         if is_creation_request and not draft.current_revision_id:
@@ -2787,7 +2794,8 @@ class VibeRaisingMonthlyUpdatePublishView(APIView):
         if visibility not in (["just_me"], ["community"], ["public"]):
             return Response({"detail": "Choose private, community, or public visibility."}, status=400)
         draft = approve_and_publish(draft, actor=request.user, revision_id=revision_id,
-            revision_hash=revision_hash, audience_visibility=visibility)
+            revision_hash=revision_hash, audience_visibility=visibility,
+            reviewed_agent_claims=request.data.get("reviewed") is True)
 
         from roo.services import StartupUpdateRewardService
 

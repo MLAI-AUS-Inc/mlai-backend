@@ -56,6 +56,8 @@ def update_payload(draft, *, published=False, community=False):
         }
     else:
         value["validation"] = copy.deepcopy(revision.validation) if revision else {"legacy_unverified": True}
+        value["agentProvenance"] = copy.deepcopy(memo.get("_agent_provenance"))
+        value["agentSources"] = copy.deepcopy(memo.get("_agent_sources", []))
         value["hasNewerDraft"] = bool(draft.published_revision_id and draft.current_revision_id != draft.published_revision_id)
         value["publishedRevisionId"] = draft.published_revision_id
         frozen_manual = (revision.snapshot.payload.get("manual_sources") or {}) if revision else {}

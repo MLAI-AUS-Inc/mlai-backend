@@ -21,6 +21,14 @@ LINEAR_CHANNEL_ISSUE_MAX_COMMENTS="${LINEAR_CHANNEL_ISSUE_MAX_COMMENTS:-250}"
 MESSAGE_SYNC_ENABLED="${MESSAGE_SYNC_ENABLED:-false}"
 SLACK_OWNER_INVENTORY_ENABLED="${SLACK_OWNER_INVENTORY_ENABLED:-false}"
 COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED="${COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED:-false}"
+VALLEY_MCP_ENABLED="${VALLEY_MCP_ENABLED:-false}"
+VALLEY_MCP_PUBLIC_BASE_URL="${VALLEY_MCP_PUBLIC_BASE_URL:-https://api.mlai.au}"
+# Empty optional values retain the host's existing startup gate/ownership proof.
+COMMUNITY_CHAT_STARTUP_UPDATES_ENABLED="${COMMUNITY_CHAT_STARTUP_UPDATES_ENABLED:-}"
+VALLEY_MCP_DOMAIN_VERIFICATION_TOKEN="${VALLEY_MCP_DOMAIN_VERIFICATION_TOKEN:-}"
+export VALLEY_MCP_ENABLED VALLEY_MCP_PUBLIC_BASE_URL
+export COMMUNITY_CHAT_STARTUP_UPDATES_ENABLED VALLEY_MCP_DOMAIN_VERIFICATION_TOKEN
+python3 scripts/validate_valley_mcp_deploy_config.py
 case "$COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED" in
     true|TRUE|True) COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED=true ;;
     false|FALSE|False) COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED=false ;;
@@ -362,6 +370,16 @@ install_remote_env_value() {
     printf '%s' "$value" \
         | ssh "$DEPLOY_SSH_TARGET" "$PROJECT_DIR/scripts/upsert_env_value_from_stdin.sh $key"
 }
+
+echo "🔧 Updating Valley MCP public configuration..."
+install_remote_env_value VALLEY_MCP_ENABLED "$VALLEY_MCP_ENABLED"
+install_remote_env_value VALLEY_MCP_PUBLIC_BASE_URL "$VALLEY_MCP_PUBLIC_BASE_URL"
+if [ -n "$COMMUNITY_CHAT_STARTUP_UPDATES_ENABLED" ]; then
+    install_remote_env_value COMMUNITY_CHAT_STARTUP_UPDATES_ENABLED "$COMMUNITY_CHAT_STARTUP_UPDATES_ENABLED"
+fi
+if [ -n "$VALLEY_MCP_DOMAIN_VERIFICATION_TOKEN" ]; then
+    install_remote_env_value VALLEY_MCP_DOMAIN_VERIFICATION_TOKEN "$VALLEY_MCP_DOMAIN_VERIFICATION_TOKEN"
+fi
 
 # The app-level token travels only through SSH stdin. Never reuse an OAuth
 # bot/user token: recipient expansion is a separate Slack authorization surface.

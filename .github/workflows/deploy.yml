@@ -68,7 +68,7 @@ jobs:
       run: python -m unittest tests.test_deploy_release_freshness tests.test_backend_web_handoff -v
 
     - name: Test deployment failure handling and live contract
-      run: python -m unittest tests.test_deploy_runtime_checks tests.test_message_sync_deploy_config tests.test_slack_owner_inventory_deploy_config tests.test_tech_volunteers_bridge_workflow tests.test_victor_ai_founder_games_bridge_workflow -v
+      run: python -m unittest tests.test_deploy_runtime_checks tests.test_message_sync_deploy_config tests.test_valley_mcp_deploy_config tests.test_slack_owner_inventory_deploy_config tests.test_tech_volunteers_bridge_workflow tests.test_victor_ai_founder_games_bridge_workflow -v
 
     - name: Check jobs delivery contracts without database access
       run: python -m unittest tests.test_jobs_delivery_unit -v
@@ -92,6 +92,7 @@ jobs:
         python scripts/test_without_database.py \
           community_chat.tests.test_startup_activity_defaults \
           community_chat.tests.test_startup_lifecycle \
+          community_chat.tests.test_startup_mcp \
           community_chat.tests.test_startup_publication \
           startup_updates.tests_month_scope \
           startup_updates.tests_monthly_groups \
@@ -610,6 +611,10 @@ jobs:
         COMMUNITY_CHAT_ADAPTER_TOKEN: ${{ secrets.COMMUNITY_CHAT_ADAPTER_TOKEN }}
         COMMUNITY_CHAT_ADAPTER_URL: ${{ vars.COMMUNITY_CHAT_ADAPTER_URL }}
         COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED: ${{ vars.COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED || 'false' }}
+        COMMUNITY_CHAT_STARTUP_UPDATES_ENABLED: ${{ vars.COMMUNITY_CHAT_STARTUP_UPDATES_ENABLED || '' }}
+        VALLEY_MCP_ENABLED: ${{ vars.VALLEY_MCP_ENABLED || 'false' }}
+        VALLEY_MCP_PUBLIC_BASE_URL: ${{ vars.VALLEY_MCP_PUBLIC_BASE_URL || 'https://api.mlai.au' }}
+        VALLEY_MCP_DOMAIN_VERIFICATION_TOKEN: ${{ vars.VALLEY_MCP_DOMAIN_VERIFICATION_TOKEN || '' }}
         MESSAGE_SYNC_ENABLED: ${{ vars.MESSAGE_SYNC_ENABLED || 'false' }}
         SLACK_OWNER_INVENTORY_ENABLED: ${{ vars.SLACK_OWNER_INVENTORY_ENABLED || 'false' }}
         MESSAGE_SYNC_SLACK_APP_ID: ${{ vars.MESSAGE_SYNC_SLACK_APP_ID }}

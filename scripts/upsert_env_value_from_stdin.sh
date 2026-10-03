@@ -4,7 +4,8 @@ set -euo pipefail
 key="${1:-}"
 case "$key" in
   MESSAGE_SYNC_ENABLED|SLACK_OWNER_INVENTORY_ENABLED|MESSAGE_SYNC_SLACK_APP_ID|MESSAGE_SYNC_SLACK_USER_APP_ID|MESSAGE_SYNC_SLACK_BOT_WORKSPACE_ID|MESSAGE_SYNC_SLACK_DISTRIBUTION|\
-  LINEAR_MEETING_REQUIRED_TEAM_KEYS|LINEAR_CHANNEL_ISSUE_BINDINGS_JSON|LINEAR_CHANNEL_ISSUE_MAX_COMMENTS|LINEAR_CHANNEL_ISSUE_WRITES_ENABLED|OFFICE_MANAGER_SLACK_CHANNEL_ID|OFFICE_MANAGER_TIMEZONE) ;;
+  LINEAR_MEETING_REQUIRED_TEAM_KEYS|LINEAR_CHANNEL_ISSUE_BINDINGS_JSON|LINEAR_CHANNEL_ISSUE_MAX_COMMENTS|LINEAR_CHANNEL_ISSUE_WRITES_ENABLED|OFFICE_MANAGER_SLACK_CHANNEL_ID|OFFICE_MANAGER_TIMEZONE|\
+  VALLEY_MCP_ENABLED|VALLEY_MCP_PUBLIC_BASE_URL|VALLEY_MCP_DOMAIN_VERIFICATION_TOKEN|COMMUNITY_CHAT_STARTUP_UPDATES_ENABLED) ;;
   *)
     echo "Unsupported production environment key" >&2
     exit 64
@@ -22,6 +23,9 @@ if [[ -z "$value" || "$value" == *$'\n'* || "$value" == *$'\r'* ]]; then
 fi
 
 case "$key" in
+  VALLEY_MCP_ENABLED|VALLEY_MCP_PUBLIC_BASE_URL|VALLEY_MCP_DOMAIN_VERIFICATION_TOKEN|COMMUNITY_CHAT_STARTUP_UPDATES_ENABLED)
+    printf '%s' "$value" | python3 scripts/validate_valley_mcp_deploy_config.py --stdin "$key"
+    ;;
   MESSAGE_SYNC_ENABLED|SLACK_OWNER_INVENTORY_ENABLED)
     [[ "$value" == "true" || "$value" == "false" ]] || {
       echo "${key} must be true or false" >&2
@@ -84,6 +88,15 @@ case "$key" in
     }
     ;;
 esac
+
+# A second plugin's proof must not silently replace the proof already served.
+if [[ "$key" == "VALLEY_MCP_DOMAIN_VERIFICATION_TOKEN" && -f .env ]]; then
+  existing_challenge="$(sed -n 's/^VALLEY_MCP_DOMAIN_VERIFICATION_TOKEN=//p' .env)"
+  if [[ -n "$existing_challenge" && "$existing_challenge" != "$value" ]]; then
+    echo "Existing OpenAI ownership proof differs; explicit reconciliation is required" >&2
+    exit 1
+  fi
+fi
 
 tmp="$(mktemp .env.managed-value.XXXXXX)"
 if [[ -f .env ]]; then
