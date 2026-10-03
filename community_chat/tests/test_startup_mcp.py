@@ -477,6 +477,66 @@ class NarrativeTests(SimpleTestCase):
         self.assertEqual(saved.call_args.args[1]["financial_snapshot"], {"income": 123})
         self.assertEqual(saved.call_args.args[1]["_agent_provenance"]["kind"], "agent_supplied")
 
+    def test_partial_legacy_edit_preserves_stored_narrative_without_mutating_it(self):
+        legacy = {"summary": "Previous summary", "highlights": ["Existing launch"],
+            "lowlights": ["Existing risk"], "asks": ["Founder introduction"],
+            "learnings": ["Existing learning"], "next_30_days": ["Existing plan"],
+            "display_config": {"full_metric_keys": ["revenue"]}}
+        draft = tools.MonthlyUpdateDraft(pk=10, organization_id=8, month=date(2026, 9, 1),
+            structured_memo=legacy)
+        draft.refresh_from_db, draft.save = MagicMock(), MagicMock()
+        with patch.object(tools.MonthlyUpdateDraft, "objects") as drafts:
+            drafts.select_for_update.return_value.filter.return_value.first.return_value = draft
+            _, saved, captured = self.save_with_mocks(draft, self.arguments(updateId=10))
+        memo = saved.call_args.args[1]
+        self.assertEqual(memo["summary"], "We shipped a launch.")
+        for field in ("highlights", "lowlights", "asks", "learnings", "next_30_days", "display_config"):
+            self.assertEqual(memo[field], legacy[field])
+            self.assertIsNot(memo[field], legacy[field])
+        self.assertEqual(legacy["summary"], "Previous summary")
+        self.assertNotIn("_agent_requests", legacy)
+        self.assertEqual(saved.call_args.kwargs["audience"], "private")
+        captured.assert_called_once()
+        self.assertIs(saved.call_args.kwargs["snapshot"], captured.return_value)
+
+    def test_legacy_carried_claims_cannot_bypass_unresolved_review(self):
+        from startup_updates import revisions
+        for status in ("failed", "pending", "needs_review"):
+            for field in ("highlights", "topline", "operations", "financial_performance",
+                          "title", "concise_analysis", "conciseAnalysis"):
+                claim = ["Unresolved carried claim"] if field in {"highlights", "operations", "financial_performance"} else "Unresolved carried claim"
+                legacy = {field: claim, "_month_sequence": 1}
+                draft = tools.MonthlyUpdateDraft(pk=10, organization_id=8, month=date(2026, 9, 1),
+                    structured_memo=legacy, groundedness_status=status)
+                draft.refresh_from_db, draft.save = MagicMock(), MagicMock()
+                with self.subTest(status=status, field=field):
+                    _, saved, _ = self.save_with_mocks(draft, self.arguments())
+                    self.assertEqual(saved.call_args.kwargs["validation"], {"groundedness_status": status})
+                    memo = saved.call_args.args[1]
+                    self.assertEqual(memo[field], legacy[field])
+                    self.assertEqual(memo["_agent_provenance"]["kind"], "agent_supplied")
+                    imported = revisions.MonthlyUpdateRevision(pk=6, draft=draft, content_hash="new-hash", validation=saved.call_args.kwargs["validation"],
+                        structured_memo={**memo, "_audience_visibility": ["just_me"]})
+                    draft.current_revision = imported
+                    with patch.object(revisions.MonthlyUpdateDraft, "objects") as drafts:
+                        drafts.select_for_update.return_value.get.return_value = draft
+                        with self.assertRaises(ValidationError):
+                            revisions.approve_and_publish.__wrapped__(draft, actor=Obj(pk=7), revision_id=6,
+                                revision_hash="new-hash", audience_visibility=["just_me"], reviewed_agent_claims=True)
+
+    def test_new_and_resolved_legacy_drafts_require_normal_agent_review(self):
+        for memo, status in (({"_month_sequence": 1}, "pending"),
+                             ({"highlights": ["Verified launch"]}, "passed"),
+                             ({"highlights": ["Founder supplied launch"]}, "founder_asserted")):
+            draft = tools.MonthlyUpdateDraft(pk=10, organization_id=8, month=date(2026, 9, 1),
+                structured_memo=memo, groundedness_status=status)
+            draft.refresh_from_db, draft.save = MagicMock(), MagicMock()
+            with self.subTest(memo=memo, status=status):
+                _, saved, _ = self.save_with_mocks(draft, self.arguments())
+                self.assertEqual(saved.call_args.kwargs["validation"], {"groundedness_status": "needs_review",
+                    "provenance": "agent_supplied", "source_verification": "unverified_external_agent"})
+                self.assertEqual(saved.call_args.kwargs["audience"], "private")
+
     def test_import_cannot_retag_unresolved_carried_claims_for_agent_only_review(self):
         from startup_updates import revisions
         for status in ("failed", "pending", "needs_review"):

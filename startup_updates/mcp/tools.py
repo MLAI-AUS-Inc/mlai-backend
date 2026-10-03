@@ -163,7 +163,7 @@ def save_draft(principal, arguments):
     if draft.month != month:
         raise ValidationError("This draft identity belongs to another reporting month. Use a new requestId.")
     current = draft.current_revision if draft.current_revision_id else None
-    old = copy.deepcopy(current.structured_memo if current else {})
+    old = copy.deepcopy(current.structured_memo if current else draft.structured_memo or {})
     receipt = (old.get("_agent_requests") or {}).get(request_id)
     if not receipt and draft.current_revision_id:
         historical = draft.revisions.filter(structured_memo___agent_requests__has_key=request_id).order_by("-number").first()
@@ -188,6 +188,13 @@ def save_draft(principal, arguments):
         # fresh agent review for the new text; all other review state survives.
         if prior_validation.get("groundedness_status") not in {"passed", "founder_asserted"} and not prior_agent_review:
             validation = copy.deepcopy(prior_validation)
+    elif any(old.get(field) for field in (*NARRATIVE_FIELDS.values(), "topline", "operations",
+            "financial_performance", "title", "concise_analysis", "conciseAnalysis")):
+        # Legacy drafts store their review state on the draft rather than a
+        # revision. Keep unresolved carried claims outside agent-only review;
+        # a newly resolved draft's month identity alone is not a carried claim.
+        if draft.groundedness_status not in {"passed", "founder_asserted"}:
+            validation = {"groundedness_status": draft.groundedness_status}
     memo = old
     for incoming, field in NARRATIVE_FIELDS.items():
         if incoming in arguments["narrative"]:
