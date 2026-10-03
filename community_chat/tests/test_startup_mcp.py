@@ -57,13 +57,31 @@ class DomainVerificationTests(SimpleTestCase):
         for token in ("", None, "short", "a" * 257, "first_token_0123456789\nsecond_token_0123456789",
                       '["synthetic_token_0123456789"]', {"token": "synthetic_token_0123456789"}):
             with self.subTest(token=token), override_settings(VALLEY_MCP_DOMAIN_VERIFICATION_TOKEN=token):
-                response = self.view(self.factory.get("/.well-known/openai-apps-challenge"))
+                response = self.view(self.factory.get("/.well-known/openai-apps-challenge", HTTP_ACCEPT="text/plain"))
             self.assertEqual(response.status_code, 404)
             self.assertEqual(response.content, b"")
 
     def test_challenge_cannot_be_updated_by_http(self):
-        response = self.view(self.factory.post("/.well-known/openai-apps-challenge", {}, format="json"))
+        response = self.view(self.factory.post("/.well-known/openai-apps-challenge", {}, format="json", HTTP_ACCEPT="text/plain"))
         self.assertEqual(response.status_code, 405)
+
+    def test_accept_headers_do_not_change_plaintext_ownership_proof(self):
+        token = "synthetic_openai_domain_token_0123456789"
+        for accept in ("text/plain", "*/*", "text/html", "application/json", "application/octet-stream"):
+            with self.subTest(accept=accept), override_settings(VALLEY_MCP_DOMAIN_VERIFICATION_TOKEN=token,
+                    VALLEY_MCP_ENABLED=False, COMMUNITY_CHAT_STARTUP_UPDATES_ENABLED=False):
+                response = self.view(self.factory.get("/.well-known/openai-apps-challenge", HTTP_ACCEPT=accept))
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.content, token.encode())
+                self.assertEqual(response["Content-Type"], "text/plain; charset=utf-8")
+                self.assertEqual(response["Cache-Control"], "no-store")
+                self.assertEqual(response["X-Content-Type-Options"], "nosniff")
+
+    def test_plaintext_proof_still_enforces_throttle(self):
+        view = views.DomainVerificationView.as_view()
+        with patch.object(views.McpRateThrottle, "allow_request", return_value=False), patch.object(views.McpRateThrottle, "wait", return_value=1):
+            response = view(self.factory.get("/.well-known/openai-apps-challenge", HTTP_ACCEPT="text/plain"))
+        self.assertEqual(response.status_code, 429)
 
     def test_origin_root_challenge_route_is_registered(self):
         from django.urls import resolve
