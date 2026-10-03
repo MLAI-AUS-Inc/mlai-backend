@@ -146,6 +146,26 @@ class ProviderEventWebhookTests(TestCase):
         digest = hmac.new(b"xero-webhook-key", raw, hashlib.sha256).digest()
         return base64.b64encode(digest).decode("ascii")
 
+    def test_artifact_wake_deduplicates_selected_scopes_and_rejects_unselected_scope(self):
+        from org_memory.provider_events import schedule_artifact_wake
+        MemorySourceScope.objects.create(
+            configuration=self.linear, scope_type="project", external_id="project-2",
+            selected=True, status=MemoryScopeStatus.SELECTED,
+        )
+        MemorySourceScope.objects.create(
+            configuration=self.linear, scope_type="project", external_id="private-project",
+            selected=False, status=MemoryScopeStatus.SELECTED,
+        )
+        self.assertEqual(schedule_artifact_wake(
+            provider="linear", external_account_id="linear-org-1", external_scope_id="private-project",
+        ), 0)
+        self.assertEqual(schedule_artifact_wake(
+            provider="linear", external_account_id="linear-org-1",
+        ), 1)
+        self.assertEqual(schedule_artifact_wake(
+            provider="linear", external_account_id="different-account",
+        ), 0)
+
     def test_xero_signature_replay_metadata_only_and_tenant_wake(self):
         raw = self._json_bytes(
             {

@@ -5,6 +5,7 @@ from datetime import date as calendar_date
 from django.core.management.base import BaseCommand, CommandError
 from django.utils import timezone
 
+from core.scheduling import run_runners
 from core.slack_founder_link_retention import (
     run_scheduled_slack_founder_link_request_cleanup,
 )
@@ -20,7 +21,7 @@ from integrations.services.github_installations import (
 )
 from integrations.services.research_automations import run_research_automation_scheduler
 from integrations.services.xero_reconciliation import run_daily_payout_reconciliation
-from jobs.services.job_pipeline import run_daily_jobs_scheduler
+from jobs.services.job_pipeline import enqueue_daily_jobs as run_daily_jobs_scheduler
 from hospital.sim_retention import run_scheduled_sim_conversation_cleanup
 from roo.coding import reconcile_coding_reservations
 from roo.office_manager import run_office_manager_scheduler
@@ -172,10 +173,7 @@ class Command(BaseCommand):
         heartbeat.last_error = ""
         heartbeat.save(update_fields=["last_started_at", "last_error", "updated_at"])
 
-        results = {}
-        failures = []
-
-        for name, runner in (
+        results, failures = run_runners((
             ("daily_discovery", run_daily_discovery_scheduler),
             ("jobs", run_daily_jobs_scheduler),
             # Drives the daily research-topic email/Slack/WhatsApp send (8am slot).
@@ -221,21 +219,19 @@ class Command(BaseCommand):
             # resolves calls whose provider usage could not be confirmed.
             # Authenticated request paths only reconcile their own account;
             # this production scheduler is the sole global sweep.
-            ("coding_reconciliation", reconcile_coding_reservations),
+            ("coding_reconciliation", lambda: {"status": "completed", **reconcile_coding_reservations()}),
             # Posts one weekday Office Manager callout, closes the volunteer
             # window, repairs message state, and sends the end-of-day reminder.
             ("office_manager", run_office_manager_scheduler),
+        ))
+        # Office Manager returns business states and nested delivery outcomes;
+        # retain its richer failure check alongside shared runner validation.
+        if (
+            "office_manager" in results
+            and "office_manager" not in failures
+            and _office_manager_scheduler_failed(results["office_manager"])
         ):
-            try:
-                results[name] = runner()
-                if name == "office_manager" and _office_manager_scheduler_failed(
-                    results[name]
-                ):
-                    failures.append(name)
-            except Exception as exc:
-                logger.exception("Scheduled %s runner failed.", name)
-                results[name] = {"status": "failed", "error": str(exc)}
-                failures.append(name)
+            failures.append("office_manager")
 
         self.stdout.write(json.dumps(results, sort_keys=True))
         if failures:

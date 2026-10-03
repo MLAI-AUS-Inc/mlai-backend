@@ -20,7 +20,7 @@ class SlackOwnerInventoryDeployConfigTests(unittest.TestCase):
         )
         self.assertLess(
             WORKFLOW.index("tests.test_slack_owner_inventory_deploy_config"),
-            WORKFLOW.index("pip install -r requirements.txt"),
+            WORKFLOW.index("pip install --require-hashes -r requirements.lock"),
         )
 
     def test_flag_is_disabled_before_migration_and_activated_before_runtime_start(self):

@@ -2655,10 +2655,12 @@ class SlackDmMirrorOwnerTests(APITestCase):
             ).exists()
         )
 
+    @patch("integrations.services.slack_dm_mirror.BuzzBridgeClient.provision_private_conversation")
     @patch("integrations.services.slack_dm_mirror.WebClient")
     def test_same_identity_reauthorization_preserves_partial_history_epoch(
         self,
         web_client,
+        provision,
     ):
         grant, conversation = self._live_conversation()
         CommunityBridgeIdentityLink.objects.create(
@@ -2707,7 +2709,21 @@ class SlackDmMirrorOwnerTests(APITestCase):
             ).exists()
         )
 
-        activate_connection(self.first_connection)
+        # Activating an already active connection preserves its registration
+        # and cursor. This case exercises renewed consent after a pause.
+        state = conversation.deliveries.get(
+            source_message_id=slack_dm_mirror.HISTORY_MAIN_STATE_ID,
+        )
+        previous_epoch = state.metadata["scan_epoch"]
+        previous_cursor = conversation.oldest_synced_ts
+        activate_connection(self.first_connection, history_days=grant.history_days)
+        state.refresh_from_db()
+        conversation.refresh_from_db()
+        self.assertEqual(state.metadata["scan_epoch"], previous_epoch)
+        self.assertEqual(conversation.oldest_synced_ts, previous_cursor)
+
+        slack_dm_mirror.pause_grant(grant)
+        grant = activate_connection(self.first_connection, history_days=grant.history_days)
 
         conversation.refresh_from_db()
         self.assertEqual(conversation.oldest_synced_ts, recent_slack_ts("1787901300.000100"))
@@ -2718,6 +2734,21 @@ class SlackDmMirrorOwnerTests(APITestCase):
                 source_message_id=slack_dm_mirror.HISTORY_RECONCILIATION_STATE_ID
             ).exists()
         )
+        self.assertEqual(process_due_history_backfills(), 0)
+        # A resumed grant must rediscover and provision its private destination
+        # before history can be delivered under the new consent generation.
+        web_client.return_value.users_conversations.return_value = {
+            "channels": [{"id": "DONE", "user": "UTWO"}],
+            "response_metadata": {},
+        }
+        web_client.return_value.users_info.side_effect = lambda *, user: {
+            "user": {"id": user, "name": user.lower(), "profile": {}}
+        }
+        provision.side_effect = lambda pubkeys, **_: {
+            "channel_id": str(conversation.mlai_channel_id),
+            "participant_pubkeys": pubkeys,
+        }
+        discover_conversations(grant)
         self.assertEqual(process_due_history_backfills(), 1)
         conversation.refresh_from_db()
         self.assertIsNotNone(conversation.history_backfilled_at)
@@ -4473,8 +4504,8 @@ class SlackDmMirrorOwnerTests(APITestCase):
             mlai_channel_id=str(conversation.mlai_channel_id),
             registration_id="",
             registration_generation="",
-            history_days=0,
-            oldest="",
+            history_days=grant.history_days,
+            oldest=slack_dm_mirror._reconciliation_oldest(conversation, recent_only=False),
         )
         slack_dm_mirror._mark_history_reconciliation_candidates_locked(conversation)
         slack_dm_mirror._enqueue_history_message(
@@ -4505,7 +4536,8 @@ class SlackDmMirrorOwnerTests(APITestCase):
                     CommunityBridgeDeliveryType.REACTION_ADD,
                 ),
             ).exclude(
-                source_message_id__startswith=slack_dm_mirror.HISTORY_STATE_PREFIX
+                # Content-free history checkpoints share the delivery table.
+                source_message_id__startswith=slack_dm_mirror.HISTORY_STATE_PREFIX,
             ).exists()
         )
 

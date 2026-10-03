@@ -26,6 +26,12 @@ and independent supporting evidence can consolidate automatically. `NEW` and
 `REFINES` respect the candidate review requirement; `SUPERSEDES` and
 `CONTRADICTS` always require human review.
 
+Reviewed consolidation and correction lock the run/proposal, review item and
+affected claims directly. Nullable relations are read without an outer-join
+`FOR UPDATE`, which PostgreSQL rejects. Claim rows are acquired in primary-key
+order and the reviewed winner is re-read from those locked rows before applying
+state transitions.
+
 The default is `gpt-5.6-luna` with reasoning effort `none`, strict Responses
 API structured output, versioned prompt/schema/consolidator identifiers, and
 no stored provider response body. The defaults follow OpenAI's current

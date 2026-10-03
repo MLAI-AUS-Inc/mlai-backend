@@ -283,7 +283,7 @@ class WebHandoffIntegrationTests(unittest.TestCase):
 
 
 class WebHandoffRollbackTests(unittest.TestCase):
-    def run_rollback(self, *, prior_proxy, replacement_started):
+    def run_rollback(self, *, prior_proxy, replacement_started, new_workers=False, stop_status=0):
         begin = DEPLOY.index("    restore_runtime_on_error() {")
         end = DEPLOY.index("\n    # A code-only release", begin)
         function = DEPLOY[begin:end].replace("\\$", "$")
@@ -326,23 +326,25 @@ class WebHandoffRollbackTests(unittest.TestCase):
                     "previous_scheduler_image_id=",
                     "previous_scheduler_tick_mtime=0",
                     "previous_runtime_container_ids=()",
-                    "runtime_services=(web scheduler)",
+                    "runtime_services=(web scheduler" + (" jobs-worker password-email-worker committee-remuneration" if new_workers else "") + ")",
                     "all_runtime_writer_services=(web scheduler)",
                     "nginx_worker_snapshot() { echo 999999; }",
                     'wait_for_nginx_workers_to_drain() { echo "drain" >> "$events"; }',
                     'wait_for_origin_web_health() { echo "health $1 $2 ${3:-}" >> "$events"; }',
                     'upsert_env_value() { echo "env $1 $2" >> "$events"; }',
-                    'docker() { echo "docker $*" >> "$events"; }',
+                    'docker() { echo "docker $*" >> "$events"; if [ "$*" = "compose stop jobs-worker" ]; then return ' + str(stop_status) + '; fi; }',
                     'bash() { echo "route $3" >> "$events"; printf "# managed-mlai-backend-api target=%s\\n" "$3" > "$web_proxy_config"; }',
                     function,
                     "restore_runtime_on_error",
+                    "recovery_status=$?",
                     'cat "$events"',
+                    'exit "$recovery_status"',
                 ]
             )
             result = subprocess.run(
                 ["bash", "-c", script], capture_output=True, text=True, timeout=5
             )
-            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.returncode, stop_status, result.stderr)
             return result.stdout
 
     def test_failed_replacement_routes_candidate_before_recreating_old_web(self):
@@ -351,6 +353,22 @@ class WebHandoffRollbackTests(unittest.TestCase):
         self.assertLess(events.index("docker compose up"), events.index("health 8001"))
         self.assertLess(events.index("health 8001"), events.index("route web"))
         self.assertIn("env APP_RELEASE " + "a" * 40, events)
+
+    def test_rollback_stops_new_workers_before_restoring_previous_runtime(self):
+        events = self.run_rollback(prior_proxy=True, replacement_started=True, new_workers=True)
+        restore = events.index("docker compose up -d --no-deps --force-recreate web scheduler")
+        for service in ("jobs-worker", "password-email-worker", "committee-remuneration"):
+            self.assertLess(events.index(f"docker compose stop {service}"), restore)
+        self.assertLess(restore, events.index("route web"))
+        self.assertLess(events.index("route web"), events.index("docker compose stop web-candidate"))
+
+    def test_failed_new_worker_stop_keeps_candidate_serving_for_recovery(self):
+        events = self.run_rollback(prior_proxy=True, replacement_started=True, new_workers=True, stop_status=42)
+        self.assertIn("route candidate", events)
+        self.assertIn("docker compose stop jobs-worker", events)
+        self.assertNotIn("docker compose up", events)
+        self.assertNotIn("docker compose stop web-candidate", events)
+        self.assertNotIn("route web", events)
 
     def test_failed_first_adoption_recreates_only_old_web(self):
         events = self.run_rollback(prior_proxy=False, replacement_started=False)

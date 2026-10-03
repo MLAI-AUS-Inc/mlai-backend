@@ -26,6 +26,10 @@ does not enable a provider merely because its worker service is running.
   job. Extraction creates reviewed candidates only; it cannot activate memory,
   call tools, change permissions, or publish to Public Roo. See
   `docs/org-memory-extraction.md`.
+- Provider-event wake queries lock distinct configuration rows through an ID
+  subquery, rather than using PostgreSQL's unsupported `FOR UPDATE DISTINCT`.
+  A scope-specific event must match that same scope's selected status; another
+  selected scope on the connection does not authorise an unselected scope.
 - Successful extraction schedules identifier-only consolidation work.
   Deterministic deduplication, reviewed supersession/contradiction, temporal
   state, and current-state projections are described in
