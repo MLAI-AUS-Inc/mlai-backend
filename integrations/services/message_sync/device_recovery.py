@@ -8,6 +8,7 @@ membership and runs the existing registration/consent authority checks.
 from datetime import timedelta
 
 from slack_sdk.errors import SlackApiError
+from django.conf import settings
 from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
@@ -22,6 +23,29 @@ from .scheduler import BudgetDeferred, LeaseLost
 
 RECOVERY_RETRY_SECONDS = 120
 DEVICE_AUDIENCE_HINT = "message_sync_device_audience"
+
+
+def schedule_source_recovery_locked(grant, connection, source_id):
+    """Wake an existing unfinished mirror after its source activity advances.
+
+    Called under the source snapshot's current grant/connection authority lock.
+    No new mirror is created here. The discovery lease, fairness position and
+    persisted provider deferral remain untouched; recovery revalidates Slack
+    membership and device authority through the normal provisioning path.
+    """
+    if (not getattr(settings, "MESSAGE_SYNC_ENABLED", False)
+            or grant.status != "active" or grant.revoked_at is not None
+            or grant.connection_id != connection.pk
+            or grant.last_discovery_at is None):
+        return False
+    if not SlackDmMirrorConversation.objects.filter(
+        grant_id=grant.pk, slack_conversation_id=source_id,
+        status__in=["provisioning", "error"], mlai_channel_id__isnull=True,
+    ).exists():
+        return False
+    grant.last_discovery_at = None
+    grant.save(update_fields=["last_discovery_at", "updated_at"])
+    return True
 
 
 def lock_enrollment_recovery_grants(user):
@@ -126,7 +150,9 @@ def recover_recent_conversation(grant, authority, *, profile_cache, cycle_starte
         )
     if requested_key:
         recovery_scope |= Q(status="live", mlai_channel_id__isnull=False) | Q(status="error")
-    candidates = recent_conversations(candidate_scope.filter(recovery_scope)).order_by("-coverage_activity", "id")
+    candidates = recent_conversations(
+        candidate_scope.filter(recovery_scope), include_owner_inventory=True,
+    ).order_by("-coverage_activity", "id")
     waiting_for_retry = False
     for candidate in candidates:
         candidate.grant = grant

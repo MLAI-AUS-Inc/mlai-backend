@@ -85,7 +85,10 @@ jobs:
       run: python scripts/test_without_database.py integrations.tests_bridge_roo_actor integrations.test_broadcast_mentions_unit
 
     - name: Check Slack conversation opening without database access
-      run: python scripts/test_without_database.py community_chat.tests.test_slack_inventory_openable community_chat.tests.test_slack_open_requests integrations.tests_slack_progressive_presentation
+      run: python scripts/test_without_database.py community_chat.tests.test_slack_inventory_openable community_chat.tests.test_slack_open_requests community_chat.tests.test_slack_open_recovery integrations.tests_slack_progressive_presentation
+
+    - name: Check unread scheduling reliability without database access
+      run: python scripts/test_without_database.py integrations.tests_message_sync_read_reliability
 
     - name: Check startup connections and reporting months without database access
       run: |

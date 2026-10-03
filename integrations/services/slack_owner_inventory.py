@@ -451,9 +451,20 @@ def source_read_targets(grant, authority, existing_targets, *, include_routed=Fa
         return []
     from integrations.services.slack_chat_read_state import ReadTarget
 
-    seen = {target.slack_id for target in existing_targets}
+    routed = {target.slack_id: target for target in existing_targets}
+    seen = set(routed)
     targets = []
     for row in grant.owner_conversation_inventory.filter(eligibility="eligible").order_by("slack_conversation_id"):
+        existing = routed.get(row.slack_conversation_id)
+        if existing is not None:
+            existing.source_inventory = row
+            # Merge scheduling metadata in this existing authorized directory
+            # pass. A mirrored room retains its transport/device boundary and
+            # shares one source cache entry and one provider probe.
+            activity = _activity_ts({"latest": {"ts": row.source_activity_ts}})
+            previous = _activity_ts({"latest": {"ts": existing.source_activity_ts}})
+            if activity and (not previous or Decimal(activity) > Decimal(previous)):
+                existing.source_activity_ts = activity
         if row.slack_conversation_id in seen and not include_routed:
             continue
         target = ReadTarget(
@@ -462,6 +473,7 @@ def source_read_targets(grant, authority, existing_targets, *, include_routed=Fa
             kind=row.kind,
             conversation=row,
             source_activity_ts=row.source_activity_ts,
+            source_inventory=row,
         )
         if target.read_scope not in authority.scopes:
             continue
@@ -475,6 +487,25 @@ def source_read_targets(grant, authority, existing_targets, *, include_routed=Fa
         row.grant = grant
         targets.append(target)
     return targets
+
+
+def record_read_activity_locked(grant, connection, authority, target, source_ts):
+    """Reuse confirmed source activity to recover an existing stalled mirror."""
+    row = target.source_inventory
+    if row is None or not has_metadata_consent(connection, authority):
+        return
+    stamp = _activity_ts({"latest": {"ts": source_ts}})
+    previous = _activity_ts({"latest": {"ts": row.source_activity_ts}})
+    if not stamp or (previous and Decimal(stamp) <= Decimal(previous)):
+        return
+    updated = grant.owner_conversation_inventory.filter(
+        pk=row.pk, slack_conversation_id=target.slack_id, eligibility="eligible",
+        source_activity_ts=row.source_activity_ts,
+    ).update(source_activity_ts=stamp)
+    if updated:
+        row.source_activity_ts = stamp
+        from .message_sync.device_recovery import schedule_source_recovery_locked
+        schedule_source_recovery_locked(grant, connection, target.slack_id)
 
 
 def hydrate_source_names(authority, *, limit=4):

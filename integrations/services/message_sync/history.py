@@ -187,6 +187,8 @@ def public_page(lease, state):
                 schedule_job(current, "thread", source_object_key=root)
         updated = record_page(current, lease.kind, updated,
                               {"messages": observed, "is_limited": response.get("is_limited")}, complete=complete)
+        from .read_activity import advance_public_activity
+        advance_public_activity(current, observed)
         delay = {"head": 60, "thread": 3600, "archive": 86400}[lease.kind]
         if lease.kind == "thread" and timestamp(lease.source_object_key)[0] < floor and not updated["observed_messages"]:
             delay = 86400

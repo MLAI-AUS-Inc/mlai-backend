@@ -47,6 +47,7 @@ release evidence may describe earlier deployment stages; verify current runtime
 state when using those operational documents.
 
 - [`mlai-chat-bridge-contract.md`](mlai-chat-bridge-contract.md)
+- [`slack-unfinished-conversation-recovery.md`](slack-unfinished-conversation-recovery.md) — reviewed recovery of existing unfinished private mirrors
 - [`mlai-chat-bridge-staging.md`](mlai-chat-bridge-staging.md)
 - [`mlai-chat-membership-bootstrap.md`](mlai-chat-membership-bootstrap.md)
 - [`mlai-chat-release-runbook.md`](mlai-chat-release-runbook.md)

@@ -782,7 +782,9 @@ account by stable Slack conversation ID. Only active consent and currently
 verified/provisioned devices qualify; old/out-of-window conversations remain
 eligible so persistent unreads are not lost. A budget pause retains the target and provider Retry-After;
 a source error advances past that target so it cannot stall the whole account.
-Group info/history pauses retain only allowlisted cursor metadata for 30 seconds,
+Group info/history pauses retain only allowlisted cursor metadata through the
+reported retry delay plus 30 seconds, capped at 120 seconds from the original
+source observation,
 never message text. Expired worker claims and changed consent reject provider
 calls and cache writes.
 
@@ -833,13 +835,14 @@ they do not need to load the full Slack directory between the inbox and the chat
 Polling coalesces with the same intent and never resets its provider backoff.
 
 Inventory items include `openable`, an owner/device-scoped availability hint.
-The unread-only directory filters this before pagination and counts only these
-actionable rows in its fresh/provisional unread totals. Out-of-window, closed
-unimported, unsupported, unmapped public and errored conversations remain in the
-explicit directory but do not appear in Unreads or Catch up. An eligible private
+The unread-only directory retains every eligible, known unread independently of
+this hint; fresh/provisional unread totals count conversations rather than import
+readiness. Out-of-window, closed unimported, unmapped public and errored
+conversations may remain visible with unavailable history. Unsupported and
+ineligible sources remain excluded. An eligible private
 source can still open through the asynchronous import; a ready authorized room
-can open immediately. A current-device terminal open failure suppresses the
-stale inventory row while that result is retained. Source-wide discovery and
+can open immediately. A current-device terminal open failure makes the row
+unopenable while that result is retained. Source-wide discovery and
 read-coverage totals remain separate, and this hint never grants relay access.
 
 The existing discovery worker handles one targeted open before enumerating the
@@ -880,11 +883,19 @@ background turn; the existing owner/workspace fairness and shared method budget
 still govern admission. A failed target has its own 60-second retry fence and
 does not pause an entire account. A secondary history/replies quota deferral
 pauses only that conversation for at least 15 seconds and its reported delay;
-independent DM info requests can continue. Visible hints expire after 90 seconds, activity
-hints after five minutes, and each account retains at most 256 hints.
+independent DM info requests can continue. Visible hints expire after 90 seconds.
+Activity hints remain pending through provider deferrals for current authorized
+targets; unroutable targets expire after a five-minute discovery grace period.
+Each account retains at most 256 hints. A successful observation consumes only
+the matching generation, so a new event during an in-flight request remains
+pending. Repeated visibility polls coalesce with pending work.
 When no explicit hint is waiting, one priority turn favors a source-only
 conversation with activity in the last seven days and no confirmed read
-snapshot. The other two favor known unreads, falling back to recent unknowns;
+snapshot. Later authenticated source activity also promotes a previously read
+snapshot. Mapped targets reuse eligible owner inventory activity, and accepted
+public bridge activity advances the existing source frontier without fetching
+message history or fabricating owner unread counts. The other two favor known
+unreads, falling back to recent unknowns;
 the fourth turn remains oldest-first for historical rooms. Source activity
 only changes polling order and never assigns an unread badge or expands consent.
 
@@ -901,7 +912,26 @@ has a known read observation under a complete discovery sweep, even if some
 observations are stale. `fresh_complete` requires no stale observations;
 `complete` retains the same strict meaning for older clients that use it to
 decide whether “All caught up” is safe. Permission-limited or stale discovery
-never satisfies any of these completion fields.
+never satisfies any of these completion fields. Coverage also includes
+`oldest_observed_at`, `newest_observed_at` and `pending_refresh_count` for the
+already cached source metadata. Inventory read items include the same `revision`,
+`latest_ts`, `last_read` and `confirmed_at` domain as mapped channel snapshots.
+The page's `read_revision` fences pagination so a changing unread directory is
+retried without combining different read generations.
+
+The worker persists content-free `progress` under
+`message_sync_read_state_v1`: pending hint count/age, unknown observation count,
+oldest observation age, last successful observation and secondary-stage retry
+timing. These describe scheduling progress, not a guarantee that every room can
+stay fresh inside two minutes under a shared workspace budget.
+
+Mobile Chats and Catch up share progressive, deduplicated unread pagination and
+the existing foreground polling cadence. Inventory observations can hand off
+to local rows before the ordinary snapshot arrives; confirmed or newer local
+reads defeat delayed inventory. Authorized unreads without available history
+remain counted with an explicit readiness state. Directory loading never
+starts broad history imports. The mobile Threads card is labelled “MLAI threads”
+because its counter intentionally excludes Slack-imported replies.
 
 Every source observation and confirmed write has a monotonically increasing
 `revision`. Full directory responses have a separate `directory_revision` under

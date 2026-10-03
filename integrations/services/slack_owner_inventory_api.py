@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone as dt_timezone
 from decimal import Decimal, InvalidOperation
+import math
 import re
 import time
 import uuid
@@ -22,6 +23,7 @@ from integrations.services.slack_chat_catalog import (
     ready_for_display,
 )
 from integrations.services.slack_chat_read_state import ReadTarget, _cache_key
+from integrations.services.message_sync.read_priority import hint_pending
 from integrations.services.slack_dm_mirror import (
     _call_slack_with_grant_authority,
     _capture_slack_grant_api_authority,
@@ -122,12 +124,29 @@ def _read_state(snapshot, now):
         }
     count = snapshot.get("unread_count")
     mention = snapshot.get("has_personal_mention")
+    def cursor(name):
+        try:
+            value = Decimal(str(snapshot.get(name, "")))
+            if value.is_finite() and 0 <= value <= Decimal(str(now + 300)):
+                return format(value, "f")
+        except (InvalidOperation, TypeError, ValueError):
+            pass
+        return ""
+    revision = snapshot.get("revision")
+    confirmed = snapshot.get("confirmed_at")
     return {
         "availability": freshness,
         "is_unread": snapshot["is_unread"],
         "unread_count": count if type(count) is int and count >= 0 else None,
         "has_personal_mention": mention if type(mention) is bool else None,
         "observed_at": observed_at,
+        # These share the exact revision domain of mapped channel snapshots.
+        # A client can hand off a source unread without resurrecting old reads.
+        "revision": revision if type(revision) is int and revision >= 0 else 0,
+        "latest_ts": cursor("latest_ts"),
+        "last_read": cursor("last_read"),
+        "confirmed_at": confirmed if type(confirmed) in (int, float)
+        and math.isfinite(confirmed) and 0 <= confirmed <= now + 300 else 0,
     }
 
 
@@ -277,14 +296,25 @@ def conversation_page(user, *, public_key, limit=50, cursor="", unread_only=Fals
         inventory_revision=revision,
         read_revision=read_revision,
     )
+    observed = [states[row.pk]["observed_at"] for row in rows
+                if row.eligibility == "eligible" and states[row.pk]["observed_at"] is not None]
+    hints = (grant.connection.sync_cursor or {}).get(READ_PRIORITY_KEY) or {}
+    read_summary.update(
+        oldest_observed_at=min(observed, default=None),
+        newest_observed_at=max(observed, default=None),
+        pending_refresh_count=sum(
+            isinstance(value, dict) and hint_pending(value, now)
+            for value in hints.values()
+        ),
+    )
     visible = [row for row in rows if (row.kind, row.pk) > after] if after else rows
     if unread_only:
         visible = [
             row for row in visible
             if row.eligibility == "eligible" and states[row.pk]["is_unread"] is True
         ]
-    # Resolve every known unread before pagination. Filtering a page afterwards
-    # can produce empty first pages and badges for conversations that cannot open.
+    # Resolve every known unread before pagination. Read visibility and import
+    # readiness are separate: a blocked mirror must not erase a known unread.
     described = {row.pk: row for row in (visible if unread_only else visible[:limit])}
     described.update({row.pk: row for row in rows if states[row.pk]["is_unread"] is True})
     selected_ids = [row.slack_conversation_id for row in described.values()]
@@ -322,12 +352,10 @@ def conversation_page(user, *, public_key, limit=50, cursor="", unread_only=Fals
     }
     for name, availability in (("fresh_unread_count", "available"), ("provisional_unread_count", "stale")):
         read_summary[name] = sum(
-            item["openable"] and item["read_state"]["is_unread"] is True
+            item["eligibility"] == "eligible" and item["read_state"]["is_unread"] is True
             and item["read_state"]["availability"] == availability
             for item in described_items.values()
         )
-    if unread_only:
-        visible = [row for row in visible if described_items[row.pk]["openable"]]
     selected = visible[:limit]
     next_cursor = None
     if len(visible) > len(selected) and selected:
@@ -400,6 +428,7 @@ def conversation_page(user, *, public_key, limit=50, cursor="", unread_only=Fals
         "last_sweep_at": state.get("last_full_sweep_at"),
         "coverage": coverage,
         "read_state_coverage": read_summary,
+        "read_revision": read_revision,
     }
 
 

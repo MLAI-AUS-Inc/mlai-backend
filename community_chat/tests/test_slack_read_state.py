@@ -315,6 +315,7 @@ class PrivateReadTargetTests(SimpleTestCase):
         with patch.object(
             reads.CommunityBridgeChannel.objects, "filter"
         ) as shared, patch.object(reads.time, "time", return_value=self.now.timestamp()):
+            shared.return_value.select_related.return_value = shared.return_value
             shared.return_value.exclude.return_value.order_by.return_value = [public]
             yield
 
@@ -740,6 +741,35 @@ class BackgroundReadCacheTests(SimpleTestCase):
         self.assertIsNone(result["has_personal_mention"])
         self.assertEqual(result["count_source"], "slack")
         self.assertNotIn(reads._pending_key(authority, target), stored)
+
+    def test_metadata_checkpoint_survives_long_budget_pause_but_not_receipt_change_or_expiry(self):
+        authority = SlackReadStateTests().authority()
+        grant = SimpleNamespace(slack_user_id="UOWNER")
+        target = reads.ReadTarget("room", "G1", "mpim")
+        details = {"id": "G1", "is_member": True, "last_read": "100.000001",
+                   "latest": {"ts": "102.000001", "text": "must not persist"}}
+        for pause, changed_receipt, expected_info in ((60, False, 1), (60, True, 2), (601, False, 2)):
+            stored = {}
+            with patch.object(reads.transaction, "atomic", side_effect=nullcontext), patch.object(
+                reads, "_lock_slack_grant_api_authority", return_value=(grant, snapshot_connection())
+            ), patch.object(reads.cache, "get", side_effect=lambda key: stored.get(key)), patch.object(
+                reads.cache, "set", side_effect=lambda key, value, **kwargs: stored.__setitem__(key, value)
+            ), patch.object(reads.cache, "delete", side_effect=lambda key: stored.pop(key, None)), patch.object(
+                reads, "_call_slack_with_grant_authority", return_value={"channel": details}
+            ) as info, patch.object(reads.time, "time", return_value=1000) as clock, patch.object(
+                reads, "_unread_messages", side_effect=[reads.BudgetDeferred(60),
+                    ([{"ts": "102.000001", "user": "UOTHER"}], "slack_history", False)]
+            ):
+                with self.assertRaises(reads.BudgetDeferred):
+                    reads.refresh_target(grant, authority, target)
+                self.assertNotIn("must not persist", str(stored))
+                clock.return_value = 1000 + pause
+                if changed_receipt:
+                    stored[reads._cache_key(authority, target) + ":receipt"] = "new-confirmation"
+                result = reads.refresh_target(grant, authority, target)
+            self.assertEqual(info.call_count, expected_info)
+            self.assertTrue(result["is_unread"])
+            self.assertEqual(result["fetched_at"], 1000 if expected_info == 1 else 1000 + pause)
 
     def test_partial_group_history_preserves_source_count_but_not_false_mention(self):
         authority = SlackReadStateTests().authority()

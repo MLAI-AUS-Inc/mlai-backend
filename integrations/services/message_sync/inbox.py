@@ -85,6 +85,10 @@ def process_inbox_once():
                 return 0
             from integrations.services.community_bridge.store import ingest_slack_event
             from integrations.services.slack_dm_mirror import ingest_slack_dm_event
+            from .read_activity import record_public_event
+            # Public ingestion locks the channel. Take state -> channel first,
+            # matching the history worker, in this same receipt transaction.
+            record_public_event(payload)
             ingest_slack_dm_event(payload) or ingest_slack_event(payload)
             from .read_priority import invalidate_event
             invalidate_event(payload)

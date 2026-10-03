@@ -11,7 +11,7 @@ from django.utils import timezone
 
 from community_chat.models import CommunityChatDevice
 from community_chat.tests.test_slack_dm_io_authority import SlackDmIoAuthorityFixture
-from integrations.models import ExternalServiceConnection, SlackDmMirrorConversation, SlackDmMirrorGrant
+from integrations.models import ExternalServiceConnection, SlackDmMirrorConversation, SlackDmMirrorGrant, SlackOwnerConversationInventory
 from integrations.services import slack_dm_mirror as dm
 from integrations.services.message_sync.device_recovery import recover_recent_conversation
 from integrations.services.message_sync.device_recovery import (
@@ -82,6 +82,41 @@ class DeviceRecoveryTests(SlackDmIoAuthorityFixture, TransactionTestCase):
         with patch.object(dm, "_call_slack_with_grant_authority") as source:
             self.assertFalse(self.recover())
         source.assert_not_called()
+
+    def test_fresh_source_inventory_recovers_mirror_without_local_activity(self):
+        self.connection.provider_metadata = {}
+        self.connection.save(update_fields=['provider_metadata'])
+        self.conversation.latest_synced_ts = ''
+        self.conversation.save(update_fields=['latest_synced_ts'])
+        SlackOwnerConversationInventory.objects.create(
+            grant=self.grant, slack_conversation_id=self.conversation.slack_conversation_id,
+            kind='im', eligibility='eligible', source_activity_ts=str(self.started.timestamp()),
+        )
+        with (patch.object(dm, '_call_slack_with_grant_authority', side_effect=self.source) as source,
+              patch.object(dm.BuzzBridgeClient, 'provision_private_conversation', return_value={'channel_id': self.room_id})):
+            self.assertTrue(self.recover())
+        self.assertEqual(source.call_args_list[0].args[1], 'conversations_info')
+        self.conversation.refresh_from_db()
+        self.assertEqual(str(self.conversation.mlai_channel_id), self.room_id)
+        self.assertEqual(self.conversation.status, 'live')
+
+    def test_inventory_hint_outside_consent_or_invalid_cannot_admit_recovery(self):
+        self.connection.provider_metadata = {}
+        self.connection.save(update_fields=['provider_metadata'])
+        self.conversation.latest_synced_ts = ''
+        self.conversation.save(update_fields=['latest_synced_ts'])
+        row = SlackOwnerConversationInventory.objects.create(
+            grant=self.grant, slack_conversation_id=self.conversation.slack_conversation_id,
+            kind='im', eligibility='eligible',
+        )
+        for stamp in ['', 'bad', str(int(self.started.timestamp()) + 3600),
+                      str(int(self.started.timestamp()) - 31 * 86400)]:
+            with self.subTest(stamp=stamp):
+                row.source_activity_ts = stamp
+                row.save(update_fields=['source_activity_ts'])
+                with patch.object(dm, '_call_slack_with_grant_authority') as source:
+                    self.assertFalse(self.recover())
+                source.assert_not_called()
 
     def test_unconsented_private_room_cannot_block_recent_dm(self):
         private = SlackDmMirrorConversation.objects.create(
