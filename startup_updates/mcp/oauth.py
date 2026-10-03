@@ -14,6 +14,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from urllib.parse import urlencode, urlsplit
+from uuid import UUID
 
 from django.conf import settings
 from django.contrib.auth import get_user_model
@@ -154,10 +155,19 @@ def callback_url(intent, **parameters):
     return intent["redirect_uri"] + separator + urlencode({**parameters, "state": intent["state"], "iss": public_base()})
 
 
+def _company_uuid(value):
+    """Parse founder-company IDs once so scope and cache keys use model UUIDs."""
+    try:
+        if not isinstance(value, (str, UUID)):
+            raise ValueError
+        return UUID(str(value))
+    except ValueError as exc:
+        raise PermissionDenied("Choose an authorised startup.") from exc
+
+
 def company_for(user, company_id, grant=None):
-    if isinstance(company_id, bool) or not re.fullmatch(r"\d{1,20}", str(company_id)):
-        raise PermissionDenied("Choose an authorised startup.")
-    if grant and str(company_id) != str(grant["company_id"]):
+    company_id = _company_uuid(company_id)
+    if grant and company_id != _company_uuid(grant["company_id"]):
         raise PermissionDenied("This agent has access to a different startup.")
     company = VibeRaisingCompany.objects.select_related("organization", "profile").filter(pk=company_id, profile__user=user).first()
     if company is None or company.organization is None:
@@ -213,7 +223,7 @@ def valid_grant(grant_id, *, scope=None):
     grant = cache.get(key("grant", grant_id))
     if not grant or grant.get("revoked") or grant.get("expiresAt", 0) <= time.time() or grant.get("resource") != mcp_url():
         raise AuthenticationFailed("Agent authorisation expired or was revoked.")
-    current_epoch = cache.get(key("epoch", f"{grant['user_id']}:{grant['company_id']}")) or ""
+    current_epoch = cache.get(key("epoch", f"{grant['user_id']}:{_company_uuid(grant['company_id'])}")) or ""
     if grant.get("revocation_epoch", "") != current_epoch:
         raise AuthenticationFailed("This startup agent connection was disconnected.")
     user = get_user_model().objects.filter(pk=grant["user_id"], is_active=True).first()
@@ -301,6 +311,7 @@ def revoke_grant(grant_id):
 
 
 def disconnect_company(user, company_id):
+    company_id = _company_uuid(company_id)
     epoch = secrets.token_urlsafe(32)
     cache.set(key("epoch", f"{user.pk}:{company_id}"), epoch, timeout=GRANT_TTL + 1)
     for grant_id in cache.get(key("index", f"{user.pk}:{company_id}")) or []:
@@ -310,6 +321,7 @@ def disconnect_company(user, company_id):
 
 
 def grants_for(user, company_id):
+    company_id = _company_uuid(company_id)
     rows = []
     for grant_id in cache.get(key("index", f"{user.pk}:{company_id}")) or []:
         grant = cache.get(key("grant", grant_id))

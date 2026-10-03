@@ -72,6 +72,13 @@ there is no invented ChatGPT/Codex listing or success state.
 
 ## Tools and evidence
 
+Startup company IDs are the existing founder-company UUIDs. OAuth consent,
+ownership checks, tools and connection indexes use the same canonical UUID;
+alternate UUID spelling cannot create a separate disconnection epoch. Draft,
+revision and user IDs retain their existing integer types. The public ownership
+challenge always returns its fixed plain-text representation, independently of
+the client's Accept header, while retaining throttling and method restrictions.
+
 - `list_startups`: return only the explicitly granted startup.
 - `get_monthly_update_brief`: return startup context, selected calendar month,
   timezone-aware reporting period and narrative-writing instructions.

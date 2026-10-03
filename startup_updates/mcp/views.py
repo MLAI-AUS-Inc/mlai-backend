@@ -50,6 +50,10 @@ class DomainVerificationView(APIView):
     permission_classes = (AllowAny,)
     throttle_classes = (McpRateThrottle,)
 
+    def perform_content_negotiation(self, request, force=False):
+        """Keep the fixed plaintext proof independent of renderer Accept rules."""
+        return super().perform_content_negotiation(request, force=True)
+
     def get(self, request):
         token = getattr(settings, "VALLEY_MCP_DOMAIN_VERIFICATION_TOKEN", "")
         if not isinstance(token, str) or not re.fullmatch(r"[A-Za-z0-9_-]{16,256}", token):
