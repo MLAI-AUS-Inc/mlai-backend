@@ -152,6 +152,19 @@ capacity and the normal operational durability settings; this is revocable
 connection state, not the durable draft store. Roll back by disabling
 `VALLEY_MCP_ENABLED`; existing draft revisions remain in the database.
 
+Public OAuth client metadata has no cache expiry: OpenAI hosts register a client
+once per MCP connection and reuse its ID for later authorisation, including after
+the thirty-day grant expires. Retaining client metadata does not extend any
+grant, account session, access token or refresh token. These small records contain
+the public client ID, name and validated callback URLs, never a client secret or
+user authorisation. Registration uses the existing anonymous 120/minute throttle,
+but records accumulate across connections; monitor Redis capacity and registration
+volume rather than automatically expiring active clients. Non-expiring keys still
+depend on Redis persistence and eviction policy. A flush, eviction or unrecoverable
+Redis loss removes registered clients and fails closed with `invalid_client`;
+the host must then register a new connection. Disconnection revokes grants without
+deleting shared client metadata. See [OpenAI's client-registration lifecycle](https://developers.openai.com/plugins/build/auth).
+
 Before enabling, deploy the compatible Chat/backend changes, configure the public
 HTTPS origin and callback client configuration, and complete platform acceptance:
 actual Claude install/consent/tool call, Cursor install/consent/tool call and

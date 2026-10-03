@@ -167,6 +167,38 @@ class OAuthTests(SimpleTestCase):
         value = oauth.create_intent(self.query)
         self.assertEqual(value["redirectOrigin"], "https://claude.ai")
 
+    def test_registered_client_outlives_old_ninety_day_limit_without_extending_credentials(self):
+        now = int(time.time())
+        user = Obj(pk=7, auth_version=3)
+        session = Obj(pk="session", user_id=7)
+        with patch("time.time", return_value=now) as clock:
+            client = oauth.register_client({"redirect_uris": self.client["redirect_uris"]})
+            query = {**self.query, "client_id": client["client_id"]}
+            intent = oauth.create_intent(query)
+            with patch.object(oauth, "company_for", return_value=Obj(pk=9)), patch.object(oauth, "_valid_session", return_value=True), patch.object(oauth, "_validate_device_owner"):
+                callback = oauth.approve_intent(intent["requestId"], user=user, session=session, company_id="9", approve=True)
+            code = parse_qs(urlsplit(callback).query)["code"][0]
+            grant_id = cache.get(oauth.key("code", code))["grant_id"]
+            value = cache.get(oauth.key("grant", grant_id))
+            self.assertEqual(value["expiresAt"], now + 30 * 86400)
+            with patch.object(oauth, "valid_grant", return_value=oauth.Principal(user=user, grant=value)):
+                tokens = oauth.issue_tokens(grant_id)
+            self.assertEqual(tokens["expires_in"], 3600)
+
+            clock.return_value = now + 3601
+            self.assertIsNone(cache.get(oauth.key("access", tokens["access_token"])))
+            self.assertIsNotNone(cache.get(oauth.key("refresh", tokens["refresh_token"])))
+            clock.return_value = now + 30 * 86400 + 1
+            self.assertIsNone(cache.get(oauth.key("refresh", tokens["refresh_token"])))
+            with self.assertRaises(AuthenticationFailed):
+                oauth.valid_grant(grant_id)
+
+            clock.return_value = now + 91 * 86400
+            self.assertEqual(oauth.client_for(client["client_id"]), client)
+            resumed = oauth.create_intent(query)
+            self.assertEqual(resumed["client_id"], client["client_id"])
+            self.assertEqual(resumed["expiresAt"], clock.return_value + 600)
+
     def test_authorize_redirect_preserves_opaque_request_without_tokens(self):
         view = views.AuthorizeView.as_view(throttle_classes=())
         response = view(APIRequestFactory().get("/mcp/oauth/authorize", self.query))

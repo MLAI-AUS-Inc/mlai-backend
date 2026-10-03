@@ -49,13 +49,18 @@ A production account named App Review MLAI was created on 21 September 2026:
 - Native password sign-in is being added through the ordinary account endpoint.
   It must produce the same installation-bound account session and onboarding
   contract as email-code sign-in. Do not use a fixed OTP or reviewer bypass.
-- Production password authentication is currently disabled. Enable it only after
-  the new ordinary sign-in flow is tested and deployed.
+- A read-only runtime inspection on 3 October 2026 confirmed that production
+  password authentication and its repository release variable are enabled.
   The release workflow reads the repository variable
   `COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED` (default `false`) so a deliberate
   activation survives subsequent deployments. This enables the ordinary
   rate-limited password endpoint for all eligible accounts, not reviewer-only
-  access. Email-code and device authentication remain required.
+  access. Email-code and device authentication remain available.
+
+A read-only account inspection on 3 October 2026 found incomplete community
+onboarding, no recorded adult confirmation, and no owned Valley startup for
+this account. Its existence and usable password do not establish reviewer
+access; complete normal onboarding and test the actual review flow first.
 
 Before submission, enter the dedicated credentials in Apple's App Review
 Information, verify them using the release candidate on iPhone, and give Apple

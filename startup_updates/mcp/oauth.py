@@ -31,7 +31,6 @@ CODE_TTL = 300
 INTENT_TTL = 600
 GRANT_TTL = 30 * 86400
 ACCESS_TTL = 3600
-CLIENT_TTL = 90 * 86400
 PREFIX = "valley-mcp:"
 
 
@@ -98,7 +97,9 @@ def register_client(data):
     client = {"client_id": client_id, "client_name": str(data.get("client_name") or "Your AI agent")[:100],
         "redirect_uris": [redirect_uri(item) for item in data["redirect_uris"]],
         "token_endpoint_auth_method": "none", "grant_types": ["authorization_code", "refresh_token"], "response_types": ["code"]}
-    cache.set(key("client", client_id), client, timeout=CLIENT_TTL)
+    # Hosts reuse a registered public client across grant expiry and later
+    # reauthorisation. Expiring its metadata would strand that connection.
+    cache.set(key("client", client_id), client, timeout=None)
     return client
 
 
