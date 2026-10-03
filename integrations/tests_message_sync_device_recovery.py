@@ -84,7 +84,10 @@ class DeviceRecoveryTests(SlackDmIoAuthorityFixture, TransactionTestCase):
         source.assert_not_called()
 
     def test_fresh_source_inventory_recovers_mirror_without_local_activity(self):
-        self.connection.provider_metadata = {}
+        # Remove cached discovery activity while preserving OAuth identity.
+        metadata = dict(self.connection.provider_metadata)
+        metadata.pop(CATALOG_KEY, None)
+        self.connection.provider_metadata = metadata
         self.connection.save(update_fields=['provider_metadata'])
         self.conversation.latest_synced_ts = ''
         self.conversation.save(update_fields=['latest_synced_ts'])
@@ -101,7 +104,9 @@ class DeviceRecoveryTests(SlackDmIoAuthorityFixture, TransactionTestCase):
         self.assertEqual(self.conversation.status, 'live')
 
     def test_inventory_hint_outside_consent_or_invalid_cannot_admit_recovery(self):
-        self.connection.provider_metadata = {}
+        metadata = dict(self.connection.provider_metadata)
+        metadata.pop(CATALOG_KEY, None)
+        self.connection.provider_metadata = metadata
         self.connection.save(update_fields=['provider_metadata'])
         self.conversation.latest_synced_ts = ''
         self.conversation.save(update_fields=['latest_synced_ts'])
