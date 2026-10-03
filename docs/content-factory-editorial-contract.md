@@ -16,18 +16,27 @@ model or reasoning settings. The 202 start response includes `companyId` and
 `researchCompanyId` for the exact company researched, including active-run
 reuse, so a new-startup draft stays scoped when the client polls or saves.
 
-Research saves submitted basics under the existing owner/company/domain guards.
-Omitted profile fields, founder names and target audience retain their saved
-values; an explicitly supplied empty field still clears that field. Clients
-should submit only the basics when starting an early draft, and omit profile
-fields managed elsewhere. The dispatch retains `persist: false`: generated
+Research saves name, website and location under the existing owner/company/domain
+guards so a new startup has a stable research and Save identity. In draft mode,
+submitted lower profile answers, LinkedIn URL, competitors, seed keywords and
+ABN remain local research context; starting research does not write those answers
+to the saved startup profile, organisation or content configuration. The endpoint
+whitelists top-level and `existingFields` / `existing_fields` context, including
+`profileFields` / `profile_fields`, and accepts camel/snake field aliases.
+Top-level values take precedence. Explicit empty strings and lists describe the
+local draft without clearing saved data; null or malformed values do not replace
+saved context. Founder and audience fields retain their saved values and cannot
+be overridden by draft context. Requests without draft mode retain the legacy
+submitted-field persistence behavior, including explicit clears. The dispatch
+retains `persist: false`: generated
 `profileFields`, LinkedIn URL, seed keywords and competitors are returned for
 editing, with the normal Save action required to persist those answers. This
 introduces no schema or migration change.
 
 The focused no-database checks execute the actual view and shared profile-save
 function with synthetic ownership/persistence/queue seams. They verify draft
-mode forwarding, legacy behavior, required basics and omission preservation;
+mode forwarding, legacy behavior, required basics, local context forwarding,
+draft-only edits and clears, new company identity and saved-field preservation;
 they do not establish real authentication, SQL locking or worker/model latency.
 Run `.venv/bin/python -m unittest content_factory.tests_startup_profile_draft_unit`.
 

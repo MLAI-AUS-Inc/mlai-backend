@@ -7466,6 +7466,76 @@ def _autofill_profile_fields_payload(startup_profile):
     }
 
 
+def _autofill_draft_existing_fields(saved_fields, data):
+    """Forward whitelisted local form values without writing saved profiles.
+
+    Explicit empty strings/lists describe the local draft, not a request to
+    clear saved data. Top-level answers take precedence over nested context.
+    Author and audience fields remain the saved values managed elsewhere.
+    """
+    containers = [
+        value for key in ("existing_fields", "existingFields")
+        if isinstance(value := data.get(key), dict)
+    ]
+    context_sources = [*containers, data]
+    profile_sources = []
+    for container in [*containers, data]:
+        profile_sources.append(container)
+        profile_sources.extend(
+            value for key in ("profile_fields", "profileFields")
+            if isinstance(value := container.get(key), dict)
+        )
+    profile_sources.append(data)
+
+    def submitted(sources, aliases, *, is_list=False, revenue=False):
+        for source in reversed(sources):
+            for alias in aliases:
+                if alias not in source:
+                    continue
+                value = source[alias]
+                if is_list:
+                    if isinstance(value, str):
+                        return True, string_list_from_value(value)
+                    if isinstance(value, list) and all(isinstance(item, str) for item in value):
+                        return True, [item.strip() for item in value if item.strip()]
+                elif revenue and isinstance(value, bool):
+                    return True, "yes" if value else "no"
+                elif isinstance(value, str):
+                    return True, value.strip()
+        return False, None
+
+    draft = dict(saved_fields)
+    for key, aliases in {
+        "brandName": ("brandName", "brand_name"),
+        "companyContext": ("companyContext", "company_context"),
+        "companyLinkedInUrl": ("companyLinkedInUrl", "company_linkedin_url"),
+        "competitors": ("competitors", "competitorDomains", "competitor_domains"),
+        "seedKeywords": ("seedKeywords", "seed_keywords", "positiveKeywords", "positive_keywords"),
+    }.items():
+        provided, value = submitted(
+            context_sources, aliases, is_list=key in {"competitors", "seedKeywords"}
+        )
+        if provided:
+            draft[key] = normalize_company_linkedin_url(value) if key == "companyLinkedInUrl" else value
+
+    profile_fields = dict(saved_fields.get("profileFields") or {})
+    for key, aliases in {
+        "shortDescription": ("shortDescription", "short_description"),
+        "problemSolved": ("problemSolved", "problem_solved"),
+        "stage": ("stage",),
+        "organizationKind": ("organizationKind", "organization_kind"),
+        "hasRevenue": ("hasRevenue", "has_revenue"),
+        "notes": ("notes",),
+        "abn": ("abn",),
+        "acn": ("acn",),
+    }.items():
+        provided, value = submitted(profile_sources, aliases, revenue=key == "hasRevenue")
+        if provided:
+            profile_fields[key] = value
+    draft["profileFields"] = profile_fields
+    return draft
+
+
 def _run_mapping(value):
     return value if isinstance(value, dict) else {}
 
@@ -14551,7 +14621,7 @@ class VibeMarketingAutofillView(APIView):
                     name=company_name,
                     domain=domain,
                     location=str(request.data.get("location") or "").strip(),
-                    abn=str(request.data.get("abn") or "").strip() or None,
+                    abn=None if draft_mode else str(request.data.get("abn") or "").strip() or None,
                 )
                 profile.active_company = company
                 profile.save(update_fields=["active_company", "updated_at"])
@@ -14564,7 +14634,7 @@ class VibeMarketingAutofillView(APIView):
                 company.domain = domain
                 if "location" in request.data:
                     company.location = str(request.data.get("location") or "").strip()
-                if "abn" in request.data:
+                if not draft_mode and "abn" in request.data:
                     set_unverified_company_abn(company, request.data.get("abn"))
                 company.save(
                     update_fields=[
@@ -14584,10 +14654,11 @@ class VibeMarketingAutofillView(APIView):
             if organization is None:
                 return Response({"detail": "Website domain is required for autofill."}, status=status.HTTP_400_BAD_REQUEST)
 
-            try:
-                apply_shared_startup_details(user=request.user, company=company, data=request.data)
-            except ValueError as exc:
-                return Response({"detail": str(exc), "field": "companyLinkedInUrl"}, status=status.HTTP_400_BAD_REQUEST)
+            if not draft_mode:
+                try:
+                    apply_shared_startup_details(user=request.user, company=company, data=request.data)
+                except ValueError as exc:
+                    return Response({"detail": str(exc), "field": "companyLinkedInUrl"}, status=status.HTTP_400_BAD_REQUEST)
 
         context = get_founder_company_context(
             request.user, company_id=company.id, persist_active=True
@@ -14614,15 +14685,20 @@ class VibeMarketingAutofillView(APIView):
             "companyLinkedInUrl": organization.company_linkedin_url,
             "profileFields": profile_fields,
         }
+        if draft_mode:
+            try:
+                existing_fields = _autofill_draft_existing_fields(existing_fields, request.data)
+            except ValueError as exc:
+                return Response({"detail": str(exc), "field": "companyLinkedInUrl"}, status=status.HTTP_400_BAD_REQUEST)
         payload = {
             "domain": organization.domain,
             "company_id": str(company.id),
             "organization_id": str(organization.id),
             "company_name": company.name,
-            "brand_name": config.brand_name or organization.name,
-            "company_linkedin_url": organization.company_linkedin_url,
+            "brand_name": existing_fields["brandName"],
+            "company_linkedin_url": existing_fields["companyLinkedInUrl"],
             "location": company.location,
-            "abn": company.abn,
+            "abn": existing_fields["profileFields"].get("abn", company.abn) if draft_mode else company.abn,
             "existing_fields": existing_fields,
             "startup_profile": startup_profile,
             "editorial_catalog_version": ((config.pillar_strategy or {}).get("editorial_catalog") or {}).get("version", 0),
