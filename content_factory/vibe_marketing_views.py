@@ -68,6 +68,7 @@ from content_factory.authors import (
 )
 from content_factory.contract import CONTENT_FACTORY_REQUEST_SOURCE
 from content_factory.baseline_metrics import baseline_display_metrics
+from content_factory.baseline_ai_evidence import ai_answer_metadata, compact_ai_providers
 from content_factory.dispatch_binding import bind_dispatch_token_run, run_is_dispatch_token_keyed
 from content_factory.editorial_catalog import article_brief_for_catalog
 from content_factory.google_baseline import collect_verified_google_metrics, google_baseline_connection_status
@@ -7254,6 +7255,10 @@ _COMPACT_BASELINE_METRIC_FIELDS = {
     "providerCount",
     "requestedProviderCount",
     "countryCode",
+    "requestedCountryCode",
+    "measurementType",
+    "evidenceVersion",
+    "locationTargeting",
     "promptSetId",
     "authorityScore",
     "backlinks",
@@ -7269,26 +7274,15 @@ _COMPACT_BASELINE_METRIC_FIELDS = {
     "aiQuotes",
 }
 
-# Per-provider fields the AI-visibility card renders; drops prompt transcripts,
-# which dominate the payload size.
-_COMPACT_BASELINE_PROVIDER_FIELDS = (
-    "key", "label", "score", "status", "source", "methodVersion", "message", "reasonCode",
-    "responseCount", "mentionCount", "citationCount", "requestedCount", "modelName", "countryCode",
-)
-
-
 def _compact_baseline_metric(metric):
     if not isinstance(metric, dict):
         return metric
     compacted = {key: value for key, value in metric.items() if key in _COMPACT_BASELINE_METRIC_FIELDS}
-    providers = compacted.get("providers")
-    if isinstance(providers, list):
-        compacted["providers"] = [
-            {field: provider.get(field) for field in _COMPACT_BASELINE_PROVIDER_FIELDS if field in provider}
-            if isinstance(provider, dict)
-            else provider
-            for provider in providers
-        ]
+    if "providers" in compacted:
+        compacted["providers"] = compact_ai_providers(compacted["providers"])
+        for field in ("countryCode", "requestedCountryCode", "measurementType", "evidenceVersion", "locationTargeting"):
+            compacted.pop(field, None)
+        compacted.update(ai_answer_metadata(metric))
     return compacted
 
 
@@ -7464,6 +7458,76 @@ def _autofill_profile_fields_payload(startup_profile):
         "organizationKind": str(startup_profile.get("organization_kind") or ""),
         "abn": "",
     }
+
+
+def _autofill_draft_existing_fields(saved_fields, data):
+    """Forward whitelisted local form values without writing saved profiles.
+
+    Explicit empty strings/lists describe the local draft, not a request to
+    clear saved data. Top-level answers take precedence over nested context.
+    Author and audience fields remain the saved values managed elsewhere.
+    """
+    containers = [
+        value for key in ("existing_fields", "existingFields")
+        if isinstance(value := data.get(key), dict)
+    ]
+    context_sources = [*containers, data]
+    profile_sources = []
+    for container in [*containers, data]:
+        profile_sources.append(container)
+        profile_sources.extend(
+            value for key in ("profile_fields", "profileFields")
+            if isinstance(value := container.get(key), dict)
+        )
+    profile_sources.append(data)
+
+    def submitted(sources, aliases, *, is_list=False, revenue=False):
+        for source in reversed(sources):
+            for alias in aliases:
+                if alias not in source:
+                    continue
+                value = source[alias]
+                if is_list:
+                    if isinstance(value, str):
+                        return True, string_list_from_value(value)
+                    if isinstance(value, list) and all(isinstance(item, str) for item in value):
+                        return True, [item.strip() for item in value if item.strip()]
+                elif revenue and isinstance(value, bool):
+                    return True, "yes" if value else "no"
+                elif isinstance(value, str):
+                    return True, value.strip()
+        return False, None
+
+    draft = dict(saved_fields)
+    for key, aliases in {
+        "brandName": ("brandName", "brand_name"),
+        "companyContext": ("companyContext", "company_context"),
+        "companyLinkedInUrl": ("companyLinkedInUrl", "company_linkedin_url"),
+        "competitors": ("competitors", "competitorDomains", "competitor_domains"),
+        "seedKeywords": ("seedKeywords", "seed_keywords", "positiveKeywords", "positive_keywords"),
+    }.items():
+        provided, value = submitted(
+            context_sources, aliases, is_list=key in {"competitors", "seedKeywords"}
+        )
+        if provided:
+            draft[key] = normalize_company_linkedin_url(value) if key == "companyLinkedInUrl" else value
+
+    profile_fields = dict(saved_fields.get("profileFields") or {})
+    for key, aliases in {
+        "shortDescription": ("shortDescription", "short_description"),
+        "problemSolved": ("problemSolved", "problem_solved"),
+        "stage": ("stage",),
+        "organizationKind": ("organizationKind", "organization_kind"),
+        "hasRevenue": ("hasRevenue", "has_revenue"),
+        "notes": ("notes",),
+        "abn": ("abn",),
+        "acn": ("acn",),
+    }.items():
+        provided, value = submitted(profile_sources, aliases, revenue=key == "hasRevenue")
+        if provided:
+            profile_fields[key] = value
+    draft["profileFields"] = profile_fields
+    return draft
 
 
 def _run_mapping(value):
@@ -13224,8 +13288,13 @@ def _autofill_start_payload(run):
     }
 
 
-def _autofill_start_response(run, *, reused_active_run=False):
+def _autofill_start_response(run, *, reused_active_run=False, research_company_id=None):
     payload = _autofill_start_payload(run)
+    saved_request = run.run_request if isinstance(getattr(run, "run_request", None), dict) else {}
+    company_id = str(research_company_id or saved_request.get("company_id") or "").strip()
+    if company_id:
+        payload["companyId"] = company_id
+        payload["researchCompanyId"] = company_id
     logger.info(
         "vibe_marketing_autofill_start_response run_id=%s domain=%s workflow=%s status=%s reused_active_run=%s has_error=%s",
         run.run_id,
@@ -14463,10 +14532,16 @@ class VibeMarketingAutofillView(APIView):
 
         company_name = str(request.data.get("company_name") or request.data.get("companyName") or "").strip()
         domain = normalize_company_domain(request.data.get("domain"))
+        draft_mode = _request_flag(request, "draft_mode", "draftMode")
         if not company_name:
             return Response({"detail": "Company name is required for autofill."}, status=status.HTTP_400_BAD_REQUEST)
         if not domain:
             return Response({"detail": "Website domain is required for autofill."}, status=status.HTTP_400_BAD_REQUEST)
+        if draft_mode and not str(request.data.get("location") or "").strip():
+            return Response(
+                {"detail": "Startup location is required to draft your profile.", "field": "location"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         if not (
             getattr(request.user, "is_staff", False) or getattr(request.user, "is_superuser", False)
         ) and not domain_is_available_to(request.user, domain):
@@ -14540,7 +14615,7 @@ class VibeMarketingAutofillView(APIView):
                     name=company_name,
                     domain=domain,
                     location=str(request.data.get("location") or "").strip(),
-                    abn=str(request.data.get("abn") or "").strip() or None,
+                    abn=None if draft_mode else str(request.data.get("abn") or "").strip() or None,
                 )
                 profile.active_company = company
                 profile.save(update_fields=["active_company", "updated_at"])
@@ -14553,7 +14628,7 @@ class VibeMarketingAutofillView(APIView):
                 company.domain = domain
                 if "location" in request.data:
                     company.location = str(request.data.get("location") or "").strip()
-                if "abn" in request.data:
+                if not draft_mode and "abn" in request.data:
                     set_unverified_company_abn(company, request.data.get("abn"))
                 company.save(
                     update_fields=[
@@ -14573,10 +14648,11 @@ class VibeMarketingAutofillView(APIView):
             if organization is None:
                 return Response({"detail": "Website domain is required for autofill."}, status=status.HTTP_400_BAD_REQUEST)
 
-            try:
-                apply_shared_startup_details(user=request.user, company=company, data=request.data)
-            except ValueError as exc:
-                return Response({"detail": str(exc), "field": "companyLinkedInUrl"}, status=status.HTTP_400_BAD_REQUEST)
+            if not draft_mode:
+                try:
+                    apply_shared_startup_details(user=request.user, company=company, data=request.data)
+                except ValueError as exc:
+                    return Response({"detail": str(exc), "field": "companyLinkedInUrl"}, status=status.HTTP_400_BAD_REQUEST)
 
         context = get_founder_company_context(
             request.user, company_id=company.id, persist_active=True
@@ -14587,7 +14663,9 @@ class VibeMarketingAutofillView(APIView):
         actor_id = founder_actor_id_for_user(request.user)
         active_run = _active_startup_autofill_run_for_domain(organization.domain)
         if active_run is not None:
-            return _autofill_start_response(active_run, reused_active_run=True)
+            return _autofill_start_response(
+                active_run, reused_active_run=True, research_company_id=company.id
+            )
 
         startup_profile = _autofill_startup_profile_payload(organization)
         profile_fields = _autofill_profile_fields_payload(startup_profile)
@@ -14601,15 +14679,20 @@ class VibeMarketingAutofillView(APIView):
             "companyLinkedInUrl": organization.company_linkedin_url,
             "profileFields": profile_fields,
         }
+        if draft_mode:
+            try:
+                existing_fields = _autofill_draft_existing_fields(existing_fields, request.data)
+            except ValueError as exc:
+                return Response({"detail": str(exc), "field": "companyLinkedInUrl"}, status=status.HTTP_400_BAD_REQUEST)
         payload = {
             "domain": organization.domain,
             "company_id": str(company.id),
             "organization_id": str(organization.id),
             "company_name": company.name,
-            "brand_name": config.brand_name or organization.name,
-            "company_linkedin_url": organization.company_linkedin_url,
+            "brand_name": existing_fields["brandName"],
+            "company_linkedin_url": existing_fields["companyLinkedInUrl"],
             "location": company.location,
-            "abn": company.abn,
+            "abn": existing_fields["profileFields"].get("abn", company.abn) if draft_mode else company.abn,
             "existing_fields": existing_fields,
             "startup_profile": startup_profile,
             "editorial_catalog_version": ((config.pillar_strategy or {}).get("editorial_catalog") or {}).get("version", 0),
@@ -14624,6 +14707,10 @@ class VibeMarketingAutofillView(APIView):
             "requested_by_slack_user_id": actor_id,
             "request_source": CONTENT_FACTORY_REQUEST_SOURCE,
         }
+        if draft_mode:
+            # Profile drafts use the worker's faster evidence-grounded pass.
+            # Generated answers remain reviewable client drafts until Save.
+            payload["draft_mode"] = True
         _mark_roo_points_gate_authorized(
             payload,
             domain=organization.domain,
@@ -14637,7 +14724,9 @@ class VibeMarketingAutofillView(APIView):
             config=config,
             payload=payload,
         )
-        return _autofill_start_response(run, reused_active_run=False)
+        return _autofill_start_response(
+            run, reused_active_run=False, research_company_id=company.id
+        )
 
 
 def _baseline_published_articles(organization, *, limit=8):
