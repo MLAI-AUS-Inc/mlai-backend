@@ -30,7 +30,7 @@ def object_schema(properties, required):
     return {"type": "object", "properties": properties, "required": required, "additionalProperties": False}
 
 
-COMPANY = {"type": "string", "description": "Startup company ID from list_startups."}
+COMPANY = {"type": "string", "format": "uuid", "description": "Startup company UUID from list_startups."}
 MONTH = {"type": "string", "pattern": r"^\d{4}-\d{2}$", "description": "Calendar reporting month YYYY-MM."}
 TOOLS = [
     {"name": "list_startups", "title": "List authorised startups", "description": "List startups this account has explicitly authorised this agent to access.",

@@ -8,6 +8,7 @@ from datetime import date, timedelta
 from types import SimpleNamespace as Obj
 from unittest.mock import MagicMock, patch
 from urllib.parse import parse_qs, urlsplit
+from uuid import UUID
 
 from django.core.cache import cache
 from django.test import SimpleTestCase, override_settings
@@ -27,8 +28,12 @@ SETTINGS = {
 }
 
 
+COMPANY_ID = "04d89807-5884-4b0e-83cc-311abf13b648"
+OTHER_COMPANY_ID = "7e399ce7-8d85-4970-ad8e-aa13bc3b028c"
+
+
 def grant(**changes):
-    return {"id": "grant", "user_id": 7, "auth_version": 3, "session_id": "session", "company_id": "9",
+    return {"id": "grant", "user_id": 7, "auth_version": 3, "session_id": "session", "company_id": COMPANY_ID,
         "client_id": "client", "clientName": "Claude", "scopes": sorted(config.SCOPES), "resource": config.mcp_url(),
         "redirectOrigin": "https://claude.ai", "createdAt": timezone.now().isoformat(), "expiresAt": int(time.time()) + 3600, "revoked": False, **changes}
 
@@ -139,7 +144,7 @@ class McpProtocolTests(SimpleTestCase):
     def test_read_scope_rechecked_before_tool_call(self):
         with patch.object(tools, "valid_grant", side_effect=PermissionDenied("revoked scope")), patch.object(tools, "company_for") as company:
             with self.assertRaises(PermissionDenied):
-                tools.call_tool(principal(), "get_monthly_update_brief", {"companyId": "9", "month": "2026-09"})
+                tools.call_tool(principal(), "get_monthly_update_brief", {"companyId": COMPANY_ID, "month": "2026-09"})
         company.assert_not_called()
 
     def test_tool_errors_are_mcp_results(self):
@@ -193,8 +198,8 @@ class OAuthTests(SimpleTestCase):
             client = oauth.register_client({"redirect_uris": self.client["redirect_uris"]})
             query = {**self.query, "client_id": client["client_id"]}
             intent = oauth.create_intent(query)
-            with patch.object(oauth, "company_for", return_value=Obj(pk=9)), patch.object(oauth, "_valid_session", return_value=True), patch.object(oauth, "_validate_device_owner"):
-                callback = oauth.approve_intent(intent["requestId"], user=user, session=session, company_id="9", approve=True)
+            with patch.object(oauth, "company_for", return_value=Obj(pk=UUID(COMPANY_ID))), patch.object(oauth, "_valid_session", return_value=True), patch.object(oauth, "_validate_device_owner"):
+                callback = oauth.approve_intent(intent["requestId"], user=user, session=session, company_id=COMPANY_ID, approve=True)
             code = parse_qs(urlsplit(callback).query)["code"][0]
             grant_id = cache.get(oauth.key("code", code))["grant_id"]
             value = cache.get(oauth.key("grant", grant_id))
@@ -238,8 +243,8 @@ class OAuthTests(SimpleTestCase):
         intent = oauth.create_intent(self.query)
         user = Obj(pk=7, auth_version=3)
         session = Obj(pk="session", user_id=7)
-        with patch.object(oauth, "company_for", return_value=Obj(pk=9)), patch.object(oauth, "_valid_session", return_value=True), patch.object(oauth, "_validate_device_owner"):
-            url = oauth.approve_intent(intent["requestId"], user=user, session=session, company_id="9", approve=True)
+        with patch.object(oauth, "company_for", return_value=Obj(pk=UUID(COMPANY_ID))), patch.object(oauth, "_valid_session", return_value=True), patch.object(oauth, "_validate_device_owner"):
+            url = oauth.approve_intent(intent["requestId"], user=user, session=session, company_id=COMPANY_ID, approve=True)
         query = parse_qs(urlsplit(url).query)
         self.assertEqual(query["iss"], [config.public_base()])
         self.assertEqual(query["state"], ["opaque-client-state"])
@@ -334,11 +339,54 @@ class OAuthTests(SimpleTestCase):
         with patch.object(oauth.VibeRaisingCompany, "objects") as companies:
             companies.select_related.return_value.filter.return_value.first.return_value = None
             with self.assertRaises(PermissionDenied):
-                oauth.company_for(principal().user, "9")
+                oauth.company_for(principal().user, COMPANY_ID)
             self.assertEqual(companies.select_related.return_value.filter.call_args.kwargs["profile__user"].pk, 7)
             companies.reset_mock()
             with self.assertRaises(PermissionDenied):
-                oauth.company_for(principal().user, "10", grant())
+                oauth.company_for(principal().user, OTHER_COMPANY_ID, grant())
+            companies.select_related.assert_not_called()
+
+    def test_model_uuid_company_approval_and_tool_round_trip(self):
+        from organizations.models import Organization
+        company = oauth.VibeRaisingCompany(id=UUID(COMPANY_ID), name="Synthetic reviewer startup",
+            organization=Organization(pk=8, name="Synthetic reviewer startup", domain="review-fixture.invalid"))
+        intent = oauth.create_intent(self.query)
+        user = Obj(pk=7, auth_version=3, is_active=True)
+        session = Obj(pk="session", user_id=7)
+        with patch.object(oauth.VibeRaisingCompany, "objects") as companies, patch.object(oauth, "_valid_session", return_value=True), patch.object(oauth, "_validate_device_owner"):
+            companies.select_related.return_value.filter.return_value.first.return_value = company
+            callback = oauth.approve_intent(intent["requestId"], user=user, session=session,
+                company_id=COMPANY_ID.upper(), approve=True)
+            companies.select_related.return_value.filter.assert_called_with(pk=UUID(COMPANY_ID), profile__user=user)
+            code = parse_qs(urlsplit(callback).query)["code"][0]
+            grant_id = cache.get(oauth.key("code", code))["grant_id"]
+            saved_grant = cache.get(oauth.key("grant", grant_id))
+            self.assertEqual(saved_grant["company_id"], COMPANY_ID)
+            self.assertEqual(cache.get(oauth.key("index", f"{user.pk}:{COMPANY_ID}")), [grant_id])
+            with patch.object(oauth, "get_user_model") as users, patch.object(oauth.CommunityChatAccountSession, "objects") as sessions, patch.object(oauth, "require_community_access"):
+                users.return_value.objects.filter.return_value.first.return_value = user
+                sessions.select_related.return_value.filter.return_value.first.return_value = session
+                value = oauth.valid_grant(grant_id)
+                self.assertEqual(oauth.grants_for(user, COMPANY_ID.upper())[0]["id"], grant_id)
+                self.assertEqual(tools.call_tool(value, "list_startups", {}),
+                    {"startups": [{"id": COMPANY_ID, "name": company.name}]})
+                with patch.object(tools.StartupProfile, "objects") as profiles:
+                    profiles.filter.return_value.first.return_value = Obj(reporting_timezone="Australia/Melbourne", short_description="Fictional test material", stage="Idea")
+                    brief = tools.call_tool(value, "get_monthly_update_brief", {"companyId": COMPANY_ID.upper(), "month": "2026-09"})
+                self.assertEqual(brief["companyId"], COMPANY_ID)
+                self.assertEqual(brief["reportingPeriod"]["timezone"], "Australia/Melbourne")
+                with patch.object(tools.MonthlyUpdateDraft, "objects") as drafts:
+                    draft = Obj(pk=10, month=date(2026, 9, 1), status="draft", current_revision=Obj(pk=5, content_hash="revision", structured_memo={}), published_revision_id=None)
+                    drafts.select_related.return_value.filter.return_value.first.return_value = draft
+                    status = tools.call_tool(value, "get_draft_status", {"companyId": COMPANY_ID, "updateId": 10})
+                self.assertEqual(status["companyId"], COMPANY_ID)
+                self.assertEqual(parse_qs(urlsplit(status["reviewUrl"]).query)["company_id"], [COMPANY_ID])
+
+    def test_invalid_company_ids_are_denied_before_ownership_query(self):
+        with patch.object(oauth.VibeRaisingCompany, "objects") as companies:
+            for company_id in (None, True, False, 9, "9", "not-a-uuid", {}, [], "04d89807-5884-4b0e-83cc-311abf13b648/other"):
+                with self.subTest(company_id=company_id), self.assertRaises(PermissionDenied):
+                    oauth.company_for(principal().user, company_id)
             companies.select_related.assert_not_called()
 
     def test_revoked_scope_rejected(self):
@@ -353,7 +401,7 @@ class OAuthTests(SimpleTestCase):
 @override_settings(**SETTINGS)
 class NarrativeTests(SimpleTestCase):
     def arguments(self, **changes):
-        return {"companyId": "9", "month": "2026-09", "requestId": "8ec75f46-340a-46fb-9aa2-b99e8974d99b", "narrative": {"summary": "We shipped a launch."}, **changes}
+        return {"companyId": COMPANY_ID, "month": "2026-09", "requestId": "8ec75f46-340a-46fb-9aa2-b99e8974d99b", "narrative": {"summary": "We shipped a launch."}, **changes}
 
     def test_financial_fields_and_nested_injection_rejected(self):
         for value in (self.arguments(metrics={"revenue": "999"}), self.arguments(financialSnapshot={}), self.arguments(publish=True),
@@ -372,7 +420,7 @@ class NarrativeTests(SimpleTestCase):
         tools.validate_save(self.arguments(sources=[{"provider": "gmail", "title": "Launch", "url": "https://mail.google.com/mail/u/0/#inbox/1", "occurredAt": "2026-09-01T12:00:00Z"}]))
 
     def save_with_mocks(self, draft, arguments):
-        company = Obj(pk=9, name="Example", organization=Obj(pk=8))
+        company = Obj(pk=UUID(COMPANY_ID), name="Example", organization=Obj(pk=8))
         with ExitStack() as stack:
             stack.enter_context(patch("django.contrib.auth.get_user_model"))
             stack.enter_context(patch.object(tools, "valid_grant", return_value=principal()))
@@ -502,18 +550,18 @@ class ConnectionConfigurationTests(SimpleTestCase):
     def test_disconnect_epoch_revokes_hidden_grants_with_a_stuck_index_lock(self):
         cache.clear()
         cache.set(oauth.key("grant", "hidden"), grant(id="hidden"))
-        cache.set(oauth.key("lock-index", "7:9"), "crashed-process")
-        oauth.disconnect_company(Obj(pk=7), "9")
+        cache.set(oauth.key("lock-index", f"7:{COMPANY_ID}"), "crashed-process")
+        oauth.disconnect_company(Obj(pk=7), COMPANY_ID.upper())
         with self.assertRaises(AuthenticationFailed):
             oauth.valid_grant("hidden")
 
     def test_disconnect_revokes_only_selected_company_grants(self):
         cache.clear()
-        cache.set(oauth.key("index", "7:9"), ["own", "foreign"])
+        cache.set(oauth.key("index", f"7:{COMPANY_ID}"), ["own", "foreign"])
         cache.set(oauth.key("grant", "own"), grant(id="own"))
-        cache.set(oauth.key("grant", "foreign"), grant(id="foreign", company_id="10"))
+        cache.set(oauth.key("grant", "foreign"), grant(id="foreign", company_id=OTHER_COMPANY_ID))
         view = agent_connections.AgentConnectionView()
-        view.company = Obj(pk=9)
+        view.company = Obj(pk=UUID(COMPANY_ID))
         response = view.delete(Obj(user=Obj(pk=7)))
         self.assertTrue(response.data["disconnected"])
         self.assertTrue(cache.get(oauth.key("grant", "own"))["revoked"])
