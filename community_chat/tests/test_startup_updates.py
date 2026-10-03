@@ -20,6 +20,7 @@ from community_chat.startups.connections import SALT, connect_browser, consume_t
 from community_chat.startups.presentation import PUBLIC_FIELDS, update_payload
 from startup_updates import revisions
 from startup_updates.review_policy import manual_validation
+from vibe_raising.views import _serialize_monthly_update
 from vibe_raising.serializers import VibeRaisingMonthlyUpdateUpsertSerializer
 
 
@@ -115,65 +116,61 @@ class StartupFacadeTests(SimpleTestCase):
         with patch('community_chat.startups.presentation._serialize_monthly_update', return_value=dto):
             result = update_payload(draft, published=True, community=True)
         self.assertEqual(set(result), set(PUBLIC_FIELDS) | {'startup'})
-        self.assertEqual(result['metricEvidence'], {'revenue': {'quality': 'founder_asserted'}})
-        self.assertEqual(result['metrics']['revenue'], '0')
+        self.assertEqual(result['metricEvidence'], {})
+        self.assertEqual(result['metrics'], {})
+        self.assertEqual(result['displayConfig'], {'snippetMetricKeys': [], 'fullMetricKeys': []})
+        self.assertIsNone(result['financialChart'])
 
-    def _metric_review_fixture(self, config=None):
+    def test_existing_community_publication_discloses_only_relative_totals(self):
         memo = {'kpi_snapshot': [
-            {'metric_key': 'revenue', 'label': 'Revenue', 'unit': 'AUD'},
-            {'metric_key': 'monthlyCosts', 'label': 'Costs', 'unit': 'AUD'},
+            {'metric_key': 'revenue', 'value': 'AUD 4,000', 'unit': 'AUD', 'quality': 'source_reported', 'source_provider': 'xero'},
+            {'metric_key': 'monthlyCosts', 'value': 'AUD 2,000', 'unit': 'AUD', 'quality': 'source_reported', 'source_provider': 'xero'},
+            {'metric_key': 'venue_invoice', 'value': 'AUD 960', 'unit': 'AUD', 'quality': 'source_reported'},
         ]}
-        if config is not None:
-            memo['display_config'] = config
-        revision = Obj(structured_memo=memo, validation={}, snapshot=Obj(payload={}))
-        draft = Obj(current_revision=revision, published_revision=revision,
-            current_revision_id=1, published_revision_id=None, organization=Obj(name='Acme'))
-        dto = {
-            'metrics': {'revenue': 'AUD 100', 'monthlyCosts': 'AUD 50'},
-            'metricEvidence': {'revenue': {'quality': 'verified'}, 'monthlyCosts': {'quality': 'verified'}},
-            'metricHistory': {'revenue': [100], 'monthlyCosts': [50]},
-            'financialSnapshot': {'cash': 900},
-            'conciseAnalysis': {'grossMargin': 50},
-            'progressCharts': [{'series': [{'points': [{'value': 50}]}]}],
-            'evidenceSnapshot': {'metrics': [{'key': 'revenue', 'display_value': 'AUD 100'}]},
-        }
-        return draft, dto
-
-    def test_empty_metric_selection_hides_figures_in_existing_chat_review(self):
-        draft, dto = self._metric_review_fixture({'full_metric_keys': [], 'snippet_metric_keys': []})
+        dto = {'metrics': {'revenue': 'AUD 4,000', 'monthlyCosts': 'AUD 2,000', 'venue_invoice': 'AUD 960'},
+            'metricEvidence': {item['metric_key']: item.copy() for item in memo['kpi_snapshot']},
+            'displayConfig': {'fullMetricKeys': ['revenue', 'monthlyCosts', 'venue_invoice']},
+            'summary': 'We launched. Revenue was AUD 4,000. We hosted 100 members.',
+            'highlights': '- We delivered the event.\n- Venue invoice: $960.\n- Volunteers helped.',
+            'evidenceSnapshot': {'private': 'AUD 960'}, 'financialSnapshot': {'private': 960}}
+        revision = Obj(structured_memo=memo)
+        draft = Obj(published_revision=revision, organization=Obj(name='Acme'))
         with patch('community_chat.startups.presentation._serialize_monthly_update', return_value=dto):
-            review = update_payload(draft)
-            community = update_payload(draft, community=True)
-        for field in ('metrics', 'metricEvidence', 'metricHistory'):
-            self.assertEqual(review[field], {})
-        for field in ('financialSnapshot', 'conciseAnalysis', 'progressCharts'):
-            self.assertIsNone(review[field])
-        self.assertEqual(community['metrics'], {})
-        self.assertEqual(community['metricEvidence'], {})
-        self.assertNotIn('evidenceSnapshot', community)
-        # The saved revision and owner-only evidence still support editing.
-        self.assertEqual(draft.current_revision.structured_memo['kpi_snapshot'][0]['metric_key'], 'revenue')
-        self.assertEqual(review['evidenceSnapshot']['metrics'][0]['display_value'], 'AUD 100')
+            result = update_payload(draft, published=True, community=True)
+        self.assertEqual(result['financialChart'], {'revenue': 1.0, 'costs': 0.5})
+        self.assertEqual(result['summary'], 'We launched. We hosted 100 members.')
+        self.assertEqual(result['highlights'], '- We delivered the event.\n- Volunteers helped.')
+        self.assertEqual(result['metrics'], {})
+        self.assertEqual(result['metricEvidence'], {})
+        self.assertNotIn('financialSnapshot', result)
+        self.assertNotIn('evidenceSnapshot', result)
+        self.assertEqual(memo['kpi_snapshot'][2]['value'], 'AUD 960')
 
-    def test_selected_metric_is_the_only_chat_review_figure(self):
-        draft, dto = self._metric_review_fixture({'fullMetricKeys': ['revenue'], 'snippetMetricKeys': []})
+    def test_owner_keeps_metrics_and_private_source_evidence(self):
+        dto = {'metrics': {'venue_invoice': 'AUD 960'}, 'metricEvidence': {}, 'evidenceSnapshot': {'private': 960}}
+        revision = Obj(structured_memo={}, validation={'groundedness_status': 'passed'}, snapshot=Obj(payload={}))
+        draft = Obj(current_revision=revision, current_revision_id=1, published_revision_id=None, organization=Obj(name='Acme'))
         with patch('community_chat.startups.presentation._serialize_monthly_update', return_value=dto):
-            review = update_payload(draft)
-        self.assertEqual(review['metrics'], {'revenue': 'AUD 100'})
-        self.assertEqual(set(review['metricEvidence']), {'revenue'})
-        self.assertEqual(review['metricHistory'], {'revenue': [100]})
-        self.assertIsNone(review['financialSnapshot'])
-        self.assertIsNone(review['progressCharts'])
+            result = update_payload(draft)
+        self.assertEqual(result['metrics'], {'venue_invoice': 'AUD 960'})
+        self.assertEqual(result['evidenceSnapshot'], {'private': 960})
 
-    def test_missing_metric_selection_keeps_legacy_chat_display(self):
-        draft, dto = self._metric_review_fixture()
-        with patch('community_chat.startups.presentation._serialize_monthly_update', return_value=dto):
-            review = update_payload(draft)
-        self.assertEqual(review['metrics'], {'revenue': 'AUD 100', 'monthlyCosts': 'AUD 50'})
-        self.assertEqual(set(review['metricEvidence']), {'revenue', 'monthlyCosts'})
-        self.assertEqual(review['metricHistory'], {'revenue': [100], 'monthlyCosts': [50]})
-        self.assertEqual(review['financialSnapshot'], {'cash': 900})
-        self.assertEqual(review['progressCharts'], [{'series': [{'points': [{'value': 50}]}]}])
+    def test_shared_founder_serializer_does_not_return_amounts(self):
+        memo = {'_audience_visibility': ['community'], 'highlights': ['We launched.', 'Venue invoice: AUD 960.'],
+            'kpi_snapshot': [{'metric_key': 'venue_invoice', 'value': 'AUD 960', 'unit': 'AUD', 'quality': 'source_reported'}]}
+        revision = Obj(pk=2, number=1, content_hash='exact-hash', snapshot_id=3, snapshot=Obj(payload={'private': 960}),
+            structured_memo=memo, validation={'groundedness_status': 'passed'}, audience='community')
+        draft = Obj(id=1, published_revision_id=2, current_revision_id=2, published_revision=revision, current_revision=revision,
+            month=date(2026, 3, 1), update_date=None, month_sequence=1, creation_key=None, updated_at=timezone.now(), published_at=timezone.now(), status='ready')
+        with patch('startup_updates.update_identity.identity_payload', return_value={'updateTitle': 'March update'}):
+            shared = _serialize_monthly_update(draft, published=True)
+        self.assertEqual(shared['metrics'], {})
+        self.assertEqual(shared['highlights'], 'We launched.')
+        self.assertNotIn('financialSnapshot', shared)
+        self.assertNotIn('evidenceSnapshot', shared)
+        with patch('startup_updates.update_identity.identity_payload', return_value={'updateTitle': 'March update'}):
+            owner = _serialize_monthly_update(draft, published=True, shared=False)
+        self.assertEqual(owner['metrics'], {'venue_invoice': 'AUD 960'})
 
 
 class ReviewPolicyTests(SimpleTestCase):

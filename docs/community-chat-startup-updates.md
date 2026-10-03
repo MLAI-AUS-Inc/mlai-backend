@@ -254,3 +254,9 @@ OAuth resume, one-startup consent, private narrative imports and revocation. It
 keeps Xero/Stripe financial evidence server-owned and requires founder review.
 See [the MCP contract and rollout guide](valley-mcp.md). Local implementation is
 not evidence of deployment or a ChatGPT directory approval.
+
+## Financial disclosure policy
+
+- Community responses disclose financial information only as `financialChart: {revenue, costs}`: two relative values between 0 and 1, normalized to the larger aggregate total (both are 0 when both totals are 0). The chart requires selected canonical `revenue` and `monthlyCosts`/`monthly_costs` values with compatible currency, provenance and accepted quality. Missing, conflicting, partial or unverified totals produce no chart. Amounts, currency strings, custom metrics and financial line items are never returned: `metrics` and `metricEvidence` are empty and both `displayConfig` lists are empty. Raw evidence, attachment metadata, storage paths, provider identifiers, exact financial charts and private analysis stay private.
+- The same projection applies to community previews and existing approved publications without changing their immutable revisions. Monetary sentences/bullets are removed from the shared narrative while the rest of the story remains. Owner responses retain original metrics and evidence for saving and private business health. Community views of the founder update API also omit exact metric history.
+- Generated narratives cannot contain monetary amounts or financial metric placeholders, including revenue/cost placeholders that would resolve to exact amounts. Nonfinancial metric placeholders remain supported. The generation-result boundary rejects such output before a revision is saved; private frozen evidence remains complete.

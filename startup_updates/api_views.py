@@ -4266,7 +4266,7 @@ class StartupUpdateDraftResultsView(APIView):
                     memo = dict(item["structured_memo"])
                     from startup_updates.evidence_contract import content_hash, validate_generated_metric_claims
                     try:
-                        validate_generated_metric_claims(memo)
+                        validate_generated_metric_claims(memo, snapshot.payload.get("metrics"))
                     except ValueError as exc:
                         from rest_framework.exceptions import ValidationError
                         raise ValidationError(str(exc))
