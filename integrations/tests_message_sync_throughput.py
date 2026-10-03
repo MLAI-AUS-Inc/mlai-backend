@@ -109,6 +109,9 @@ class ThroughputTelemetryTests(SimpleTestCase):
     def setUp(self):
         cache.clear()
         self.scope = telemetry.scope_key('ATEST', 'TTEST', 'conversations.history')
+        sink = patch.object(telemetry, '_enqueue', side_effect=lambda delta: telemetry._write_batch([delta]))
+        sink.start()
+        self.addCleanup(sink.stop)
 
     def snapshot(self):
         return telemetry.snapshot([self.scope], minutes=1, now=120)['scopes'][self.scope]
@@ -256,7 +259,9 @@ class InitialImportPriorityTests(SlackDmIoAuthorityFixture, TransactionTestCase)
     def test_command_reports_observed_scope_counters_without_source_identifiers(self):
         BridgeApiBudget.objects.create(app_id='ATEST', workspace_id='TSECRET', method='conversations.history', next_admitted_at=timezone.now())
         scope = telemetry.scope_key('ATEST', 'TSECRET', 'conversations.history')
-        with patch.object(telemetry, 'time', return_value=61):
+        with patch.object(telemetry, 'time', return_value=61), patch.object(
+            telemetry, '_enqueue', side_effect=lambda delta: telemetry._write_batch([delta])
+        ):
             telemetry.record(scope, 'admitted', 20)
         output = StringIO()
         with patch.object(telemetry, 'time', return_value=120):
@@ -265,3 +270,11 @@ class InitialImportPriorityTests(SlackDmIoAuthorityFixture, TransactionTestCase)
         self.assertNotIn('TSECRET', payload)
         row = json.loads(payload)['provider_throughput']['measured_scopes'][0]
         self.assertEqual(row['requests_per_minute'], 20)
+        output = StringIO()
+        with patch.object(telemetry, 'time', return_value=120):
+            call_command('message_sync_status', window_minutes=2, stdout=output)
+        partial = json.loads(output.getvalue())['provider_throughput']
+        self.assertEqual(partial['observed_minutes'][scope], 1)
+        self.assertIsNone(partial['measured_scopes'][0]['requests_per_minute'])
+        self.assertIsNone(partial['measured_scopes'][0]['configured_budget_used_percent'])
+        self.assertIn('best_effort', partial['reliability'])

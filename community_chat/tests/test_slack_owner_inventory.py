@@ -363,15 +363,16 @@ class SlackOwnerInventoryTests(SlackDmIoAuthorityFixture, TransactionTestCase):
         cache.set(key, {"available": True, "is_unread": True, "unread_count": 3,
                         "has_personal_mention": False, "fetched_at": time.time()}, timeout=86400)
         page = conversation_page(self.user, public_key=self.owner_key, unread_only=True)
-        self.assertEqual(page["items"], [])
+        self.assertEqual([item["slack_conversation_id"] for item in page["items"]], ["DARCHIVED"])
+        self.assertFalse(page["items"][0]["openable"])
         self.assertEqual(page["read_state_coverage"]["eligible_count"], 1)
-        self.assertEqual(page["read_state_coverage"]["fresh_unread_count"], 0)
+        self.assertEqual(page["read_state_coverage"]["fresh_unread_count"], 1)
         self.assertEqual(
             [target.slack_id for target in source_read_targets(self.grant, self.authority, [])],
             ["DARCHIVED"],
         )
 
-    def test_unopenable_unreads_are_filtered_before_paging_and_counting(self):
+    def test_unopenable_unreads_remain_visible_before_paging_and_counting(self):
         self.consent()
         record_private_page(self.authority, [
             self.row("DOLD", age=90 * 86400), self.row("DCLOSED", is_open=False),
@@ -383,13 +384,14 @@ class SlackOwnerInventoryTests(SlackDmIoAuthorityFixture, TransactionTestCase):
                 "has_personal_mention": False, "fetched_at": time.time(),
             }, timeout=86400)
         first = conversation_page(self.user, public_key=self.owner_key, unread_only=True, limit=1)
-        self.assertEqual([item["slack_conversation_id"] for item in first["items"]], ["DFIRST"])
-        self.assertTrue(first["items"][0]["openable"])
-        self.assertEqual(first["read_state_coverage"]["fresh_unread_count"], 2)
+        self.assertEqual([item["slack_conversation_id"] for item in first["items"]], ["DOLD"])
+        self.assertFalse(first["items"][0]["openable"])
+        self.assertEqual(first["read_state_coverage"]["fresh_unread_count"], 4)
         second = conversation_page(self.user, public_key=self.owner_key, unread_only=True,
                                    limit=1, cursor=first["next_cursor"])
-        self.assertEqual([item["slack_conversation_id"] for item in second["items"]], ["DNEXT"])
-        self.assertIsNone(second["next_cursor"])
+        self.assertEqual([item["slack_conversation_id"] for item in second["items"]], ["DCLOSED"])
+        self.assertFalse(second["items"][0]["openable"])
+        self.assertIsNotNone(second["next_cursor"])
 
     def test_source_read_targets_cover_unprovisioned_and_dedupe_routed(self):
         self.consent()

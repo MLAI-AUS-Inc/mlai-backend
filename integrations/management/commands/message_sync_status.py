@@ -25,6 +25,8 @@ class Command(BaseCommand):
         parser.add_argument('--max-heartbeat-age', type=int, default=180)
         parser.add_argument('--window-minutes', type=int, default=5,
                             help='Completed minute buckets for provider throughput (1–15).')
+        parser.add_argument('--window-hours', type=int, default=None,
+                            help='Use retained completed hour buckets instead (1–168).')
 
     def handle(self, *args, **options):
         enabled = bool(getattr(settings, 'MESSAGE_SYNC_ENABLED', False))
@@ -32,6 +34,8 @@ class Command(BaseCommand):
             raise CommandError('--max-heartbeat-age must be positive')
         if not 1 <= options['window_minutes'] <= 15:
             raise CommandError('--window-minutes must be between 1 and 15')
+        if options['window_hours'] is not None and not 1 <= options['window_hours'] <= 168:
+            raise CommandError('--window-hours must be between 1 and 168')
         if options['check'] and not enabled:
             self.stdout.write(json.dumps({'enabled': False}))
             return
@@ -63,19 +67,25 @@ class Command(BaseCommand):
         budgets = list(BridgeApiBudget.objects.filter(method__in=telemetry.METHODS))
         scopes = {telemetry.scope_key(b.app_id, b.workspace_id, b.method): b for b in budgets}
         try:
-            throughput = telemetry.snapshot(scopes, minutes=options['window_minutes'])
+            hours = options['window_hours']
+            throughput = (telemetry.hourly_snapshot(scopes, hours=hours) if hours is not None
+                          else telemetry.snapshot(scopes, minutes=options['window_minutes']))
+            minutes = hours * 60 if hours is not None else options['window_minutes']
             rows = []
             for scope, counters in throughput.pop('scopes').items():
                 if counters is None:
                     continue
                 budget = scopes[scope]
                 allowance = 60 / provider_interval(budget.method)
+                complete_window = (throughput['observed_hours'][scope] == hours if hours is not None
+                                   else throughput['observed_minutes'][scope] == minutes)
                 rows.append({'scope': scope, 'method': budget.method, **counters,
-                             'requests_per_minute': round(counters['admitted'] / options['window_minutes'], 2),
+                             'requests_per_minute': round(counters['admitted'] / minutes, 2) if complete_window else None,
                              'configured_requests_per_minute': allowance,
-                             'configured_budget_used_percent': round(100 * counters['admitted'] / (options['window_minutes'] * allowance), 1),
+                             'configured_budget_used_percent': round(100 * counters['admitted'] / (minutes * allowance), 1) if complete_window else None,
                              'mean_request_ms': round(counters['request_ms'] / counters['finished']) if counters['finished'] else None})
-            throughput.update(available=True, measured_scopes=rows)
+            throughput.update(available=True, measured_scopes=rows,
+                              reliability='best_effort_lower_bound; observed buckets do not prove all requests were recorded')
         except Exception:
             throughput = {'available': False}
         result = {
@@ -87,7 +97,7 @@ class Command(BaseCommand):
             'due_jobs': list(due.values('kind').annotate(count=Count('id'), oldest_due_at=Min('due_at')).order_by('kind')),
             'expired_job_leases': BridgeSyncJob.objects.filter(lease_expires_at__lte=now).count(),
             'source_coverage': list(BridgeSyncState.objects.values('status').annotate(count=Count('id'), oldest_scan=Min('last_successful_scan_at')).order_by('status')),
-            'provider_cooldowns': list(BridgeApiBudget.objects.filter(cooldown_until__gt=now).values('method').annotate(count=Count('id'), until=Max('cooldown_until')).order_by('method')),
+            'provider_cooldowns': list(BridgeApiBudget.objects.filter(cooldown_until__gt=now).exclude(method__startswith='priority:').values('method').annotate(count=Count('id'), until=Max('cooldown_until')).order_by('method')),
             'public_delivery': delivery(CommunityBridgeDelivery.objects.filter(target_platform='buzz')),
             'private_delivery': delivery(SlackDmMirrorDelivery.objects.all()),
             'workers': list(BridgeWorkerHeartbeat.objects.values(

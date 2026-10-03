@@ -1,7 +1,7 @@
 """Versioned proof that a complete private window reached the current room."""
 from decimal import Decimal
 
-from django.db.models import Case, CharField, DecimalField, F, IntegerField, OuterRef, Q, Value, When
+from django.db.models import Case, CharField, DecimalField, F, IntegerField, OuterRef, Q, Subquery, Value, When
 from django.db import connections
 from django.db.models.functions import Cast, Concat, Greatest, Least, Replace
 from django.db.models.fields.json import KeyTextTransform, KeyTransform
@@ -38,7 +38,7 @@ def current_coverage_rows():
     )
 
 
-def recent_conversations(query, *, now=None):
+def recent_conversations(query, *, now=None, include_owner_inventory=False):
     """Restrict repair candidates to known activity inside their selected window."""
     from integrations.services.slack_dm_mirror import _history_days
     now = now or timezone.now()
@@ -51,7 +51,32 @@ def recent_conversations(query, *, now=None):
         source = Func(F('grant__connection__provider_metadata'),
                       Concat(Value('$."mlai_chat_conversations_v1"."'), F('slack_conversation_id'), Value('"."latest_message_ts"')),
                       function='json_extract', output_field=CharField())
-    query = query.annotate(coverage_source_ts=source).annotate(
+    query = query.annotate(coverage_source_ts=source)
+    activity_sources = []
+    if include_owner_inventory:
+        from integrations.models import SlackOwnerConversationInventory
+
+        # A newly observed unread can precede both delivery and legacy catalog
+        # hydration. This is only a recovery scheduling hint: the recovery
+        # worker still validates current Slack membership before provisioning.
+        inventory = SlackOwnerConversationInventory.objects.filter(
+            grant_id=OuterRef('grant_id'),
+            slack_conversation_id=OuterRef('slack_conversation_id'),
+            eligibility='eligible', kind__in=['im', 'mpim', 'private_channel'],
+        ).values('source_activity_ts')[:1]
+        query = query.annotate(coverage_inventory_ts=Subquery(inventory)).annotate(
+            coverage_inventory=Case(
+                When(coverage_inventory_ts__regex=r'^\d{10}(\.\d{1,6})?$',
+                     then=Cast('coverage_inventory_ts', decimal)),
+                default=Value(Decimal(0)), output_field=decimal,
+            ),
+        )
+        activity_sources.append(Case(
+            When(coverage_inventory__lte=int(now.timestamp()) + 300,
+                 then=F('coverage_inventory')),
+            default=Value(Decimal(0)), output_field=decimal,
+        ))
+    query = query.annotate(
         coverage_latest=Case(When(latest_synced_ts__regex=r'^\d{10}(\.\d{1,6})?$',
                                  then=Cast('latest_synced_ts', decimal)),
                              default=Value(Decimal(0)), output_field=decimal),
@@ -64,6 +89,7 @@ def recent_conversations(query, *, now=None):
     ).annotate(coverage_activity=Greatest(
         Case(When(coverage_latest__lte=int(now.timestamp())+300, then=F('coverage_latest')), default=Value(Decimal(0)), output_field=decimal),
         Case(When(coverage_source__lte=int(now.timestamp())+300, then=F('coverage_source')), default=Value(Decimal(0)), output_field=decimal),
+        *activity_sources,
     ))
     return query.filter(coverage_activity__gt=0).filter(
         Q(coverage_days=0) | Q(coverage_activity__gte=Value(int(now.timestamp())) - F('coverage_days') * Value(86400)),

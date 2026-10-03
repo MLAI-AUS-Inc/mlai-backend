@@ -63,11 +63,11 @@ class SlackInventoryOpenableTests(SimpleTestCase):
     def test_confirmed_ready_room_supersedes_previous_open_failure(self):
         self.assertTrue(self.item(mirror=True, ready=True, open_error="inventory_source_changed")["openable"])
 
-    def test_broken_import_waits_for_repair_before_reappearing_in_unreads(self):
+    def test_broken_import_waits_for_repair_before_it_can_open(self):
         self.assertFalse(self.item(mirror=True, mirror_status="error")["openable"])
         self.assertTrue(self.item(mirror=True, mirror_status="live")["openable"])
 
-    def test_page_and_summary_skip_blocked_rows_before_limit(self):
+    def test_page_and_summary_retain_known_unreads_before_mirrors_can_open(self):
         rows = [SimpleNamespace(
             pk=index, slack_conversation_id=f"D{index}", kind="im", eligibility="eligible",
             source_activity_ts="1800000000" if index == 1 else "1900000000",
@@ -103,21 +103,27 @@ class SlackInventoryOpenableTests(SimpleTestCase):
             ):
                 stack.enter_context(patch(f"{api.__name__}.{name}", **kwargs))
             first = api.conversation_page(object(), public_key="owner", unread_only=True, limit=1)
-            self.assertEqual([item["slack_conversation_id"] for item in first["items"]], ["D3"])
-            self.assertEqual(first["read_state_coverage"]["fresh_unread_count"], 2)
+            self.assertEqual([item["slack_conversation_id"] for item in first["items"]], ["D1"])
+            self.assertFalse(first["items"][0]["openable"])
+            self.assertEqual(first["read_state_coverage"]["fresh_unread_count"], 4)
+            self.assertEqual(first["read_revision"], 0)
+            self.assertEqual(first["read_state_coverage"]["pending_refresh_count"], 0)
+            self.assertIsNotNone(first["read_state_coverage"]["oldest_observed_at"])
             second = api.conversation_page(object(), public_key="owner", unread_only=True, limit=1, cursor=first["next_cursor"])
-            self.assertEqual([item["slack_conversation_id"] for item in second["items"]], ["D4"])
-            self.assertIsNone(second["next_cursor"])
+            self.assertEqual([item["slack_conversation_id"] for item in second["items"]], ["D2"])
+            self.assertFalse(second["items"][0]["openable"])
+            self.assertIsNotNone(second["next_cursor"])
             directory = api.conversation_page(object(), public_key="owner", limit=1)
             self.assertEqual(directory["items"][0]["slack_conversation_id"], "D1")
             self.assertFalse(directory["items"][0]["openable"])
-            self.assertEqual(directory["read_state_coverage"]["fresh_unread_count"], 2)
+            self.assertEqual(directory["read_state_coverage"]["fresh_unread_count"], 4)
             from integrations.services.slack_open_requests import KEY
             failure = {"epoch": "epoch", "until": 1900000120, "error": "inventory_history_consent_required"}
             connection.sync_cursor[KEY] = {"7:D3": failure}
             blocked = api.conversation_page(object(), public_key="owner", unread_only=True)
-            self.assertEqual([item["slack_conversation_id"] for item in blocked["items"]], ["D4"])
-            self.assertEqual(blocked["read_state_coverage"]["fresh_unread_count"], 1)
+            self.assertEqual([item["slack_conversation_id"] for item in blocked["items"]], ["D1", "D2", "D3", "D4"])
+            self.assertFalse(blocked["items"][2]["openable"])
+            self.assertEqual(blocked["read_state_coverage"]["fresh_unread_count"], 4)
             for replacement in (
                 {"7:D3": {**failure, "epoch": "previous-consent"}},
                 {"8:D3": failure},
@@ -125,4 +131,28 @@ class SlackInventoryOpenableTests(SimpleTestCase):
             ):
                 connection.sync_cursor[KEY] = replacement
                 restored = api.conversation_page(object(), public_key="owner", unread_only=True)
-                self.assertEqual([item["slack_conversation_id"] for item in restored["items"]], ["D3", "D4"])
+                self.assertEqual([item["slack_conversation_id"] for item in restored["items"]], ["D1", "D2", "D3", "D4"])
+
+    def test_inventory_and_mapped_snapshot_share_revision_and_read_frontiers(self):
+        value = api._read_state({
+            "available": True, "is_unread": True, "unread_count": 2,
+            "fetched_at": 1900000000, "revision": 123,
+            "latest_ts": "1899999999.000002", "last_read": "1899999000.000001",
+            "confirmed_at": 1899999500,
+        }, 1900000060)
+        self.assertEqual(value["revision"], 123)
+        self.assertEqual(value["latest_ts"], "1899999999.000002")
+        self.assertEqual(value["last_read"], "1899999000.000001")
+        self.assertEqual(value["confirmed_at"], 1899999500)
+        self.assertEqual(value["availability"], "available")
+
+    def test_invalid_inventory_versions_never_become_a_confirmed_read(self):
+        value = api._read_state({
+            "available": True, "is_unread": True, "fetched_at": 1900000000,
+            "revision": True, "confirmed_at": float("nan"),
+            "latest_ts": "nan", "last_read": "-1",
+        }, 1900000060)
+        self.assertEqual(value["revision"], 0)
+        self.assertEqual(value["confirmed_at"], 0)
+        self.assertEqual(value["latest_ts"], "")
+        self.assertEqual(value["last_read"], "")

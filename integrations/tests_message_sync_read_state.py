@@ -97,7 +97,10 @@ class BackgroundReadStateTests(SlackDmIoAuthorityFixture, TransactionTestCase):
 
     def test_source_id_cursor_survives_restart_and_directory_reordering(self):
         seen = []
-        with self.source(lambda grant, authority, target: seen.append(target.slack_id)):
+        def observe(grant, authority, target):
+            seen.append(target.slack_id)
+            return {'available': True, 'is_unread': False, 'fetched_at': timezone.now().timestamp()}
+        with self.source(observe):
             self.assertEqual(sync.refresh_read_state_once(), 1)
             self.release_due()
             self.assertEqual(sync.refresh_read_state_once(), 1)
@@ -121,7 +124,10 @@ class BackgroundReadStateTests(SlackDmIoAuthorityFixture, TransactionTestCase):
             self.assertEqual(sync.refresh_read_state_once(), 0)
         self.release_due()
         seen=[]
-        with self.source(lambda grant, authority, target: seen.append(target.slack_id)):
+        def observe(grant, authority, target):
+            seen.append(target.slack_id)
+            return {'available': True, 'is_unread': False, 'fetched_at': timezone.now().timestamp()}
+        with self.source(observe):
             self.assertEqual(sync.refresh_read_state_once(), 1)
         self.assertEqual(seen, ['D2'])
 

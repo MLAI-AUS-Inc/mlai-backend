@@ -19,10 +19,92 @@ With durable message sync enabled, a private archive scan owns initial thread
 pagination. Its independent thread-repair job waits rather than fetching the
 same replies concurrently or immediately repeating them. Full-window private
 reconciliation runs daily. Continuous source events, recent-head repair,
-independent thread repair, and membership/consent verification retain their
-existing cadence. A completed old-root thread scan with no recent messages
+independent thread repair, and membership/consent verification continue. A completed old-root thread scan with no recent messages
 waits a day before rechecking; an old root with recent replies retains hourly
 repair. Legacy mode retains hourly full-window reconciliation.
+
+## Adaptive recent-history repair
+
+The first recent-history scan still covers the preceding day within the selected
+history window. After a complete, unrestricted source scan, the next routine
+scan starts five minutes before that scan's upper bound. This watermark moves
+only when every page has committed under the existing lease and authority
+checks; partial, failed and source-limited scans cannot advance it. A worker
+returning after an outage scans the full gap within consent, including gaps
+longer than one day. Mapping, participant audience or consent-window changes
+invalidate the old incremental boundary. No message body is stored in this
+checkpoint, and it never determines the user's read cursor.
+
+The default retains the one-minute repair cadence. Only when
+`MESSAGE_SYNC_QUIET_HEAD_BACKOFF_ENABLED=true` do successive quiet scans wait
+two, four, eight and then at most fifteen minutes. Verified source events and
+authorized foreground hints wake existing mirrors without replacing active
+leases, pagination, owner fairness or provider retry delays. Event delivery and
+the existing explicit conversation-open refresh remain independent of this
+background timer. Every six hours the head scan includes the preceding day
+again to catch older edits and known thread roots; existing full-window archive
+and thread reconciliation remain in place.
+
+The fifteen-minute cap is deliberately conservative until callback reliability
+and recovery latency have been measured. It reduces idle work but does not
+prove capacity for every hundreds-user workload. The true repair interval can
+still exceed its target when shared method budgets are saturated.
+
+## Foreground service and measurement
+
+The existing app/workspace/method budget remains the only provider allowance.
+Recent foreground demand limits competing background admission to half that
+allowance; idle background work can borrow the whole allowance. Provider
+`Retry-After` always wins, and adding replicas cannot multiply capacity.
+Foreground requests are not capped by this preference: continuous foreground
+saturation can still delay background completion. The import-share estimate is
+a planning assumption, not a guaranteed reservation.
+
+Open-chat head checks, new activity/read hints, and discovery needed to validate
+staged live private messages retain foreground priority. Opening a conversation
+does not promote its entire archive or thread-repair queue. Public wakeups are
+optional, bounded and skip busy state rows so they do not hold up cached reads.
+Client startup, rendering, subscription limits and consent-selected history are
+unchanged by these scheduling changes.
+
+`message_sync_status --window-minutes 15` reports recent provider counters;
+`--window-hours 24` uses completed hourly buckets retained for seven days.
+Telemetry is best effort and excludes bodies, tokens and user identifiers.
+Missing bucket coverage is unknown, not zero use. Combine provider counters
+with oldest queue age, actual delivery latency, worker progress, host memory,
+database pool waits and device startup/scrolling measurements.
+
+`message_sync_capacity --owners 300 --mirrors-per-owner 20
+--repair-interval-minutes 15` models a lower bound of 400 history requests/minute
+before active chats, thread repair and imports. This exceeds a configured
+50/minute allowance. Adaptive repair and more server RAM alone therefore do not
+establish a 300-user capacity guarantee; measure actual mirrored conversations,
+event coverage and competing traffic before expanding onboarding.
+
+## Rollout and rollback
+
+1. Deploy with quiet backoff disabled. Record comparable baseline and candidate
+   foreground delivery/startup latency, queue ages and provider deferrals.
+2. Verify public, DM, group-DM and private-channel callbacks for the correct
+   app/workspace, including edits, replies, reconnect recovery and revocation.
+   An aggregate healthy heartbeat is not evidence of every callback path.
+3. Use the isolated relay capacity harness in `mlai-chat/perf/RELAY_CAPACITY.md`
+   for 300/500 synthetic-client fan-out and private-audience checks. Its offline
+   tests are not measured relay capacity. Compare the actual mobile experience
+   separately; require no material startup, scrolling or delivery regression.
+4. Enable quiet backoff for a monitored release only after those gates pass.
+   Watch for lost/duplicate delivery, rising backlog and source recovery delay.
+   Stop expanding onboarding if the offered request rate exceeds the budget.
+5. Disable `MESSAGE_SYNC_QUIET_HEAD_BACKOFF_ENABLED` to restore the one-minute
+   scheduling policy. Already scheduled quiet jobs may take up to fifteen
+   minutes to run once; active hints continue to wake eligible jobs. Reverting
+   the release restores the previous scheduler without a schema migration.
+
+Do not shorten a user's selected history window to meet a throughput target.
+For eventual migration away from Slack, serve native chat through the existing
+relay and reduce bridge obligations as users explicitly disconnect. Separate
+bridges or Slack plan upgrades do not create more allowance for the same
+app/workspace/method.
 
 ## Capacity and the one-to-two-hour objective
 

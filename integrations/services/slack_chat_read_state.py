@@ -36,6 +36,11 @@ from integrations.services.slack_dm_mirror import (
 )
 from integrations.services.message_sync.scheduler import BudgetDeferred
 
+# Bound reuse even when Slack's Retry-After is much longer. The resumed history
+# call rechecks token/grant authority; source classification is re-read at this
+# deadline instead of allowing a long cooldown to retain membership metadata.
+MAX_PENDING_INFO_SECONDS = 120
+
 
 @dataclass
 class ReadTarget:
@@ -49,6 +54,7 @@ class ReadTarget:
     # Owner-directory activity can prioritize an unknown cursor without
     # treating the conversation as unread or importing its message history.
     source_activity_ts: str = ""
+    source_inventory: object = None
 
     @property
     def read_scope(self):
@@ -205,19 +211,22 @@ def _targets_for_keys(grant, keys, *, recent_only=False, coverage=None, include_
                 conversation.slack_conversation_id,
                 kind,
                 conversation=conversation,
+                source_activity_ts=conversation.latest_synced_ts,
             )
         )
     # The owner's user token separately verifies Slack membership for public
     # bridge channels. A bot's read position is never used for a member.
     public = [
         ReadTarget(
-            c.destination_channel_id, c.slack_channel_id, "public_channel", bridge=c
+            c.destination_channel_id, c.slack_channel_id, "public_channel", bridge=c,
+            source_activity_ts=getattr(getattr(c, "sync_state", None), "latest_source_activity", ""),
         )
         for c in CommunityBridgeChannel.objects.filter(
             slack_workspace_id=grant.slack_workspace_id,
             destination_platform="buzz",
             enabled=True,
         )
+        .select_related("sync_state")
         .exclude(destination_channel_id="")
         .order_by("slack_channel_id")
     ]
@@ -305,7 +314,9 @@ def refresh_target(grant, authority, target):
         pending = cache.get(pending_key)
         receipt = cache.get(key + ":receipt")
     observed_at = time.time()
-    if pending and observed_at - pending["fetched_at"] < 30:
+    if (pending and pending.get("receipt") == receipt
+            and 0 <= observed_at - pending["fetched_at"] < MAX_PENDING_INFO_SECONDS
+            and observed_at < pending.get("expires_at", pending["fetched_at"] + 30)):
         details, observed_at = pending["details"], pending["fetched_at"]
     else:
         try:
@@ -346,7 +357,13 @@ def refresh_target(grant, authority, target):
                 with transaction.atomic():
                     _lock_slack_grant_api_authority(authority, required_scopes={target.read_scope})
                     if cache.get(key + ":receipt") == receipt:
-                        cache.set(pending_key, {"details": safe, "fetched_at": observed_at}, timeout=30)
+                        now = time.time()
+                        expires_at = min(observed_at + MAX_PENDING_INFO_SECONDS,
+                                         now + max(30, getattr(exc, "retry_after", 0) + 30))
+                        if expires_at > now:
+                            cache.set(pending_key, {"details": safe, "fetched_at": observed_at,
+                                                   "receipt": receipt, "expires_at": expires_at},
+                                      timeout=max(1, int(expires_at - now)))
                 raise
         snapshot = read_state_snapshot(details, kind=target.kind, owner_id=grant.slack_user_id, messages=messages)
         if snapshot is not None:
@@ -364,12 +381,16 @@ def refresh_target(grant, authority, target):
         cached = {"available": snapshot is not None, **(snapshot or {})}
     cached.setdefault("fetched_at", observed_at)
     with transaction.atomic():
-        _, connection = _lock_slack_grant_api_authority(authority, required_scopes={target.read_scope})
+        locked_grant, connection = _lock_slack_grant_api_authority(authority, required_scopes={target.read_scope})
         if cache.get(key + ":receipt") != receipt:
             # A confirmed read overtook this source request; retry a fresh read.
             raise BudgetDeferred(1)
         from .message_sync.read_snapshots import publish_snapshot
         cached = publish_snapshot(connection, key, cached)
+        if cached.get("available") is True and target.source_inventory is not None:
+            from .slack_owner_inventory import record_read_activity_locked
+            record_read_activity_locked(locked_grant, connection, authority, target,
+                                        cached.get("latest_ts"))
         cache.delete(pending_key)
     return cached
 

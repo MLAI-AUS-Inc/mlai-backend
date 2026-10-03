@@ -8,6 +8,7 @@ from django.utils import timezone
 from .history import next_checkpoint, page_messages, timestamp
 from .coverage import record_page
 from .history_policy import history_page_limit
+from .head_repair import finish_head, head_scope, observe_head, prepare_head
 from .scheduler import LeaseLost, finish_job, locked_job, schedule_job
 
 
@@ -49,13 +50,16 @@ def private_page(lease, state):
     authority = dm._capture_slack_grant_api_authority(grant)
     scopes = dm._history_required_scopes(conversation.slack_conversation_id, kind=dm.conversation_kind(conversation))
     checkpoint = dict(lease.checkpoint)
-    checkpoint.setdefault("scan_id", uuid.uuid4().hex)
     checkpoint.setdefault("upper_bound", f"{int(time.time())}.999999")
     upper_seconds = timestamp(checkpoint["upper_bound"])[0]
     history_days = dm._grant_history_days(grant)
     scan_floor = max(0, upper_seconds - history_days * 86400) if history_days else 0
     if lease.kind == "head":
-        scan_floor = max(scan_floor, upper_seconds - 86400)
+        checkpoint = prepare_head(state, checkpoint, now=time.time(), consent_floor=scan_floor,
+                                  scope=head_scope(state, conversation=conversation, history_days=history_days))
+    # A consent/audience change can discard the old head pagination entirely.
+    # Mint the epoch only after that reset so the new scan has a valid fence.
+    checkpoint.setdefault("scan_id", uuid.uuid4().hex)
     checkpoint.setdefault("oldest", f"{scan_floor}.000000")
     # Consent reduction invalidates the original request/cursor. Normal time
     # passage keeps pagination stable and is enforced independently at writes.
@@ -133,6 +137,10 @@ def private_page(lease, state):
         updated = record_page(sync_state, lease.kind, updated,
                               {"messages": observed, "is_limited": response.get("is_limited")}, complete=complete)
         delay = 60 if lease.kind == "head" else 3600
+        if lease.kind == "head":
+            updated = observe_head(updated, observed)
+            delay = finish_head(sync_state, updated, complete=complete, now=time.time(),
+                                scope=head_scope(sync_state, conversation=current, history_days=current_days))
         if lease.kind == "thread" and timestamp(lease.source_object_key)[0] < current_floor and not updated["observed_messages"]:
             delay = 86400
         finish_job(lease, checkpoint={} if complete else updated,
