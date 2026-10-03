@@ -4,6 +4,42 @@ Local implementation: 10–11 September 2026. This document describes code, not 
 
 The founder frontend calls the authenticated `/api/v1/vibe-marketing` views. The backend owns organisation access, billing, approved editorial policy and dispatch. Content Factory owns model selection, research, repository changes, previews and release checks.
 
+## Startup profile drafts (3 October 2026)
+
+`POST /api/v1/vibe-marketing/autofill` accepts `draftMode: true` (or
+`draft_mode: true`) for the startup-details form. This mode requires company
+name, website domain and startup location, then forwards `draft_mode: true` to
+Content Factory for its faster profile-drafting workflow. Requests without the
+flag retain the existing deep research workflow and optional-location contract.
+The worker owns model routing; this endpoint does not accept caller-selected
+model or reasoning settings. The 202 start response includes `companyId` and
+`researchCompanyId` for the exact company researched, including active-run
+reuse, so a new-startup draft stays scoped when the client polls or saves.
+
+Research saves name, website and location under the existing owner/company/domain
+guards so a new startup has a stable research and Save identity. In draft mode,
+submitted lower profile answers, LinkedIn URL, competitors, seed keywords and
+ABN remain local research context; starting research does not write those answers
+to the saved startup profile, organisation or content configuration. The endpoint
+whitelists top-level and `existingFields` / `existing_fields` context, including
+`profileFields` / `profile_fields`, and accepts camel/snake field aliases.
+Top-level values take precedence. Explicit empty strings and lists describe the
+local draft without clearing saved data; null or malformed values do not replace
+saved context. Founder and audience fields retain their saved values and cannot
+be overridden by draft context. Requests without draft mode retain the legacy
+submitted-field persistence behavior, including explicit clears. The dispatch
+retains `persist: false`: generated
+`profileFields`, LinkedIn URL, seed keywords and competitors are returned for
+editing, with the normal Save action required to persist those answers. This
+introduces no schema or migration change.
+
+The focused no-database checks execute the actual view and shared profile-save
+function with synthetic ownership/persistence/queue seams. They verify draft
+mode forwarding, legacy behavior, required basics, local context forwarding,
+draft-only edits and clears, new company identity and saved-field preservation;
+they do not establish real authentication, SQL locking or worker/model latency.
+Run `.venv/bin/python -m unittest content_factory.tests_startup_profile_draft_unit`.
+
 ## Editorial catalog
 
 The service-authenticated `GET /api/content-factory/org/config/?domain=…` response includes:

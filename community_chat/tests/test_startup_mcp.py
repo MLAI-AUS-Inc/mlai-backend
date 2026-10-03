@@ -8,10 +8,12 @@ from datetime import date, timedelta
 from types import SimpleNamespace as Obj
 from unittest.mock import MagicMock, patch
 from urllib.parse import parse_qs, urlsplit
+from uuid import UUID
 
 from django.core.cache import cache
 from django.test import SimpleTestCase, override_settings
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 from rest_framework.exceptions import AuthenticationFailed, PermissionDenied, ValidationError
 from rest_framework.test import APIRequestFactory
 
@@ -27,8 +29,12 @@ SETTINGS = {
 }
 
 
+COMPANY_ID = "04d89807-5884-4b0e-83cc-311abf13b648"
+OTHER_COMPANY_ID = "7e399ce7-8d85-4970-ad8e-aa13bc3b028c"
+
+
 def grant(**changes):
-    return {"id": "grant", "user_id": 7, "auth_version": 3, "session_id": "session", "company_id": "9",
+    return {"id": "grant", "user_id": 7, "auth_version": 3, "session_id": "session", "company_id": COMPANY_ID,
         "client_id": "client", "clientName": "Claude", "scopes": sorted(config.SCOPES), "resource": config.mcp_url(),
         "redirectOrigin": "https://claude.ai", "createdAt": timezone.now().isoformat(), "expiresAt": int(time.time()) + 3600, "revoked": False, **changes}
 
@@ -57,13 +63,31 @@ class DomainVerificationTests(SimpleTestCase):
         for token in ("", None, "short", "a" * 257, "first_token_0123456789\nsecond_token_0123456789",
                       '["synthetic_token_0123456789"]', {"token": "synthetic_token_0123456789"}):
             with self.subTest(token=token), override_settings(VALLEY_MCP_DOMAIN_VERIFICATION_TOKEN=token):
-                response = self.view(self.factory.get("/.well-known/openai-apps-challenge"))
+                response = self.view(self.factory.get("/.well-known/openai-apps-challenge", HTTP_ACCEPT="text/plain"))
             self.assertEqual(response.status_code, 404)
             self.assertEqual(response.content, b"")
 
     def test_challenge_cannot_be_updated_by_http(self):
-        response = self.view(self.factory.post("/.well-known/openai-apps-challenge", {}, format="json"))
+        response = self.view(self.factory.post("/.well-known/openai-apps-challenge", {}, format="json", HTTP_ACCEPT="text/plain"))
         self.assertEqual(response.status_code, 405)
+
+    def test_accept_headers_do_not_change_plaintext_ownership_proof(self):
+        token = "synthetic_openai_domain_token_0123456789"
+        for accept in ("text/plain", "*/*", "text/html", "application/json", "application/octet-stream"):
+            with self.subTest(accept=accept), override_settings(VALLEY_MCP_DOMAIN_VERIFICATION_TOKEN=token,
+                    VALLEY_MCP_ENABLED=False, COMMUNITY_CHAT_STARTUP_UPDATES_ENABLED=False):
+                response = self.view(self.factory.get("/.well-known/openai-apps-challenge", HTTP_ACCEPT=accept))
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.content, token.encode())
+                self.assertEqual(response["Content-Type"], "text/plain; charset=utf-8")
+                self.assertEqual(response["Cache-Control"], "no-store")
+                self.assertEqual(response["X-Content-Type-Options"], "nosniff")
+
+    def test_plaintext_proof_still_enforces_throttle(self):
+        view = views.DomainVerificationView.as_view()
+        with patch.object(views.McpRateThrottle, "allow_request", return_value=False), patch.object(views.McpRateThrottle, "wait", return_value=1):
+            response = view(self.factory.get("/.well-known/openai-apps-challenge", HTTP_ACCEPT="text/plain"))
+        self.assertEqual(response.status_code, 429)
 
     def test_origin_root_challenge_route_is_registered(self):
         from django.urls import resolve
@@ -118,10 +142,25 @@ class McpProtocolTests(SimpleTestCase):
         self.assertEqual(response.status_code, 401)
         self.assertIn("/.well-known/oauth-protected-resource/mcp/valley", response["WWW-Authenticate"])
 
+    def test_stream_get_reaches_authentication_and_stateless_method_response(self):
+        request = self.factory.get("/mcp/valley", HTTP_ACCEPT="text/event-stream")
+        response = self.view(request)
+        self.assertEqual(response.status_code, 401)
+        self.assertIn("resource_metadata", response["WWW-Authenticate"])
+        request = self.factory.get("/mcp/valley", HTTP_ACCEPT="text/event-stream",
+            HTTP_AUTHORIZATION="Bearer valley_access_test")
+        with patch.object(oauth, "authenticate_token", return_value=principal()):
+            response = self.view(request)
+        self.assertEqual(response.status_code, 405)
+        self.assertEqual(response["Allow"], "POST")
+        request = self.factory.get("/mcp/valley", HTTP_ACCEPT="text/event-stream",
+            HTTP_ORIGIN="https://attacker.test", HTTP_AUTHORIZATION="Bearer valley_access_test")
+        self.assertEqual(self.view(request).status_code, 403)
+
     def test_read_scope_rechecked_before_tool_call(self):
         with patch.object(tools, "valid_grant", side_effect=PermissionDenied("revoked scope")), patch.object(tools, "company_for") as company:
             with self.assertRaises(PermissionDenied):
-                tools.call_tool(principal(), "get_monthly_update_brief", {"companyId": "9", "month": "2026-09"})
+                tools.call_tool(principal(), "get_monthly_update_brief", {"companyId": COMPANY_ID, "month": "2026-09"})
         company.assert_not_called()
 
     def test_tool_errors_are_mcp_results(self):
@@ -160,6 +199,80 @@ class OAuthTests(SimpleTestCase):
                 oauth.register_client({"redirect_uris": [callback]})
         oauth.register_client({"redirect_uris": ["http://localhost:3210/callback"]})
 
+    def test_cursor_registration_preserves_all_three_host_callbacks(self):
+        callbacks = [
+            "cursor://anysphere.cursor-mcp/oauth/callback",
+            "https://www.cursor.com/agents/mcp/oauth/callback",
+            "http://localhost:8787/callback",
+        ]
+        response = views.RegisterView.as_view(throttle_classes=())(APIRequestFactory().post(
+            "/mcp/oauth/register", {"client_name": "Cursor", "redirect_uris": callbacks,
+                "token_endpoint_auth_method": "none"}, format="json"))
+        self.assertEqual(response.status_code, 201)
+        client = json.loads(response.content)
+        self.assertEqual(client["redirect_uris"], callbacks)
+        self.assertEqual(oauth.client_for(client["client_id"])["redirect_uris"], callbacks)
+
+    def test_cursor_callbacks_preserve_pkce_resource_startup_and_scope_binding(self):
+        callbacks = [
+            "cursor://anysphere.cursor-mcp/oauth/callback",
+            "https://www.cursor.com/agents/mcp/oauth/callback",
+            "http://localhost:8787/callback",
+        ]
+        client = oauth.register_client({"client_name": "Cursor", "redirect_uris": callbacks})
+        user = Obj(pk=7, auth_version=3)
+        session = Obj(pk="session", user_id=7)
+        for callback in callbacks:
+            with self.subTest(callback=callback):
+                query = {**self.query, "client_id": client["client_id"], "redirect_uri": callback,
+                    "scope": "startup:brief:read"}
+                for changes in ({"code_challenge_method": "plain"}, {"scope": "finance:write"},
+                                {"resource": "https://attacker.test/mcp"}, {"redirect_uri": callback + "?other=1"}):
+                    with self.assertRaises(oauth.OAuthError):
+                        oauth.create_intent({**query, **changes})
+                intent = oauth.create_intent(query)
+                self.assertEqual(intent["scopes"], ["startup:brief:read"])
+                self.assertEqual(intent["resource"], config.mcp_url())
+                with patch.object(oauth, "company_for", return_value=Obj(pk=UUID(COMPANY_ID))), patch.object(oauth, "_valid_session", return_value=True), patch.object(oauth, "_validate_device_owner"):
+                    result = oauth.approve_intent(intent["requestId"], user=user, session=session,
+                        company_id=COMPANY_ID, approve=True)
+                self.assertTrue(result.startswith(callback + "?"))
+                returned = parse_qs(urlsplit(result).query)
+                self.assertEqual(returned["state"], [query["state"]])
+                self.assertEqual(returned["iss"], [config.public_base()])
+                code = returned["code"][0]
+                record = cache.get(oauth.key("code", code))
+                saved_grant = cache.get(oauth.key("grant", record["grant_id"]))
+                self.assertEqual(saved_grant["company_id"], COMPANY_ID)
+                self.assertEqual(saved_grant["client_id"], client["client_id"])
+                self.assertEqual(saved_grant["scopes"], ["startup:brief:read"])
+                exchange = {"grant_type": "authorization_code", "code": code, "client_id": client["client_id"],
+                    "redirect_uri": callback, "resource": config.mcp_url(), "code_verifier": self.verifier}
+                with patch.object(oauth, "valid_grant", return_value=oauth.Principal(user=user, grant=saved_grant)):
+                    for changes in ({"code_verifier": "z" * 43}, {"redirect_uri": callbacks[(callbacks.index(callback) + 1) % 3]},
+                                    {"resource": "https://attacker.test/mcp"}):
+                        with self.assertRaises(oauth.OAuthError):
+                            oauth.token_exchange({**exchange, **changes})
+                    self.assertEqual(oauth.token_exchange(exchange)["scope"], "startup:brief:read")
+                    with self.assertRaises(oauth.OAuthError):
+                        oauth.token_exchange(exchange)
+
+    def test_cursor_callback_exception_does_not_admit_other_native_urls(self):
+        for callback in (
+            "cursor://anysphere.cursor-deeplink/oauth/callback",
+            "cursor://anysphere.cursor-mcp/oauth/callback/",
+            "cursor://anysphere.cursor-mcp/other",
+            "cursor://anysphere.cursor-mcp/oauth/callback?next=https://attacker.test",
+            "cursor://anysphere.cursor-mcp/oauth/callback#fragment",
+            "cursor://user@anysphere.cursor-mcp/oauth/callback",
+            "cursor://anysphere.cursor-mcp:8787/oauth/callback",
+            "cursor://anysphere.cursor-mcp.attacker.test/oauth/callback",
+            "cursor://anysphere.cursor-mcp/oauth/%63allback",
+            "other://anysphere.cursor-mcp/oauth/callback",
+        ):
+            with self.subTest(callback=callback), self.assertRaises(oauth.OAuthError):
+                oauth.register_client({"redirect_uris": [callback]})
+
     def test_registration_rejects_malformed_grant_types_and_exposes_callback_origin(self):
         for grants in (3, [{}], "authorization_code"):
             with self.assertRaises(oauth.OAuthError):
@@ -175,8 +288,8 @@ class OAuthTests(SimpleTestCase):
             client = oauth.register_client({"redirect_uris": self.client["redirect_uris"]})
             query = {**self.query, "client_id": client["client_id"]}
             intent = oauth.create_intent(query)
-            with patch.object(oauth, "company_for", return_value=Obj(pk=9)), patch.object(oauth, "_valid_session", return_value=True), patch.object(oauth, "_validate_device_owner"):
-                callback = oauth.approve_intent(intent["requestId"], user=user, session=session, company_id="9", approve=True)
+            with patch.object(oauth, "company_for", return_value=Obj(pk=UUID(COMPANY_ID))), patch.object(oauth, "_valid_session", return_value=True), patch.object(oauth, "_validate_device_owner"):
+                callback = oauth.approve_intent(intent["requestId"], user=user, session=session, company_id=COMPANY_ID, approve=True)
             code = parse_qs(urlsplit(callback).query)["code"][0]
             grant_id = cache.get(oauth.key("code", code))["grant_id"]
             value = cache.get(oauth.key("grant", grant_id))
@@ -220,8 +333,8 @@ class OAuthTests(SimpleTestCase):
         intent = oauth.create_intent(self.query)
         user = Obj(pk=7, auth_version=3)
         session = Obj(pk="session", user_id=7)
-        with patch.object(oauth, "company_for", return_value=Obj(pk=9)), patch.object(oauth, "_valid_session", return_value=True), patch.object(oauth, "_validate_device_owner"):
-            url = oauth.approve_intent(intent["requestId"], user=user, session=session, company_id="9", approve=True)
+        with patch.object(oauth, "company_for", return_value=Obj(pk=UUID(COMPANY_ID))), patch.object(oauth, "_valid_session", return_value=True), patch.object(oauth, "_validate_device_owner"):
+            url = oauth.approve_intent(intent["requestId"], user=user, session=session, company_id=COMPANY_ID, approve=True)
         query = parse_qs(urlsplit(url).query)
         self.assertEqual(query["iss"], [config.public_base()])
         self.assertEqual(query["state"], ["opaque-client-state"])
@@ -316,11 +429,54 @@ class OAuthTests(SimpleTestCase):
         with patch.object(oauth.VibeRaisingCompany, "objects") as companies:
             companies.select_related.return_value.filter.return_value.first.return_value = None
             with self.assertRaises(PermissionDenied):
-                oauth.company_for(principal().user, "9")
+                oauth.company_for(principal().user, COMPANY_ID)
             self.assertEqual(companies.select_related.return_value.filter.call_args.kwargs["profile__user"].pk, 7)
             companies.reset_mock()
             with self.assertRaises(PermissionDenied):
-                oauth.company_for(principal().user, "10", grant())
+                oauth.company_for(principal().user, OTHER_COMPANY_ID, grant())
+            companies.select_related.assert_not_called()
+
+    def test_model_uuid_company_approval_and_tool_round_trip(self):
+        from organizations.models import Organization
+        company = oauth.VibeRaisingCompany(id=UUID(COMPANY_ID), name="Synthetic reviewer startup",
+            organization=Organization(pk=8, name="Synthetic reviewer startup", domain="review-fixture.invalid"))
+        intent = oauth.create_intent(self.query)
+        user = Obj(pk=7, auth_version=3, is_active=True)
+        session = Obj(pk="session", user_id=7)
+        with patch.object(oauth.VibeRaisingCompany, "objects") as companies, patch.object(oauth, "_valid_session", return_value=True), patch.object(oauth, "_validate_device_owner"):
+            companies.select_related.return_value.filter.return_value.first.return_value = company
+            callback = oauth.approve_intent(intent["requestId"], user=user, session=session,
+                company_id=COMPANY_ID.upper(), approve=True)
+            companies.select_related.return_value.filter.assert_called_with(pk=UUID(COMPANY_ID), profile__user=user)
+            code = parse_qs(urlsplit(callback).query)["code"][0]
+            grant_id = cache.get(oauth.key("code", code))["grant_id"]
+            saved_grant = cache.get(oauth.key("grant", grant_id))
+            self.assertEqual(saved_grant["company_id"], COMPANY_ID)
+            self.assertEqual(cache.get(oauth.key("index", f"{user.pk}:{COMPANY_ID}")), [grant_id])
+            with patch.object(oauth, "get_user_model") as users, patch.object(oauth.CommunityChatAccountSession, "objects") as sessions, patch.object(oauth, "require_community_access"):
+                users.return_value.objects.filter.return_value.first.return_value = user
+                sessions.select_related.return_value.filter.return_value.first.return_value = session
+                value = oauth.valid_grant(grant_id)
+                self.assertEqual(oauth.grants_for(user, COMPANY_ID.upper())[0]["id"], grant_id)
+                self.assertEqual(tools.call_tool(value, "list_startups", {}),
+                    {"startups": [{"id": COMPANY_ID, "name": company.name}]})
+                with patch.object(tools.StartupProfile, "objects") as profiles:
+                    profiles.filter.return_value.first.return_value = Obj(reporting_timezone="Australia/Melbourne", short_description="Fictional test material", stage="Idea")
+                    brief = tools.call_tool(value, "get_monthly_update_brief", {"companyId": COMPANY_ID.upper(), "month": "2026-09"})
+                self.assertEqual(brief["companyId"], COMPANY_ID)
+                self.assertEqual(brief["reportingPeriod"]["timezone"], "Australia/Melbourne")
+                with patch.object(tools.MonthlyUpdateDraft, "objects") as drafts:
+                    draft = Obj(pk=10, month=date(2026, 9, 1), status="draft", current_revision=Obj(pk=5, content_hash="revision", structured_memo={}), published_revision_id=None)
+                    drafts.select_related.return_value.filter.return_value.first.return_value = draft
+                    status = tools.call_tool(value, "get_draft_status", {"companyId": COMPANY_ID, "updateId": 10})
+                self.assertEqual(status["companyId"], COMPANY_ID)
+                self.assertEqual(parse_qs(urlsplit(status["reviewUrl"]).query)["company_id"], [COMPANY_ID])
+
+    def test_invalid_company_ids_are_denied_before_ownership_query(self):
+        with patch.object(oauth.VibeRaisingCompany, "objects") as companies:
+            for company_id in (None, True, False, 9, "9", "not-a-uuid", {}, [], "04d89807-5884-4b0e-83cc-311abf13b648/other"):
+                with self.subTest(company_id=company_id), self.assertRaises(PermissionDenied):
+                    oauth.company_for(principal().user, company_id)
             companies.select_related.assert_not_called()
 
     def test_revoked_scope_rejected(self):
@@ -333,9 +489,68 @@ class OAuthTests(SimpleTestCase):
 
 
 @override_settings(**SETTINGS)
+class BriefActivityWindowTests(SimpleTestCase):
+    def setUp(self):
+        self.now = parse_datetime("2026-10-03T04:00:00Z")
+        self.company = Obj(pk=UUID(COMPANY_ID), name="Example", organization=Obj(pk=8, domain="example.test"))
+
+    def brief(self, **changes):
+        arguments = {"companyId": COMPANY_ID, "month": "2026-10", **changes}
+        with patch.object(tools, "valid_grant", return_value=principal()), patch.object(tools, "company_for", return_value=self.company), patch.object(tools.StartupProfile, "objects") as profiles, patch.object(tools.timezone, "now", return_value=self.now):
+            profiles.filter.return_value.first.return_value = Obj(reporting_timezone="Australia/Melbourne")
+            return tools.call_tool(principal(), "get_monthly_update_brief", arguments)
+
+    def test_absent_window_keeps_calendar_month_and_current_cutoff(self):
+        for month, end in (("2026-09", "2026-10-01T00:00:00+10:00"), ("2026-10", self.now.isoformat())):
+            with self.subTest(month=month):
+                brief = self.brief(month=month)
+                self.assertEqual(brief["activityWindow"], {
+                    "startInclusive": month + "-01T00:00:00+10:00", "endExclusive": end})
+                self.assertEqual(brief["reportingPeriod"]["month"], month + "-01")
+
+    def test_last_thirty_days_cross_month_without_changing_financial_period(self):
+        window = {"startInclusive": "2026-09-03T04:00:00Z", "endExclusive": "2026-10-03T14:00:00+10:00"}
+        default = self.brief()
+        brief = self.brief(activityWindow=window)
+        self.assertEqual(brief["activityWindow"], {"startInclusive": "2026-09-03T04:00:00+00:00", "endExclusive": window["endExclusive"]})
+        self.assertEqual(brief["reportingPeriod"], default["reportingPeriod"])
+        self.assertEqual(brief["month"], "2026-10")
+        instructions = " ".join(brief["instructions"])
+        self.assertIn("coverageNotes", instructions)
+        self.assertIn(brief["activityWindow"]["startInclusive"], instructions)
+        self.assertIn(brief["activityWindow"]["endExclusive"], instructions)
+
+    def test_window_requires_exact_shape_aware_dates_and_increasing_bounded_range(self):
+        valid = {"startInclusive": "2026-09-03T04:00:00Z", "endExclusive": "2026-10-03T04:00:00Z"}
+        for window in (None, [], {}, {**valid, "timezone": "UTC"},
+                       {**valid, "startInclusive": "2026-09-03T04:00:00"},
+                       {**valid, "startInclusive": "2026-13-03T04:00:00Z"},
+                       {**valid, "startInclusive": 123},
+                       {**valid, "startInclusive": valid["endExclusive"]},
+                       {**valid, "startInclusive": "2026-10-04T04:00:00Z"},
+                       {**valid, "startInclusive": "2026-09-02T03:59:59Z"},
+                       {**valid, "endExclusive": "2026-10-03T04:05:01Z"}):
+            with self.subTest(window=window), self.assertRaises(ValidationError):
+                self.brief(activityWindow=window)
+
+    def test_window_allows_timezone_offsets_and_small_clock_skew(self):
+        window = {"startInclusive": "2026-09-02T14:05:00+10:00", "endExclusive": "2026-10-03T15:05:00+11:00"}
+        self.assertEqual(self.brief(activityWindow=window)["activityWindow"], window)
+
+    def test_window_cannot_select_a_future_financial_month_or_enter_save_schema(self):
+        window = {"startInclusive": "2026-09-03T04:00:00Z", "endExclusive": "2026-10-03T04:00:00Z"}
+        with self.assertRaises(ValidationError):
+            self.brief(month="2026-11", activityWindow=window)
+        self.assertNotIn("activityWindow", tools.SAVE_FIELDS)
+        definition = next(item for item in tools.TOOLS if item["name"] == "get_monthly_update_brief")
+        self.assertIn("activityWindow", definition["inputSchema"]["properties"])
+        self.assertNotIn("activityWindow", definition["inputSchema"]["required"])
+
+
+@override_settings(**SETTINGS)
 class NarrativeTests(SimpleTestCase):
     def arguments(self, **changes):
-        return {"companyId": "9", "month": "2026-09", "requestId": "8ec75f46-340a-46fb-9aa2-b99e8974d99b", "narrative": {"summary": "We shipped a launch."}, **changes}
+        return {"companyId": COMPANY_ID, "month": "2026-09", "requestId": "8ec75f46-340a-46fb-9aa2-b99e8974d99b", "narrative": {"summary": "We shipped a launch."}, **changes}
 
     def test_financial_fields_and_nested_injection_rejected(self):
         for value in (self.arguments(metrics={"revenue": "999"}), self.arguments(financialSnapshot={}), self.arguments(publish=True),
@@ -354,7 +569,7 @@ class NarrativeTests(SimpleTestCase):
         tools.validate_save(self.arguments(sources=[{"provider": "gmail", "title": "Launch", "url": "https://mail.google.com/mail/u/0/#inbox/1", "occurredAt": "2026-09-01T12:00:00Z"}]))
 
     def save_with_mocks(self, draft, arguments):
-        company = Obj(pk=9, name="Example", organization=Obj(pk=8))
+        company = Obj(pk=UUID(COMPANY_ID), name="Example", organization=Obj(pk=8))
         with ExitStack() as stack:
             stack.enter_context(patch("django.contrib.auth.get_user_model"))
             stack.enter_context(patch.object(tools, "valid_grant", return_value=principal()))
@@ -403,13 +618,75 @@ class NarrativeTests(SimpleTestCase):
         draft.revisions.filter.return_value.order_by.return_value.first.return_value = None
         with self.assertRaises(RevisionConflict):
             self.save_with_mocks(draft, self.arguments())
-        _, saved, captured = self.save_with_mocks(draft, self.arguments(expectedRevision=5))
+        coverage = "Narrative startInclusive=2026-08-15T00:00:00Z; endExclusive=2026-09-14T00:00:00Z. Slack unavailable."
+        _, saved, captured = self.save_with_mocks(draft, self.arguments(expectedRevision=5, coverageNotes=coverage))
         captured.assert_not_called()
         self.assertIs(saved.call_args.kwargs["snapshot"], snapshot)
         self.assertEqual(saved.call_args.kwargs["audience"], "private")
         self.assertEqual(saved.call_args.kwargs["validation"]["groundedness_status"], "needs_review")
         self.assertEqual(saved.call_args.args[1]["financial_snapshot"], {"income": 123})
         self.assertEqual(saved.call_args.args[1]["_agent_provenance"]["kind"], "agent_supplied")
+        self.assertEqual(saved.call_args.args[1]["_agent_provenance"]["coverage_notes"], coverage)
+
+    def test_partial_legacy_edit_preserves_stored_narrative_without_mutating_it(self):
+        legacy = {"summary": "Previous summary", "highlights": ["Existing launch"],
+            "lowlights": ["Existing risk"], "asks": ["Founder introduction"],
+            "learnings": ["Existing learning"], "next_30_days": ["Existing plan"],
+            "display_config": {"full_metric_keys": ["revenue"]}}
+        draft = tools.MonthlyUpdateDraft(pk=10, organization_id=8, month=date(2026, 9, 1),
+            structured_memo=legacy)
+        draft.refresh_from_db, draft.save = MagicMock(), MagicMock()
+        with patch.object(tools.MonthlyUpdateDraft, "objects") as drafts:
+            drafts.select_for_update.return_value.filter.return_value.first.return_value = draft
+            _, saved, captured = self.save_with_mocks(draft, self.arguments(updateId=10))
+        memo = saved.call_args.args[1]
+        self.assertEqual(memo["summary"], "We shipped a launch.")
+        for field in ("highlights", "lowlights", "asks", "learnings", "next_30_days", "display_config"):
+            self.assertEqual(memo[field], legacy[field])
+            self.assertIsNot(memo[field], legacy[field])
+        self.assertEqual(legacy["summary"], "Previous summary")
+        self.assertNotIn("_agent_requests", legacy)
+        self.assertEqual(saved.call_args.kwargs["audience"], "private")
+        captured.assert_called_once()
+        self.assertIs(saved.call_args.kwargs["snapshot"], captured.return_value)
+
+    def test_legacy_carried_claims_cannot_bypass_unresolved_review(self):
+        from startup_updates import revisions
+        for status in ("failed", "pending", "needs_review"):
+            for field in ("highlights", "topline", "operations", "financial_performance",
+                          "title", "concise_analysis", "conciseAnalysis"):
+                claim = ["Unresolved carried claim"] if field in {"highlights", "operations", "financial_performance"} else "Unresolved carried claim"
+                legacy = {field: claim, "_month_sequence": 1}
+                draft = tools.MonthlyUpdateDraft(pk=10, organization_id=8, month=date(2026, 9, 1),
+                    structured_memo=legacy, groundedness_status=status)
+                draft.refresh_from_db, draft.save = MagicMock(), MagicMock()
+                with self.subTest(status=status, field=field):
+                    _, saved, _ = self.save_with_mocks(draft, self.arguments())
+                    self.assertEqual(saved.call_args.kwargs["validation"], {"groundedness_status": status})
+                    memo = saved.call_args.args[1]
+                    self.assertEqual(memo[field], legacy[field])
+                    self.assertEqual(memo["_agent_provenance"]["kind"], "agent_supplied")
+                    imported = revisions.MonthlyUpdateRevision(pk=6, draft=draft, content_hash="new-hash", validation=saved.call_args.kwargs["validation"],
+                        structured_memo={**memo, "_audience_visibility": ["just_me"]})
+                    draft.current_revision = imported
+                    with patch.object(revisions.MonthlyUpdateDraft, "objects") as drafts:
+                        drafts.select_for_update.return_value.get.return_value = draft
+                        with self.assertRaises(ValidationError):
+                            revisions.approve_and_publish.__wrapped__(draft, actor=Obj(pk=7), revision_id=6,
+                                revision_hash="new-hash", audience_visibility=["just_me"], reviewed_agent_claims=True)
+
+    def test_new_and_resolved_legacy_drafts_require_normal_agent_review(self):
+        for memo, status in (({"_month_sequence": 1}, "pending"),
+                             ({"highlights": ["Verified launch"]}, "passed"),
+                             ({"highlights": ["Founder supplied launch"]}, "founder_asserted")):
+            draft = tools.MonthlyUpdateDraft(pk=10, organization_id=8, month=date(2026, 9, 1),
+                structured_memo=memo, groundedness_status=status)
+            draft.refresh_from_db, draft.save = MagicMock(), MagicMock()
+            with self.subTest(memo=memo, status=status):
+                _, saved, _ = self.save_with_mocks(draft, self.arguments())
+                self.assertEqual(saved.call_args.kwargs["validation"], {"groundedness_status": "needs_review",
+                    "provenance": "agent_supplied", "source_verification": "unverified_external_agent"})
+                self.assertEqual(saved.call_args.kwargs["audience"], "private")
 
     def test_import_cannot_retag_unresolved_carried_claims_for_agent_only_review(self):
         from startup_updates import revisions
@@ -445,8 +722,11 @@ class ConnectionConfigurationTests(SimpleTestCase):
         claude = next(item for item in rows if item["id"] == "claude")
         self.assertIn("connectorUrl=", claude["installUrl"])
         cursor = next(item for item in rows if item["id"] == "cursor")
-        self.assertIn("/link/mcp/install", cursor["installUrl"])
-        encoded = parse_qs(urlsplit(cursor["installUrl"]).query)["config"][0]
+        cursor_url = urlsplit(cursor["installUrl"])
+        self.assertEqual((cursor_url.scheme, cursor_url.netloc, cursor_url.path),
+            ("https", "cursor.com", "/en-US/install-mcp"))
+        self.assertEqual(parse_qs(cursor_url.query)["name"], ["Valley"])
+        encoded = parse_qs(cursor_url.query)["config"][0]
         self.assertEqual(json.loads(base64.b64decode(encoded)), {"url": config.mcp_url()})
         self.assertEqual([item["id"] for item in rows], ["claude", "codex", "cursor"])
         codex = next(item for item in rows if item["id"] == "codex")
@@ -484,18 +764,18 @@ class ConnectionConfigurationTests(SimpleTestCase):
     def test_disconnect_epoch_revokes_hidden_grants_with_a_stuck_index_lock(self):
         cache.clear()
         cache.set(oauth.key("grant", "hidden"), grant(id="hidden"))
-        cache.set(oauth.key("lock-index", "7:9"), "crashed-process")
-        oauth.disconnect_company(Obj(pk=7), "9")
+        cache.set(oauth.key("lock-index", f"7:{COMPANY_ID}"), "crashed-process")
+        oauth.disconnect_company(Obj(pk=7), COMPANY_ID.upper())
         with self.assertRaises(AuthenticationFailed):
             oauth.valid_grant("hidden")
 
     def test_disconnect_revokes_only_selected_company_grants(self):
         cache.clear()
-        cache.set(oauth.key("index", "7:9"), ["own", "foreign"])
+        cache.set(oauth.key("index", f"7:{COMPANY_ID}"), ["own", "foreign"])
         cache.set(oauth.key("grant", "own"), grant(id="own"))
-        cache.set(oauth.key("grant", "foreign"), grant(id="foreign", company_id="10"))
+        cache.set(oauth.key("grant", "foreign"), grant(id="foreign", company_id=OTHER_COMPANY_ID))
         view = agent_connections.AgentConnectionView()
-        view.company = Obj(pk=9)
+        view.company = Obj(pk=UUID(COMPANY_ID))
         response = view.delete(Obj(user=Obj(pk=7)))
         self.assertTrue(response.data["disconnected"])
         self.assertTrue(cache.get(oauth.key("grant", "own"))["revoked"])
