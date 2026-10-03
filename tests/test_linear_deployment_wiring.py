@@ -253,6 +253,7 @@ class LinearDeploymentWiringTests(unittest.TestCase):
 
         values = {
             "MESSAGE_SYNC_ENABLED": "false",
+            "MESSAGE_SYNC_QUIET_HEAD_BACKOFF_ENABLED": "false",
             "SLACK_OWNER_INVENTORY_ENABLED": "false",
             "MESSAGE_SYNC_SLACK_APP_ID": "ATEST",
             "MESSAGE_SYNC_SLACK_USER_APP_ID": "APRIVATE",
