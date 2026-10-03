@@ -21,6 +21,9 @@ credential tools.
    Launching a client does not imply successful connection.
 3. The client discovers the protected resource and authorization server, then
    registers a public client or uses an explicitly configured existing client.
+   If Claude offers an OAuth-client choice, select **Register automatically**.
+   This server supports dynamic registration and explicitly configured clients;
+   it does not fetch arbitrary published client-identity metadata documents.
 4. `/mcp/oauth/authorize` validates exact registered redirect URI, `resource`,
    state, scopes and PKCE S256. It redirects to
    `${COMMUNITY_CHAT_FRONTEND_URL}/my-startup/connections?mcpAuthorization=<opaque>`.
@@ -34,6 +37,17 @@ credential tools.
 6. The callback contains a short-lived one-use authorization code, state and
    RFC 9207 issuer. The client exchanges the code and PKCE verifier for scoped
    OAuth tokens. It then calls the Streamable HTTP MCP endpoint.
+
+Cursor registers three callback URLs together: its HTTPS web callback,
+`http://localhost:8787/callback`, and
+`cursor://anysphere.cursor-mcp/oauth/callback`. Registration preserves all three.
+The last URI is the only permitted custom-scheme callback: credentials, ports,
+query parameters, fragments, alternate hosts and path variants are rejected.
+This OAuth callback is separate from Cursor's `anysphere.cursor-deeplink` install
+handler. The consent UI must support the OAuth callback, including the code,
+state and issuer query parameters added by the server. Exact registered-callback,
+PKCE, resource, startup and scope checks still apply to every callback. See
+[Cursor's callback registration guidance](https://forum.cursor.com/t/mcp-oauth-redirect-uri-mismatch-in-cursor-desktop/171867).
 
 Consent is necessary to authorise the external agent. Connections reuse the
 normal Chat sign-in rather than introducing another account system. A founder
@@ -58,8 +72,10 @@ changes and removal of startup ownership also revoke effective access.
 
 MCP requests send `Authorization: Bearer <OAuth access token>`, JSON Content-Type,
 and Accept containing both `application/json` and `text/event-stream`. The server
-returns JSON; it does not allocate a session or provide an SSE stream. GET/DELETE
-on the MCP route return 405. Supported protocol versions are 2025-11-25,
+returns JSON; it does not allocate a session or provide an SSE stream. An
+unauthenticated GET receives the OAuth challenge even with `Accept:
+text/event-stream`; authenticated GET/DELETE requests return 405 with `Allow:
+POST`. Supported protocol versions are 2025-11-25,
 2025-06-18 and 2025-03-26. Incoming browser Origin values must match the explicit
 MCP allowlist; server-to-server calls without Origin are accepted. Existing
 throttling uses the shared cache.
@@ -81,7 +97,14 @@ the client's Accept header, while retaining throttling and method restrictions.
 
 - `list_startups`: return only the explicitly granted startup.
 - `get_monthly_update_brief`: return startup context, selected calendar month,
-  timezone-aware reporting period and narrative-writing instructions.
+  timezone-aware financial reporting period, narrative activity window and
+  narrative-writing instructions. Optional `activityWindow` input contains
+  `startInclusive` and `endExclusive` timezone-aware ISO timestamps. The range
+  must be increasing, at most 31 days, and end no later than the current time
+  plus five minutes of clock tolerance. This permits a rolling last-30-days
+  narrative even when it crosses a month boundary. Without this argument the
+  narrative window remains the selected calendar month, capped at now. The
+  `reportingPeriod` and saved draft's financial month are unchanged.
 - `save_narrative_draft`: accept supported narrative sections, source references,
   coverage notes and a UUID `requestId`. Edits also provide `updateId` and the
   current `expectedRevision`. The first request's UUID is the existing independent
@@ -109,6 +132,15 @@ includes `agentProvenance` and `agentSources`; public/community DTOs omit them.
 A founder still reviews financial claims in free text. The MCP cannot write the
 verified financial block. Founders review and approve exact saved revisions
 through the existing Chat flow.
+
+The brief instructs agents to save the explicit narrative activity dates and
+missing-source limitations in existing `coverageNotes`. These remain unverified
+agent assertions. This read-only brief argument does not extend the draft-save
+schema, pin or enforce individual source timestamps, or change the direct
+connector worker's `calendar_month_v1` financial/evidence contract. Hosts should
+check the discovered brief input schema before sending `activityWindow` to an
+older server. A prompt-only fallback must state its narrative dates and monthly
+financial bucket explicitly instead of claiming the old brief covers 30 days.
 
 ## Configuration and rollout
 

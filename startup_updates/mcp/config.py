@@ -71,7 +71,7 @@ def client_catalog():
             install = "https://cursor.com/link/mcp/install?" + urlencode({"name": "Valley", "config": config})
             method = "deeplink"
         instructions = {
-            "claude": ["Open Claude to add the prefilled Valley connector.", "Sign in to MLAI and choose the startup this agent can access."],
+            "claude": ["Open Claude to add the prefilled Valley connector.", "If Claude asks for an OAuth client, choose Register automatically.", "Sign in to MLAI and choose the startup this agent can access."],
             "cursor": ["Open Cursor to install the Valley MCP server.", "Use Cursor's Connect action to sign in to MLAI and choose your startup."],
             "codex": ["In Codex, open Settings → MCP servers → Add server. Choose Streamable HTTP and enter the Valley server URL.", "Save, restart if requested, then choose Authenticate to sign in to MLAI and select your startup."],
         }[key]

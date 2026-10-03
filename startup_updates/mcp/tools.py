@@ -32,11 +32,16 @@ def object_schema(properties, required):
 
 COMPANY = {"type": "string", "format": "uuid", "description": "Startup company UUID from list_startups."}
 MONTH = {"type": "string", "pattern": r"^\d{4}-\d{2}$", "description": "Calendar reporting month YYYY-MM."}
+ACTIVITY_WINDOW = {**object_schema({
+    "startInclusive": {"type": "string", "format": "date-time"},
+    "endExclusive": {"type": "string", "format": "date-time"},
+}, ["startInclusive", "endExclusive"]),
+    "description": "Optional narrative source window, with timezone-aware timestamps, at most 31 days and ending no later than now (five-minute clock tolerance). Does not change the calendar financial reporting period."}
 TOOLS = [
     {"name": "list_startups", "title": "List authorised startups", "description": "List startups this account has explicitly authorised this agent to access.",
         "inputSchema": object_schema({}, []), "annotations": {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False}},
     {"name": "get_monthly_update_brief", "title": "Get monthly update brief", "description": "Get startup context and reporting dates. Search the user's already-connected sources for these dates; save a narrative draft with citations. Financial figures come from Valley's direct connections.",
-        "inputSchema": object_schema({"companyId": COMPANY, "month": MONTH}, ["companyId", "month"]), "annotations": {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False}},
+        "inputSchema": object_schema({"companyId": COMPANY, "month": MONTH, "activityWindow": ACTIVITY_WINDOW}, ["companyId", "month"]), "annotations": {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False}},
     {"name": "save_narrative_draft", "title": "Save a private narrative draft", "description": "Save a private monthly update for founder review. Only narrative and source references are accepted. Financial metrics and publishing cannot be changed. Retry using the same requestId; existing draft edits require expectedRevision.",
         "inputSchema": object_schema({"companyId": COMPANY, "month": MONTH, "requestId": {"type": "string", "format": "uuid"},
             "updateId": {"type": "integer", "minimum": 1}, "expectedRevision": {"type": ["integer", "null"]},
@@ -120,18 +125,46 @@ def status_payload(company, draft):
         "reviewUrl": settings.COMMUNITY_CHAT_FRONTEND_URL.rstrip("/") + "/my-startup/updates?" + query}
 
 
-def _brief(company, month):
+def _activity_window(value, period, now):
+    if value is None:
+        return {"startInclusive": period["start"], "endExclusive": period["cutoff"]}
+    if not isinstance(value, dict) or set(value) != {"startInclusive", "endExclusive"}:
+        raise ValidationError("Activity windows require startInclusive and endExclusive only.")
+    bounds = []
+    for field in ("startInclusive", "endExclusive"):
+        raw = value[field]
+        if not isinstance(raw, str) or len(raw) > 128:
+            raise ValidationError("Activity window timestamps must be timezone-aware ISO dates.")
+        try:
+            stamp = parse_datetime(raw)
+        except (ValueError, OverflowError) as exc:
+            raise ValidationError("Activity window timestamps must be timezone-aware ISO dates.") from exc
+        if stamp is None or timezone.is_naive(stamp):
+            raise ValidationError("Activity window timestamps must include a timezone.")
+        bounds.append(stamp)
+    start, end = bounds
+    if not timedelta(0) < end - start <= timedelta(days=31):
+        raise ValidationError("Choose an increasing activity window of at most 31 days.")
+    if end > now + timedelta(minutes=5):
+        raise ValidationError("The activity window cannot end in the future.")
+    return {"startInclusive": start.isoformat(), "endExclusive": end.isoformat()}
+
+
+def _brief(company, month, activity_window=None):
     profile = StartupProfile.objects.filter(organization=company.organization).first()
     zone = getattr(profile, "reporting_timezone", "UTC") or "UTC"
-    if month > timezone.now().astimezone(ZoneInfo(zone)).date().replace(day=1):
+    now = timezone.now()
+    if month > now.astimezone(ZoneInfo(zone)).date().replace(day=1):
         raise ValidationError("Choose the current month or an earlier month.")
-    period = reporting_period(month, zone)
+    period = reporting_period(month, zone, as_of=now)
+    window = _activity_window(activity_window, period, now)
     return {"companyId": str(company.pk), "startup": {"name": company.name, "domain": company.organization.domain,
         "description": getattr(profile, "short_description", ""), "stage": getattr(profile, "stage", "")},
-        "month": month.isoformat()[:7], "reportingPeriod": period,
+        "month": month.isoformat()[:7], "reportingPeriod": period, "activityWindow": window,
         "sections": list(NARRATIVE_FIELDS), "instructions": [
-            "Use the user's already-connected Gmail, Linear, Luma or other relevant sources within reportingPeriod.",
+            "Search the user's already-connected sources within activityWindow: include startInclusive and exclude endExclusive. This is the narrative source window; reportingPeriod remains the calendar financial period.",
             "Distinguish completed work from plans; include source links and dated evidence when available.",
+            f"Record the narrative source window in coverageNotes as startInclusive={window['startInclusive']}; endExclusive={window['endExclusive']}. These dates describe agent-supplied coverage, not verified financial evidence.",
             "Describe unavailable sources and incomplete coverage in coverageNotes; exclude unrelated personal information.",
             "Leave financial figures to Valley's direct Xero/Stripe evidence. Do not submit financial metric fields.",
             "Save a private draft using save_narrative_draft and return its reviewUrl. The founder reviews and publishes in MLAI Chat."]}
@@ -231,7 +264,9 @@ def call_tool(principal, name, arguments):
         return {"startups": [{"id": str(company.pk), "name": company.name}]}
     company = company_for(principal.user, arguments["companyId"], principal.grant)
     if name == "get_monthly_update_brief":
-        return _brief(company, month_date(arguments["month"]))
+        if "activityWindow" in arguments and not isinstance(arguments["activityWindow"], dict):
+            raise ValidationError("Activity windows require startInclusive and endExclusive only.")
+        return _brief(company, month_date(arguments["month"]), arguments.get("activityWindow"))
     if name == "save_narrative_draft":
         return save_draft(principal, arguments)
     update_id = arguments.get("updateId")
