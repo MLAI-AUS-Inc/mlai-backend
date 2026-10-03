@@ -4,6 +4,33 @@ Local implementation: 10–11 September 2026. This document describes code, not 
 
 The founder frontend calls the authenticated `/api/v1/vibe-marketing` views. The backend owns organisation access, billing, approved editorial policy and dispatch. Content Factory owns model selection, research, repository changes, previews and release checks.
 
+## Startup profile drafts (3 October 2026)
+
+`POST /api/v1/vibe-marketing/autofill` accepts `draftMode: true` (or
+`draft_mode: true`) for the startup-details form. This mode requires company
+name, website domain and startup location, then forwards `draft_mode: true` to
+Content Factory for its faster profile-drafting workflow. Requests without the
+flag retain the existing deep research workflow and optional-location contract.
+The worker owns model routing; this endpoint does not accept caller-selected
+model or reasoning settings. The 202 start response includes `companyId` and
+`researchCompanyId` for the exact company researched, including active-run
+reuse, so a new-startup draft stays scoped when the client polls or saves.
+
+Research saves submitted basics under the existing owner/company/domain guards.
+Omitted profile fields, founder names and target audience retain their saved
+values; an explicitly supplied empty field still clears that field. Clients
+should submit only the basics when starting an early draft, and omit profile
+fields managed elsewhere. The dispatch retains `persist: false`: generated
+`profileFields`, LinkedIn URL, seed keywords and competitors are returned for
+editing, with the normal Save action required to persist those answers. This
+introduces no schema or migration change.
+
+The focused no-database checks execute the actual view and shared profile-save
+function with synthetic ownership/persistence/queue seams. They verify draft
+mode forwarding, legacy behavior, required basics and omission preservation;
+they do not establish real authentication, SQL locking or worker/model latency.
+Run `.venv/bin/python -m unittest content_factory.tests_startup_profile_draft_unit`.
+
 ## Editorial catalog
 
 The service-authenticated `GET /api/content-factory/org/config/?domain=…` response includes:

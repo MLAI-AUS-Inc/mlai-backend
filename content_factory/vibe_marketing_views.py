@@ -13224,8 +13224,13 @@ def _autofill_start_payload(run):
     }
 
 
-def _autofill_start_response(run, *, reused_active_run=False):
+def _autofill_start_response(run, *, reused_active_run=False, research_company_id=None):
     payload = _autofill_start_payload(run)
+    saved_request = run.run_request if isinstance(getattr(run, "run_request", None), dict) else {}
+    company_id = str(research_company_id or saved_request.get("company_id") or "").strip()
+    if company_id:
+        payload["companyId"] = company_id
+        payload["researchCompanyId"] = company_id
     logger.info(
         "vibe_marketing_autofill_start_response run_id=%s domain=%s workflow=%s status=%s reused_active_run=%s has_error=%s",
         run.run_id,
@@ -14463,10 +14468,16 @@ class VibeMarketingAutofillView(APIView):
 
         company_name = str(request.data.get("company_name") or request.data.get("companyName") or "").strip()
         domain = normalize_company_domain(request.data.get("domain"))
+        draft_mode = _request_flag(request, "draft_mode", "draftMode")
         if not company_name:
             return Response({"detail": "Company name is required for autofill."}, status=status.HTTP_400_BAD_REQUEST)
         if not domain:
             return Response({"detail": "Website domain is required for autofill."}, status=status.HTTP_400_BAD_REQUEST)
+        if draft_mode and not str(request.data.get("location") or "").strip():
+            return Response(
+                {"detail": "Startup location is required to draft your profile.", "field": "location"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         if not (
             getattr(request.user, "is_staff", False) or getattr(request.user, "is_superuser", False)
         ) and not domain_is_available_to(request.user, domain):
@@ -14587,7 +14598,9 @@ class VibeMarketingAutofillView(APIView):
         actor_id = founder_actor_id_for_user(request.user)
         active_run = _active_startup_autofill_run_for_domain(organization.domain)
         if active_run is not None:
-            return _autofill_start_response(active_run, reused_active_run=True)
+            return _autofill_start_response(
+                active_run, reused_active_run=True, research_company_id=company.id
+            )
 
         startup_profile = _autofill_startup_profile_payload(organization)
         profile_fields = _autofill_profile_fields_payload(startup_profile)
@@ -14624,6 +14637,10 @@ class VibeMarketingAutofillView(APIView):
             "requested_by_slack_user_id": actor_id,
             "request_source": CONTENT_FACTORY_REQUEST_SOURCE,
         }
+        if draft_mode:
+            # Profile drafts use the worker's faster evidence-grounded pass.
+            # Generated answers remain reviewable client drafts until Save.
+            payload["draft_mode"] = True
         _mark_roo_points_gate_authorized(
             payload,
             domain=organization.domain,
@@ -14637,7 +14654,9 @@ class VibeMarketingAutofillView(APIView):
             config=config,
             payload=payload,
         )
-        return _autofill_start_response(run, reused_active_run=False)
+        return _autofill_start_response(
+            run, reused_active_run=False, research_company_id=company.id
+        )
 
 
 def _baseline_published_articles(organization, *, limit=8):
