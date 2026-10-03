@@ -119,18 +119,27 @@ class MonthlyEvidencePipelineTests(StartupUpdateApiTestCase):
             return self.client.post(reverse("startup_updates_draft_results", args=[self.run.run_id]), {"drafts": [item]}, format="json", **self.headers)
 
     def test_generation_retry_and_review_use_pinned_values(self):
+        self.run.run_request["input_sources"].append("google_analytics")
+        self.run.save(update_fields=["run_request"])
+        users = StartupMetricObservation.objects.create(
+            organization=self.organization, period_month=date(2026, 3, 1),
+            metric_key="activeUsers", metric_name="Active users", value_number=10,
+            value_text="10", unit="count", source_provider="google_analytics")
         pin = self.pin()
         self.observation.value_number = 999
         self.observation.value_text = "AUD 999"
         self.observation.save()
+        users.value_number = 99
+        users.value_text = "99"
+        users.save()
         self.assertEqual(self.pin(), pin)
         item = {"month": "2026-03-01", "snapshot_id": pin["snapshot_id"], "expected_revision": pin["expected_revision"],
-            "structured_memo": {"highlights": ["Revenue was {{metric:revenue}}."]}}
+            "structured_memo": {"highlights": ["We welcomed {{metric:activeUsers}} active users."]}}
         saved = self.submit(item)
         self.assertEqual(saved.status_code, 200, saved.data)
         receipt = saved.data["drafts"][0]
         draft = MonthlyUpdateDraft.objects.get(organization=self.organization, month=date(2026, 3, 1))
-        self.assertEqual(draft.current_revision.structured_memo["highlights"], ["Revenue was AUD 100."])
+        self.assertEqual(draft.current_revision.structured_memo["highlights"], ["We welcomed 10 active users."])
         self.assertEqual(draft.current_revision.snapshot.payload["charts"]["performance"][-1]["income"], 100)
         retry = self.submit(item)
         self.assertEqual(retry.status_code, 200, retry.data)
@@ -141,6 +150,13 @@ class MonthlyEvidencePipelineTests(StartupUpdateApiTestCase):
         self.assertEqual(draft.current_revision.validation["groundedness_status"], "passed")
         changed = self.submit({**item, "structured_memo": {"highlights": ["Changed retry"]}})
         self.assertEqual(changed.status_code, 409)
+
+    def test_rejects_generated_financial_metric_placeholder(self):
+        pin = self.pin()
+        item = {"month": "2026-03-01", "snapshot_id": pin["snapshot_id"], "expected_revision": pin["expected_revision"],
+            "structured_memo": {"highlights": ["Revenue was {{metric:revenue}}."]}}
+        self.assertEqual(self.submit(item).status_code, 400)
+        self.assertFalse(MonthlyUpdateDraft.objects.filter(organization=self.organization).exists())
 
     def test_rejects_unbound_generated_revenue_and_foreign_snapshot(self):
         pin = self.pin()

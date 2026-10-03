@@ -1058,6 +1058,11 @@ def _serialize_monthly_update(draft, structured_memo=None, *, published=False, s
     value["financialChart"] = financial_chart(value, metric_items=structured_memo.get("kpi_snapshot"))
     if shared is None:
         shared = published and any(audience in value["audienceVisibility"] for audience in ("community", "public"))
+        if published and not shared and isinstance(structured_memo.get("progress_charts"), list):
+            # Preserve the saved disclosure selection on legacy published views.
+            # Owner evidence is available through the explicit shared=False path.
+            value.update(metrics={}, metricEvidence={}, metricSuggestions={}, metricHistory={},
+                financialSnapshot=None, conciseAnalysis=None, financialChart=None)
     if shared:
         return shared_update(value, metric_items=structured_memo.get("kpi_snapshot"))
     return value

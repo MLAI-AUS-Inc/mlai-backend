@@ -80,6 +80,12 @@ class ProgressApiTests(TestCase):
         self.assertEqual(public["progressCharts"][0]["series"][0]["points"][-1]["value"],5)
         self.assertNotIn("scope",public["progressCharts"][0]["series"][0])
         self.assertNotIn("observationId",public["progressCharts"][0]["series"][0]["points"][0])
+        private=_serialize_monthly_update(draft,published=True,shared=False)
+        self.assertEqual(private["metrics"]["revenue"],"AUD 99999")
+        shared=_serialize_monthly_update(draft,published=True,shared=True)
+        self.assertEqual(shared["metrics"],{})
+        self.assertNotIn("progressCharts",shared)
+        self.assertNotIn("financialSnapshot",shared)
         with self.assertRaises(ValueError): first.save()
 
     def test_disabled_flag_hides_api(self):
