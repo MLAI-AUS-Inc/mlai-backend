@@ -285,7 +285,7 @@ class PublicReadActivityTests(SimpleTestCase):
             CommunityBridgeChannel.objects, "filter"
         ) as channel_query, patch.object(BridgeSyncState.objects, "select_for_update") as state_lock, patch.object(
             CommunityBridgeChannel.objects, "select_for_update"
-        ) as channel_lock:
+        ) as channel_lock, patch("integrations.services.message_sync.head_repair.wake_head_locked") as wake:
             channel_query.return_value.exclude.return_value.first.return_value = channel
             state_lock.return_value.filter.return_value.first.side_effect = lambda: (order.append("state") or state)
             channel_lock.return_value.filter.return_value.first.side_effect = lambda: (order.append("channel") or channel)
@@ -295,6 +295,7 @@ class PublicReadActivityTests(SimpleTestCase):
         self.assertEqual(order, ["state", "channel"])
         self.assertEqual(state.latest_source_activity, "100.000001")
         state.save.assert_called_once_with(update_fields=["latest_source_activity"])
+        wake.assert_called_once_with(state)
         self.assertNotIn("must not be copied", str(vars(state)))
 
     def test_public_activity_is_monotonic_and_excludes_control_and_thread_only_rows(self):

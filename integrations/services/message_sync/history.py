@@ -11,6 +11,7 @@ from integrations.services.community_bridge.slack import SlackBridgeClient
 from integrations.services.community_bridge.store import ingest_slack_event
 from .coverage import record_page
 from .history_policy import history_page_limit
+from .head_repair import finish_head, head_scope, observe_head, prepare_head
 from .scheduler import locked_job, schedule_job, finish_job
 
 PUBLIC_HISTORY_DAYS = 30
@@ -97,7 +98,10 @@ def public_page(lease, state):
     # perpetually open. New arrivals are covered by callbacks and the next head.
     checkpoint.setdefault("upper_bound", f"{int(time.time())}.999999")
     upper_seconds = timestamp(checkpoint["upper_bound"])[0]
-    scan_floor = max(0, upper_seconds - (86400 if lease.kind == "head" else PUBLIC_HISTORY_DAYS * 86400))
+    scan_floor = max(0, upper_seconds - PUBLIC_HISTORY_DAYS * 86400)
+    if lease.kind == "head":
+        checkpoint = prepare_head(state, checkpoint, now=time.time(), consent_floor=scan_floor,
+                                  scope=head_scope(state))
     checkpoint.setdefault("oldest", f"{scan_floor}.000000")
     if timestamp(checkpoint["oldest"])[0] < scan_floor:
         # Old deployments saved unbounded public archive cursors. Restart that
@@ -190,6 +194,9 @@ def public_page(lease, state):
         from .read_activity import advance_public_activity
         advance_public_activity(current, observed)
         delay = {"head": 60, "thread": 3600, "archive": 86400}[lease.kind]
+        if lease.kind == "head":
+            updated = observe_head(updated, observed)
+            delay = finish_head(current, updated, complete=complete, now=time.time(), scope=head_scope(current))
         if lease.kind == "thread" and timestamp(lease.source_object_key)[0] < floor and not updated["observed_messages"]:
             delay = 86400
         finish_job(lease, checkpoint={} if complete else updated,

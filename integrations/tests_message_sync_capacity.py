@@ -31,3 +31,15 @@ class ImportCapacityTests(SimpleTestCase):
         for kwargs in ({}, {"info_probes": -1}, {"owners": 0}, {"history_pages": 1, "import_share": 0}):
             with self.assertRaises(CommandError):
                 self.capacity(**kwargs)
+
+    @override_settings(MESSAGE_SYNC_SLACK_DISTRIBUTION="internal")
+    def test_recurring_mirrors_cannot_hide_behind_faster_initial_imports(self):
+        model = self.capacity(owners=300, mirrors_per_owner=20)["recurring_head_model"]
+        self.assertEqual(model["owner_conversation_pairs"], 6000)
+        self.assertEqual(model["minimum_history_requests_per_minute"], 400)
+        self.assertEqual(model["assessment"], "unsustainable_at_assumed_cadence")
+
+    def test_invalid_repair_cadence_is_rejected(self):
+        for minutes in (0, -1, 1441, float('nan'), float('inf')):
+            with self.assertRaises(CommandError):
+                self.capacity(mirrors_per_owner=1, repair_interval_minutes=minutes)

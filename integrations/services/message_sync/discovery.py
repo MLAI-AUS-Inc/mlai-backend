@@ -3,6 +3,7 @@
 Lock order matches consent revocation: user, all grants, connection. No Slack
 request runs while claiming; every later provider call/write checks this lease.
 """
+import math
 import uuid
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -18,6 +19,7 @@ from django.utils import timezone
 
 from integrations.models import ExternalServiceConnection, SlackDmMirrorGrant
 from .scheduler import BudgetDeferred, LeaseLost
+from .request_priority import request_priority
 
 KEY = "message_sync_discovery"
 DURABLE_POLL_SECONDS = 1.0
@@ -138,6 +140,44 @@ def finish_discovery(lease, *, delay_seconds=DURABLE_POLL_SECONDS, error_code=""
         connection.save(update_fields=["sync_cursor", "updated_at"])
 
 
+def discovery_request_priority(connection):
+    """Prioritize an owner's live callbacks and opens without decrypting them.
+
+    Unknown private/group messages are encrypted and held in this exact owner
+    checkpoint until discovery can route them. The existing discovery engine
+    still checks consent, scopes, membership and leases before every request.
+    Explicit device-bound opens also retain prompt discovery. Pure directory
+    sweeps remain background work; priority does not authorize an open.
+    """
+    from integrations.services.slack_dm_mirror import PENDING_EVENT_CHECKPOINT_KEY
+    from integrations.services.slack_open_requests import KEY as OPEN_KEY, has_pending_opens
+    cursor = connection.sync_cursor or {}
+    if not isinstance(cursor, dict):
+        return "background"
+    opens = cursor.get(OPEN_KEY)
+    if isinstance(opens, dict):
+        # The existing helper owns pending-state/expiry semantics. Filter only
+        # malformed envelopes before calling it; no owner/device lookup or
+        # content access is needed for this scheduling hint.
+        valid_opens = {key: value for key, value in opens.items()
+                       if isinstance(value, dict)
+                       and all(isinstance(value.get(field), str) and value[field].strip()
+                               for field in ("id", "source_id", "public_key", "epoch"))
+                       and all(type(value.get(field)) in (int, float) and math.isfinite(value[field])
+                               for field in ("requested_at", "until", "due"))}
+        if has_pending_opens({OPEN_KEY: valid_opens}):
+            return "foreground"
+    pending = cursor.get(PENDING_EVENT_CHECKPOINT_KEY)
+    if not isinstance(pending, list):
+        return "background"
+    return "foreground" if any(
+        isinstance(item, dict)
+        and isinstance(item.get("channel_id"), str) and item["channel_id"].strip()
+        and isinstance(item.get("ciphertext"), str) and item["ciphertext"]
+        for item in pending
+    ) else "background"
+
+
 def discover_once(interval_seconds):
     """Run one resumable discovery page under a durable generation fence."""
     from integrations.services import slack_dm_mirror as dm
@@ -147,7 +187,7 @@ def discover_once(interval_seconds):
     delay, error, return_turn = DURABLE_POLL_SECONDS, "", False
     try:
         grant = SlackDmMirrorGrant.objects.select_related("connection").get(pk=lease.grant_id)
-        with discovery_context(lease):
+        with discovery_context(lease), request_priority(discovery_request_priority(grant.connection)):
             dm.discover_conversations(grant)
     except LeaseLost:
         return False

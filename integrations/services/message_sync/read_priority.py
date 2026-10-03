@@ -128,6 +128,9 @@ def enqueue_refresh(authority, targets, *, reason="visible"):
         cursor[WORKER_KEY] = {**(cursor.get(WORKER_KEY) or {}), "due": now}
         connection.sync_cursor = cursor
         connection.save(update_fields=["sync_cursor", "updated_at"])
+        from .head_repair import defer_public_target_wake, wake_private_targets
+        wake_private_targets(authority, targets)
+        defer_public_target_wake(authority, targets)
 
 
 def select_target(ordered, snapshots, cache_key, cursor, *, now, turn):

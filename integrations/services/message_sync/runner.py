@@ -9,6 +9,7 @@ from .coverage import failure_code
 from .inbox import enabled
 from .private_history import private_page
 from .scheduler import BudgetDeferred, LeaseLost, claim_job, fail_job, locked_job
+from .request_priority import request_priority
 
 logger = logging.getLogger(__name__)
 _current_lease = ContextVar("message_sync_job_lease", default=None)
@@ -39,10 +40,15 @@ def process_history_once(*, seed=True, prefer_import=False):
     if lease is None:
         return 0
     try:
-        state = BridgeSyncState.objects.select_related(
+        from integrations.services.slack_chat_refresh import prioritize_open_conversations
+        states = prioritize_open_conversations(
+            BridgeSyncState.objects.all(), conversation_field="private_conversation_id",
+        )
+        state = states.select_related(
             "public_channel", "private_conversation__grant__connection",
         ).get(pk=lease.state_id)
-        with job_context(lease):
+        priority = "foreground" if lease.kind == "head" and state.foreground_refresh else "background"
+        with job_context(lease), request_priority(priority):
             if state.private_conversation_id:
                 private_page(lease, state)
             else:

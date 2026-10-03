@@ -101,7 +101,11 @@ Run `python manage.py message_sync_status --window-minutes 5` in the deployed
 worker. `provider_throughput` reports completed minute buckets per opaque
 app/workspace/method scope: admitted requests, local admission deferrals, actual
 provider 429s, failed requests, mean request latency and use of our configured
-budget. Counters expire after 20 minutes, contain no source IDs, tokens or
+budget. Minute counters expire after 20 minutes; completed hourly buckets are
+available with `--window-hours 24` and retained for seven days. Counters are
+queued without blocking messages and may be dropped if the bounded telemetry
+queue or cache is unavailable. Partial windows report unknown utilization,
+and even observed buckets are best-effort lower bounds. They contain no source IDs, tokens or
 message content, and cannot affect synchronization if telemetry fails. An absent
 scope means no recorded samples, not proof of zero demand. Allow a complete
 measurement window after rollout; compare equivalent backlog and owner load.

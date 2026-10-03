@@ -1,11 +1,48 @@
 """Deployment configuration must fail before credentials or services change."""
 import unittest
+from pathlib import Path
+import shutil
+import subprocess
+import tempfile
 from scripts.validate_message_sync_deploy_config import validate
 
 
 class MessageSyncDeployConfigTests(unittest.TestCase):
+    def test_quiet_backoff_deploys_disabled_by_default_and_upserts_safely(self):
+        root = Path(__file__).resolve().parents[1]
+        key = "MESSAGE_SYNC_QUIET_HEAD_BACKOFF_ENABLED"
+        workflow = (root / ".github/workflows/deploy.yml").read_text()
+        deploy = (root / "deploy.sh").read_text()
+        self.assertIn(key + ": ${{ vars." + key + " || 'false' }}", workflow)
+        self.assertIn('install_remote_env_value ' + key + ' "$' + key + '"', deploy)
+        with tempfile.TemporaryDirectory() as directory:
+            sandbox = Path(directory)
+            (sandbox / "scripts").mkdir()
+            shutil.copy(root / "scripts/upsert_env_value_from_stdin.sh", sandbox / "scripts")
+            env_file = sandbox / ".env"
+            env_file.write_text("KEEP_ME=yes\n")
+            for value in ("true", "false", "yes", "TRUE", "true\nfalse"):
+                with self.subTest(value=value):
+                    before = env_file.read_text()
+                    result = subprocess.run(
+                        ["bash", "scripts/upsert_env_value_from_stdin.sh", key],
+                        cwd=sandbox, input=value, text=True, capture_output=True, timeout=5,
+                    )
+                    if value in {"true", "false"}:
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        self.assertEqual(env_file.read_text(), f"KEEP_ME=yes\n{key}={value}\n")
+                    else:
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertEqual(env_file.read_text(), before)
+
     def test_disabled_needs_no_new_credentials(self):
         validate({})
+
+    def test_quiet_backoff_defaults_off_and_requires_explicit_valid_sync(self):
+        validate({"MESSAGE_SYNC_QUIET_HEAD_BACKOFF_ENABLED": "false"})
+        for value in ("yes", "true"):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "QUIET_HEAD_BACKOFF"):
+                validate({"MESSAGE_SYNC_QUIET_HEAD_BACKOFF_ENABLED": value})
 
     def test_inventory_requires_explicit_boolean_and_durable_sync(self):
         validate({"SLACK_OWNER_INVENTORY_ENABLED": "false"})
@@ -34,6 +71,7 @@ class MessageSyncDeployConfigTests(unittest.TestCase):
             "MESSAGE_SYNC_SLACK_DISTRIBUTION": "restricted",
         }
         validate(valid)
+        validate({**valid, "MESSAGE_SYNC_QUIET_HEAD_BACKOFF_ENABLED": "true"})
         validate({**valid, "SLACK_OWNER_INVENTORY_ENABLED": "true"})
         private = {**valid, "MESSAGE_SYNC_SLACK_USER_APP_ID": "APRIVATE",
                    "MESSAGE_SYNC_SLACK_USER_SIGNING_SECRET": "a" * 32,

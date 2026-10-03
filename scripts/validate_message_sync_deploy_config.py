@@ -7,6 +7,11 @@ def validate(env):
     enabled = env.get("MESSAGE_SYNC_ENABLED", "false").lower()
     if enabled not in {"true", "false"}:
         raise ValueError("MESSAGE_SYNC_ENABLED must be true or false")
+    quiet_backoff = env.get("MESSAGE_SYNC_QUIET_HEAD_BACKOFF_ENABLED", "false").lower()
+    if quiet_backoff not in {"true", "false"}:
+        raise ValueError("MESSAGE_SYNC_QUIET_HEAD_BACKOFF_ENABLED must be true or false")
+    if quiet_backoff == "true" and enabled != "true":
+        raise ValueError("MESSAGE_SYNC_QUIET_HEAD_BACKOFF_ENABLED requires MESSAGE_SYNC_ENABLED=true")
     inventory_enabled = env.get("SLACK_OWNER_INVENTORY_ENABLED", "false").lower()
     if inventory_enabled not in {"true", "false"}:
         raise ValueError("SLACK_OWNER_INVENTORY_ENABLED must be true or false")

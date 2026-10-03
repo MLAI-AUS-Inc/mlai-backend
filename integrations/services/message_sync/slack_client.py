@@ -5,6 +5,7 @@ from slack_sdk.errors import SlackApiError
 
 from .budgets import admit_request, record_cooldown
 from .scheduler import BudgetDeferred
+from .request_priority import current_priority
 from . import telemetry
 
 
@@ -39,7 +40,7 @@ def budgeted_client(client, *, workspace_id, app_id=None):
             if metric_scope:
                 telemetry.record(metric_scope, counter, amount)
         try:
-            admit_request(**scope, interval_seconds=provider_interval(api_method))
+            admit_request(**scope, interval_seconds=provider_interval(api_method), priority=current_priority())
         except BudgetDeferred:
             record("deferred")
             raise
@@ -64,8 +65,9 @@ def budgeted_client(client, *, workspace_id, app_id=None):
             record("failed")
             raise
         finally:
+            elapsed_ms = round((time.monotonic() - started) * 1000)
             record("finished")
-            record("request_ms", round((time.monotonic() - started) * 1000))
+            record("request_ms", elapsed_ms)
 
     client.api_call = api_call
     # Retries run through the durable worker, not SDK sleeps under consent locks.

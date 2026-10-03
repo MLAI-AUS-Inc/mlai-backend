@@ -87,8 +87,15 @@ jobs:
     - name: Check Slack conversation opening without database access
       run: python scripts/test_without_database.py community_chat.tests.test_slack_inventory_openable community_chat.tests.test_slack_open_requests community_chat.tests.test_slack_open_recovery integrations.tests_slack_progressive_presentation
 
-    - name: Check unread scheduling reliability without database access
-      run: python scripts/test_without_database.py integrations.tests_message_sync_read_reliability
+    - name: Check unread and capacity scheduling without database access
+      run: |
+        python scripts/test_without_database.py \
+          integrations.tests_message_sync_read_reliability \
+          integrations.tests_message_sync_head_repair \
+          integrations.tests_message_sync_priority_budget \
+          integrations.tests_message_sync_priority_routing \
+          integrations.tests_message_sync_telemetry \
+          integrations.tests_message_sync_capacity
 
     - name: Check startup connections and reporting months without database access
       run: |
@@ -619,6 +626,7 @@ jobs:
         VALLEY_MCP_PUBLIC_BASE_URL: ${{ vars.VALLEY_MCP_PUBLIC_BASE_URL || 'https://api.mlai.au' }}
         VALLEY_MCP_DOMAIN_VERIFICATION_TOKEN: ${{ vars.VALLEY_MCP_DOMAIN_VERIFICATION_TOKEN || '' }}
         MESSAGE_SYNC_ENABLED: ${{ vars.MESSAGE_SYNC_ENABLED || 'false' }}
+        MESSAGE_SYNC_QUIET_HEAD_BACKOFF_ENABLED: ${{ vars.MESSAGE_SYNC_QUIET_HEAD_BACKOFF_ENABLED || 'false' }}
         SLACK_OWNER_INVENTORY_ENABLED: ${{ vars.SLACK_OWNER_INVENTORY_ENABLED || 'false' }}
         MESSAGE_SYNC_SLACK_APP_ID: ${{ vars.MESSAGE_SYNC_SLACK_APP_ID }}
         MESSAGE_SYNC_SLACK_APP_TOKEN: ${{ secrets.MESSAGE_SYNC_SLACK_APP_TOKEN }}

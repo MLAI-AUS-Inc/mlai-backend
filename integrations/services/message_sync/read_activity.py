@@ -80,3 +80,5 @@ def record_public_event(payload):
         if state.workspace_id != channel.slack_workspace_id or state.source_channel_id != channel.slack_channel_id:
             return
         advance_public_activity(state, [event])
+        from .head_repair import wake_head_locked
+        wake_head_locked(state)
