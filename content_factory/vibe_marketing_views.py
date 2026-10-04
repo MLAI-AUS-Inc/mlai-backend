@@ -6951,7 +6951,7 @@ def _restart_article_payload_from_run(*, run, context, config, actor_id):
         if "delivery_mode_explicit" in run_request
         else run_request.get("deliveryModeExplicit")
     )
-    from .portable_drafts import original_portable_run
+    from content_factory.portable_drafts import original_portable_run
     delivery_mode_explicit = delivery_mode_explicit or original_portable_run(run)
     requested_delivery_mode = str(
         run_request.get("delivery_mode")

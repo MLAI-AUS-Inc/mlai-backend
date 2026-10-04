@@ -4,11 +4,15 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import shlex
+import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
 
 from roo.office_manager_policy import OFFICE_MANAGER_TEST_CHANNEL_ID
+from scripts.validate_website_deploy_config import canonical_migration_plan, validate as validate_website, validate_single
 
 
 DEPLOY_SCRIPT = (Path(__file__).resolve().parents[1] / "deploy.sh").read_text()
@@ -51,12 +55,13 @@ class DeploymentRuntimeChecksTests(unittest.TestCase):
             "    # Recovery disables errexit", 1
         )[0]
         decision = (start + decision).replace("\\$", "$")
-        plan = "Apply app.0001_example"
+        plan = "Planned operations:\napp.0001_example\n    Example"
         approved_hash = hashlib.sha256(plan.encode()).hexdigest()
         for check_result, plan_result, approval, expected_exit, expected_pending, expected_calls in (
             (0, 0, "", 0, "0", "check,"),
             (1, 0, "", 1, None, "check,plan,"),
             (1, 0, "wrong-plan-hash", 1, None, "check,plan,"),
+            (1, 0, hashlib.sha256((plan + " changed").encode()).hexdigest(), 1, None, "check,plan,"),
             (1, 0, approved_hash, 0, "1", "check,plan,"),
             (1, 2, approved_hash, 2, None, "check,plan,"),
         ):
@@ -70,7 +75,7 @@ class DeploymentRuntimeChecksTests(unittest.TestCase):
                     "compose_run_web() {",
                     "  case \" $* \" in",
                     "    *' --check '*) printf check, >> \"$calls_file\"; return " + str(check_result) + ";;",
-                    "    *' --plan '*) printf plan, >> \"$calls_file\"; echo " + plan + "; return " + str(plan_result) + ";;",
+                    "    *' --plan '*) printf plan, >> \"$calls_file\"; printf '%s\\n' " + shlex.quote(plan) + "; return " + str(plan_result) + ";;",
                     "  esac",
                     "}",
                     'read_env_value() { echo "' + approval + '"; }',
@@ -85,6 +90,20 @@ class DeploymentRuntimeChecksTests(unittest.TestCase):
                     self.assertIn(f"pending={expected_pending}", result.stdout)
                 else:
                     self.assertNotIn("pending=", result.stdout)
+
+    def test_reviewed_multiline_migration_plan_uses_exact_shell_digest(self):
+        start = '    echo "🔎 Checking pending migrations before pausing runtime services..."'
+        decision = (start + DEPLOY_SCRIPT.split(start, 1)[1].split("    # Recovery disables errexit", 1)[0]).replace("\\$", "$")
+        plan = "Planned operations:\ncontent_factory.0042_website_connection_lifecycle\n    Create model WebsiteConnection"
+        for reviewed_plan, expected in ((plan, 0), (plan + "\n    Create model Unreviewed", 1)):
+            approved = hashlib.sha256(reviewed_plan.encode()).hexdigest()
+            script = "\n".join([
+                "set -euo pipefail", "web_proxy_preexisting=1",
+                "compose_run_web() { case \" $* \" in *' --check '*) return 1;; *' --plan '*) printf '%s\\n' " + shlex.quote(plan) + ";; esac; }",
+                'read_env_value() { printf "%s" "' + approved + '"; }', decision,
+            ])
+            result = subprocess.run(["bash", "-c", script], text=True, capture_output=True, timeout=5)
+            self.assertEqual(result.returncode, expected, result.stderr)
 
     def test_container_probes_do_not_consume_remaining_ssh_script(self):
         release_probe = next(
@@ -180,3 +199,73 @@ class DeploymentRuntimeChecksTests(unittest.TestCase):
                 payload = self.valid_contract()
                 del payload[key]
                 self.assertNotEqual(self.validate_contract(payload).returncode, 0)
+
+
+class WebsiteDeploymentConfigTests(unittest.TestCase):
+    def test_plan_canonicalization_retains_every_operation_and_rejects_ambiguous_output(self):
+        plan = "Planned operations:\ncontent_factory.0042_website_connection_lifecycle\n    Create model WebsiteConnection"
+        for prefix in ("", "Initializing Firebase with project ID: synthetic\nDEBUG: ESAFETY VIEWS MODULE LOADED\n"):
+            self.assertEqual(canonical_migration_plan(prefix + plan + "\n"), plan)
+        self.assertNotEqual(canonical_migration_plan(plan + "\n    Unreviewed operation"), plan)
+        for invalid in ("", "Import failed", plan + "\nPlanned operations:\nUnexpected"):
+            with self.assertRaises(ValueError):
+                canonical_migration_plan(invalid)
+
+    def test_paused_default_and_each_rollout_mode_are_explicit(self):
+        validate_website({})
+        validate_website({"WEBSITE_CONNECTION_WRITE_MODE": "disabled"})
+        validate_website({"WEBSITE_CONNECTION_WRITE_MODE": "enabled"})
+        validate_website({"WEBSITE_CONNECTION_WRITE_MODE": "canary", "WEBSITE_CONNECTION_CANARY_DOMAINS": "talathrive.com,site.example.test"})
+        for mode in ("", "true", "DISABLED", "typo", "disabled\nenabled"):
+            with self.subTest(mode=mode), self.assertRaises(ValueError):
+                validate_website({"WEBSITE_CONNECTION_WRITE_MODE": mode})
+        with self.assertRaises(ValueError):
+            validate_website({"WEBSITE_CONNECTION_WRITE_MODE": "canary"})
+
+    def test_canary_domains_reject_noncanonical_or_ambiguous_authority(self):
+        for domains in ("https://site.test", "*.site.test", "site.test.", "SITE.TEST", "site.test, site2.test", "site.test,site.test", "site.test,", "127.0.0.1", "localhost", "-bad.site.test", "site.test\nother.test", "site.test/path"):
+            with self.subTest(domains=domains), self.assertRaises(ValueError):
+                validate_single("WEBSITE_CONNECTION_CANARY_DOMAINS", domains)
+        for value in ("a" * 63, "A" * 64, "a" * 65, "a" * 64 + "\n", "not-a-hash"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                validate_single("APPROVED_MIGRATION_PLAN_SHA256", value)
+
+    def test_workflow_and_remote_writer_install_approved_values_before_runtime_mutation(self):
+        root = Path(__file__).resolve().parents[1]
+        workflow = (root / ".github/workflows/deploy.yml").read_text()
+        for key, default in (("WEBSITE_CONNECTION_WRITE_MODE", "disabled"), ("WEBSITE_CONNECTION_CANARY_DOMAINS", ""), ("APPROVED_MIGRATION_PLAN_SHA256", "")):
+            self.assertIn(key + ": ${{ vars." + key + " || '" + default + "' }}", workflow)
+            self.assertIn('install_remote_env_value ' + key + ' "$' + key + '"', DEPLOY_SCRIPT)
+            self.assertLess(DEPLOY_SCRIPT.index('install_remote_env_value ' + key), DEPLOY_SCRIPT.index('    migrations_pending=1'))
+        self.assertLess(DEPLOY_SCRIPT.index('python3 scripts/validate_website_deploy_config.py'), DEPLOY_SCRIPT.index('rsync -avz'))
+
+    def test_stdin_writer_clears_old_approval_and_canary_without_touching_other_environment(self):
+        root = Path(__file__).resolve().parents[1]
+        values = {
+            "WEBSITE_CONNECTION_WRITE_MODE": ("disabled", "canary", "enabled", "", "true", "disabled\nenabled"),
+            "WEBSITE_CONNECTION_CANARY_DOMAINS": ("site.example.test", "", "https://site.test", "*.site.test"),
+            "APPROVED_MIGRATION_PLAN_SHA256": ("a" * 64, "", "A" * 64, "a" * 63, "a" * 64 + "\nnot-a-hash"),
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            sandbox = Path(directory)
+            (sandbox / "scripts").mkdir()
+            for name in ("upsert_env_value_from_stdin.sh", "validate_website_deploy_config.py"):
+                shutil.copy(root / "scripts" / name, sandbox / "scripts")
+            for key, candidates in values.items():
+                for value in candidates:
+                    with self.subTest(key=key, value=value):
+                        env_file = sandbox / ".env"
+                        original = "KEEP_ME=yes\n" + key + "=old-value\n"
+                        env_file.write_text(original)
+                        result = subprocess.run(["bash", "scripts/upsert_env_value_from_stdin.sh", key], cwd=sandbox,
+                                                input=value, text=True, capture_output=True, timeout=5)
+                        try:
+                            validate_single(key, value)
+                            valid = True
+                        except ValueError:
+                            valid = False
+                        self.assertEqual(result.returncode == 0, valid, result.stderr)
+                        self.assertEqual(env_file.read_text(), "KEEP_ME=yes\n" + key + "=" + value + "\n" if valid else original)
+                        self.assertEqual(result.stdout, "")
+                        if valid:
+                            self.assertEqual(env_file.stat().st_mode & 0o777, 0o600)

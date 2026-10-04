@@ -5,7 +5,8 @@ key="${1:-}"
 case "$key" in
   MESSAGE_SYNC_ENABLED|MESSAGE_SYNC_QUIET_HEAD_BACKOFF_ENABLED|SLACK_OWNER_INVENTORY_ENABLED|MESSAGE_SYNC_SLACK_APP_ID|MESSAGE_SYNC_SLACK_USER_APP_ID|MESSAGE_SYNC_SLACK_BOT_WORKSPACE_ID|MESSAGE_SYNC_SLACK_DISTRIBUTION|\
   LINEAR_MEETING_REQUIRED_TEAM_KEYS|LINEAR_CHANNEL_ISSUE_BINDINGS_JSON|LINEAR_CHANNEL_ISSUE_MAX_COMMENTS|LINEAR_CHANNEL_ISSUE_WRITES_ENABLED|OFFICE_MANAGER_SLACK_CHANNEL_ID|OFFICE_MANAGER_TIMEZONE|\
-  VALLEY_MCP_ENABLED|VALLEY_MCP_PUBLIC_BASE_URL|VALLEY_MCP_DOMAIN_VERIFICATION_TOKEN|COMMUNITY_CHAT_STARTUP_UPDATES_ENABLED) ;;
+  VALLEY_MCP_ENABLED|VALLEY_MCP_PUBLIC_BASE_URL|VALLEY_MCP_DOMAIN_VERIFICATION_TOKEN|COMMUNITY_CHAT_STARTUP_UPDATES_ENABLED|\
+  WEBSITE_CONNECTION_WRITE_MODE|WEBSITE_CONNECTION_CANARY_DOMAINS|APPROVED_MIGRATION_PLAN_SHA256) ;;
   *)
     echo "Unsupported production environment key" >&2
     exit 64
@@ -17,12 +18,15 @@ cd "$repo_root"
 umask 077
 value="$(cat)"
 
-if [[ -z "$value" || "$value" == *$'\n'* || "$value" == *$'\r'* ]]; then
+if [[ "$value" == *$'\n'* || "$value" == *$'\r'* ]]; then
   echo "Invalid single-line payload for ${key}" >&2
   exit 1
 fi
 
 case "$key" in
+  WEBSITE_CONNECTION_WRITE_MODE|WEBSITE_CONNECTION_CANARY_DOMAINS|APPROVED_MIGRATION_PLAN_SHA256)
+    printf '%s' "$value" | python3 scripts/validate_website_deploy_config.py --stdin "$key"
+    ;;
   VALLEY_MCP_ENABLED|VALLEY_MCP_PUBLIC_BASE_URL|VALLEY_MCP_DOMAIN_VERIFICATION_TOKEN|COMMUNITY_CHAT_STARTUP_UPDATES_ENABLED)
     printf '%s' "$value" | python3 scripts/validate_valley_mcp_deploy_config.py --stdin "$key"
     ;;
@@ -88,6 +92,11 @@ case "$key" in
     }
     ;;
 esac
+
+if [[ -z "$value" && "$key" != "WEBSITE_CONNECTION_CANARY_DOMAINS" && "$key" != "APPROVED_MIGRATION_PLAN_SHA256" ]]; then
+  echo "Invalid empty payload for ${key}" >&2
+  exit 1
+fi
 
 # A second plugin's proof must not silently replace the proof already served.
 if [[ "$key" == "VALLEY_MCP_DOMAIN_VERIFICATION_TOKEN" && -f .env ]]; then

@@ -24,6 +24,11 @@ SLACK_OWNER_INVENTORY_ENABLED="${SLACK_OWNER_INVENTORY_ENABLED:-false}"
 COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED="${COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED:-false}"
 VALLEY_MCP_ENABLED="${VALLEY_MCP_ENABLED:-false}"
 VALLEY_MCP_PUBLIC_BASE_URL="${VALLEY_MCP_PUBLIC_BASE_URL:-https://api.mlai.au}"
+WEBSITE_CONNECTION_WRITE_MODE="${WEBSITE_CONNECTION_WRITE_MODE:-disabled}"
+WEBSITE_CONNECTION_CANARY_DOMAINS="${WEBSITE_CONNECTION_CANARY_DOMAINS:-}"
+APPROVED_MIGRATION_PLAN_SHA256="${APPROVED_MIGRATION_PLAN_SHA256:-}"
+export WEBSITE_CONNECTION_WRITE_MODE WEBSITE_CONNECTION_CANARY_DOMAINS APPROVED_MIGRATION_PLAN_SHA256
+python3 scripts/validate_website_deploy_config.py
 # Empty optional values retain the host's existing startup gate/ownership proof.
 COMMUNITY_CHAT_STARTUP_UPDATES_ENABLED="${COMMUNITY_CHAT_STARTUP_UPDATES_ENABLED:-}"
 VALLEY_MCP_DOMAIN_VERIFICATION_TOKEN="${VALLEY_MCP_DOMAIN_VERIFICATION_TOKEN:-}"
@@ -377,6 +382,12 @@ install_remote_env_value() {
     printf '%s' "$value" \
         | ssh "$DEPLOY_SSH_TARGET" "$PROJECT_DIR/scripts/upsert_env_value_from_stdin.sh $key"
 }
+
+# Always install optional empty values too: clearing a repository variable must
+# remove a previous release's canary list or exact migration approval.
+install_remote_env_value WEBSITE_CONNECTION_WRITE_MODE "$WEBSITE_CONNECTION_WRITE_MODE"
+install_remote_env_value WEBSITE_CONNECTION_CANARY_DOMAINS "$WEBSITE_CONNECTION_CANARY_DOMAINS"
+install_remote_env_value APPROVED_MIGRATION_PLAN_SHA256 "$APPROVED_MIGRATION_PLAN_SHA256"
 
 echo "🔧 Updating Valley MCP public configuration..."
 install_remote_env_value VALLEY_MCP_ENABLED "$VALLEY_MCP_ENABLED"
@@ -1457,7 +1468,7 @@ if parsed.username or parsed.password or parsed.query or parsed.fragment:
         migrations_pending=0
         echo "✅ No pending migrations; current runtime stays online during deployment checks."
     else
-        migration_plan=\$(compose_run_web python manage.py migrate --plan --noinput)
+        migration_plan=\$(compose_run_web python manage.py migrate --plan --noinput | python3 scripts/validate_website_deploy_config.py --migration-plan)
         printf '%s\n' "\$migration_plan"
         approved_plan_sha256=\$(read_env_value APPROVED_MIGRATION_PLAN_SHA256)
         actual_plan_sha256=\$(printf '%s' "\$migration_plan" | sha256sum | cut -d ' ' -f 1)

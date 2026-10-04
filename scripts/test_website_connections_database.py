@@ -7,7 +7,9 @@ approval per AGENTS.md; never invoke against an existing database.
 """
 
 import argparse
+import hashlib
 import importlib
+import json
 import os
 from pathlib import Path
 import shutil
@@ -46,6 +48,21 @@ def replay_with_legacy_rows():
     org = Organization.objects.create(domain="migration.example.test", name="Synthetic migration")
     cfg = Config.objects.create(organization=org, github_repo="example/site", article_template="Legacy template")
     before = Config.objects.values().get(pk=cfg.pk)
+    executor = MigrationExecutor(connection)
+    pending = executor.migration_plan(executor.loader.graph.leaf_nodes())
+    assert [(migration.app_label, migration.name, backwards) for migration, backwards in pending] == [("content_factory", "0042_website_connection_lifecycle", False)]
+    # Exercise the same fresh-process Django CLI as deployment, with our
+    # disposable DB/network guards and environment intact. Import diagnostics
+    # vary with environment; the deployed gate preserves the exact plan block.
+    code = "from types import SimpleNamespace; from pathlib import Path; import json, sys; from scripts.test_website_connections_database import run_checks; run_checks(SimpleNamespace(engine=sys.argv[1], plan_only=True), Path(sys.argv[2]), json.loads(sys.argv[3]))"
+    database = {key: connection.settings_dict[key] for key in ("ENGINE", "NAME", "HOST", "PORT", "USER")}
+    result = subprocess.run([sys.executable, "-c", code, "postgres" if connection.vendor == "postgresql" else "sqlite", str(Path(database["NAME"]).parent) if connection.vendor == "sqlite" else str(Path(database["HOST"]).parent), json.dumps(database)],
+                            cwd=ROOT, check=True, capture_output=True, text=True)
+    from scripts.validate_website_deploy_config import canonical_migration_plan
+    plan = canonical_migration_plan(result.stdout)
+    assert "content_factory.0042_website_connection_lifecycle" in plan
+    print(plan, flush=True)
+    print("Candidate migration plan SHA256: " + hashlib.sha256(plan.encode()).hexdigest(), flush=True)
     executor = MigrationExecutor(connection)
     executor.migrate(executor.loader.graph.leaf_nodes())
     Config = executor.loader.project_state(executor.loader.graph.leaf_nodes()).apps.get_model("content_factory", "OrganizationContentConfig")
@@ -112,6 +129,10 @@ def run_checks(args, directory, database):
         module.REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"]["auth_magic_link"] = None
         import django
         django.setup()
+        if getattr(args, "plan_only", False):
+            from django.core.management import execute_from_command_line
+            execute_from_command_line(["manage.py", "migrate", "--plan", "--noinput"])
+            return
         validate_migration_scope()
         from django.core.management import call_command
         try:
