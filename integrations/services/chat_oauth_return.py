@@ -17,7 +17,7 @@ def native_chat_connection_return_url(value):
         pairs = parse_qsl(parsed.query, keep_blank_values=True)
         params = dict(pairs)
         if (parsed.scheme not in {"mlaichat", "mlaichat-dev"} or parsed.netloc != "connections"
-                or parsed.path not in {"", "/"} or parsed.fragment
+                or parsed.path or parsed.fragment
                 or len(pairs) != len(params)
                 or set(params) != {"company_id", "provider"}
                 or params["provider"] not in CHAT_CONNECTION_PROVIDERS):

@@ -128,9 +128,10 @@ def article_brief_for_catalog(strategy, request_payload):
 def merge_strategy(existing, incoming):
     """Generated scans cannot erase or replace policy or approval history."""
     result = deepcopy(incoming or {})
-    result.pop(CATALOG_KEY, None)
-    if CATALOG_KEY in (existing or {}):
-        result[CATALOG_KEY] = deepcopy(existing[CATALOG_KEY])
+    for key in (CATALOG_KEY, "chat_source_preferences"):
+        result.pop(key, None)
+        if key in (existing or {}):
+            result[key] = deepcopy(existing[key])
     return result
 
 
@@ -255,3 +256,8 @@ def discovery_audience_context(strategy, payload):
     if audience is None:
         raise ValueError("Choose an approved customer profile for research")
     return {k:v for k,v in audience.items() if k not in {"approved_by", "approved_at", "status"}}
+
+
+def public_strategy(strategy):
+    """Exclude private Chat defaults from worker/model and article contracts."""
+    return {key: deepcopy(value) for key, value in (strategy or {}).items() if key != "chat_source_preferences"}

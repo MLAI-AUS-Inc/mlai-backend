@@ -65,6 +65,8 @@ class EditorialRevisionTests(unittest.TestCase):
             "_remote_response_write_guard": lambda *args, **kwargs: nullcontext(),
             "scoped_run_contract": lambda run: {},
             "connection_contract": lambda payload: {},
+            "_setup_blocked_response_for_generation": lambda *args, **kwargs: None,
+            "_quoted_price_response": lambda *args, **kwargs: None,
             "copy": copy, "uuid": uuid, "hashlib": hashlib, "Response": Response, "status": status,
             "DatabaseError": DatabaseError, "OrganizationContentConfig": self.config_model,
             "article_brief_for_catalog": article_brief_for_catalog,

@@ -43,6 +43,15 @@ def get_content_factory_content_island_topic_cost_points(domain: Optional[str]) 
     return CONTENT_FACTORY_CONTENT_ISLAND_TOPIC_COST_POINTS
 
 
+def get_content_factory_research_cost_points(domain: Optional[str], requested_topic_count=4) -> int:
+    """Quote one Roo point per requested research topic, with a bounded batch."""
+    try:
+        count = int(requested_topic_count)
+    except (TypeError, ValueError):
+        count = 4
+    return get_content_factory_content_island_topic_cost_points(domain) * max(1, min(count, 8))
+
+
 def get_content_factory_ai_agent_required_points(domain: Optional[str]) -> int:
     if is_free_content_factory_domain(domain):
         return 0
@@ -71,7 +80,7 @@ def build_roo_points_payload(
     balance = int(current_balance or 0)
     if cost > 0 and action == CONTENT_FACTORY_ACTION_CONTENT_ISLAND_TOPIC_GENERATION:
         plural = "point" if cost == 1 else "points"
-        message = f"Generating content-island topics costs {cost} Roo {plural}, and this user does not have enough."
+        message = f"Researching topics costs {cost} Roo {plural}, and this user does not have enough."
     elif cost > 0:
         message = f"Creating an article costs {cost} Roo points, and this user does not have enough."
     else:

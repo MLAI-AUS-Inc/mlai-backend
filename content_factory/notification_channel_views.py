@@ -565,8 +565,15 @@ class VibeMarketingResearchAutomationRunNowView(APIView):
         context, error = _resolve_context_or_response(request)
         if error:
             return error
+        from content_factory.billing import get_content_factory_research_cost_points
+        from integrations.services.article_generation import _require_expected_cost, ArticleGenerationError
+        try:
+            _require_expected_cost(request.data, get_content_factory_research_cost_points(context.organization.domain, 3))
+        except ArticleGenerationError as exc:
+            return Response(exc.payload, status=409)
         result = start_manual_automation_run(
-            context.organization, requested_by_user_id=getattr(request.user, "id", None)
+            context.organization, requested_by_user_id=getattr(request.user, "id", None),
+            request_id=request.data.get("idempotencyKey") or request.data.get("clientRequestId"),
         )
         result_status = result.get("status")
         if result_status == "no_automation":
@@ -625,4 +632,6 @@ class VibeMarketingResearchAutomationRunStatusView(APIView):
         )
         if run is None:
             return Response({"detail": "Run not found."}, status=status.HTTP_404_NOT_FOUND)
+        from integrations.services.research_automations import reconcile_automation_research_dispatch
+        run = reconcile_automation_research_dispatch(run)
         return Response(serialize_manual_run_status(run), status=status.HTTP_200_OK)
