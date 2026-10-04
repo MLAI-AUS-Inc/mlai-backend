@@ -66,10 +66,12 @@ class ArticlePublishApprovalReceiptTests(SimpleTestCase):
                 run.pk = 1
                 run.workflow = "article_generation"
                 run.save = MagicMock()
+                run.refresh_from_db = MagicMock()
                 current = _review_run()
                 current.pk = 1
                 current.workflow = "article_generation"
                 current.save = MagicMock()
+                current.refresh_from_db = MagicMock()
                 request = SimpleNamespace(data={}, user=SimpleNamespace(pk=1))
 
                 def remote_approve(**_kwargs):
@@ -109,7 +111,12 @@ class ArticlePublishApprovalReceiptTests(SimpleTestCase):
                     ),
                 ):
                     lock.return_value.get.side_effect = locked_current
-                    response = VibeMarketingRunControlView().post(request, run.run_id, "approve")
+                    # This database-free unit exercises approval identity drift
+                    # after authorization. The lifecycle/database suites cover
+                    # the outer website-consent decorator with real requests.
+                    response = VibeMarketingRunControlView.post.__wrapped__(
+                        VibeMarketingRunControlView(), request, run.run_id, "approve",
+                    )
 
                 self.assertEqual(response.status_code, 409)
                 accept_feedback.assert_not_called()

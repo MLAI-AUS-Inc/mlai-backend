@@ -198,7 +198,12 @@ class EditorialSnapshotPersistenceSeamTests(unittest.TestCase):
         self.model.objects.select_for_update.return_value.filter.side_effect = self.locked_query
         self.model.objects.filter.side_effect = self.query
         self.model.objects.update_or_create.side_effect = self.save_snapshot
+        # Website consent is exercised with real DB row locks in
+        # tests_website_connections; this AST harness isolates editorial policy.
         self.ns = {
+            "guarded_owner_operation": lambda *args, **kwargs: lambda method: method,
+            "guarded_service_write": lambda *args, **kwargs: lambda method: method,
+            "REPOSITORY_WORKFLOWS": frozenset(),
             "__name__": "content_factory.service_views", "__package__": "content_factory",
             "transaction": SimpleNamespace(atomic=self.atomic), "ContentFactoryRun": self.model,
             "ContentFactoryRunStep": self.steps, "ContentFactoryRunStepAttempt": self.attempts,

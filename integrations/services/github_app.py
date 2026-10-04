@@ -109,7 +109,9 @@ def create_installation_access_token(
     repository: str,
     permission_mode: str = "write",
     use_cache: bool = True,
+    repository_id: Optional[int] = None,
 ) -> GitHubInstallationToken:
+    """Mint a repository token, preferring immutable identity when supplied."""
     normalized_installation_id = str(installation_id or "").strip()
     normalized_repository = str(repository or "").strip()
     if not normalized_installation_id:
@@ -119,6 +121,10 @@ def create_installation_access_token(
 
     mode = "read" if str(permission_mode or "").strip().lower() == "read" else "write"
     key = _cache_key(installation_id=normalized_installation_id, repository=normalized_repository, permission_mode=mode)
+    if repository_id is not None:
+        if isinstance(repository_id, bool) or not isinstance(repository_id, int) or repository_id < 1:
+            raise GitHubAppTokenError("GitHub repository identity must be a positive integer.")
+        key = f"{key}:repository-id:{repository_id}"
     if use_cache:
         cached = cache.get(key)
         if isinstance(cached, dict) and cached.get("github_token"):
@@ -145,6 +151,9 @@ def create_installation_access_token(
             "pull_requests": "read" if mode == "read" else "write",
         },
     }
+    if repository_id is not None:
+        body.pop("repositories")
+        body["repository_ids"] = [repository_id]
     response = http_requests.post(
         f"https://api.github.com/app/installations/{normalized_installation_id}/access_tokens",
         headers={

@@ -714,8 +714,10 @@ def github_callback(request):
         config.github_token_expires_at = token_expires_at
         config.github_user_name = github_login
         config.connected_slack_user_id = slack_user_id or config.connected_slack_user_id
-        config.github_repo = repo_to_store if repo_to_store else None
-        config.github_installation_id = installation_id
+        # OAuth refresh cannot select a repository or revive website consent.
+        if not config.website_connection_id:
+            config.github_repo = repo_to_store if repo_to_store else None
+            config.github_installation_id = installation_id
         config.github_scopes = []
         config.save()
 

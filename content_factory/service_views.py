@@ -33,6 +33,7 @@ from content_factory.article_system import (
     registry_target_publish_ready,
     resolve_article_system,
 )
+from content_factory.website_connections import guarded_service_write, contract_for
 from content_factory.article_setup_reset import (
     carry_reset_markers,
     clear_article_setup_reset_markers,
@@ -524,8 +525,15 @@ class ContentFactoryOrgConfigView(APIView):
                 ).order_by('name')
             ]
 
+        if config and config.website_connection_id:
+            website = config.website_connection
+            response_data["website_connection"] = {**contract_for(website), "state": website.state, "capabilities": website.capabilities}
+            response_data.update(contract_for(website))
+            latest_inventory = website.scan_snapshots.filter(generation=website.generation, evidence__has_key="repository_inventory").order_by("-created_at").first()
+            response_data["repository_inventory"] = (latest_inventory.evidence or {}).get("repository_inventory") if latest_inventory else None
         return Response(response_data, status=status.HTTP_200_OK)
 
+    @guarded_service_write("config_write", only_repository=True)
     def put(self, request):
         """
         Create org if not exists, then upsert config.
@@ -1258,27 +1266,13 @@ class ContentFactoryComponentDetailView(APIView):
 
 
 class ContentFactoryTokenView(APIView):
+    """Issue an ephemeral selected-repository token for an exact connection generation.
+
+    GET requires domain, website_connection_id and connection_generation. Write
+    credentials additionally require permission_mode=write and a mutation action.
+    Legacy OAuth credentials never override a denied or missing website grant.
     """
-    On-demand token refresh endpoint for content-factory.
 
-    GET /api/content-factory/token?domain=mlai.au
-    GET /api/content-factory/token?slack_user_id=U12345
-
-    Content-factory can call this endpoint mid-job to get a fresh GitHub token
-    without needing to restart the entire pipeline.
-
-    Supports both:
-    - domain: Fetches org-level token (preferred)
-    - slack_user_id: Fetches user-level token (legacy fallback)
-
-    Returns:
-        {
-            "github_token": "ghu_xxxx...",
-            "github_repo": "owner/repo",
-            "expires_at": "2024-01-16T12:00:00Z" (optional),
-            "source": "org" | "user"
-        }
-    """
     authentication_classes = []
     permission_classes = [HasRooApiKey]
 
@@ -1297,222 +1291,8 @@ class ContentFactoryTokenView(APIView):
         return domain
 
     def get(self, request):
-        from integrations.services.github import ensure_valid_token, TokenRefreshError
-        from integrations.services.article_generation import ensure_valid_org_token, ArticleGenerationError
-        from integrations.services.github_app import (
-            GitHubAppTokenError,
-            create_installation_access_token,
-            github_app_credentials_configured,
-        )
-        from integrations.services.github_installations import (
-            installation_for_repo,
-            resolve_user_for_actor_id,
-            user_has_registered_installation,
-        )
-        from integrations.models import UserIntegration
-
-        domain = request.query_params.get('domain')
-        slack_user_id = request.query_params.get('slack_user_id')
-        requested_repo = str(request.query_params.get('github_repo') or '').strip()
-
-        if not domain and not slack_user_id:
-            return Response(
-                {'error': 'Either domain or slack_user_id query parameter is required'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        # Try domain-based lookup first (org-level)
-        if domain:
-            normalized_domain = self._normalize_domain(domain)
-            try:
-                # Fetch config for additional context
-                org = Organization.objects.get(domain=normalized_domain)
-                config = org.content_config
-                configured_repo = str(config.github_repo or '').strip()
-                github_repo = requested_repo or configured_repo
-                installation_id = str(config.github_installation_id or '').strip()
-
-                # Resolve repository access from the founder's installation
-                # registry before trusting the legacy per-company id. A founder
-                # can authorize multiple GitHub accounts, so the stored config id
-                # may refer to another account after switching companies.
-                actor_id = str(config.connected_slack_user_id or slack_user_id or '').strip()
-                registry_user = resolve_user_for_actor_id(actor_id)
-                # A registry of only stale (uninstalled) installations lists no
-                # repos and must not be treated as authoritative — otherwise a
-                # dead row forces a hard "installation mismatch" 401 instead of
-                # falling back to the legacy per-org id. Excludes GitHub-confirmed
-                # dead rows; the reconciliation sweep durably removes them.
-                registry_is_authoritative = (
-                    registry_user is not None
-                    and user_has_registered_installation(registry_user)
-                )
-                if registry_is_authoritative and github_repo:
-                    registry_installation = installation_for_repo(registry_user, github_repo)
-                    if registry_installation is None:
-                        message = (
-                            f"The MLAI Tools GitHub App is not installed for {github_repo} under any "
-                            "GitHub account connected by this founder. Reconnect GitHub for this repository, "
-                            "then retry."
-                        )
-                        logger.warning(
-                            "GitHub installation registry could not resolve repo domain=%s repo=%s actor_id=%s",
-                            normalized_domain,
-                            github_repo,
-                            actor_id,
-                        )
-                        return Response(
-                            {
-                                'error': 'GitHub repository installation mismatch',
-                                'message': message,
-                                'action_required': 'auth_required',
-                                'reason_code': 'repository_not_accessible_by_registered_installations',
-                                'github_repo': github_repo,
-                            },
-                            status=status.HTTP_401_UNAUTHORIZED,
-                        )
-
-                    installation_id = str(registry_installation.installation_id or '').strip()
-                    if (
-                        installation_id
-                        and installation_id != str(config.github_installation_id or '').strip()
-                        and github_repo.casefold() == configured_repo.casefold()
-                    ):
-                        previous_installation_id = str(config.github_installation_id or '').strip()
-                        config.github_installation_id = installation_id
-                        config.save(update_fields=['github_installation_id', 'updated_at'])
-                        logger.info(
-                            "Self-healed GitHub installation binding domain=%s repo=%s old_installation_id=%s installation_id=%s",
-                            normalized_domain,
-                            github_repo,
-                            previous_installation_id,
-                            installation_id,
-                        )
-
-                if installation_id and github_repo:
-                    if not github_app_credentials_configured():
-                        logger.warning("GitHub App credentials are not configured for installation token lookup.")
-                        return Response(
-                            {
-                                'error': 'GitHub App credentials are not configured',
-                                'message': 'MLAI Tools GitHub App server credentials are missing. Configure GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY, then retry.',
-                                'action_required': 'server_configuration_required',
-                                'github_repo': github_repo,
-                                'github_installation_id': installation_id,
-                            },
-                            status=status.HTTP_401_UNAUTHORIZED,
-                        )
-                    try:
-                        installation_token = create_installation_access_token(
-                            installation_id=installation_id,
-                            repository=github_repo,
-                            permission_mode='write',
-                        )
-                    except GitHubAppTokenError as exc:
-                        logger.warning(
-                            "GitHub App installation token lookup failed for domain=%s repo=%s installation_id=%s: %s",
-                            normalized_domain,
-                            github_repo,
-                            installation_id,
-                            exc,
-                        )
-                        return Response(
-                            {
-                                'error': 'GitHub App installation access failed',
-                                'message': str(exc),
-                                'action_required': 'auth_required',
-                                'reason_code': 'github_installation_token_mint_failed',
-                                'github_repo': github_repo,
-                                'github_installation_id': installation_id,
-                            },
-                            status=status.HTTP_401_UNAUTHORIZED,
-                        )
-
-                    response_data = installation_token.as_content_factory_payload(domain=normalized_domain)
-                    logger.info(
-                        "Provided GitHub App installation token for %s repo=%s installation_id=%s",
-                        normalized_domain,
-                        github_repo,
-                        installation_id,
-                    )
-                    return Response(response_data, status=status.HTTP_200_OK)
-
-                fresh_token = ensure_valid_org_token(normalized_domain)
-                response_data = {
-                    'github_token': fresh_token,
-                    'github_repo': github_repo or config.github_repo,
-                    'domain': normalized_domain,
-                    'source': 'org',
-                    'token_source': 'github_oauth_user_token',
-                }
-
-                if config.github_token_expires_at:
-                    response_data['expires_at'] = config.github_token_expires_at.isoformat()
-
-                logger.info(f"Provided fresh org-level GitHub token for {normalized_domain}")
-                return Response(response_data, status=status.HTTP_200_OK)
-
-            except Organization.DoesNotExist:
-                if not slack_user_id:
-                    return Response(
-                        {'error': f'Organization not found: {domain}'},
-                        status=status.HTTP_404_NOT_FOUND
-                    )
-                # Fall through to user-level lookup
-            except (ArticleGenerationError, TokenRefreshError) as e:
-                if not slack_user_id:
-                    logger.warning(f"Token refresh failed for org {domain}: {e}")
-                    return Response(
-                        {
-                            'error': 'Token refresh failed',
-                            'message': str(e),
-                            'action_required': 'auth_required'
-                        },
-                        status=status.HTTP_401_UNAUTHORIZED
-                    )
-                # Fall through to user-level lookup
-
-        # User-level lookup (legacy fallback)
-        if slack_user_id:
-            try:
-                fresh_token = ensure_valid_token(slack_user_id)
-
-                integration = UserIntegration.objects.get(slack_user_id=slack_user_id)
-
-                response_data = {
-                    'github_token': fresh_token,
-                    'github_repo': integration.github_repo,
-                    'slack_user_id': slack_user_id,
-                    'source': 'user',
-                    'token_source': 'github_oauth_user_token',
-                }
-
-                if integration.github_token_expires_at:
-                    response_data['expires_at'] = integration.github_token_expires_at.isoformat()
-
-                logger.info(f"Provided fresh user-level GitHub token for {slack_user_id}")
-                return Response(response_data, status=status.HTTP_200_OK)
-
-            except UserIntegration.DoesNotExist:
-                return Response(
-                    {'error': 'No integration found for this user'},
-                    status=status.HTTP_404_NOT_FOUND
-                )
-            except TokenRefreshError as e:
-                logger.warning(f"Token refresh failed for {slack_user_id}: {e}")
-                return Response(
-                    {
-                        'error': 'Token refresh failed',
-                        'message': str(e),
-                        'action_required': 'auth_required'
-                    },
-                    status=status.HTTP_401_UNAUTHORIZED
-                )
-
-        return Response(
-            {'error': 'No valid credentials found'},
-            status=status.HTTP_404_NOT_FOUND
-        )
+        from .website_tokens import issue_website_token
+        return issue_website_token(request)
 
 
 class ContentFactoryGitHubStatusView(APIView):
@@ -3860,6 +3640,7 @@ class ContentFactoryCallbackView(APIView):
     authentication_classes = []
     permission_classes = [HasRooApiKey]
 
+    @guarded_service_write("config_write", only_repository=True, portable=True)
     def post(self, request):
         data = request.data.copy()
         # WhatsApp/email research has no Slack delivery route. JSON null must
@@ -5162,45 +4943,13 @@ class ContentFactoryCallbackView(APIView):
                 status=status.HTTP_200_OK,
             )
 
-        try:
-            result = publish_article(job_id, slack_user_id=slack_user_id, domain=domain)
-            job.status = 'generating'
-            job.error_message = ''
-            update_fields = ['status', 'error_message', 'updated_at']
-            if pr_url and job.pr_url != pr_url:
-                job.pr_url = pr_url
-                update_fields.append('pr_url')
-            job.save(update_fields=update_fields)
-            self._record_callback_marker(
-                job=job,
-                bucket='callback_actions',
-                event_name='preview_ready_auto_approve',
-                dedupe_key=dedupe_key,
-                extra_request_meta={'publish_stage': 'auto_approved'},
-            )
-            logger.info("Auto-approved preview for job %s", job_id)
-            return Response(
-                {
-                    'status': 'processed',
-                    'job_id': job_id,
-                    'auto_approved': True,
-                    'slack_sent': notification_sent,
-                    'cf_response': result,
-                },
-                status=status.HTTP_200_OK,
-            )
-        except ArticleGenerationError as exc:
-            logger.warning("Failed to auto-approve preview for %s: %s", job_id, exc)
-            job.error_message = str(exc)
-            job.save(update_fields=['error_message', 'updated_at'])
-            return Response(
-                {
-                    'status': 'deferred',
-                    'job_id': job_id,
-                    'message': str(exc),
-                },
-                status=status.HTTP_200_OK,
-            )
+        from .website_connections import queue_website_followup
+        operation = queue_website_followup("publish_article", data={**data, "dedupe_key": dedupe_key},
+            arguments={"job_id": job_id, "slack_user_id": slack_user_id, "domain": domain})
+        return Response({
+            "status": "queued", "job_id": job_id, "auto_approval_queued": True,
+            "operation_id": str(operation.pk), "slack_sent": notification_sent,
+        }, status=status.HTTP_200_OK)
 
     def _handle_content_ready(self, data):
         from integrations.services.notification_adapters import (
@@ -5528,7 +5277,9 @@ class ContentFactoryCallbackView(APIView):
                 if job.request_meta:
                     logger.info(f"Retrying article generation for job {job_id}")
                     # Reuse request_meta which contains the original article_request
-                    trigger_article_generation(slack_user_id, job.request_meta)
+                    from .website_connections import queue_website_followup
+                    queue_website_followup("trigger_article_generation", data=data,
+                        arguments={"slack_user_id": slack_user_id, "article_request": job.request_meta})
                     return Response({
                         'status': 'retried', 
                         'job_id': job_id, 
@@ -5538,15 +5289,13 @@ class ContentFactoryCallbackView(APIView):
                 # Scenario B: Topic Confirmation (Phase 2)
                 elif job.selected_keyword:
                      logger.info(f"Retrying topic confirmation for job {job_id}")
-                     confirm_topic(
-                         domain=domain,
-                         confirmed_keyword=job.selected_keyword,
-                         slack_user_id=slack_user_id,
-                         requested_by_slack_user_id=requested_by_slack_user_id or None,
-                         slack_channel_id=job.slack_channel_id,
-                         slack_thread_ts=job.slack_thread_ts,
-                         slack_root_message_ts=job.slack_root_message_ts or job.slack_thread_ts,
-                     )
+                     from .website_connections import queue_website_followup
+                     queue_website_followup("confirm_topic", data=data, arguments={
+                         "domain": domain, "confirmed_keyword": job.selected_keyword,
+                         "slack_user_id": slack_user_id, "requested_by_slack_user_id": requested_by_slack_user_id or None,
+                         "slack_channel_id": job.slack_channel_id, "slack_thread_ts": job.slack_thread_ts,
+                         "slack_root_message_ts": job.slack_root_message_ts or job.slack_thread_ts,
+                     })
                      return Response({
                          'status': 'retried', 
                          'job_id': job_id, 
@@ -5998,9 +5747,11 @@ class ContentFactoryCallbackView(APIView):
                             intent.get('type') == 'write_article'
                             and normalize_domain(article_req.get('domain', '')) == normalize_domain(domain)
                         ):
+                            from .website_connections import queue_website_followup
+                            queue_website_followup("trigger_article_generation", data=data,
+                                arguments={"slack_user_id": slack_user_id, "article_request": article_req})
                             integration.pending_intent = None
                             integration.save(update_fields=['pending_intent'])
-                            trigger_article_generation(slack_user_id, article_req)
                             pending_resumed = True
                             logger.info(f"Auto-resumed pending article intent after scan for {slack_user_id}/{domain}")
                 except Exception as e:
@@ -6725,13 +6476,14 @@ class ContentFactoryCallbackView(APIView):
                         # Only resume if intent is for the same domain
                         intent_domain = normalize_domain(article_req.get('domain', ''))
                         if intent_domain == normalized_domain:
-                            # Clear intent first (prevent double-trigger)
-                            integration.pending_intent = None
-                            integration.save()
-
+                            # Queue idempotently before clearing the durable intent.
                             # Auto-trigger article generation
                             from integrations.services.article_generation import trigger_article_generation
-                            trigger_article_generation(slack_user_id, article_req)
+                            from .website_connections import queue_website_followup
+                            queue_website_followup("trigger_article_generation", data=data,
+                                arguments={"slack_user_id": slack_user_id, "article_request": article_req})
+                            integration.pending_intent = None
+                            integration.save(update_fields=['pending_intent'])
                             pending_resumed = True
                             logger.info(f"Auto-resumed pending article intent for {slack_user_id}/{domain}")
             except Exception as e:
@@ -8883,6 +8635,14 @@ def _sync_content_factory_run_snapshot(*, run_id: str, data: dict, step_states: 
                     "status": data["status"], "run_request": data.get("run_request") or {},
                 },
             )
+        original_request = existing_run.run_request if isinstance(existing_run.run_request, dict) else {}
+        from .website_connections import portable_run_update_allowed
+        from .website_contract import connection_contract
+        if original_request.get("delivery_mode") == "content_only" and not connection_contract(original_request):
+            if not portable_run_update_allowed(existing_run, data):
+                raise EditorialRunConflict("A portable draft snapshot cannot acquire repository authority")
+            data["run_request"] = {**(data.get("run_request") or {}), "delivery_mode": "content_only"}
+            data["domain"] = existing_run.domain
         # Worker observations may omit request fields. The known reader/offer
         # decision is immutable history, not a field a sparse callback can clear.
         data = merge_editorial_run_snapshot(
@@ -9014,6 +8774,7 @@ class ContentFactoryRunView(APIView):
             return Response({"error": "Run not found"}, status=status.HTTP_404_NOT_FOUND)
         return Response(_serialize_content_factory_run(run), status=status.HTTP_200_OK)
 
+    @guarded_service_write("config_write", only_repository=True, portable=True)
     def put(self, request, run_id: str):
         existing_run = ContentFactoryRun.objects.filter(run_id=run_id).first()
         payload = sanitize_json_for_postgres(dict(request.data))
@@ -9284,6 +9045,7 @@ class ContentFactoryRunControlView(APIView):
     authentication_classes = []
     permission_classes = [HasRooApiKey]
 
+    @guarded_service_write("publish", remote_actions={"promote-bundle", "publish-pr"})
     def post(self, request, run_id: str, action: str):
         from integrations.services.article_generation import ArticleGenerationError, publish_article_as_pr
         from content_factory.models import ContentFactoryJob

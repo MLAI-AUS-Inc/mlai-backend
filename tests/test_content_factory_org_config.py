@@ -2,7 +2,7 @@ import os
 
 from django.test import TestCase, override_settings
 from rest_framework import status
-from rest_framework.test import APIClient
+from tests.website_fixtures import WebsiteBoundAPIClient as APIClient
 
 from content_factory.models import OrganizationContentConfig, WebsiteDesignSnapshot
 from organizations.models import Organization
@@ -29,6 +29,7 @@ class ContentFactoryOrgConfigTests(TestCase):
             article_path_pattern="app/articles/{category}/{slug}.tsx",
             registry_path="app/articles/registry.ts",
         )
+        self.client.bind_fixture(self.config)
 
     def test_org_config_round_trips_publish_target_metadata(self):
         publish_targets = [
@@ -689,6 +690,7 @@ class ContentFactoryOrgConfigPublishTargetPreservationTests(TestCase):
             default_publish_target_id=REGISTERED_TARGET["target_id"],
             article_system={"state": "roo_scaffolded", "source": "scaffold", "confidence": "high"},
         )
+        self.client.bind_fixture(self.config)
 
     def _put(self, body):
         payload = {"domain": "theproductbus.com"}

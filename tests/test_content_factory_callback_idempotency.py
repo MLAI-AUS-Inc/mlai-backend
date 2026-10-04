@@ -15,7 +15,7 @@ from unittest.mock import patch
 from django.test import SimpleTestCase, TestCase, override_settings
 from django.utils import timezone
 from rest_framework import status
-from rest_framework.test import APIClient
+from tests.website_fixtures import WebsiteBoundAPIClient as APIClient
 
 from content_factory.models import ContentFactoryCallbackEvent
 from workflow_runs.models import (
@@ -66,11 +66,17 @@ class ContentFactoryCallbackGuardTestCase(TestCase):
         settings.ROO_API_KEY = self.api_key
         settings.INTERNAL_API_KEY = self.api_key
         self.client.credentials(HTTP_X_API_KEY=self.api_key)
+        from organizations.models import Organization
+        from content_factory.models import OrganizationContentConfig
+        org = Organization.objects.create(name="Synthetic callback", domain="mlai.au")
+        config = OrganizationContentConfig.objects.create(organization=org)
+        self.client.bind_fixture(config, repo="MLAI-AUS-Inc/mlai-au")
 
 
 class CallbackEventIdIdempotencyTests(ContentFactoryCallbackGuardTestCase):
     def test_delayed_failure_is_stopped_before_handler_or_refund(self):
         run = ContentFactoryRun.objects.create(run_id="recovered-article", workflow="direct_generate",
+            organization=self.client.website_fixture.organization, run_request=self.client._bound_payload({}),
             status="running", result={"generation": 2, "state_version": 50})
         payload = {"event_type": "generation_failed", "event_id": "delayed-failure", "job_id": run.run_id,
             "status": "failed", "generation": 1, "state_version": 999, "refundable": True,
@@ -96,6 +102,7 @@ class CallbackEventIdIdempotencyTests(ContentFactoryCallbackGuardTestCase):
     def test_new_generation_can_replace_failed_snapshot_without_pending_intent(self):
         from content_factory.service_views import _sync_content_factory_run_snapshot, _serialize_content_factory_run
         run = ContentFactoryRun.objects.create(run_id="versioned-snapshot", workflow="direct_generate",
+            organization=self.client.website_fixture.organization, run_request=self.client._bound_payload({}),
             status="failed", result={"generation": 1, "state_version": 90})
         payload = {"workflow": "direct_generate", "status": "running", "generation": 2,
             "state_version": 1, "failure": {}, "recovery": {"state": "consumed"}}
