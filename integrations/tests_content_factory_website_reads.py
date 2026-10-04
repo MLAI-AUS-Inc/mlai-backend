@@ -129,20 +129,20 @@ class WebsiteAppRunReadTests(WebsiteDatabaseFixture, TestCase):
         remote.assert_not_called()
 
     def test_original_portable_run_can_sync_content_only_result(self):
-        self.run.run_request = {"delivery_mode": "content_only"}
+        self.run.run_request = {"delivery_mode": "content_only", "delivery_mode_confirmed": True}
         self.run.github_repo = ""
         self.run.save(update_fields=["run_request", "github_repo"])
         saved = _sync_remote_run_payload(self.run.run_id, self.snapshot(run_request={}, result={"content_package": {"article_markdown": "Draft"}}))
         self.assertEqual(saved.status, "completed")
-        self.assertEqual(saved.run_request, {"delivery_mode": "content_only"})
+        self.assertEqual(saved.run_request, {"delivery_mode": "content_only", "delivery_mode_confirmed": True})
 
     def test_incoming_portable_mode_cannot_bypass_original_consent(self):
         transition_connection(self.config, action="disconnect", expected=self.binding)
-        saved = _sync_remote_run_payload(self.run.run_id, self.snapshot(run_request={"delivery_mode": "content_only"}))
+        saved = _sync_remote_run_payload(self.run.run_id, self.snapshot(run_request={"delivery_mode": "content_only", "delivery_mode_confirmed": True}))
         self.assertEqual(saved.status, "cancelled")
 
     def test_portable_snapshot_cannot_claim_publication(self):
-        self.run.run_request = {"delivery_mode": "content_only"}
+        self.run.run_request = {"delivery_mode": "content_only", "delivery_mode_confirmed": True}
         self.run.github_repo = ""
         self.run.save(update_fields=["run_request", "github_repo"])
         saved = _sync_remote_run_payload(self.run.run_id, self.snapshot(run_request={}, result={"pr_url": "https://github.com/example/site/pull/7"}))
