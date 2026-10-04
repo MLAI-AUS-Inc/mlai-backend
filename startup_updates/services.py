@@ -3499,7 +3499,9 @@ def create_startup_update_run(
     narrative_period=None,
     automatic_source_scope=False,
     audience_visibility=None,
+    cover_image=None,
 ) -> ContentFactoryRun:
+    from startup_updates.cover_images import normalize_cover_image
     requested_audience = normalize_audience_visibility(audience_visibility)
     if requested_audience not in (["just_me"], ["community"], ["public"]):
         raise ValueError("Choose private, community, or public visibility.")
@@ -3595,6 +3597,7 @@ def create_startup_update_run(
         "reporting_timezone": reporting_timezone,
         "reporting_contract_version": 1,
         "audience_visibility": requested_audience,
+        "cover_image": normalize_cover_image(cover_image),
         "startup_profile_id": profile.id if profile else None,
         "binding_id": binding.id,
         "google_connection_id": google_connection.id if google_connection else None,
