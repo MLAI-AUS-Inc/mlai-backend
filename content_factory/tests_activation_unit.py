@@ -349,7 +349,7 @@ class PulseSourceAdmissionTests(SimpleTestCase):
     def test_selected_disconnected_or_unconfigured_source_blocks_before_shared_generation(self):
         from vibe_raising.views import VibeRaisingEmailDraftStartView
         for row in ({"key": "gmail", "status": "reauth_required", "selected": False},
-                    {"key": "google_analytics", "status": "connected", "selected": False},
+                    {"key": "google_analytics", "status": "connected", "selected": False, "usableForUpdates": False},
                     {"key": "gmail", "status": "syncing", "selected": True},
                     {"key": "gmail", "status": "connected", "selected": True, "available": False},
                     {"key": "gmail", "status": "connected", "selected": True, "usableForUpdates": False}):

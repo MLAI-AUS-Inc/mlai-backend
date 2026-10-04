@@ -23,7 +23,7 @@ def source_capabilities(source, *, preferences=None):
     source = dict(source)
     provider = source.get("provider") or source.get("key")
     mode = "oauth" if provider in OAUTH_PROVIDERS else "api_key" if provider in API_KEY_PROVIDERS else None
-    ready = source.get("status") in {"connected", "ready"} and source.get("selected") is True and source.get("usableForUpdates") is not False and source.get("available") is not False
+    ready = source.get("status") in {"connected", "ready"} and source.get("usableForUpdates") is not False and source.get("available") is not False
     usable = provider in UPDATE_PROVIDERS and ready and provider != "google_drive"
     default_enabled = provider != "google_drive" and bool(source.get("connectionId") or source.get("status") in {
         "connected", "ready", "syncing", "needs_reauth", "needs_action", "expired", "auth_required"})

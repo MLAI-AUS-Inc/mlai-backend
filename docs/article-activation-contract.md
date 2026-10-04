@@ -167,3 +167,5 @@ callback preservation and refunds. They do not prove SQL locking, persistence,
 real session/OAuth authentication or production worker behavior. No trusted
 already-migrated disposable database was found locally, so no database-backed
 runner or migration was invoked.
+
+Pulse resource scope is automatic for the reporting month. Legacy manual `selected` flags are not admission requirements; current status, availability and explicit data usability determine readiness.

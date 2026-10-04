@@ -198,7 +198,6 @@ class GenerateView(ChatStartupAccess, founder.VibeRaisingEmailDraftStartView):
         by_key = {row.get("key"): source_capabilities(row) for row in rows if isinstance(row, dict)}
         unavailable = [key for key in selected if key != "manual_documents" and
             (by_key.get(key, {}).get("status") not in {"connected", "ready"}
-             or by_key.get(key, {}).get("selected") is not True
              or by_key.get(key, {}).get("usableForUpdates") is False
              or by_key.get(key, {}).get("available") is False)]
         if unavailable:

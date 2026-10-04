@@ -157,7 +157,7 @@ class SourcePreferenceStorageTests(SimpleTestCase):
         self.assertNotIn(prefs.PREFERENCE_KEY, merge_strategy({}, {prefs.PREFERENCE_KEY: {"attacker": True}}))
 
     def test_syncing_missing_selection_and_website_sources_cannot_be_update_inputs(self):
-        for provider, status_value, selected in (("slack", "syncing", True), ("google_analytics", "connected", False), ("google_drive", "connected", True), ("github", "connected", True)):
+        for provider, status_value, selected in (("slack", "syncing", True), ("google_drive", "connected", True), ("github", "connected", True)):
             self.assertFalse(prefs.source_capabilities({"key": provider, "status": status_value, "selected": selected})["usableForUpdates"])
         self.assertTrue(prefs.source_capabilities({"key": "slack", "status": "connected", "selected": True}, preferences={"slack": False})["usableForUpdates"])
 

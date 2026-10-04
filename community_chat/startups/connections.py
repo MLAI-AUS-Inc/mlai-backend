@@ -54,7 +54,7 @@ class ConnectView(ChatStartupAccess, APIView):
             raise ValidationError("This source does not support browser connection.")
         ticket = signing.dumps({"uid": request.user.pk, "company": str(self.company.pk),
             "session": str(request.auth.pk), "provider": provider,
-            "return_to": request.data.get("returnTo") if request.data.get("returnTo") in {"mobile", "desktop-dev"} else None,
+            "return_to": getattr(request, "data", {}).get("returnTo") if getattr(request, "data", {}).get("returnTo") in {"mobile", "desktop-dev"} else None,
             "nonce": secrets.token_urlsafe(24)}, salt=SALT)
         url = request.build_absolute_uri(reverse("chat_startups_connect_browser"))
         return Response({"authorizationUrl": f"{url}?{urlencode({'ticket': ticket})}"})
