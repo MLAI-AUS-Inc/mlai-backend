@@ -23,22 +23,13 @@ from .website_contract import (
     evidence_digest, safe_repository_path, sanitized_evidence, template_validation,
     validate_authority,
 )
+from .portable_drafts import REPOSITORY_CONFIG_FIELDS, portable_run_update_allowed
 
 
 REPOSITORY_WORKFLOWS = frozenset({
     "repo_scan", "content_factory_scan", "article_system_setup", "direct_generate",
     "confirmed_topic", "article_revision", "publish_article", "article_publish",
     "publish_bundle", "component_revision", "article_generation", "scaffold_articles",
-})
-REPOSITORY_CONFIG_FIELDS = frozenset({
-    "article_template", "design_guide", "resource_prompt", "scan_summary", "tech_stack",
-    "installed_packages", "repo_execution_contract", "build_healing_hints", "article_system",
-    "article_system_setup_cache", "scan_artifact_cache", "framework_component_specs",
-    "last_scanned_sha", "last_scanned_at", "scan_request_fingerprint", "publish_targets",
-    "default_publish_target_id", "generated_components", "component_mapping", "design_snapshot",
-    "visual_context", "renderer_style_profile", "reference_screenshots", "directory_style_feedback",
-    "articles_scaffolded", "articles_scaffold_pr_url", "articles_scaffold_preview_url",
-    "article_path_pattern", "registry_path", "repository_inventory",
 })
 
 
@@ -263,7 +254,16 @@ def authority_guard(data, *, action="read", domain="", github_repo="", require_s
         require_repository_write_policy(action=action, domain=connection.organization.domain)
         if action in {"setup", "publish", "merge", "preview"}:
             verify_repository_native_target(connection)
-        expected_source = check_source_identity(connection, payload, required=action in {"publish", "merge"})
+        if action == "portable":
+            from .website_contract import SHA_PATTERN
+            expected_source = str(payload.get("expected_source_sha") or payload.get("source_sha") or payload.get("repo_head_sha") or "").lower()
+            if expected_source and not SHA_PATTERN.fullmatch(expected_source):
+                raise WebsiteAuthorityError("invalid_source_sha", "An exact source commit is required.", status=422)
+            observed = str(observed_source_sha(connection) or "").lower()
+            if expected_source and observed and expected_source != observed:
+                raise WebsiteAuthorityError("website_source_changed", "The reviewed repository source changed. Refresh before continuing.")
+        else:
+            expected_source = check_source_identity(connection, payload, required=action in {"publish", "merge"})
         if action in {"publish", "merge"} or (action == "preview" and expected_source):
             verify_repository_head(connection, expected_source or connection.verified_sha)
         if require_selected and not OrganizationContentConfig.objects.filter(
@@ -379,61 +379,6 @@ def queue_website_followup(kind, *, data, arguments):
         return operation
 
 
-PORTABLE_CALLBACK_EVENTS = frozenset({
-    "content_ready", "generation_failed", "generation_blocked", "article_progress",
-    "article_admission_attention", "error",
-})
-PORTABLE_WORKFLOWS = frozenset({"article_generation", "direct_generate", "confirmed_topic", "article_revision", "component_revision"})
-
-
-def portable_run_update_allowed(run, payload, *, event_type=""):
-    """Allow draft-only updates from original durable intent, never sender claims.
-
-    This grants no repository configuration, preview, publication or token access.
-    Only the callback and run-snapshot surfaces opt in to this exception.
-    """
-    original = getattr(run, "run_request", None)
-    if not isinstance(original, dict) or original.get("delivery_mode") != "content_only" or connection_contract(original):
-        return False
-    if getattr(run, "workflow", "") not in PORTABLE_WORKFLOWS or (event_type and event_type not in PORTABLE_CALLBACK_EVENTS):
-        return False
-    if payload.get("domain") and str(payload["domain"]).lower().strip() != str(run.domain).lower().strip():
-        return False
-    workflow_groups = ({"article_generation", "direct_generate", "confirmed_topic"}, {"article_revision", "component_revision"})
-    allowed_workflows = next((group for group in workflow_groups if run.workflow in group), {run.workflow})
-    if payload.get("workflow") and payload["workflow"] not in allowed_workflows:
-        return False
-    if any(payload.get(key) and str(payload[key]) != str(run.run_id) for key in ("run_id", "job_id")):
-        return False
-    forbidden = REPOSITORY_CONFIG_FIELDS | set(CONNECTION_FIELDS) | {
-        "github_token", "github_installation_id", "expected_source_sha", "source_sha", "repo_head_sha", "commit_sha",
-        "branch", "branch_name", "head_sha", "pr_url", "pr_number", "pull_request_url", "publish_url",
-        "live_preview", "live_preview_url", "preview_url", "preview_commit_sha", "verified_sha", "capabilities",
-        "publishingReady", "previewSupported", "build_verified", "route_is_live", "preview_content_verified",
-        "website_connection", "article_system_setup", "publish_child_run_id", "setup_run_id",
-        "connectionId", "connectionGeneration", "connectionTargetId", "repositoryId",
-        "websiteConnectionId", "websiteConnection", "livePreview", "previewUrl", "livePreviewUrl", "prUrl",
-    }
-    def safe(value):
-        if isinstance(value, dict):
-            for key, item in value.items():
-                normalized_key = re.sub(r"(?<!^)(?=[A-Z])", "_", str(key)).lower()
-                if (key in forbidden or normalized_key in forbidden) and item not in (None, "", False, [], {}):
-                    return False
-                if normalized_key in {"delivery_mode", "requested_delivery_mode", "resolved_delivery_mode", "publish_resolution"} and item not in (None, "", "content_only"):
-                    return False
-                if normalized_key == "github_repo" and item and item != getattr(run, "github_repo", ""):
-                    return False
-                if normalized_key == "domain" and item and str(item).lower().strip() != str(run.domain).lower().strip():
-                    return False
-                if normalized_key in {"status", "publish_status", "publish_stage", "merge_status", "approval_state"} and item in ("published", "merged", "approved", "auto_approved", "pr_created", "draft_pr_created", "setup_pr_created"):
-                    return False
-                if not safe(item):
-                    return False
-        elif isinstance(value, list):
-            return all(safe(item) for item in value)
-        return True
-    return safe(payload)
 
 
 def needs_repository_authority(data):

@@ -105,7 +105,9 @@ class ActivationAdmissionTests(SimpleTestCase):
              patch.object(views, "_setup_blocked_response_for_generation", return_value=blocked), \
              patch.object(views, "_charge_roo_points_for_article") as billing, \
              patch.object(views, "_queue_content_factory_run") as queue:
-            response = views.VibeMarketingArticleView().post(self.request)
+            # This fixture isolates activation; the combined consent wrapper is
+            # exercised against real rows in tests_activation_connections.
+            response = views.VibeMarketingArticleView.post.__wrapped__(views.VibeMarketingArticleView(), self.request)
         self.assertEqual(response.status_code, 409)
         billing.assert_not_called()
         queue.assert_not_called()
@@ -121,7 +123,7 @@ class ActivationAdmissionTests(SimpleTestCase):
                  patch.object(views, "_setup_blocked_response_for_generation", return_value=Response({}, status=409)), \
                  patch.object(views, "_call_content_factory_run_action") as remote, \
                  patch.object(views, "_restart_article_run") as restart:
-                response = views.VibeMarketingRunControlView().post(self.request, "run-1", action)
+                response = views.VibeMarketingRunControlView.post.__wrapped__(views.VibeMarketingRunControlView(), self.request, "run-1", action)
                 self.assertEqual(response.status_code, 409)
                 remote.assert_not_called()
                 restart.assert_not_called()
@@ -131,7 +133,7 @@ class ActivationAdmissionTests(SimpleTestCase):
              patch.object(views, "_get_config", return_value=config()), \
              patch.object(views, "_setup_blocked_response_for_generation", return_value=Response({}, status=409)), \
              patch.object(views, "_call_content_factory_component_revision") as remote:
-            response = views.VibeMarketingRunCommentsSubmitView().post(self.request, "run-1")
+            response = views.VibeMarketingRunCommentsSubmitView.post.__wrapped__(views.VibeMarketingRunCommentsSubmitView(), self.request, "run-1")
         self.assertEqual(response.status_code, 409)
         remote.assert_not_called()
 
@@ -280,7 +282,8 @@ class ActivationRequestAndLegacyTests(SimpleTestCase):
              patch.object(views, "_get_config", return_value=config()), \
              patch.object(views, "_setup_blocked_response_for_generation", return_value=Response({"code": "article_system_setup_blocked"}, status=409)), \
              patch.object(views, "_charge_roo_points_for_article") as charge, \
-             patch.object(views, "_queue_content_factory_run") as queue:
+             patch.object(views, "_queue_content_factory_run") as queue, \
+             patch.object(views.VibeMarketingArticleView, "post", views.VibeMarketingArticleView.post.__wrapped__):
             response = views.VibeMarketingArticleView.as_view(authentication_classes=[], permission_classes=[IsAuthenticated])(request)
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.data["code"], "article_system_setup_blocked")

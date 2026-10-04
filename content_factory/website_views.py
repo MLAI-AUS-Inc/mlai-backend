@@ -34,7 +34,15 @@ def guarded_owner_operation(action, *, bind_selected=False, run_operation=False,
             if error:
                 return error
             try:
-                if not run_operation and action == "read" and str(request.data.get("delivery_mode") or request.data.get("deliveryMode") or config.article_delivery_mode) == "content_only":
+                from .portable_drafts import explicit_portable_request, original_portable_run
+                if not run_operation and action == "read" and explicit_portable_request(request.data):
+                    expected = connection_contract(request.data)
+                    if expected:
+                        current = config.website_connection
+                        if current is None or any(connection_contract(contract_for(current)).get(key) != value for key, value in expected.items() if key != "connection_target_id"):
+                            raise WebsiteAuthorityError("website_connection_changed", "The reviewed website connection changed. Refresh before continuing.")
+                        with authority_guard({**dict(request.data), "domain": context.organization.domain, "github_repo": current.github_repo}, action="portable"):
+                            pass
                     return method(self, request, *args, **kwargs)
                 run_action = kwargs.get("action")
                 if run_operation and run_action in {"cancel", "deny", "refresh-setup-pr-status"}:
@@ -44,6 +52,14 @@ def guarded_owner_operation(action, *, bind_selected=False, run_operation=False,
                     run = ContentFactoryRun.objects.filter(run_id=run_id).first()
                     if run is None or not _run_belongs_to_context(run, context):
                         return Response({"detail": "Run not found."}, status=404)
+                    if original_portable_run(run) and run_action not in {"approve", "publish-pr", "promote-bundle", "merge-publish-pr", "retry-preview-quality"}:
+                        if connection_contract(request.data):
+                            raise WebsiteAuthorityError("website_connection_changed", "A portable draft cannot acquire repository authority.")
+                        if any(request.data.get(key) not in (None, "", "content_only") for key in (
+                            "delivery_mode", "deliveryMode", "resolved_delivery_mode", "resolvedDeliveryMode",
+                        )):
+                            raise WebsiteAuthorityError("portable_repository_access_denied", "A confirmed portable draft cannot switch to repository delivery. Start a separately reviewed repository run.")
+                        return method(self, request, *args, **kwargs)
                     payload = scoped_run_contract(run)
                     expected = connection_contract(request.data)
                     if expected and any(connection_contract(payload).get(key) != value for key, value in expected.items()):
@@ -145,7 +161,10 @@ class WebsiteConnectionAuthorizeView(APIView):
     def get(self, request):
         try:
             with authority_guard(dict(request.query_params.items()), action=str(request.query_params.get("action") or "read")) as connection:
-                return Response({"allowed": True, **contract_for(connection), "state": connection.state, "capabilities": connection.capabilities})
+                portable = request.query_params.get("action") == "portable"
+                return Response({"allowed": True, **contract_for(connection), "state": connection.state,
+                    "permission_mode": "none" if portable else "read", "capabilities": {} if portable else connection.capabilities,
+                    "expected_source_sha": str(request.query_params.get("expected_source_sha") or request.query_params.get("source_sha") or request.query_params.get("repo_head_sha") or "").lower()})
         except WebsiteAuthorityError as exc:
             return Response(exc.as_dict(), status=exc.status)
 

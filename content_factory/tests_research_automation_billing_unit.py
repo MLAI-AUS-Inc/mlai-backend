@@ -187,7 +187,8 @@ class WorkerArticleAdmissionTests(SimpleTestCase):
         self.factory = APIRequestFactory()
         self.params = {"article_admission": "1", "domain": "fixture.test", "github_repo": "fixture/site", "requested_by_slack_user_id": "mlai_user:7"}
         self.user = Obj(id=7, pk=7)
-        self.config = Obj(github_repo="fixture/site", organization=Obj(domain="fixture.test"))
+        self.config = Obj(github_repo="fixture/site", organization=Obj(domain="fixture.test"), website_connection_id=None)
+        self.context = Obj(organization=self.config.organization, profile=Obj(user=self.user))
 
     def call(self, params=None, key=True):
         request = self.factory.get("/api/content-factory/org/config", params or self.params, **({"HTTP_X_API_KEY": "synthetic-service-key"} if key else {}))
@@ -208,20 +209,23 @@ class WorkerArticleAdmissionTests(SimpleTestCase):
             with self.subTest(ready=ready), \
                  patch("integrations.services.github_installations.resolve_user_for_actor_id", return_value=self.user), \
                  patch("core.actor_ids.actor_ids_for_user", return_value=["mlai_user:7"]), \
-                 patch("integrations.services.github_connections.get_owned_org_config", return_value=self.config) as owned, \
+                 patch("content_factory.activation.founder_context_for_domain", return_value=self.context) as owned, \
+                 patch.object(marketing, "_get_config", return_value=self.config), \
                  patch.object(marketing, "_article_capabilities_for_context", return_value={"version": 1, "canGenerateArticle": ready, "reasonCode": "verification_required", "reason": "Verify setup"}) as capability:
                 response = self.call()
             self.assertEqual(response.status_code, 200 if ready else 409)
-            owned.assert_called_once_with(["mlai_user:7"], "fixture.test")
+            owned.assert_called_once_with(self.user, "fixture.test")
             self.assertTrue(capability.call_args.kwargs["force"])
             self.assertEqual(response.data["github_repo"], "fixture/site")
             self.assertEqual(response["Cache-Control"], "private, no-store")
 
     def test_switched_repo_or_different_owner_rejects_without_verification(self):
-        for cfg in (None, Obj(github_repo="fixture/other")):
+        for cfg in (None, Obj(github_repo="fixture/other", website_connection_id=None)):
             with patch("integrations.services.github_installations.resolve_user_for_actor_id", return_value=self.user), \
                  patch("core.actor_ids.actor_ids_for_user", return_value=["mlai_user:7"]), \
-                 patch("integrations.services.github_connections.get_owned_org_config", return_value=cfg), \
+                 patch("content_factory.activation.founder_context_for_domain", return_value=self.context,
+                       side_effect=PermissionError("Wrong founder") if cfg is None else None), \
+                 patch.object(marketing, "_get_config", return_value=cfg), \
                  patch.object(marketing, "_article_capabilities_for_context") as capability:
-                self.assertEqual(self.call().status_code, 409)
+                self.assertEqual(self.call().status_code, 403 if cfg is None else 409)
                 capability.assert_not_called()

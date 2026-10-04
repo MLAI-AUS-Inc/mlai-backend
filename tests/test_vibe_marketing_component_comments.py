@@ -69,7 +69,9 @@ class _PublishRetryApprovalFixture:
         website.capabilities = {"inventoryReady": True, "generationReady": True,
                                 "publishingReady": True, "previewSupported": True}
         website.verified_sha = "a" * 40
-        website.save(update_fields=["capabilities", "verified_sha"])
+        website.authorized_by = self.user
+        website.last_verified_at = timezone.now()
+        website.save(update_fields=["capabilities", "verified_sha", "authorized_by", "last_verified_at"])
         config.default_publish_target_id = "articles"
         config.save(update_fields=["default_publish_target_id"])
         WebsiteConnectionTarget.objects.create(
@@ -102,6 +104,13 @@ class _PublishRetryApprovalFixture:
         tokens = patch("integrations.services.github_app.create_installation_access_token", return_value=credential)
         tokens.start()
         self.addCleanup(tokens.stop)
+        # The real activation gate still reads current-generation target proof.
+        # Provider transport is synthetic; fresh-head behavior is covered by
+        # tests_activation_connections and tests_activation_unit.
+        access = patch("content_factory.vibe_marketing_views._verify_github_repository_access",
+            return_value={"verified": True, "branch": website.branch, "sha": website.verified_sha})
+        access.start()
+        self.addCleanup(access.stop)
 
     def _create_bound_run(self, **kwargs):
         # Explicit consent is present at fixture creation, as it must be in a
@@ -176,6 +185,15 @@ class _PublishRetryApprovalFixture:
 
 
 class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase):
+    def _clear_first_time_verification(self):
+        """First setup has inventory consent, without a verified live adapter."""
+        website = self.client.website_fixture
+        website.capabilities = {**website.capabilities, "publishingReady": False}
+        website.verified_sha = ""
+        website.last_verified_at = None
+        website.save(update_fields=["capabilities", "verified_sha", "last_verified_at"])
+        website.targets.update(verified_at=None)
+
     def setUp(self):
         cache.clear()
         self.client = WebsiteBoundAPIClient()
@@ -309,7 +327,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         )
         return config, account
 
-    def test_vibe_zero_cost_ai_routes_require_six_roo_points_without_spending(self):
+    def test_vibe_configuration_routes_require_six_roo_points_without_spending(self):
         _config, account = self._prepare_billable_vibe_context(balance=5)
 
         with patch(
@@ -330,7 +348,6 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
                     "/api/v1/vibe-marketing/article-system-setup/",
                     {"githubRepo": "example/site", "articleSurfaceUrl": "/articles"},
                 ),
-                ("/api/v1/vibe-marketing/discovery/", {}),
             ]
             for path, payload in requests:
                 response = self.client.post(path, payload, format="json")
@@ -344,7 +361,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         self.assertEqual(account.balance, 5)
         self.assertEqual(account.lifetime_spent, 0)
 
-    def test_vibe_zero_cost_ai_routes_authorize_without_spending(self):
+    def test_vibe_configuration_routes_authorize_without_spending(self):
         _config, account = self._prepare_billable_vibe_context(balance=6)
         queued_payloads = {}
 
@@ -372,7 +389,6 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
                     "/api/v1/vibe-marketing/scan/",
                     {"githubRepo": "example/site", "scanPurpose": "inventory"},
                 ),
-                ("discovery", "/api/v1/vibe-marketing/discovery/", {}),
                 (
                     "article-system-setup",
                     "/api/v1/vibe-marketing/article-system-setup/",
@@ -3203,6 +3219,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
 
     @patch("content_factory.vibe_marketing_views._github_api_request", new=_open_setup_pull_fixture)
     def test_first_time_setup_allows_research_but_blocks_explicit_publication(self):
+        self._clear_first_time_verification()
         self._prepare_articles_setup_gate(status="preview_ready")
         self._create_bound_run(
             run_id="setup-gate-run",
@@ -3254,6 +3271,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         self.assertEqual(article_response.data["code"], "article_system_setup_blocked")
 
     def test_code_review_ready_setup_moves_wizard_to_review_step(self):
+        self._clear_first_time_verification()
         # Server-rendered stacks get no hosted preview; the run parks in
         # code_review_ready (content-factory#599). The wizard must advance to
         # the review step with a link to the run page — previously this status
@@ -3319,6 +3337,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         )
 
     def test_code_review_ready_wizard_survives_premature_publish_target(self):
+        self._clear_first_time_verification()
         # arb-gen.com: Content Factory registered a publish target synthesized
         # from the scaffold's setup cache while the setup run was still awaiting
         # approval. The org then computed generation_ready via "published",
@@ -3395,6 +3414,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
 
     @patch("content_factory.vibe_marketing_views._github_api_request", new=_open_setup_pull_fixture)
     def test_first_time_articles_setup_preview_failed_shows_review_diagnostics(self):
+        self._clear_first_time_verification()
         self._prepare_articles_setup_gate(status="preview_failed")
         self._create_bound_run(
             run_id="setup-gate-run",

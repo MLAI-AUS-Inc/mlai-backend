@@ -109,6 +109,7 @@ jobs:
           community_chat.tests.test_startup_publication \
           startup_updates.tests_month_scope \
           startup_updates.tests_monthly_groups \
+          startup_updates.tests_covers \
           startup_updates.tests_update_identity.GenerationDateCompatibilityTests
 
     - name: Run no-database editorial contract checks
@@ -259,6 +260,7 @@ jobs:
           tests.test_health_check \
           tests.test_content_factory_org_config \
           content_factory.tests_website_connections \
+          content_factory.tests_activation_connections \
           content_factory.tests_website_portable \
           content_factory.tests_website_portable_wire \
           integrations.tests_content_factory_website_reads \

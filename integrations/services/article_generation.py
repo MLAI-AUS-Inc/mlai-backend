@@ -453,7 +453,7 @@ def _resolve_delivery_mode_confirmation(article_request: Optional[dict], *, requ
     raw_confirmation = article_request.get("delivery_mode_confirmed")
     if raw_confirmation is None:
         return bool(requested_mode)
-    return bool(raw_confirmation)
+    return raw_confirmation is True or str(raw_confirmation).lower() in {"true", "1"}
 
 
 def _resolve_saved_article_delivery_mode(config: Optional[OrganizationContentConfig]) -> Optional[str]:
@@ -705,9 +705,8 @@ def _serialize_existing_billed_job(job) -> dict:
     }
 
 
-def require_article_activation(*, domain, actor_id, user=None, expected_repo=""):
+def require_article_activation(*, domain, actor_id, user=None, expected_repo="", article_request=None):
     """Apply the same Articles gate to older authenticated and Roo entry points."""
-    from types import SimpleNamespace
     from integrations.services.github_installations import resolve_user_for_actor_id
     from content_factory.vibe_marketing_views import _article_capabilities_for_context, _get_config
     actor = str(actor_id or "").strip()
@@ -715,12 +714,20 @@ def require_article_activation(*, domain, actor_id, user=None, expected_repo="")
     if user is None:
         raise ArticleGenerationError("An authenticated founder is required to generate articles.")
     _validate_authenticated_content_factory_actor(user=user, actor_id=actor)
+    from content_factory.activation import founder_context_for_domain
+    from content_factory.portable_drafts import explicit_portable_request
     try:
-        organization = Organization.objects.get(domain=normalize_domain(domain))
-    except Organization.DoesNotExist as exc:
-        raise ArticleGenerationError("Add your startup website before generating articles.") from exc
-    config = _get_config(organization)
-    context = SimpleNamespace(organization=organization, profile=SimpleNamespace(user=user))
+        context = founder_context_for_domain(user, normalize_domain(domain))
+    except PermissionError as exc:
+        raise ArticleGenerationError(str(exc)) from exc
+    config = _get_config(context.organization)
+    if explicit_portable_request(article_request or {}):
+        from content_factory.website_contract import connection_contract
+        from content_factory.website_connections import authority_guard
+        if connection_contract(article_request):
+            with authority_guard(article_request, domain=context.organization.domain, action="portable"):
+                pass
+        return config
     capabilities = _article_capabilities_for_context(context, config, force=True)
     if expected_repo and str(expected_repo).lower() != str(config.github_repo or "").lower():
         capabilities = {**capabilities, "canGenerateArticle": False, "canPublishArticle": False,
@@ -753,7 +760,7 @@ def _charge_content_factory_user(
     from roo.permissions import InsufficientBalanceError
     from roo.services import PointsService
 
-    require_article_activation(domain=resolved_domain, actor_id=created_by_slack_id, user=user)
+    require_article_activation(domain=resolved_domain, actor_id=created_by_slack_id, user=user, article_request=article_request)
     client_request_id = _get_client_request_id(article_request)
     cost_points = get_content_factory_article_cost_points(resolved_domain)
     _require_expected_cost(article_request, cost_points)
@@ -919,11 +926,17 @@ def _refund_content_factory_request(
 ):
     from content_factory.models import ContentFactoryJob
     from roo.services import PointsService
+    from roo.models import Ledger
 
     client_request_id = _get_client_request_id(article_request)
-    cost_points = get_content_factory_article_cost_points(resolved_domain)
-    if cost_points == 0:
+    original = Ledger.objects.filter(user=user, kind="SPEND", source=CONTENT_FACTORY_LEDGER_SOURCE,
+        idempotency_key=f"content_factory:charge:{client_request_id}").first()
+    amount = -int(getattr(original, "delta_microroo", 0) or 0) if original else 0
+    if amount <= 0 or amount % 1_000_000:
         return None
+    # Refund the recorded charge and its allocation, even if today's price is
+    # different. A job's billing flag alone never authorizes a credit.
+    cost_points = amount // 1_000_000
 
     requested_by_slack_user_id = _resolve_requested_by_slack_user_id(slack_user_id, article_request)
     ledger, _ = PointsService.refund(
@@ -1098,7 +1111,7 @@ def _post_content_factory_queue_request(
     require_unlocked_remote_call()
     if payload.get("delivery_mode") == "content_only":
         from content_factory.website_contract import CONNECTION_FIELDS
-        for field in (*CONNECTION_FIELDS, "github_token", "expected_source_sha"):
+        for field in (*CONNECTION_FIELDS, "github_token", "expected_source_sha", "source_sha", "repo_head_sha", "app_root", "branch"):
             payload.pop(field, None)
         payload["github_repo"] = ""
     if endpoint.rstrip("/").endswith(("/article", "/confirm-topic")) and payload.get("delivery_mode") != "content_only":
@@ -1277,19 +1290,17 @@ def maybe_auto_refund_terminal_failure(
         billed_job.billing_status = CONTENT_FACTORY_BILLING_STATUS_REFUNDED
         billed_job.save(update_fields=["billing_status", "updated_at"])
         return True, refund_points
-    refund_points = get_content_factory_article_cost_points(resolved_domain)
-    if refund_points <= 0:
-        return False, 0
-
     refund_reason = str(error_message or resolved_error_code or "deterministic failure").strip()
-    _refund_content_factory_request(
+    refund_ledger = _refund_content_factory_request(
         user=user,
         slack_user_id=getattr(billed_job, "slack_user_id", "") or getattr(job, "slack_user_id", ""),
         article_request=request_meta,
         resolved_domain=resolved_domain,
         reason=refund_reason,
     )
-    return True, refund_points
+    if refund_ledger is None:
+        return False, 0
+    return True, int(refund_ledger.delta_microroo or 0) // 1_000_000
 
 
 def _job_uses_deferred_billing(job) -> bool:
@@ -2059,7 +2070,7 @@ def trigger_article_generation(
     client_request_id = _get_client_request_id(article_request)
     if article_request.get("topic"):
         require_article_activation(domain=resolved_domain,
-            actor_id=_resolve_requested_by_slack_user_id(slack_user_id, article_request), user=billing_user)
+            actor_id=_resolve_requested_by_slack_user_id(slack_user_id, article_request), user=billing_user, article_request=article_request)
     if not article_request.get("topic"):
         import hashlib
         # Bind legacy research reuse to its authenticated payer and startup too.
@@ -2915,7 +2926,8 @@ def confirm_topic(
     if request_source != CONTENT_FACTORY_REQUEST_SOURCE:
         raise ArticleGenerationError("Content Factory article requests must originate from Roo Slackbot.")
     require_article_activation(domain=normalized_domain,
-        actor_id=requested_by_slack_user_id or slack_user_id, user=billing_user)
+        actor_id=requested_by_slack_user_id or slack_user_id, user=billing_user,
+        article_request={"delivery_mode": delivery_mode, "delivery_mode_confirmed": delivery_mode_confirmed})
     _require_expected_cost({"expected_cost_points": expected_cost_points}, get_content_factory_article_cost_points(normalized_domain))
     source_job = None
     if source_run_id:

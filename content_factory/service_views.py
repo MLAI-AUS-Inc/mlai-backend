@@ -269,31 +269,54 @@ def _content_factory_github_auth_url(*, slack_user_id: str, domain: Optional[str
 
 
 def _worker_article_admission_response(request):
-    """Fresh, exact tenant/repo admission on the existing service-authenticated API."""
-    from types import SimpleNamespace
+    """Fresh action-specific admission for the exact founder and reviewed consent."""
     from core.actor_ids import actor_ids_for_user
     from integrations.services.github_installations import resolve_user_for_actor_id
-    from integrations.services.github_connections import get_owned_org_config
-    from content_factory.vibe_marketing_views import _article_capabilities_for_context
+    from content_factory.activation import article_capabilities, founder_context_for_domain
+    from content_factory.portable_drafts import explicit_portable_request
+    from content_factory.website_contract import WebsiteAuthorityError, connection_contract
+    from content_factory.website_connections import authority_guard, contract_for
+    from content_factory.vibe_marketing_views import _article_capabilities_for_context, _get_config
 
-    domain = _normalize_content_factory_domain(request.query_params.get('domain') or '')
-    repo = str(request.query_params.get('github_repo') or '').strip()
-    actor = str(request.query_params.get('requested_by_slack_user_id') or request.query_params.get('slack_user_id') or '').strip()
-    if not domain or not repo or not actor:
-        return Response({'code': 'article_admission_scope_required', 'detail': 'Domain, repository and founder actor are required.'}, status=400)
+    data = dict(request.query_params.items())
+    domain = _normalize_content_factory_domain(data.get('domain') or '')
+    repo = str(data.get('github_repo') or '').strip()
+    actor = str(data.get('requested_by_slack_user_id') or data.get('slack_user_id') or '').strip()
+    portable = explicit_portable_request(data)
+    if not domain or not actor or (not portable and not repo):
+        return Response({'code': 'article_admission_scope_required', 'detail': 'Domain, founder actor and repository (except confirmed portable drafts) are required.'}, status=400)
     user = resolve_user_for_actor_id(actor)
     if user is None or actor not in actor_ids_for_user(user):
         return Response({'code': 'article_admission_actor_invalid', 'detail': 'A valid founder actor is required.'}, status=403)
-    config = get_owned_org_config(actor_ids_for_user(user), domain)
-    if config is None or str(config.github_repo or '').lower() != repo.lower():
-        return Response({'code': 'article_system_setup_blocked', 'reasonCode': 'repository_changed',
-                         'detail': 'This founder does not own the selected website repository.'}, status=409)
-    context = SimpleNamespace(organization=config.organization, profile=SimpleNamespace(user=user))
-    capabilities = _article_capabilities_for_context(context, config, force=True)
-    body = {'domain': config.organization.domain, 'github_repo': config.github_repo, 'articleCapabilities': capabilities}
-    if not capabilities.get('canGenerateArticle'):
+    try:
+        context = founder_context_for_domain(user, domain)
+    except PermissionError as exc:
+        return Response({'code': 'article_admission_owner_invalid', 'detail': str(exc)}, status=403)
+    config = _get_config(context.organization)
+    try:
+        expected = connection_contract(data)
+        if expected or (not portable and config.website_connection_id):
+            if not expected:
+                raise WebsiteAuthorityError('website_connection_required', 'The reviewed connection identity is required.')
+            current = config.website_connection
+            if current is None or any(connection_contract(contract_for(current)).get(key) != value for key, value in expected.items() if key != 'connection_target_id'):
+                raise WebsiteAuthorityError('website_connection_changed', 'The reviewed website connection changed.')
+            with authority_guard({**data, 'domain': domain, 'github_repo': repo or current.github_repo}, action='portable' if portable else 'read'):
+                pass
+        if not portable and str(config.github_repo or '').lower() != repo.lower():
+            raise WebsiteAuthorityError('repository_changed', 'This founder does not own the selected website repository.')
+    except WebsiteAuthorityError as exc:
+        return Response(exc.as_dict(), status=exc.status)
+    capabilities = (article_capabilities(config, domain=domain, account={'saved': False, 'owned': False},
+        evidence={'verified': False, 'reasonCode': 'integration_required'}) if portable
+        else _article_capabilities_for_context(context, config, force=True))
+    allowed = capabilities.get('canGeneratePortableDraft' if portable else 'canGenerateArticle')
+    body = {'domain': context.organization.domain, 'github_repo': repo if expected else '' if portable else config.github_repo,
+            'articleCapabilities': capabilities, 'delivery_mode': 'content_only' if portable else str(data.get('delivery_mode') or ''),
+            **expected, 'expected_source_sha': str(data.get('expected_source_sha') or data.get('source_sha') or data.get('repo_head_sha') or '').lower()}
+    if not allowed:
         body.update({'code': 'article_system_setup_blocked', 'reasonCode': capabilities.get('reasonCode'), 'detail': capabilities.get('reason')})
-    return Response(body, status=200 if capabilities.get('canGenerateArticle') else 409, headers={'Cache-Control': 'private, no-store'})
+    return Response(body, status=200 if allowed else 409, headers={'Cache-Control': 'private, no-store'})
 
 
 class ContentFactoryOrgConfigView(APIView):
@@ -8754,7 +8777,7 @@ def _sync_content_factory_run_snapshot(*, run_id: str, data: dict, step_states: 
                 },
             )
         original_request = existing_run.run_request if isinstance(existing_run.run_request, dict) else {}
-        from .website_connections import portable_run_update_allowed
+        from .portable_drafts import portable_run_update_allowed
         from .website_contract import connection_contract
         if original_request.get("delivery_mode") == "content_only" and not connection_contract(original_request):
             if not portable_run_update_allowed(existing_run, data):

@@ -60,6 +60,9 @@ def integration_evidence(config, latest_runs=(), *, setup_gate=None, now=None):
     authority. Runtime repository probing additionally verifies the current HEAD.
     """
     now = now or timezone.now()
+    connection = getattr(config, "website_connection", None)
+    if connection is not None:
+        return durable_integration_evidence(config, connection, now=now)
     raw = mapping(getattr(config, "article_system", None))
     pending = mapping(raw.get("pending_article_system_setup"))
     repo = str(getattr(config, "github_repo", "") or "").strip()
@@ -140,6 +143,40 @@ def integration_evidence(config, latest_runs=(), *, setup_gate=None, now=None):
     return {**base, "verified": True, "verifiedAt": verified_at.isoformat(), "branch": branch, "sha": sha, "reasonCode": ""}
 
 
+def durable_integration_evidence(config, connection, *, now=None):
+    """Use current-generation target proof, never legacy ready flags after binding."""
+    from .website_contract import SHA_PATTERN
+    from .website_rollout import repository_write_policy
+    now = now or timezone.now()
+    repo = str(getattr(config, "github_repo", "") or "")
+    base = {"verified": False, "routePath": "/articles", "verifiedAt": None, "repo": repo,
+            "branch": connection.branch, "sha": connection.verified_sha}
+    if repo.casefold() != connection.github_repo.casefold():
+        return {**base, "reasonCode": "repository_changed"}
+    if connection.state != "connected":
+        return {**base, "reasonCode": "website_publishing_paused" if connection.state == "paused" else "website_disconnected"}
+    if not repository_write_policy(connection.organization.domain)["allowed"]:
+        return {**base, "reasonCode": "website_writes_paused"}
+    if connection.app_root or any(item.get("code") in {"APPLICATION_ROOT_VERIFICATION_REQUIRED", "SETUP_BRANCH_VERIFICATION_REQUIRED"} for item in connection.blockers):
+        return {**base, "reasonCode": "integration_required"}
+    if not (mapping(connection.capabilities).get("publishingReady") and mapping(connection.capabilities).get("generationReady")):
+        return {**base, "reasonCode": "integration_required"}
+    key = str(getattr(config, "default_publish_target_id", "") or "")
+    targets = connection.targets.filter(generation=connection.generation)
+    target = targets.filter(target_key=key).first() if key else None
+    if (target is None or not target.verified_at or not mapping(target.capabilities).get("publishingReady")
+            or not SHA_PATTERN.fullmatch(connection.verified_sha or "") or target.source_sha != connection.verified_sha
+            or not connection.branch):
+        return {**base, "reasonCode": "verification_required"}
+    verified_at = connection.last_verified_at
+    if (not verified_at or verified_at > now + timedelta(minutes=5) or now - verified_at > VERIFICATION_MAX_AGE
+            or target.verified_at > now + timedelta(minutes=5) or now - target.verified_at > VERIFICATION_MAX_AGE):
+        return {**base, "reasonCode": "verification_stale"}
+    contract = mapping(target.contract)
+    route = str(contract.get("route_path") or contract.get("public_path") or str(contract.get("route_template") or "").split("{")[0] or "/articles")
+    return {**base, "verified": True, "routePath": "/" + route.strip("/"), "verifiedAt": verified_at.isoformat(), "reasonCode": ""}
+
+
 def article_capabilities(config, *, domain="", account=None, evidence=None, repository_access=None):
     """Return the versioned, action-specific client projection, failing closed."""
     account = account or github_account_state(config)
@@ -150,6 +187,8 @@ def article_capabilities(config, *, domain="", account=None, evidence=None, repo
                  and access.get("branch") == evidence.get("branch") and access.get("sha") == evidence.get("sha"))
     code = "" if ready else "github_required" if not account.get("saved") else "repository_required" if not repo_selected else access.get("reasonCode") or evidence.get("reasonCode") or "github_verification_required"
     reasons = {
+        "website_disconnected": "Reconnect your website before repository work.", "website_publishing_paused": "Resume website publishing before repository work.",
+        "website_writes_paused": "Website changes are temporarily paused.", "repository_changed": "Review the selected website repository.",
         "github_required": "Connect GitHub to get started.", "repository_required": "Choose your website repository.",
         "integration_required": "Connect your articles page to start writing.", "setup_pr_unmerged": "Review and merge your articles setup.",
         "verification_required": "Verify your articles integration.", "verification_stale": "Check your website integration again.",
@@ -159,7 +198,7 @@ def article_capabilities(config, *, domain="", account=None, evidence=None, repo
     route = evidence.get("routePath") or "/articles"
     label = route.strip("/").split("/")[0].replace("-", " ").title() or "Articles"
     unit = get_content_factory_content_island_topic_cost_points(domain)
-    return {"version": 1, "canResearch": bool(domain), "canGenerateArticle": ready, "canPublishArticle": ready,
+    return {"version": 1, "canResearch": bool(domain), "canGenerateArticle": ready, "canGeneratePortableDraft": bool(domain), "canPublishArticle": ready,
             "stage": "ready" if ready else "unavailable" if code == "github_unavailable" else "github" if not account.get("saved") or code == "github_access_required" else "repository" if not repo_selected else "verifying" if code in {"verification_required", "verification_stale", "github_verification_required", "github_unavailable"} else "integration",
             "reasonCode": code, "reason": reasons.get(code, "Complete articles setup to start writing."),
             "githubConnected": bool(account.get("saved")), "accountStatus": "connected" if access.get("verified") else account.get("status", "not_connected"),
@@ -168,3 +207,14 @@ def article_capabilities(config, *, domain="", account=None, evidence=None, repo
             "nextStep": "repository" if not repo_selected or not account.get("saved") or code.startswith("github_") else "articles",
             "verifiedAt": evidence.get("verifiedAt"),
             "prices": {"article": get_content_factory_article_cost_points(domain), "researchTopic": unit, "research": unit * 4, "islandResearch": unit, "automationResearch": unit * 3}}
+
+
+def founder_context_for_domain(user, domain):
+    """Resolve a persisted founder company by exact organization ownership."""
+    from founder_tools.models import VibeRaisingProfile
+    from founder_tools.services import FounderCompanyContext
+    profile = VibeRaisingProfile.objects.filter(user=user, role=VibeRaisingProfile.ROLE_FOUNDER).first()
+    company = profile.companies.select_related("organization").filter(organization__domain__iexact=domain).first() if profile else None
+    if company is None:
+        raise PermissionError("This founder does not own the selected startup website.")
+    return FounderCompanyContext(profile=profile, company=company, organization=company.organization)

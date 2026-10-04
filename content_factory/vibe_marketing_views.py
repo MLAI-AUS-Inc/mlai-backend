@@ -6951,6 +6951,8 @@ def _restart_article_payload_from_run(*, run, context, config, actor_id):
         if "delivery_mode_explicit" in run_request
         else run_request.get("deliveryModeExplicit")
     )
+    from .portable_drafts import original_portable_run
+    delivery_mode_explicit = delivery_mode_explicit or original_portable_run(run)
     requested_delivery_mode = str(
         run_request.get("delivery_mode")
         or run_request.get("deliveryMode")
@@ -10517,6 +10519,10 @@ def _serialize_run(
     topic_candidates=None, precomputed_article_setup_state=None,
 ):
     compact = mode in {"summary", "status"}
+    original_request = _run_mapping(run.run_request)
+    original_mode = str(original_request.get("delivery_mode") or original_request.get("deliveryMode") or "")
+    original_confirmation = original_request.get("delivery_mode_confirmed", original_request.get("deliveryModeConfirmed",
+        original_request.get("delivery_mode_explicit", original_request.get("deliveryModeExplicit"))))
     step_states = _serialize_run_steps(run, compact=compact)
     from content_factory.run_state import reliability_presentation
     result = _run_mapping(run.result)
@@ -10580,6 +10586,8 @@ def _serialize_run(
             "workflow": run.workflow,
             "domain": run.domain,
             "githubRepo": run.github_repo,
+            "deliveryMode": original_mode,
+            "deliveryModeConfirmed": bool(original_mode) and (original_confirmation is True or str(original_confirmation).lower() in {"true", "1"}),
             "status": run.status,
             "currentStep": run.current_step,
             "approvalState": run.approval_state,
@@ -10650,6 +10658,8 @@ def _serialize_run(
         "workflow": run.workflow,
         "domain": run.domain,
         "githubRepo": run.github_repo,
+        "deliveryMode": original_mode,
+        "deliveryModeConfirmed": bool(original_mode) and (original_confirmation is True or str(original_confirmation).lower() in {"true", "1"}),
         "status": run.status,
         "currentStep": run.current_step,
         "approvalState": run.approval_state,
@@ -11082,6 +11092,7 @@ def _serialize_bootstrap(context, request=None, *, view="full"):
 _BOOTSTRAP_WORKFLOW_RUN_FIELDS = (
     "runId", "workflow", "status", "currentStep", "approvalState", "sourceRunId",
     "resumeAvailable", "restartAvailable", "retryAvailable", "updatedAt",
+    "deliveryMode", "deliveryModeConfirmed",
     "previewUrl", "prUrl", "routePath", "blockingReason", "blockingCode",
     "publishChildStatus", "publishChildRecoverable", "publishChildWaitReason",
 )
@@ -11416,8 +11427,13 @@ def _timed_vibe_response(payload, *, started_at, metric_name, view=None, respons
 def _github_account_for_context(context, config):
     from integrations.services.github_installations import user_github_installations
     user = context.profile.user
-    return github_account_state(config, actor_ids=actor_ids_for_user(user),
-                                installations=user_github_installations(user))
+    account = github_account_state(config, actor_ids=actor_ids_for_user(user),
+                                   installations=user_github_installations(user))
+    connection = getattr(config, "website_connection", None)
+    if connection is not None and connection.authorized_by_id == user.pk:
+        account = {**account, "owned": True, "saved": bool(connection.installation_id),
+                   "status": "checking" if connection.installation_id else "not_connected"}
+    return account
 
 
 def _verify_github_repository_access(context, config, *, force=False):
@@ -11425,7 +11441,9 @@ def _verify_github_repository_access(context, config, *, force=False):
     repo = str(getattr(config, "github_repo", "") or "").strip()
     if not repo or not _github_account_for_context(context, config).get("owned"):
         return {"verified": False, "reasonCode": "github_access_required"}
+    connection = getattr(config, "website_connection", None)
     fingerprint = hashlib.sha256(str((context.profile.user.pk, context.organization.pk, repo,
+        (str(connection.pk), connection.generation, connection.repository_id, connection.installation_id) if connection else None,
         config.connected_slack_user_id, config.github_installation_id,
         config.github_token_encrypted, config.github_token_expires_at)).encode()).hexdigest()
     key = "articles-repository-access-v1:" + fingerprint
@@ -11457,6 +11475,8 @@ def _verify_github_repository_access(context, config, *, force=False):
                     result["reasonCode"] = "github_access_required"
             else:
                 result["reasonCode"] = "github_access_required"
+    except WebsiteAuthorityError as exc:
+        result["reasonCode"] = exc.code
     except (GitHubAppTokenError, TokenRefreshError, ArticleGenerationError):
         result["reasonCode"] = "github_access_required"
     except (http_client.RequestException, TypeError, ValueError):
@@ -11470,14 +11490,17 @@ def _article_capabilities_for_context(context, config, *, latest_runs=None, forc
     account = _github_account_for_context(context, config)
     gate = _article_system_setup_gate(config, runs, resolve_article_system(config))
     evidence = integration_evidence(config, runs, setup_gate=gate)
-    access = _verify_github_repository_access(context, config, force=force) if account.get("saved") and getattr(config, "github_repo", "") else {}
+    access = _verify_github_repository_access(context, config, force=force) if account.get("saved") and getattr(config, "github_repo", "") and (evidence.get("verified") or not getattr(config, "website_connection", None)) else {}
     if evidence.get("verified") and access.get("verified") and (access.get("branch") != evidence.get("branch") or access.get("sha") != evidence.get("sha")):
         evidence = {**evidence, "verified": False, "reasonCode": "verification_stale"}
     return article_capabilities(config, domain=context.organization.domain, account=account,
                                 evidence=evidence, repository_access=access)
 
 
-def _setup_blocked_response_for_generation(context, config, *, run=None, publishing=False):
+def _setup_blocked_response_for_generation(context, config, *, run=None, publishing=False, request_data=None):
+    from .portable_drafts import explicit_portable_request, original_portable_run
+    if not publishing and (original_portable_run(run) if run is not None else explicit_portable_request(request_data or {})):
+        return None
     capabilities = _article_capabilities_for_context(context, config, force=True)
     if run is not None and str(getattr(run, "github_repo", "") or "").lower() != str(config.github_repo or "").lower():
         capabilities = {**capabilities, "canGenerateArticle": False, "canPublishArticle": False,
@@ -11971,6 +11994,12 @@ def _run_result_from_remote(remote_data):
             merged[key] = remote_data.get(key)
     if not merged and remote_data:
         merged = dict(remote_data)
+    for key in ("review_draft_html", "reviewDraftHtml"):
+        value = merged.get(key)
+        if isinstance(value, str) and len(value) > MAX_REVIEW_DRAFT_HTML_CHARS:
+            merged.pop(key, None)
+            merged["review_draft_actions_available"] = False
+            merged["reviewDraftActionsAvailable"] = False
     return merged
 
 
@@ -13033,7 +13062,7 @@ def _queue_content_factory_run(*, endpoint, workflow, context, config, payload, 
         # Portable editorial work has no repository authority, even when the
         # company retains a disconnected repository in its settings.
         from .website_contract import CONNECTION_FIELDS
-        for field in (*CONNECTION_FIELDS, "github_token", "expected_source_sha"):
+        for field in (*CONNECTION_FIELDS, "github_token", "expected_source_sha", "source_sha", "repo_head_sha", "app_root", "branch"):
             payload.pop(field, None)
         payload["github_repo"] = ""
     if workflow in REPOSITORY_WORKFLOWS and payload.get("delivery_mode") != "content_only":
@@ -15829,7 +15858,7 @@ class VibeMarketingArticleView(APIView):
         if error_response:
             return error_response
         config = _get_config(context.organization)
-        blocked_response = _setup_blocked_response_for_generation(context, config)
+        blocked_response = _setup_blocked_response_for_generation(context, config, request_data=request.data)
         if blocked_response is not None:
             return blocked_response
         selected_title = str(
@@ -15972,11 +16001,6 @@ class VibeMarketingArticleView(APIView):
                 default=False,
             )
         )
-        if blocked_response:
-            if delivery_mode_explicit and requested_delivery_mode == "publish_code":
-                return blocked_response
-            requested_delivery_mode = "content_only"
-            delivery_mode_explicit = True
         # "Operable" repo = the platform can actually reach the repo: a live user OAuth
         # token OR a stamped GitHub App installation (the credential every scan/scaffold/
         # publish/live-preview operation authenticates with). The prior check only honored
