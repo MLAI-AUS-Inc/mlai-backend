@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from content_factory.website_connections import guarded_backend_run_action
+
 import ast
 import copy
 import hashlib
@@ -12,6 +14,14 @@ import re
 import socket
 import uuid
 import time
+from contextlib import nullcontext
+
+from .website_contract import WebsiteAuthorityError, connection_contract
+from .website_connections import (
+    REPOSITORY_WORKFLOWS, authority_guard, bind_website, contract_for,
+    scoped_run_contract, summary_for as website_summary, transition_connection,
+)
+from .website_views import guarded_owner_operation
 from io import BytesIO
 from datetime import timedelta, timezone as datetime_timezone
 from urllib.parse import parse_qsl, quote, urlencode, urlsplit
@@ -4579,91 +4589,36 @@ def _resolve_installation_id_for_repo(config, repo: str) -> str:
 
 
 def _github_app_token_payload_for_domain(*, domain: str, github_repo: str, permission_mode: str = "write") -> dict:
-    normalized_domain = normalize_company_domain(domain or "")
-    repo = str(github_repo or "").strip()
-    if not normalized_domain or not repo or not github_app_credentials_configured():
-        return {}
-    try:
-        organization = Organization.objects.get(domain=normalized_domain)
-        config = _get_config(organization)
-    except Organization.DoesNotExist:
-        return {}
-    installation_id = _resolve_installation_id_for_repo(config, repo)
-    if not installation_id:
-        return {}
-    token = create_installation_access_token(
-        installation_id=installation_id,
-        repository=repo,
-        permission_mode=permission_mode,
-    )
-    return token.as_content_factory_payload(domain=normalized_domain)
+    from .website_tokens import mint_website_token
+    config = OrganizationContentConfig.objects.select_related("website_connection__organization").get(organization__domain=normalize_company_domain(domain))
+    if not config.website_connection:
+        raise WebsiteAuthorityError("website_connection_required", "Connect this website before repository work.")
+    payload = {**contract_for(config.website_connection), "github_repo": github_repo}
+    return mint_website_token(payload, permission_mode=permission_mode, action="setup" if permission_mode == "write" else "read")
+
 
 
 def _github_token_for_repo_operation(*, domain: str, github_repo: str, permission_mode: str = "write") -> tuple[str, str]:
-    try:
-        payload = _github_app_token_payload_for_domain(
-            domain=domain,
-            github_repo=github_repo,
-            permission_mode=permission_mode,
-        )
-        token = str(payload.get("github_token") or "").strip()
-        if token:
-            return token, str(payload.get("token_source") or "github_app_installation")
-    except GitHubAppTokenError as exc:
-        logger.warning(
-            "github_app_installation_token_unavailable_falling_back domain=%s github_repo=%s error=%s",
-            domain,
-            github_repo,
-            exc,
-        )
+    payload = _github_app_token_payload_for_domain(domain=domain, github_repo=github_repo, permission_mode=permission_mode)
+    return payload["github_token"], "github_app_installation"
 
-    token = ensure_valid_org_token(domain)
-    return token, "github_oauth_user_token"
 
 
 def _live_preview_github_token_payload(run):
-    domain = normalize_company_domain(getattr(run, "domain", "") or "")
-    github_repo = str(getattr(run, "github_repo", "") or "").strip()
-    if not domain or not github_repo:
-        return {}
-    try:
-        token_payload = _github_app_token_payload_for_domain(
-            domain=domain,
-            github_repo=github_repo,
-            permission_mode="write",
-        )
-        github_token = str(token_payload.get("github_token") or "").strip()
-        if github_token:
-            return {
-                "github_token": github_token,
-                "github_installation_id": token_payload.get("github_installation_id"),
-                "token_source": token_payload.get("token_source") or "github_app_installation",
-            }
-    except GitHubAppTokenError as exc:
-        logger.warning(
-            "content_factory_live_preview_github_app_token_unavailable_falling_back run_id=%s domain=%s github_repo=%s error=%s",
-            getattr(run, "run_id", ""),
-            domain,
-            github_repo,
-            exc,
-        )
+    # Workers obtain ephemeral credentials from the broker using saved consent.
+    with authority_guard(scoped_run_contract(run), action="preview"):
+        return scoped_run_contract(run)
 
-    try:
-        github_token = ensure_valid_org_token(domain)
-    except (ArticleGenerationError, TokenRefreshError) as exc:
-        logger.warning(
-            "content_factory_live_preview_token_unavailable run_id=%s domain=%s github_repo=%s error=%s",
-            getattr(run, "run_id", ""),
-            domain,
-            github_repo,
-            exc,
-        )
-        return {}
-    github_token = str(github_token or "").strip()
-    return {"github_token": github_token, "token_source": "github_oauth_user_token"} if github_token else {}
 
 
 def _ensure_article_live_preview(run):
+    try:
+        with authority_guard(scoped_run_contract(run), action="preview"):
+            pass
+    except WebsiteAuthorityError:
+        # Historical draft/status reads remain useful after disconnect; only
+        # starting or refreshing the repository preview requires live consent.
+        return run
     if _article_preview_should_refresh(run):
         payload = _call_content_factory_live_preview(run_id=run.run_id, method="GET")
         return _persist_live_preview_payload(run, payload)
@@ -5157,7 +5112,9 @@ def _publish_evidence_from_run(run, *, compact=False):
     result = run.result or {}
     diagnostics = result.get("diagnostics") or run.verification_summary or {}
     preview_url = result.get("preview_url") or result.get("article_url") or result.get("url")
-    if _run_has_article_review_preview_marker(run):
+    if _run_has_article_review_preview_marker(run) or (
+        result.get("publish_handoff_pending") and _run_delivery_mode(run) == "content_only"
+    ):
         preview_url = None
     evidence = {
         "runId": run.run_id,
@@ -5483,53 +5440,19 @@ def _pull_request_url_from_run(run) -> str:
 
 
 def _link_built_scaffold_publish_target(config) -> bool:
-    """Register the durable ``react_article_system`` publish target from the built scaffold cache.
-
-    Shared by the manual Accept action AND the automatic approve/merge of an article-system setup,
-    so a FRESH scaffold self-registers without anyone touching the Accept button. Synthesizes the
-    target from the scaffold's committed support files (``article_system_setup_cache.managed_files``)
-    via the path-correct ``react_article_system_target_from_setup_cache`` and persists it, marking the
-    article system ``react_article_system`` and clearing any user-unlink watermark (an explicit
-    approve/accept re-links). No-op (returns False) when there is no built scaffold cache to
-    synthesize from. Idempotent: re-running just re-asserts the same target.
-
-    Does NOT preserve a *stronger* existing target — the scaffold's own target is authoritative for
-    its surface — but it also never downgrades to a weaker one because it only ever writes the
-    direct ``react_article_system`` target (or no-ops).
-    """
-    if not config:
+    """Select an actually verified adapter; a setup file cache is not proof."""
+    website = config.website_connection
+    if website is None or website.state != "connected":
         return False
-    bundle = react_article_system_target_from_setup_cache(config.article_system_setup_cache)
-    if not bundle:
+    rows = website.targets.filter(generation=website.generation, source_sha=website.verified_sha, verified_at__isnull=False)
+    targets = [row.contract for row in rows if row.capabilities.get("publishingReady")]
+    if not targets:
         return False
-    article_system = dict(config.article_system or {})
-    config.publish_targets = bundle["publish_targets"]
-    config.default_publish_target_id = bundle["default_publish_target_id"]
-    config.article_path_pattern = bundle["article_path_pattern"]
-    config.registry_path = bundle["registry_path"]
-    if str(article_system.get("state") or "") not in {"existing", "roo_scaffolded"}:
-        article_system["state"] = "existing"
-    article_system["system_type"] = "react_article_system"
-    article_system["publish_mutation_target"] = bundle["registry_path"]
-    article_system.pop(PUBLISH_DISCONNECTED_KEY, None)
-    article_system["scaffold_accepted_at"] = timezone.now().isoformat()
-    # Linking a built scaffold (auto after merge, or explicit Accept) is a durable
-    # exit from any prior reset — drop the watermark so it can't suppress published.
-    clear_article_setup_reset_markers(article_system)
-    config.article_system = article_system
-    update_fields = [
-        "publish_targets",
-        "default_publish_target_id",
-        "article_path_pattern",
-        "registry_path",
-        "article_system",
-        "updated_at",
-    ]
-    if not config.articles_scaffolded:
-        config.articles_scaffolded = True
-        update_fields.append("articles_scaffolded")
-    config.save(update_fields=update_fields)
+    config.publish_targets = targets
+    config.default_publish_target_id = targets[0]["target_id"]
+    config.save(update_fields=["publish_targets", "default_publish_target_id", "updated_at"])
     return True
+
 
 
 def _mark_pending_article_system_setup_merged(config, *, run=None, result=None, pr_url="", pr_number=None):
@@ -6012,11 +5935,12 @@ def _apply_setup_auto_merge_pending(*, run, config, reason=""):
 SETUP_MERGE_TERMINAL_CHECK_STATES = {"failed", "failure", "error", "closed"}
 
 
+@guarded_backend_run_action("setup")
 def _attempt_setup_publish_merge(*, run, context):
-    """Publish the setup PR to production the way article generation does: tolerate the
-    checks:read permission gap, try a direct squash merge (works on an unprotected main),
-    then fall back to GitHub native auto-merge (GitHub merges when required checks/reviews
-    pass). Shared by the manual Publish action and the hands-off auto-publish hook.
+    """Merge the setup PR under current consent and an exact GitHub head fence.
+
+    Protected pull requests remain available for review and an explicit retry.
+    Shared by the manual Publish action and the hands-off auto-publish hook.
 
     Returns {"outcome": "merged"|"auto_merge_pending"|"checks_failed"|"manual_required"
     |"no_repo"|"no_pr"|"error", "detail": str, "checks": dict, "run": run}."""
@@ -6052,6 +5976,9 @@ def _attempt_setup_publish_merge(*, run, context):
             "run": _apply_setup_merge_result(run=run, context=context, checks_status="merged"),
         }
 
+    from .website_connections import validate_setup_merge_source
+    validate_setup_merge_source(run, (pull.get("head") or {}).get("sha"))
+
     # Genuinely failed checks (visible) → don't merge; surface it.
     if str(checks.get("state") or "").lower() in SETUP_MERGE_TERMINAL_CHECK_STATES:
         reason = checks.get("message") or "GitHub checks did not pass."
@@ -6061,6 +5988,7 @@ def _attempt_setup_publish_merge(*, run, context):
     # 1) Direct squash merge — works on an unprotected main or when the App is a ruleset
     #    bypass actor. pull_requests:write (which the token has) is enough here.
     merge_payload = {
+        "sha": (pull.get("head") or {}).get("sha"),
         "commit_title": f"Merge Content Factory articles setup from {run.run_id}",
         "merge_method": "squash",
     }
@@ -6083,8 +6011,10 @@ def _attempt_setup_publish_merge(*, run, context):
         merge_error = str(exc)
         logger.info("vibe_marketing_setup_direct_merge_failed run_id=%s repo=%s detail=%s", run.run_id, repo, merge_error)
 
-    # 2) Direct merge failed (protected main / required reviews) → GitHub native auto-merge.
-    auto = _enable_native_auto_merge(repo=repo, pr_number=pr_number, token=token)
+    # Protected branches require review and an explicit retry under live consent.
+    # A pending GitHub-native auto-merge cannot obey a later website disconnect.
+    # Keep protected PRs reviewable; the explicit merge action can be retried.
+    auto = {"status": "manual_required", "detail": "Review the protected pull request and retry publishing after required checks pass."}
     if auto.get("status") == "already_merged":
         return {
             "outcome": "merged",
@@ -6491,6 +6421,7 @@ def _refresh_pending_article_system_setup_pr_status(
     return run, True
 
 
+@guarded_backend_run_action("merge")
 def _check_and_merge_publish_pr(*, run, context):
     """Check the publish PR's checks and merge it when they pass.
 
@@ -6539,7 +6470,10 @@ def _check_and_merge_publish_pr(*, run, context):
                 "detail": checks.get("message") or "Publish PR checks are not ready.",
                 "checks": checks,
             }
+        from .website_connections import validate_publish_merge_source
+        validate_publish_merge_source(run, (pull.get("head") or {}).get("sha"), (pull.get("head") or {}).get("ref"))
         merge_payload = {
+            "sha": (pull.get("head") or {}).get("sha"),
             "commit_title": f"Publish Content Factory article from {run.run_id}",
             "merge_method": "squash",
         }
@@ -8883,6 +8817,9 @@ def _article_setup_state_for_config(config, *, latest_runs=None, run=None, organ
     updated_values = [value for value in updated_values if value]
     updated_at = max(updated_values).isoformat() if updated_values else None
     return {
+        "websiteConnection": website_summary(config),
+        "connectionId": str(config.website_connection_id) if config and config.website_connection_id else None,
+        "connectionGeneration": config.website_connection.generation if config and config.website_connection_id else None,
         "repo": scan_repo,
         "githubRepo": scan_repo,
         "defaultBranch": scan_default_branch or None,
@@ -10675,6 +10612,7 @@ def _serialize_run(
     if compact:
         return {
             "runId": run.run_id,
+            **connection_contract(run.run_request or {}),
             "editorialSnapshot": editorial_snapshot,
             "workflow": run.workflow,
             "domain": run.domain,
@@ -10744,6 +10682,7 @@ def _serialize_run(
     ) if run.workflow in ARTICLE_WORKFLOWS else result
     return {
         "runId": run.run_id,
+            **connection_contract(run.run_request or {}),
             "editorialSnapshot": editorial_snapshot,
         "workflow": run.workflow,
         "domain": run.domain,
@@ -11117,6 +11056,11 @@ def _overlay_live_bootstrap_fields(payload, *, context, request):
     """
     if not isinstance(payload, dict):
         return payload
+    website_config = _get_config(context.organization)
+    website = website_summary(website_config, company_id=context.company.pk)
+    payload["websiteConnection"] = website
+    if isinstance(payload.get("articleSetupState"), dict):
+        payload["articleSetupState"] = {**payload["articleSetupState"], "websiteConnection": website}
     try:
         google_status = google_baseline_connection_status(context.profile.user, context.organization)
         google_status["connectUrl"] = _google_baseline_connect_url(request, context)
@@ -12102,7 +12046,7 @@ def _article_system_setup_remote_can_replace_local(run, result, remote_status) -
     return bool(remote_payload_active or remote_status in RUNNING_RUN_STATUSES or remote_generation > local_generation)
 
 
-def _merge_preserved_live_preview(local_result, remote_result):
+def _merge_preserved_live_preview(local_result, remote_result, *, allow_retry=False):
     if not isinstance(remote_result, dict):
         return remote_result
     if _result_has_current_failure(remote_result):
@@ -12113,7 +12057,7 @@ def _merge_preserved_live_preview(local_result, remote_result):
     remote_preview = _preview_payload_from_result(remote_result)
     if not _empty_preview_payload(remote_preview):
         return remote_result
-    if _preview_payload_is_terminal_failure(local_preview):
+    if _preview_payload_is_terminal_failure(local_preview) and allow_retry:
         return remote_result
     merged = dict(remote_result)
     merged["livePreview"] = local_preview
@@ -12585,12 +12529,16 @@ def _sync_local_run_from_remote(run, remote_data):
     from content_factory.run_state import stale_execution_event
     if not isinstance(remote_data, dict) or not remote_data:
         return run
-    with transaction.atomic():
-        ContentFactoryRun.objects.select_for_update().get(pk=run.pk)
-        run.refresh_from_db()
-        if stale_execution_event(run.result, remote_data, saved_status=run.status):
-            return run
-        return _sync_local_run_from_remote_locked(run, remote_data)
+    fence = authority_guard(scoped_run_contract(run), action="config_write") if run.workflow in REPOSITORY_WORKFLOWS else nullcontext()
+    try:
+        with fence, transaction.atomic():
+            ContentFactoryRun.objects.select_for_update().get(pk=run.pk)
+            run.refresh_from_db()
+            if stale_execution_event(run.result, remote_data, saved_status=run.status):
+                return run
+            return _sync_local_run_from_remote_locked(run, remote_data)
+    except WebsiteAuthorityError:
+        return run
 
 
 def _sync_local_run_from_remote_locked(run, remote_data):
@@ -12673,7 +12621,10 @@ def _sync_local_run_from_remote_locked(run, remote_data):
         )
         active_result_cleanup_applied = True
     if result:
-        result = _merge_preserved_live_preview(run.result or {}, result)
+        result = _merge_preserved_live_preview(
+            run.result or {}, result,
+            allow_retry=remote_current_retry_attempt or remote_active_retry_attempt,
+        )
         if run.workflow in ARTICLE_WORKFLOWS:
             # Review lineage and publish/merge evidence are written locally,
             # so Content Factory status polling must not erase them.
@@ -12999,6 +12950,29 @@ def _resolve_dispatch_token_run(run):
 
 
 def _queue_content_factory_run(*, endpoint, workflow, context, config, payload, billing_refund_context=None):
+    if workflow in REPOSITORY_WORKFLOWS and payload.get("delivery_mode") != "content_only":
+        config.refresh_from_db()
+        website = config.website_connection
+        try:
+            if website is None:
+                raise WebsiteAuthorityError("website_connection_required", "Connect and verify this website before continuing.")
+            supplied = connection_contract(payload)
+            if supplied and any(connection_contract(contract_for(website)).get(key) != value for key, value in supplied.items() if key != "connection_target_id"):
+                raise WebsiteAuthorityError("website_connection_changed", "The website changed before dispatch.")
+            payload.update(contract_for(website))
+            with authority_guard(payload, action="scan" if endpoint == "scan" else "setup" if workflow in {"article_system_setup", "scaffold_articles"} else "read"):
+                return _queue_content_factory_run_authorized(endpoint=endpoint, workflow=workflow, context=context, config=config, payload=payload, billing_refund_context=billing_refund_context)
+        except WebsiteAuthorityError as exc:
+            if billing_refund_context:
+                refund = _refund_roo_points_for_content_island_topic_start if billing_refund_context.get("kind") == CONTENT_FACTORY_ACTION_CONTENT_ISLAND_TOPIC_GENERATION else _refund_roo_points_for_article_start
+                refund(charged_user=billing_refund_context.get("charged_user"), actor_id=founder_actor_id_for_user(context.profile.user),
+                    article_request=billing_refund_context.get("article_request") or {}, domain=context.organization.domain, reason=str(exc))
+            return _create_local_run(workflow=workflow, domain=context.organization.domain, github_repo=config.github_repo or "", payload=payload,
+                remote_data={"status": "blocked", "error": str(exc), "error_code": exc.code, "retryable": False})
+    return _queue_content_factory_run_authorized(endpoint=endpoint, workflow=workflow, context=context, config=config, payload=payload, billing_refund_context=billing_refund_context)
+
+
+def _queue_content_factory_run_authorized(*, endpoint, workflow, context, config, payload, billing_refund_context=None):
     actor_id = founder_actor_id_for_user(context.profile.user)
     remote_config = _content_factory_remote_config()
     remote_data = {}
@@ -13316,6 +13290,16 @@ def _call_content_factory_run_action(
     timeout=(3, 15),
     transport_errors_are_pending=False,
 ):
+    if action not in {"cancel", "deny"}:
+        scoped_run = ContentFactoryRun.objects.filter(run_id=run_id).first()
+        if scoped_run and scoped_run.workflow in REPOSITORY_WORKFLOWS:
+            try:
+                saved = scoped_run_contract(scoped_run)
+                operation = "publish" if action in {"approve", "publish-pr", "promote-bundle"} else "setup"
+                with authority_guard(saved, action=operation):
+                    payload = {**(payload or {}), **connection_contract(saved)}
+            except WebsiteAuthorityError as exc:
+                return {**exc.as_dict(), "status": "blocked", "content_factory_status_code": exc.status}
     remote_config = _content_factory_remote_config()
     if not remote_config["enabled"]:
         technical_error = _content_factory_unavailable_message(remote_config)
@@ -14464,7 +14448,13 @@ class VibeMarketingSettingsView(APIView):
         _assign_config_actor(config, request.user)
         config.brand_name = request.data.get("brand_name", request.data.get("brandName", config.brand_name))
         config.company_context = request.data.get("company_context", request.data.get("companyContext", config.company_context))
-        config.github_repo = request.data.get("github_repo", request.data.get("githubRepo", config.github_repo))
+        requested_repo = str(request.data.get("github_repo", request.data.get("githubRepo", config.github_repo)) or "").strip()
+        if requested_repo.casefold() != str(config.github_repo or "").casefold():
+            try:
+                bind_website(config, user=request.user, repo=requested_repo, expected=request.data)
+            except WebsiteAuthorityError as exc:
+                transaction.set_rollback(True)
+                return Response(exc.as_dict(), status=exc.status)
         config.article_delivery_mode = request.data.get(
             "article_delivery_mode",
             request.data.get("articleDeliveryMode", config.article_delivery_mode),
@@ -14862,83 +14852,38 @@ class VibeMarketingBaselineHistoryView(APIView):
 
 class VibeMarketingGitHubConnectView(APIView):
     def post(self, request):
-        context, error_response = _resolve_context_or_response(request)
-        if error_response:
-            return error_response
-        scope_response = _explicit_company_scope_required_response(request, context)
-        if scope_response:
-            return scope_response
+        context, error = _resolve_context_or_response(request)
+        if error:
+            return error
+        error = _explicit_company_scope_required_response(request, context)
+        if error:
+            return error
         config = _get_config(context.organization)
+        repo = _clean_github_repo(request.data.get("github_repo") or request.data.get("githubRepo") or config.github_repo)
+        conflict = _github_repo_company_conflict_response(context=context, requested_repo=repo)
+        if conflict:
+            return conflict
+        force = _bool_from_request(_request_value(request.data, "force_reconnect", "forceReconnect", default=False))
+        if repo and not force:
+            try:
+                connection = bind_website(config, user=request.user, repo=repo,
+                    app_root=request.data.get("appRoot", request.data.get("app_root", "")),
+                    branch=request.data.get("branch", ""), expected=request.data)
+                return Response({**_connected_github_response(config),
+                    "websiteConnection": website_summary(config, company_id=context.company.pk), **contract_for(connection)})
+            except WebsiteAuthorityError as exc:
+                if exc.code not in {"github_authorization_required", "github_repository_unavailable"}:
+                    return Response(exc.as_dict(), status=exc.status)
         actor_id = founder_actor_id_for_user(request.user)
-        config_update_fields = _assign_config_actor(config, request.user)
-        force_reconnect = _bool_from_request(
-            _request_value(request.data, "force_reconnect", "forceReconnect", default=False)
-        )
-        requested_repo = _clean_github_repo(request.data.get("github_repo") or request.data.get("githubRepo"))
-        conflict_response = _github_repo_company_conflict_response(
-            context=context,
-            requested_repo=requested_repo or config.github_repo,
-        )
-        if conflict_response:
-            return conflict_response
-        if requested_repo and not force_reconnect:
-            config.github_repo = requested_repo
-            config_update_fields.append("github_repo")
-        config_update_fields.append("updated_at")
-        config.save(update_fields=list(dict.fromkeys(config_update_fields)))
-
-        if not force_reconnect:
-            # Founder-scoped reuse is authoritative because it can disambiguate
-            # multiple GitHub accounts by repository owner. It also self-heals a
-            # stale per-company installation id before legacy OAuth is considered.
-            registry_connection = _connect_with_registry_installation(
-                config,
-                user=request.user,
-                requested_repo=requested_repo,
-            )
-            if registry_connection:
-                return Response(registry_connection, status=status.HTTP_200_OK)
-
-            existing_connection = _connect_with_existing_github_credentials(
-                config,
-                domain=context.organization.domain,
-                actor_id=actor_id,
-                requested_repo=requested_repo,
-            )
-            if existing_connection:
-                return Response(existing_connection, status=status.HTTP_200_OK)
-
-        return_url = str(_request_value(request.data, "return_url", "returnUrl", default="") or "").strip() or None
         try:
-            auth_url = build_github_auth_url(
-                actor_id, domain=context.organization.domain, request=request, return_url=return_url
-            )
-        except Exception as exc:
-            logger.exception(
-                "vibe_marketing_github_auth_url_failed domain=%s actor_id=%s",
-                context.organization.domain,
-                actor_id,
-            )
-            return Response(
-                {
-                    "status": "auth_unavailable",
-                    "connection_state": "auth_required",
-                    "github_repo": config.github_repo,
-                    "detail": "GitHub authorization could not be opened. Check GitHub App configuration.",
-                    "error": "github_auth_url_failed",
-                },
-                status=status.HTTP_503_SERVICE_UNAVAILABLE,
-            )
+            auth_url = build_github_auth_url(actor_id, domain=context.organization.domain, request=request,
+                return_url=str(_request_value(request.data, "return_url", "returnUrl", default="") or "").strip() or None)
+        except Exception:
+            return Response({"status": "auth_unavailable", "error": "github_auth_url_failed",
+                "detail": "GitHub authorization could not be opened."}, status=503)
+        return Response({"status": "auth_required", "connection_state": "auth_required", "github_repo": repo,
+            "auth_url": auth_url, "websiteConnection": website_summary(config, company_id=context.company.pk)})
 
-        return Response(
-            {
-                "status": "auth_required",
-                "connection_state": "auth_required",
-                "github_repo": config.github_repo,
-                "auth_url": auth_url,
-            },
-            status=status.HTTP_200_OK,
-        )
 
 
 class VibeMarketingGitHubReposView(APIView):
@@ -15112,6 +15057,7 @@ def _scan_should_force_refresh(config, request_data) -> bool:
 
 
 class VibeMarketingScanView(APIView):
+    @guarded_owner_operation("scan", bind_selected=True)
     def post(self, request):
         context, error_response = _resolve_context_or_response(request)
         if error_response:
@@ -15249,6 +15195,7 @@ class VibeMarketingScanView(APIView):
 
 
 class VibeMarketingArticleSystemSetupView(APIView):
+    @guarded_owner_operation("setup", bind_selected=True)
     def post(self, request):
         context, error_response = _resolve_context_or_response(request)
         if error_response:
@@ -15418,43 +15365,9 @@ def _delete_article_setup_scaffold_branches(config, *, limit: int = 10) -> dict:
 
 class VibeMarketingArticleSetupResetView(APIView):
     def post(self, request):
-        context, error_response = _resolve_context_or_response(request)
-        if error_response:
-            return error_response
-        config = _get_config(context.organization)
-        requested_repo = str(_request_value(request.data, "githubRepo", "github_repo", default="") or "").strip()
-        github_repo = requested_repo or str(config.github_repo or "").strip()
-        if not github_repo:
-            return Response({"detail": "Choose a GitHub repository before resetting articles setup."}, status=status.HTTP_400_BAD_REQUEST)
-        configured_repo = str(config.github_repo or "").strip()
-        if configured_repo and configured_repo.lower() != github_repo.lower():
-            return Response({"detail": "Repository does not match the connected project."}, status=status.HTTP_409_CONFLICT)
+        from .website_views import WebsiteConnectionActionView
+        return WebsiteConnectionActionView().post(request, "reset")
 
-        # Best-effort: delete the generated scaffold branch(es) in content-factory
-        # before clearing local state (the runs are still resolvable here). Content
-        # factory only deletes branches it generated and skips when a PR is open, so
-        # this is safe; failures never block the local reset.
-        scaffold_cleanup = _delete_article_setup_scaffold_branches(config)
-        # The persisted setup state lives in this service's OrganizationContentConfig,
-        # so the local clear is the source of truth that _article_setup_state reads.
-        # deep=True = full teardown: also clears scan/reuse/design caches, deletes the
-        # article_system_setup runs, and drops design snapshots (not just scaffold flags),
-        # so a re-scaffold starts from a genuinely fresh state.
-        reset_payload = reset_article_setup_config(config, github_repo=github_repo, deep=True)
-        latest_runs = _latest_runs_for_org(context.organization, limit=12)
-        article_setup_state = _article_setup_state(
-            context=context,
-            latest_runs=latest_runs,
-        )
-        return Response(
-            {
-                **reset_payload,
-                "remote": scaffold_cleanup,
-                "articleSetupState": article_setup_state,
-                "article_setup_state": article_setup_state,
-            },
-            status=status.HTTP_200_OK,
-        )
 
 
 def _scaffold_connection_state(config) -> dict:
@@ -15484,33 +15397,24 @@ class VibeMarketingArticleSetupAcceptView(APIView):
     Idempotent: re-accepting just re-asserts the target.
     """
 
+    @guarded_owner_operation("publish")
     def post(self, request):
-        context, error_response = _resolve_context_or_response(request)
-        if error_response:
-            return error_response
+        context, error = _resolve_context_or_response(request)
+        if error:
+            return error
         config = _get_config(context.organization)
-        if not str(config.github_repo or "").strip():
-            return Response(
-                {"detail": "Choose a GitHub repository before linking the articles scaffold."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        if not _link_built_scaffold_publish_target(config):
-            return Response(
-                {"detail": "No built articles scaffold to link yet. Build and publish the scaffold first."},
-                status=status.HTTP_409_CONFLICT,
-            )
+        connection = config.website_connection
+        verified = list(connection.targets.filter(generation=connection.generation, source_sha=connection.verified_sha, verified_at__isnull=False))
+        targets = [row.contract for row in verified if row.capabilities.get("publishingReady")]
+        if not targets:
+            return Response({"code": "verified_publish_target_required", "detail": "Scan and verify this repository before enabling publishing."}, status=409)
+        config.publish_targets = targets
+        config.default_publish_target_id = targets[0]["target_id"]
+        config.article_system = {k: v for k, v in (config.article_system or {}).items() if k != PUBLISH_DISCONNECTED_KEY}
+        config.save(update_fields=["publish_targets", "default_publish_target_id", "article_system", "updated_at"])
+        return Response({"ok": True, "websiteConnection": website_summary(config, company_id=context.company.pk),
+            "articleSetupState": _article_setup_state(context=context, latest_runs=_latest_runs_for_org(context.organization, limit=12))})
 
-        latest_runs = _latest_runs_for_org(context.organization, limit=12)
-        article_setup_state = _article_setup_state(context=context, latest_runs=latest_runs)
-        return Response(
-            {
-                "ok": True,
-                **_scaffold_connection_state(config),
-                "articleSetupState": article_setup_state,
-                "article_setup_state": article_setup_state,
-            },
-            status=status.HTTP_200_OK,
-        )
 
 
 class VibeMarketingArticleSetupDisconnectView(APIView):
@@ -15523,38 +15427,9 @@ class VibeMarketingArticleSetupDisconnectView(APIView):
     """
 
     def post(self, request):
-        context, error_response = _resolve_context_or_response(request)
-        if error_response:
-            return error_response
-        config = _get_config(context.organization)
+        from .website_views import WebsiteConnectionActionView
+        return WebsiteConnectionActionView().post(request, "pause")
 
-        config.publish_targets = []
-        config.default_publish_target_id = None
-        article_system = dict(config.article_system or {})
-        article_system[PUBLISH_DISCONNECTED_KEY] = timezone.now().isoformat()
-        article_system.pop("scaffold_accepted_at", None)
-        article_system["publish_mutation_target"] = None
-        config.article_system = article_system
-        config.save(
-            update_fields=[
-                "publish_targets",
-                "default_publish_target_id",
-                "article_system",
-                "updated_at",
-            ]
-        )
-
-        latest_runs = _latest_runs_for_org(context.organization, limit=12)
-        article_setup_state = _article_setup_state(context=context, latest_runs=latest_runs)
-        return Response(
-            {
-                "ok": True,
-                **_scaffold_connection_state(config),
-                "articleSetupState": article_setup_state,
-                "article_setup_state": article_setup_state,
-            },
-            status=status.HTTP_200_OK,
-        )
 
 
 class VibeMarketingDiscoveryView(APIView):
@@ -15834,6 +15709,7 @@ def _article_selection_conflicts(*, submitted, resolved):
 
 
 class VibeMarketingArticleView(APIView):
+    @guarded_owner_operation("read", run_operation=False)
     def post(self, request):
         context, error_response = _resolve_context_or_response(request)
         if error_response:
@@ -16391,6 +16267,7 @@ class VibeMarketingRunView(APIView):
 
 
 class VibeMarketingArticleSystemRevisionsView(APIView):
+    @guarded_owner_operation("setup", run_operation=True)
     def post(self, request, run_id):
         context, error_response = _resolve_context_or_response(request, require_domain=False)
         if error_response:
@@ -16752,6 +16629,7 @@ class VibeMarketingRunCommentDetailView(VibeMarketingRunCommentsMixin, APIView):
 
 @method_decorator(transaction.atomic, name="dispatch")
 class VibeMarketingRunCommentsSubmitView(VibeMarketingRunCommentsMixin, APIView):
+    @guarded_owner_operation("read", run_operation=True)
     def post(self, request, run_id):
         context, run, error_response = self._resolve_run(request, run_id)
         if error_response is not None:
@@ -16929,6 +16807,7 @@ class VibeMarketingRunCommentsSubmitView(VibeMarketingRunCommentsMixin, APIView)
 
 @method_decorator(transaction.atomic, name="dispatch")
 class VibeMarketingRunCommentsAcceptRevisionView(VibeMarketingRunCommentsMixin, APIView):
+    @guarded_owner_operation("read", run_operation=True)
     def post(self, request, run_id):
         context, run, error_response = self._resolve_run(request, run_id)
         if error_response is not None:
@@ -17023,6 +16902,7 @@ class VibeMarketingRunLivePreviewView(APIView):
             run = self._persist_preview(run, payload)
         return Response(_serialize_run(run, context=context), status=status.HTTP_200_OK)
 
+    @guarded_owner_operation("preview", run_operation=True)
     def post(self, request, run_id):
         context, run, error_response = self._resolve_run(request, run_id)
         if error_response is not None:
@@ -17294,6 +17174,7 @@ def _article_publish_approval_receipt_failure(run):
 
 @method_decorator(transaction.atomic, name="dispatch")
 class VibeMarketingRunControlView(APIView):
+    @guarded_owner_operation("setup", run_operation=True)
     def post(self, request, run_id, action):
         context, error_response = _resolve_context_or_response(request, require_domain=False)
         if error_response:

@@ -15,9 +15,7 @@ from content_factory.contract import (
 )
 from integrations.utils import normalize_domain
 from integrations.services.github_connections import build_github_oauth_url
-from content_factory.article_setup_reset import carry_reset_markers
-from content_factory.article_system import merge_article_system, resolve_article_system
-from content_factory.models import GeneratedComponent, ComponentMapping
+from content_factory.models import GeneratedComponent
 
 logger = logging.getLogger(__name__)
 
@@ -488,6 +486,8 @@ def scan_github_project(
             "generate_components": generate_components,
         }
 
+        from content_factory.website_connections import dispatch_contract
+        payload.update(dispatch_contract(resolved_domain, payload, action="scan"))
         cf_response = http_requests.post(
             scan_endpoint,
             json=payload,
@@ -538,6 +538,7 @@ def scan_github_project(
                     slack_channel_id=slack_channel_id or '',
                     slack_thread_ts=slack_thread_ts or '',
                     request_meta={
+                        **{key: payload[key] for key in ('website_connection_id', 'connection_generation', 'repository_id') if key in payload},
                         'type': 'scan',
                         'github_repo': github_repo,
                         'scaffold_if_missing': scaffold_if_missing,
@@ -619,184 +620,11 @@ def scan_github_project(
     except Exception as e:
         raise ScanError(f"Unexpected error during scan: {e}")
 
-    # Update project_scanned status and tracking info on UserIntegration (if available)
-    from django.utils import timezone
-    final_sha = current_sha
-    if integration:
-        integration.project_scanned = True
-
-        # Fetch the CURRENT latest SHA after scan completes (not the one from start)
-        # This prevents false "has_updates" if commits were pushed during the scan
-        try:
-            final_sha = get_latest_repo_sha(github_token, github_repo)
-            integration.last_scanned_sha = final_sha
-            logger.info(f"Updated last_scanned_sha to final SHA: {final_sha}")
-        except Exception as e:
-            # Fallback to the SHA from scan start if re-fetch fails
-            logger.warning(f"Failed to fetch final SHA, using start SHA: {e}")
-            if current_sha:
-                integration.last_scanned_sha = current_sha
-
-        integration.last_scanned_at = timezone.now()
-        integration.save()
-
-    # Save scan artifacts to OrganizationContentConfig
-    org_domain = resolved_domain or github_repo
-    try:
-        # Ensure Organization exists (idempotent, keyed by domain)
-        org_name = resolved_domain or "Unknown"
-        if integration and integration.github_user_name:
-            org_name = integration.github_user_name
-
-        org, _ = Organization.objects.get_or_create(
-            domain=org_domain,
-            defaults={"name": org_name}
-        )
-
-        # Ensure Config exists
-        config, _ = OrganizationContentConfig.objects.get_or_create(organization=org)
-
-        # Update fields from scan response
-        # Support both nested 'config' key (legacy) and top-level keys (current)
-        cf_config = cf_data.get('config', {})
-
-        # Only set github_repo/token if not already set (preserve org-level auth)
-        if not config.github_repo:
-            config.github_repo = github_repo
-        if not config.github_token_encrypted:
-            config.github_token_encrypted = github_token
-        if slack_user_id and not config.connected_slack_user_id:
-            config.connected_slack_user_id = slack_user_id
-        if final_sha:
-            config.last_scanned_sha = final_sha
-        config.last_scanned_at = timezone.now()
-
-        # Save artifacts if present (check top-level first, then nested 'config')
-        if 'article_template' in cf_data:
-            config.article_template = cf_data['article_template']
-        elif 'article_template' in cf_config:
-            config.article_template = cf_config['article_template']
-
-        if 'design_guide' in cf_data:
-            config.design_guide = cf_data['design_guide']
-        elif 'design_guide' in cf_config:
-            config.design_guide = cf_config['design_guide']
-
-        if 'resource_prompt' in cf_data:
-            config.resource_prompt = cf_data['resource_prompt']
-        elif 'resource_prompt' in cf_config:
-            config.resource_prompt = cf_config['resource_prompt']
-
-        if 'scan_summary' in cf_data:
-            config.scan_summary = cf_data['scan_summary']
-        elif 'scan_summary' in cf_config:
-            config.scan_summary = cf_config['scan_summary']
-
-        if 'tech_stack' in cf_data:
-            config.tech_stack = cf_data['tech_stack']
-        elif 'tech_stack' in cf_config:
-            config.tech_stack = cf_config['tech_stack']
-        if 'company_context' in cf_data:
-            config.company_context = cf_data['company_context']
-        elif 'company_context' in cf_config:
-            config.company_context = cf_config['company_context']
-
-        from content_factory.editorial_catalog import merge_strategy
-        if 'pillar_strategy' in cf_data:
-            config.pillar_strategy = merge_strategy(config.pillar_strategy, cf_data['pillar_strategy'])
-        elif 'pillar_strategy' in cf_config:
-            config.pillar_strategy = merge_strategy(config.pillar_strategy, cf_config['pillar_strategy'])
-
-        if 'article_system' in cf_data or 'article_system' in cf_config:
-            raw_article_system = config.article_system if isinstance(config.article_system, dict) else {}
-            incoming_article_system = cf_data['article_system'] if 'article_system' in cf_data else cf_config['article_system']
-            # An article-setup reset must survive scan syncs: merge/normalize drop the
-            # reset watermark + tombstones, which only live on the raw stored dict.
-            config.article_system = carry_reset_markers(
-                raw_article_system,
-                merge_article_system(resolve_article_system(config), incoming_article_system),
-            )
-
-        # Save additional metadata if present
-        if 'article_path_pattern' in cf_data:
-            config.article_path_pattern = cf_data.get('article_path_pattern')
-        if 'registry_path' in cf_data:
-            config.registry_path = cf_data.get('registry_path')
-
-        # The service config endpoint uses the same organization lock for
-        # editorial catalog writes. Refresh that reserved policy immediately
-        # before this scan save so a stale scan cannot undo a newer approval.
-        from django.db import transaction
-        with transaction.atomic():
-            Organization.objects.select_for_update().get(pk=org.pk)
-            latest_strategy = OrganizationContentConfig.objects.filter(pk=config.pk).values_list("pillar_strategy", flat=True).get()
-            config.pillar_strategy = merge_strategy(latest_strategy, config.pillar_strategy)
-            config.save()
-        logger.info(f"Updated OrganizationContentConfig for {org_domain}")
-
-        # Save generated components and component mapping from scan response
-        component_generation = cf_data.get('component_generation', {})
-        generated_components = cf_data.get('generated_components', [])
-        component_mapping_data = cf_data.get('component_mapping', {})
-
-        if generated_components:
-            components_saved = 0
-            for comp_data in generated_components:
-                comp_name = comp_data.get('name')
-                if not comp_name:
-                    continue
-                comp_defaults = {
-                    'content': comp_data.get('content', ''),
-                    'source': comp_data.get('source', 'generated'),
-                    'original_path': comp_data.get('original_path'),
-                    'similarity_score': comp_data.get('similarity_score', 0.0),
-                    'matched_component': comp_data.get('matched_component'),
-                    'adaptation_notes': comp_data.get('adaptation_notes', ''),
-                }
-                # Article-assembly metadata (Phase 0): persist the component's real import + spec so
-                # the library is available for article composition, regardless of which scan path
-                # (this inline Slack-triggered save or the content-factory config PUT) ingested it.
-                # Only (re)write when the payload carries the keys so a reuse-path scan can't clobber it.
-                if 'import_statement' in comp_data:
-                    comp_defaults['import_statement'] = comp_data.get('import_statement') or ''
-                if 'metadata' in comp_data:
-                    comp_defaults['metadata'] = comp_data.get('metadata') or {}
-                GeneratedComponent.objects.update_or_create(
-                    organization=org,
-                    name=comp_name,
-                    defaults=comp_defaults,
-                )
-                components_saved += 1
-            logger.info(f"Saved {components_saved} generated components for {org_domain}")
-
-        if component_generation or component_mapping_data:
-            mapping_defaults = {
-                'mapping_data': component_mapping_data,
-            }
-            if component_generation:
-                mapping_defaults['generation_status'] = component_generation.get('status')
-                mapping_defaults['design_guide_path'] = component_generation.get('design_guide_path')
-                mapping_defaults['failed_components'] = component_generation.get('failed_components', [])
-                generated = component_generation.get('components_generated', 0)
-                adapted = component_generation.get('components_adapted', 0)
-                mapping_defaults['generated_count'] = generated
-                mapping_defaults['matched_count'] = adapted
-                mapping_defaults['total_components'] = generated + adapted
-                storage = component_generation.get('storage', {})
-                if storage:
-                    mapping_defaults['storage_local_path'] = storage.get('local_path')
-                    mapping_defaults['storage_pr_url'] = storage.get('pr_url')
-                    mapping_defaults['storage_branch_url'] = storage.get('branch_url')
-            if current_sha:
-                mapping_defaults['last_scan_commit'] = current_sha
-            ComponentMapping.objects.update_or_create(
-                organization=org,
-                defaults=mapping_defaults
-            )
-            logger.info(f"Updated ComponentMapping for {org_domain}")
-
-    except Exception as e:
-        logger.error(f"Failed to save scan artifacts to OrganizationContentConfig: {e}")
+    # The worker's fenced config PUT/callback is the sole artifact writer.
+    # A legacy poll response must not overwrite templates after disconnect or
+    # label old scan evidence with a newer repository HEAD.
+    scanned_sha = _record_bound_scan_completion(payload, cf_data, integration)
+    org_domain = resolved_domain
 
     logger.info(f"Scan triggered successfully for {slack_user_id}, repo: {github_repo}, domain: {org_domain}, SHA: {current_sha}")
 
@@ -805,10 +633,33 @@ def scan_github_project(
         "slack_user_id": slack_user_id,
         "github_repo": github_repo,
         "domain": org_domain,
-        "scanned_sha": current_sha,
+        "scanned_sha": scanned_sha,
         "scan_run_id": scan_run_id,
         "content_factory_response": cf_data,
     }
+
+
+def _record_bound_scan_completion(binding, result, integration=None):
+    """Record legacy scan bookkeeping only under its original website consent."""
+    from django.utils import timezone
+    from content_factory.website_connections import authority_guard
+    from content_factory.website_contract import SHA_PATTERN
+    result = result if isinstance(result, dict) else {}
+    inventory = result.get("repository_inventory") if isinstance(result.get("repository_inventory"), dict) else {}
+    config = result.get("config") if isinstance(result.get("config"), dict) else {}
+    sha = str(result.get("source_sha") or result.get("repo_head_sha")
+              or inventory.get("source_sha") or inventory.get("repo_head_sha")
+              or config.get("last_scanned_sha") or "")
+    sha = sha if SHA_PATTERN.fullmatch(sha) else ""
+    with authority_guard({**binding, "expected_source_sha": sha}, action="scan") as website:
+        if integration:
+            integration.refresh_from_db()
+            if (integration.github_repo or "").casefold() == website.github_repo.casefold():
+                integration.project_scanned = True
+                integration.last_scanned_sha = sha or None
+                integration.last_scanned_at = timezone.now()
+                integration.save(update_fields=["project_scanned", "last_scanned_sha", "last_scanned_at"])
+    return sha
 
 
 def get_latest_repo_sha(token: str, repo_name: str) -> str:
@@ -900,6 +751,8 @@ def scaffold_articles_directory(
     logger.info(f"Triggering article scaffolding for {domain}")
 
     try:
+        from content_factory.website_connections import dispatch_contract
+        payload.update(dispatch_contract(domain, payload, action="setup"))
         response = http_requests.post(
             scaffold_endpoint,
             json=payload,
@@ -919,7 +772,7 @@ def scaffold_articles_directory(
                     status='queued',
                     slack_channel_id=slack_channel_id or '',
                     slack_thread_ts=slack_thread_ts or '',
-                    request_meta={'type': 'scaffold_articles'},
+                    request_meta={**payload, 'type': 'scaffold_articles'},
                 )
                 logger.info(f"Scaffold job created: {job_id} for {domain}")
 
@@ -984,8 +837,11 @@ def decide_scan_scaffold(
     )
 
     try:
+        from content_factory.website_connections import dispatch_contract
+        binding = dispatch_contract(domain, {}, action="setup", source_run_id=scan_run_id) if normalized_decision == "approve" else {}
         response = http_requests.post(
             action_endpoint,
+            json=binding,
             headers=headers,
             timeout=(3, 30),
         )

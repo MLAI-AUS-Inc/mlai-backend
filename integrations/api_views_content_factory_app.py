@@ -427,8 +427,14 @@ class ContentFactoryAppSettingsView(APIView):
             config.brand_name = str(data.get("brand_name") or "").strip() or config.brand_name
             config.company_context = str(data.get("company_context") or "").strip() or config.company_context
             github_repo = str(data.get("github_repo") or "").strip()
-            if github_repo:
-                config.github_repo = github_repo
+            if github_repo and github_repo.casefold() != str(config.github_repo or "").casefold():
+                from content_factory.website_connections import bind_website
+                from content_factory.website_contract import WebsiteAuthorityError
+                try:
+                    bind_website(config, user=request.user, repo=github_repo, expected=data)
+                except WebsiteAuthorityError as exc:
+                    transaction.set_rollback(True)
+                    return Response(exc.as_dict(), status=exc.status)
             config.save()
 
         return Response(

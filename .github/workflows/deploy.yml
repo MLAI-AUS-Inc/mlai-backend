@@ -255,6 +255,7 @@ jobs:
           tests.test_linear_deployment_wiring \
           tests.test_health_check \
           tests.test_content_factory_org_config \
+          content_factory.tests_website_connections \
           tests.test_island_research_contract \
           tests.test_new_endpoints.EndpointTests \
           tests.test_new_endpoints.ContentFactoryCallbackTests \

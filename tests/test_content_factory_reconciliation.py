@@ -28,7 +28,15 @@ from workflow_runs.models import ContentFactoryRun, ContentFactoryRunStatus
 
 
 def _make_run(run_id, *, workflow="direct_generate", status=ContentFactoryRunStatus.RUNNING, age_minutes=90):
+    from content_factory.models import OrganizationContentConfig
+    from organizations.models import Organization
+    from tests.website_fixtures import bind_config_fixture
+    org, _ = Organization.objects.get_or_create(domain='example.com', defaults={'name': 'Example'})
+    config, _ = OrganizationContentConfig.objects.get_or_create(organization=org)
+    from content_factory.website_connections import contract_for
+    binding = contract_for(config.website_connection) if config.website_connection_id else bind_config_fixture(config)
     run = ContentFactoryRun.objects.create(
+        organization=org, run_request=binding,
         run_id=run_id,
         workflow=workflow,
         domain="example.com",

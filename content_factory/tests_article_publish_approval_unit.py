@@ -109,7 +109,12 @@ class ArticlePublishApprovalReceiptTests(SimpleTestCase):
                     ),
                 ):
                     lock.return_value.get.side_effect = locked_current
-                    response = VibeMarketingRunControlView().post(request, run.run_id, "approve")
+                    # This database-free unit exercises approval identity drift
+                    # after authorization. The lifecycle/database suites cover
+                    # the outer website-consent decorator with real requests.
+                    response = VibeMarketingRunControlView.post.__wrapped__(
+                        VibeMarketingRunControlView(), request, run.run_id, "approve",
+                    )
 
                 self.assertEqual(response.status_code, 409)
                 accept_feedback.assert_not_called()

@@ -125,6 +125,16 @@ def automation_run_idempotency_key(
     return f"research-automation:{automation_id}:{local_date.isoformat()}:{slot_index}"
 
 
+
+def _scheduled_website_binding(organization):
+    """Capture website consent when the scheduled job is created, never on retry."""
+    from content_factory.website_connections import contract_for
+    config = getattr(organization, "content_config", None)
+    if config and config.website_connection_id and config.website_connection.state in {"connected", "paused"}:
+        return contract_for(config.website_connection)
+    return {}
+
+
 def ensure_due_automation_runs(*, now: Optional[datetime] = None, limit: int = SCHEDULE_LOOKAHEAD_LIMIT) -> list[AutomationRun]:
     current = now or timezone.now()
     created_or_existing: list[AutomationRun] = []
@@ -168,6 +178,7 @@ def ensure_due_automation_runs(*, now: Optional[datetime] = None, limit: int = S
                             "status": AutomationRunStatus.SCHEDULED,
                             "idempotency_key": key,
                             "request_payload": {
+                                **_scheduled_website_binding(automation.organization),
                                 "timezone": slot["timezone"],
                                 "local_time": slot["local_time"],
                             },
@@ -196,6 +207,10 @@ def _discovery_payload_for_run(run: AutomationRun) -> dict[str, Any]:
         # when unset. Must match the WhatsApp topic template's title slots.
         "requested_topic_count": 3,
     }
+    from content_factory.website_contract import connection_contract
+    original = run.request_payload or {}
+    if connection_contract(original):
+        payload.update({key: original[key] for key in ("website_connection_id", "connection_generation", "repository_id", "connection_target_id", "github_repo", "app_root", "branch", "expected_source_sha") if key in original})
     from .daily_research_policy import daily_topic_policy
     payload["daily_topic_policy"] = daily_topic_policy(run)
     payload["client_request_id"] = run.idempotency_key
@@ -461,6 +476,7 @@ def start_manual_automation_run(
             status=AutomationRunStatus.SCHEDULED,
             idempotency_key=key,
             request_payload={
+                **_scheduled_website_binding(automation.organization),
                 "trigger_source": "founder_tools_run_now",
                 "requested_by_user_id": requested_by_user_id,
                 "timezone": timezone_name,

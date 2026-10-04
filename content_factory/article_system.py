@@ -48,6 +48,10 @@ def normalize_article_system(value: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         for key in ARTICLE_SYSTEM_TEMPLATE:
             if key in value:
                 article_system[key] = value.get(key)
+        # Consent is not detector output. Keep an explicit unlink through all
+        # normalization paths, including service PUT and scan callbacks.
+        if value.get("publish_disconnected_at"):
+            article_system["publish_disconnected_at"] = value["publish_disconnected_at"]
 
     if article_system["state"] not in {"missing", "existing", "roo_scaffolded", "ambiguous"}:
         article_system["state"] = "missing"
@@ -296,6 +300,14 @@ def article_system_ready(article_system: Dict[str, Any]) -> bool:
 
 
 def merge_article_system(current_value: Optional[Dict[str, Any]], incoming_value: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Merge detection while preserving the owner's explicit publishing unlink."""
+    merged = _merge_article_system_detection(current_value, incoming_value)
+    if isinstance(current_value, dict) and current_value.get("publish_disconnected_at"):
+        merged["publish_disconnected_at"] = current_value["publish_disconnected_at"]
+    return merged
+
+
+def _merge_article_system_detection(current_value: Optional[Dict[str, Any]], incoming_value: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     current = normalize_article_system(current_value)
     incoming = normalize_article_system(incoming_value)
 

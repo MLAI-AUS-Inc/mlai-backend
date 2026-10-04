@@ -239,6 +239,8 @@ def _purge_org_marketing_data(organization) -> None:
     from startup_updates.models import MonthlyUpdateDraft
     from workflow_runs.models import ContentFactoryRun
 
+    from content_factory.website_connections import offboard_website_connections
+    offboard_website_connections(organization, purge=True)
     MonthlyUpdateDraft.objects.filter(organization=organization).delete()
     # Cascades ContentFactoryRunStep; ContentFactoryJob is domain-keyed, not FK.
     ContentFactoryRun.objects.filter(organization=organization).delete()
@@ -294,6 +296,9 @@ def offboard_company(company: VibeRaisingCompany, *, reason: str = "company_offb
             .exists()
         )
         summary["orgShared"] = org_shared
+        if org_shared:
+            from content_factory.website_connections import offboard_website_connections
+            offboard_website_connections(organization, user=user)
 
         # 1) Gmail: revoke the Google refresh token, delete the connection row
         #    and its cached mail. disconnect_gmail_for_user is (user, org)-scoped.

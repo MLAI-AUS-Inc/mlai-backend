@@ -211,12 +211,14 @@ class EndpointTests(ContentFactoryTestDataMixin, TestCase):
         from integrations.services.github_app import GitHubInstallationToken
 
         organization = Organization.objects.create(name="Acme", domain="acme.com")
-        OrganizationContentConfig.objects.create(
+        config = OrganizationContentConfig.objects.create(
             organization=organization,
             github_repo="acme/site",
             github_token_encrypted="legacy-user-token",
             github_installation_id="12345",
         )
+        from tests.website_fixtures import bind_config_fixture
+        binding = bind_config_fixture(config)
         app_token = GitHubInstallationToken(
             token="ghs_installation",
             expires_at=timezone.now() + timedelta(minutes=50),
@@ -231,7 +233,7 @@ class EndpointTests(ContentFactoryTestDataMixin, TestCase):
         ) as create_token:
             response = self.client.get(
                 reverse("content_factory_token"),
-                {"domain": "acme.com", "github_repo": "acme/site"},
+                {**binding, "domain": "acme.com", "github_repo": "acme/site", "permission_mode": "write", "action": "setup"},
             )
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
@@ -243,10 +245,10 @@ class EndpointTests(ContentFactoryTestDataMixin, TestCase):
         create_token.assert_called_once_with(
             installation_id="12345",
             repository="acme/site",
-            permission_mode="write",
+            permission_mode="write", repository_id=12345, use_cache=False,
         )
 
-    def test_content_factory_token_resolves_repo_from_founder_registry_and_self_heals_stale_config(self):
+    def test_content_factory_token_requires_explicit_connection_instead_of_self_healing_consent(self):
         from integrations.services.github_app import GitHubInstallationToken
 
         founder = User.objects.create_user(email="mark@example.com", slack_id="U_MARK")
@@ -293,16 +295,11 @@ class EndpointTests(ContentFactoryTestDataMixin, TestCase):
                 },
             )
 
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data["github_token"], "ghs_sheldon")
-        self.assertEqual(response.data["github_installation_id"], "145558994")
-        create_token.assert_called_once_with(
-            installation_id="145558994",
-            repository="sheldonhealth/v0-sheldon-health-app",
-            permission_mode="write",
-        )
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(response.data["code"], "website_connection_required")
+        create_token.assert_not_called()
         config.refresh_from_db()
-        self.assertEqual(config.github_installation_id, "145558994")
+        self.assertEqual(config.github_installation_id, "145611291")
 
     def test_content_factory_token_rejects_repo_not_owned_by_registered_installations(self):
         founder = User.objects.create_user(email="founder@example.com", slack_id="U_FOUNDER")
@@ -328,12 +325,8 @@ class EndpointTests(ContentFactoryTestDataMixin, TestCase):
                 {"domain": "acme.example", "github_repo": "sheldonhealth/v0-sheldon-health-app"},
             )
 
-        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
-        self.assertEqual(
-            response.data["reason_code"],
-            "repository_not_accessible_by_registered_installations",
-        )
-        self.assertIn("sheldonhealth/v0-sheldon-health-app", response.data["message"])
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(response.data["code"], "website_connection_required")
         create_token.assert_not_called()
 
     def test_content_factory_token_does_not_rebind_config_for_one_off_requested_repo(self):
@@ -357,6 +350,8 @@ class EndpointTests(ContentFactoryTestDataMixin, TestCase):
             installation_id="145558994",
             account_login="sheldonhealth",
         )
+        from tests.website_fixtures import bind_config_fixture
+        binding = bind_config_fixture(config)
         app_token = GitHubInstallationToken(
             token="ghs_innerx",
             expires_at=timezone.now() + timedelta(minutes=50),
@@ -374,11 +369,11 @@ class EndpointTests(ContentFactoryTestDataMixin, TestCase):
         ):
             response = self.client.get(
                 reverse("content_factory_token"),
-                {"domain": "multi.example", "github_repo": "msinclair123/v0-innerx-ai"},
+                {**binding, "domain": "multi.example", "github_repo": "msinclair123/v0-innerx-ai"},
             )
 
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data["github_installation_id"], "145611291")
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(response.data["code"], "website_repository_changed")
         config.refresh_from_db()
         self.assertEqual(config.github_repo, "sheldonhealth/v0-sheldon-health-app")
         self.assertEqual(config.github_installation_id, "145558994")
@@ -449,23 +444,29 @@ class EndpointTests(ContentFactoryTestDataMixin, TestCase):
 
     def test_content_factory_token_blocks_when_installation_app_credentials_missing(self):
         organization = Organization.objects.create(name="Acme", domain="acme.com")
-        OrganizationContentConfig.objects.create(
+        config = OrganizationContentConfig.objects.create(
             organization=organization,
             github_repo="acme/site",
             github_token_encrypted="legacy-user-token",
             github_installation_id="12345",
         )
 
-        with patch("integrations.services.github_app.github_app_credentials_configured", return_value=False):
-            response = self.client.get(reverse("content_factory_token"), {"domain": "acme.com"})
+        from tests.website_fixtures import bind_config_fixture
+        from integrations.services.github_app import GitHubAppTokenError
+        binding = bind_config_fixture(config)
+        with patch("integrations.services.github_app.create_installation_access_token", side_effect=GitHubAppTokenError("Not configured")):
+            response = self.client.get(reverse("content_factory_token"), {**binding, "domain": "acme.com"})
 
-        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
-        self.assertEqual(response.data["action_required"], "server_configuration_required")
-        self.assertEqual(response.data["github_installation_id"], "12345")
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(response.data["error"], "github_repository_unavailable")
         self.assertNotIn("legacy-user-token", str(response.data))
 
     @patch('integrations.services.github.http_requests.post')
     def test_scaffold_decision_endpoint_queues_scaffold_job(self, mock_post):
+        from tests.website_fixtures import bind_config_fixture
+        org = Organization.objects.create(domain='mlai.au', name='MLAI')
+        config = OrganizationContentConfig.objects.create(organization=org, github_repo='MLAI-AUS-Inc/mlai-au')
+        binding = bind_config_fixture(config)
         ContentFactoryJob.objects.create(
             job_id="scan-run-approval-1",
             domain="mlai.au",
@@ -473,7 +474,7 @@ class EndpointTests(ContentFactoryTestDataMixin, TestCase):
             status="awaiting_confirmation",
             slack_channel_id="C123",
             slack_thread_ts="123.456",
-            request_meta={"type": "scan"},
+            request_meta={"type": "scan", **binding},
         )
 
         mock_response = MagicMock()
@@ -885,12 +886,29 @@ class ArticleSystemDecisionTests(TestCase):
 
 class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
     def setUp(self):
-        self.client = APIClient()
+        from tests.website_fixtures import CallbackFixtureClient
+        self.client = CallbackFixtureClient()
         self.api_key = "test_roo_key"
         os.environ['ROO_API_KEY'] = self.api_key
         from django.conf import settings
         settings.ROO_API_KEY = self.api_key
         self.client.credentials(HTTP_X_API_KEY=self.api_key)
+
+    def _authorize_publish_fixture(self, run_id):
+        from content_factory.website_models import WebsiteConnectionTarget
+        self.client._bound_payload({'run_id': run_id, 'domain': 'mlai.au'})
+        website = self.client.website_fixture
+        website.capabilities = {'publishingReady': True}
+        website.verified_sha = 'a' * 40
+        website.save(update_fields=['capabilities', 'verified_sha'])
+        config = OrganizationContentConfig.objects.get(website_connection=website)
+        config.default_publish_target_id = 'native'
+        config.save(update_fields=['default_publish_target_id'])
+        WebsiteConnectionTarget.objects.create(connection=website, generation=website.generation,
+            target_key='native', source_sha=website.verified_sha, capabilities={'publishingReady': True}, verified_at=timezone.now())
+        provider = patch('content_factory.website_connections.verify_repository_head', return_value=website.verified_sha)
+        provider.start()
+        self.addCleanup(provider.stop)
 
     def _charge_article(self, user, request_id):
         return PointsService.spend(
@@ -3866,6 +3884,7 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
             slack_root_message_ts="123.456",
         )
 
+        self._authorize_publish_fixture("job-content-ready-promote")
         response = self.client.post(
             reverse('content_factory_run_control', args=["job-content-ready-promote", "promote-bundle"]),
             {},
@@ -4004,6 +4023,7 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
             request_meta={"requested_by_slack_user_id": "U_REQUESTER"},
         )
 
+        self._authorize_publish_fixture("job-content-ready-promote")
         response = self.client.post(
             reverse('content_factory_run_control', args=["job-content-ready-promote", "promote-bundle"]),
             {},
@@ -4040,6 +4060,7 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
             request_meta={"requested_by_slack_user_id": "U123"},
         )
 
+        self._authorize_publish_fixture("job-content-ready-promote")
         response = self.client.post(
             reverse('content_factory_run_control', args=["job-content-ready-promote", "promote-bundle"]),
             {},

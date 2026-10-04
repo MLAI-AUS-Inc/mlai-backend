@@ -464,6 +464,8 @@ def run_github_installation_reconciliation_sweep(*, limit: Optional[int] = None,
             pk=inst.pk, updated_at=inst.updated_at
         ).delete()
         if deleted:
+            from content_factory.website_reconciliation import revoke_installation
+            revoke_installation(inst.installation_id)
             summary["pruned"] += 1
             logger.warning(
                 "github_installation_reconciliation pruned stale installation "

@@ -180,11 +180,21 @@ def _adopt_remote_payload(run: ContentFactoryRun, payload: dict) -> str:
     step_states = payload.get("step_states") or payload.get("steps") or {}
     if not isinstance(step_states, dict):
         step_states = {}
-    _sync_content_factory_run_snapshot(
-        run_id=run.run_id,
-        data=sync_payload,
-        step_states=step_states,
-    )
+    from .website_connections import authority_guard, needs_repository_authority, scoped_run_contract
+    from .website_contract import WebsiteAuthorityError, connection_contract
+    if needs_repository_authority({"workflow": run.workflow}):
+        try:
+            original = scoped_run_contract(run)
+            with authority_guard(original, action="read"):
+                binding = connection_contract(original)
+                sync_payload.update(binding)
+                sync_payload["run_request"] = {**(run.run_request or {}), **(sync_payload.get("run_request") or {}), **binding}
+                _sync_content_factory_run_snapshot(run_id=run.run_id, data=sync_payload, step_states=step_states)
+        except WebsiteAuthorityError:
+            run.refresh_from_db()
+            return run.status
+    else:
+        _sync_content_factory_run_snapshot(run_id=run.run_id, data=sync_payload, step_states=step_states)
     return normalized_status
 
 

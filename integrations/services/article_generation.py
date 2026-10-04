@@ -1053,6 +1053,9 @@ def _post_content_factory_queue_request(
     domain: Optional[str],
     source_run_id: Optional[str] = None,
 ) -> object:
+    if endpoint.rstrip("/").endswith(("/article", "/confirm-topic")) and payload.get("delivery_mode") != "content_only":
+        from content_factory.website_connections import dispatch_contract
+        payload.update(dispatch_contract(domain, payload, action="read", source_run_id=str(payload.get("source_run_id") or "")))
     attempts = CONTENT_FACTORY_FAST_QUEUE_RETRY_COUNT + 1
     timeout = (
         CONTENT_FACTORY_FAST_QUEUE_CONNECT_TIMEOUT_SECONDS,
@@ -2031,6 +2034,15 @@ def trigger_article_generation(
     if not resolved_domain:
         raise ArticleGenerationError("Domain is required.")
 
+    # Capture consent before charging or scheduling. A later child run must use
+    # this generation, never whichever repository is selected when it resumes.
+    from content_factory.website_connections import contract_for, dispatch_contract
+    selected_delivery_mode, _ = resolve_article_delivery_mode(article_request=article_request, config=config)
+    if topic and selected_delivery_mode != "content_only":
+        article_request.update(dispatch_contract(resolved_domain, article_request, action="read"))
+    elif config and config.website_connection_id and config.website_connection.state in {"connected", "paused"}:
+        article_request.update(contract_for(config.website_connection))
+
     # Retrieve competitors and seed_keywords early for Auto-Write or Payload
     competitors = []
     seed_keywords = []
@@ -2074,6 +2086,8 @@ def trigger_article_generation(
 
         logger.info(f"Research mode enabled for {resolved_domain}. Triggering discovery at {discovery_endpoint}.")
 
+        from content_factory.website_contract import connection_contract
+        payload.update(connection_contract(article_request))
         try:
             response = _post_content_factory_queue_request(
                 discovery_endpoint,
@@ -2236,6 +2250,8 @@ def trigger_article_generation(
         )
     )
 
+    from content_factory.website_contract import connection_contract
+    payload.update(connection_contract(article_request))
     try:
         response = _post_content_factory_queue_request(
             generate_endpoint,
@@ -2622,9 +2638,11 @@ def publish_article(job_id: str, slack_user_id: str = None, domain: str = None) 
     logger.info(f"Publishing article to: {publish_endpoint}")
 
     try:
+        from content_factory.website_connections import dispatch_contract
+        binding = dispatch_contract(domain or "", {}, action="publish", source_run_id=job_id)
         response = http_requests.post(
             publish_endpoint,
-            json={},
+            json=binding,
             headers=headers,
             timeout=(3, 30),
         )
@@ -2680,9 +2698,11 @@ def promote_article_bundle(
     logger.info(f"Promoting article bundle via: {promote_endpoint}")
 
     try:
+        from content_factory.website_connections import dispatch_contract
+        binding = dispatch_contract(resolved_domain, {}, action="publish", source_run_id=job_id)
         response = http_requests.post(
             promote_endpoint,
-            json={},
+            json=binding,
             headers=headers,
             timeout=(3, 30),
         )

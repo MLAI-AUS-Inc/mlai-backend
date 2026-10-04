@@ -182,6 +182,23 @@ class ResearchAutomationSchedulerTests(TestCase):
         self.user.slack_id = "U_WRITER"
         self.user.save(update_fields=["slack_id"])
 
+    def test_scheduled_discovery_keeps_binding_captured_before_repository_change(self):
+        from integrations.services.research_automations import ensure_due_automation_runs, _discovery_payload_for_run
+        from tests.website_fixtures import bind_config_fixture
+        config, _ = OrganizationContentConfig.objects.get_or_create(organization=self.org)
+        binding = bind_config_fixture(config)
+        automation = create_or_update_research_automation(
+            domain=self.org.domain, channel_type=NotificationChannelType.EMAIL,
+            route_id=self.user.email, user=self.user, timezone_name="Australia/Melbourne",
+            frequency_per_day=1, local_send_times=["08:00"], consent_state=NotificationConsentState.ACTIVE)
+        run = ensure_due_automation_runs(now=datetime(2026, 3, 23, 21, 5, tzinfo=dt_timezone.utc))[0]
+        self.assertEqual(run.request_payload['website_connection_id'], binding['website_connection_id'])
+        config.website_connection.generation = 2
+        config.website_connection.save(update_fields=['generation'])
+        payload = _discovery_payload_for_run(run)
+        self.assertEqual(payload['connection_generation'], 1)
+        self.assertEqual(payload['website_connection_id'], binding['website_connection_id'])
+
     @patch("integrations.services.research_automations._require_content_factory_ai_agent_points", return_value=(None, 10))
     @patch("integrations.services.research_automations._post_content_factory_queue_request")
     def test_scheduler_dispatches_due_email_run_with_notification_context_once(self, mock_post, mock_gate):
@@ -376,7 +393,8 @@ class ResearchAutomationSchedulerTests(TestCase):
 )
 class ResearchAutomationCallbackTests(TestCase):
     def setUp(self):
-        self.client = APIClient()
+        from tests.website_fixtures import CallbackFixtureClient
+        self.client = CallbackFixtureClient()
         self.api_key = "test-roo-key"
         self.client.credentials(HTTP_X_API_KEY=self.api_key)
         self.override = override_settings(ROO_API_KEY=self.api_key, INTERNAL_API_KEY=self.api_key)
@@ -1257,7 +1275,8 @@ class ReviewReadyCallbackFallbackTests(TestCase):
     """
 
     def setUp(self):
-        self.client = APIClient()
+        from tests.website_fixtures import CallbackFixtureClient
+        self.client = CallbackFixtureClient()
         self.client.credentials(HTTP_X_API_KEY="test-roo-key")
         self.org = Organization.objects.create(name="Review Co", domain="review.example.com")
         self.whatsapp = NotificationChannel.objects.create(
