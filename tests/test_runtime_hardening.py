@@ -310,6 +310,7 @@ class RuntimeHardeningConfigTests(SimpleTestCase):
             root = Path(directory)
             for scenario, allowed in (
                 ("stopped", True),
+                ("none", True),
                 ("inventory_failed", False),
                 ("stop_failed", False),
                 ("still_active", False),
@@ -327,7 +328,7 @@ class RuntimeHardeningConfigTests(SimpleTestCase):
                             "systemctl() {",
                             '  if [ "$1" = list-units ]; then',
                             '    [ "$scenario" != inventory_failed ] || return 1',
-                            '    printf "%s\\n" legacy-watchdog.service unrelated.service',
+                            '    if [ "$scenario" = none ]; then echo unrelated.service; else printf "%s\\n" legacy-watchdog.service unrelated.service; fi',
                             "  elif [ \"$1\" = show ]; then",
                             '    if [ "$2" = --property=ExecStart ]; then',
                             '      if [ "$4" = legacy-watchdog.service ]; then echo "/srv/mlai-backend/ops/docker-health-watchdog.sh"; else echo /usr/bin/other; fi',

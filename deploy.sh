@@ -1359,6 +1359,10 @@ if parsed.username or parsed.password or parsed.query or parsed.fragment:
     }
     restore_host_writer_watchdogs() {
         local unit
+        # Bash 3.2 treats expansion of an empty array as unbound under set -u.
+        if [ "\${#writer_watchdog_units_to_restore[@]}" -eq 0 ]; then
+            return 0
+        fi
         for unit in "\${writer_watchdog_units_to_restore[@]}"; do
             systemctl start "\$unit" || return 1
             if [ "\$(systemctl show --property=ActiveState --value "\$unit")" != "active" ]; then
