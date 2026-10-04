@@ -55,7 +55,7 @@ class ArticlePreviewLeaseProxyView(views.VibeMarketingRunLivePreviewProxyView):
         if not views._run_belongs_to_context(run, context):
             return None, None, Response({"detail": "Preview not found."}, status=404)
         try:
-            with authority_guard(grant, action="preview"):
+            with authority_guard(grant, action="read"):
                 if connection_contract(grant) != connection_contract(run.run_request or {}):
                     raise WebsiteAuthorityError("website_connection_changed", "Preview access expired.")
         except WebsiteAuthorityError as exc:

@@ -140,6 +140,7 @@ class ArticleDispatchControlFlowTests(unittest.TestCase):
             "guarded_owner_operation": lambda *args, **kwargs: lambda method: method,
             "guarded_service_write": lambda *args, **kwargs: lambda method: method,
             "REPOSITORY_WORKFLOWS": frozenset(),
+            "require_unlocked_remote_call": lambda: None,
             "uuid": uuid, "status": status, "Response": Response, "DatabaseError": DatabaseError,
             "OrganizationContentConfig": self.config_model, "article_brief_for_catalog": article_brief_for_catalog,
             "logger": Mock(), "timezone": SimpleNamespace(now=lambda: datetime(2026, 9, 10, tzinfo=dt_timezone.utc)),

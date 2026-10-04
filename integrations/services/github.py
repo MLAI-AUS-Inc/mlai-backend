@@ -732,6 +732,8 @@ def scaffold_articles_directory(
     Raises:
         ScanError: If the API call fails.
     """
+    from content_factory.website_connections import require_unlocked_remote_call
+    require_unlocked_remote_call()
     from content_factory.models import ContentFactoryJob
 
     content_factory_url = getattr(settings, 'CONTENT_FACTORY_URL', 'http://localhost:8001')
@@ -762,24 +764,26 @@ def scaffold_articles_directory(
 
         if response.status_code in [200, 202]:
             data = response.json()
-            job_id = data.get('job_id')
+            from content_factory.vibe_marketing_views import _remote_response_write_guard
+            with _remote_response_write_guard(data, workflow="scaffold_articles", binding=payload):
+                job_id = data.get('job_id')
 
-            if job_id:
-                ContentFactoryJob.objects.create(
-                    job_id=job_id,
-                    domain=domain,
-                    slack_user_id=slack_user_id,
-                    status='queued',
-                    slack_channel_id=slack_channel_id or '',
-                    slack_thread_ts=slack_thread_ts or '',
-                    request_meta={**payload, 'type': 'scaffold_articles'},
-                )
-                logger.info(f"Scaffold job created: {job_id} for {domain}")
+                if job_id:
+                    ContentFactoryJob.objects.create(
+                        job_id=job_id,
+                        domain=domain,
+                        slack_user_id=slack_user_id,
+                        status='queued',
+                        slack_channel_id=slack_channel_id or '',
+                        slack_thread_ts=slack_thread_ts or '',
+                        request_meta={**payload, 'type': 'scaffold_articles'},
+                    )
+                    logger.info(f"Scaffold job created: {job_id} for {domain}")
 
-            return {
-                "job_id": job_id,
-                "status": data.get('status', 'queued'),
-            }
+                return {
+                    "job_id": job_id,
+                    "status": data.get('status', 'queued'),
+                }
         elif response.status_code == 412:
             # Content Factory prerequisite check failed
             try:
@@ -811,6 +815,8 @@ def decide_scan_scaffold(
     slack_thread_ts: str = None,
 ) -> dict:
     """Approve or deny a scaffold proposal for a repo scan run."""
+    from content_factory.website_connections import require_unlocked_remote_call
+    require_unlocked_remote_call()
     from content_factory.models import ContentFactoryJob
 
     normalized_decision = str(decision or "").strip().lower()
@@ -848,41 +854,44 @@ def decide_scan_scaffold(
         data = response.json() if response.content else {}
 
         if response.status_code in [200, 202]:
-            parent_job = ContentFactoryJob.objects.filter(job_id=scan_run_id).first()
-            if parent_job:
-                parent_job.status = 'confirmed' if normalized_decision == 'approve' else 'cancelled'
-                parent_meta = dict(parent_job.request_meta or {})
-                parent_meta.update(
-                    {
-                        'type': parent_meta.get('type') or 'scan',
-                        'scaffold_decision': normalized_decision,
-                        'scaffold_status': data.get('status') or parent_meta.get('scaffold_status'),
-                    }
-                )
-                parent_job.request_meta = parent_meta
-                parent_job.save(update_fields=['status', 'request_meta', 'updated_at'])
+            from content_factory.vibe_marketing_views import _remote_response_write_guard
+            with _remote_response_write_guard(data, workflow="scaffold_articles", binding=binding):
+                parent_job = ContentFactoryJob.objects.filter(job_id=scan_run_id).first()
+                if parent_job:
+                    parent_job.status = 'confirmed' if normalized_decision == 'approve' else 'cancelled'
+                    parent_meta = dict(parent_job.request_meta or {})
+                    parent_meta.update(
+                        {
+                            'type': parent_meta.get('type') or 'scan',
+                            'scaffold_decision': normalized_decision,
+                            'scaffold_status': data.get('status') or parent_meta.get('scaffold_status'),
+                        }
+                    )
+                    parent_job.request_meta = parent_meta
+                    parent_job.save(update_fields=['status', 'request_meta', 'updated_at'])
 
-            scaffold_job_id = data.get('scaffold_job_id')
-            if normalized_decision == 'approve' and scaffold_job_id:
-                ContentFactoryJob.objects.update_or_create(
-                    job_id=scaffold_job_id,
-                    defaults={
-                        'domain': domain,
-                        'slack_user_id': slack_user_id,
-                        'status': 'queued',
-                        'slack_channel_id': slack_channel_id or '',
-                        'slack_thread_ts': slack_thread_ts or '',
-                        'request_meta': {
-                            'type': 'scaffold_articles',
-                            'parent_scan_run_id': scan_run_id,
+                scaffold_job_id = data.get('scaffold_job_id')
+                if normalized_decision == 'approve' and scaffold_job_id:
+                    ContentFactoryJob.objects.update_or_create(
+                        job_id=scaffold_job_id,
+                        defaults={
+                            'domain': domain,
+                            'slack_user_id': slack_user_id,
+                            'status': 'queued',
+                            'slack_channel_id': slack_channel_id or '',
+                            'slack_thread_ts': slack_thread_ts or '',
+                            'request_meta': {
+                                'type': 'scaffold_articles',
+                                'parent_scan_run_id': scan_run_id,
+                                **binding,
+                            },
                         },
-                    },
-                )
+                    )
 
-            return {
-                "status_code": response.status_code,
-                "data": data,
-            }
+                return {
+                    "status_code": response.status_code,
+                    "data": data,
+                }
 
         logger.error(
             "Content Factory scaffold %s failed for %s: %s - %s",

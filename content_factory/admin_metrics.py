@@ -308,6 +308,8 @@ def _timeline(now: datetime) -> list[dict[str, Any]]:
 def build_vibe_marketing_admin_usage_payload(
     range_value: str | None = None, *, now: datetime | None = None
 ) -> dict[str, Any]:
+    from .website_health import website_connection_health
+
     now = now or timezone.now()
     range_key = normalize_usage_range(range_value)
     start, end, previous_start, previous_end = _period_bounds(range_key, now)
@@ -338,4 +340,5 @@ def build_vibe_marketing_admin_usage_payload(
         ],
         "timeline": _timeline(now),
         "asOf": now.isoformat(),
+        "websiteConnections": website_connection_health(now=now),
     }

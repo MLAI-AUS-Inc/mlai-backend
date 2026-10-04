@@ -10,7 +10,7 @@ from core.permissions import HasRooApiKey
 from .website_contract import WebsiteAuthorityError, connection_contract, sanitized_evidence
 from .website_connections import (
     authority_guard, bind_website, contract_for, scoped_run_contract,
-    summary_for, transition_connection,
+    summary_for, transition_connection, owner_operation_scope,
 )
 
 
@@ -23,7 +23,7 @@ def _context(request):
     return context, _get_config(context.organization), error
 
 
-def guarded_owner_operation(action, *, bind_selected=False, run_operation=False):
+def guarded_owner_operation(action, *, bind_selected=False, run_operation=False, local_only=False):
     """Check browser-provided generation before entering legacy mutation paths."""
     def decorate(method):
         @wraps(method)
@@ -64,13 +64,18 @@ def guarded_owner_operation(action, *, bind_selected=False, run_operation=False)
                     if current is None:
                         raise WebsiteAuthorityError("website_connection_required", "Connect this website before continuing.")
                     if not expected and not newly_bound:
-                        raise WebsiteAuthorityError("website_connection_required", "Refresh the website connection before continuing.")
+                        raise WebsiteAuthorityError("website_connection_required", "Reload the web app or update MLAI, then reconnect this website.")
                     payload = contract_for(current) if newly_bound else expected
                     payload.update(domain=context.organization.domain, github_repo=requested_repo)
                 effective_action = action
                 if run_operation and run_action:
                     effective_action = "merge" if run_action == "merge-publish-pr" else "publish" if run_action in {"approve", "publish-pr", "promote-bundle"} else "setup"
                 with authority_guard(payload, action=effective_action):
+                    if local_only:
+                        return method(self, request, *args, **kwargs)
+                # The worker synchronously reauthorizes dispatch and mutations.
+                # Preserve consent identity across HTTP, never the DB row locks.
+                with owner_operation_scope(payload):
                     return method(self, request, *args, **kwargs)
             except WebsiteAuthorityError as exc:
                 return Response(exc.as_dict(), status=exc.status)

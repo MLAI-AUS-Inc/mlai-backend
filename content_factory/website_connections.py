@@ -1,6 +1,7 @@
 """Website lifecycle authority shared by browser, service and scheduler paths."""
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
+from contextvars import ContextVar
 from functools import wraps
 import hashlib
 import re
@@ -41,6 +42,57 @@ REPOSITORY_CONFIG_FIELDS = frozenset({
 })
 
 
+_owner_contract = ContextVar("website_owner_contract", default=None)
+_authority_depth = ContextVar("website_authority_depth", default=0)
+
+
+@contextmanager
+def owner_operation_scope(payload):
+    """Retain the reviewed identity across remote calls without retaining locks."""
+    token = _owner_contract.set(dict(payload))
+    try:
+        yield
+    finally:
+        _owner_contract.reset(token)
+
+
+def owner_operation_contract():
+    """Return the original reviewed identity, never today's replacement binding."""
+    return dict(_owner_contract.get() or {})
+
+
+def owner_write_guard(payload=None):
+    """Fence a local persistence phase after remote work against revocation."""
+    original = payload if payload is not None else owner_operation_contract()
+    return authority_guard(original, action="read") if connection_contract(original) else nullcontext()
+
+
+def guarded_local_run_write(method):
+    """Guard local-only run projection helpers, including background poll writes."""
+    @wraps(method)
+    def wrapped(*args, **kwargs):
+        run = kwargs.get("run") or (args[0] if args else None)
+        payload = scoped_run_contract(run) if run is not None else owner_operation_contract()
+        try:
+            with owner_write_guard(payload):
+                return method(*args, **kwargs)
+        except WebsiteAuthorityError:
+            if owner_operation_contract():
+                raise
+            if run is not None and getattr(run, "pk", None):
+                run.refresh_from_db()
+            return run
+    return wrapped
+
+
+def require_unlocked_remote_call():
+    """Reject a cross-service call that could reenter our authority transaction."""
+    explicit_transactions = [block for block in transaction.get_connection().atomic_blocks
+        if not getattr(block, "_from_testcase", False)]
+    if _authority_depth.get() or explicit_transactions:
+        raise RuntimeError("Content Factory HTTP must run outside database transactions")
+
+
 def contract_for(connection):
     """Project only non-secret identifiers for a worker operation."""
     return {
@@ -77,8 +129,12 @@ def summary_for(config, *, company_id=None):
         actions.append("pause" if connection.state == "connected" else "reconnect")
     if connection.repository_mutations.exists():
         actions.append("cleanup")
+    target_blocked = connection.app_root or any(item.get("code") in {"APPLICATION_ROOT_VERIFICATION_REQUIRED", "SETUP_BRANCH_VERIFICATION_REQUIRED"} for item in connection.blockers)
+    if target_blocked:
+        capabilities.update(publishingReady=False, previewSupported=False)
+        actions = [action for action in actions if action not in {"setup", "publish", "preview"}]
     latest = connection.operations.order_by("-created_at").first()
-    return {
+    summary = {
         "latestOperation": {"id": str(latest.pk), "action": latest.action, "state": latest.state, "receipt": latest.receipt} if latest else None,
         "connectionId": str(connection.pk), "connectionGeneration": connection.generation,
         "companyId": str(company_id) if company_id else None,
@@ -88,6 +144,9 @@ def summary_for(config, *, company_id=None):
         "blockers": connection.blockers, "verifiedSha": connection.verified_sha or None,
         "configurationVersion": connection.configuration_version,
     }
+
+    from .website_rollout import apply_repository_write_policy
+    return apply_repository_write_policy(summary, domain=connection.organization.domain)
 
 
 def _payload_with_context(data):
@@ -130,6 +189,37 @@ def check_source_identity(connection, payload, *, required=False):
     return expected
 
 
+def read_repository_native_target(connection):
+    """Read immutable identity and the provider's current default branch."""
+    from integrations import http_client
+    from integrations.services.github_app import create_installation_access_token
+    try:
+        credential = create_installation_access_token(installation_id=connection.installation_id,
+            repository=connection.github_repo, repository_id=connection.repository_id, permission_mode="read")
+        response = http_client.get(f"https://api.github.com/repos/{connection.github_repo}",
+            headers={"Authorization": f"Bearer {credential.token}", "Accept": "application/vnd.github+json"}, timeout=(3, 15))
+        response.raise_for_status()
+        return response.json()
+    except Exception as exc:
+        raise WebsiteAuthorityError("github_source_unavailable", "GitHub could not verify the current repository target. Retry when GitHub is available.", status=503, retryable=True) from exc
+
+
+def verify_repository_native_target(connection):
+    """Native mutation adapters currently support only the root/default branch.
+
+    Inventory remains available for every selection. Comparing live branch names
+    is necessary even when selected and default branches happen to share a SHA.
+    """
+    if connection.app_root:
+        raise WebsiteAuthorityError("APPLICATION_ROOT_VERIFICATION_REQUIRED", "This application root can be scanned, but native website changes need an adapter verified for that root.")
+    metadata = read_repository_native_target(connection)
+    if (metadata.get("id") != connection.repository_id
+            or str(metadata.get("full_name") or "").casefold() != connection.github_repo.casefold()):
+        raise WebsiteAuthorityError("website_repository_changed", "The immutable GitHub repository identity changed.")
+    if not metadata.get("default_branch") or metadata["default_branch"] != connection.branch:
+        raise WebsiteAuthorityError("SETUP_BRANCH_VERIFICATION_REQUIRED", "This branch can be scanned, but native website changes need an adapter verified for this selected branch.")
+
+
 def verify_repository_head(connection, expected_sha):
     """Recheck GitHub's selected branch before promoting publication readiness."""
     from urllib.parse import quote
@@ -158,7 +248,7 @@ def authority_guard(data, *, action="read", domain="", github_repo="", require_s
     payload = _payload_with_context(data)
     contract = connection_contract(payload)
     if not contract:
-        raise WebsiteAuthorityError("website_connection_required", "Reconnect this website to continue repository work.")
+        raise WebsiteAuthorityError("website_connection_required", "Reload the web app or update MLAI, then reconnect this website to continue.")
     domain = str(domain or payload.get("domain") or "").lower().strip()
     github_repo = str(github_repo or payload.get("github_repo") or "").strip()
     with transaction.atomic():
@@ -169,6 +259,10 @@ def authority_guard(data, *, action="read", domain="", github_repo="", require_s
         Organization.objects.select_for_update().get(pk=candidate.organization_id)
         connection = WebsiteConnection.objects.select_for_update().select_related("organization").get(pk=candidate.pk)
         validate_authority(connection, payload, action=action, domain=domain, github_repo=github_repo)
+        from .website_rollout import require_repository_write_policy
+        require_repository_write_policy(action=action, domain=connection.organization.domain)
+        if action in {"setup", "publish", "merge", "preview"}:
+            verify_repository_native_target(connection)
         expected_source = check_source_identity(connection, payload, required=action in {"publish", "merge"})
         if action in {"publish", "merge"} or (action == "preview" and expected_source):
             verify_repository_head(connection, expected_source or connection.verified_sha)
@@ -184,7 +278,11 @@ def authority_guard(data, *, action="read", domain="", github_repo="", require_s
             raise WebsiteAuthorityError("website_target_changed", "The publishing target changed. Scan this website again.")
         if action in {"publish", "merge"} and (target is None or not target.verified_at or not target.capabilities.get("publishingReady") or target.source_sha != connection.verified_sha):
             raise WebsiteAuthorityError("website_target_verification_required", "Select a verified publishing target for this repository.")
-        yield connection
+        token = _authority_depth.set(_authority_depth.get() + 1)
+        try:
+            yield connection
+        finally:
+            _authority_depth.reset(token)
 
 
 def scoped_run_contract(run):
@@ -195,13 +293,22 @@ def scoped_run_contract(run):
     return payload
 
 
-def guarded_service_write(action, *, only_repository=False):
+def guarded_service_write(action, *, only_repository=False, remote_actions=(), portable=False):
     """Fence legacy service handlers without weakening their existing permissions."""
     def decorate(method):
         @wraps(method)
         def wrapped(self, request, *args, **kwargs):
             data = request.query_params if request.method == "GET" else request.data
             payload = dict(data.items())
+            if kwargs.get("run_id"):
+                payload["run_id"] = kwargs["run_id"]
+            if portable:
+                from workflow_runs.models import ContentFactoryRun
+                run_id = str(payload.get("run_id") or payload.get("job_id") or "")
+                with transaction.atomic():
+                    original = ContentFactoryRun.objects.select_for_update().filter(run_id=run_id).first() if run_id else None
+                    if portable_run_update_allowed(original, payload, event_type=str(payload.get("event_type") or payload.get("event") or "")):
+                        return method(self, request, *args, **kwargs)
             if only_repository and not needs_repository_authority(payload):
                 return method(self, request, *args, **kwargs)
             try:
@@ -223,19 +330,110 @@ def guarded_service_write(action, *, only_repository=False):
                             source_payload = {**payload, **(payload.get("repository_inventory") if isinstance(payload.get("repository_inventory"), dict) else {})}
                             check_source_identity(connection, source_payload, required=True)
                         validate_template_update(payload)
-                    response = method(self, request, *args, **kwargs)
-                    if action == "config_write" and response.status_code < 300:
+                    if kwargs.get("action") not in remote_actions:
+                        response = method(self, request, *args, **kwargs)
+                    else:
+                        response = None
+                    if action == "config_write" and response is not None and response.status_code < 300:
                         record_scan_evidence(connection, payload)
                         if run_id:
                             run = ContentFactoryRun.objects.filter(run_id=run_id).first()
                             if run:
                                 run.run_request = {**(run.run_request or {}), **connection_contract(payload)}
                                 run.save(update_fields=["run_request", "updated_at"])
-                    return response
+                    if response is not None:
+                        return response
+                # These actions synchronously call the worker, which calls our
+                # authority/token/config APIs back. Release every row lock first.
+                with owner_operation_scope(payload):
+                    return method(self, request, *args, **kwargs)
             except WebsiteAuthorityError as exc:
                 return Response(exc.as_dict(), status=exc.status)
         return wrapped
     return decorate
+
+
+def queue_website_followup(kind, *, data, arguments):
+    """Persist a callback follow-up without worker HTTP inside the callback lock."""
+    if kind not in {"publish_article", "trigger_article_generation", "confirm_topic"}:
+        raise ValueError("Unsupported website follow-up")
+    binding = {**connection_contract(data), "domain": str(data.get("domain") or "")}
+    with authority_guard(binding, action="config_write") as website:
+        arguments = sanitized_evidence(arguments)
+        if kind == "trigger_article_generation":
+            article = dict(arguments.get("article_request") or {})
+            original = connection_contract(article)
+            if original and any(binding.get(key) != value for key, value in original.items()):
+                raise WebsiteAuthorityError("website_connection_changed", "Pending article belongs to a previous website connection.")
+            arguments["article_request"] = {**article, **binding, "github_repo": website.github_repo,
+                "client_request_id": article.get("client_request_id") or f"callback:{data.get('job_id')}:{kind}"}
+        elif kind == "confirm_topic":
+            arguments["source_run_id"] = str(data.get("job_id") or "")
+        digest = evidence_digest({"kind": kind, "job_id": data.get("job_id"), "dedupe_key": data.get("dedupe_key"), "arguments": arguments})
+        operation, _ = WebsiteConnectionOperation.objects.get_or_create(
+            idempotency_key=f"{website.pk}:followup:{digest}", defaults={
+                "connection": website, "generation": website.generation, "action": "worker_followup",
+                "payload": {"kind": kind, "arguments": arguments, "binding": binding, "source_run_id": str(data.get("job_id") or ""), "callback_dedupe_key": str(data.get("dedupe_key") or "")},
+                "receipt": {"status": "queued", "repository_modified": False},
+            })
+        return operation
+
+
+PORTABLE_CALLBACK_EVENTS = frozenset({
+    "content_ready", "generation_failed", "generation_blocked", "article_progress",
+    "article_admission_attention", "error",
+})
+PORTABLE_WORKFLOWS = frozenset({"article_generation", "direct_generate", "confirmed_topic", "article_revision", "component_revision"})
+
+
+def portable_run_update_allowed(run, payload, *, event_type=""):
+    """Allow draft-only updates from original durable intent, never sender claims.
+
+    This grants no repository configuration, preview, publication or token access.
+    Only the callback and run-snapshot surfaces opt in to this exception.
+    """
+    original = getattr(run, "run_request", None)
+    if not isinstance(original, dict) or original.get("delivery_mode") != "content_only" or connection_contract(original):
+        return False
+    if getattr(run, "workflow", "") not in PORTABLE_WORKFLOWS or (event_type and event_type not in PORTABLE_CALLBACK_EVENTS):
+        return False
+    if payload.get("domain") and str(payload["domain"]).lower().strip() != str(run.domain).lower().strip():
+        return False
+    workflow_groups = ({"article_generation", "direct_generate", "confirmed_topic"}, {"article_revision", "component_revision"})
+    allowed_workflows = next((group for group in workflow_groups if run.workflow in group), {run.workflow})
+    if payload.get("workflow") and payload["workflow"] not in allowed_workflows:
+        return False
+    if any(payload.get(key) and str(payload[key]) != str(run.run_id) for key in ("run_id", "job_id")):
+        return False
+    forbidden = REPOSITORY_CONFIG_FIELDS | set(CONNECTION_FIELDS) | {
+        "github_token", "github_installation_id", "expected_source_sha", "source_sha", "repo_head_sha", "commit_sha",
+        "branch", "branch_name", "head_sha", "pr_url", "pr_number", "pull_request_url", "publish_url",
+        "live_preview", "live_preview_url", "preview_url", "preview_commit_sha", "verified_sha", "capabilities",
+        "publishingReady", "previewSupported", "build_verified", "route_is_live", "preview_content_verified",
+        "website_connection", "article_system_setup", "publish_child_run_id", "setup_run_id",
+        "connectionId", "connectionGeneration", "connectionTargetId", "repositoryId",
+        "websiteConnectionId", "websiteConnection", "livePreview", "previewUrl", "livePreviewUrl", "prUrl",
+    }
+    def safe(value):
+        if isinstance(value, dict):
+            for key, item in value.items():
+                normalized_key = re.sub(r"(?<!^)(?=[A-Z])", "_", str(key)).lower()
+                if (key in forbidden or normalized_key in forbidden) and item not in (None, "", False, [], {}):
+                    return False
+                if normalized_key in {"delivery_mode", "requested_delivery_mode", "resolved_delivery_mode", "publish_resolution"} and item not in (None, "", "content_only"):
+                    return False
+                if normalized_key == "github_repo" and item and item != getattr(run, "github_repo", ""):
+                    return False
+                if normalized_key == "domain" and item and str(item).lower().strip() != str(run.domain).lower().strip():
+                    return False
+                if normalized_key in {"status", "publish_status", "publish_stage", "merge_status", "approval_state"} and item in ("published", "merged", "approved", "auto_approved", "pr_created", "draft_pr_created", "setup_pr_created"):
+                    return False
+                if not safe(item):
+                    return False
+        elif isinstance(value, list):
+            return all(safe(item) for item in value)
+        return True
+    return safe(payload)
 
 
 def needs_repository_authority(data):
@@ -354,6 +552,14 @@ def bind_website(config, *, user, repo, app_root="", branch="", site_url="", rec
         else:
             connection = WebsiteConnection.objects.create(organization=config.organization, authorized_by=user, app_root=app_root,
                 site_url=site_url or config.organization.domain, **{**metadata, "branch": branch or metadata["branch"]})
+        target_blocker = None
+        if connection.app_root:
+            target_blocker = {"code": "APPLICATION_ROOT_VERIFICATION_REQUIRED", "message": "Inventory is available. Native website changes need an adapter verified for this application root."}
+        elif connection.branch != metadata["branch"]:
+            target_blocker = {"code": "SETUP_BRANCH_VERIFICATION_REQUIRED", "message": "Inventory is available. Native website changes need an adapter verified for this selected branch."}
+        if target_blocker:
+            connection.blockers = [*connection.blockers, target_blocker]
+            connection.save(update_fields=["blockers", "updated_at"])
         config.website_connection = connection
         invalidate_repository_config(config, archive_templates=False)
         config.github_repo = metadata["github_repo"]
@@ -392,6 +598,8 @@ def transition_connection(config, *, action, expected, idempotency_key="", verif
                 idempotency_key=key, action=action, state="pending", payload={"mutation_ids": [str(x) for x in connection.repository_mutations.values_list("id", flat=True)]},
                 receipt={"status": "proposal_requested", "requires_review": True, "repository_modified": False})
         old_generation = connection.generation
+        connection.operations.filter(action="worker_followup", generation=old_generation, state="pending").update(
+            state="cancelled", receipt={"status": "authority_revoked", "repository_modified": False}, updated_at=timezone.now())
         connection.generation += 1
         connection.configuration_version += 1
         connection.state = {"pause": "paused", "disconnect": "disconnected", "revoke": "revoked", "reconnect": "connected", "reset": connection.state}[action]
@@ -475,7 +683,7 @@ def offboard_website_connections(organization, *, user=None, purge=False):
             website.targets.all().delete()
             website.repository_mutations.all().delete()
             # Cleanup approval ceases when the owning company is deleted.
-            website.operations.filter(Q(action="cleanup") | ~Q(state="pending")).delete()
+            website.operations.filter(Q(action__in=["cleanup", "worker_followup"]) | ~Q(state="pending")).delete()
             pending = list(website.operations.filter(state="pending"))
             for operation in pending:
                 operation.payload = {key: operation.payload[key] for key in
@@ -521,13 +729,22 @@ def record_scan_evidence(connection, data):
         targets = data.get("publish_targets") if isinstance(data.get("publish_targets"), list) else []
         verified = False
         preview = False
+        native_allowed = True
+        if any(isinstance(target, dict) and (target.get("verification") or {}).get("status") in {"passed", "verified", "preview_verified"} for target in targets):
+            try:
+                verify_repository_native_target(connection)
+            except WebsiteAuthorityError as exc:
+                if exc.code not in {"APPLICATION_ROOT_VERIFICATION_REQUIRED", "SETUP_BRANCH_VERIFICATION_REQUIRED"}:
+                    raise
+                native_allowed = False
+                connection.blockers = [item for item in connection.blockers if item.get("code") != exc.code] + [{"code": exc.code, "message": str(exc)}]
         for target in targets:
             if not isinstance(target, dict) or not target.get("target_id"):
                 continue
             proof = target.get("verification") if isinstance(target.get("verification"), dict) else {}
-            ready = proof.get("status") in {"passed", "verified"} and proof.get("source_sha") == sha
+            ready = native_allowed and proof.get("status") in {"passed", "verified"} and proof.get("source_sha") == sha
             verified |= bool(ready and target.get("publish_capability") in {"direct", "hook"})
-            preview_ready = proof.get("status") == "preview_verified" and proof.get("base_sha") == sha and bool(SHA_PATTERN.fullmatch(str(proof.get("source_sha") or "")))
+            preview_ready = native_allowed and proof.get("status") == "preview_verified" and proof.get("base_sha") == sha and bool(SHA_PATTERN.fullmatch(str(proof.get("source_sha") or "")))
             preview |= bool((ready or preview_ready) and proof.get("preview_capable"))
             WebsiteConnectionTarget.objects.update_or_create(connection=connection, target_key=str(target["target_id"]), defaults={
                 "generation": connection.generation, "adapter": str(target.get("delivery_adapter") or ""),

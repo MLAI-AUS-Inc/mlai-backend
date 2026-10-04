@@ -171,6 +171,62 @@ def disable_pending_native_auto_merge(connection, urls):
     return pending
 
 
+def _process_worker_followup(identifier, now):
+    """Claim a durable follow-up, release all DB locks, then contact the worker."""
+    from .website_connections import authority_guard, owner_write_guard
+    from .website_contract import WebsiteAuthorityError
+    from integrations.services import article_generation
+    with transaction.atomic():
+        operation = WebsiteConnectionOperation.objects.select_for_update().filter(pk=identifier, state="pending").first()
+        if operation is None or (operation.next_attempt_at and operation.next_attempt_at > now):
+            return None
+        operation.attempts += 1
+        attempt = operation.attempts
+        operation.next_attempt_at = now + timedelta(minutes=5)
+        operation.save(update_fields=["attempts", "next_attempt_at", "updated_at"])
+        payload = dict(operation.payload)
+    binding = payload.get("binding") or {}
+    kind = payload.get("kind")
+    state, receipt = "pending", {"status": "retry_pending", "repository_modified": False}
+    remote = {}
+    try:
+        action = "publish" if kind == "publish_article" else "read"
+        with authority_guard(binding, action=action):
+            pass
+        functions = {"publish_article": article_generation.publish_article,
+            "trigger_article_generation": article_generation.trigger_article_generation,
+            "confirm_topic": article_generation.confirm_topic}
+        remote = functions[kind](**payload["arguments"])
+        with owner_write_guard(binding):
+            state, receipt = "completed", {"status": "dispatched", "repository_modified": False,
+                "run_id": str((remote or {}).get("run_id") or (remote or {}).get("job_id") or payload.get("source_run_id") or "")}
+            if kind == "publish_article":
+                from .models import ContentFactoryJob
+                job = ContentFactoryJob.objects.filter(job_id=payload.get("source_run_id")).first()
+                if job:
+                    job.status = "generating"
+                    metadata = dict(job.request_meta or {})
+                    actions = dict(metadata.get("callback_actions") or {})
+                    markers = list(actions.get("preview_ready_auto_approve") or [])
+                    if payload.get("callback_dedupe_key") and payload["callback_dedupe_key"] not in markers:
+                        markers.append(payload["callback_dedupe_key"])
+                    actions["preview_ready_auto_approve"] = markers
+                    job.request_meta = {**metadata, "publish_stage": "auto_approved", "callback_actions": actions}
+                    job.save(update_fields=["status", "request_meta", "updated_at"])
+    except WebsiteAuthorityError as exc:
+        state, receipt = "cancelled", {"status": "authority_revoked", "code": exc.code, "repository_modified": False}
+        if isinstance(remote, dict) and (remote.get("run_id") or remote.get("job_id")):
+            from .vibe_marketing_views import _create_local_run
+            _create_local_run(workflow="publish_article" if kind == "publish_article" else "article_generation",
+                domain=binding.get("domain", ""), payload=binding, remote_data=remote)
+    except Exception:
+        receipt["last_error"] = "worker_followup_unavailable"
+    # Compare-and-set the claim: a duplicate reconciler cannot replace a newer receipt.
+    WebsiteConnectionOperation.objects.filter(pk=identifier, attempts=attempt, state="pending").update(
+        state=state, receipt=receipt, next_attempt_at=now + timedelta(seconds=min(3600, 15 * 2 ** min(attempt, 8))), updated_at=timezone.now())
+    return state
+
+
 def process_website_connection_operations(*, limit=20, now=None):
     """Retry cancellation/token revocation, and build bounded cleanup proposals."""
     from integrations import http_client
@@ -181,10 +237,16 @@ def process_website_connection_operations(*, limit=20, now=None):
         .order_by("next_attempt_at").values_list("id", flat=True)[:limit])
     result = {"processed": 0, "completed": 0, "pending": 0}
     for identifier in ids:
+        if WebsiteConnectionOperation.objects.filter(pk=identifier, action="worker_followup").exists():
+            outcome = _process_worker_followup(identifier, now)
+            if outcome is not None:
+                result["processed"] += 1
+                result["pending" if outcome == "pending" else "completed"] += 1
+            continue
         purge_connection_id = None
         with transaction.atomic():
-            # Do not lock the connection while awaiting remote cancellation or
-            # a read-only cleanup inventory. Revocation must remain immediate.
+            # Lease this operation briefly. Neither operation nor authority rows
+            # may stay locked across worker HTTP (offboarding locks both).
             op = WebsiteConnectionOperation.objects.select_for_update(of=("self",)).select_related("connection").filter(pk=identifier).first()
             if op is None:
                 continue
@@ -192,58 +254,67 @@ def process_website_connection_operations(*, limit=20, now=None):
                 continue
             result["processed"] += 1
             op.attempts += 1
-            try:
-                if op.action == "cleanup":
-                    op.receipt = _cleanup_proposal(op)
-                    op.state = "review_required"
-                else:
-                    tokens = revoke_generation_tokens(op.connection_id, op.payload.get("previous_generation"))
-                    cancel_ids = op.payload.get("cancel_run_ids", [])
-                    preview_ids = op.payload.get("stop_preview_run_ids", [])
-                    pending = list(cancel_ids[20:])
-                    preview_pending = list(preview_ids[20:])
-                    remote = _content_factory_remote_config()
-                    for run_id in cancel_ids[:20]:
-                        if not remote["enabled"]:
-                            pending.append(run_id)
-                            continue
-                        response = http_client.post(f"{remote['base_url']}/api/runs/{run_id}/cancel",
-                            headers=_content_factory_headers(), json={"reason": "website_connection_changed"}, timeout=(3, 15))
-                        try:
-                            body = response.json()
-                        except (ValueError, AttributeError):
-                            body = {}
-                        cleanup_pending = isinstance(body, dict) and (body.get("cleanup_pending") is True or body.get("cleanupPending") is True)
-                        if response.status_code not in {200, 204, 404} or cleanup_pending:
-                            pending.append(run_id)
-                    for run_id in preview_ids[:20]:
-                        if not remote["enabled"]:
-                            preview_pending.append(run_id)
-                            continue
-                        response = http_client.post(f"{remote['base_url']}/api/runs/{run_id}/preview/stop",
-                            headers=_content_factory_headers(), json={"reason": "website_connection_changed"}, timeout=(3, 15))
-                        try:
-                            body = response.json()
-                        except (ValueError, AttributeError):
-                            body = {}
-                        confirmed = response.status_code == 204 or (response.status_code == 200 and isinstance(body, dict)
-                            and body.get("cleanup_success") is True and body.get("cleanup_pending") is not True and body.get("cleanupPending") is not True)
-                        if not confirmed:
-                            preview_pending.append(run_id)
-                    pending_merges = disable_pending_native_auto_merge(op.connection, op.payload.get("disable_auto_merge_prs", []))
-                    op.payload = {**op.payload, "cancel_run_ids": pending, "stop_preview_run_ids": preview_pending, "disable_auto_merge_prs": pending_merges}
-                    op.receipt = {**op.receipt, "tokens": tokens, "preview_cleanup_pending": bool(preview_pending),
-                        "remote_cleanup_pending": bool(pending or preview_pending or pending_merges or tokens["pending"])}
-                    if not op.receipt["remote_cleanup_pending"]:
-                        op.state = "completed"
-            except Exception:
-                # No transport messages can accidentally include credentials or source bodies.
-                op.receipt = {**op.receipt, "last_error": "remote_reconciliation_unavailable"}
-            op.next_attempt_at = now + timedelta(seconds=min(3600, 15 * 2 ** min(op.attempts, 8)))
-            op.save(update_fields=["attempts", "receipt", "payload", "state", "next_attempt_at", "updated_at"])
-            result["pending" if op.state == "pending" else "completed"] += 1
-            if op.state == "completed" and op.payload.get("purge_after_reconciliation"):
-                purge_connection_id = op.connection_id
+            op.next_attempt_at = now + timedelta(minutes=5)
+            op.save(update_fields=["attempts", "next_attempt_at", "updated_at"])
+            claimed_at = op.updated_at
+        from .website_connections import require_unlocked_remote_call
+        require_unlocked_remote_call()
+        try:
+            if op.action == "cleanup":
+                op.receipt = _cleanup_proposal(op)
+                op.state = "review_required"
+            else:
+                tokens = revoke_generation_tokens(op.connection_id, op.payload.get("previous_generation"))
+                cancel_ids = op.payload.get("cancel_run_ids", [])
+                preview_ids = op.payload.get("stop_preview_run_ids", [])
+                pending = list(cancel_ids[20:])
+                preview_pending = list(preview_ids[20:])
+                remote = _content_factory_remote_config()
+                for run_id in cancel_ids[:20]:
+                    if not remote["enabled"]:
+                        pending.append(run_id)
+                        continue
+                    response = http_client.post(f"{remote['base_url']}/api/runs/{run_id}/cancel",
+                        headers=_content_factory_headers(), json={"reason": "website_connection_changed"}, timeout=(3, 15))
+                    try:
+                        body = response.json()
+                    except (ValueError, AttributeError):
+                        body = {}
+                    cleanup_pending = isinstance(body, dict) and (body.get("cleanup_pending") is True or body.get("cleanupPending") is True)
+                    if response.status_code not in {200, 204, 404} or cleanup_pending:
+                        pending.append(run_id)
+                for run_id in preview_ids[:20]:
+                    if not remote["enabled"]:
+                        preview_pending.append(run_id)
+                        continue
+                    response = http_client.post(f"{remote['base_url']}/api/runs/{run_id}/preview/stop",
+                        headers=_content_factory_headers(), json={"reason": "website_connection_changed"}, timeout=(3, 15))
+                    try:
+                        body = response.json()
+                    except (ValueError, AttributeError):
+                        body = {}
+                    confirmed = response.status_code == 204 or (response.status_code == 200 and isinstance(body, dict)
+                        and body.get("cleanup_success") is True and body.get("cleanup_pending") is not True and body.get("cleanupPending") is not True)
+                    if not confirmed:
+                        preview_pending.append(run_id)
+                pending_merges = disable_pending_native_auto_merge(op.connection, op.payload.get("disable_auto_merge_prs", []))
+                op.payload = {**op.payload, "cancel_run_ids": pending, "stop_preview_run_ids": preview_pending, "disable_auto_merge_prs": pending_merges}
+                op.receipt = {**op.receipt, "tokens": tokens, "preview_cleanup_pending": bool(preview_pending),
+                    "remote_cleanup_pending": bool(pending or preview_pending or pending_merges or tokens["pending"])}
+                if not op.receipt["remote_cleanup_pending"]:
+                    op.state = "completed"
+        except Exception:
+            # No transport messages can accidentally include credentials or source bodies.
+            op.receipt = {**op.receipt, "last_error": "remote_reconciliation_unavailable"}
+        op.next_attempt_at = now + timedelta(seconds=min(3600, 15 * 2 ** min(op.attempts, 8)))
+        applied = WebsiteConnectionOperation.objects.filter(pk=op.pk, state="pending", attempts=op.attempts,
+            updated_at=claimed_at).update(receipt=op.receipt, payload=op.payload, state=op.state,
+                next_attempt_at=op.next_attempt_at, updated_at=timezone.now())
+        # Offboarding may redact the payload while transport runs. Never replace
+        # that newer retention/erasure receipt with our pre-request snapshot.
+        result["pending" if not applied or op.state == "pending" else "completed"] += 1
+        if applied and op.state == "completed" and op.payload.get("purge_after_reconciliation"):
+            purge_connection_id = op.connection_id
         if purge_connection_id:
             # Follow the same org -> connection lock order as owner lifecycle
             # writes, after releasing the operation lock to avoid inversion.
@@ -260,6 +331,8 @@ def process_website_connection_operations(*, limit=20, now=None):
 
 def approve_cleanup_proposal(config, *, user, data):
     """Open a reviewed, exact-SHA removal PR without restoring ordinary access."""
+    from .website_rollout import require_repository_write_policy
+    require_repository_write_policy(action="cleanup", domain=config.organization.domain)
     from organizations.models import Organization
     from integrations import http_client
     from integrations.services.github_app import create_installation_access_token

@@ -68,7 +68,7 @@ def validate_authority(connection, payload, *, action="read", domain="", github_
         raise WebsiteAuthorityError("invalid_connection_action", "Unknown website operation.", status=400)
     contract = connection_contract(payload)
     if not contract:
-        raise WebsiteAuthorityError("website_connection_required", "Connect this website again before continuing repository work.")
+        raise WebsiteAuthorityError("website_connection_required", "Reload the web app or update MLAI, then reconnect this website to continue.")
     if str(connection.id) != contract["website_connection_id"] or connection.generation != contract["connection_generation"]:
         raise WebsiteAuthorityError("website_connection_changed", "The website connection changed. Refresh before continuing.")
     if connection.state not in {"connected", "paused"}:

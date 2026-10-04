@@ -11,6 +11,7 @@ import importlib
 import os
 from pathlib import Path
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -85,10 +86,24 @@ def run_checks(args, directory, database):
             raise RuntimeError("Refusing a connection outside this disposable website database.")
         return original_ensure(wrapper)
 
+    original_connect, original_create_connection = socket.socket.connect, socket.create_connection
+
+    def local_connect(sock, address):
+        # Real threaded HTTP regression servers exercise synchronous worker ->
+        # backend reentry. Only numeric loopback is permitted, never DNS/remote.
+        if sock.family in {socket.AF_INET, socket.AF_INET6} and isinstance(address, tuple) and address[0] in {"127.0.0.1", "::1"}:
+            return original_connect(sock, address)
+        raise AssertionError("External network forbidden during icp tests")
+
+    def local_create_connection(address, *args, **kwargs):
+        if not isinstance(address, tuple) or address[0] not in {"127.0.0.1", "::1"}:
+            raise AssertionError("External network forbidden during icp tests")
+        return original_create_connection(address, *args, **kwargs)
+
     with (
         patch("dotenv.load_dotenv", return_value=False),
-        patch("socket.socket.connect", side_effect=AssertionError("External network forbidden during icp tests")),
-        patch("socket.create_connection", side_effect=AssertionError("External network forbidden during icp tests")),
+        patch("socket.socket.connect", new=local_connect),
+        patch("socket.create_connection", new=local_create_connection),
         patch.object(BaseDatabaseWrapper, "ensure_connection", ensure_local_database),
     ):
         module = importlib.import_module("mlai.settings")

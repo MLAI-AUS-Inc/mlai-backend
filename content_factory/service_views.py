@@ -3640,7 +3640,7 @@ class ContentFactoryCallbackView(APIView):
     authentication_classes = []
     permission_classes = [HasRooApiKey]
 
-    @guarded_service_write("config_write", only_repository=True)
+    @guarded_service_write("config_write", only_repository=True, portable=True)
     def post(self, request):
         data = request.data.copy()
         # WhatsApp/email research has no Slack delivery route. JSON null must
@@ -4943,45 +4943,13 @@ class ContentFactoryCallbackView(APIView):
                 status=status.HTTP_200_OK,
             )
 
-        try:
-            result = publish_article(job_id, slack_user_id=slack_user_id, domain=domain)
-            job.status = 'generating'
-            job.error_message = ''
-            update_fields = ['status', 'error_message', 'updated_at']
-            if pr_url and job.pr_url != pr_url:
-                job.pr_url = pr_url
-                update_fields.append('pr_url')
-            job.save(update_fields=update_fields)
-            self._record_callback_marker(
-                job=job,
-                bucket='callback_actions',
-                event_name='preview_ready_auto_approve',
-                dedupe_key=dedupe_key,
-                extra_request_meta={'publish_stage': 'auto_approved'},
-            )
-            logger.info("Auto-approved preview for job %s", job_id)
-            return Response(
-                {
-                    'status': 'processed',
-                    'job_id': job_id,
-                    'auto_approved': True,
-                    'slack_sent': notification_sent,
-                    'cf_response': result,
-                },
-                status=status.HTTP_200_OK,
-            )
-        except ArticleGenerationError as exc:
-            logger.warning("Failed to auto-approve preview for %s: %s", job_id, exc)
-            job.error_message = str(exc)
-            job.save(update_fields=['error_message', 'updated_at'])
-            return Response(
-                {
-                    'status': 'deferred',
-                    'job_id': job_id,
-                    'message': str(exc),
-                },
-                status=status.HTTP_200_OK,
-            )
+        from .website_connections import queue_website_followup
+        operation = queue_website_followup("publish_article", data={**data, "dedupe_key": dedupe_key},
+            arguments={"job_id": job_id, "slack_user_id": slack_user_id, "domain": domain})
+        return Response({
+            "status": "queued", "job_id": job_id, "auto_approval_queued": True,
+            "operation_id": str(operation.pk), "slack_sent": notification_sent,
+        }, status=status.HTTP_200_OK)
 
     def _handle_content_ready(self, data):
         from integrations.services.notification_adapters import (
@@ -5309,7 +5277,9 @@ class ContentFactoryCallbackView(APIView):
                 if job.request_meta:
                     logger.info(f"Retrying article generation for job {job_id}")
                     # Reuse request_meta which contains the original article_request
-                    trigger_article_generation(slack_user_id, job.request_meta)
+                    from .website_connections import queue_website_followup
+                    queue_website_followup("trigger_article_generation", data=data,
+                        arguments={"slack_user_id": slack_user_id, "article_request": job.request_meta})
                     return Response({
                         'status': 'retried', 
                         'job_id': job_id, 
@@ -5319,15 +5289,13 @@ class ContentFactoryCallbackView(APIView):
                 # Scenario B: Topic Confirmation (Phase 2)
                 elif job.selected_keyword:
                      logger.info(f"Retrying topic confirmation for job {job_id}")
-                     confirm_topic(
-                         domain=domain,
-                         confirmed_keyword=job.selected_keyword,
-                         slack_user_id=slack_user_id,
-                         requested_by_slack_user_id=requested_by_slack_user_id or None,
-                         slack_channel_id=job.slack_channel_id,
-                         slack_thread_ts=job.slack_thread_ts,
-                         slack_root_message_ts=job.slack_root_message_ts or job.slack_thread_ts,
-                     )
+                     from .website_connections import queue_website_followup
+                     queue_website_followup("confirm_topic", data=data, arguments={
+                         "domain": domain, "confirmed_keyword": job.selected_keyword,
+                         "slack_user_id": slack_user_id, "requested_by_slack_user_id": requested_by_slack_user_id or None,
+                         "slack_channel_id": job.slack_channel_id, "slack_thread_ts": job.slack_thread_ts,
+                         "slack_root_message_ts": job.slack_root_message_ts or job.slack_thread_ts,
+                     })
                      return Response({
                          'status': 'retried', 
                          'job_id': job_id, 
@@ -5779,9 +5747,11 @@ class ContentFactoryCallbackView(APIView):
                             intent.get('type') == 'write_article'
                             and normalize_domain(article_req.get('domain', '')) == normalize_domain(domain)
                         ):
+                            from .website_connections import queue_website_followup
+                            queue_website_followup("trigger_article_generation", data=data,
+                                arguments={"slack_user_id": slack_user_id, "article_request": article_req})
                             integration.pending_intent = None
                             integration.save(update_fields=['pending_intent'])
-                            trigger_article_generation(slack_user_id, article_req)
                             pending_resumed = True
                             logger.info(f"Auto-resumed pending article intent after scan for {slack_user_id}/{domain}")
                 except Exception as e:
@@ -6506,13 +6476,14 @@ class ContentFactoryCallbackView(APIView):
                         # Only resume if intent is for the same domain
                         intent_domain = normalize_domain(article_req.get('domain', ''))
                         if intent_domain == normalized_domain:
-                            # Clear intent first (prevent double-trigger)
-                            integration.pending_intent = None
-                            integration.save()
-
+                            # Queue idempotently before clearing the durable intent.
                             # Auto-trigger article generation
                             from integrations.services.article_generation import trigger_article_generation
-                            trigger_article_generation(slack_user_id, article_req)
+                            from .website_connections import queue_website_followup
+                            queue_website_followup("trigger_article_generation", data=data,
+                                arguments={"slack_user_id": slack_user_id, "article_request": article_req})
+                            integration.pending_intent = None
+                            integration.save(update_fields=['pending_intent'])
                             pending_resumed = True
                             logger.info(f"Auto-resumed pending article intent for {slack_user_id}/{domain}")
             except Exception as e:
@@ -8664,6 +8635,14 @@ def _sync_content_factory_run_snapshot(*, run_id: str, data: dict, step_states: 
                     "status": data["status"], "run_request": data.get("run_request") or {},
                 },
             )
+        original_request = existing_run.run_request if isinstance(existing_run.run_request, dict) else {}
+        from .website_connections import portable_run_update_allowed
+        from .website_contract import connection_contract
+        if original_request.get("delivery_mode") == "content_only" and not connection_contract(original_request):
+            if not portable_run_update_allowed(existing_run, data):
+                raise EditorialRunConflict("A portable draft snapshot cannot acquire repository authority")
+            data["run_request"] = {**(data.get("run_request") or {}), "delivery_mode": "content_only"}
+            data["domain"] = existing_run.domain
         # Worker observations may omit request fields. The known reader/offer
         # decision is immutable history, not a field a sparse callback can clear.
         data = merge_editorial_run_snapshot(
@@ -8795,7 +8774,7 @@ class ContentFactoryRunView(APIView):
             return Response({"error": "Run not found"}, status=status.HTTP_404_NOT_FOUND)
         return Response(_serialize_content_factory_run(run), status=status.HTTP_200_OK)
 
-    @guarded_service_write("config_write", only_repository=True)
+    @guarded_service_write("config_write", only_repository=True, portable=True)
     def put(self, request, run_id: str):
         existing_run = ContentFactoryRun.objects.filter(run_id=run_id).first()
         payload = sanitize_json_for_postgres(dict(request.data))
@@ -9066,7 +9045,7 @@ class ContentFactoryRunControlView(APIView):
     authentication_classes = []
     permission_classes = [HasRooApiKey]
 
-    @guarded_service_write("publish")
+    @guarded_service_write("publish", remote_actions={"promote-bundle", "publish-pr"})
     def post(self, request, run_id: str, action: str):
         from integrations.services.article_generation import ArticleGenerationError, publish_article_as_pr
         from content_factory.models import ContentFactoryJob

@@ -102,10 +102,35 @@ class WebsiteDatabaseFixture:
         head_check = patch('content_factory.website_connections.verify_repository_head', side_effect=lambda connection, sha: sha)
         head_check.start()
         self.addCleanup(head_check.stop)
+        native_metadata = patch("content_factory.website_connections.read_repository_native_target",
+            side_effect=lambda connection: {"id": connection.repository_id, "full_name": connection.github_repo, "default_branch": "main"})
+        native_metadata.start()
+        self.addCleanup(native_metadata.stop)
 
 
 @override_settings(ROO_API_KEY='synthetic-test-key', INTERNAL_API_KEY='synthetic-test-key')
 class WebsiteLifecycleTests(WebsiteDatabaseFixture, TestCase):
+    def test_legacy_scaffold_late_response_cannot_create_active_child_after_disconnect(self):
+        from types import SimpleNamespace
+        from integrations.services.github import decide_scan_scaffold
+        from .models import ContentFactoryJob
+        source = ContentFactoryJob.objects.create(job_id='legacy-scaffold-source', domain=self.org.domain,
+            slack_user_id='synthetic', status='awaiting_confirmation', request_meta=self.binding)
+        def accepted_after_disconnect(*args, **kwargs):
+            transition_connection(self.config, action='disconnect', expected=self.binding)
+            return SimpleNamespace(status_code=202, content=b'{}', json=lambda: {
+                'job_id': source.job_id, 'scaffold_job_id': 'late-scaffold-child', 'status': 'queued'})
+        with patch('integrations.services.github.http_requests.post', side_effect=accepted_after_disconnect):
+            with self.assertRaises(WebsiteAuthorityError):
+                decide_scan_scaffold(scan_run_id=source.job_id, decision='approve', domain=self.org.domain, slack_user_id='synthetic')
+        source.refresh_from_db()
+        self.assertNotEqual(source.status, 'confirmed')
+        self.assertFalse(ContentFactoryJob.objects.filter(job_id='late-scaffold-child', status='queued').exists())
+        child = ContentFactoryRun.objects.get(run_id='late-scaffold-child')
+        self.assertEqual(child.status, 'cancelled')
+        self.assertTrue(WebsiteConnectionOperation.objects.filter(
+            idempotency_key=f'{self.website.pk}:late-dispatch:late-scaffold-child').exists())
+
     def test_legacy_scan_completion_cannot_restore_config_after_disconnect(self):
         from integrations.models import UserIntegration
         from integrations.services.github import _record_bound_scan_completion

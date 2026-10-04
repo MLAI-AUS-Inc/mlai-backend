@@ -26,6 +26,7 @@ from workflow_runs.models import (
 )
 from content_factory.vibe_marketing_views import (
     _apply_setup_merge_result,
+    _maybe_verify_merged_setup_for_blocked_articles,
     _call_content_factory_run_status,
     _call_content_factory_live_preview,
     _content_package_from_run,
@@ -90,6 +91,10 @@ class _PublishRetryApprovalFixture:
         provider = patch("content_factory.website_connections.verify_repository_head", return_value=website.verified_sha)
         provider.start()
         self.addCleanup(provider.stop)
+        native_metadata = patch("content_factory.website_connections.read_repository_native_target",
+            side_effect=lambda connection: {"id": connection.repository_id, "full_name": connection.github_repo, "default_branch": "main"})
+        native_metadata.start()
+        self.addCleanup(native_metadata.stop)
         from integrations.services.github_app import GitHubInstallationToken
         credential = GitHubInstallationToken(token="synthetic-fixture-token",
             expires_at=timezone.now() + timedelta(minutes=50), installation_id=website.installation_id,
@@ -5256,6 +5261,12 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
             },
         )
 
+    def _merge_then_verify_setup(self, **kwargs):
+        # Persist the merge in its short transaction, then dispatch verification
+        # after the guard releases its locks (the production orchestration order).
+        merged = _apply_setup_merge_result(**kwargs)
+        return _maybe_verify_merged_setup_for_blocked_articles(run=merged, context=kwargs["context"])
+
     def _merge_continuation_context(self):
         return SimpleNamespace(organization=self.organization, profile=self.profile)
 
@@ -5272,7 +5283,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
             "content_factory.vibe_marketing_views._call_content_factory_run_action",
             return_value=response_payload,
         ) as verify_call:
-            merged_run = _apply_setup_merge_result(
+            merged_run = self._merge_then_verify_setup(
                 run=setup_run,
                 context=self._merge_continuation_context(),
                 checks_status="merged",
@@ -5305,12 +5316,12 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
             "content_factory.vibe_marketing_views._call_content_factory_run_action",
             return_value={"status": "skipped", "reason": "no_blocked_article_parents"},
         ) as verify_call:
-            first = _apply_setup_merge_result(
+            first = self._merge_then_verify_setup(
                 run=setup_run,
                 context=self._merge_continuation_context(),
                 checks_status="merged",
             )
-            merged_run = _apply_setup_merge_result(
+            merged_run = self._merge_then_verify_setup(
                 run=setup_run,
                 context=self._merge_continuation_context(),
                 checks_status="merged",
@@ -5330,13 +5341,13 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
             "content_factory.vibe_marketing_views._call_content_factory_run_action",
             side_effect=[{"status": "resume_queued"}, {"status": "completed"}],
         ) as verify_call:
-            first = _apply_setup_merge_result(
+            first = self._merge_then_verify_setup(
                 run=setup_run,
                 context=self._merge_continuation_context(),
                 checks_status="merged",
             )
             first_accepted_at = first.result["merged_setup_verification"]["accepted_at"]
-            second = _apply_setup_merge_result(
+            second = self._merge_then_verify_setup(
                 run=setup_run,
                 context=self._merge_continuation_context(),
                 checks_status="merged",
@@ -5366,7 +5377,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
             "content_factory.vibe_marketing_views._call_content_factory_run_action",
             side_effect=responses,
         ) as verify_call:
-            first = _apply_setup_merge_result(
+            first = self._merge_then_verify_setup(
                 run=setup_run,
                 context=self._merge_continuation_context(),
                 checks_status="merged",
@@ -5421,7 +5432,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
             "content_factory.vibe_marketing_views._call_content_factory_run_action",
             side_effect=responses,
         ) as verify_call:
-            setup_run = _apply_setup_merge_result(
+            setup_run = self._merge_then_verify_setup(
                 run=setup_run,
                 context=self._merge_continuation_context(),
                 checks_status="merged",
@@ -5499,7 +5510,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
             "content_factory.vibe_marketing_views._call_content_factory_run_action",
             return_value=response_payload,
         ) as verify_call:
-            setup_run = _apply_setup_merge_result(
+            setup_run = self._merge_then_verify_setup(
                 run=setup_run,
                 context=self._merge_continuation_context(),
                 checks_status="merged",

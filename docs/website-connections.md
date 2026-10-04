@@ -48,6 +48,12 @@ Verified GitHub installation deletion/suspension, repository removal, transfer, 
 
 Deploy backend schema/API, worker tuple propagation/guards, and frontend capability handling as one coordinated release. Older repository jobs without tuples intentionally fail closed and need a newly authorized scan. Roll back by disabling repository work; do not bypass generation enforcement to resume legacy jobs.
 
+### Canary control and business-outcome monitoring
+
+Set `WEBSITE_CONNECTION_WRITE_MODE=disabled` during cutover, then `canary` with `WEBSITE_CONNECTION_CANARY_DOMAINS=talathrive.com` for the scoped acceptance test. `enabled` permits ordinary connection checks; it is not an authorization grant. Invalid modes and an empty canary list deny new setup, publication, merge, preview-deployment and reviewed Git cleanup writes. Read/inventory/export and disconnect remain available. Canonical client summaries display the same restriction. Previously accepted provider requests still require reconciliation.
+
+`python manage.py report_website_connections --domain talathrive.com --hours 24` is a read-only, sanitized JSON report. `--check` exits nonzero when business-level scans failed/blocked, reconciliation has remained pending for more than 15 minutes, or the bounded 2,000-run sample was truncated. It reports connection states, adoption backlog, inventory, quarantined templates, operation age, scan outcomes and mean lifecycle elapsed time. That elapsed time includes queue/processing and reflects durable row timestamps; it is not a CPU/build-duration measure. A read-only shadow comparison counts legacy scaffolded state and canonical current verification without granting authority. The existing admin usage payload includes this report as `websiteConnections`; an operator can wire the command's exit code into existing monitoring. It does not create an external notification subscription.
+
 ## Local verification
 
 With explicit approval for migration 0042 and its existing dependency graph, the harness creates fresh synthetic databases, ignores `.env`, denies external network, and removes its database when finished:
@@ -60,3 +66,13 @@ python scripts/test_website_connections_database.py --engine postgres --replay c
 PostgreSQL mode creates a temporary socket-only local cluster using `initdb`/`pg_ctl`. It exercises actual row-lock concurrency; SQLite skips that one test. The harness also checks Django system configuration and migration drift.
 
 GitHub repository-ID token scoping follows [the installation token API](https://docs.github.com/en/rest/apps/apps#create-an-installation-access-token-for-an-app); deleting and recreating a repository under the same name cannot inherit an old connection grant.
+
+Repository callback follow-ups use durable `worker_followup` operations and are dispatched by the existing website reconciler after callback transactions commit. The original connection generation is retained, and disconnect cancels pending follow-ups. Worker HTTP never runs inside the owner/config authority transaction; local response projection takes a fresh fence. An accepted response that races disconnect is retained as cancelled history with remote cleanup queued.
+
+The native mutation adapter currently accepts only the repository root on GitHub's current default branch. Every setup, publication, merge and preview authority check verifies immutable repository identity and the current default branch with GitHub; identical SHAs on different branches do not bypass the check. Other selections remain available for inventory, with explicit adapter-verification blockers.
+
+Client compatibility: old native builds without the original connection tuple fail closed and must update MLAI before reconnecting. The browser is the initial canary client. Native source parity does not mean a compatible TestFlight/App Store binary has been distributed; no native release is included in this deployment.
+
+Portable `content_only` generation deliberately dispatches without repository identity or consent. Its durable original mode permits only editorial run snapshots and content/progress/failure callbacks; sender-supplied mode, a publication result, a hosted-preview claim, or an organisation-config write cannot use this exception. A portable draft must start a new explicitly authorised repository workflow to publish. Native clients without reviewed connection fields fail closed and need a compatible update; browser canary verification does not imply a mobile binary has been distributed.
+
+All reconciliation actions lease an operation in a short transaction and release it before remote HTTP. A conditional update checks the original claim timestamp afterward. Concurrent offboarding therefore cannot deadlock with the worker's cancellation callback or have an erasure/retention receipt replaced by stale transport results.

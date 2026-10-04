@@ -207,7 +207,8 @@ class EndpointTests(ContentFactoryTestDataMixin, TestCase):
             {"type": "write_article", "article_request": {"domain": "mlai.au"}},
         )
 
-    def test_content_factory_token_prefers_github_app_installation_token(self):
+    @patch("content_factory.website_connections.read_repository_native_target", side_effect=lambda connection: {"id": connection.repository_id, "full_name": connection.github_repo, "default_branch": "main"})
+    def test_content_factory_token_prefers_github_app_installation_token(self, _native_metadata):
         from integrations.services.github_app import GitHubInstallationToken
 
         organization = Organization.objects.create(name="Acme", domain="acme.com")
@@ -461,8 +462,9 @@ class EndpointTests(ContentFactoryTestDataMixin, TestCase):
         self.assertEqual(response.data["error"], "github_repository_unavailable")
         self.assertNotIn("legacy-user-token", str(response.data))
 
+    @patch("content_factory.website_connections.read_repository_native_target", side_effect=lambda connection: {"id": connection.repository_id, "full_name": connection.github_repo, "default_branch": "main"})
     @patch('integrations.services.github.http_requests.post')
-    def test_scaffold_decision_endpoint_queues_scaffold_job(self, mock_post):
+    def test_scaffold_decision_endpoint_queues_scaffold_job(self, mock_post, _native_metadata):
         from tests.website_fixtures import bind_config_fixture
         org = Organization.objects.create(domain='mlai.au', name='MLAI')
         config = OrganizationContentConfig.objects.create(organization=org, github_repo='MLAI-AUS-Inc/mlai-au')
@@ -909,6 +911,10 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         provider = patch('content_factory.website_connections.verify_repository_head', return_value=website.verified_sha)
         provider.start()
         self.addCleanup(provider.stop)
+        native_metadata = patch("content_factory.website_connections.read_repository_native_target",
+            side_effect=lambda connection: {"id": connection.repository_id, "full_name": connection.github_repo, "default_branch": "main"})
+        native_metadata.start()
+        self.addCleanup(native_metadata.stop)
 
     def _charge_article(self, user, request_id):
         return PointsService.spend(
@@ -3808,11 +3814,19 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
             "dedupe_key": "preview-ready-1",
         }
 
+        self._authorize_publish_fixture("job-preview-ready")
         response = self.client.post(url, data, format='json')
         duplicate_response = self.client.post(url, data, format='json')
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(duplicate_response.status_code, status.HTTP_200_OK)
+        mock_publish_article.assert_not_called()
+        self.assertTrue(response.data["auto_approval_queued"])
+        from content_factory.website_models import WebsiteConnectionOperation
+        from content_factory.website_reconciliation import process_website_connection_operations
+        self.assertEqual(WebsiteConnectionOperation.objects.filter(action="worker_followup").count(), 1)
+        process_website_connection_operations()
+        process_website_connection_operations()  # Completed follow-ups never repeat.
         job = ContentFactoryJob.objects.get(job_id="job-preview-ready")
         self.assertEqual(job.status, "generating")
         self.assertEqual(job.pr_url, "https://github.com/example/pr/1")
@@ -3825,7 +3839,7 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         self.assertEqual(job.request_meta["callback_notifications"]["preview_ready"], ["preview-ready-1"])
         self.assertEqual(job.request_meta["callback_actions"]["preview_ready_auto_approve"], ["preview-ready-1"])
         mock_publish_article.assert_called_once_with(
-            "job-preview-ready",
+            job_id="job-preview-ready",
             slack_user_id="U123",
             domain="mlai.au",
         )

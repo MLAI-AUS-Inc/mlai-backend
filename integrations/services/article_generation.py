@@ -1053,6 +1053,13 @@ def _post_content_factory_queue_request(
     domain: Optional[str],
     source_run_id: Optional[str] = None,
 ) -> object:
+    from content_factory.website_connections import require_unlocked_remote_call
+    require_unlocked_remote_call()
+    if payload.get("delivery_mode") == "content_only":
+        from content_factory.website_contract import CONNECTION_FIELDS
+        for field in (*CONNECTION_FIELDS, "github_token", "expected_source_sha"):
+            payload.pop(field, None)
+        payload["github_repo"] = ""
     if endpoint.rstrip("/").endswith(("/article", "/confirm-topic")) and payload.get("delivery_mode") != "content_only":
         from content_factory.website_connections import dispatch_contract
         payload.update(dispatch_contract(domain, payload, action="read", source_run_id=str(payload.get("source_run_id") or "")))
@@ -2471,6 +2478,8 @@ def set_article_delivery_mode(job_id: str, delivery_mode: Optional[str] = None) 
     """
     Select a delivery mode for an article run paused before queueing.
     """
+    from content_factory.website_connections import require_unlocked_remote_call
+    require_unlocked_remote_call()
     if delivery_mode:
         selected_mode = _normalize_requested_delivery_mode(delivery_mode)
     else:
@@ -2547,6 +2556,8 @@ def check_generation_status(job_id: str) -> dict:
         dict: { "job_id": "...", "status": "...", "progress": int, "current_step": "...", "error": ... }
     """
 
+    from content_factory.website_connections import require_unlocked_remote_call
+    require_unlocked_remote_call()
     content_factory_url = _get_content_factory_base_url()
     status_endpoint = f"{content_factory_url.rstrip('/')}/api/runs/{job_id}"
     status_endpoint_legacy = f"{content_factory_url.rstrip('/')}/api/pipeline/publish/status/{job_id}"
@@ -2629,6 +2640,8 @@ def publish_article(job_id: str, slack_user_id: str = None, domain: str = None) 
     Returns:
         dict: { "status": "published", "preview_url": "...", "pr_url": "...", "branch_name": "..." }
     """
+    from content_factory.website_connections import require_unlocked_remote_call
+    require_unlocked_remote_call()
     # Publishing is now an approval transition on an existing run.
     content_factory_url = _get_content_factory_base_url()
     publish_endpoint = f"{content_factory_url.rstrip('/')}/api/runs/{job_id}/approve"
@@ -2671,6 +2684,8 @@ def promote_article_bundle(
     """
     Promote a completed content package or publish bundle into a child publish run.
     """
+    from content_factory.website_connections import require_unlocked_remote_call
+    require_unlocked_remote_call()
     from content_factory.models import ContentFactoryJob
 
     content_factory_url = _get_content_factory_base_url()
@@ -2718,32 +2733,36 @@ def promote_article_bundle(
             raise ArticleGenerationError(f"Promote bundle failed: {response.text}")
 
         payload = response.json()
-        child_job_id = str(payload.get("job_id") or payload.get("run_id") or "").strip()
-        if child_job_id:
-            _store_job_tracking_record(
-                child_job_id,
-                domain=resolved_domain,
-                slack_user_id=resolved_slack_user_id,
-                request_meta={
-                    "source_run_id": job_id,
-                    "promotion_source": "promote_bundle",
-                    "requested_delivery_mode": "publish_code",
-                    "requested_by_slack_user_id": resolved_requested_by_slack_user_id,
-                },
-                slack_channel_id=resolved_channel_id,
-                slack_thread_ts=resolved_thread_ts,
-                slack_root_message_ts=resolved_root_ts,
-                default_status="queued",
-            )
-            if source_job:
-                request_meta = dict(source_job.request_meta or {})
-                request_meta["promoted_publish_job_id"] = child_job_id
-                request_meta["publish_stage"] = "promotion_requested"
-                if resolved_requested_by_slack_user_id:
-                    request_meta["requested_by_slack_user_id"] = resolved_requested_by_slack_user_id
-                if request_meta != (source_job.request_meta or {}):
-                    source_job.request_meta = request_meta
-                    source_job.save(update_fields=["request_meta", "updated_at"])
+        from content_factory.vibe_marketing_views import _remote_response_write_guard
+        with _remote_response_write_guard(payload, workflow="publish_article", binding=binding):
+            child_job_id = str(payload.get("job_id") or payload.get("run_id") or "").strip()
+            if child_job_id:
+                _store_job_tracking_record(
+                    child_job_id,
+                    domain=resolved_domain,
+                    slack_user_id=resolved_slack_user_id,
+                    request_meta={
+                        **binding,
+                        "source_run_id": job_id,
+                        "promotion_source": "promote_bundle",
+                        "requested_delivery_mode": "publish_code",
+                        "requested_by_slack_user_id": resolved_requested_by_slack_user_id,
+                    },
+                    slack_channel_id=resolved_channel_id,
+                    slack_thread_ts=resolved_thread_ts,
+                    slack_root_message_ts=resolved_root_ts,
+                    default_status="queued",
+                )
+                if source_job:
+                    source_job.refresh_from_db()
+                    request_meta = dict(source_job.request_meta or {})
+                    request_meta["promoted_publish_job_id"] = child_job_id
+                    request_meta["publish_stage"] = "promotion_requested"
+                    if resolved_requested_by_slack_user_id:
+                        request_meta["requested_by_slack_user_id"] = resolved_requested_by_slack_user_id
+                    if request_meta != (source_job.request_meta or {}):
+                        source_job.request_meta = request_meta
+                        source_job.save(update_fields=["request_meta", "updated_at"])
 
         return payload
 

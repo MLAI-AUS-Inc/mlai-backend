@@ -66,10 +66,12 @@ class ArticlePublishApprovalReceiptTests(SimpleTestCase):
                 run.pk = 1
                 run.workflow = "article_generation"
                 run.save = MagicMock()
+                run.refresh_from_db = MagicMock()
                 current = _review_run()
                 current.pk = 1
                 current.workflow = "article_generation"
                 current.save = MagicMock()
+                current.refresh_from_db = MagicMock()
                 request = SimpleNamespace(data={}, user=SimpleNamespace(pk=1))
 
                 def remote_approve(**_kwargs):
