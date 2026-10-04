@@ -12,6 +12,7 @@ import uuid
 
 from .tests_editorial_dispatch_unit import selected_brief, approved_catalog, retired_catalog
 from .editorial_catalog import article_brief_for_catalog
+from .portable_drafts import original_portable_run
 from django.db import DatabaseError
 from rest_framework import status
 from rest_framework.response import Response
@@ -54,7 +55,19 @@ class EditorialRevisionTests(unittest.TestCase):
         self.local = Mock(side_effect=self.create_local)
         self.feedback = Mock()
         self.view = SimpleNamespace(_resolve_run=lambda *_: (self.context, self.run, None))
+        # Website consent is exercised with real DB row locks in
+        # tests_website_connections; this AST harness isolates editorial policy.
         self.ns = {
+            "guarded_owner_operation": lambda *args, **kwargs: lambda method: method,
+            "guarded_service_write": lambda *args, **kwargs: lambda method: method,
+            "REPOSITORY_WORKFLOWS": frozenset(),
+            "require_unlocked_remote_call": lambda: None,
+            "owner_write_guard": lambda *args, **kwargs: nullcontext(),
+            "_remote_response_write_guard": lambda *args, **kwargs: nullcontext(),
+            "scoped_run_contract": lambda run: {},
+            "connection_contract": lambda payload: {},
+            "_setup_blocked_response_for_generation": lambda *args, **kwargs: None,
+            "_quoted_price_response": lambda *args, **kwargs: None,
             "copy": copy, "uuid": uuid, "hashlib": hashlib, "Response": Response, "status": status,
             "DatabaseError": DatabaseError, "OrganizationContentConfig": self.config_model,
             "article_brief_for_catalog": article_brief_for_catalog,
@@ -114,6 +127,35 @@ class EditorialRevisionTests(unittest.TestCase):
         self.assertEqual(self.remote.call_args.kwargs["json"].get("editorial_brief"), selected_brief())
         self.assertEqual(self.local.call_args.kwargs["payload"].get("editorial_brief"), selected_brief())
         self.assertEqual(self.run.run_request, before)
+
+    def test_portable_source_keeps_unbound_original_intent_on_revision(self):
+        self.run.github_repo = ""
+        self.run.run_request.update(delivery_mode="content_only", delivery_mode_confirmed=True)
+        before = copy.deepcopy(self.run.run_request)
+
+        self.assertEqual(self.submit().status_code, 202)
+
+        local = self.local.call_args.kwargs
+        self.assertEqual(local["github_repo"], "")
+        self.assertTrue(original_portable_run(SimpleNamespace(run_request=local["payload"])))
+        self.assertEqual(local["payload"]["source_run_id"], self.source.run_id)
+        self.assertEqual(self.run.run_request, before)
+
+    def test_result_hint_or_bound_source_cannot_grant_portable_revision(self):
+        for request, result in (
+            ({"editorial_brief": selected_brief()}, {"delivery_mode": "content_only"}),
+            ({"editorial_brief": selected_brief(), "delivery_mode": "content_only",
+              "delivery_mode_confirmed": True, "website_connection_id": str(uuid.uuid4()),
+              "connection_generation": 1}, {}),
+        ):
+            with self.subTest(request=request):
+                self.local.reset_mock()
+                self.run.run_request = request
+                self.run.result = result
+                self.assertEqual(self.submit().status_code, 202)
+                local = self.local.call_args.kwargs
+                self.assertEqual(local["github_repo"], "fixture/site")
+                self.assertFalse(original_portable_run(SimpleNamespace(run_request=local["payload"])))
 
     def test_retired_policy_stops_billing_comments_and_dispatch(self):
         self.strategy = retired_catalog()

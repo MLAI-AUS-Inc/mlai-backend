@@ -137,6 +137,10 @@ def shared_update(value: dict, *, metric_items=None) -> dict:
     result["metrics"] = {}
     result["metricEvidence"] = {}
     result["displayConfig"] = {"snippetMetricKeys": [], "fullMetricKeys": []}
+    from startup_updates.cover_images import cover_image_from_config
+    cover = cover_image_from_config(value.get("displayConfig"))
+    if cover is not None:
+        result["displayConfig"]["coverImage"] = cover
     metric_keys = financial_metric_keys(metric_items)
     metric_keys.update(financial_metric_keys([dict(item, key=key) for key, item in (value.get("metricEvidence") or {}).items() if isinstance(item, dict)]))
     for key in NARRATIVE_FIELDS:

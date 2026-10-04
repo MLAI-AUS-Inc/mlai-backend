@@ -1,7 +1,10 @@
 from pathlib import Path
 import importlib.util
+import os
 import re
+import shlex
 import subprocess
+import tempfile
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -163,6 +166,242 @@ class RuntimeHardeningConfigTests(SimpleTestCase):
         self.assertIn("rate_limited=true", script)
         self.assertIn("StartLimitIntervalSec=600", service)
         self.assertIn("StartLimitBurst=3", service)
+
+    def test_watchdog_does_not_restart_writers_while_migration_is_paused(self):
+        script = ROOT / "ops" / "docker-health-watchdog.sh"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            marker = root / "writers-paused"
+            marker.write_text("reviewed-release\n")
+            calls = root / "compose-calls"
+            compose = root / "compose"
+            compose.write_text(
+                "#!/bin/sh\n"
+                f"printf '%s\\n' \"$*\" >> {shlex.quote(str(calls))}\n"
+            )
+            compose.chmod(0o755)
+            environment = {
+                "WATCHDOG_SERVICE_NAME": "web",
+                "WATCHDOG_INTERVAL_SECONDS": "0.05",
+                "WATCHDOG_WRITER_PAUSE_SENTINEL": str(marker),
+                "DOCKER_COMPOSE_CMD": str(compose),
+            }
+            with self.assertRaises(subprocess.TimeoutExpired) as timed_out:
+                subprocess.run(
+                    ["bash", str(script)],
+                    env=environment,
+                    capture_output=True,
+                    text=True,
+                    timeout=0.75,
+                    check=False,
+                )
+            self.assertIn("action=paused_for_migration", timed_out.exception.stdout.decode())
+            self.assertFalse(calls.exists(), "watchdog must not inspect or start a paused writer")
+
+    def test_watchdog_rechecks_pause_immediately_before_start(self):
+        script = ROOT / "ops" / "docker-health-watchdog.sh"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            marker = root / "writers-paused"
+            calls = root / "compose-actions"
+            compose = root / "compose"
+            compose.write_text(
+                "#!/bin/sh\n"
+                'if [ "$1" = ps ]; then '
+                f"printf 'reviewed-release\\n' > {shlex.quote(str(marker))}; else "
+                f"printf '%s\\n' \"$*\" >> {shlex.quote(str(calls))}; fi\n"
+            )
+            compose.chmod(0o755)
+            environment = {
+                **os.environ,
+                "WATCHDOG_SERVICE_NAME": "web",
+                "WATCHDOG_INTERVAL_SECONDS": "0.05",
+                "WATCHDOG_WRITER_PAUSE_SENTINEL": str(marker),
+                "DOCKER_COMPOSE_CMD": str(compose),
+            }
+            with self.assertRaises(subprocess.TimeoutExpired) as timed_out:
+                subprocess.run(
+                    ["bash", str(script)],
+                    env=environment,
+                    capture_output=True,
+                    text=True,
+                    timeout=0.75,
+                    check=False,
+                )
+            self.assertTrue(marker.exists(), f"stdout={timed_out.exception.stdout!r} stderr={timed_out.exception.stderr!r}")
+            self.assertFalse(calls.exists(), "watchdog must recheck before starting web")
+
+    def test_migration_pause_refuses_failed_or_unverified_writer_stop(self):
+        deploy = (ROOT / "deploy.sh").read_text()
+        start = deploy.index("    pause_runtime_writers_for_migration() {")
+        end = deploy.index("\n    }\n    restore_runtime_on_error()", start) + len("\n    }")
+        pause_function = deploy[start:end].replace("\\$", "$")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for scenario, allowed in (
+                ("stopped", True),
+                ("stop_failed", False),
+                ("ps_failed", False),
+                ("inspect_failed", False),
+                ("still_running", False),
+                ("already_paused", False),
+                ("watchdog_failed", False),
+            ):
+                with self.subTest(scenario=scenario):
+                    marker = root / f"pause-{scenario}"
+                    if scenario == "already_paused":
+                        marker.write_text("previous-release\n")
+                    calls = root / f"calls-{scenario}"
+                    probe = "\n".join(
+                        [
+                            "set -euo pipefail",
+                            f"scenario={shlex.quote(scenario)}",
+                            f"writer_pause_sentinel={shlex.quote(str(marker))}",
+                            f"calls={shlex.quote(str(calls))}",
+                            "APP_RELEASE=reviewed-release",
+                            "runtime_pause_started=0",
+                            "all_runtime_writer_services=(web scheduler)",
+                            'pause_host_writer_watchdogs() { [ "$scenario" != watchdog_failed ]; }',
+                            "restore_host_writer_watchdogs() { :; }",
+                            "docker() {",
+                            '  printf "%s\\n" "$*" >> "$calls"',
+                            '  if [ "$1" = compose ] && [ "$2" = stop ]; then',
+                            '    [ "$scenario" != stop_failed ]; return $?',
+                            "  fi",
+                            '  if [ "$1" = compose ] && [ "$2" = ps ]; then',
+                            '    [ "$scenario" != ps_failed ] || return 1',
+                            '    [ "$5" != web ] || printf "%s\\n" web-container',
+                            "    return 0",
+                            "  fi",
+                            '  if [ "$1" = inspect ]; then',
+                            '    [ "$scenario" != inspect_failed ] || return 1',
+                            '    [ "$scenario" != still_running ] || { echo true; return 0; }',
+                            "    echo false; return 0",
+                            "  fi",
+                            "  return 1",
+                            "}",
+                            pause_function,
+                            "pause_runtime_writers_for_migration",
+                            "echo migration-started",
+                        ]
+                    )
+                    result = subprocess.run(
+                        ["bash", "-c", probe], capture_output=True, text=True, timeout=5
+                    )
+                    self.assertEqual(result.returncode == 0, allowed, result.stderr)
+                    self.assertEqual("migration-started" in result.stdout, allowed)
+                    self.assertEqual(marker.exists(), scenario != "watchdog_failed")
+                    if marker.exists():
+                        self.assertEqual(
+                            marker.read_text(),
+                            "previous-release\n" if scenario == "already_paused" else "reviewed-release\n",
+                        )
+                    if scenario in ("already_paused", "watchdog_failed"):
+                        self.assertFalse(calls.exists())
+                    else:
+                        self.assertIn("compose stop web scheduler", calls.read_text())
+
+    def test_legacy_host_watchdog_is_stopped_before_migration(self):
+        deploy = (ROOT / "deploy.sh").read_text()
+        start = deploy.index("    pause_host_writer_watchdogs() {")
+        end = deploy.index("    pause_runtime_writers_for_migration() {", start)
+        host_functions = deploy[start:end].replace("\\$", "$")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for scenario, allowed in (
+                ("stopped", True),
+                ("none", True),
+                ("inventory_failed", False),
+                ("stop_failed", False),
+                ("still_active", False),
+                ("lingering_process", False),
+            ):
+                with self.subTest(scenario=scenario):
+                    state = root / f"state-{scenario}"
+                    state.write_text("active\n")
+                    script = "\n".join(
+                        [
+                            "set -euo pipefail",
+                            f"scenario={shlex.quote(scenario)}",
+                            f"state={shlex.quote(str(state))}",
+                            "writer_watchdog_units_to_restore=()",
+                            "systemctl() {",
+                            '  if [ "$1" = list-units ]; then',
+                            '    [ "$scenario" != inventory_failed ] || return 1',
+                            '    if [ "$scenario" = none ]; then echo unrelated.service; else printf "%s\\n" legacy-watchdog.service unrelated.service; fi',
+                            "  elif [ \"$1\" = show ]; then",
+                            '    if [ "$2" = --property=ExecStart ]; then',
+                            '      if [ "$4" = legacy-watchdog.service ]; then echo "/srv/mlai-backend/ops/docker-health-watchdog.sh"; else echo /usr/bin/other; fi',
+                            '    else cat "$state"; fi',
+                            '  elif [ "$1" = stop ]; then',
+                            '    [ "$scenario" != stop_failed ] || return 1',
+                            '    [ "$scenario" = still_active ] || echo inactive > "$state"',
+                            '  elif [ "$1" = start ]; then echo active > "$state"',
+                            "  else return 1; fi",
+                            "}",
+                            'pgrep() { if [ "$scenario" = lingering_process ]; then echo "999 /srv/mlai-backend/ops/docker-health-watchdog.sh"; else return 1; fi; }',
+                            host_functions,
+                            "pause_host_writer_watchdogs",
+                            "echo migration-started",
+                            "restore_host_writer_watchdogs",
+                            "echo restored",
+                        ]
+                    )
+                    result = subprocess.run(
+                        ["bash", "-c", script], capture_output=True, text=True, timeout=5
+                    )
+                    self.assertEqual(result.returncode == 0, allowed, result.stderr)
+                    self.assertEqual("migration-started" in result.stdout, allowed)
+                    self.assertEqual(state.read_text(), "active\n" if allowed or scenario in ("inventory_failed", "stop_failed", "still_active") else "inactive\n")
+                    if allowed:
+                        self.assertIn("restored", result.stdout)
+
+    def test_writer_watchdog_pause_clears_only_after_safe_rollback(self):
+        deploy = (ROOT / "deploy.sh").read_text()
+        start = deploy.index("    restore_runtime_on_error() {")
+        end = deploy.index("\n    # A code-only release", start)
+        recovery_function = deploy[start:end].replace("\\$", "$")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = root / "rollback-manifest"
+            manifest.write_text("web|old-image|old-ref|rollback-web\n")
+            for recreation_succeeds in (True, False):
+                with self.subTest(recreation_succeeds=recreation_succeeds):
+                    marker = root / "writers-paused"
+                    marker.write_text("reviewed-release\n")
+                    script = "\n".join(
+                        [
+                            "set -euo pipefail",
+                            f"rollback_manifest={shlex.quote(str(manifest))}",
+                            f"writer_pause_sentinel={shlex.quote(str(marker))}",
+                            f"recreation_succeeds={1 if recreation_succeeds else 0}",
+                            "runtime_restore_attempted=0",
+                            "migrations_pending=1",
+                            "runtime_pause_started=1",
+                            "new_runtime_replacement_started=0",
+                            "migration_started=0",
+                            "schema_transition_completed=0",
+                            "web_candidate_started=0",
+                            "web_only_rollback=0",
+                            "previous_app_release=old-release",
+                            "previous_runtime_container_ids=()",
+                            "previous_scheduler_container_id=",
+                            "upsert_env_value() { :; }",
+                            "restore_host_writer_watchdogs() { :; }",
+                            'docker() { [ "$2" != compose ] || :; if [ "$1" = compose ] && [ "$2" = up ]; then [ "$recreation_succeeds" = 1 ]; else return 0; fi; }',
+                            recovery_function,
+                            "restore_runtime_on_error",
+                        ]
+                    )
+                    result = subprocess.run(
+                        ["bash", "-c", script], capture_output=True, text=True, timeout=5
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(marker.exists(), not recreation_succeeds)
+        # The success path removes the marker only after release health checks,
+        # while an incomplete schema transition intentionally retains it.
+        self.assertLess(deploy.index("Expected video upload session preflight"), deploy.index('rm -f "\\$writer_pause_sentinel"\n    fi\n    trap - ERR EXIT'))
+        self.assertIn("Keep the watchdog pause until an operator repairs the schema.", deploy)
 
     def test_coworking_repair_migration_has_duplicate_preflight(self):
         migration = (

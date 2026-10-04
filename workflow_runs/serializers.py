@@ -30,6 +30,10 @@ class ContentFactoryRunStepSerializer(serializers.Serializer):
 
 
 class ContentFactoryRunSyncSerializer(serializers.Serializer):
+    website_connection_id = serializers.UUIDField(required=False)
+    connection_generation = serializers.IntegerField(required=False, min_value=1)
+    connection_target_id = serializers.CharField(required=False)
+    repository_id = serializers.IntegerField(required=False, min_value=1)
     generation = serializers.IntegerField(required=False, min_value=0)
     state_version = serializers.IntegerField(required=False, min_value=0)
     failure = serializers.DictField(required=False)

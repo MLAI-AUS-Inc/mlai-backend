@@ -1,4 +1,5 @@
 import calendar
+from startup_updates.cover_images import cover_image_from_config
 
 from rest_framework import serializers
 
@@ -23,7 +24,7 @@ def _normalize_display_config_keys(values):
     return keys
 
 
-def normalize_vibe_raising_display_config(raw):
+def normalize_vibe_raising_display_config(raw, *, validate_cover=False):
     """Normalize a metric display config to snake_case catalog keys.
 
     Snippet keys are always a subset of full keys (missing ones are unioned
@@ -32,6 +33,10 @@ def normalize_vibe_raising_display_config(raw):
     """
     if not isinstance(raw, dict):
         return None
+
+    cover = cover_image_from_config(raw)
+    if validate_cover and any(key in raw for key in ("coverImage", "cover_image")) and cover is None:
+        raise serializers.ValidationError({"displayConfig": "Choose a valid cover image."})
 
     snippet = _normalize_display_config_keys(
         raw.get("snippetMetricKeys")
@@ -46,7 +51,10 @@ def normalize_vibe_raising_display_config(raw):
     for key in snippet:
         if key not in full:
             full.append(key)
-    return {"snippet_metric_keys": snippet, "full_metric_keys": full}
+    result = {"snippet_metric_keys": snippet, "full_metric_keys": full}
+    if cover is not None:
+        result["cover_image"] = cover
+    return result
 
 
 def _blank_to_none(value):
@@ -375,6 +383,6 @@ class VibeRaisingMonthlyUpdateUpsertSerializer(AliasInputSerializer):
         attrs["metricSuggestions"] = normalized_suggestions
 
         attrs["displayConfig"] = normalize_vibe_raising_display_config(
-            attrs.get("displayConfig")
+            attrs.get("displayConfig"), validate_cover=True
         )
         return attrs

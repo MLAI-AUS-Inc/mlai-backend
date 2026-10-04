@@ -134,7 +134,15 @@ class ArticleDispatchControlFlowTests(unittest.TestCase):
             pass
         self.transport_error = TransportError
         self.http = SimpleNamespace(RequestException=TransportError, post=Mock(side_effect=self.post))
+        # Website consent is exercised with real DB row locks in
+        # tests_website_connections; this AST harness isolates editorial policy.
         self.ns = {
+            "guarded_owner_operation": lambda *args, **kwargs: lambda method: method,
+            "guarded_service_write": lambda *args, **kwargs: lambda method: method,
+            "REPOSITORY_WORKFLOWS": frozenset(),
+            "require_unlocked_remote_call": lambda: None,
+            "_setup_blocked_response_for_generation": lambda *args, **kwargs: None,
+            "_quoted_price_response": lambda *args, **kwargs: None,
             "uuid": uuid, "status": status, "Response": Response, "DatabaseError": DatabaseError,
             "OrganizationContentConfig": self.config_model, "article_brief_for_catalog": article_brief_for_catalog,
             "logger": Mock(), "timezone": SimpleNamespace(now=lambda: datetime(2026, 9, 10, tzinfo=dt_timezone.utc)),
@@ -162,15 +170,15 @@ class ArticleDispatchControlFlowTests(unittest.TestCase):
             "_refund_roo_points_for_article_start": self.refund, "_refund_roo_points_for_content_island_topic_start": Mock(),
             "charge_content_factory_request_for_user": self.charge, "InsufficientRooPointsError": type("Insufficient", (Exception,), {}),
             "build_roo_points_authorization_payload": lambda **kwargs: {"roo_points_billing_status": kwargs["billing_status"]},
-            "get_content_factory_ai_agent_required_points": lambda domain: 6, "_roo_points_balance_for_user": lambda user: 20,
+            "get_content_factory_ai_agent_required_points": lambda domain: 6, "get_content_factory_article_cost_points": lambda domain: 6, "_roo_points_balance_for_user": lambda user: 20,
             "_resolve_context_or_response": lambda request: (self.context, None),
-            "_setup_blocked_response_for_generation": lambda *args: None,
+            "_setup_blocked_response_for_generation": lambda *args, **kwargs: None,
             "match_covered_topic": lambda **kwargs: None, "_github_repo_operable": lambda config: True,
             "article_system_ready": lambda config: True, "resolve_article_system": lambda config: {},
             "normalize_authors": lambda authors: authors, "resolve_default_author": lambda *args: None,
         }
         names = {"_run_mapping", "_request_value", "_bool_from_request", "_refresh_article_editorial_payload", "_friendly_content_factory_error", "_blocked_worker_payload",
-                 "_restart_article_payload_from_run", "_restart_article_run", "_charge_roo_points_for_article", "_queue_content_factory_run",
+                 "_restart_article_payload_from_run", "_restart_article_run", "_charge_roo_points_for_article", "_queue_content_factory_run", "_queue_content_factory_run_authorized",
                  "_run_result_from_remote", "_resolve_dispatch_token_run", "_fail_unconfirmed_dispatch_run"}
         tree = ast.parse(Path(__file__).with_name("vibe_marketing_views.py").read_text())
         nodes = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in names]

@@ -66,10 +66,12 @@ class ArticlePublishApprovalReceiptTests(SimpleTestCase):
                 run.pk = 1
                 run.workflow = "article_generation"
                 run.save = MagicMock()
+                run.refresh_from_db = MagicMock()
                 current = _review_run()
                 current.pk = 1
                 current.workflow = "article_generation"
                 current.save = MagicMock()
+                current.refresh_from_db = MagicMock()
                 request = SimpleNamespace(data={}, user=SimpleNamespace(pk=1))
 
                 def remote_approve(**_kwargs):
@@ -95,7 +97,9 @@ class ArticlePublishApprovalReceiptTests(SimpleTestCase):
                 with (
                     patch("content_factory.article_review_views.check_approval_comments", return_value=None),
                     patch("content_factory.article_review_views.record_review_approval") as accept_feedback,
-                    patch("content_factory.vibe_marketing_views._resolve_context_or_response", return_value=(object(), None)),
+                    patch("content_factory.vibe_marketing_views._resolve_context_or_response", return_value=(SimpleNamespace(organization=object()), None)),
+                    patch("content_factory.vibe_marketing_views._get_config", return_value=object()),
+                    patch("content_factory.vibe_marketing_views._setup_blocked_response_for_generation", return_value=None),
                     patch("content_factory.vibe_marketing_views.get_object_or_404", return_value=run),
                     patch("content_factory.vibe_marketing_views._run_belongs_to_context", return_value=True),
                     patch("content_factory.vibe_marketing_views._latest_review_ready_component_revision", return_value=None),
@@ -109,7 +113,12 @@ class ArticlePublishApprovalReceiptTests(SimpleTestCase):
                     ),
                 ):
                     lock.return_value.get.side_effect = locked_current
-                    response = VibeMarketingRunControlView().post(request, run.run_id, "approve")
+                    # This database-free unit exercises approval identity drift
+                    # after authorization. The lifecycle/database suites cover
+                    # the outer website-consent decorator with real requests.
+                    response = VibeMarketingRunControlView.post.__wrapped__(
+                        VibeMarketingRunControlView(), request, run.run_id, "approve",
+                    )
 
                 self.assertEqual(response.status_code, 409)
                 accept_feedback.assert_not_called()

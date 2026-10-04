@@ -28,13 +28,13 @@ class DatabaseContinuityTests(unittest.TestCase):
         # Compose otherwise recreates a healthy Postgres container on each
         # code release, even before the web handoff begins.
         commands = [
-            line.strip()
+            line.strip().split("docker compose up -d ", 1)[1]
             for line in DEPLOY.splitlines()
-            if line.strip().startswith("docker compose up -d ")
+            if "docker compose up -d " in line and "#" not in line
         ]
         self.assertEqual(len(commands), 6)
         database = [line for line in commands if line.endswith(" db")]
-        self.assertEqual(database, ["docker compose up -d --no-recreate db"])
+        self.assertEqual(database, ["--no-recreate db"])
         for command in commands:
             if command not in database:
                 self.assertIn("--no-deps", command)
@@ -307,6 +307,7 @@ class WebHandoffRollbackTests(unittest.TestCase):
                     f"web_proxy_config={shlex.quote(str(config))}",
                     f"rollback_manifest={shlex.quote(str(manifest))}",
                     f"events={shlex.quote(str(events))}",
+                    f"writer_pause_sentinel={shlex.quote(str(root / 'writers-paused'))}",
                     "web_proxy_script=/unused",
                     "APP_RELEASE=" + "b" * 40,
                     "previous_app_release=" + "a" * 40,
@@ -332,6 +333,7 @@ class WebHandoffRollbackTests(unittest.TestCase):
                     'wait_for_nginx_workers_to_drain() { echo "drain" >> "$events"; }',
                     'wait_for_origin_web_health() { echo "health $1 $2 ${3:-}" >> "$events"; }',
                     'upsert_env_value() { echo "env $1 $2" >> "$events"; }',
+                    'restore_host_writer_watchdogs() { :; }',
                     'docker() { echo "docker $*" >> "$events"; }',
                     'bash() { echo "route $3" >> "$events"; printf "# managed-mlai-backend-api target=%s\\n" "$3" > "$web_proxy_config"; }',
                     function,

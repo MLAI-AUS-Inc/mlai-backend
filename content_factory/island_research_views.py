@@ -28,9 +28,10 @@ class ContentIslandResearchView(APIView):
         config = views._get_config(context.organization)
         payload = {"domain": context.organization.domain, "client_request_id": key,
                    "slack_user_id": views.founder_actor_id_for_user(request.user),
-                   "request_source": views.CONTENT_FACTORY_REQUEST_SOURCE, "island_research_brief": brief}
+                   "request_source": views.CONTENT_FACTORY_REQUEST_SOURCE, "island_research_brief": brief,
+                   "requested_topic_count": 1}
         charged_user, article_request, error = views._charge_roo_points_for_content_island_topic_generation(
-            request, context=context, payload=payload)
+            request, context=context, payload=payload, scope_request_id=False)
         if error is not None:
             return error
         run = views._queue_content_factory_run(endpoint="island-research", workflow="island_refresh",

@@ -266,6 +266,8 @@ def save_revision(draft, memo, *, snapshot, audience="private", expected_revisio
     from startup_updates.update_identity import memo_with_month_identity
     # Identity metadata is owned by the server and survives manual/generation edits.
     memo = memo_with_month_identity(draft, copy.deepcopy(memo))
+    from startup_updates.cover_images import retain_cover_image
+    memo = retain_cover_image(memo, current.structured_memo if current else draft.structured_memo or {})
     from startup_updates.covers import inherit_cover
     try:
         memo = inherit_cover(copy.deepcopy(memo), current.structured_memo if current else (draft.structured_memo or {}), draft.organization_id)

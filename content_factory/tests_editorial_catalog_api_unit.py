@@ -296,6 +296,7 @@ class EditorialCatalogAPIUnitTests(unittest.TestCase):
         cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "ContentFactoryOrgConfigView")
         method = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "put")
         namespace = {"sanitize_json_for_postgres": lambda value: value, "EDIT_FIELDS": EDIT_FIELDS,
+                     "guarded_service_write": lambda *args, **kwargs: lambda method: method,
                      "service_catalog_update": self.views.service_catalog_update, "Response": Response,
                      "status": status, "Organization": self.org_model}
         exec(compile(ast.Module(body=[method], type_ignores=[]), "service_views.py", "exec"), namespace)

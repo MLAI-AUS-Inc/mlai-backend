@@ -269,15 +269,18 @@ class LinearDeploymentWiringTests(unittest.TestCase):
             "VALLEY_MCP_PUBLIC_BASE_URL": "https://api.mlai.au",
             "VALLEY_MCP_DOMAIN_VERIFICATION_TOKEN": "synthetic-public-proof-123456",
             "COMMUNITY_CHAT_STARTUP_UPDATES_ENABLED": "true",
+            "WEBSITE_CONNECTION_WRITE_MODE": "disabled",
+            "WEBSITE_CONNECTION_CANARY_DOMAINS": "",
+            "APPROVED_MIGRATION_PLAN_SHA256": "a" * 64,
         }
-        keys = set(re.findall(r"^\s*install_remote_env_value ([A-Z_]+)", (REPO_ROOT / "deploy.sh").read_text(), re.MULTILINE))
+        keys = set(re.findall(r"^\s*install_remote_env_value ([A-Z0-9_]+)", (REPO_ROOT / "deploy.sh").read_text(), re.MULTILINE))
         self.assertEqual(keys, set(values))
         for key, value in values.items():
             with self.subTest(key=key), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 (root / "scripts").mkdir()
                 for name in ("upsert_env_value_from_stdin.sh", "validate_linear_channel_issue_deploy_config.py",
-                             "validate_valley_mcp_deploy_config.py"):
+                             "validate_valley_mcp_deploy_config.py", "validate_website_deploy_config.py"):
                     shutil.copy(REPO_ROOT / "scripts" / name, root / "scripts")
                 (root / ".env").write_text("KEEP_ME=yes\n")
                 result = subprocess.run(

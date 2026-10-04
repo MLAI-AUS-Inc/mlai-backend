@@ -150,8 +150,13 @@ def process_github_event(event_type, payload) -> dict:
     payload = payload if isinstance(payload, dict) else {}
     if event_type == "ping":
         return {"event": "ping"}
+    if event_type in {"installation", "installation_repositories", "repository"}:
+        from .website_reconciliation import handle_website_github_event
+        return handle_website_github_event(event_type, payload)
     if event_type == "pull_request":
         return handle_pull_request(payload)
     if event_type == "push":
-        return handle_push(payload)
+        from .website_reconciliation import handle_website_github_event
+        lifecycle = handle_website_github_event(event_type, payload)
+        return {**handle_push(payload), "website_connections_invalidated": lifecycle.get("invalidated", 0)}
     return {"event": event_type or "unknown", "ignored": True}

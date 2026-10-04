@@ -1,4 +1,6 @@
+from startup_updates.cover_images import WATERCOLOR_ARTWORK, normalize_cover_image, retain_cover_image, generated_cover_image
 """Contract and disclosure checks. These tests never create a database."""
+from contextlib import ExitStack, nullcontext
 from datetime import date, timedelta
 import json
 from types import SimpleNamespace as Obj
@@ -20,7 +22,7 @@ from community_chat.startups.connections import SALT, connect_browser, consume_t
 from community_chat.startups.presentation import PUBLIC_FIELDS, update_payload
 from startup_updates import revisions
 from startup_updates.review_policy import manual_validation
-from vibe_raising.views import _serialize_monthly_update
+from vibe_raising.views import _serialize_monthly_update, _build_manual_structured_memo, _extract_display_config
 from vibe_raising.serializers import VibeRaisingMonthlyUpdateUpsertSerializer
 
 
@@ -316,3 +318,178 @@ class FrozenManualEvidenceTests(SimpleTestCase):
         self.assertEqual(payload['manual_sources'], base['manual_sources'])
         self.assertIsNot(payload['manual_sources'], base['manual_sources'])
         self.assertFalse(any(item['key'] == 'revenue' for item in payload['metrics']))
+
+
+class CoverImageTests(SimpleTestCase):
+    def test_all_cover_types_round_trip_through_save_and_shared_projection(self):
+        from startup_updates.disclosure import shared_update
+
+        choices = [
+            {'kind': 'watercolor', 'artwork': 'workspace'},
+            {'kind': 'minimal', 'month': 10},
+            {'kind': 'upload', 'url': 'https://media.example/cropped-cover.jpg'},
+        ]
+        for cover in choices:
+            with self.subTest(cover=cover):
+                serializer = VibeRaisingMonthlyUpdateUpsertSerializer(data={
+                    'month': 'October', 'year': 2026,
+                    'displayConfig': {'snippetMetricKeys': ['revenue'], 'fullMetricKeys': ['revenue'], 'coverImage': cover},
+                })
+                self.assertTrue(serializer.is_valid(), serializer.errors)
+                memo = _build_manual_structured_memo(serializer.validated_data)
+                self.assertEqual(memo['display_config']['cover_image'], cover)
+                display = _extract_display_config(memo)
+                self.assertEqual(display['coverImage'], cover)
+                shared = shared_update({'displayConfig': display})
+                self.assertEqual(shared['displayConfig'], {
+                    'snippetMetricKeys': [], 'fullMetricKeys': [], 'coverImage': cover,
+                })
+
+    def test_invalid_cover_is_rejected_at_save_boundary(self):
+        invalid = [
+            {'kind': 'minimal', 'month': 0}, {'kind': 'minimal', 'month': 13},
+            {'kind': 'minimal', 'month': True}, {'kind': 'minimal', 'month': '10'},
+            {'kind': 'watercolor', 'artwork': '../private'},
+            {'kind': 'watercolor', 'artwork': 'not-in-catalog'},
+            {'kind': 'upload', 'url': 'data:image/png;base64,private'},
+            {'kind': 'upload', 'url': 'blob:https://example.test/temporary'},
+            {'kind': 'upload', 'url': 'javascript:alert(1)'},
+            {'kind': 'upload', 'url': 'https://name:secret@example.test/private'},
+            {'kind': 'upload', 'url': 'https://[invalid'},
+            {'kind': 'upload', 'url': 'https://media.example/space here'},
+            {'kind': 'unknown'}, None,
+        ]
+        for cover in invalid:
+            with self.subTest(cover=cover):
+                serializer = VibeRaisingMonthlyUpdateUpsertSerializer(data={
+                    'month': 'October', 'year': 2026, 'displayConfig': {'coverImage': cover},
+                })
+                self.assertFalse(serializer.is_valid())
+                self.assertIn('displayConfig', serializer.errors)
+
+    def test_all_twelve_watercolor_options_are_valid(self):
+        self.assertEqual(len(WATERCOLOR_ARTWORK), 12)
+        for artwork in WATERCOLOR_ARTWORK:
+            cover = {'kind': 'watercolor', 'artwork': artwork}
+            self.assertEqual(normalize_cover_image(cover), cover)
+
+    def test_first_generated_cover_retains_default_metric_selection(self):
+        cover = {'kind': 'watercolor', 'artwork': 'fern-garden'}
+        original = {'kpi_snapshot': [{'metric_key': 'revenue', 'value': '100'}, {'metric_key': 'monthlyCosts', 'value': '40'}]}
+        generated = generated_cover_image(original, {'cover_image': cover})
+        self.assertNotIn('display_config', original)
+        self.assertEqual(_extract_display_config(generated), {
+            'coverImage': cover, 'fullMetricKeys': ['revenue', 'monthlyCosts'],
+            'snippetMetricKeys': ['revenue', 'monthlyCosts'],
+        })
+
+    def test_generate_endpoint_passes_selected_cover_to_run_before_dispatch(self):
+        from vibe_raising import views as founder_views
+
+        cover = {'kind': 'watercolor', 'artwork': 'orchard'}
+        org, company, binding = Obj(id=7), Obj(organization=Obj()), Obj(google_connection_id=None)
+        request = Obj(user=Obj(id=1), data={'displayConfig': {'coverImage': cover}, 'updateDate': '2026-09-30'}, query_params={})
+        patches = {
+            '_get_founder_company_context_or_response': ({'company': company, 'domain': 'acme.example'}, None),
+            '_ensure_binding_for_company': (org, None, binding),
+            '_resolve_manual_documents_for_request': [], '_get_requested_manual_document_ids': [],
+            '_get_requested_manual_summary': 'Founder notes', '_get_requested_input_sources': ['manual_documents'],
+            '_requested_target_month_from_request': date(2026, 9, 1), 'google_connection_for_org': None,
+            'coerce_startup_update_sources_for_gmail_scope': (['manual_documents'], None, {}),
+            '_sync_selected_connector_sources_for_draft': {}, 'get_open_startup_update_run': None,
+            '_monthly_update_drafts_cover_input_sources': False, '_build_email_draft_payload': {},
+        }
+        with ExitStack() as stack:
+            for name, result in patches.items():
+                stack.enter_context(patch.object(founder_views, name, return_value=result))
+            draft = Obj(pk=1, current_revision_id=None, month=date(2026, 9, 1), update_date=date(2026, 9, 30), save=MagicMock())
+            stack.enter_context(patch.object(founder_views.transaction, 'atomic', side_effect=lambda: nullcontext()))
+            stack.enter_context(patch('startup_updates.update_identity.resolve_update', return_value=(draft, True)))
+            stack.enter_context(patch('startup_updates.update_identity.identity_payload', return_value={}))
+            stack.enter_context(patch('startup_updates.update_identity.narrative_window', return_value={'start': '2026-09-01T00:00:00Z', 'end': '2026-10-01T00:00:00Z'}))
+            create = stack.enter_context(patch.object(founder_views, 'create_startup_update_run', return_value=Obj(run_id='new', run_request={})))
+            dispatch = stack.enter_context(patch.object(founder_views, '_dispatch_run_to_valley', return_value=True))
+            response = founder_views.VibeRaisingEmailDraftStartView().post(request)
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(create.call_args.kwargs['cover_image'], cover)
+        dispatch.assert_called_once()
+
+    def test_new_generation_run_persists_cover_without_provider_or_database_access(self):
+        from startup_updates import services
+
+        cover = {'kind': 'minimal', 'month': 9}
+        org = Obj(id=7, startup_profile=None, domain='acme.example')
+        binding = Obj(id=8, google_connection=None, user=Obj(), organization=org, user_id=1)
+        with ExitStack() as stack:
+            stack.enter_context(patch('integrations.services.external_connectors.google_connection_for_org', return_value=None))
+            stack.enter_context(patch.object(services, 'get_open_startup_update_run', return_value=None))
+            stack.enter_context(patch.object(services, 'supersede_conflicting_startup_update_runs'))
+            stack.enter_context(patch.object(services, 'build_external_context_for_sources', return_value={}))
+            stack.enter_context(patch.object(services, 'reconcile_startup_update_run_source_steps'))
+            stack.enter_context(patch.object(services.transaction, 'atomic', side_effect=lambda: nullcontext()))
+            runs = stack.enter_context(patch.object(services.ContentFactoryRun, 'objects'))
+            services.create_startup_update_run(organization=org, binding=binding, target_month=date(2026, 1, 1),
+                input_sources=['manual_documents'], manual_summary='A good month', cover_image=cover)
+        request = runs.create.call_args.kwargs['run_request']
+        self.assertEqual(request['cover_image'], cover)
+        self.assertEqual(request['manual_summary'], 'A good month')
+
+    def test_cover_does_not_disclose_arbitrary_metadata(self):
+        from startup_updates.disclosure import shared_update
+
+        cover = {'kind': 'watercolor', 'artwork': 'coast', 'storagePath': 'private', 'evidence': {'amount': 100}}
+        self.assertEqual(normalize_cover_image(cover), {'kind': 'watercolor', 'artwork': 'coast'})
+        shared = shared_update({'displayConfig': {'coverImage': cover, 'private': 'secret'}})
+        self.assertEqual(shared['displayConfig'], {
+            'snippetMetricKeys': [], 'fullMetricKeys': [],
+            'coverImage': {'kind': 'watercolor', 'artwork': 'coast'},
+        })
+
+    def test_regeneration_and_older_clients_keep_existing_cover_without_mutation(self):
+        cover = {'kind': 'minimal', 'month': 10}
+        previous = {'display_config': {'cover_image': cover, 'full_metric_keys': ['revenue']}, 'summary': 'Old'}
+        generated = {'summary': 'New'}
+        regenerated = retain_cover_image(generated, previous)
+        self.assertEqual(regenerated['display_config'], previous['display_config'])
+        older_client = retain_cover_image({'display_config': {'full_metric_keys': ['monthlyCosts']}}, previous)
+        self.assertEqual(older_client['display_config'], {'cover_image': cover, 'full_metric_keys': ['monthlyCosts']})
+        regenerated['display_config']['cover_image']['month'] = 9
+        self.assertEqual(cover['month'], 10)
+        self.assertEqual(generated, {'summary': 'New'})
+
+    def test_current_and_published_revisions_return_their_own_cover(self):
+        def revision(pk, cover):
+            return Obj(pk=pk, number=pk, content_hash=f'hash-{pk}', snapshot_id=pk, snapshot=Obj(payload={}),
+                structured_memo={'_month_sequence': 1, 'display_config': {'cover_image': cover}, '_audience_visibility': ['community']},
+                validation={'groundedness_status': 'passed'}, audience='community')
+
+        published_cover = {'kind': 'watercolor', 'artwork': 'workspace'}
+        current_cover = {'kind': 'upload', 'url': 'https://media.example/new-cover.jpg'}
+        draft = Obj(id=1, pk=1, organization_id=7, structured_memo={"_month_sequence": 1}, current_revision=revision(3, current_cover), published_revision=revision(2, published_cover),
+            current_revision_id=3, published_revision_id=2, month=date(2026, 10, 1), updated_at=timezone.now(),
+            published_at=timezone.now(), status='draft', organization=Obj(name='Acme'), update_date=None, creation_key=None, first_published_at=None, month_sequence=1)
+        self.assertEqual(update_payload(draft)['displayConfig']['coverImage'], current_cover)
+        self.assertEqual(update_payload(draft, community=True)['displayConfig']['coverImage'], current_cover)
+        self.assertEqual(update_payload(draft, published=True, community=True)['displayConfig']['coverImage'], published_cover)
+
+    def test_cover_is_retained_in_regenerated_revision_and_changes_revision_hash(self):
+        cover = {'kind': 'watercolor', 'artwork': 'workspace'}
+        current = Obj(pk=2, structured_memo={'_month_sequence': 1, 'display_config': {'cover_image': cover}}, validation={'groundedness_status': 'passed'}, content_hash='previous')
+        snapshot = Obj(pk=4, organization_id=7, month=date(2026, 10, 1), content_hash='snapshot', payload={'metrics': [], 'events': []})
+        draft = Obj(pk=1, organization_id=7, month=snapshot.month, current_revision=current,
+            structured_memo=current.structured_memo, update_date=None, month_sequence=1, published_at=None, revisions=MagicMock(), save=MagicMock())
+        draft.revisions.aggregate.return_value = {'n': 2}
+
+        def saved_memo(incoming):
+            with patch.object(revisions.MonthlyUpdateDraft, 'objects') as drafts, patch.object(revisions.MonthlyUpdateRevision, 'objects') as rows:
+                drafts.select_for_update.return_value.get.return_value = draft
+                rows.create.side_effect = lambda **kwargs: Obj(**kwargs)
+                result = revisions.save_revision.__wrapped__(draft, incoming, snapshot=snapshot, expected_revision=2)
+            draft.current_revision = current
+            return result
+
+        generated = saved_memo({'summary': 'Generated again'})
+        self.assertEqual(generated.structured_memo['display_config']['cover_image'], cover)
+        selected = saved_memo({'summary': 'Generated again', 'display_config': {'cover_image': {'kind': 'minimal', 'month': 10}}})
+        self.assertNotEqual(generated.content_hash, selected.content_hash)
+        self.assertEqual(current.structured_memo['display_config']['cover_image'], cover)

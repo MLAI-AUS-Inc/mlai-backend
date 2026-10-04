@@ -1,7 +1,5 @@
 """Company-owned article review facade over Content Factory's canonical draft."""
 from urllib.parse import quote
-from django.db import transaction
-from django.utils.decorators import method_decorator
 
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -11,6 +9,20 @@ from . import vibe_marketing_views as views
 
 def remote_review(run, *, payload=None):
     """Forward a scoped review operation without passing browser credentials."""
+    views.require_unlocked_remote_call()
+    if payload is not None:
+        original = views.scoped_run_contract(run)
+        try:
+            supplied = views.connection_contract(payload)
+            binding = views.connection_contract(original)
+            if supplied and any(binding.get(key) != value for key, value in supplied.items()):
+                raise views.WebsiteAuthorityError("website_connection_changed", "The article belongs to a previous website connection.")
+            if binding or original.get("delivery_mode") != "content_only":
+                with views.authority_guard(original, action="read"):
+                    pass
+                payload = {**payload, **binding}
+        except views.WebsiteAuthorityError as exc:
+            return Response(exc.as_dict(), status=exc.status)
     config = views._content_factory_remote_config()
     if not config["enabled"]:
         return Response({"detail": "Article editing is temporarily unavailable."}, status=503)
@@ -29,7 +41,6 @@ def remote_review(run, *, payload=None):
     return data
 
 
-@method_decorator(transaction.atomic, name="dispatch")
 class VibeMarketingArticleReviewView(views.VibeMarketingRunCommentsMixin, APIView):
     """Read or edit the canonical article using the existing ownership boundary."""
 

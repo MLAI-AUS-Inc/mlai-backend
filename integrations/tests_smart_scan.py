@@ -7,6 +7,7 @@ from integrations.services.article_generation import ArticleGenerationError
 from integrations.services.github import scan_github_project, get_latest_repo_sha
 from integrations.services.github_connections import parse_github_oauth_state
 from content_factory.models import OrganizationContentConfig
+from content_factory.website_models import WebsiteConnection
 from organizations.models import Organization
 
 class SmartScanTests(TestCase):
@@ -36,6 +37,14 @@ class SmartScanTests(TestCase):
                 "verified_at": "2026-03-08T00:00:00+00:00",
             },
         )
+        self.website_connection = WebsiteConnection.objects.create(
+            organization=self.organization,
+            repository_id=123,
+            github_repo="owner/repo",
+            branch="main",
+        )
+        self.config.website_connection = self.website_connection
+        self.config.save(update_fields=["website_connection", "updated_at"])
 
     @patch('integrations.services.github.http_requests.get')
     def test_get_latest_repo_sha(self, mock_get):
@@ -58,14 +67,14 @@ class SmartScanTests(TestCase):
 
     @patch('integrations.services.github.get_latest_repo_sha')
     @patch('integrations.services.github.http_requests.post')
-    def test_scan_updates_sha(self, mock_post, mock_get_sha):
+    def test_scan_records_only_worker_verified_sha(self, mock_post, mock_get_sha):
         # Mock GitHub SHA fetch
-        mock_get_sha.return_value = 'commit_sha_xyz'
+        mock_get_sha.return_value = 'a' * 40
 
         # Mock Content Factory response
         mock_cf_response = MagicMock()
         mock_cf_response.status_code = 200
-        mock_cf_response.json.return_value = {'status': 'ok'}
+        mock_cf_response.json.return_value = {'status': 'ok', 'source_sha': 'a' * 40}
         mock_post.return_value = mock_cf_response
 
         # Run scan
@@ -74,11 +83,12 @@ class SmartScanTests(TestCase):
         # Reload and check
         self.integration.refresh_from_db()
         self.assertTrue(self.integration.project_scanned)
-        self.assertEqual(self.integration.last_scanned_sha, 'commit_sha_xyz')
+        self.assertEqual(self.integration.last_scanned_sha, 'a' * 40)
         self.assertIsNotNone(self.integration.last_scanned_at)
         self.config.refresh_from_db()
-        self.assertEqual(self.config.last_scanned_sha, 'commit_sha_xyz')
-        self.assertIsNotNone(self.config.last_scanned_at)
+        # Only the fenced worker callback may update organisation scan evidence.
+        self.assertIsNone(self.config.last_scanned_sha)
+        self.assertIsNone(self.config.last_scanned_at)
 
     @patch('integrations.services.github.get_latest_repo_sha')
     @patch('integrations.services.github.http_requests.post')

@@ -1,5 +1,7 @@
 """Draft review authorization and approval tests; storage and network are mocked."""
+from contextlib import nullcontext
 from types import SimpleNamespace
+import uuid
 from unittest.mock import MagicMock, patch
 
 from django.core import signing
@@ -13,7 +15,7 @@ from .article_preview_lease import ArticlePreviewLeaseProxyView, SALT, LIFETIME
 
 class ArticleReviewTests(SimpleTestCase):
     def setUp(self):
-        self.run = SimpleNamespace(run_id='article-1', workflow='article_generation', result={}, organization_id=7, domain='company.test')
+        self.run = SimpleNamespace(run_id='article-1', workflow='article_generation', result={}, organization_id=7, domain='company.test', run_request={'delivery_mode': 'content_only'})
 
     @patch('content_factory.article_review_views.views.VibeMarketingComponentComment')
     def test_comments_require_exact_waiver_including_body(self, model):
@@ -60,14 +62,19 @@ class ArticleReviewTests(SimpleTestCase):
         self.assertEqual(result.data['detail'], 'The article changed.')
         self.assertEqual(request.call_args.kwargs['headers'], {'X-API-Key': 'service-only'})
 
+    @patch('content_factory.article_preview_lease.authority_guard', side_effect=lambda *args, **kwargs: nullcontext())
     @patch('content_factory.article_preview_lease.views.get_object_or_404')
-    def test_preview_grant_is_scoped_to_run_and_company(self, lookup):
-        token = signing.dumps({'run': 'article-1', 'organization': 7, 'domain': 'company.test'}, salt=SALT)
+    def test_preview_grant_is_scoped_to_run_and_company(self, lookup, guard):
+        binding = {'website_connection_id': str(uuid.uuid4()), 'connection_generation': 1}
+        self.run.run_request = binding
+        token = signing.dumps({'run': 'article-1', 'organization': 7, 'domain': 'company.test', **binding}, salt=SALT)
         view = ArticlePreviewLeaseProxyView()
         view.kwargs = {'token': token}
         request = RequestFactory().get('/preview')
         lookup.return_value = self.run
         self.assertIsNone(view._resolve_run(request, 'article-1')[2])
+        self.assertEqual(guard.call_args.kwargs['action'], 'read')
+        self.assertEqual(guard.call_args.args[0]['connection_generation'], 1)
         self.assertEqual(view._resolve_run(request, 'article-2')[2].status_code, 404)
         self.run.organization_id = 8
         self.assertEqual(view._resolve_run(request, 'article-1')[2].status_code, 404)

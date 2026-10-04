@@ -45,8 +45,9 @@ class SlackOwnerInventoryDeployConfigTests(unittest.TestCase):
         self.assertIn('upsert_env_value SLACK_OWNER_INVENTORY_ENABLED "false" || true', recovery)
         self.assertLess(
             recovery.index('upsert_env_value SLACK_OWNER_INVENTORY_ENABLED "false" || true'),
-            recovery.index('docker compose up -d --no-deps --force-recreate "\\${runtime_services[@]}" || true'),
+            recovery.index('if docker compose up -d --no-deps --force-recreate "\\${runtime_services[@]}"'),
         )
+        self.assertNotIn('docker compose up -d --no-deps --force-recreate "\\${runtime_services[@]}" || true', recovery)
 
     def test_running_web_must_have_reviewed_inventory_flag(self):
         self.assertIn(

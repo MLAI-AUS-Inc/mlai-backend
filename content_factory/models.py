@@ -14,6 +14,11 @@ class OrganizationContentConfig(models.Model):
     organization = models.OneToOneField(
         Organization, on_delete=models.CASCADE, related_name='content_config'
     )
+    website_connection = models.ForeignKey(
+        "content_factory.WebsiteConnection", null=True, blank=True,
+        on_delete=models.SET_NULL, related_name="selected_configs",
+        help_text="Selected website; its generation is the publication consent authority.",
+    )
     connected_slack_user_id = models.CharField(
         max_length=50,
         blank=True,
@@ -1834,3 +1839,13 @@ class ContentIslandRefreshDispatch(models.Model):
         return f"{self.organization.domain}/{self.local_date} ({self.status})"
 
 
+# Keep connection lifecycle records in a small domain-owned module while exposing
+# them through Django's normal models discovery and migration state.
+from .website_models import (  # noqa: E402,F401
+    WebsiteConnection,
+    WebsiteConnectionOperation,
+    WebsiteConnectionTarget,
+    WebsiteRepositoryMutation,
+    WebsiteScanSnapshot,
+    WebsiteTemplateRevision,
+)

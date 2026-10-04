@@ -10,6 +10,7 @@ from core.slack_founder_link_retention import (
 )
 from content_analytics.services.report_scheduler import run_daily_article_report_scheduler
 from content_factory.reconciliation import run_content_factory_reconciliation_sweep
+from content_factory.website_reconciliation import process_website_connection_operations
 from content_factory.services.island_refresh_scheduler import run_island_refresh_scheduler
 from integrations.services.daily_discovery import (
     enqueue_scheduled_discovery,
@@ -190,6 +191,7 @@ class Command(BaseCommand):
             # "registry exists" guards. Self-throttling (min-age + probe
             # interval + batch cap), so it is safe to tick every loop.
             ("github_installation_reconciliation", run_github_installation_reconciliation_sweep),
+            ("website_connection_operations", process_website_connection_operations),
             # Refreshes the durable Stripe payout ledger once per local day.
             # This never posts to Xero; posting always requires admin approval.
             ("stripe_payout_reconciliation", run_daily_payout_reconciliation),

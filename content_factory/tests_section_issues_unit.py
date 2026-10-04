@@ -12,6 +12,31 @@ from content_factory import vibe_marketing_views as views
 
 
 class SectionIssueContractTests(SimpleTestCase):
+    def test_saved_delivery_confirmation_is_projected_only_from_original_input(self):
+        now = datetime.now(timezone.utc)
+        run = SimpleNamespace(run_id="portable-summary", workflow="island_refresh", domain="example.test", github_repo="",
+            status="blocked", current_step="", approval_state="not_required", resume_available=True,
+            created_at=now, updated_at=now, step_order=[], steps=SimpleNamespace(order_by=lambda *args: []),
+            result={"delivery_mode": "content_only", "delivery_mode_confirmed": True}, run_request={},
+            acceptance_summary={}, verification_summary={}, error="")
+        with patch.object(views, "_run_source_run_id", return_value=""), \
+             patch.object(views, "_article_restart_available", return_value=False), \
+             patch.object(views, "_article_setup_state", return_value={}), \
+             patch.object(views, "_workflow_progress", return_value={}), \
+             patch.object(views, "_content_package_from_run", return_value=None), \
+             patch.object(views, "_component_feedback_from_run", return_value={}), \
+             patch.object(views, "_run_content_island_payload", return_value=None):
+            for mode in ("summary", "status", "full"):
+                projected = views._serialize_run(run, mode=mode)
+                self.assertEqual(projected["deliveryMode"], "")
+                self.assertFalse(projected["deliveryModeConfirmed"])
+            run.run_request = {"delivery_mode": "content_only", "delivery_mode_confirmed": True}
+            projected = views._serialize_run(run, mode="summary")
+            self.assertEqual(projected["deliveryMode"], "content_only")
+            self.assertTrue(projected["deliveryModeConfirmed"])
+            run.run_request["delivery_mode_confirmed"] = "false"
+            self.assertFalse(views._serialize_run(run, mode="summary")["deliveryModeConfirmed"])
+
     def test_hosted_quality_issues_appear_in_full_and_compact_article_views(self):
         from content_factory.tests_hosted_quality_issues_unit import sixth_shaped_report
 

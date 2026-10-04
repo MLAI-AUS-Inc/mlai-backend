@@ -58,6 +58,10 @@ ARTICLE_SETUP_RESET_KEYS = ("article_setup_reset", "article_setup_reset_at", "ar
 # reset leaves these, which made a "reset" still reuse old components, short-circuit the
 # next scan (stale sha/fingerprint), and inherit stale repo classification + design memory.
 ARTICLE_SETUP_DEEP_RESET_FIELDS = (
+    "scan_artifact_cache",
+    "article_template",
+    "resource_prompt",
+    "design_guide",
     "article_system_setup_cache",
     "framework_component_specs",
     "last_scanned_sha",
@@ -84,7 +88,7 @@ def carry_reset_markers(source, target):
     """
     if not isinstance(source, dict) or not isinstance(target, dict):
         return target
-    for key in ARTICLE_SETUP_RESET_KEYS:
+    for key in (*ARTICLE_SETUP_RESET_KEYS, "publish_disconnected_at"):
         if key in source and key not in target:
             target[key] = source[key]
     return target

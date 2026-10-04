@@ -24,6 +24,11 @@ SLACK_OWNER_INVENTORY_ENABLED="${SLACK_OWNER_INVENTORY_ENABLED:-false}"
 COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED="${COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED:-false}"
 VALLEY_MCP_ENABLED="${VALLEY_MCP_ENABLED:-false}"
 VALLEY_MCP_PUBLIC_BASE_URL="${VALLEY_MCP_PUBLIC_BASE_URL:-https://api.mlai.au}"
+WEBSITE_CONNECTION_WRITE_MODE="${WEBSITE_CONNECTION_WRITE_MODE:-disabled}"
+WEBSITE_CONNECTION_CANARY_DOMAINS="${WEBSITE_CONNECTION_CANARY_DOMAINS:-}"
+APPROVED_MIGRATION_PLAN_SHA256="${APPROVED_MIGRATION_PLAN_SHA256:-}"
+export WEBSITE_CONNECTION_WRITE_MODE WEBSITE_CONNECTION_CANARY_DOMAINS APPROVED_MIGRATION_PLAN_SHA256
+python3 scripts/validate_website_deploy_config.py
 # Empty optional values retain the host's existing startup gate/ownership proof.
 COMMUNITY_CHAT_STARTUP_UPDATES_ENABLED="${COMMUNITY_CHAT_STARTUP_UPDATES_ENABLED:-}"
 VALLEY_MCP_DOMAIN_VERIFICATION_TOKEN="${VALLEY_MCP_DOMAIN_VERIFICATION_TOKEN:-}"
@@ -377,6 +382,12 @@ install_remote_env_value() {
     printf '%s' "$value" \
         | ssh "$DEPLOY_SSH_TARGET" "$PROJECT_DIR/scripts/upsert_env_value_from_stdin.sh $key"
 }
+
+# Always install optional empty values too: clearing a repository variable must
+# remove a previous release's canary list or exact migration approval.
+install_remote_env_value WEBSITE_CONNECTION_WRITE_MODE "$WEBSITE_CONNECTION_WRITE_MODE"
+install_remote_env_value WEBSITE_CONNECTION_CANARY_DOMAINS "$WEBSITE_CONNECTION_CANARY_DOMAINS"
+install_remote_env_value APPROVED_MIGRATION_PLAN_SHA256 "$APPROVED_MIGRATION_PLAN_SHA256"
 
 echo "🔧 Updating Valley MCP public configuration..."
 install_remote_env_value VALLEY_MCP_ENABLED "$VALLEY_MCP_ENABLED"
@@ -1299,6 +1310,110 @@ if parsed.username or parsed.password or parsed.query or parsed.fragment:
     migration_started=0
     schema_transition_started=0
     schema_transition_completed=0
+    writer_pause_sentinel=/run/mlai-backend-writers-paused
+    writer_watchdog_units_to_restore=()
+    pause_host_writer_watchdogs() {
+        local units unit exec_start active_state watchdog_processes watchdog_status
+        # The host may still run a watchdog from /srv rather than the checkout
+        # being deployed to /root. Discover its systemd unit by ExecStart, not
+        # by a guessed unit name, and stop it before pausing any writer.
+        if ! units=\$(systemctl list-units --all --type=service --plain --no-legend | awk '{print (\$1 == "●" ? \$2 : \$1)}'); then
+            echo "❌ Cannot inventory host watchdog units; migration has not started." >&2
+            return 1
+        fi
+        for unit in \$units; do
+            if ! exec_start=\$(systemctl show --property=ExecStart --value "\$unit"); then
+                echo "❌ Cannot inspect host service \$unit; migration has not started." >&2
+                return 1
+            fi
+            case "\$exec_start" in
+                *docker-health-watchdog.sh*) ;;
+                *) continue ;;
+            esac
+            if ! active_state=\$(systemctl show --property=ActiveState --value "\$unit"); then
+                echo "❌ Cannot inspect watchdog state for \$unit; migration has not started." >&2
+                return 1
+            fi
+            case "\$active_state" in
+                inactive|failed) ;;
+                *) writer_watchdog_units_to_restore+=("\$unit") ;;
+            esac
+            if ! systemctl stop "\$unit"; then
+                echo "❌ Could not stop host watchdog \$unit; migration has not started." >&2
+                return 1
+            fi
+            if [ "\$(systemctl show --property=ActiveState --value "\$unit")" != "inactive" ]; then
+                echo "❌ Host watchdog \$unit is still active; migration has not started." >&2
+                return 1
+            fi
+        done
+        if ! command -v pgrep >/dev/null 2>&1; then
+            echo "❌ Cannot check for unmanaged host watchdog processes; migration has not started." >&2
+            return 1
+        fi
+        watchdog_processes=\$(pgrep -af '[d]ocker-health-watchdog.sh') && watchdog_status=0 || watchdog_status=\$?
+        if [ "\$watchdog_status" -gt 1 ] || [ -n "\$watchdog_processes" ]; then
+            echo "❌ A host watchdog remains running or cannot be inspected; migration has not started." >&2
+            return 1
+        fi
+    }
+    restore_host_writer_watchdogs() {
+        local unit
+        # Bash 3.2 treats expansion of an empty array as unbound under set -u.
+        if [ "\${#writer_watchdog_units_to_restore[@]}" -eq 0 ]; then
+            return 0
+        fi
+        for unit in "\${writer_watchdog_units_to_restore[@]}"; do
+            systemctl start "\$unit" || return 1
+            if [ "\$(systemctl show --property=ActiveState --value "\$unit")" != "active" ]; then
+                echo "❌ Host watchdog \$unit did not resume." >&2
+                return 1
+            fi
+        done
+        writer_watchdog_units_to_restore=()
+    }
+    pause_runtime_writers_for_migration() {
+        local service container_ids container_id running
+        if [ -e "\$writer_pause_sentinel" ]; then
+            echo "❌ A prior migration writer pause is still active; operator review is required." >&2
+            return 1
+        fi
+        # The host watchdog must see the pause before any Compose service is
+        # stopped, or it could restart web during a long schema transition.
+        if ! printf '%s\n' "$APP_RELEASE" > "\$writer_pause_sentinel"; then
+            rm -f "\$writer_pause_sentinel" || true
+            return 1
+        fi
+        if ! pause_host_writer_watchdogs; then
+            # No Compose writer has been touched. Keep the previous runtime
+            # online and undo any watchdog stops that completed before failure.
+            if restore_host_writer_watchdogs; then
+                rm -f "\$writer_pause_sentinel" || true
+            fi
+            return 1
+        fi
+        runtime_pause_started=1
+        if ! docker compose stop "\${all_runtime_writer_services[@]}"; then
+            echo "❌ Could not stop every runtime writer; migration has not started." >&2
+            return 1
+        fi
+        for service in "\${all_runtime_writer_services[@]}"; do
+            if ! container_ids=\$(docker compose ps --all --quiet "\$service"); then
+                echo "❌ Could not inspect stopped writer service \$service; migration has not started." >&2
+                return 1
+            fi
+            for container_id in \$container_ids; do
+                if ! running=\$(docker inspect --format '{{.State.Running}}' "\$container_id"); then
+                    echo "❌ Could not inspect writer container \$container_id; migration has not started." >&2
+                    return 1
+                fi
+                if [ "\$running" != "false" ]; then
+                    echo "❌ Writer service \$service is still running (\$container_id); migration has not started." >&2
+                    return 1
+                fi
+            done
+        done
+    }
     restore_runtime_on_error() {
         if [ "\$runtime_restore_attempted" = "1" ]; then
             return
@@ -1382,6 +1497,7 @@ if parsed.username or parsed.password or parsed.query or parsed.fragment:
                 echo "❌ CRITICAL: migration transition is incomplete; runtime services remain stopped for audited schema repair."
                 echo "⚠️ Deployment failed after schema advancement began; keeping all runtime writers safely disabled."
                 docker compose stop "\${all_runtime_writer_services[@]}" || true
+                # Keep the watchdog pause until an operator repairs the schema.
                 return
             fi
         fi
@@ -1407,11 +1523,18 @@ if parsed.username or parsed.password or parsed.query or parsed.fragment:
                 restored_services+=("\$service")
             done < "\$rollback_manifest"
             if [ "\${#restored_services[@]}" -gt 0 ]; then
-                docker compose up -d --no-deps --force-recreate "\${restored_services[@]}"
+                if ! docker compose up -d --no-deps --force-recreate "\${restored_services[@]}"; then
+                    echo "❌ Previous runtime could not be restored; writer watchdog remains paused." >&2
+                    return
+                fi
             elif [ "\${#previous_runtime_container_ids[@]}" -gt 0 ]; then
-                docker start "\${previous_runtime_container_ids[@]}" >/dev/null || true
+                if ! docker start "\${previous_runtime_container_ids[@]}" >/dev/null; then
+                    echo "❌ Previous runtime could not be restarted; writer watchdog remains paused." >&2
+                    return
+                fi
             else
                 echo "⚠️ No prior runtime containers were recorded; leaving services stopped for operator recovery."
+                return
             fi
             if [ "\$web_candidate_started" = "1" ]; then
                 wait_for_origin_web_health 8001 "\$previous_app_release" || return
@@ -1435,14 +1558,27 @@ if parsed.username or parsed.password or parsed.query or parsed.fragment:
             else
                 echo "⚠️ No prior scheduler container was available to restore." >&2
             fi
+            if restore_host_writer_watchdogs; then
+                rm -f "\$writer_pause_sentinel" || echo "❌ Clear the writer pause sentinel manually after recovery." >&2
+            else
+                echo "❌ Host watchdog recovery is incomplete; writer pause sentinel remains." >&2
+            fi
             return
         fi
 
         # Once a migration began, the old binary may be incompatible with the
         # schema. Recreate the new image with staged-off features and require
         # a fresh scheduler tick after recovery.
-        docker compose up -d --no-deps --force-recreate "\${runtime_services[@]}" || true
-        verify_scheduler_recovery_tick "" "" 0 || true
+        if docker compose up -d --no-deps --force-recreate "\${runtime_services[@]}" \
+            && verify_scheduler_recovery_tick "" "" 0; then
+            if restore_host_writer_watchdogs; then
+                rm -f "\$writer_pause_sentinel" || echo "❌ Clear the writer pause sentinel manually after recovery." >&2
+            else
+                echo "❌ Host watchdog recovery is incomplete; writer pause sentinel remains." >&2
+            fi
+        else
+            echo "❌ New runtime recovery is incomplete; writer watchdog remains paused." >&2
+        fi
     }
 
     # A code-only release has no schema transition. Keep the current web and
@@ -1457,7 +1593,7 @@ if parsed.username or parsed.password or parsed.query or parsed.fragment:
         migrations_pending=0
         echo "✅ No pending migrations; current runtime stays online during deployment checks."
     else
-        migration_plan=\$(compose_run_web python manage.py migrate --plan --noinput)
+        migration_plan=\$(compose_run_web python manage.py migrate --plan --noinput | python3 scripts/validate_website_deploy_config.py --migration-plan)
         printf '%s\n' "\$migration_plan"
         approved_plan_sha256=\$(read_env_value APPROVED_MIGRATION_PLAN_SHA256)
         actual_plan_sha256=\$(printf '%s' "\$migration_plan" | sha256sum | cut -d ' ' -f 1)
@@ -1479,8 +1615,7 @@ if parsed.username or parsed.password or parsed.query or parsed.fragment:
     if [ "\$migrations_pending" = "1" ]; then
         verify_current_main_release_on_host
         echo "⏸️ Pausing all runtime writers before DB migrations..."
-        runtime_pause_started=1
-        docker compose stop "\${all_runtime_writer_services[@]}" || true
+        pause_runtime_writers_for_migration
         echo "🗄️ Running migrations..."
         # From this point a failed migrate may still have committed earlier
         # append-only migrations. Never restore either binary until the complete
@@ -1506,6 +1641,8 @@ if parsed.username or parsed.password or parsed.query or parsed.fragment:
             # reverse an allocation whose provenance 0037 marked unknown.
             docker compose up -d --no-deps --force-recreate "\${runtime_services[@]}"
             verify_scheduler_recovery_tick "" "" 0
+            restore_host_writer_watchdogs
+            rm -f "\$writer_pause_sentinel"
             runtime_restore_attempted=1
         else
             # No schema changed and no runtime was paused. Leave the healthy
@@ -1975,6 +2112,10 @@ if slugs != expected:
     rm -f "\$preflight_headers"
     # Release checks have committed the new web slot. Housekeeping cannot
     # safely invoke image rollback after the candidate has been stopped.
+    if [ "\$migrations_pending" = "1" ]; then
+        restore_host_writer_watchdogs
+        rm -f "\$writer_pause_sentinel"
+    fi
     trap - ERR EXIT
     if [ "\$web_candidate_started" = "1" ]; then
         if wait_for_nginx_workers_to_drain "\$web_candidate_drain_workers"; then

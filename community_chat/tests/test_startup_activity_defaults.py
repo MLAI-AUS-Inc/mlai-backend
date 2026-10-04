@@ -18,7 +18,7 @@ PERIOD = {"start": "2026-09-01T00:00:00+10:00", "end": "2026-09-26T12:00:00+10:0
 
 class SourcePreferenceTests(SimpleTestCase):
     def test_off_preserves_connection_and_usability(self):
-        source = source_capabilities({"provider": "slack", "status": "connected", "connectionId": 3}, preferences={"slack": False})
+        source = source_capabilities({"provider": "slack", "status": "connected", "connectionId": 3, "selected": True}, preferences={"slack": False})
         self.assertFalse(source["enabled"])
         self.assertTrue(source["usableForUpdates"])
         self.assertTrue(source["canDisconnect"])
@@ -34,10 +34,10 @@ class SourcePreferenceTests(SimpleTestCase):
         self.assertIn("not available yet", source["warning"])
 
     def test_preferences_are_company_scoped(self):
-        profile = Obj(progress_configuration={preferences.PREFERENCE_KEY: {"a": {"gmail": False, "linear": "false"}, "b": {"gmail": True}}})
+        profile = Obj(progress_configuration={preferences.PREFERENCE_KEY: {"a:2": {"gmail": False, "linear": "false"}, "b": {"gmail": True}}})
         with patch.object(preferences.StartupProfile, "objects") as manager:
             manager.filter.return_value.first.return_value = profile
-            actual = preferences.source_preferences(Obj(pk="a", organization_id=7))
+            actual = preferences.source_preferences(Obj(pk="a", organization_id=7, profile=Obj(user_id=2)))
             manager.filter.assert_called_once_with(organization_id=7)
         self.assertEqual(actual, {"gmail": False})
 
@@ -45,14 +45,14 @@ class SourcePreferenceTests(SimpleTestCase):
         profile = MagicMock(progress_configuration={"version": 2, preferences.PREFERENCE_KEY: {"sibling": {"gmail": True}}})
         with patch.object(preferences.Organization, "objects"), patch.object(preferences.StartupProfile, "objects") as manager:
             manager.select_for_update.return_value.get_or_create.return_value = profile, False
-            result = preferences.set_source_preference.__wrapped__(Obj(pk="owned", organization_id=7), "gmail", False)
-        self.assertEqual(profile.progress_configuration, {"version": 2, preferences.PREFERENCE_KEY: {"sibling": {"gmail": True}, "owned": {"gmail": False}}})
+            result = preferences.set_source_preference.__wrapped__(Obj(pk="owned", organization_id=7, profile=Obj(user_id=2)), "gmail", False)
+        self.assertEqual(profile.progress_configuration, {"version": 2, preferences.PREFERENCE_KEY: {"sibling": {"gmail": True}, "owned:2": {"gmail": False}}})
         self.assertEqual(result["enabled"], False)
 
     def test_invalid_values_fail_before_persistence(self):
         for provider, value in (("other", True), ("gmail", "false"), ("slack", 0), ("luma", None)):
             with self.subTest(provider=provider, value=value), self.assertRaises(ValidationError):
-                preferences.set_source_preference.__wrapped__(Obj(pk="owned", organization_id=7), provider, value)
+                preferences.set_source_preference.__wrapped__(Obj(pk="owned", organization_id=7, profile=Obj(user_id=2)), provider, value)
 
     def test_post_does_not_disconnect(self):
         view = DisconnectView()
@@ -144,9 +144,12 @@ class WorkerScopeTests(SimpleTestCase):
 
     def test_catalog_failure_returns_actionable_client_error(self):
         from community_chat.startups.views import GenerateView
-        with patch("vibe_raising.views.VibeRaisingEmailDraftStartView.post", side_effect=external_connectors.ConnectorConfigurationError("Catalog did not finish.")), self.assertRaises(ValidationError) as caught:
-            GenerateView().post(Obj(data={"inputSources": ["slack"]}))
+        view = GenerateView()
+        view.company = Obj(organization=Obj(pk=7))
+        with patch("integrations.services.external_connectors.serialize_source_status", return_value={"sources": [{"provider": "slack", "key": "slack", "status": "connected", "selected": True}]}), patch("vibe_raising.views.VibeRaisingEmailDraftStartView.post", side_effect=external_connectors.ConnectorConfigurationError("Catalog did not finish.")), self.assertRaises(ValidationError) as caught:
+            view.post(Obj(user=Obj(pk=2), data={"inputSources": ["slack"]}))
         self.assertIn("Catalog did not finish.", str(caught.exception.detail))
+
 
 
 class CachedSourceReplayTests(SimpleTestCase):

@@ -11,6 +11,8 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from . import vibe_marketing_views as views
+from .website_connections import authority_guard
+from .website_contract import WebsiteAuthorityError, connection_contract
 
 SALT = "article-preview-read-only-v1"
 LIFETIME = 900
@@ -19,6 +21,7 @@ LIFETIME = 900
 class ArticlePreviewLeaseView(APIView):
     """Mint a grant only after the existing company/run authorization check."""
 
+    @views.guarded_owner_operation("preview", run_operation=True)
     def post(self, request, run_id):
         context, error = views._resolve_context_or_response(request, require_domain=False)
         if error is not None:
@@ -27,7 +30,7 @@ class ArticlePreviewLeaseView(APIView):
         if not views._run_belongs_to_context(run, context):
             return Response({"detail": "Run not found."}, status=404)
         token = signing.dumps({"run": run.run_id, "organization": context.organization.id,
-                               "domain": context.organization.domain}, salt=SALT, compress=True)
+                               "domain": context.organization.domain, **connection_contract(run.run_request or {})}, salt=SALT, compress=True)
         prefix = f"/api/v1/vibe-marketing/article-preview/{quote(token, safe='')}/{quote(run.run_id, safe='')}/"
         return Response({"url": request.build_absolute_uri(prefix), "expiresIn": LIFETIME},
                         headers={"Cache-Control": "no-store"})
@@ -51,6 +54,12 @@ class ArticlePreviewLeaseProxyView(views.VibeMarketingRunLivePreviewProxyView):
         context = SimpleNamespace(organization=SimpleNamespace(id=grant["organization"], domain=grant["domain"]))
         if not views._run_belongs_to_context(run, context):
             return None, None, Response({"detail": "Preview not found."}, status=404)
+        try:
+            with authority_guard(grant, action="read"):
+                if connection_contract(grant) != connection_contract(run.run_request or {}):
+                    raise WebsiteAuthorityError("website_connection_changed", "Preview access expired.")
+        except WebsiteAuthorityError as exc:
+            return None, None, Response(exc.as_dict(), status=exc.status)
         return context, run, None
 
     def get(self, request, run_id, token, proxy_path=""):

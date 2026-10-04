@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from contextlib import contextmanager
 from datetime import date
 
 from django.conf import settings
@@ -31,6 +32,14 @@ from core.models import (
     WebsiteDesignSnapshot,
 )
 from content_factory.service_views import _serialize_content_factory_run, _sync_content_factory_run_snapshot
+from content_factory.website_contract import WebsiteAuthorityError, connection_contract
+from content_factory.website_connections import (
+    authority_guard,
+    needs_repository_authority,
+    portable_run_update_allowed,
+    require_unlocked_remote_call,
+    scoped_run_contract,
+)
 from integrations import http_client as http_requests
 from integrations.content_factory_contract import CONTENT_FACTORY_REQUEST_SOURCE
 from integrations.services.article_generation import (
@@ -215,6 +224,7 @@ def _content_factory_headers() -> dict:
 
 
 def _content_factory_request(method: str, path: str, *, payload: dict | None = None):
+    require_unlocked_remote_call()
     url = f"{_content_factory_base_url()}{path}"
     request = getattr(http_requests, method.lower())
     kwargs = {"headers": _content_factory_headers(), "timeout": (3, 30)}
@@ -237,6 +247,17 @@ def _proxy_error(response):
     return Response(_response_json(response), status=response.status_code)
 
 
+@contextmanager
+def _run_projection_scope(run: ContentFactoryRun, payload: dict, *, action: str = "read"):
+    """Keep a worker observation under the run's original website consent."""
+    original = {**scoped_run_contract(run), "workflow": run.workflow}
+    if portable_run_update_allowed(run, payload) or not needs_repository_authority(original):
+        yield
+    else:
+        with authority_guard(original, action=action):
+            yield
+
+
 def _sync_remote_run_payload(run_id: str, payload: dict) -> ContentFactoryRun | None:
     if not isinstance(payload, dict) or not payload.get("workflow") or not payload.get("status"):
         return None
@@ -245,13 +266,33 @@ def _sync_remote_run_payload(run_id: str, payload: dict) -> ContentFactoryRun | 
     if not isinstance(step_states, dict):
         step_states = {}
 
-    sync_payload = dict(payload)
-    sync_payload["run_id"] = run_id
-    run, _created = _sync_content_factory_run_snapshot(
-        run_id=run_id,
-        data=sync_payload,
-        step_states=step_states,
-    )
+    # A service credential must never turn knowledge of a remote run ID into
+    # ownership or import an unknown run into this user's local history.
+    run = ContentFactoryRun.objects.filter(run_id=run_id).first()
+    if run is None:
+        return None
+    try:
+        generation_aliases = {"article_generation", "direct_generate", "confirmed_topic"}
+        if payload["workflow"] != run.workflow and not {payload["workflow"], run.workflow}.issubset(generation_aliases):
+            raise WebsiteAuthorityError("website_run_changed", "Run workflow changed.")
+        for key in ("domain", "github_repo", "slack_user_id"):
+            if payload.get(key) and payload[key] != getattr(run, key):
+                raise WebsiteAuthorityError("website_run_changed", "Run identity changed.")
+        original_contract = connection_contract(run.run_request or {})
+        for source in (payload, payload.get("run_request") or {}):
+            if any(original_contract.get(key) != value for key, value in connection_contract(source).items()):
+                raise WebsiteAuthorityError("website_run_changed", "Run website connection changed.")
+        with _run_projection_scope(run, payload):
+            sync_payload = {**payload, "run_id": run_id,
+                **{key: getattr(run, key) for key in ("workflow", "domain", "github_repo", "slack_user_id")},
+                "run_request": run.run_request}
+            run, _created = _sync_content_factory_run_snapshot(
+                run_id=run_id, data=sync_payload, step_states=step_states,
+            )
+    except WebsiteAuthorityError:
+        # Revocation and reconnect preserve the historical row. A refresh cannot
+        # resurrect it or retrofit the new connection onto its old dispatch.
+        run.refresh_from_db()
     return run
 
 
@@ -427,8 +468,14 @@ class ContentFactoryAppSettingsView(APIView):
             config.brand_name = str(data.get("brand_name") or "").strip() or config.brand_name
             config.company_context = str(data.get("company_context") or "").strip() or config.company_context
             github_repo = str(data.get("github_repo") or "").strip()
-            if github_repo:
-                config.github_repo = github_repo
+            if github_repo and github_repo.casefold() != str(config.github_repo or "").casefold():
+                from content_factory.website_connections import bind_website
+                from content_factory.website_contract import WebsiteAuthorityError
+                try:
+                    bind_website(config, user=request.user, repo=github_repo, expected=data)
+                except WebsiteAuthorityError as exc:
+                    transaction.set_rollback(True)
+                    return Response(exc.as_dict(), status=exc.status)
             config.save()
 
         return Response(
@@ -714,10 +761,10 @@ class ContentFactoryAppRunView(APIView):
         refresh = str(request.query_params.get("refresh") or "").lower() in {"1", "true", "yes"}
         run = ContentFactoryRun.objects.filter(run_id=run_id).first()
 
-        if run and not _run_belongs_to_actor(run, actor_ids):
+        if run is None or not _run_belongs_to_actor(run, actor_ids):
             return Response({"error": "Run not found"}, status=status.HTTP_404_NOT_FOUND)
 
-        should_fetch_remote = refresh or run is None or (run.status in ACTIVE_RUN_STATUSES)
+        should_fetch_remote = refresh or (run.status in ACTIVE_RUN_STATUSES)
         if should_fetch_remote:
             try:
                 response = _content_factory_request("get", f"/api/runs/{run_id}")
@@ -753,7 +800,7 @@ class ContentFactoryAppRunArtifactsView(APIView):
     def get(self, request, run_id: str):
         actor_ids = actor_ids_for_user(request.user)
         run = ContentFactoryRun.objects.filter(run_id=run_id).first()
-        if run and not _run_belongs_to_actor(run, actor_ids):
+        if run is None or not _run_belongs_to_actor(run, actor_ids):
             return Response({"error": "Run not found"}, status=status.HTTP_404_NOT_FOUND)
 
         try:
@@ -786,7 +833,7 @@ class ContentFactoryAppRunControlView(APIView):
         actor_id = _ensure_actor_id(request.user)
         actor_ids = actor_ids_for_user(request.user)
         run = ContentFactoryRun.objects.filter(run_id=run_id).first()
-        if run and not _run_belongs_to_actor(run, actor_ids):
+        if run is None or not _run_belongs_to_actor(run, actor_ids):
             return Response({"error": "Run not found"}, status=status.HTTP_404_NOT_FOUND)
 
         if action == "delivery-mode":
@@ -812,7 +859,12 @@ class ContentFactoryAppRunControlView(APIView):
             return Response({"error": "Unsupported action"}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
+            if action != "deny":
+                with _run_projection_scope(run, {}, action="setup"):
+                    pass
             response = _content_factory_request("post", f"/api/runs/{run_id}/{action}", payload={})
+        except WebsiteAuthorityError as exc:
+            return Response(exc.as_dict(), status=exc.status)
         except (http_requests.exceptions.RequestException, ArticleGenerationError) as exc:
             return Response({"error": str(exc)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
 
@@ -824,13 +876,16 @@ class ContentFactoryAppRunControlView(APIView):
         if remote_run:
             return Response(_serialize_content_factory_run(remote_run), status=status.HTTP_200_OK)
 
-        if run:
-            if action == "deny":
-                run.status = ContentFactoryRunStatus.DENIED
-            elif action in {"approve", "resume"}:
-                run.status = ContentFactoryRunStatus.RUNNING
-            run.resume_available = action == "resume"
-            run.save(update_fields=["status", "resume_available", "updated_at"])
+        try:
+            with _run_projection_scope(run, payload):
+                if action == "deny":
+                    run.status = ContentFactoryRunStatus.DENIED
+                elif action in {"approve", "resume"}:
+                    run.status = ContentFactoryRunStatus.RUNNING
+                run.resume_available = action == "resume"
+                run.save(update_fields=["status", "resume_available", "updated_at"])
+        except WebsiteAuthorityError as exc:
+            return Response(exc.as_dict(), status=exc.status)
 
         return Response(payload, status=status.HTTP_200_OK)
 

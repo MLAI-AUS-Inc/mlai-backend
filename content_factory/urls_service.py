@@ -1,8 +1,13 @@
 from django.urls import path
 
 from . import service_views as views
+from .website_views import WebsiteConnectionAuthorizeView, WebsiteMutationView
 
 urlpatterns = [
+    path('connections/authorize', WebsiteConnectionAuthorizeView.as_view(), name='website_connection_authorize'),
+    path('connections/authorize/', WebsiteConnectionAuthorizeView.as_view()),
+    path('connections/mutations', WebsiteMutationView.as_view(), name='website_connection_mutation'),
+    path('connections/mutations/', WebsiteMutationView.as_view()),
     path('service/config/', views.ContentFactoryServiceConfigView.as_view(), name='content_factory_service_config'),
     path('service/config', views.ContentFactoryServiceConfigView.as_view(), name='content_factory_service_config_no_slash'),
     path('org/config/', views.ContentFactoryOrgConfigView.as_view(), name='content_factory_org_config'),

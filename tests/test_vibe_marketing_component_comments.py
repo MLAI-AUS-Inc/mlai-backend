@@ -7,7 +7,9 @@ from django.contrib.auth import get_user_model
 from django.core.cache import cache
 from django.test import TestCase, override_settings
 from django.utils import timezone
-from rest_framework.test import APIClient
+from tests.website_fixtures import WebsiteBoundAPIClient
+from content_factory.website_connections import contract_for
+from content_factory.website_models import WebsiteConnectionTarget, WebsiteRepositoryMutation
 
 from integrations import http_client
 from content_factory.article_publish_approval import RECEIPT_KEY, make_article_publish_approval_receipt
@@ -24,6 +26,7 @@ from workflow_runs.models import (
 )
 from content_factory.vibe_marketing_views import (
     _apply_setup_merge_result,
+    _maybe_verify_merged_setup_for_blocked_articles,
     _call_content_factory_run_status,
     _call_content_factory_live_preview,
     _content_package_from_run,
@@ -47,7 +50,76 @@ class _Response(SimpleNamespace):
         return self.payload
 
 
+def _open_setup_pull_fixture(method, path, **kwargs):
+    """A synthetic provider read; unexpected repository writes fail the test."""
+    if method != "GET" or "/pulls/" not in path:
+        raise AssertionError(f"Unexpected GitHub operation in setup read fixture: {method} {path}")
+    return {"state": "open", "merged": False, "head": {"sha": "c" * 40}}
+
+
 class _PublishRetryApprovalFixture:
+    def _bind_verified_website(self, config):
+        """Provide real persisted consent/proof for downstream behavior tests.
+
+        Authority denial tests live in content_factory.tests_website_connections;
+        only the GitHub HEAD transport is substituted here, never the guard.
+        """
+        self.client.bind_fixture(config, repo=config.github_repo)
+        website = self.client.website_fixture
+        website.capabilities = {"inventoryReady": True, "generationReady": True,
+                                "publishingReady": True, "previewSupported": True}
+        website.verified_sha = "a" * 40
+        website.authorized_by = self.user
+        website.last_verified_at = timezone.now()
+        website.save(update_fields=["capabilities", "verified_sha", "authorized_by", "last_verified_at"])
+        config.default_publish_target_id = "articles"
+        config.save(update_fields=["default_publish_target_id"])
+        WebsiteConnectionTarget.objects.create(
+            connection=website, target_key="articles", generation=website.generation,
+            source_sha=website.verified_sha, capabilities={"publishingReady": True},
+            verified_at=timezone.now(), contract={"target_id": "articles", "label": "Articles",
+                "publish_capability": "direct", "route": "/articles/{slug}",
+                "verification": {"status": "passed", "source_sha": website.verified_sha}},
+        )
+        WebsiteConnectionTarget.objects.create(
+            connection=website, target_key="setup-preview", generation=website.generation,
+            source_sha=website.verified_sha, capabilities={"publishingReady": False},
+            contract={"target_id": "setup-preview", "verification": {
+                "status": "preview_verified", "source_sha": "c" * 40,
+                "base_sha": website.verified_sha,
+            }},
+        )
+        self.website_binding = {**contract_for(website), "expected_source_sha": website.verified_sha}
+        provider = patch("content_factory.website_connections.verify_repository_head", return_value=website.verified_sha)
+        provider.start()
+        self.addCleanup(provider.stop)
+        native_metadata = patch("content_factory.website_connections.read_repository_native_target",
+            side_effect=lambda connection: {"id": connection.repository_id, "full_name": connection.github_repo, "default_branch": "main"})
+        native_metadata.start()
+        self.addCleanup(native_metadata.stop)
+        from integrations.services.github_app import GitHubInstallationToken
+        credential = GitHubInstallationToken(token="synthetic-fixture-token",
+            expires_at=timezone.now() + timedelta(minutes=50), installation_id=website.installation_id,
+            repository=website.github_repo)
+        tokens = patch("integrations.services.github_app.create_installation_access_token", return_value=credential)
+        tokens.start()
+        self.addCleanup(tokens.stop)
+        # The real activation gate still reads current-generation target proof.
+        # Provider transport is synthetic; fresh-head behavior is covered by
+        # tests_activation_connections and tests_activation_unit.
+        access = patch("content_factory.vibe_marketing_views._verify_github_repository_access",
+            return_value={"verified": True, "branch": website.branch, "sha": website.verified_sha})
+        access.start()
+        self.addCleanup(access.stop)
+
+    def _create_bound_run(self, **kwargs):
+        # Explicit consent is present at fixture creation, as it must be in a
+        # queued production request. Foreign-company fixtures stay unbound.
+        if kwargs.get("domain") == self.website_binding["domain"] and kwargs.get("github_repo", "").casefold() == self.website_binding["github_repo"].casefold():
+            kwargs["run_request"] = {**self.website_binding, **kwargs.get("run_request", {})}
+            kwargs.setdefault("organization", self.organization)
+        return ContentFactoryRun.objects.create(**kwargs)
+
     def _approve_review_for_publish_retry(self, run):
         """Seed an explicit prior approval for tests of publish retry behavior."""
         result = dict(run.result or {})
@@ -76,7 +148,7 @@ class _PublishRetryApprovalFixture:
         run.save(update_fields=["result", "approval_state", "run_request", "updated_at"])
 
     def _failed_intermediate_with_review_ready_child(self):
-        failed = ContentFactoryRun.objects.create(
+        failed = self._create_bound_run(
             run_id="article-run-comments-failed-intermediate",
             workflow="article_revision",
             domain="mlai.au",
@@ -85,7 +157,7 @@ class _PublishRetryApprovalFixture:
             run_request={"source_run_id": self.run.run_id},
             result={"status": "failed"},
         )
-        latest = ContentFactoryRun.objects.create(
+        latest = self._create_bound_run(
             run_id="article-run-comments-ready-grandchild",
             workflow="article_revision",
             domain="mlai.au",
@@ -113,8 +185,18 @@ class _PublishRetryApprovalFixture:
 
 
 class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase):
+    def _clear_first_time_verification(self):
+        """First setup has inventory consent, without a verified live adapter."""
+        website = self.client.website_fixture
+        website.capabilities = {**website.capabilities, "publishingReady": False}
+        website.verified_sha = ""
+        website.last_verified_at = None
+        website.save(update_fields=["capabilities", "verified_sha", "last_verified_at"])
+        website.targets.update(verified_at=None)
+
     def setUp(self):
-        self.client = APIClient()
+        cache.clear()
+        self.client = WebsiteBoundAPIClient()
         self.user = User.objects.create_user(
             email="founder-comments@example.com",
             password="password",
@@ -131,8 +213,9 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         )
         self.profile.active_company = self.company
         self.profile.save(update_fields=["active_company", "updated_at"])
-        OrganizationContentConfig.objects.create(organization=self.organization, github_repo="MLAI-AUS-Inc/mlai-au")
-        self.run = ContentFactoryRun.objects.create(
+        config = OrganizationContentConfig.objects.create(organization=self.organization, github_repo="MLAI-AUS-Inc/mlai-au")
+        self._bind_verified_website(config)
+        self.run = self._create_bound_run(
             run_id="article-run-comments",
             workflow="article_generation",
             domain="mlai.au",
@@ -237,13 +320,14 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
                 "updated_at",
             ]
         )
+        self._bind_verified_website(config)
         account, _ = PointsAccount.objects.update_or_create(
             user=self.user,
             defaults={"balance": balance, "earned_balance": balance},
         )
         return config, account
 
-    def test_vibe_zero_cost_ai_routes_require_six_roo_points_without_spending(self):
+    def test_vibe_configuration_routes_require_six_roo_points_without_spending(self):
         _config, account = self._prepare_billable_vibe_context(balance=5)
 
         with patch(
@@ -264,7 +348,6 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
                     "/api/v1/vibe-marketing/article-system-setup/",
                     {"githubRepo": "example/site", "articleSurfaceUrl": "/articles"},
                 ),
-                ("/api/v1/vibe-marketing/discovery/", {}),
             ]
             for path, payload in requests:
                 response = self.client.post(path, payload, format="json")
@@ -278,13 +361,13 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         self.assertEqual(account.balance, 5)
         self.assertEqual(account.lifetime_spent, 0)
 
-    def test_vibe_zero_cost_ai_routes_authorize_without_spending(self):
+    def test_vibe_configuration_routes_authorize_without_spending(self):
         _config, account = self._prepare_billable_vibe_context(balance=6)
         queued_payloads = {}
 
         def fake_queue(endpoint, workflow, context, config, payload, **kwargs):
             queued_payloads[endpoint] = dict(payload)
-            return ContentFactoryRun.objects.create(
+            return self._create_bound_run(
                 run_id=f"{endpoint}-roo-gate-run",
                 workflow=workflow,
                 domain=context.organization.domain,
@@ -306,7 +389,6 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
                     "/api/v1/vibe-marketing/scan/",
                     {"githubRepo": "example/site", "scanPurpose": "inventory"},
                 ),
-                ("discovery", "/api/v1/vibe-marketing/discovery/", {}),
                 (
                     "article-system-setup",
                     "/api/v1/vibe-marketing/article-system-setup/",
@@ -369,7 +451,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
             response = self.client.get(f"/api/v1/vibe-marketing/runs/{self.run.run_id}")
 
         self.assertEqual(response.status_code, 200)
-        preview_call.assert_called_once_with(run_id=self.run.run_id, method="POST", payload={"force": False})
+        preview_call.assert_called_once_with(run_id=self.run.run_id, method="POST", payload={"force": False, **self.website_binding})
         expected_preview_url = (
             f"{settings.DEFAULT_BACKEND_URL}/api/v1/vibe-marketing/runs/{self.run.run_id}"
             "/live-preview/proxy/articles/featured/generated?cfInspector=1"
@@ -394,7 +476,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         self.assertEqual(self.run.result["livePreview"]["failedCommand"], "bun run typecheck")
 
     def test_repo_scan_run_serializes_stale_retry_metadata(self):
-        scan_run = ContentFactoryRun.objects.create(
+        scan_run = self._create_bound_run(
             run_id="repo-scan-stale",
             workflow="repo_scan",
             domain="mlai.au",
@@ -422,7 +504,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         self.assertEqual(response.data["queuedAt"], "2026-05-12T03:00:00+00:00")
 
     def test_completed_repo_scan_status_ignores_stale_remote_processing(self):
-        scan_run = ContentFactoryRun.objects.create(
+        scan_run = self._create_bound_run(
             run_id="repo-scan-completed-local",
             workflow="repo_scan",
             domain="mlai.au",
@@ -457,7 +539,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         self.assertIn("content_factory_scan_status_poll_preserved_local_terminal_state", "\n".join(logs.output))
 
     def test_awaiting_confirmation_repo_scan_status_ignores_stale_remote_processing(self):
-        scan_run = ContentFactoryRun.objects.create(
+        scan_run = self._create_bound_run(
             run_id="repo-scan-awaiting-local",
             workflow="repo_scan",
             domain="mlai.au",
@@ -490,7 +572,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         self.assertEqual(scan_run.current_step, "finalize")
 
     def test_active_repo_scan_status_updates_from_remote_completed(self):
-        scan_run = ContentFactoryRun.objects.create(
+        scan_run = self._create_bound_run(
             run_id="repo-scan-running-local",
             workflow="repo_scan",
             domain="mlai.au",
@@ -588,11 +670,11 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         self.assertTrue(scaffold["passed"])
         self.assertTrue(scaffold["componentCatalogReady"])
         self.assertEqual(scaffold["missingComponents"], [])
-        self.assertFalse(response.data["hasCompletedArticleFlow"])
+        self.assertTrue(response.data["hasCompletedArticleFlow"])
         self.assertEqual(response.data["startPageMode"], "topic_picker")
 
     def test_starting_new_scan_supersedes_stale_scan_run(self):
-        stale_run = ContentFactoryRun.objects.create(
+        stale_run = self._create_bound_run(
             run_id="repo-scan-stale-old",
             workflow="repo_scan",
             domain="mlai.au",
@@ -601,7 +683,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
             current_step="load_repo_context",
             result={"stale": True, "stale_reason": "scan_queue_not_started", "retry_available": True},
         )
-        queued_run = ContentFactoryRun.objects.create(
+        queued_run = self._create_bound_run(
             run_id="repo-scan-new",
             workflow="repo_scan",
             domain="mlai.au",
@@ -634,7 +716,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
     def test_scan_approval_persists_setup_run_id_and_local_setup_child(self):
-        scan_run = ContentFactoryRun.objects.create(
+        scan_run = self._create_bound_run(
             run_id="repo-scan-awaiting-setup",
             workflow="repo_scan",
             domain="mlai.au",
@@ -759,7 +841,11 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         }
         self.run.save(update_fields=["result", "updated_at"])
 
-        response = self.client.get(f"/api/v1/vibe-marketing/runs/{self.run.run_id}")
+        with (
+            patch("content_factory.vibe_marketing_views._call_content_factory_run_status", return_value={}),
+            patch("content_factory.vibe_marketing_views._call_content_factory_live_preview", return_value=self.run.result["livePreview"]),
+        ):
+            response = self.client.get(f"/api/v1/vibe-marketing/runs/{self.run.run_id}")
 
         self.assertEqual(response.status_code, 200)
         preview = response.data["livePreview"]
@@ -769,7 +855,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         self.assertEqual(preview["nativePreviewFailure"]["errorCode"], "preview_proof_failed")
         self.assertEqual(preview["visualFallback"]["cssSources"], ["fallback.css", "app/globals.css"])
 
-    def test_completed_article_run_auto_prepare_forwards_org_github_token(self):
+    def test_completed_article_run_auto_prepare_forwards_binding_without_org_token(self):
         config = OrganizationContentConfig.objects.get(organization=self.organization)
         config.github_token_encrypted = "org-live-preview-token"
         config.save(update_fields=["github_token_encrypted", "updated_at"])
@@ -800,12 +886,11 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
             method="POST",
             payload={
                 "force": False,
-                "github_token": "org-live-preview-token",
-                "token_source": "github_oauth_user_token",
+                **self.website_binding,
             },
         )
 
-    def test_completed_article_run_auto_prepare_prefers_github_app_installation_token(self):
+    def test_completed_article_run_auto_prepare_uses_broker_binding_not_installation_token(self):
         from integrations.services.github_app import GitHubInstallationToken
 
         config = OrganizationContentConfig.objects.get(organization=self.organization)
@@ -849,16 +934,10 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
             method="POST",
             payload={
                 "force": False,
-                "github_token": "ghs_installation",
-                "github_installation_id": "12345",
-                "token_source": "github_app_installation",
+                **self.website_binding,
             },
         )
-        create_token.assert_called_once_with(
-            installation_id="12345",
-            repository="MLAI-AUS-Inc/mlai-au",
-            permission_mode="write",
-        )
+        create_token.assert_not_called()
 
     def test_completed_article_run_refreshes_starting_preview_failure(self):
         self.run.result = {
@@ -1359,12 +1438,12 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         preview_call.assert_called_once_with(
             run_id=self.run.run_id,
             method="POST",
-            payload={"force": True, "local_repo_path": ""},
+            payload={"force": True, "local_repo_path": "", **self.website_binding},
         )
         self.assertEqual(response.data["livePreview"]["status"], "failed")
 
     def test_article_system_live_preview_failure_blocks_setup_run(self):
-        setup_run = ContentFactoryRun.objects.create(
+        setup_run = self._create_bound_run(
             run_id="article-system-preview-failed",
             workflow="article_system_setup",
             domain="mlai.au",
@@ -1399,7 +1478,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         self.assertEqual(setup_run.result["article_system_setup"]["status"], "preview_failed")
         self.assertEqual(response.data["livePreview"]["builderRunUrl"], "https://github.com/drsamdonegan/content-factory/actions/runs/21")
 
-    def test_live_preview_retry_forwards_org_github_token(self):
+    def test_live_preview_retry_forwards_binding_without_org_token(self):
         config = OrganizationContentConfig.objects.get(organization=self.organization)
         config.github_token_encrypted = "org-live-preview-token"
         config.save(update_fields=["github_token_encrypted", "updated_at"])
@@ -1423,8 +1502,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
             payload={
                 "force": True,
                 "local_repo_path": "",
-                "github_token": "org-live-preview-token",
-                "token_source": "github_oauth_user_token",
+                **self.website_binding,
             },
         )
 
@@ -1531,8 +1609,8 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         self.assertEqual(response.data["componentType"], "references")
         self.assertEqual(response.data["selector"], '[data-cf-component-id="authoritative-references"]')
 
-    def test_revision_run_does_not_serialize_source_run_comments(self):
-        VibeMarketingComponentComment.objects.create(
+    def test_revision_run_projects_unresolved_source_feedback_without_copying_rows(self):
+        source_comment = VibeMarketingComponentComment.objects.create(
             run=self.run,
             actor=self.user,
             component_id="title",
@@ -1543,7 +1621,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
             status="submitted",
             batch_id="batch-original",
         )
-        revision_run = ContentFactoryRun.objects.create(
+        revision_run = self._create_bound_run(
             run_id="article-run-comments-revision",
             workflow="article_revision",
             domain="mlai.au",
@@ -1556,7 +1634,10 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         response = self.client.get(f"/api/v1/vibe-marketing/runs/{revision_run.run_id}/comments")
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data["comments"], [])
+        self.assertEqual(len(response.data["comments"]), 1)
+        self.assertEqual(response.data["comments"][0]["context"]["sourceCommentId"], str(source_comment.pk))
+        self.assertEqual(response.data["comments"][0]["status"], "draft")
+        self.assertFalse(VibeMarketingComponentComment.objects.filter(run=revision_run).exists())
         self.assertEqual(response.data["latestBatch"]["id"], "batch-original")
         self.assertEqual(response.data["latestBatch"]["sourceRunId"], self.run.run_id)
         self.assertEqual(response.data["latestBatch"]["revisionRunId"], revision_run.run_id)
@@ -1566,7 +1647,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
     def test_cancel_article_run_marks_tombstone_and_hides_from_bootstrap(self):
         self.run.status = ContentFactoryRunStatus.RUNNING
         self.run.current_step = "draft_article"
-        self.run.run_request = {"target_keyword": "ai marketing"}
+        self.run.run_request = {**self.website_binding, "target_keyword": "ai marketing"}
         self.run.result = {
             "target_keyword": "ai marketing",
             "delivery_package": {
@@ -1665,7 +1746,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
                 "updated_at",
             ]
         )
-        parent = ContentFactoryRun.objects.create(
+        parent = self._create_bound_run(
             run_id="scan-parent-clean",
             workflow="repo_scan",
             domain="mlai.au",
@@ -1678,7 +1759,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
                 "article_system_setup": {"status": "running", "setup_run_id": "setup-cancel-clean"},
             },
         )
-        setup_run = ContentFactoryRun.objects.create(
+        setup_run = self._create_bound_run(
             run_id="setup-cancel-clean",
             workflow="article_system_setup",
             domain="mlai.au",
@@ -1747,7 +1828,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         source_run_id = "disc-ai-detectors"
         keyword = "how do ai detectors work"
         attempts = [
-            ContentFactoryRun.objects.create(
+            self._create_bound_run(
                 run_id=f"ai-detectors-{idx}",
                 workflow="article_generation",
                 domain="mlai.au",
@@ -1764,7 +1845,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
             keyword_normalized=keyword,
             status=KeywordStatus.IN_PROGRESS,
         )
-        other = ContentFactoryRun.objects.create(
+        other = self._create_bound_run(
             run_id="unrelated-topic",
             workflow="article_generation",
             domain="mlai.au",
@@ -1815,7 +1896,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         if source_run_id:
             run_request["source_run_id"] = source_run_id
             result["source_run_id"] = source_run_id
-        run = ContentFactoryRun.objects.create(
+        run = self._create_bound_run(
             run_id=run_id,
             workflow=workflow,
             domain="mlai.au",
@@ -1876,7 +1957,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         self.assertEqual(lineage[0]["runId"], rev.run_id)
         self.assertEqual(lineage[0]["stageLabel"], "Needs attention")
 
-    def test_written_original_hidden_revision_visible_single_card(self):
+    def test_written_original_hidden_active_revision_visible_single_card(self):
         now = timezone.now()
         keyword = "detector false positives"
         WrittenArticle.objects.create(
@@ -1887,11 +1968,11 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
             primary_keyword=keyword,
         )
         root = self._make_article_run("fp-root", workflow="article_generation", status=ContentFactoryRunStatus.COMPLETED, keyword=keyword, updated_at=now - timedelta(minutes=10))
-        rev = self._make_article_run("fp-rev", workflow="article_revision", status=ContentFactoryRunStatus.BLOCKED, source_run_id=root.run_id, keyword=keyword, updated_at=now - timedelta(minutes=1))
+        rev = self._make_article_run("fp-rev", workflow="article_revision", status=ContentFactoryRunStatus.RUNNING, source_run_id=root.run_id, keyword=keyword, updated_at=now - timedelta(minutes=1))
 
         drafts = self.client.get("/api/v1/vibe-marketing/bootstrap/?view=summary").data["draftArticles"]
         draft_run_ids = {d["runId"] for d in drafts}
-        # the published/written original is hidden; only the revision remains, once.
+        # Published topics live in recent articles; an actively running edit remains visible.
         self.assertNotIn(root.run_id, draft_run_ids)
         lineage = self._lineage_cards(drafts, {root.run_id, rev.run_id}, root.run_id)
         self.assertEqual(len(lineage), 1, lineage)
@@ -1931,7 +2012,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
     def test_cancel_group_skips_publish_protected_attempts_and_reports_them(self):
         source_run_id = "disc-protected-ai-detectors"
         keyword = "how ai detector reports work"
-        cancellable_one = ContentFactoryRun.objects.create(
+        cancellable_one = self._create_bound_run(
             run_id="ai-detectors-cancellable-one",
             workflow="article_generation",
             domain="mlai.au",
@@ -1940,7 +2021,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
             run_request={"source_run_id": source_run_id, "target_keyword": keyword},
             result={"target_keyword": keyword},
         )
-        protected = ContentFactoryRun.objects.create(
+        protected = self._create_bound_run(
             run_id="ai-detectors-protected",
             workflow="article_generation",
             domain="mlai.au",
@@ -1952,7 +2033,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
                 "draft_pr_url": "https://github.com/MLAI-AUS-Inc/mlai-au/pull/77",
             },
         )
-        cancellable_two = ContentFactoryRun.objects.create(
+        cancellable_two = self._create_bound_run(
             run_id="ai-detectors-cancellable-two",
             workflow="article_generation",
             domain="mlai.au",
@@ -2003,7 +2084,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
     def test_submit_from_completed_revision_uses_revision_draft_comments(self):
-        revision_run = ContentFactoryRun.objects.create(
+        revision_run = self._create_bound_run(
             run_id="article-run-comments-revision",
             workflow="article_revision",
             domain="mlai.au",
@@ -2193,6 +2274,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         self.run.domain = "example.com"
         self.run.github_repo = "example/site"
         self.run.run_request = {
+            **self.website_binding,
             "topic": "Reliable Content Harnesses",
             "target_keyword": "content harness",
             "delivery_mode": "content_only",
@@ -2240,6 +2322,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         self.run.domain = "example.com"
         self.run.github_repo = "example/site"
         self.run.run_request = {
+            **self.website_binding,
             "topic": "Legacy Content Harnesses",
             "target_keyword": "legacy content harness",
             "delivery_mode": "content_only",
@@ -2268,7 +2351,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
     def test_article_system_revision_submits_setup_pinned_comments(self):
-        setup_run = ContentFactoryRun.objects.create(
+        setup_run = self._create_bound_run(
             run_id="article-system-setup-comments",
             workflow="article_system_setup",
             domain="mlai.au",
@@ -2350,7 +2433,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
     def test_article_system_revision_rolls_pins_back_to_draft_on_definitive_cf_rejection(self):
-        setup_run = ContentFactoryRun.objects.create(
+        setup_run = self._create_bound_run(
             run_id="article-system-setup-4xx",
             workflow="article_system_setup",
             domain="mlai.au",
@@ -2390,7 +2473,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
     def test_article_system_revision_keeps_pins_submitted_on_retryable_cf_failure(self):
-        setup_run = ContentFactoryRun.objects.create(
+        setup_run = self._create_bound_run(
             run_id="article-system-setup-5xx",
             workflow="article_system_setup",
             domain="mlai.au",
@@ -2428,7 +2511,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
     def test_article_system_revision_keeps_freeform_body_compatibility(self):
-        setup_run = ContentFactoryRun.objects.create(
+        setup_run = self._create_bound_run(
             run_id="article-system-setup-freeform",
             workflow="article_system_setup",
             domain="mlai.au",
@@ -2463,7 +2546,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         # A Content Factory 5xx is retryable; the view must NOT report it as a 202 (which the
         # frontend would treat as a successful send and silently redirect), but as a 502 while
         # still persisting the batch as submitted/retryable so "Retry revision comments" works.
-        setup_run = ContentFactoryRun.objects.create(
+        setup_run = self._create_bound_run(
             run_id="article-system-setup-cf-500",
             workflow="article_system_setup",
             domain="mlai.au",
@@ -2538,7 +2621,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
     def test_submit_from_failed_revision_retries_source_batch(self):
-        revision_run = ContentFactoryRun.objects.create(
+        revision_run = self._create_bound_run(
             run_id="article-run-comments-revision",
             workflow="article_revision",
             domain="mlai.au",
@@ -2633,15 +2716,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
             opportunity_index=80,
             status=KeywordStatus.PENDING,
         )
-        ResearchedKeyword.objects.create(
-            organization=self.organization,
-            keyword="australian founders",
-            volume=700,
-            difficulty=30,
-            opportunity_index=80,
-            status=KeywordStatus.PENDING,
-        )
-        self.run.run_request = {"delivery_mode": "content_only"}
+        self.run.run_request = {**self.website_binding, "delivery_mode": "content_only"}
         self.run.acceptance_summary = {"content_packaged": True}
         self.run.result = {
             "delivery_mode": "content_only",
@@ -2747,7 +2822,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
             "pr_url": "https://github.com/MLAI-AUS-Inc/mlai-au/pull/99",
         }
         self.run.save(update_fields=["acceptance_summary", "result", "updated_at"])
-        active_run = ContentFactoryRun.objects.create(
+        active_run = self._create_bound_run(
             run_id="new-article-generation",
             workflow="confirmed_topic",
             domain="mlai.au",
@@ -3021,7 +3096,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
             },
         }
         self.run.save(update_fields=["status", "current_step", "result", "updated_at"])
-        ContentFactoryRun.objects.create(
+        self._create_bound_run(
             run_id="setup-status-view",
             workflow="article_system_setup",
             domain="mlai.au",
@@ -3071,7 +3146,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
                 "updated_at",
             ]
         )
-        self.run.run_request = {"delivery_mode": "content_only"}
+        self.run.run_request = {**self.website_binding, "delivery_mode": "content_only"}
         self.run.acceptance_summary = {"content_packaged": True}
         self.run.result = {
             "delivery_mode": "content_only",
@@ -3142,9 +3217,11 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         self.assertEqual(steps["choose_topic"]["status"], "locked")
         self.assertIsNone(steps["choose_topic"]["primaryAction"])
 
-    def test_first_time_articles_setup_preview_blocks_research_and_article_actions(self):
+    @patch("content_factory.vibe_marketing_views._github_api_request", new=_open_setup_pull_fixture)
+    def test_first_time_setup_allows_research_but_blocks_explicit_publication(self):
+        self._clear_first_time_verification()
         self._prepare_articles_setup_gate(status="preview_ready")
-        ContentFactoryRun.objects.create(
+        self._create_bound_run(
             run_id="setup-gate-run",
             workflow="article_system_setup",
             domain="mlai.au",
@@ -3174,19 +3251,27 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         self.assertEqual(steps["research"]["status"], "locked")
         self.assertEqual(steps["choose_topic"]["status"], "locked")
 
-        discovery_response = self.client.post("/api/v1/vibe-marketing/discovery/", {}, format="json")
-        self.assertEqual(discovery_response.status_code, 409)
-        self.assertEqual(discovery_response.data["code"], "article_system_setup_blocked")
+        # Research is independent of website setup; only publication waits for
+        # the verified target. Keep dispatch synthetic while exercising consent.
+        discovery_run = self._create_bound_run(
+            run_id="research-during-setup", workflow="auto_discovery", domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au", status=ContentFactoryRunStatus.QUEUED,
+        )
+        with patch("content_factory.vibe_marketing_views._queue_content_factory_run", return_value=discovery_run) as queue:
+            discovery_response = self.client.post("/api/v1/vibe-marketing/discovery/", {}, format="json")
+        self.assertEqual(discovery_response.status_code, 202)
+        self.assertEqual(queue.call_args.kwargs["workflow"], "auto_discovery")
 
         article_response = self.client.post(
             "/api/v1/vibe-marketing/article/",
-            {"topic": "AI adoption", "targetKeyword": "ai adoption"},
+            {"topic": "AI adoption", "targetKeyword": "ai adoption", "deliveryMode": "publish_code", "deliveryModeExplicit": True},
             format="json",
         )
         self.assertEqual(article_response.status_code, 409)
         self.assertEqual(article_response.data["code"], "article_system_setup_blocked")
 
     def test_code_review_ready_setup_moves_wizard_to_review_step(self):
+        self._clear_first_time_verification()
         # Server-rendered stacks get no hosted preview; the run parks in
         # code_review_ready (content-factory#599). The wizard must advance to
         # the review step with a link to the run page — previously this status
@@ -3202,7 +3287,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         article_system["pending_article_system_setup"] = pending
         config.article_system = article_system
         config.save(update_fields=["article_system", "updated_at"])
-        ContentFactoryRun.objects.create(
+        self._create_bound_run(
             run_id="setup-gate-run",
             workflow="article_system_setup",
             domain="mlai.au",
@@ -3233,7 +3318,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         self.assertIn("setup-gate-run", steps["review"]["primaryAction"]["href"])
 
     def _create_code_review_ready_run(self):
-        return ContentFactoryRun.objects.create(
+        return self._create_bound_run(
             run_id="setup-gate-run",
             workflow="article_system_setup",
             domain="mlai.au",
@@ -3252,6 +3337,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         )
 
     def test_code_review_ready_wizard_survives_premature_publish_target(self):
+        self._clear_first_time_verification()
         # arb-gen.com: Content Factory registered a publish target synthesized
         # from the scaffold's setup cache while the setup run was still awaiting
         # approval. The org then computed generation_ready via "published",
@@ -3290,6 +3376,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         self.assertEqual(steps["review"]["status"], "needs_action")
         self.assertEqual(steps["review"]["primaryAction"]["label"], "Review setup changes")
 
+    @patch("content_factory.vibe_marketing_views._github_api_request", new=_open_setup_pull_fixture)
     def test_status_view_result_includes_setup_status(self):
         # The wizard's poller reads runs/<id>/?view=status (compact serializer)
         # and resolves the child status from result.setup_status. The compact
@@ -3325,9 +3412,11 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         config.publish_targets = [{"kind": "react_article_system", "source": "scan"}]
         self.assertTrue(_article_system_is_published(config, {"state": "missing"}))
 
+    @patch("content_factory.vibe_marketing_views._github_api_request", new=_open_setup_pull_fixture)
     def test_first_time_articles_setup_preview_failed_shows_review_diagnostics(self):
+        self._clear_first_time_verification()
         self._prepare_articles_setup_gate(status="preview_failed")
-        ContentFactoryRun.objects.create(
+        self._create_bound_run(
             run_id="setup-gate-run",
             workflow="article_system_setup",
             domain="mlai.au",
@@ -3370,7 +3459,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         config.article_system = article_system
         config.publish_targets = [{"id": "articles", "label": "Articles"}]
         config.save(update_fields=["article_system", "publish_targets", "updated_at"])
-        ContentFactoryRun.objects.create(
+        self._create_bound_run(
             run_id="setup-gate-run",
             workflow="article_system_setup",
             domain="mlai.au",
@@ -3389,7 +3478,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
                 },
             },
         )
-        ContentFactoryRun.objects.create(
+        self._create_bound_run(
             run_id="verify-setup-run",
             workflow="repo_scan",
             domain="mlai.au",
@@ -3443,7 +3532,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         )
         self.run.status = ContentFactoryRunStatus.CANCELLED
         self.run.save(update_fields=["status", "updated_at"])
-        discovery_run = ContentFactoryRun.objects.create(
+        discovery_run = self._create_bound_run(
             run_id="topic-discovery-complete",
             workflow="auto_discovery",
             domain="mlai.au",
@@ -3497,7 +3586,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
             opportunity_index=80,
             status=KeywordStatus.PENDING,
         )
-        self.run.run_request = {"delivery_mode": "content_only"}
+        self.run.run_request = {**self.website_binding, "delivery_mode": "content_only"}
         self.run.acceptance_summary = {"content_packaged": True}
         self.run.result = {
             "delivery_mode": "content_only",
@@ -3563,7 +3652,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         )
         self.organization.seed_keywords = ["australian founders"]
         self.organization.save(update_fields=["seed_keywords"])
-        self.run.run_request = {"delivery_mode": "publish_code"}
+        self.run.run_request = {**self.website_binding, "delivery_mode": "publish_code"}
         self.run.status = ContentFactoryRunStatus.APPROVAL_REQUIRED
         self.run.current_step = "await_review"
         self.run.approval_state = ContentFactoryApprovalState.APPROVAL_REQUIRED
@@ -3630,7 +3719,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
                 "updated_at",
             ]
         )
-        self.run.run_request = {"delivery_mode": "publish_code"}
+        self.run.run_request = {**self.website_binding, "delivery_mode": "publish_code"}
         self.run.status = ContentFactoryRunStatus.APPROVAL_REQUIRED
         self.run.current_step = "await_review"
         self.run.approval_state = ContentFactoryApprovalState.APPROVAL_REQUIRED
@@ -3681,6 +3770,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
             ]
         )
         self.run.run_request = {
+            **self.website_binding,
             "domain": "mlai.au",
             "topic": "Australian founders",
             "target_keyword": "australian founders",
@@ -3893,6 +3983,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
             status=KeywordStatus.PENDING,
         )
         self.run.run_request = {
+            **self.website_binding,
             "domain": "mlai.au",
             "topic": "Australian founders",
             "target_keyword": "australian founders",
@@ -3983,6 +4074,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
 
         self.run.approval_state = ContentFactoryApprovalState.APPROVED
         self.run.run_request = {
+            **self.website_binding,
             **(self.run.run_request or {}),
             RECEIPT_KEY: {
                 "action": "approve",
@@ -4077,7 +4169,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
     def test_older_approved_run_cannot_promote_unapproved_latest_revision(self):
         self._approve_review_for_publish_retry(self.run)
-        ContentFactoryRun.objects.create(
+        self._create_bound_run(
             run_id="article-run-comments-latest-unapproved-revision",
             workflow="article_revision",
             domain="mlai.au",
@@ -4096,7 +4188,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
     def test_older_source_cannot_approve_newer_review_ready_revision(self):
-        latest = ContentFactoryRun.objects.create(
+        latest = self._create_bound_run(
             run_id="article-run-comments-latest-approval-revision",
             workflow="article_revision",
             domain="mlai.au",
@@ -4144,7 +4236,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
     def test_failed_intermediate_does_not_hide_newest_revision_from_approve(self):
         failed, latest = self._failed_intermediate_with_review_ready_child()
         foreign_organization = Organization.objects.create(name="Other publisher", domain="other.test")
-        foreign_child = ContentFactoryRun.objects.create(
+        foreign_child = self._create_bound_run(
             run_id="article-run-comments-foreign-grandchild",
             workflow="article_revision",
             domain="mlai.au",
@@ -4197,7 +4289,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
     def test_existing_publish_child_approval_does_not_need_article_preview_proof(self):
-        child = ContentFactoryRun.objects.create(
+        child = self._create_bound_run(
             run_id="article-run-comments-existing-publish-child",
             workflow="article_generation",
             domain="mlai.au",
@@ -4253,7 +4345,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
     def test_promote_bundle_targets_accepted_component_revision(self):
-        revision_run = ContentFactoryRun.objects.create(
+        revision_run = self._create_bound_run(
             run_id="article-run-comments-revision-accepted",
             workflow="article_revision",
             domain="mlai.au",
@@ -4262,7 +4354,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
             run_request={"source_run_id": self.run.run_id, "feedback_batch_id": "batch-accepted"},
             result={"source_run_id": self.run.run_id, "feedback_batch_id": "batch-accepted"},
         )
-        self.run.run_request = {"delivery_mode": "review_draft"}
+        self.run.run_request = {**self.website_binding, "delivery_mode": "review_draft"}
         self.run.result = {
             "delivery_mode": "review_draft",
             "component_feedback_latest_batch": {
@@ -4317,7 +4409,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
     def test_stale_run_view_and_publish_target_latest_review_ready_revision(self):
-        first_revision = ContentFactoryRun.objects.create(
+        first_revision = self._create_bound_run(
             run_id="article-run-comments-revision-first",
             workflow="article_revision",
             domain="mlai.au",
@@ -4334,7 +4426,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
                 "promote_bundle_url": "/api/runs/article-run-comments-revision-first/promote-bundle",
             },
         )
-        latest_revision = ContentFactoryRun.objects.create(
+        latest_revision = self._create_bound_run(
             run_id="article-run-comments-revision-latest",
             workflow="article_revision",
             domain="mlai.au",
@@ -4351,7 +4443,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
                 "promote_bundle_url": "/api/runs/article-run-comments-revision-latest/promote-bundle",
             },
         )
-        latest_publish = ContentFactoryRun.objects.create(
+        latest_publish = self._create_bound_run(
             run_id="article-publish-child-latest",
             workflow="article_generation",
             domain="mlai.au",
@@ -4372,7 +4464,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         )
         latest_revision.result["publish_child_run_id"] = latest_publish.run_id
         latest_revision.save(update_fields=["result", "updated_at"])
-        stale_publish = ContentFactoryRun.objects.create(
+        stale_publish = self._create_bound_run(
             run_id="article-publish-child-stale",
             workflow="article_generation",
             domain="mlai.au",
@@ -4453,6 +4545,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         self.organization.seed_keywords = ["australian founders"]
         self.organization.save(update_fields=["seed_keywords"])
         self.run.run_request = {
+            **self.website_binding,
             "domain": "mlai.au",
             "topic": "Australian founders",
             "target_keyword": "australian founders",
@@ -4625,7 +4718,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
             },
         }
         self.run.save(update_fields=["acceptance_summary", "result", "updated_at"])
-        ContentFactoryRun.objects.create(
+        self._create_bound_run(
             run_id="article-publish-child-stuck",
             workflow="article_generation",
             domain="mlai.au",
@@ -4721,7 +4814,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
             },
         }
         self.run.save(update_fields=["acceptance_summary", "result", "updated_at"])
-        ContentFactoryRun.objects.create(
+        self._create_bound_run(
             run_id="article-publish-child-missing",
             workflow="article_generation",
             domain="mlai.au",
@@ -4755,7 +4848,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
     def test_missing_publish_child_route_does_not_poll_remote_repeatedly(self):
-        child = ContentFactoryRun.objects.create(
+        child = self._create_bound_run(
             run_id="article-publish-child-missing-route",
             workflow="article_generation",
             domain="mlai.au",
@@ -4785,7 +4878,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         self.assertIn("queued but did not start", response.data["publishChildWaitReason"])
 
     def test_failed_article_system_setup_status_skips_remote_poll(self):
-        setup_run = ContentFactoryRun.objects.create(
+        setup_run = self._create_bound_run(
             run_id="article-system-setup-failed",
             workflow="article_system_setup",
             domain="mlai.au",
@@ -4813,7 +4906,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         status_mock.assert_not_called()
 
     def test_preview_failed_article_system_setup_status_skips_remote_poll_even_if_local_status_is_running(self):
-        setup_run = ContentFactoryRun.objects.create(
+        setup_run = self._create_bound_run(
             run_id="article-system-setup-preview-failed",
             workflow="article_system_setup",
             domain="mlai.au",
@@ -4840,7 +4933,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         status_mock.assert_not_called()
 
     def test_sync_local_run_from_remote_maps_preview_failed_to_blocked(self):
-        setup_run = ContentFactoryRun.objects.create(
+        setup_run = self._create_bound_run(
             run_id="article-system-setup-preview-failed-remote",
             workflow="article_system_setup",
             domain="mlai.au",
@@ -4867,7 +4960,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         self.assertEqual(setup_run.result["status"], "preview_failed")
 
     def test_sync_local_run_from_remote_does_not_save_identical_terminal_payload(self):
-        setup_run = ContentFactoryRun.objects.create(
+        setup_run = self._create_bound_run(
             run_id="article-system-setup-same-failure",
             workflow="article_system_setup",
             domain="mlai.au",
@@ -4876,6 +4969,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
             current_step="validate_directory_dependencies",
             result={
                 "status": "failed",
+                "current_step": "validate_directory_dependencies",
                 "error": "Directory scaffold dependency validation failed: Missing required directory component slots: article_list",
                 "error_code": "DIRECTORY_DEPENDENCY_VALIDATION_FAILED",
             },
@@ -4911,7 +5005,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         }
         self.run.save(update_fields=["acceptance_summary", "result", "updated_at"])
         self._approve_review_for_publish_retry(self.run)
-        ContentFactoryRun.objects.create(
+        self._create_bound_run(
             run_id="article-publish-child-ghost",
             workflow="article_generation",
             domain="mlai.au",
@@ -4966,7 +5060,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         }
         self.run.save(update_fields=["acceptance_summary", "result", "updated_at"])
         self._approve_review_for_publish_retry(self.run)
-        ContentFactoryRun.objects.create(
+        self._create_bound_run(
             run_id="article-publish-child-route",
             workflow="article_generation",
             domain="mlai.au",
@@ -5015,7 +5109,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         }
         self.run.save(update_fields=["acceptance_summary", "result", "updated_at"])
         self._approve_review_for_publish_retry(self.run)
-        ContentFactoryRun.objects.create(
+        self._create_bound_run(
             run_id="article-publish-child-stuck",
             workflow="article_generation",
             domain="mlai.au",
@@ -5094,7 +5188,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
             patch(
                 "content_factory.vibe_marketing_views._github_pull_checks_state",
                 return_value=(
-                    {"state": "open", "merged": False},
+                    {"state": "open", "merged": False, "head": {"sha": "c" * 40}},
                     {"ready": False, "state": "pending", "message": "GitHub Actions checks are still running."},
                 ),
             ),
@@ -5110,7 +5204,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
     def test_direct_article_system_setup_approve_persists_pr_created_state(self):
         config = self._prepare_articles_setup_gate(status="preview_ready")
-        setup_run = ContentFactoryRun.objects.create(
+        setup_run = self._create_bound_run(
             run_id="setup-direct-approve",
             workflow="article_system_setup",
             domain="mlai.au",
@@ -5165,7 +5259,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         run_request = {}
         if blocked_article_run_ids is not None:
             run_request["blocked_article_run_ids"] = blocked_article_run_ids
-        return ContentFactoryRun.objects.create(
+        return self._create_bound_run(
             run_id="setup-merge-continuation",
             workflow="article_system_setup",
             domain="mlai.au",
@@ -5187,6 +5281,12 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
             },
         )
 
+    def _merge_then_verify_setup(self, **kwargs):
+        # Persist the merge in its short transaction, then dispatch verification
+        # after the guard releases its locks (the production orchestration order).
+        merged = _apply_setup_merge_result(**kwargs)
+        return _maybe_verify_merged_setup_for_blocked_articles(run=merged, context=kwargs["context"])
+
     def _merge_continuation_context(self):
         return SimpleNamespace(organization=self.organization, profile=self.profile)
 
@@ -5203,7 +5303,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
             "content_factory.vibe_marketing_views._call_content_factory_run_action",
             return_value=response_payload,
         ) as verify_call:
-            merged_run = _apply_setup_merge_result(
+            merged_run = self._merge_then_verify_setup(
                 run=setup_run,
                 context=self._merge_continuation_context(),
                 checks_status="merged",
@@ -5236,12 +5336,12 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
             "content_factory.vibe_marketing_views._call_content_factory_run_action",
             return_value={"status": "skipped", "reason": "no_blocked_article_parents"},
         ) as verify_call:
-            first = _apply_setup_merge_result(
+            first = self._merge_then_verify_setup(
                 run=setup_run,
                 context=self._merge_continuation_context(),
                 checks_status="merged",
             )
-            merged_run = _apply_setup_merge_result(
+            merged_run = self._merge_then_verify_setup(
                 run=setup_run,
                 context=self._merge_continuation_context(),
                 checks_status="merged",
@@ -5261,13 +5361,13 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
             "content_factory.vibe_marketing_views._call_content_factory_run_action",
             side_effect=[{"status": "resume_queued"}, {"status": "completed"}],
         ) as verify_call:
-            first = _apply_setup_merge_result(
+            first = self._merge_then_verify_setup(
                 run=setup_run,
                 context=self._merge_continuation_context(),
                 checks_status="merged",
             )
             first_accepted_at = first.result["merged_setup_verification"]["accepted_at"]
-            second = _apply_setup_merge_result(
+            second = self._merge_then_verify_setup(
                 run=setup_run,
                 context=self._merge_continuation_context(),
                 checks_status="merged",
@@ -5297,7 +5397,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
             "content_factory.vibe_marketing_views._call_content_factory_run_action",
             side_effect=responses,
         ) as verify_call:
-            first = _apply_setup_merge_result(
+            first = self._merge_then_verify_setup(
                 run=setup_run,
                 context=self._merge_continuation_context(),
                 checks_status="merged",
@@ -5352,7 +5452,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
             "content_factory.vibe_marketing_views._call_content_factory_run_action",
             side_effect=responses,
         ) as verify_call:
-            setup_run = _apply_setup_merge_result(
+            setup_run = self._merge_then_verify_setup(
                 run=setup_run,
                 context=self._merge_continuation_context(),
                 checks_status="merged",
@@ -5401,7 +5501,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         )
 
     def test_nonbenign_setup_parent_skip_is_projected_to_blocked_article(self):
-        attached_run = ContentFactoryRun.objects.create(
+        attached_run = self._create_bound_run(
             run_id="article-attached-to-post-merge-scan",
             workflow="article_generation",
             domain="mlai.au",
@@ -5430,7 +5530,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
             "content_factory.vibe_marketing_views._call_content_factory_run_action",
             return_value=response_payload,
         ) as verify_call:
-            setup_run = _apply_setup_merge_result(
+            setup_run = self._merge_then_verify_setup(
                 run=setup_run,
                 context=self._merge_continuation_context(),
                 checks_status="merged",
@@ -5490,7 +5590,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
             }
         }
         config.save(update_fields=["articles_scaffolded", "article_system", "updated_at"])
-        older_setup = ContentFactoryRun.objects.create(
+        older_setup = self._create_bound_run(
             run_id="older-linked-setup",
             workflow="article_system_setup",
             domain="mlai.au",
@@ -5532,8 +5632,8 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
             "newer-org-setup",
         )
 
-    def test_merge_setup_pr_publishes_via_auto_merge_when_direct_merge_blocked(self):
-        setup_run = ContentFactoryRun.objects.create(
+    def test_merge_setup_pr_requires_manual_merge_without_irrevocable_native_auto_merge(self):
+        setup_run = self._create_bound_run(
             run_id="setup-merge-pending",
             workflow="article_system_setup",
             domain="mlai.au",
@@ -5559,25 +5659,25 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
             patch(
                 "content_factory.vibe_marketing_views._github_pull_checks_state_lenient",
                 return_value=(
-                    {"state": "open", "merged": False, "head": {"sha": "s"}, "node_id": "PR_x"},
+                    {"state": "open", "merged": False, "head": {"sha": "c" * 40}, "node_id": "PR_x"},
                     {"ready": True, "state": "unknown", "message": "Checks visibility unavailable; relying on GitHub merge enforcement."},
                 ),
             ),
             patch("content_factory.vibe_marketing_views._github_api_request", side_effect=ValueError("At least 1 approving review is required.")),
-            patch("content_factory.vibe_marketing_views._enable_native_auto_merge", return_value={"status": "enabled", "message": "ok"}),
+            patch("content_factory.vibe_marketing_views._enable_native_auto_merge", return_value={"status": "enabled", "message": "ok"}) as native_auto_merge,
         ):
             response = self.client.post(f"/api/v1/vibe-marketing/runs/{setup_run.run_id}/merge-setup-pr", {}, format="json")
 
-        # An unmergeable direct merge no longer refuses — it publishes via GitHub native
-        # auto-merge (mirrors article publish), so the run goes to "publishing".
-        self.assertEqual(response.status_code, 200)
+        # GitHub-native auto-merge cannot honor a later website disconnect.
+        # A protected branch therefore requires a deliberate manual merge.
+        self.assertEqual(response.status_code, 409)
         setup_run.refresh_from_db()
-        self.assertEqual(setup_run.result["merge_status"], "publishing")
-        self.assertTrue(setup_run.result["article_system_setup"]["native_auto_merge_enabled"])
+        self.assertEqual(setup_run.result["merge_status"], "manual_merge_required")
+        native_auto_merge.assert_not_called()
 
     def test_merge_setup_pr_records_manual_merge_required_when_github_blocks_api_merge(self):
         config = self._prepare_articles_setup_gate(status="pr_created")
-        setup_run = ContentFactoryRun.objects.create(
+        setup_run = self._create_bound_run(
             run_id="setup-merge-protected",
             workflow="article_system_setup",
             domain="mlai.au",
@@ -5605,7 +5705,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
             patch(
                 "content_factory.vibe_marketing_views._github_pull_checks_state_lenient",
                 return_value=(
-                    {"state": "open", "merged": False, "head": {"sha": "s"}},
+                    {"state": "open", "merged": False, "head": {"sha": "c" * 40}},
                     {"ready": True, "state": "success", "message": "Checks are passing."},
                 ),
             ),
@@ -5629,7 +5729,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
 
     def test_refresh_setup_pr_status_detects_manual_github_merge_without_rescan(self):
         config = self._prepare_articles_setup_gate(status="pr_created")
-        setup_run = ContentFactoryRun.objects.create(
+        setup_run = self._create_bound_run(
             run_id="setup-manual-refresh",
             workflow="article_system_setup",
             domain="mlai.au",
@@ -5713,7 +5813,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         config = self._prepare_articles_setup_gate(status="pr_created")
         config.connected_slack_user_id = "U123"
         config.save(update_fields=["connected_slack_user_id", "updated_at"])
-        setup_run = ContentFactoryRun.objects.create(
+        setup_run = self._create_bound_run(
             run_id="setup-merge-success",
             workflow="article_system_setup",
             domain="mlai.au",
@@ -5742,7 +5842,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
             patch(
                 "content_factory.vibe_marketing_views._github_pull_checks_state",
                 return_value=(
-                    {"state": "open", "merged": False},
+                    {"state": "open", "merged": False, "head": {"sha": "c" * 40}},
                     {"ready": True, "state": "success", "message": "Checks are passing."},
                 ),
             ),
@@ -5780,7 +5880,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         workflow_steps = {step["id"]: step for step in bootstrap_response.data["workflowProgress"]["steps"]}
         self.assertEqual(workflow_steps["research"]["status"], "ready")
 
-        queued_article = ContentFactoryRun.objects.create(
+        queued_article = self._create_bound_run(
             run_id="article-after-setup-merge",
             workflow="article_generation",
             domain="mlai.au",
@@ -5815,7 +5915,7 @@ class VibeMarketingPublishFlowTests(_PublishRetryApprovalFixture, TestCase):
 
     def setUp(self):
         cache.clear()
-        self.client = APIClient()
+        self.client = WebsiteBoundAPIClient()
         self.user = User.objects.create_user(
             email="founder-publish@example.com",
             password="password",
@@ -5832,8 +5932,9 @@ class VibeMarketingPublishFlowTests(_PublishRetryApprovalFixture, TestCase):
         )
         self.profile.active_company = self.company
         self.profile.save(update_fields=["active_company", "updated_at"])
-        OrganizationContentConfig.objects.create(organization=self.organization, github_repo="MLAI-AUS-Inc/mlai-au")
-        self.run = ContentFactoryRun.objects.create(
+        config = OrganizationContentConfig.objects.create(organization=self.organization, github_repo="MLAI-AUS-Inc/mlai-au")
+        self._bind_verified_website(config)
+        self.run = self._create_bound_run(
             run_id="article-run-publish",
             workflow="article_generation",
             domain="mlai.au",
@@ -5851,7 +5952,7 @@ class VibeMarketingPublishFlowTests(_PublishRetryApprovalFixture, TestCase):
         }
         if auto_merge:
             run_request["publish_auto_merge"] = True
-        child = ContentFactoryRun.objects.create(
+        child = self._create_bound_run(
             run_id=run_id,
             workflow="article_generation",
             domain="mlai.au",
@@ -5866,6 +5967,19 @@ class VibeMarketingPublishFlowTests(_PublishRetryApprovalFixture, TestCase):
         self.run.result = article_result
         self.run.save(update_fields=["result", "updated_at"])
         return child
+
+    def _seed_publish_receipt(self, run, *, head_sha="c" * 40, branch="cf/publish-fixture"):
+        """Attest the precise worker-owned head which the founder may merge."""
+        run.result = {**(run.result or {}), "head_sha": head_sha, "branch_name": branch}
+        run.save(update_fields=["result", "updated_at"])
+        return WebsiteRepositoryMutation.objects.create(
+            connection=self.client.website_fixture,
+            generation=self.client.website_fixture.generation,
+            operation_id=f"fixture-publish:{run.run_id}", run_id=run.run_id,
+            base_sha="a" * 40, head_sha=head_sha, branch=branch,
+            pr_url=run.result.get("pr_url", ""), patch_digest="d" * 64,
+            files=[], status="applied",
+        )
 
     def _create_written_article(self, slug="ai-adoption-guide"):
         return WrittenArticle.objects.create(
@@ -5953,6 +6067,7 @@ class VibeMarketingPublishFlowTests(_PublishRetryApprovalFixture, TestCase):
             },
             auto_merge=True,
         )
+        self._seed_publish_receipt(child)
         article_row = self._create_written_article()
 
         with (
@@ -5961,7 +6076,7 @@ class VibeMarketingPublishFlowTests(_PublishRetryApprovalFixture, TestCase):
             patch(
                 "content_factory.vibe_marketing_views._github_pull_checks_state",
                 return_value=(
-                    {"state": "open", "merged": False},
+                    {"state": "open", "merged": False, "head": {"sha": "c" * 40, "ref": "cf/publish-fixture"}},
                     {"ready": True, "state": "success", "message": "Checks are passing."},
                 ),
             ),
@@ -5996,7 +6111,7 @@ class VibeMarketingPublishFlowTests(_PublishRetryApprovalFixture, TestCase):
             patch(
                 "content_factory.vibe_marketing_views._github_pull_checks_state",
                 return_value=(
-                    {"state": "open", "merged": False},
+                    {"state": "open", "merged": False, "head": {"sha": "c" * 40}},
                     {"ready": False, "state": "pending", "message": "GitHub Actions checks are still running."},
                 ),
             ) as checks_mock,
@@ -6030,7 +6145,7 @@ class VibeMarketingPublishFlowTests(_PublishRetryApprovalFixture, TestCase):
             patch(
                 "content_factory.vibe_marketing_views._github_pull_checks_state",
                 return_value=(
-                    {"state": "open", "merged": False},
+                    {"state": "open", "merged": False, "head": {"sha": "c" * 40}},
                     {"ready": False, "state": "failed", "message": "One or more GitHub Actions checks failed."},
                 ),
             ) as checks_mock,
@@ -6103,6 +6218,7 @@ class VibeMarketingPublishFlowTests(_PublishRetryApprovalFixture, TestCase):
                 "merge_blocked_reason": "One or more GitHub Actions checks failed.",
             },
         )
+        self._seed_publish_receipt(child)
         article_row = self._create_written_article()
 
         with (
@@ -6110,7 +6226,7 @@ class VibeMarketingPublishFlowTests(_PublishRetryApprovalFixture, TestCase):
             patch(
                 "content_factory.vibe_marketing_views._github_pull_checks_state",
                 return_value=(
-                    {"state": "open", "merged": False},
+                    {"state": "open", "merged": False, "head": {"sha": "c" * 40, "ref": "cf/publish-fixture"}},
                     {"ready": True, "state": "success", "message": "Checks are passing."},
                 ),
             ),
@@ -6127,6 +6243,27 @@ class VibeMarketingPublishFlowTests(_PublishRetryApprovalFixture, TestCase):
         self.assertEqual(self.run.result["merge_status"], "merged")
         article_row.refresh_from_db()
         self.assertEqual(article_row.publish_status, ArticlePublishStatus.MERGED)
+
+    def test_publish_merge_refuses_missing_or_changed_owned_head(self):
+        for case, recorded_sha in [("missing", None), ("changed", "b" * 40)]:
+            with self.subTest(case=case):
+                child = self._create_publish_child(
+                    run_id=f"publish-owned-head-{case}", status=ContentFactoryRunStatus.COMPLETED,
+                    result={"status": "completed", "pr_url": "https://github.com/MLAI-AUS-Inc/mlai-au/pull/94", "pr_number": 94},
+                )
+                if recorded_sha:
+                    self._seed_publish_receipt(child, head_sha=recorded_sha)
+                with (
+                    patch("content_factory.vibe_marketing_views._github_token_for_repo_operation", return_value=("synthetic-token", "test")),
+                    patch("content_factory.vibe_marketing_views._github_pull_checks_state", return_value=(
+                        {"state": "open", "merged": False, "head": {"sha": "c" * 40, "ref": "cf/publish-fixture"}},
+                        {"ready": True, "state": "success", "message": "Checks are passing."},
+                    )),
+                    patch("content_factory.vibe_marketing_views._github_api_request") as merge,
+                ):
+                    response = self.client.post(f"/api/v1/vibe-marketing/runs/{self.run.run_id}/merge-publish-pr", {}, format="json")
+                self.assertEqual(response.status_code, 409)
+                merge.assert_not_called()
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
     def test_promote_bundle_records_auto_merge_flag(self):

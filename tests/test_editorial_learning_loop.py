@@ -18,6 +18,8 @@ from content_factory.models import (
     VibeMarketingComponentComment,
     VibeMarketingComponentCommentStatus,
 )
+from content_factory.website_connections import contract_for
+from content_factory.website_models import WebsiteConnection
 from content_factory.vibe_marketing_views import (
     _create_editorial_feedback_candidates,
     _feedback_family_key,
@@ -179,6 +181,22 @@ class AcceptRevisionLearningTests(EditorialLearningLoopBase):
     preview_url = "https://preview.example/articles/revision-run-learning"
     preview_sha = "a" * 40
 
+    def setUp(self):
+        super().setUp()
+        connection = WebsiteConnection.objects.create(
+            organization=self.organization,
+            authorized_by=self.user,
+            repository_id=123,
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            branch="main",
+        )
+        config = OrganizationContentConfig.objects.get(organization=self.organization)
+        config.website_connection = connection
+        config.save(update_fields=["website_connection", "updated_at"])
+        self.website_contract = contract_for(connection)
+        self.run.run_request = self.website_contract
+        self.run.save(update_fields=["run_request", "updated_at"])
+
     def _revision_run(self, batch_id="batch-1"):
         return ContentFactoryRun.objects.create(
             run_id="revision-run-learning",
@@ -186,7 +204,7 @@ class AcceptRevisionLearningTests(EditorialLearningLoopBase):
             domain="mlai.au",
             github_repo="MLAI-AUS-Inc/mlai-au",
             status=ContentFactoryRunStatus.COMPLETED,
-            run_request={"source_run_id": self.run.run_id, "feedback_batch_id": batch_id},
+            run_request={**self.website_contract, "source_run_id": self.run.run_id, "feedback_batch_id": batch_id},
             result={
                 "source_run_id": self.run.run_id,
                 "feedback_batch_id": batch_id,
@@ -243,11 +261,12 @@ class AcceptRevisionLearningTests(EditorialLearningLoopBase):
             "content_factory.vibe_marketing_views._call_content_factory_editorial_learnings_apply",
             return_value={"status": "queued"},
         ) as fold_call:
-            response = self.client.post(
-                f"/api/v1/vibe-marketing/runs/{revision_run.run_id}/comments/accept-revision",
-                self._accept_payload(),
-                format="json",
-            )
+            with self.captureOnCommitCallbacks(execute=True):
+                response = self.client.post(
+                    f"/api/v1/vibe-marketing/runs/{revision_run.run_id}/comments/accept-revision",
+                    self._accept_payload(),
+                    format="json",
+                )
 
         self.assertEqual(response.status_code, 200, response.data)
         fold_call.assert_called_once()
