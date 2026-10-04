@@ -760,18 +760,25 @@ def _extract_display_config(structured_memo):
         raw = (structured_memo or {}).get("displayConfig")
     normalized = normalize_vibe_raising_display_config(raw)
 
-    if normalized is None:
+    if normalized is None or (
+        "cover_image" in normalized
+        and not any(key in raw for key in ("snippetMetricKeys", "snippet_metric_keys", "fullMetricKeys", "full_metric_keys"))
+    ):
         valued_keys = set(_extract_metrics(structured_memo))
         ordered = [key for key in MANUAL_METRIC_LABELS if key in valued_keys]
         normalized = {
+            **(normalized or {}),
             "snippet_metric_keys": ordered[:DEFAULT_SNIPPET_METRIC_COUNT],
             "full_metric_keys": ordered,
         }
 
-    return {
+    result = {
         "snippetMetricKeys": normalized["snippet_metric_keys"],
         "fullMetricKeys": normalized["full_metric_keys"],
     }
+    if "cover_image" in normalized:
+        result["coverImage"] = normalized["cover_image"]
+    return result
 
 
 def _extract_metric_suggestions(structured_memo):
@@ -3020,6 +3027,10 @@ class VibeRaisingEmailDraftStartView(APIView):
         if error_response:
             return error_response
 
+        display_config = normalize_vibe_raising_display_config(
+            request.data.get("displayConfig", request.data.get("display_config")), validate_cover=True,
+        )
+
         company = context["company"]
         domain = context["domain"]
         if not domain:
@@ -3149,7 +3160,8 @@ class VibeRaisingEmailDraftStartView(APIView):
                 manual_document_ids=manual_document_ids, manual_summary=manual_summary,
                 force_regenerate=force, update_draft=draft, narrative_period=period,
                 automatic_source_scope=bool(getattr(self, "automatic_source_scope", False)),
-                audience_visibility=requested_audience)
+                audience_visibility=requested_audience,
+                cover_image=(display_config or {}).get("cover_image"))
         if not existing_run or _should_dispatch_existing_run(run):
             dispatch_result = _dispatch_run_to_valley(run)
             if not dispatch_result:
