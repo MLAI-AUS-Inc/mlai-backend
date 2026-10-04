@@ -6,6 +6,7 @@ CHECK_INTERVAL_SECONDS="${WATCHDOG_INTERVAL_SECONDS:-60}"
 MAX_RESTARTS="${WATCHDOG_MAX_RESTARTS:-3}"
 RESTART_WINDOW_SECONDS="${WATCHDOG_RESTART_WINDOW_SECONDS:-600}"
 COMPOSE_CMD="${DOCKER_COMPOSE_CMD:-docker compose}"
+WRITER_PAUSE_SENTINEL="${WATCHDOG_WRITER_PAUSE_SENTINEL:-/run/mlai-backend-writers-paused}"
 restart_times=()
 
 prune_restart_times() {
@@ -21,11 +22,18 @@ prune_restart_times() {
 }
 
 while true; do
+  if [[ -e "${WRITER_PAUSE_SENTINEL}" ]]; then
+    echo "[watchdog] service=${SERVICE_NAME} action=paused_for_migration"
+    sleep "${CHECK_INTERVAL_SECONDS}"
+    continue
+  fi
   container_id="$(${COMPOSE_CMD} ps -q "${SERVICE_NAME}" 2>/dev/null | head -n 1 || true)"
 
   if [[ -z "${container_id}" ]]; then
-    echo "[watchdog] service=${SERVICE_NAME} container=missing action=up"
-    ${COMPOSE_CMD} up -d "${SERVICE_NAME}" || true
+    if [[ ! -e "${WRITER_PAUSE_SENTINEL}" ]]; then
+      echo "[watchdog] service=${SERVICE_NAME} container=missing action=up"
+      ${COMPOSE_CMD} up -d "${SERVICE_NAME}" || true
+    fi
     sleep "${CHECK_INTERVAL_SECONDS}"
     continue
   fi
@@ -42,9 +50,11 @@ while true; do
       continue
     fi
 
-    echo "[watchdog] service=${SERVICE_NAME} action=restart"
-    ${COMPOSE_CMD} restart "${SERVICE_NAME}" || true
-    restart_times+=("${now}")
+    if [[ ! -e "${WRITER_PAUSE_SENTINEL}" ]]; then
+      echo "[watchdog] service=${SERVICE_NAME} action=restart"
+      ${COMPOSE_CMD} restart "${SERVICE_NAME}" || true
+      restart_times+=("${now}")
+    fi
   fi
 
   sleep "${CHECK_INTERVAL_SECONDS}"

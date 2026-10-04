@@ -35,6 +35,8 @@ class DeploymentRuntimeChecksTests(unittest.TestCase):
                     'runtime_restore_attempted=0',
                     'run_office_manager_migration_audit() { return 1; }',
                     'upsert_env_value() { :; }',
+                    'restore_host_writer_watchdogs() { :; }',
+                    'writer_pause_sentinel="$(mktemp)"',
                     'docker() { echo docker-recreate; }',
                     'verify_scheduler_recovery_tick() { echo scheduler-verified; }',
                     branch,
