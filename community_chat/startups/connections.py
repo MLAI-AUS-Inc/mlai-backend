@@ -44,42 +44,39 @@ class ConnectView(ChatStartupAccess, APIView):
     def post(self, request, provider):
         provider = PROVIDER_ALIASES.get(provider, provider)
         if provider in {"luma", "humanitix"}:
-            view = LumaConnectView if provider == "luma" else HumanitixConnectView
-            response = view().post(request)
+            response = (LumaConnectView if provider == "luma" else HumanitixConnectView)().post(request)
             if response.status_code == 200 and isinstance(response.data, dict):
                 response.data["connected"] = any(
-                    (source.get("provider") or source.get("key")) == provider
-                    and source.get("status") in {"connected", "syncing"}
-                    for source in response.data.get("sources", [])
-                )
+                    (row.get("provider") or row.get("key")) == provider and row.get("status") == "connected"
+                    for row in response.data.get("sources", []) if isinstance(row, dict))
             return response
         if provider not in PROVIDERS:
             raise ValidationError("This source does not support browser connection.")
         ticket = signing.dumps({"uid": request.user.pk, "company": str(self.company.pk),
             "session": str(request.auth.pk), "provider": provider,
-            "return_to": getattr(request, "data", {}).get("returnTo") if getattr(request, "data", {}).get("returnTo") in ("mobile", "desktop-dev") else None,
+            "return_to": request.data.get("returnTo") if request.data.get("returnTo") in {"mobile", "desktop-dev"} else None,
             "nonce": secrets.token_urlsafe(24)}, salt=SALT)
         url = request.build_absolute_uri(reverse("chat_startups_connect_browser"))
         return Response({"authorizationUrl": f"{url}?{urlencode({'ticket': ticket})}"})
 
 
 class DisconnectView(ChatStartupAccess, APIView):
-    """Disconnect only the explicitly selected startup's own provider account."""
+    """Manage defaults and disconnect only the chosen startup's own credentials."""
     def post(self, request, provider):
+        provider = PROVIDER_ALIASES.get(provider, provider)
         return Response(set_source_preference(self.company, provider, request.data.get("enabled")))
 
     def delete(self, request, provider):
+        provider = PROVIDER_ALIASES.get(provider, provider)
         if provider not in UPDATE_PROVIDERS:
             raise ValidationError("Choose a supported connection.")
         if self.company.organization is None:
             return Response({"status": "not_connected"})
         if provider == "gmail":
-            return Response(disconnect_gmail_for_user(request.user,
-                organization=self.company.organization, delete_derived_data=False))
-        connection_ids = list(ExternalServiceConnection.objects.filter(
-            user=request.user, organization=self.company.organization, provider=provider,
-        ).exclude(status="disconnected").values_list("pk", flat=True))
-        for connection_id in connection_ids:
+            return Response(disconnect_gmail_for_user(request.user, organization=self.company.organization, delete_derived_data=False))
+        ids = list(ExternalServiceConnection.objects.filter(user=request.user,
+            organization=self.company.organization, provider=provider).exclude(status="disconnected").values_list("pk", flat=True))
+        for connection_id in ids:
             disconnect_external_connection(request.user, connection_id)
         return Response({"status": "disconnected"})
 
@@ -103,13 +100,14 @@ def connect_browser(request):
     except (signing.BadSignature, KeyError, ValueError, get_user_model().DoesNotExist, VibeRaisingCompany.DoesNotExist):
         return HttpResponseBadRequest("This connection link expired or was already used. Start again in MLAI Chat.")
     request.user = user
-    request.chat_oauth_context = {"chat_session_id": str(session.pk), "chat_company_id": str(company.pk)}
+    request.chat_oauth_context = {"chat_session_id": str(session.pk), "chat_company_id": str(company.pk), "user_id": user.pk}
+    if getattr(company, "organization_id", None) is not None:
+        request.chat_oauth_context["organization_id"] = company.organization_id
     query = QueryDict(mutable=True)
     frontend = settings.COMMUNITY_CHAT_FRONTEND_URL.rstrip("/")
-    return_query = urlencode({"company_id": str(company.pk), "connected": provider})
-    return_url = f"{frontend}/my-startup/connections?{return_query}"
-    if payload.get("return_to"):
-        scheme = "mlaichat-dev" if payload.get("return_to") == "desktop-dev" else "mlaichat"
+    return_url = f"{frontend}/my-startup/connections?" + urlencode({"company_id": str(company.pk), "connected": provider})
+    if payload.get("return_to") in {"mobile", "desktop-dev"}:
+        scheme = "mlaichat-dev" if payload["return_to"] == "desktop-dev" else "mlaichat"
         return_url = f"{scheme}://connections?" + urlencode({"company_id": str(company.pk), "provider": provider})
     query.update({"company_id": str(company.pk), "next": return_url})
     if provider == "gmail":
@@ -127,7 +125,7 @@ def connect_browser(request):
             return HttpResponseBadRequest("GitHub is not available yet. Please try again later.")
         state = build_github_oauth_state(domain=organization.domain,
             slack_user_id=founder_actor_id_for_user(user), return_url=return_url,
-            chat_context={**request.chat_oauth_context, "user_id": user.pk})
+            chat_context={**request.chat_oauth_context, "organization_id": organization.pk})
         response = redirect(build_github_installation_url(state.raw))
     else:
         response = connector_connect(request, "google" if provider == "google_search_console" else provider)

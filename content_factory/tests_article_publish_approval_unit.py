@@ -95,7 +95,9 @@ class ArticlePublishApprovalReceiptTests(SimpleTestCase):
                 with (
                     patch("content_factory.article_review_views.check_approval_comments", return_value=None),
                     patch("content_factory.article_review_views.record_review_approval") as accept_feedback,
-                    patch("content_factory.vibe_marketing_views._resolve_context_or_response", return_value=(object(), None)),
+                    patch("content_factory.vibe_marketing_views._resolve_context_or_response", return_value=(SimpleNamespace(organization=object()), None)),
+                    patch("content_factory.vibe_marketing_views._get_config", return_value=object()),
+                    patch("content_factory.vibe_marketing_views._setup_blocked_response_for_generation", return_value=None),
                     patch("content_factory.vibe_marketing_views.get_object_or_404", return_value=run),
                     patch("content_factory.vibe_marketing_views._run_belongs_to_context", return_value=True),
                     patch("content_factory.vibe_marketing_views._latest_review_ready_component_revision", return_value=None),

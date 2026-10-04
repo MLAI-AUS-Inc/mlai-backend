@@ -61,6 +61,7 @@ from content_factory.article_system import (
     react_article_system_target_from_setup_cache,
     resolve_article_system,
 )
+from content_factory.activation import article_capabilities, github_account_state, integration_evidence
 from content_factory.authors import (
     author_profile_for_renderer,
     normalize_authors,
@@ -173,6 +174,7 @@ from content_factory.billing import (
     get_content_factory_ai_agent_required_points,
     get_content_factory_article_cost_points,
     get_content_factory_content_island_topic_cost_points,
+    get_content_factory_research_cost_points,
     is_free_content_factory_domain,
 )
 from integrations.services.article_generation import (
@@ -230,7 +232,6 @@ FIXED_ARTICLE_REVIEW_COMPONENTS = (
     {"id": "events-cta", "type": "events-cta", "label": "Upcoming events CTA"},
 )
 REMOTE_REQUIRED_WORKFLOWS = {
-    "island_refresh",
     "article_system_setup",
     "article_generation",
     "content_factory_article",
@@ -239,6 +240,7 @@ REMOTE_REQUIRED_WORKFLOWS = {
     "repo_scan",
     "content_factory_scan",
     "auto_discovery",
+    "island_refresh",
     "content_factory_discovery",
     "daily_discovery",
     "website_baseline",
@@ -698,7 +700,20 @@ def _mark_roo_points_gate_authorized(payload: dict, *, domain: str, action: str,
     )
 
 
+def _quoted_price_response(request, *, cost_points):
+    expected = _request_value(request.data, "expectedCostPoints", "expected_cost_points", default=None)
+    if expected is None:
+        return None  # Compatibility: old clients still receive authoritative billing.
+    if isinstance(expected, bool) or not isinstance(expected, int) or expected != cost_points:
+        return Response({"detail": "The Roo point price changed. Review the updated price before continuing.",
+                         "code": "roo_points_quote_changed", "costPoints": cost_points}, status=409)
+    return None
+
+
 def _charge_roo_points_for_article(request, *, context, payload: dict):
+    quote_error = _quoted_price_response(request, cost_points=get_content_factory_article_cost_points(context.organization.domain))
+    if quote_error is not None:
+        return None, None, None, quote_error
     editorial_error = _refresh_article_editorial_payload(organization=context.organization, payload=payload)
     if editorial_error is not None:
         return None, None, None, editorial_error
@@ -750,8 +765,12 @@ def _charge_roo_points_for_article(request, *, context, payload: dict):
     return charged_user, charge_ledger, article_request, None
 
 
-def _charge_roo_points_for_content_island_topic_generation(request, *, context, payload: dict):
+def _charge_roo_points_for_content_island_topic_generation(request, *, context, payload: dict, scope_request_id=True):
     domain = context.organization.domain
+    cost_points = get_content_factory_research_cost_points(domain, payload.get("requested_topic_count", 4))
+    quote_error = _quoted_price_response(request, cost_points=cost_points)
+    if quote_error is not None:
+        return None, None, quote_error
     content_island_slug = str(payload.get("content_island_slug") or "").strip()
     # Bound the slug embedded in the generated id: it lands in Ledger.reference_id AND
     # ContentFactoryJob.client_request_id, both CharField(max_length=100). A long island
@@ -764,6 +783,11 @@ def _charge_roo_points_for_content_island_topic_generation(request, *, context, 
         or _request_value(request.data, "client_request_id", "clientRequestId", default="")
         or f"vibe-content-island-topics:{context.organization.id}:{_island_trace}:{uuid.uuid4().hex}"
     ).strip()
+    # Scope caller retries to their account and company; remote dispatch and ledger
+    # use the same durable id, including after a transport timeout.
+    if scope_request_id:
+        client_request_id = "vibe-research:" + hashlib.sha256(
+            f"{request.user.pk}:{context.company.pk}:{client_request_id}".encode()).hexdigest()
     payload["client_request_id"] = client_request_id
     actor_id = founder_actor_id_for_user(request.user)
     article_request = {
@@ -5733,6 +5757,19 @@ def _maybe_verify_merged_setup_for_blocked_articles(*, run, context, force=False
     if not force and _setup_merged_verification_is_settled(existing):
         return run
 
+    # This legacy worker operation also resumes historical parents. Its HTTP
+    # endpoint ignores request JSON, so it cannot be used as a verify-only scan.
+    # First verify with the existing inventory/rescan flow; only then continue.
+    blocked = _setup_blocked_response_for_generation(context, _get_config(context.organization), run=run)
+    if blocked is not None:
+        metadata = {"accepted": False, "pending": False, "retryable": True,
+            "status": "verification_required", "reasonCode": blocked.data.get("reasonCode"),
+            "error": blocked.data.get("detail"), "nextRequiredStep": "articles",
+            "next_action": "verify_articles_integration", "blocked_article_run_ids": blocked_article_run_ids}
+        if existing == metadata:
+            return run
+        return _persist_setup_merged_verification(run, metadata)
+
     actor_user = getattr(getattr(context, "profile", None), "user", None)
     actor_id = (
         founder_actor_id_for_user(actor_user)
@@ -6499,7 +6536,11 @@ def _check_and_merge_publish_pr(*, run, context):
     {"outcome": "merged" | "already_merged" | "pending" | "no_repo" | "no_pr"
     | "error", "detail": str, "checks": dict}.
     """
-    repo = run.github_repo or _get_config(context.organization).github_repo
+    config = _get_config(context.organization)
+    blocked = _setup_blocked_response_for_generation(context, config, run=run, publishing=True)
+    if blocked is not None:
+        return {"outcome": "error", "detail": blocked.data.get("detail"), "checks": {}}
+    repo = run.github_repo or config.github_repo
     if not repo:
         return {"outcome": "no_repo", "detail": "No GitHub repository is configured for this publish run.", "checks": {}}
     pr_number = _pull_request_number_from_run(run)
@@ -8731,15 +8772,9 @@ def _article_setup_state_for_config(config, *, latest_runs=None, run=None, organ
         setup_run = None
     related_runs = _dedupe_runs(latest_runs, explicit_runs, [latest_scan, setup_run])
     setup_gate = _article_system_setup_gate(config, related_runs, article_system)
-    generation_ready = bool(
-        setup_gate.get("generationReady")
-        or bool(generation_ready)
-        or (
-            generation_ready is None
-            and organization is not None
-            and _article_generation_history_exists(organization, related_runs, since=article_setup_reset_at(config))
-        )
-    )
+    generation_ready = compute_article_readiness(
+        organization, config, related_runs, article_system=article_system, setup_gate=setup_gate,
+    )["generation_ready"]
     if setup_gate.get("setupRunId") and (not setup_run or setup_run.run_id != setup_gate.get("setupRunId")):
         setup_run = (
             _article_setup_state_run_from_latest(related_runs, setup_gate.get("setupRunId"))
@@ -9478,114 +9513,26 @@ def compute_article_readiness(
     article_system=None,
     setup_gate=None,
 ):
-    """Single authoritative rollup of "can this org generate an article into its repo?".
-
-    The same readiness boolean was previously re-derived in three places with subtly
-    different ``or`` chains (``_article_generation_ready_for_config`` + the setup gate +
-    ``_profile_checks``' history fallback). This collapses that into one function so the
-    answer can't disagree with itself, and surfaces WHICH step is missing (``blocking_reason``
-    / ``reason_code``) so the wizard can tell the user instead of a generic "setup required".
-
-    Semantics are byte-for-byte the canonical formula ``_profile_checks`` already used:
-    ``setup_gate.generationReady or _article_generation_ready_for_config(...) or history``
-    (history restricted to work done after an article-setup reset). The individual signals
-    are returned as ``proofs`` for diagnostics; the gate's own internals are left untouched.
-    """
-    latest_runs = latest_runs or []
+    """Require current integration evidence; historical activity never grants access."""
     if not isinstance(article_system, dict):
         article_system = resolve_article_system(config) if config else {}
     if setup_gate is None:
-        setup_gate = _article_system_setup_gate(config, latest_runs, article_system)
-
-    scaffolded = bool(getattr(config, "articles_scaffolded", False)) if config else False
-    published = bool(setup_gate.get("published")) or bool(
-        config and _article_system_is_published(config, article_system)
-    )
-    setup_merged = bool(setup_gate.get("setupMerged"))
-    history = bool(
-        organization is not None
-        and _article_generation_history_exists(
-            organization, latest_runs, since=article_setup_reset_at(config) if config else None
-        )
-    )
-
-    # Whether a repo is connected at all — used only to word the github-required blocker
-    # below (repo present but credential lost => "reconnect", vs no repo => "connect").
-    # Readiness itself stays a function of the article SURFACE: the credential is a
-    # separate wizard check (the `github` check, operable-aware) and the ultimate
-    # authority is the generate-time gate, so it is not folded in here.
-    github_repo_set = bool(str(getattr(config, "github_repo", "") or "").strip()) if config else False
-
-    generation_ready = bool(
-        setup_gate.get("generationReady")
-        or (config and _article_generation_ready_for_config(config, latest_runs, article_system))
-        or history
-    )
-
-    proofs = {
-        "articles_scaffolded": scaffolded,
-        "article_system_published": published,
-        "setup_merged": setup_merged,
-        "generation_history": history,
-    }
-
-    if generation_ready:
-        via = next(
-            (name for name, ok in (
-                ("scaffolded", scaffolded),
-                ("published", published),
-                ("setup_merged", setup_merged),
-                ("history", history),
-            ) if ok),
-            "ready",
-        )
-        return {
-            "generation_ready": True,
-            "blocking_reason": None,
-            "reason_code": "",
-            "via": via,
-            "proofs": proofs,
-        }
-
-    # Not ready: classify the blocker in wizard order so the UI can point at the next step.
+        setup_gate = _article_system_setup_gate(config, latest_runs or [], article_system)
+    evidence = integration_evidence(config, latest_runs or [], setup_gate=setup_gate)
     github_ready = bool(config and _github_repo_operable(config))
-    scan_ready = bool(
-        config
-        and (config.last_scanned_at or config.scan_summary or config.article_system or config.publish_targets)
-    )
-    if not github_ready:
-        if github_repo_set:
-            reason_code, reason = (
-                "github_required",
-                "Reconnect GitHub — the platform no longer has access to this repository "
-                "(the GitHub App installation is missing or revoked and any saved token has expired).",
-            )
-        else:
-            reason_code, reason = "github_required", "Connect a GitHub repository before generating articles."
-    elif setup_gate.get("setupBlocked"):
-        reason_code, reason = (
-            "setup_pr_unmerged",
-            "Merge the articles setup PR before generating articles. If you merged it in GitHub, refresh merge status.",
-        )
-    elif not scan_ready:
-        reason_code, reason = "scan_required", "Scan the repository to locate the articles publishing surface."
-    elif not _article_repo_is_review_capable(config, github_ready=github_ready):
-        reason_code, reason = (
-            "articles_location_required",
-            "Connect and verify the articles location before generating an exact preview article.",
-        )
-    elif setup_gate.get("setupRunId"):
-        reason_code, reason = "awaiting_setup", "The articles setup build is in progress. Wait for it to finish, then generate."
-    else:
-        reason_code, reason = "setup_required", "Set up the articles publishing surface before generating articles."
-
-    return {
-        "generation_ready": False,
-        "blocking_reason": reason,
-        "reason_code": reason_code,
-        "via": "",
-        "proofs": proofs,
+    ready = bool(github_ready and evidence["verified"])
+    code = "" if ready else "github_required" if not github_ready else evidence["reasonCode"]
+    reasons = {
+        "github_required": "Connect GitHub and choose your website repository.",
+        "repository_required": "Choose your website repository.",
+        "setup_pr_unmerged": "Review and merge your articles setup before writing.",
+        "integration_required": "Connect your articles page before writing.",
+        "verification_required": "Verify the integration on your website's default branch.",
+        "verification_stale": "Refresh the repository scan to verify your articles integration.",
     }
+    return {"generation_ready": ready, "blocking_reason": reasons.get(code) if code else None,
+            "reason_code": code, "via": "verified_integration" if ready else "",
+            "proofs": {"integration_verified": evidence["verified"], "github_credential_available": github_ready}}
 
 
 def _workflow_progress(*, context=None, run=None, latest_runs=None, checks=None, topic_candidates=None):
@@ -11126,6 +11073,18 @@ def _overlay_live_bootstrap_fields(payload, *, context, request):
             "vibe_bootstrap_google_overlay_failed org_id=%s",
             getattr(getattr(context, "organization", None), "id", None),
         )
+    capabilities = _article_capabilities_for_context(context, _get_config(context.organization))
+    payload["articleCapabilities"] = capabilities
+    # Older clients also consume these flags; keep per-user permissions live on
+    # cached bootstrap responses rather than exposing credential-only readiness.
+    scaffold = (payload.get("checks") or {}).get("scaffold")
+    if isinstance(scaffold, dict):
+        scaffold.update({"generationReady": capabilities["canGenerateArticle"],
+            "blockingReason": capabilities["reason"], "reasonCode": capabilities["reasonCode"]})
+    for key in ("articleSetupState", "article_setup_state"):
+        state = payload.get(key)
+        if isinstance(state, dict):
+            state["generationReady"] = capabilities["canGenerateArticle"]
     return payload
 
 
@@ -11319,9 +11278,10 @@ def _compute_bootstrap_payload(context, request=None, *, view="full", config=Non
         "websiteBaseline": _serialize_baseline_snapshot(baseline_snapshot, config, compact=compact),
         "googleBaselineConnection": google_status,
         "checks": checks,
+        "articleCapabilities": _article_capabilities_for_context(context, config, latest_runs=latest_runs),
         "articleSetupState": article_setup_state,
         "article_setup_state": article_setup_state,
-        "latestRuns": serialized_runs,
+        "latestRuns": [_serialize_run(run, context=context, latest_runs=latest_runs, checks=checks, mode=run_mode) for run in latest_runs],
         "latestRunsByWorkflow": latest_runs_by_workflow,
         "topicCandidates": topic_candidates,
         "topicPillars": topic_pillars,
@@ -11408,6 +11368,7 @@ def _serialize_bootstrap_without_domain(company):
             "githubConnectionState": "missing_domain",
         },
         "checks": checks,
+        "articleCapabilities": article_capabilities(None),
         "startupProfile": {
             "founderNames": [],
             "stage": "",
@@ -11492,36 +11453,80 @@ def _timed_vibe_response(payload, *, started_at, metric_name, view=None, respons
     return Response(payload, status=response_status, headers=headers)
 
 
-def _setup_blocked_response_for_generation(context, config):
-    # Operability (user token OR App installation) mirrors the generation gate: an
-    # App-installation org with an unmerged setup PR should get the clear "merge the
-    # setup PR" block here rather than a generic location message downstream.
-    if not _github_repo_operable(config):
+def _github_account_for_context(context, config):
+    from integrations.services.github_installations import user_github_installations
+    user = context.profile.user
+    return github_account_state(config, actor_ids=actor_ids_for_user(user),
+                                installations=user_github_installations(user))
+
+
+def _verify_github_repository_access(context, config, *, force=False):
+    """Check real write authorization and current default-branch identity."""
+    repo = str(getattr(config, "github_repo", "") or "").strip()
+    if not repo or not _github_account_for_context(context, config).get("owned"):
+        return {"verified": False, "reasonCode": "github_access_required"}
+    fingerprint = hashlib.sha256(str((context.profile.user.pk, context.organization.pk, repo,
+        config.connected_slack_user_id, config.github_installation_id,
+        config.github_token_encrypted, config.github_token_expires_at)).encode()).hexdigest()
+    key = "articles-repository-access-v1:" + fingerprint
+    cached = None if force else cache.get(key)
+    if isinstance(cached, dict):
+        return cached
+    result = {"verified": False, "reasonCode": "github_unavailable"}
+    try:
+        token, source = _github_token_for_repo_operation(
+            domain=context.organization.domain, github_repo=repo, permission_mode="write")
+        headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
+        response = http_client.get(f"https://api.github.com/repos/{quote(repo, safe='/')}", headers=headers, timeout=(3, 8))
+        if response.status_code in {401, 403, 404}:
+            result["reasonCode"] = "github_access_required"
+        elif response.status_code == 200:
+            payload = _run_mapping(response.json())
+            branch = str(payload.get("default_branch") or "").strip()
+            # App token mint explicitly requests Contents/Pull requests write;
+            # user OAuth tokens need the repository's push permission as well.
+            writable = source == "github_app_installation" or bool(_run_mapping(payload.get("permissions")).get("push"))
+            if str(payload.get("full_name") or "").lower() == repo.lower() and writable and branch:
+                head = http_client.get(f"https://api.github.com/repos/{quote(repo, safe='/')}/commits/{quote(branch, safe='')}",
+                    headers=headers, timeout=(3, 8))
+                if head.status_code == 200:
+                    sha = str(_run_mapping(head.json()).get("sha") or "")
+                    if sha:
+                        result = {"verified": True, "branch": branch, "sha": sha, "checkedAt": timezone.now().isoformat()}
+                elif head.status_code in {401, 403, 404}:
+                    result["reasonCode"] = "github_access_required"
+            else:
+                result["reasonCode"] = "github_access_required"
+    except (GitHubAppTokenError, TokenRefreshError, ArticleGenerationError):
+        result["reasonCode"] = "github_access_required"
+    except (http_client.RequestException, TypeError, ValueError):
+        pass
+    cache.set(key, result, 60 if result.get("verified") else 15)
+    return result
+
+
+def _article_capabilities_for_context(context, config, *, latest_runs=None, force=False):
+    runs = list(latest_runs) if latest_runs is not None else _latest_runs_for_org(context.organization, limit=12)
+    account = _github_account_for_context(context, config)
+    gate = _article_system_setup_gate(config, runs, resolve_article_system(config))
+    evidence = integration_evidence(config, runs, setup_gate=gate)
+    access = _verify_github_repository_access(context, config, force=force) if account.get("saved") and getattr(config, "github_repo", "") else {}
+    if evidence.get("verified") and access.get("verified") and (access.get("branch") != evidence.get("branch") or access.get("sha") != evidence.get("sha")):
+        evidence = {**evidence, "verified": False, "reasonCode": "verification_stale"}
+    return article_capabilities(config, domain=context.organization.domain, account=account,
+                                evidence=evidence, repository_access=access)
+
+
+def _setup_blocked_response_for_generation(context, config, *, run=None, publishing=False):
+    capabilities = _article_capabilities_for_context(context, config, force=True)
+    if run is not None and str(getattr(run, "github_repo", "") or "").lower() != str(config.github_repo or "").lower():
+        capabilities = {**capabilities, "canGenerateArticle": False, "canPublishArticle": False,
+                        "reasonCode": "repository_changed", "reason": "This draft belongs to a different website repository."}
+    if capabilities["canPublishArticle" if publishing else "canGenerateArticle"]:
         return None
-    latest_runs = _latest_runs_for_org(context.organization)
-    _refreshed_setup_run, setup_pr_refreshed = _refresh_pending_article_system_setup_pr_status(context=context, config=config, latest_runs=latest_runs)
-    if setup_pr_refreshed:
-        latest_runs = _latest_runs_for_org(context.organization)
-    checks = _profile_checks(
-        context.organization,
-        config,
-        latest_runs,
-        _latest_baseline_snapshot(context.organization),
-    )
-    scaffold_check = checks.get("scaffold", {})
-    if not scaffold_check.get("setupBlocked"):
-        return None
-    return Response(
-        {
-            "detail": scaffold_check.get("blockingReason")
-            or "Merge the articles setup PR before starting topic research or article generation. If you merged it in GitHub, refresh merge status.",
-            "code": "article_system_setup_blocked",
-            "reasonCode": scaffold_check.get("reasonCode") or "setup_pr_unmerged",
-            "check": "scaffold",
-            "scaffold": scaffold_check,
-        },
-        status=status.HTTP_409_CONFLICT,
-    )
+    return Response({"detail": capabilities["reason"], "code": "article_system_setup_blocked",
+                     "reasonCode": capabilities["reasonCode"], "articleCapabilities": capabilities,
+                     "nextRequiredStep": capabilities["nextStep"]}, status=status.HTTP_409_CONFLICT)
 
 
 def _recommended_next_action(checks):
@@ -11879,7 +11884,12 @@ def _run_result_from_remote(remote_data):
     else:
         merged = {}
     for key in (
-        "generation", "state_version", "failure", "recovery_intents", "budget",
+        "island_research",
+        "suggested_islands",
+        "keyword_count",
+        "market",
+        "source",
+        "researched_at",
         "warnings",
         "errors",
         "error",
@@ -11902,12 +11912,6 @@ def _run_result_from_remote(remote_data):
         "live_preview",
         "componentManifest",
         "component_manifest",
-        "section_issues",
-        "sectionIssues",
-        "review_draft_html",
-        "review_draft_actions_available",
-        "reviewDraftHtml",
-        "reviewDraftActionsAvailable",
         "publish_child_status",
         "publish_child_recoverable",
         "publish_child_wait_reason",
@@ -12007,15 +12011,6 @@ def _run_result_from_remote(remote_data):
             merged[key] = remote_data.get(key)
     if not merged and remote_data:
         merged = dict(remote_data)
-    review_draft_too_large = False
-    for key in ("review_draft_html", "reviewDraftHtml"):
-        value = merged.get(key)
-        if value is not None and not _bounded_review_draft_html(value):
-            review_draft_too_large |= isinstance(value, str) and len(value) > MAX_REVIEW_DRAFT_HTML_CHARS
-            merged.pop(key, None)
-    if review_draft_too_large:
-        merged["review_draft_actions_available"] = False
-        merged["reviewDraftActionsAvailable"] = False
     return merged
 
 
@@ -12816,6 +12811,7 @@ CONTENT_FACTORY_KEYED_DISPATCH_WORKFLOWS = {
     "island_refresh",
     "article_generation",
     "auto_discovery",
+    "island_refresh",
     "startup_autofill",
     "website_baseline",
     "article_system_setup",
@@ -13209,6 +13205,7 @@ def _queue_content_factory_run(*, endpoint, workflow, context, config, payload, 
                 "article_request": {
                     "client_request_id": dispatch_key,
                     "domain": context.organization.domain,
+                    "requested_topic_count": payload.get("requested_topic_count", 4),
                     "topic": str(payload.get("topic") or payload.get("custom_title") or payload.get("target_keyword") or ""),
                 },
             }
@@ -15111,6 +15108,22 @@ def _scan_should_force_refresh(config, request_data) -> bool:
     return True
 
 
+def _pin_merged_setup_verification_scan(config, run):
+    """Bind an ordinary inventory verification to a merged pending setup."""
+    raw = _run_mapping(getattr(config, "article_system", None))
+    pending = _run_mapping(raw.get("pending_article_system_setup"))
+    if not pending or not _article_system_setup_status_is_merged(
+        setup_status=str(pending.get("status") or pending.get("setupStatus") or pending.get("setup_status") or ""),
+        merge_status=str(pending.get("mergeStatus") or pending.get("merge_status") or ""),
+    ):
+        return False
+    pending = {**pending, "rescanRunId": run.run_id, "rescan_run_id": run.run_id,
+        "status": "merged_verifying", "setupStatus": "merged_verifying", "setup_status": "merged_verifying"}
+    config.article_system = {**raw, "pending_article_system_setup": pending}
+    config.save(update_fields=["article_system", "updated_at"])
+    return True
+
+
 class VibeMarketingScanView(APIView):
     def post(self, request):
         context, error_response = _resolve_context_or_response(request)
@@ -15584,7 +15597,6 @@ class VibeMarketingDiscoveryView(APIView):
                 island_scope = resolve_island_discovery_scope(context.organization, config, content_island_slug)
             except ValueError as exc:
                 return Response({"detail": str(exc)}, status=400)
-            content_island_slug = island_scope.get("slug") or content_island_slug
             content_island_name = island_scope["name"]
             content_island_keyword = island_scope["keyword"]
             content_island_icon_key = island_scope["icon_key"]
@@ -15607,35 +15619,8 @@ class VibeMarketingDiscoveryView(APIView):
                     "requested_topic_count": max(1, min(requested_topic_count, 8)),
                 }
             )
-            charged_user, article_request, billing_error = _charge_roo_points_for_content_island_topic_generation(
-                request,
-                context=context,
-                payload=payload,
-            )
-            if billing_error is not None:
-                return billing_error
-            billing_refund_context = {
-                "kind": CONTENT_FACTORY_ACTION_CONTENT_ISLAND_TOPIC_GENERATION,
-                "charged_user": charged_user,
-                "article_request": article_request,
-                "reason": "Vibe Marketing content-island topic generation queue did not start.",
-            }
         else:
-            gate_response, gate_balance = _require_roo_points_for_ai_agent(
-                request.user,
-                domain=context.organization.domain,
-                action="topic_discovery",
-            )
-            if gate_response is not None:
-                return gate_response
-            _mark_roo_points_gate_authorized(
-                payload,
-                domain=context.organization.domain,
-                action="topic_discovery",
-                current_balance=gate_balance,
-            )
-            # Optional free-form custom idea: scopes discovery to the user's angle/keyword.
-            # Billed as the same topic_discovery action above (no separate gate).
+            # Custom and general research use the same paid admission below.
             custom_topic_title = str(
                 _request_value(request.data, "customTopicTitle", "custom_topic_title", default="") or ""
             ).strip()
@@ -15660,6 +15645,24 @@ class VibeMarketingDiscoveryView(APIView):
                         "requested_topic_count": max(1, min(custom_topic_count, 8)),
                     }
                 )
+        try:
+            requested_count = int(_request_value(request.data, "requestedTopicCount", "requested_topic_count", default=4))
+        except (TypeError, ValueError):
+            requested_count = 4
+        payload.setdefault("requested_topic_count", max(1, min(requested_count, 8)))
+        charged_user, article_request, billing_error = _charge_roo_points_for_content_island_topic_generation(
+            request,
+            context=context,
+            payload=payload,
+        )
+        if billing_error is not None:
+            return billing_error
+        billing_refund_context = {
+            "kind": CONTENT_FACTORY_ACTION_CONTENT_ISLAND_TOPIC_GENERATION,
+            "charged_user": charged_user,
+            "article_request": article_request,
+            "reason": "Vibe Marketing content-island topic generation queue did not start.",
+        }
         if research_audience:
             payload["research_audience"] = research_audience
         run = _queue_content_factory_run(
@@ -15840,6 +15843,8 @@ class VibeMarketingArticleView(APIView):
             return error_response
         config = _get_config(context.organization)
         blocked_response = _setup_blocked_response_for_generation(context, config)
+        if blocked_response is not None:
+            return blocked_response
         selected_title = str(
             _request_value(request.data, "selected_title", "selectedTitle", "candidate_title", "candidateTitle", default="")
             or ""
@@ -16756,6 +16761,9 @@ class VibeMarketingRunCommentsSubmitView(VibeMarketingRunCommentsMixin, APIView)
         context, run, error_response = self._resolve_run(request, run_id)
         if error_response is not None:
             return error_response
+        blocked = _setup_blocked_response_for_generation(context, _get_config(context.organization), run=run)
+        if blocked is not None:
+            return blocked
         source_run = run
         run_request = run.run_request if isinstance(run.run_request, dict) else {}
         run_result = run.result if isinstance(run.result, dict) else {}
@@ -17302,6 +17310,13 @@ class VibeMarketingRunControlView(APIView):
         if not _run_belongs_to_context(run, context):
             return Response({"detail": "Run not found."}, status=status.HTTP_404_NOT_FOUND)
 
+        gated_actions = {"restart", "resume", "revise", "regenerate-image", "regenerate-images", "retry-preview-quality", "promote-bundle", "publish-pr", "approve", "merge-publish-pr"}
+        if action in gated_actions and run.workflow in ARTICLE_WORKFLOWS | {"article_publish", "publish_article"}:
+            blocked = _setup_blocked_response_for_generation(context, _get_config(context.organization), run=run,
+                publishing=action in {"promote-bundle", "publish-pr", "approve", "merge-publish-pr"})
+            if blocked is not None:
+                return blocked
+
         approval_requires_receipt = (
             action == "approve"
             and run.workflow in ARTICLE_WORKFLOWS
@@ -17455,6 +17470,9 @@ class VibeMarketingRunControlView(APIView):
             return Response(_serialize_run(restarted_run, context=context), status=status.HTTP_202_ACCEPTED)
 
         if action == "enable-daily-automation":
+            quote_error = _quoted_price_response(request, cost_points=get_content_factory_research_cost_points(context.organization.domain, 3))
+            if quote_error:
+                return quote_error
             from integrations.services.notification_channels import (
                 ensure_research_automation_for_org,
                 serialize_channel,

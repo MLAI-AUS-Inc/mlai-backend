@@ -135,6 +135,9 @@ class ArticleDispatchControlFlowTests(unittest.TestCase):
         self.transport_error = TransportError
         self.http = SimpleNamespace(RequestException=TransportError, post=Mock(side_effect=self.post))
         self.ns = {
+            "_setup_blocked_response_for_generation": lambda *args, **kwargs: None,
+            "_quoted_price_response": lambda *args, **kwargs: None,
+            "_get_config": lambda *_: self.config if hasattr(self, "config") else None,
             "uuid": uuid, "status": status, "Response": Response, "DatabaseError": DatabaseError,
             "OrganizationContentConfig": self.config_model, "article_brief_for_catalog": article_brief_for_catalog,
             "logger": Mock(), "timezone": SimpleNamespace(now=lambda: datetime(2026, 9, 10, tzinfo=dt_timezone.utc)),
@@ -162,9 +165,9 @@ class ArticleDispatchControlFlowTests(unittest.TestCase):
             "_refund_roo_points_for_article_start": self.refund, "_refund_roo_points_for_content_island_topic_start": Mock(),
             "charge_content_factory_request_for_user": self.charge, "InsufficientRooPointsError": type("Insufficient", (Exception,), {}),
             "build_roo_points_authorization_payload": lambda **kwargs: {"roo_points_billing_status": kwargs["billing_status"]},
-            "get_content_factory_ai_agent_required_points": lambda domain: 6, "_roo_points_balance_for_user": lambda user: 20,
+            "get_content_factory_ai_agent_required_points": lambda domain: 6, "get_content_factory_article_cost_points": lambda domain: 6, "_roo_points_balance_for_user": lambda user: 20,
             "_resolve_context_or_response": lambda request: (self.context, None),
-            "_setup_blocked_response_for_generation": lambda *args: None,
+            "_setup_blocked_response_for_generation": lambda *args, **kwargs: None,
             "match_covered_topic": lambda **kwargs: None, "_github_repo_operable": lambda config: True,
             "article_system_ready": lambda config: True, "resolve_article_system": lambda config: {},
             "normalize_authors": lambda authors: authors, "resolve_default_author": lambda *args: None,

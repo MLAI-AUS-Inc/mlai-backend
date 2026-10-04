@@ -55,6 +55,9 @@ class EditorialRevisionTests(unittest.TestCase):
         self.feedback = Mock()
         self.view = SimpleNamespace(_resolve_run=lambda *_: (self.context, self.run, None))
         self.ns = {
+            "_setup_blocked_response_for_generation": lambda *args, **kwargs: None,
+            "_quoted_price_response": lambda *args, **kwargs: None,
+            "_get_config": lambda *_: self.config if hasattr(self, "config") else None,
             "copy": copy, "uuid": uuid, "hashlib": hashlib, "Response": Response, "status": status,
             "DatabaseError": DatabaseError, "OrganizationContentConfig": self.config_model,
             "article_brief_for_catalog": article_brief_for_catalog,

@@ -6,6 +6,7 @@ VIBE_MARKETING_WORKFLOWS = frozenset(
         "content_factory_scan",
         "article_system_setup",
         "auto_discovery",
+        "island_refresh",
         "content_factory_discovery",
         "article_generation",
         "content_factory_article",

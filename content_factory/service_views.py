@@ -39,7 +39,7 @@ from content_factory.article_setup_reset import (
     clear_cancelled_article_setup_config,
 )
 from content_factory.authors import normalize_authors, org_config_author_payload
-from content_factory.editorial_catalog import EDIT_FIELDS, catalog_payload, merge_strategy
+from content_factory.editorial_catalog import EDIT_FIELDS, catalog_payload, merge_strategy, public_strategy
 from content_factory.editorial_run_state import EditorialRunConflict, merge_editorial_run_snapshot
 from content_factory.editorial_views import service_catalog_update
 from content_factory.auth import content_factory_github_connection_state
@@ -267,6 +267,34 @@ def _content_factory_github_auth_url(*, slack_user_id: str, domain: Optional[str
     return build_github_auth_url(slack_user_id or "", domain=normalized_domain or None)
 
 
+def _worker_article_admission_response(request):
+    """Fresh, exact tenant/repo admission on the existing service-authenticated API."""
+    from types import SimpleNamespace
+    from core.actor_ids import actor_ids_for_user
+    from integrations.services.github_installations import resolve_user_for_actor_id
+    from integrations.services.github_connections import get_owned_org_config
+    from content_factory.vibe_marketing_views import _article_capabilities_for_context
+
+    domain = _normalize_content_factory_domain(request.query_params.get('domain') or '')
+    repo = str(request.query_params.get('github_repo') or '').strip()
+    actor = str(request.query_params.get('requested_by_slack_user_id') or request.query_params.get('slack_user_id') or '').strip()
+    if not domain or not repo or not actor:
+        return Response({'code': 'article_admission_scope_required', 'detail': 'Domain, repository and founder actor are required.'}, status=400)
+    user = resolve_user_for_actor_id(actor)
+    if user is None or actor not in actor_ids_for_user(user):
+        return Response({'code': 'article_admission_actor_invalid', 'detail': 'A valid founder actor is required.'}, status=403)
+    config = get_owned_org_config(actor_ids_for_user(user), domain)
+    if config is None or str(config.github_repo or '').lower() != repo.lower():
+        return Response({'code': 'article_system_setup_blocked', 'reasonCode': 'repository_changed',
+                         'detail': 'This founder does not own the selected website repository.'}, status=409)
+    context = SimpleNamespace(organization=config.organization, profile=SimpleNamespace(user=user))
+    capabilities = _article_capabilities_for_context(context, config, force=True)
+    body = {'domain': config.organization.domain, 'github_repo': config.github_repo, 'articleCapabilities': capabilities}
+    if not capabilities.get('canGenerateArticle'):
+        body.update({'code': 'article_system_setup_blocked', 'reasonCode': capabilities.get('reasonCode'), 'detail': capabilities.get('reason')})
+    return Response(body, status=200 if capabilities.get('canGenerateArticle') else 409, headers={'Cache-Control': 'private, no-store'})
+
+
 class ContentFactoryOrgConfigView(APIView):
     """
     GET/PUT org config for Content Factory service.
@@ -308,6 +336,8 @@ class ContentFactoryOrgConfigView(APIView):
         Lookup org config by domain, github_repo, or slack_user_id query param.
         Returns 404 if organization not found.
         """
+        if request.query_params.get('article_admission') == '1':
+            return _worker_article_admission_response(request)
         domain = request.query_params.get('domain')
         github_repo = request.query_params.get('github_repo')
         slack_user_id = request.query_params.get('slack_user_id')
@@ -453,7 +483,7 @@ class ContentFactoryOrgConfigView(APIView):
             'scan_summary': config.scan_summary if config else None,
             'tech_stack': config.tech_stack if config else {},
             'installed_packages': config.installed_packages if config else {},
-            'pillar_strategy': config.pillar_strategy if config else {},
+            'pillar_strategy': public_strategy(config.pillar_strategy) if config else {},
             'build_healing_hints': config.build_healing_hints if config else [],
             'repo_execution_contract': config.repo_execution_contract if config else {},
             'article_path_pattern': config.article_path_pattern if config else None,
@@ -732,6 +762,8 @@ class ContentFactoryOrgConfigView(APIView):
                     'repoHeadSha': scan_head_sha,
                     'repo_head_sha': scan_head_sha,
                     'status': 'completed',
+                    'article_system_readiness': data.get('article_system_readiness') if isinstance(data.get('article_system_readiness'), dict) else {},
+                    'publish_targets': data.get('publish_targets') if isinstance(data.get('publish_targets'), list) else [],
                     'completedAt': scan_timestamp.isoformat(),
                     'completed_at': scan_timestamp.isoformat(),
                     'updatedAt': scan_timestamp.isoformat(),
@@ -5841,6 +5873,8 @@ class ContentFactoryCallbackView(APIView):
                 'scanRunId': str(run_id or '').strip(),
                 'scan_run_id': str(run_id or '').strip(),
                 'status': 'completed',
+                'article_system_readiness': data.get('article_system_readiness') if isinstance(data.get('article_system_readiness'), dict) else {},
+                'publish_targets': data.get('publish_targets') if isinstance(data.get('publish_targets'), list) else [],
                 'completedAt': scan_completed_at.isoformat(),
                 'completed_at': scan_completed_at.isoformat(),
                 'updatedAt': timezone.now().isoformat(),
@@ -6970,6 +7004,90 @@ class ContentFactoryCallbackView(APIView):
                 job.save(update_fields=update_fields)
 
         logger.info(f"Topic selection recorded for job {job_id}: {len(options)} options found")
+
+        if not options and selection.get('selected_keyword'):
+            # Backwards compatibility
+            options = [selection.copy()]
+            selection['options'] = options
+
+        # Limit to top 4 options
+        options = options[:4]
+
+        # Get or create job tracking record
+        job, created = ContentFactoryJob.objects.update_or_create(
+            job_id=job_id,
+            defaults={
+                'domain': domain,
+                'slack_user_id': slack_user_id,
+                'status': 'awaiting_confirmation',
+                'selected_keyword': selection.get('selected_keyword', ''),
+                'selection_reason': selection.get('selection_reason', ''),
+                'selection_data': selection,
+            }
+        )
+        requested_by_slack_user_id = self._callback_requested_by_slack_user_id(job=job, data=data)
+        if requested_by_slack_user_id:
+            request_meta = dict(job.request_meta or {})
+            if request_meta.get('requested_by_slack_user_id') != requested_by_slack_user_id:
+                request_meta['requested_by_slack_user_id'] = requested_by_slack_user_id
+                job.request_meta = request_meta
+                job.save(update_fields=['request_meta', 'updated_at'])
+        job.last_progress_milestone_key = 'awaiting_confirmation'
+        job.last_progress_updated_at = timezone.now()
+        job.still_working_pinged_at = None
+        job.save(update_fields=['last_progress_milestone_key', 'last_progress_updated_at', 'still_working_pinged_at', 'updated_at'])
+        notification_context = normalize_notification_context(data.get("notification_context"))
+        if notification_context:
+            request_meta = dict(job.request_meta or {})
+            request_meta["notification_context"] = notification_context
+            automation_run = resolve_automation_run(notification_context)
+            if automation_run:
+                request_meta.setdefault("trigger_source", "research_automation")
+                request_meta["automation_id"] = str(automation_run.automation_id)
+                request_meta["automation_run_id"] = str(automation_run.id)
+                if automation_run.request_payload:
+                    request_meta.update(
+                        {
+                            key: value
+                            for key, value in automation_run.request_payload.items()
+                            if key in {"user_email", "recipient_user_id"}
+                        }
+                    )
+            job.request_meta = request_meta
+            job.save(update_fields=["request_meta", "updated_at"])
+        dispatch = ScheduledDiscoveryDispatch.objects.filter(content_factory_job_id=job_id).first()
+        scheduled_daily_job = is_scheduled_daily_job(job) or bool(dispatch)
+        if scheduled_daily_job:
+            request_meta = dict(job.request_meta or {})
+            update_fields = []
+            if request_meta.get("trigger_source") != SCHEDULED_DAILY_TRIGGER_SOURCE:
+                request_meta["trigger_source"] = SCHEDULED_DAILY_TRIGGER_SOURCE
+                update_fields.append("request_meta")
+            if not job.billing_status:
+                job.billing_status = CONTENT_FACTORY_BILLING_STATUS_DEFERRED
+                update_fields.append("billing_status")
+            if update_fields:
+                job.request_meta = request_meta
+                update_fields.append("updated_at")
+                job.save(update_fields=update_fields)
+
+        logger.info(f"Topic selection recorded for job {job_id}: {len(options)} options found")
+
+        if not options and (job.request_meta or {}).get('roo_points_action') == 'content_island_topic_generation':
+            from integrations.services.article_generation import maybe_auto_refund_terminal_failure
+            maybe_auto_refund_terminal_failure(job, error_code='EMPTY_RESEARCH_RESULT',
+                error_message='Research completed without usable topic options.', refundable=True)
+            job.status = 'error'
+            job.error_message = 'Research completed without usable topic options.'
+            job.save(update_fields=['status', 'error_message', 'updated_at'])
+            if notification_context:
+                automation_run = resolve_automation_run(notification_context)
+                if automation_run and normalize_domain(automation_run.automation.organization.domain) == normalize_domain(domain):
+                    automation_run.status = 'failed'
+                    automation_run.last_error = job.error_message
+                    automation_run.save(update_fields=['status', 'last_error', 'updated_at'])
+            return Response({'status': 'received', 'job_id': job_id, 'awaiting_confirmation': False,
+                             'error_code': 'EMPTY_RESEARCH_RESULT'}, status=200)
 
         if notification_context and options:
             upsert_live_progress_card(

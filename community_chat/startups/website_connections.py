@@ -1,25 +1,28 @@
-"""Website authorizations displayed beside update sources, without draft opt-in."""
+"""Website authorization status, separate from sources included in Pulse."""
 from django.conf import settings
 
+from content_factory.activation import github_account_state
 from content_factory.google_baseline import google_connection_has_baseline_scope
 from content_factory.models import OrganizationContentConfig
 from founder_tools.services import actor_ids_for_user
 from integrations.services.external_connectors import google_connection_for_org, is_provider_configured
+from integrations.services.github_installations import user_github_installations
 
 
 def website_connection_sources(user, company):
-    """Read only the selected startup's saved Google/GitHub authorization."""
+    """Project the selected startup's saved account state without claiming access."""
     organization = company.organization
     google = google_connection_for_org(user, organization) if organization else None
     google_ready = google_connection_has_baseline_scope(google)
     google_configured = is_provider_configured("gmail")
     github_configured = bool(getattr(settings, "GITHUB_OAUTH_CLIENT_ID", "")
         and getattr(settings, "GITHUB_OAUTH_CLIENT_SECRET", ""))
-    config = OrganizationContentConfig.objects.filter(
-        organization=organization, connected_slack_user_id__in=actor_ids_for_user(user),
-    ).first() if organization else None
-    github_ready = bool(config and config.github_installation_id
-        and config.github_connection_state in {"connected", "repo_selection_required"})
+    config = OrganizationContentConfig.objects.filter(organization=organization).first() if organization else None
+    account = github_account_state(config, actor_ids=actor_ids_for_user(user), installations=user_github_installations(user))
+    github_status = account["status"]
+    # Saved access remains visible even if the server's OAuth initiation is disabled.
+    if not account["saved"] and (not github_configured or not organization):
+        github_status = "unavailable"
     common = {"connectMode": "oauth", "canDisconnect": False, "usableForUpdates": False,
         "enabled": False, "selected": False, "capabilities": ["website"],
         "activityWindowDays": 30, "selectionMode": "recent_activity"}
@@ -32,10 +35,12 @@ def website_connection_sources(user, company):
             "warning": None if google_configured else "Google Search Console is not available yet."},
         {**common, "key": "github", "provider": "github", "label": "GitHub",
             "configured": github_configured, "canConnect": bool(github_configured and organization),
-            "status": "connected" if github_ready else "not_connected" if github_configured and organization else "unavailable",
-            "accountLabel": config.github_user_name if github_ready else None,
-            "warning": ("GitHub is not available yet." if not github_configured else
-                "Choose a repository in website setup to publish articles."
-                if github_ready and not config.github_repo else None)
-                if organization else "Add your startup website in Startup details first."},
+            "status": github_status, "accountLabel": account["accountLabel"],
+            "repositorySelected": bool(config and config.github_repo), "repositoryAccessVerified": False,
+            "warning": ("Checking your saved GitHub access. Open website setup to verify it."
+                if github_status == "checking" else "Review your GitHub access."
+                if github_status == "needs_action" else "GitHub is not available yet."
+                if github_status == "unavailable" and organization else
+                "Add your startup website in Startup details first." if not organization else
+                "Choose a repository in website setup." if account["saved"] and not (config and config.github_repo) else None)},
     ]

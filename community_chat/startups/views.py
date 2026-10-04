@@ -185,6 +185,25 @@ class GenerateView(ChatStartupAccess, founder.VibeRaisingEmailDraftStartView):
 
     def post(self, request):
         validate_generation_sources(request.data)
+        # Check the effective selection before the shared view can debit or queue.
+        # Notes/documents are usable without an OAuth source; revoked accounts
+        # and missing property selections require an explicit client decision.
+        from integrations.services.external_connectors import serialize_source_status
+        selected = founder._include_manual_source_if_needed(
+            request.data.get("inputSources", request.data.get("input_sources", [])),
+            manual_document_ids=founder._get_requested_manual_document_ids(request),
+            manual_summary=founder._get_requested_manual_summary(request),
+        )
+        rows = serialize_source_status(request.user, organization=self.company.organization).get("sources", [])
+        by_key = {row.get("key"): source_capabilities(row) for row in rows if isinstance(row, dict)}
+        unavailable = [key for key in selected if key != "manual_documents" and
+            (by_key.get(key, {}).get("status") not in {"connected", "ready"}
+             or by_key.get(key, {}).get("selected") is not True
+             or by_key.get(key, {}).get("usableForUpdates") is False
+             or by_key.get(key, {}).get("available") is False)]
+        if unavailable:
+            return Response({"detail": "Reconnect or remove unavailable sources before generating.",
+                "code": "startup_update_sources_unavailable", "unavailableSources": unavailable}, status=409)
         try:
             return super().post(request)
         except ConnectorConfigurationError as exc:

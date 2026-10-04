@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 from datetime import date, datetime, time, timedelta, timezone as dt_timezone
 from typing import Any, Iterable, Optional
@@ -18,16 +19,18 @@ from content_factory.models import (
     ResearchAutomation,
     ResearchAutomationStatus,
 )
-from content_factory.billing import get_content_factory_ai_agent_required_points
+from content_factory.billing import (
+    CONTENT_FACTORY_ACTION_CONTENT_ISLAND_TOPIC_GENERATION,
+    build_roo_points_authorization_payload,
+    get_content_factory_research_cost_points,
+)
 from integrations.services.article_generation import (
-    CONTENT_FACTORY_BILLING_STATUS_DEFERRED,
+    CONTENT_FACTORY_BILLING_STATUS_CHARGED,
     CONTENT_FACTORY_REQUEST_SOURCE,
     InsufficientRooPointsError,
-    _build_content_factory_headers,
-    _content_factory_authorization_payload,
-    _get_content_factory_base_url,
-    _post_content_factory_queue_request,
-    _require_content_factory_ai_agent_points,
+    charge_content_factory_topic_generation_for_user,
+    refund_content_factory_topic_generation_for_user,
+    _content_factory_balance_for_user,
     _store_job_tracking_record,
 )
 from integrations.services.notification_adapters import (
@@ -263,13 +266,12 @@ def dispatch_automation_run(run_id: str) -> dict[str, Any]:
         run.save(update_fields=["status", "last_error", "updated_at"])
 
     payload = _discovery_payload_for_run(run)
-    AutomationRun.objects.filter(pk=run.id).update(request_payload=payload)
     domain = payload.get("domain") or ""
-    # Browsing topics is free; the Roo-points charge is deferred to topic
-    # approval (confirm_topic -> _charge_deferred_discovery_job_if_needed).
-    # Free-listed domains skip billing entirely and keep the bare-dispatch path.
-    paying_domain = get_content_factory_ai_agent_required_points(domain) > 0
-    endpoint = f"{_get_content_factory_base_url().rstrip('/')}/api/runs/discovery"
+    payload["client_request_id"] = "automation-research:" + hashlib.sha256(
+        f"{run.automation.organization_id}:{run.idempotency_key}".encode()).hexdigest()
+    paying_domain = get_content_factory_research_cost_points(domain, 3) > 0
+    charged_user, charge_ledger, cost_points = None, None, 0
+    queue_entered = False
     try:
         if paying_domain:
             actor_slack_id = str(payload.get("requested_by_slack_user_id") or "").strip()
@@ -288,65 +290,68 @@ def dispatch_automation_run(run_id: str) -> dict[str, Any]:
                     "automation_run_id": str(run.id),
                     "error": "billing_identity_missing",
                 }
-            # Gate on balance (raises InsufficientRooPointsError below), then stamp
-            # a deferred authorization so content-factory admits the discovery.
-            _gated_user, gated_balance = _require_content_factory_ai_agent_points(
-                slack_user_id=actor_slack_id,
+            from integrations.services.github_installations import resolve_user_for_actor_id
+            charged_user = resolve_user_for_actor_id(actor_slack_id)
+            if charged_user is None:
+                raise ValueError("billing_identity_missing")
+            charged_user, charge_ledger, cost_points = charge_content_factory_topic_generation_for_user(
+                user=charged_user, actor_id=actor_slack_id,
                 article_request=payload,
                 resolved_domain=domain,
-                action="topic_discovery",
             )
             payload.update(
-                _content_factory_authorization_payload(
-                    resolved_domain=domain,
-                    action="topic_discovery",
-                    cost_points=0,
-                    billing_status=CONTENT_FACTORY_BILLING_STATUS_DEFERRED,
-                    current_balance=gated_balance,
+                build_roo_points_authorization_payload(
+                    domain=domain,
+                    action=CONTENT_FACTORY_ACTION_CONTENT_ISLAND_TOPIC_GENERATION,
+                    cost_points=cost_points,
+                    required_points=cost_points,
+                    billing_status=CONTENT_FACTORY_BILLING_STATUS_CHARGED,
+                    current_balance=_content_factory_balance_for_user(charged_user),
+                    ledger_id=getattr(charge_ledger, "pk", None),
                 )
             )
 
-        response = _post_content_factory_queue_request(
-            endpoint,
-            payload=payload,
-            headers=_build_content_factory_headers(),
-            operation="queue_research_automation_discovery",
-            domain=domain,
-        )
-        if response.status_code not in {200, 202}:
-            error = f"Content Factory returned {response.status_code}: {response.text}"
-            AutomationRun.objects.filter(pk=run.id).update(
-                status=AutomationRunStatus.FAILED,
-                last_error=error,
-            )
-            return {"status": "failed", "automation_run_id": str(run.id), "error": error}
-        data = response.json()
-        content_factory_run_id = str(data.get("job_id") or data.get("run_id") or data.get("task_id") or "").strip()
+        from types import SimpleNamespace
+        from content_factory.vibe_marketing_views import _queue_content_factory_run, _get_config
+        user = charged_user or run.automation.user or run.automation.notification_channel.user
+        if user is None:
+            raise ValueError("billing_identity_missing")
+        context = SimpleNamespace(organization=run.automation.organization, profile=SimpleNamespace(user=user))
+        queue_config = _get_config(context.organization)
+        queue_entered = True
+        remote_run = _queue_content_factory_run(endpoint="discovery", workflow="auto_discovery",
+            context=context, config=queue_config, payload=payload,
+            billing_refund_context={"kind": CONTENT_FACTORY_ACTION_CONTENT_ISLAND_TOPIC_GENERATION,
+                "charged_user": charged_user, "article_request": payload,
+                "reason": "Scheduled research could not start."} if charged_user else None)
+        content_factory_run_id = str(remote_run.run_id)
+        unresolved = bool((remote_run.run_request or {}).get("dispatch_pending_resolution"))
+        queue_failed = remote_run.status in {"blocked", "failed", "cancelled"} and not unresolved
         if paying_domain and content_factory_run_id:
-            # Track the discovery job with a deferred hold so topic approval can
-            # charge the founder's wallet. The actor rides in request_meta
-            # (requested_by_slack_user_id) for _charge_deferred_discovery_job.
             _store_job_tracking_record(
                 content_factory_run_id,
                 domain=domain,
                 slack_user_id="",
                 request_meta=payload,
                 default_status="queued",
-                client_request_id=run.idempotency_key,
+                client_request_id=payload["client_request_id"],
                 billing_source_job_id=content_factory_run_id,
-                billing_amount=0,
-                billing_status=CONTENT_FACTORY_BILLING_STATUS_DEFERRED,
+                billing_amount=cost_points,
+                billing_status="refunded" if queue_failed else CONTENT_FACTORY_BILLING_STATUS_CHARGED,
+                billing_ledger_id=getattr(charge_ledger, "pk", None),
             )
         AutomationRun.objects.filter(pk=run.id).update(
+            status=AutomationRunStatus.FAILED if queue_failed else AutomationRunStatus.QUEUED,
             content_factory_run_id=content_factory_run_id,
             request_payload=payload,
-            last_error="",
+            last_error=str(remote_run.error or "Research could not start.") if queue_failed else "",
         )
         ResearchAutomation.objects.filter(pk=run.automation_id).update(last_scheduled_for_at=run.scheduled_for_at)
         return {
-            "status": "queued",
+            "status": "failed" if queue_failed else "queued",
             "automation_run_id": str(run.id),
             "content_factory_run_id": content_factory_run_id,
+            **({"error": str(remote_run.error or "dispatch_failed")} if queue_failed else {}),
         }
     except InsufficientRooPointsError as exc:
         logger.info("Research automation run %s blocked on Roo points: %s", run.id, exc)
@@ -357,6 +362,11 @@ def dispatch_automation_run(run_id: str) -> dict[str, Any]:
         return {"status": "failed", "automation_run_id": str(run.id), "error": "insufficient_roo_points"}
     except Exception as exc:
         logger.warning("Failed to dispatch research automation run %s: %s", run.id, exc)
+        if charged_user is not None and cost_points > 0 and not queue_entered:
+            # The queue helper handles ambiguity and owns refunds after dispatch.
+            # Failures before entering it are safe to refund here.
+            refund_content_factory_topic_generation_for_user(user=charged_user, actor_id=actor_slack_id,
+                article_request=payload, resolved_domain=domain, reason=str(exc))
         AutomationRun.objects.filter(pk=run.id).update(
             status=AutomationRunStatus.FAILED,
             last_error=str(exc),
@@ -381,6 +391,7 @@ def start_manual_automation_run(
     organization,
     *,
     requested_by_user_id: Optional[int] = None,
+    request_id: Optional[str] = None,
     now: Optional[datetime] = None,
 ) -> dict[str, Any]:
     """Start an on-demand ("Run today now") research run for an org's automation.
@@ -413,8 +424,14 @@ def start_manual_automation_run(
     ).exists()
     if not has_target:
         return {"status": "no_delivery_channels"}
-    from .daily_research_policy import record_engagement
-    record_engagement(organization, now=current)
+
+    explicit_key = None
+    if request_id:
+        explicit_key = "manual-research:" + hashlib.sha256(
+            f"{organization.pk}:{requested_by_user_id}:{str(request_id)[:200]}".encode()).hexdigest()
+        existing = AutomationRun.objects.filter(automation=automation, idempotency_key=explicit_key).first()
+        if existing is not None:
+            return {"status": "reused", "automation_run_id": str(existing.id), "run_status": existing.status}
 
     timezone_name = _coerce_timezone(automation.timezone)
     local_date = current.astimezone(ZoneInfo(timezone_name)).date()
@@ -479,6 +496,28 @@ def start_manual_automation_run(
     result = dispatch_automation_run(str(run.id))
     result.setdefault("automation_run_id", str(run.id))
     return result
+
+
+def reconcile_automation_research_dispatch(run):
+    """Resolve a lost queue response with the same canonical dispatch key."""
+    from workflow_runs.models import ContentFactoryRun
+    from content_factory.vibe_marketing_views import _resolve_dispatch_token_run, _run_pending_remote_dispatch
+    if run.status != AutomationRunStatus.QUEUED or not run.content_factory_run_id:
+        return run
+    domain = normalize_domain(run.automation.organization.domain)
+    local = ContentFactoryRun.objects.filter(run_id=run.content_factory_run_id,
+        domain=domain, workflow="auto_discovery").first()
+    if local is None or not _run_pending_remote_dispatch(local):
+        return run
+    resolved = _resolve_dispatch_token_run(local)
+    if resolved is None:
+        return run
+    run.content_factory_run_id = resolved.run_id
+    if resolved.status in {"failed", "cancelled"}:
+        run.status = AutomationRunStatus.FAILED
+        run.last_error = resolved.error or "Research could not start. Your points were refunded."
+    run.save(update_fields=["content_factory_run_id", "status", "last_error", "updated_at"])
+    return run
 
 
 def fail_stuck_automation_runs(

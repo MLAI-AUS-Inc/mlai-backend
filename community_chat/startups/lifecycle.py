@@ -19,30 +19,22 @@ UPDATE_PROVIDERS = OAUTH_PROVIDERS | API_KEY_PROVIDERS
 
 
 def source_capabilities(source, *, preferences=None):
-    """Describe connection actions separately from automatic source inclusion."""
+    """Keep default inclusion, data readiness and connection actions independent."""
     source = dict(source)
     provider = source.get("provider") or source.get("key")
     mode = "oauth" if provider in OAUTH_PROVIDERS else "api_key" if provider in API_KEY_PROVIDERS else None
-    connected = source.get("status") in {"connected", "syncing"}
-    source.update({
-        "connectMode": mode,
+    ready = source.get("status") in {"connected", "ready"} and source.get("selected") is True and source.get("usableForUpdates") is not False and source.get("available") is not False
+    usable = provider in UPDATE_PROVIDERS and ready and provider != "google_drive"
+    default_enabled = provider != "google_drive" and bool(source.get("connectionId") or source.get("status") in {
+        "connected", "ready", "syncing", "needs_reauth", "needs_action", "expired", "auth_required"})
+    source.update({"connectMode": mode,
         "canConnect": bool(mode and source.get("configured", source.get("status") != "unavailable")),
-        "canDisconnect": bool(source.get("connectionId") or (provider == "gmail" and connected)),
-        "usableForUpdates": bool(provider in UPDATE_PROVIDERS and connected and provider != "google_drive"),
-    })
-    if provider == "google_drive" and connected:
+        "canDisconnect": bool(source.get("connectionId") or (provider == "gmail" and source.get("status") == "connected")),
+        "usableForUpdates": usable, "enabled": (preferences or {}).get(provider, default_enabled),
+        "activityWindowDays": None, "activityPeriod": "reporting_month", "selectionMode": "recent_activity"})
+    if provider == "google_drive" and source.get("status") == "connected":
         source["warning"] = "Google Drive is connected. Update imports are not available yet."
-    source["enabled"] = bool(source["usableForUpdates"] and (preferences or {}).get(provider, True))
-    source["activityWindowDays"] = None
-    source["activityPeriod"] = "reporting_month"
-    source["selectionMode"] = "recent_activity"
-    if source.get("warning") in {
-        "Select Slack channels before using Slack in a monthly update.",
-        "Select a Google Analytics property before using Google Analytics in a monthly update.",
-    }:
-        source["warning"] = None
     return source
-
 
 @transaction.atomic
 def delete_update(*, organization, update_id, revision_id, revision_hash):
