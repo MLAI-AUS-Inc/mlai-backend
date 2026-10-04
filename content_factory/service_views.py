@@ -8782,7 +8782,11 @@ def _sync_content_factory_run_snapshot(*, run_id: str, data: dict, step_states: 
         if original_request.get("delivery_mode") == "content_only" and not connection_contract(original_request):
             if not portable_run_update_allowed(existing_run, data):
                 raise EditorialRunConflict("A portable draft snapshot cannot acquire repository authority")
-            data["run_request"] = {**(data.get("run_request") or {}), "delivery_mode": "content_only"}
+            # Only a previously confirmed original reaches this branch. Sparse
+            # worker snapshots cannot erase that consent and strand later
+            # callbacks or revision resumes; worker claims never create it.
+            data["run_request"] = {**(data.get("run_request") or {}),
+                                   "delivery_mode": "content_only", "delivery_mode_confirmed": True}
             data["domain"] = existing_run.domain
         # Worker observations may omit request fields. The known reader/offer
         # decision is immutable history, not a field a sparse callback can clear.

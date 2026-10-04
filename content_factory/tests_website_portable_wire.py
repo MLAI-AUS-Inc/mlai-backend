@@ -21,7 +21,8 @@ class PortableWorkerWireTests(SimpleTestCase):
     def setUp(self):
         self.wire = json.loads((Path(__file__).parent / "testdata" / "portable_worker_wire.json").read_text())
         self.run = SimpleNamespace(run_id="run-content-only-1", workflow="article_generation",
-            domain="example.com", github_repo="", run_request={"delivery_mode": "content_only"})
+            domain="example.com", github_repo="",
+            run_request={"delivery_mode": "content_only", "delivery_mode_confirmed": True})
 
     def test_actual_progress_and_completion_callbacks_are_portable(self):
         self.assertEqual([payload["event"] for payload in self.wire["callbacks"]],
@@ -53,4 +54,8 @@ class PortableWorkerWireTests(SimpleTestCase):
 
     def test_real_payload_does_not_override_original_native_intent(self):
         self.run.run_request = {"delivery_mode": "publish_code"}
+        self.assertFalse(portable_run_update_allowed(self.run, self.wire["snapshot"]))
+
+    def test_real_payload_does_not_confirm_a_saved_default(self):
+        self.run.run_request = {"delivery_mode": "content_only"}
         self.assertFalse(portable_run_update_allowed(self.run, self.wire["snapshot"]))

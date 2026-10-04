@@ -28,8 +28,7 @@ def portable_run_update_allowed(run, payload, *, event_type=""):
     This grants no repository configuration, preview, publication or token access.
     Only the callback and run-snapshot surfaces opt in to this exception.
     """
-    original = getattr(run, "run_request", None)
-    if not isinstance(original, dict) or original.get("delivery_mode") != "content_only" or connection_contract(original):
+    if not original_portable_run(run):
         return False
     if getattr(run, "workflow", "") not in PORTABLE_WORKFLOWS or (event_type and event_type not in PORTABLE_CALLBACK_EVENTS):
         return False

@@ -16811,6 +16811,8 @@ class VibeMarketingRunCommentsSubmitView(VibeMarketingRunCommentsMixin, APIView)
                     .order_by("created_at", "id")
                 )
                 draft_comments = [comment for comment in draft_comments if str(comment.body or "").strip()]
+        from content_factory.portable_drafts import original_portable_run
+        portable_revision = original_portable_run(source_run)
         billing_payload, editorial_error = _revision_editorial_payload_from_run(context=context, run=source_run)
         if editorial_error is not None:
             return editorial_error
@@ -16917,12 +16919,19 @@ class VibeMarketingRunCommentsSubmitView(VibeMarketingRunCommentsMixin, APIView)
                 )
 
             config = _get_config(context.organization)
+            revision_request = dict(remote_payload)
+            if portable_revision:
+                # The worker builds a content-only child from its saved source,
+                # but the local revision must retain that same original consent.
+                # Never infer it from a result or a caller-supplied revision body.
+                revision_request.update(delivery_mode="content_only", delivery_mode_confirmed=True,
+                                        delivery_mode_explicit=True)
             revision_run = _create_local_run(
                 workflow="article_revision",
                 domain=context.organization.domain,
-                github_repo=config.github_repo or run.github_repo or "",
+                github_repo="" if portable_revision else config.github_repo or run.github_repo or "",
                 actor_id=founder_actor_id_for_user(request.user),
-                payload=remote_payload,
+                payload=revision_request,
                 remote_data=remote_data,
             )
             revision_result = revision_run.result or {}

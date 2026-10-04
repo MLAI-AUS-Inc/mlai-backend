@@ -15,7 +15,8 @@ class PortableWebsiteDraftTests(TestCase):
         self.org = Organization.objects.create(domain="portable.example.test", name="Portable")
         self.config = OrganizationContentConfig.objects.create(organization=self.org, company_context="Original")
         self.run = ContentFactoryRun.objects.create(run_id="portable-draft", organization=self.org,
-            domain=self.org.domain, workflow="direct_generate", status="running", run_request={"delivery_mode": "content_only"})
+            domain=self.org.domain, workflow="direct_generate", status="running",
+            run_request={"delivery_mode": "content_only", "delivery_mode_confirmed": True})
         self.factory = APIRequestFactory()
 
     def request(self, method, payload):
@@ -66,3 +67,14 @@ class PortableWebsiteDraftTests(TestCase):
     def test_bound_run_cannot_use_portable_exception(self):
         self.run.run_request.update(website_connection_id="fbc09c73-e449-4c43-88ea-385b249a7a20", connection_generation=1)
         self.assertFalse(portable_run_update_allowed(self.run, {"status": "completed"}))
+
+    def test_unconfirmed_saved_default_cannot_receive_portable_worker_updates(self):
+        self.run.run_request.pop("delivery_mode_confirmed")
+        self.run.save(update_fields=["run_request"])
+        response = ContentFactoryRunView.as_view()(self.request("put", {
+            "workflow": "direct_generate", "domain": self.org.domain, "status": "completed",
+            "run_request": {"delivery_mode": "content_only", "delivery_mode_confirmed": True},
+        }), run_id=self.run.run_id)
+        self.assertEqual(response.status_code, 409, response.data)
+        self.run.refresh_from_db()
+        self.assertEqual(self.run.status, "running")
