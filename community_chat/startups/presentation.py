@@ -10,7 +10,7 @@ PUBLIC_FIELDS = (
 )
 
 
-def update_payload(draft, *, published=False, community=False):
+def update_payload(draft, *, published=False, community=False, user=None):
     """Never expose private evidence, source URLs or uploads to community readers."""
     value = _serialize_monthly_update(draft, published=published, shared=False)
     revision = draft.published_revision if published else draft.current_revision
@@ -24,6 +24,9 @@ def update_payload(draft, *, published=False, community=False):
         value = shared_update(value, metric_items=memo.get("kpi_snapshot"))
         value = {key: copy.deepcopy(value.get(key)) for key in PUBLIC_FIELDS}
     else:
+        if user is not None:
+            from startup_updates.rewards import update_reward_receipt
+            value["reward"] = update_reward_receipt(draft, user=user)
         value["financialChart"] = financial_chart(value, metric_items=memo.get("kpi_snapshot"))
         value["validation"] = copy.deepcopy(revision.validation) if revision else {"legacy_unverified": True}
         value["agentProvenance"] = copy.deepcopy(memo.get("_agent_provenance"))

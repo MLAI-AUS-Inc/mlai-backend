@@ -106,6 +106,12 @@ class VerifyCompanyWithAbrTests(SimpleTestCase):
         self.assertEqual(result["acn"], COMPANY_ACN)
         self.assertEqual(result["entity_type_code"], "PRV")
 
+    def test_legal_and_all_trading_names_are_available_for_identity_matching(self):
+        xml = _company_xml().replace("</mainName>", """</mainName>
+          <businessName><organisationName>First Brand</organisationName></businessName>
+          <businessName><organisationName>Second Brand</organisationName></businessName>""")
+        self.assertEqual(self._verify(xml)["names"], ["EXAMPLE PTY LTD", "First Brand", "Second Brand"])
+
     def test_pretty_printed_abr_response_is_parsed(self):
         # Real ABR responses are indented, so <ABN> carries whitespace text before its
         # inner <identifierValue>. The parser must skip the wrapper and read the leaf.

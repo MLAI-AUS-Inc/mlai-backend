@@ -539,7 +539,7 @@ class VibeRaisingApiTests(TestCase):
                 self.assertEqual(response.status_code, 400)
         self.assertFalse(MonthlyUpdateDraft.objects.filter(organization__domain="acme.com").exists())
 
-    @patch("roo.services.StartupUpdateRewardService.award_monthly_update_completion")
+    @patch("startup_updates.rewards.award_completion", return_value={"points": 5, "awarded": True, "status": "awarded"})
     def test_draft_publish_preserves_audience_visibility(self, mock_award):
         self.client.force_authenticate(user=self.user)
         _profile, company = self._create_founder_company(domain="acme.com", registered=True)
@@ -581,12 +581,7 @@ class VibeRaisingApiTests(TestCase):
         self.assertIsNotNone(draft.published_at)
         self.assertEqual(draft.audience_visibility, ["community"])
         self.assertEqual(self.client.get("/api/v1/vibe-raising/drafts/").data["drafts"], [])
-        mock_award.assert_called_once_with(
-            user=self.user,
-            company=company,
-            month_bucket=date(2026, 6, 1),
-            draft=draft,
-        )
+        mock_award.assert_called_once_with(self.user, company, draft, newly_approved=True)
 
     def test_publish_requires_founder_owner(self):
         self.client.force_authenticate(user=self.user)
@@ -629,7 +624,7 @@ class VibeRaisingApiTests(TestCase):
         self.assertIsNone(draft.published_at)
         self.assertEqual(draft.status, MonthlyUpdateDraftStatus.DRAFT)
 
-    @patch("roo.services.StartupUpdateRewardService.award_monthly_update_completion")
+    @patch("startup_updates.rewards.award_completion", return_value={"points": 5, "awarded": True, "status": "awarded"})
     def test_publish_is_idempotent_and_preserves_existing_visibility(self, mock_award):
         self.client.force_authenticate(user=self.user)
         _profile, company = self._create_founder_company(domain="acme.com", registered=True)
@@ -659,7 +654,8 @@ class VibeRaisingApiTests(TestCase):
         self.assertEqual(draft.published_at, first_published_at)
         self.assertEqual(draft.audience_visibility, ["just_me"])
         self.assertEqual(second_response.data["update"]["audienceVisibility"], ["just_me"])
-        mock_award.assert_called_once()
+        self.assertEqual(mock_award.call_count, 2)
+        self.assertFalse(mock_award.call_args.kwargs["newly_approved"])
 
     def test_editing_published_update_preserves_publish_state_and_visibility_when_omitted(self):
         self.client.force_authenticate(user=self.user)

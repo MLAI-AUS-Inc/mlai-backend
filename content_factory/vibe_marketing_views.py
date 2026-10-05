@@ -13909,6 +13909,12 @@ def _abn_records_from_xml(xml_text: str) -> list[dict]:
                 "acn": acn or None,
                 "entityName": _xml_text(node, "organisationName", "entityName", "name"),
                 "businessName": _xml_text(node, "businessName", "tradingName", "mainTradingName"),
+                "names": list(dict.fromkeys(
+                    value.text.strip()
+                    for value in node.iter()
+                    if _local_xml_name(value.tag) in {"organisationName", "entityName", "name"}
+                    and value.text and value.text.strip()
+                )),
                 "status": _xml_text(node, "entityStatusCode", "status"),
                 "entityTypeCode": _xml_text(node, "entityTypeCode"),
                 "entityTypeName": _xml_text(node, "entityTypeName", "entityDescription", "entityTypeDescription"),
@@ -13941,6 +13947,7 @@ def verify_company_with_abr(abn) -> dict:
             "status": str,        # ABR entity status code, e.g. "Active"
             "active": bool,
             "is_company": bool,   # active Australian company (not required for perks)
+            "names": list[str],   # legal and current trading/business names
         }
 
     Network/parse failures degrade to ``reachable=False`` rather than raising, so the
@@ -13958,6 +13965,7 @@ def verify_company_with_abr(abn) -> dict:
         "status": "",
         "active": False,
         "is_company": False,
+        "names": [],
     }
 
     lookup_acn = normalize_acn(abn) if not result["abn"] else None
@@ -14007,6 +14015,7 @@ def verify_company_with_abr(abn) -> dict:
         result["found"] = False
         return result
     result["entity_type_name"] = (record.get("entityTypeName") or "").strip()
+    result["names"] = record.get("names") or []
     result["status"] = (record.get("status") or "").strip()
     result["active"] = result["status"].lower() == "active"
 

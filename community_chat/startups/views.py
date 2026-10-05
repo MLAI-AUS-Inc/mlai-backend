@@ -102,7 +102,7 @@ class UpdatesView(ChatStartupAccess, founder.VibeRaisingMonthlyUpdateView):
         except (ValueError, TypeError, DjangoValidationError):
             raise ValidationError({"offset": "Use a nonnegative integer."})
         rows = list(drafts[offset:offset + 51])
-        return Response({"updates": [update_payload(row) for row in rows[:50]],
+        return Response({"updates": [update_payload(row, user=request.user) for row in rows[:50]],
             "nextOffset": offset + 50 if len(rows) > 50 else None})
 
     def post(self, request):
@@ -128,14 +128,14 @@ class UpdateView(ChatStartupAccess, APIView):
         ).select_related("organization", "current_revision__snapshot", "published_revision__snapshot")
         if published and not draft.published_revision_id:
             raise NotFound("No approved version exists yet.")
-        value = update_payload(draft, published=published)
+        value = update_payload(draft, published=published, user=request.user)
         # Use the approved receipt, never the working draft's selected audience.
         if published and approved_updates("public").filter(pk=draft.pk).exists():
             value["publicUrl"] = request.build_absolute_uri(reverse("chat_startups_public_update", kwargs={"update_id": draft.pk}))
         return Response({"update": value,
             "communityPreview": update_payload(draft, published=published, community=True),
             "previousUpdates": [] if published else [
-                update_payload(row) for row in siblings.exclude(pk=draft.pk).order_by("-updated_at", "-pk")
+                update_payload(row, user=request.user) for row in siblings.exclude(pk=draft.pk).order_by("-updated_at", "-pk")
             ]})
 
 
