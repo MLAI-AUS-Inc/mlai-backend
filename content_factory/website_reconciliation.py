@@ -235,7 +235,7 @@ def process_website_connection_operations(*, limit=20, now=None):
     now = now or timezone.now()
     ids = list(WebsiteConnectionOperation.objects.filter(Q(next_attempt_at__isnull=True) | Q(next_attempt_at__lte=now), state="pending")
         .order_by("next_attempt_at").values_list("id", flat=True)[:limit])
-    result = {"processed": 0, "completed": 0, "pending": 0}
+    result = {"status": "completed", "processed": 0, "completed": 0, "pending": 0}
     for identifier in ids:
         if WebsiteConnectionOperation.objects.filter(pk=identifier, action="worker_followup").exists():
             outcome = _process_worker_followup(identifier, now)

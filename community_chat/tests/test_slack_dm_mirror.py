@@ -2657,7 +2657,7 @@ class SlackDmMirrorOwnerTests(APITestCase):
 
     @patch("integrations.services.slack_dm_mirror.BuzzBridgeClient.provision_private_conversation")
     @patch("integrations.services.slack_dm_mirror.WebClient")
-    def test_same_identity_reauthorization_preserves_partial_history_epoch(
+    def test_active_identity_preserves_cursor_but_renewed_consent_restarts_partial_history(
         self,
         web_client,
         provision,
@@ -2726,8 +2726,8 @@ class SlackDmMirrorOwnerTests(APITestCase):
         grant = activate_connection(self.first_connection, history_days=grant.history_days)
 
         conversation.refresh_from_db()
-        self.assertEqual(conversation.oldest_synced_ts, recent_slack_ts("1787901300.000100"))
-        self.assertTrue(
+        self.assertEqual(conversation.oldest_synced_ts, "")
+        self.assertFalse(
             conversation.deliveries.filter(
                 source_message_id__startswith=slack_dm_mirror.HISTORY_STATE_PREFIX
             ).exclude(
@@ -2738,19 +2738,21 @@ class SlackDmMirrorOwnerTests(APITestCase):
         # A resumed grant must rediscover and provision its private destination
         # before history can be delivered under the new consent generation.
         web_client.return_value.users_conversations.return_value = {
-            "channels": [{"id": "DONE", "user": "UTWO"}],
+            "channels": [{"id": "DONE", "user": "UTWO", "latest": recent_slack_ts("1787901300.000100")}],
             "response_metadata": {},
         }
         web_client.return_value.users_info.side_effect = lambda *, user: {
             "user": {"id": user, "name": user.lower(), "profile": {}}
         }
+        renewed_channel_id = str(uuid.uuid4())
         provision.side_effect = lambda pubkeys, **_: {
-            "channel_id": str(conversation.mlai_channel_id),
+            "channel_id": renewed_channel_id,
             "participant_pubkeys": pubkeys,
         }
         discover_conversations(grant)
         self.assertEqual(process_due_history_backfills(), 1)
         conversation.refresh_from_db()
+        self.assertEqual(str(conversation.mlai_channel_id), renewed_channel_id)
         self.assertIsNotNone(conversation.history_backfilled_at)
         refreshed = conversation.deliveries.get(
             source_message_id=recent_slack_ts("1787901300.000100"),

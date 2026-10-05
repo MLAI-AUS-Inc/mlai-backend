@@ -49,6 +49,9 @@ from content_factory.models import (
     WrittenArticle,
 )
 from content_factory.vibe_marketing_views import _persist_article_memory_from_run
+from content_factory.article_editorial import ArticleEditorialConflict
+from content_factory.website_connections import contract_for
+from content_factory.website_models import WebsiteConnection
 from core.models import User
 from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
 from organizations.models import Organization
@@ -109,6 +112,24 @@ class ContentAnalyticsContractTests(TestCase):
         )
         self.client = APIClient()
         self.client.force_authenticate(user=self.user)
+
+    def _connected_website_request(self):
+        website = WebsiteConnection.objects.create(
+            organization=self.organization, authorized_by=self.user,
+            github_repo="example/analytics-site", repository_id=123,
+            installation_id="45", branch="main", site_url=self.organization.domain,
+        )
+        self.config.github_repo = website.github_repo
+        self.config.website_connection = website
+        self.config.github_token_encrypted = "synthetic-analytics-token"
+        self.config.save(update_fields=["github_repo", "website_connection", "github_token_encrypted", "updated_at"])
+        metadata = patch(
+            "content_factory.website_connections.read_repository_native_target",
+            return_value={"id": 123, "full_name": website.github_repo, "default_branch": "main"},
+        )
+        metadata.start()
+        self.addCleanup(metadata.stop)
+        return {**contract_for(website), "companyId": str(self.company.pk)}
 
     def test_public_config_contains_exact_apex_and_www_domains(self):
         payload = public_analytics_config(self.organization, analytics_article_id=self.article.analytics_id)
@@ -683,6 +704,7 @@ class ContentAnalyticsContractTests(TestCase):
         response = self.client.post(
             "/api/v1/vibe-marketing/article-system-setup/",
             {
+                **self._connected_website_request(),
                 "articleSurfaceMode": "existing",
                 "articleSurfaceUrl": "https://www.example.com/articles",
             },
@@ -700,9 +722,10 @@ class ContentAnalyticsContractTests(TestCase):
             ],
         )
 
+    @patch("content_factory.vibe_marketing_views._article_capabilities_for_context", return_value={"canGenerateArticle": True})
     @patch("content_factory.vibe_marketing_views._queue_content_factory_run")
     @patch("content_factory.vibe_marketing_views._charge_roo_points_for_article")
-    def test_article_request_allocates_uuid_before_dispatch(self, charge, queue):
+    def test_article_request_allocates_uuid_before_dispatch(self, charge, queue, capabilities):
         captured = {}
 
         def fake_charge(request, *, context, payload):
@@ -716,7 +739,7 @@ class ContentAnalyticsContractTests(TestCase):
         queue.side_effect = fake_queue
         response = self.client.post(
             "/api/v1/vibe-marketing/article/",
-            {"customTitle": "A new tracked article", "targetKeyword": "new tracked keyword"},
+            {**self._connected_website_request(), "customTitle": "A new tracked article", "targetKeyword": "new tracked keyword"},
             format="json",
         )
 
@@ -754,6 +777,7 @@ class ArticleAnalyticsPersistenceTests(TestCase):
         ):
             article = _persist_article_memory_from_run(organization=organization, run=run)
 
+        article.refresh_from_db()
         self.assertEqual(article.analytics_id, analytics_id)
         self.assertEqual(article.canonical_url, "https://persist.example/articles/persisted-analytics")
         self.assertEqual(article.canonical_path, "/articles/persisted-analytics")
@@ -790,11 +814,13 @@ class ArticleAnalyticsPersistenceTests(TestCase):
             "content_factory.vibe_marketing_views._publish_evidence_from_run",
             return_value={},
         ):
-            persisted = _persist_article_memory_from_run(organization=organization, run=run)
+            with self.assertRaisesRegex(ArticleEditorialConflict, "stable identity"):
+                _persist_article_memory_from_run(organization=organization, run=run)
 
         article.refresh_from_db()
-        self.assertEqual(persisted.pk, article.pk)
         self.assertEqual(article.analytics_id, original_id)
+        self.assertEqual(article.title, "Stable analytics")
+        self.assertEqual(article.source_run_id, "")
 
     def test_location_migration_backfills_the_existing_canonical_lifetime(self):
         organization = Organization.objects.create(name="Legacy Co", domain="legacy.example")

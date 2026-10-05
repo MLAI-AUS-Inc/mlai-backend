@@ -128,6 +128,7 @@ class JobsSchedulerTests(TestCase):
         output = stdout.getvalue()
         self.assertIn('"research_automations"', output)
         self.assertIn('"queued": 2', output)
+        self.assertIn('"website_connection_operations": {"completed": 0, "pending": 0, "processed": 0, "status": "completed"}', output)
         heartbeat = ScheduledDiscoveryHeartbeat.objects.get(
             name="scheduled_discovery"
         )
