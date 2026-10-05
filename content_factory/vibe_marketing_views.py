@@ -6141,6 +6141,8 @@ def _maybe_auto_publish_setup(*, run, context):
         logger.warning("vibe_marketing_setup_auto_publish_failed run_id=%s error=%s", run.run_id, exc)
 
 def _github_api_request(method, path, *, token, body=None, expected=(200,)):
+    from .website_connections import authorize_backend_provider_mutation, record_backend_provider_outcome
+    operation_id = authorize_backend_provider_mutation(method, path)
     url = f"https://api.github.com{path}"
     headers = {
         "Authorization": f"Bearer {token}",
@@ -6152,6 +6154,7 @@ def _github_api_request(method, path, *, token, body=None, expected=(200,)):
         payload = response.json() if response.content else {}
     except Exception:
         payload = {}
+    record_backend_provider_outcome(operation_id, accepted=response.status_code in expected, payload=payload)
     if response.status_code not in expected:
         detail = payload.get("message") if isinstance(payload, dict) else ""
         raise ValueError(detail or f"GitHub returned {response.status_code}.")
@@ -8804,9 +8807,8 @@ def _article_setup_state_for_config(config, *, latest_runs=None, run=None, organ
     # "not_needed" and no approve_url; without this the UI would still render an
     # enabled Build button that 409s on /approve and silently refreshes.
     scan_result_payload = _run_mapping(latest_scan.result) if latest_scan else {}
-    scan_inner_result = (
-        scan_result_payload.get("result") if isinstance(scan_result_payload.get("result"), dict) else {}
-    )
+    from .website_discovery import normalize_scan_callback
+    scan_inner_result = normalize_scan_callback(scan_result_payload)
     scan_surface_resolution = (
         scan_inner_result.get("article_surface_resolution")
         if isinstance(scan_inner_result.get("article_surface_resolution"), dict)
@@ -10255,6 +10257,8 @@ def _log_terminal_repo_scan_status(run, payload):
         return
     result = _run_mapping(payload.get("result"))
     readiness = _run_mapping(result.get("article_system_readiness"))
+    from .website_discovery import normalize_scan_callback
+    result = normalize_scan_callback(result)
     candidates = result.get("detected_candidates")
     if not isinstance(candidates, list):
         candidates = readiness.get("detected_candidates")
@@ -11085,16 +11089,21 @@ def _overlay_live_bootstrap_fields(payload, *, context, request):
         )
     capabilities = _article_capabilities_for_context(context, _get_config(context.organization))
     payload["articleCapabilities"] = capabilities
+    from .website_journey import journey_for_context
+    payload["websiteJourney"] = journey_for_context(context, website_config, capabilities=capabilities)
     # Older clients also consume these flags; keep per-user permissions live on
     # cached bootstrap responses rather than exposing credential-only readiness.
     scaffold = (payload.get("checks") or {}).get("scaffold")
     if isinstance(scaffold, dict):
-        scaffold.update({"generationReady": capabilities["canGenerateArticle"],
+        scaffold.update({"passed": capabilities["canGenerateArticle"], "published": capabilities["canGenerateArticle"],
+            "generationReady": capabilities["canGenerateArticle"],
             "blockingReason": capabilities["reason"], "reasonCode": capabilities["reasonCode"]})
     for key in ("articleSetupState", "article_setup_state"):
         state = payload.get(key)
         if isinstance(state, dict):
             state["generationReady"] = capabilities["canGenerateArticle"]
+            state["scaffoldConnected"] = capabilities["canGenerateArticle"]
+            state["setupMerged"] = capabilities["canGenerateArticle"]
     return payload
 
 
@@ -11482,20 +11491,26 @@ def _timed_vibe_response(payload, *, started_at, metric_name, view=None, respons
     return Response(payload, status=response_status, headers=headers)
 
 
-def _github_account_for_context(context, config):
+def _github_account_for_context(context, config, *, force=False):
     from integrations.services.github_installations import user_github_installations
     user = context.profile.user
-    account = github_account_state(config, actor_ids=actor_ids_for_user(user),
-                                   installations=user_github_installations(user))
+    installations = user_github_installations(user)
+    account = github_account_state(config, actor_ids=actor_ids_for_user(user), installations=installations)
+    if installations:
+        account = {**account, "owned": True, "saved": True}
     connection = getattr(config, "website_connection", None)
-    if connection is not None and connection.authorized_by_id == user.pk:
+    if connection is not None and connection.authorized_by_id == user.pk and connection.state != "revoked":
         account = {**account, "owned": True, "saved": bool(connection.installation_id),
-                   "status": "checking" if connection.installation_id else "not_connected"}
+                   "status": "needs_verification" if connection.installation_id else "not_connected"}
+    if account.get("owned") and account.get("saved"):
+        from .website_github_access import verify_account_access
+        proof = verify_account_access(user, installations=installations, connection=connection, force=force)
+        account = {**account, **proof, "status": "connected" if proof.get("verified") else "needs_verification"}
     return account
 
 
 def _verify_github_repository_access(context, config, *, force=False):
-    """Check real write authorization and current default-branch identity."""
+    """Verify inventory reads independently from write authorization and rollout."""
     repo = str(getattr(config, "github_repo", "") or "").strip()
     if not repo or not _github_account_for_context(context, config).get("owned"):
         return {"verified": False, "reasonCode": "github_access_required"}
@@ -11510,8 +11525,16 @@ def _verify_github_repository_access(context, config, *, force=False):
         return cached
     result = {"verified": False, "reasonCode": "github_unavailable"}
     try:
-        token, source = _github_token_for_repo_operation(
-            domain=context.organization.domain, github_repo=repo, permission_mode="write")
+        if connection is not None:
+            # Access is independent of integration/rollout readiness. Mint only
+            # an ephemeral backend probe credential; never hand it to a worker.
+            from integrations.services.github_app import create_installation_access_token
+            credential = create_installation_access_token(installation_id=connection.installation_id,
+                repository=repo, repository_id=connection.repository_id, permission_mode="read", use_cache=False)
+            token, source = credential.token, "github_app_installation"
+        else:
+            token, source = _github_token_for_repo_operation(
+                domain=context.organization.domain, github_repo=repo, permission_mode="read")
         headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
         response = http_client.get(f"https://api.github.com/repos/{quote(repo, safe='/')}", headers=headers, timeout=(3, 8))
         if response.status_code in {401, 403, 404}:
@@ -11519,16 +11542,21 @@ def _verify_github_repository_access(context, config, *, force=False):
         elif response.status_code == 200:
             payload = _run_mapping(response.json())
             branch = str(payload.get("default_branch") or "").strip()
-            # App token mint explicitly requests Contents/Pull requests write;
-            # user OAuth tokens need the repository's push permission as well.
-            writable = source == "github_app_installation" or bool(_run_mapping(payload.get("permissions")).get("push"))
-            if str(payload.get("full_name") or "").lower() == repo.lower() and writable and branch:
+            writable = bool(_run_mapping(payload.get("permissions")).get("push"))
+            if source == "github_app_installation":
+                try:
+                    write_credential = create_installation_access_token(installation_id=connection.installation_id,
+                        repository=repo, repository_id=connection.repository_id, permission_mode="write", use_cache=False)
+                    writable = True
+                except GitHubAppTokenError:
+                    writable = False
+            if str(payload.get("full_name") or "").lower() == repo.lower() and branch:
                 head = http_client.get(f"https://api.github.com/repos/{quote(repo, safe='/')}/commits/{quote(branch, safe='')}",
                     headers=headers, timeout=(3, 8))
                 if head.status_code == 200:
                     sha = str(_run_mapping(head.json()).get("sha") or "")
                     if sha:
-                        result = {"verified": True, "branch": branch, "sha": sha, "checkedAt": timezone.now().isoformat()}
+                        result = {"verified": True, "writable": writable, "branch": branch, "sha": sha, "checkedAt": timezone.now().isoformat()}
                 elif head.status_code in {401, 403, 404}:
                     result["reasonCode"] = "github_access_required"
             else:
@@ -11539,16 +11567,23 @@ def _verify_github_repository_access(context, config, *, force=False):
         result["reasonCode"] = "github_access_required"
     except (http_client.RequestException, TypeError, ValueError):
         pass
+    finally:
+        for probe in (locals().get("credential"), locals().get("write_credential")):
+            if probe is not None:
+                try:
+                    http_client.delete("https://api.github.com/installation/token", headers={"Authorization": f"Bearer {probe.token}"}, timeout=(3, 8))
+                except http_client.RequestException:
+                    pass
     cache.set(key, result, 60 if result.get("verified") else 15)
     return result
 
 
 def _article_capabilities_for_context(context, config, *, latest_runs=None, force=False):
     runs = list(latest_runs) if latest_runs is not None else _latest_runs_for_org(context.organization, limit=12)
-    account = _github_account_for_context(context, config)
+    account = _github_account_for_context(context, config, force=force)
     gate = _article_system_setup_gate(config, runs, resolve_article_system(config))
     evidence = integration_evidence(config, runs, setup_gate=gate)
-    access = _verify_github_repository_access(context, config, force=force) if account.get("saved") and getattr(config, "github_repo", "") and (evidence.get("verified") or not getattr(config, "website_connection", None)) else {}
+    access = _verify_github_repository_access(context, config, force=force) if account.get("saved") and getattr(config, "github_repo", "") else {}
     if evidence.get("verified") and access.get("verified") and (access.get("branch") != evidence.get("branch") or access.get("sha") != evidence.get("sha")):
         evidence = {**evidence, "verified": False, "reasonCode": "verification_stale"}
     return article_capabilities(config, domain=context.organization.domain, account=account,
@@ -13122,7 +13157,12 @@ def _queue_content_factory_run(*, endpoint, workflow, context, config, payload, 
             payload.update(contract_for(website))
             with authority_guard(payload, action="scan" if endpoint == "scan" else "setup" if workflow in {"article_system_setup", "scaffold_articles"} else "read"):
                 pass
-            return _queue_content_factory_run_authorized(endpoint=endpoint, workflow=workflow, context=context, config=config, payload=payload, billing_refund_context=billing_refund_context)
+            from .website_operations import reserve_workflow_operation, bind_operation_run
+            payload.setdefault("client_request_id", _mint_dispatch_client_request_id(workflow))
+            operation = reserve_workflow_operation(website, workflow=workflow, payload=payload)
+            run = _queue_content_factory_run_authorized(endpoint=endpoint, workflow=workflow, context=context, config=config, payload=payload, billing_refund_context=billing_refund_context)
+            bind_operation_run(operation, run)
+            return run
         except WebsiteAuthorityError as exc:
             if billing_refund_context:
                 refund = _refund_roo_points_for_content_island_topic_start if billing_refund_context.get("kind") == CONTENT_FACTORY_ACTION_CONTENT_ISLAND_TOPIC_GENERATION else _refund_roo_points_for_article_start
@@ -15401,6 +15441,7 @@ class VibeMarketingScanView(APIView):
             "scan_purpose": scan_purpose,
             "force_refresh": force_refresh,
         }
+        payload["client_request_id"] = str(request.headers.get("Idempotency-Key") or request.data.get("idempotency_key") or request.data.get("clientRequestId") or _mint_dispatch_client_request_id("repo_scan"))
         _mark_roo_points_gate_authorized(
             payload,
             domain=context.organization.domain,
@@ -15513,6 +15554,7 @@ class VibeMarketingArticleSystemSetupView(APIView):
             ),
             "analytics_article_manifest": analytics_article_manifest(context.organization),
         }
+        payload["client_request_id"] = str(request.headers.get("Idempotency-Key") or request.data.get("idempotency_key") or request.data.get("clientRequestId") or _mint_dispatch_client_request_id("article_system_setup"))
         _mark_roo_points_gate_authorized(
             payload,
             domain=context.organization.domain,

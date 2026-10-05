@@ -225,7 +225,7 @@ class ActivationScopeAndProbeTests(SimpleTestCase):
              patch.object(views, "_github_token_for_repo_operation", return_value=("synthetic-only", source)) as token, \
              patch.object(views.http_client, "get", side_effect=responses) as network:
             result = views._verify_github_repository_access(self.context, self.cfg, force=True)
-        token.assert_called_once_with(domain="example.test", github_repo="founder/site", permission_mode="write")
+        token.assert_called_once_with(domain="example.test", github_repo="founder/site", permission_mode="read")
         return result, network, store
 
     def test_repository_probe_verifies_real_push_permission_branch_and_head(self):
@@ -238,15 +238,24 @@ class ActivationScopeAndProbeTests(SimpleTestCase):
         self.assertEqual(network.call_count, 2)
         self.assertNotIn("synthetic-only", repr(store.set.call_args))
 
-    def test_revoked_wrong_or_read_only_repository_is_not_ready(self):
+    def test_revoked_or_wrong_repository_cannot_be_read(self):
         for response in (Mock(status_code=401), Mock(status_code=404),
-                         Mock(status_code=200, json=Mock(return_value={"full_name": "founder/other", "default_branch": "main", "permissions": {"push": True}})),
-                         Mock(status_code=200, json=Mock(return_value={"full_name": "founder/site", "default_branch": "main", "permissions": {"push": False}}))):
+                         Mock(status_code=200, json=Mock(return_value={"full_name": "founder/other", "default_branch": "main", "permissions": {"push": True}}))):
             with self.subTest(response=response):
                 result, network, _ = self.probe([response])
                 self.assertFalse(result["verified"])
                 self.assertEqual(result["reasonCode"], "github_access_required")
                 self.assertEqual(network.call_count, 1)
+
+    def test_read_only_repository_is_inventory_ready_but_not_publish_ready(self):
+        result, _, _ = self.probe([
+            Mock(status_code=200, json=Mock(return_value={"full_name": "founder/site", "default_branch": "main", "permissions": {"push": False}})),
+            Mock(status_code=200, json=Mock(return_value={"sha": "abc123"}))])
+        self.assertTrue(result["verified"])
+        self.assertFalse(result["writable"])
+        caps = article_capabilities(self.cfg, account={"owned": True, "saved": True}, evidence={"verified": True, "branch": "main", "sha": "abc123"}, repository_access=result)
+        self.assertFalse(caps["canGenerateArticle"])
+        self.assertEqual(caps["reasonCode"], "github_write_required")
 
     def test_outage_and_revoked_access_are_actionable_even_if_setup_missing(self):
         result, _, _ = self.probe([views.http_client.RequestException("synthetic outage")])

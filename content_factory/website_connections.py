@@ -35,6 +35,9 @@ REPOSITORY_WORKFLOWS = frozenset({
 
 _owner_contract = ContextVar("website_owner_contract", default=None)
 _authority_depth = ContextVar("website_authority_depth", default=0)
+_verified_heads = ContextVar("website_verified_heads", default=frozenset())
+_verified_native_targets = ContextVar("website_verified_native_targets", default=frozenset())
+_backend_provider_scope = ContextVar("website_backend_provider_scope", default=None)
 
 
 @contextmanager
@@ -45,6 +48,12 @@ def owner_operation_scope(payload):
         yield
     finally:
         _owner_contract.reset(token)
+
+
+def extend_owner_operation_contract(fields):
+    """Carry a newly reserved operation through subsequent local persistence."""
+    if _owner_contract.get() is not None:
+        _owner_contract.set({**_owner_contract.get(), **fields})
 
 
 def owner_operation_contract():
@@ -120,7 +129,9 @@ def summary_for(config, *, company_id=None):
         actions.append("pause" if connection.state == "connected" else "reconnect")
     if connection.repository_mutations.exists():
         actions.append("cleanup")
-    target_blocked = connection.app_root or any(item.get("code") in {"APPLICATION_ROOT_VERIFICATION_REQUIRED", "SETUP_BRANCH_VERIFICATION_REQUIRED"} for item in connection.blockers)
+    custom_certified = connection.targets.filter(generation=connection.generation, target_key=config.default_publish_target_id,
+        adapter="custom_contract_v1", capabilities__adapterCertified=True, source_sha=connection.verified_sha).exists() if config.default_publish_target_id else False
+    target_blocked = not custom_certified and (connection.app_root or any(item.get("code") in {"APPLICATION_ROOT_VERIFICATION_REQUIRED", "SETUP_BRANCH_VERIFICATION_REQUIRED"} for item in connection.blockers))
     if target_blocked:
         capabilities.update(publishingReady=False, previewSupported=False)
         actions = [action for action in actions if action not in {"setup", "publish", "preview"}]
@@ -149,7 +160,7 @@ def _payload_with_context(data):
             explicit = connection_contract(payload)
             if explicit and nested_contract and explicit != nested_contract:
                 raise WebsiteAuthorityError("website_contract_conflict", "Conflicting website connection identities.")
-            for key in (*CONNECTION_FIELDS, "domain", "github_repo", "expected_source_sha", "source_sha", "repo_head_sha"):
+            for key in (*CONNECTION_FIELDS, "operation_id", "operation_attempt", "deletion_epoch", "domain", "github_repo", "expected_source_sha", "source_sha", "repo_head_sha"):
                 if key not in payload and key in nested:
                     payload[key] = nested[key]
     return payload
@@ -173,7 +184,11 @@ def check_source_identity(connection, payload, *, required=False):
     if observed and expected and expected != observed:
         # Webhooks can arrive out of order. Only GitHub's current selected ref
         # may supersede an observation; a worker cannot simply assert a new SHA.
-        verify_repository_head(connection, expected)
+        verified = (str(connection.pk), connection.generation, expected) in _verified_heads.get()
+        if not verified:
+            if transaction.get_connection().in_atomic_block:
+                raise WebsiteAuthorityError("website_source_recheck_required", "Refresh source verification before writing.", retryable=True)
+            verify_repository_head(connection, expected)
         WebsiteScanSnapshot.objects.create(connection=connection, generation=connection.generation,
             run_id=f"head-check:{uuid.uuid4()}", source_sha=expected, detector_version="github_head",
             fingerprint=evidence_digest({"source_sha": expected}), evidence={"source": "github_head_verification"})
@@ -201,6 +216,15 @@ def verify_repository_native_target(connection):
     Inventory remains available for every selection. Comparing live branch names
     is necessary even when selected and default branches happen to share a SHA.
     """
+    config = OrganizationContentConfig.objects.filter(website_connection=connection).first()
+    selected = connection.targets.filter(generation=connection.generation, target_key=config.default_publish_target_id,
+        adapter="custom_contract_v1", capabilities__adapterCertified=True).first() if config and config.default_publish_target_id else None
+    if selected and selected.verified_at and selected.source_sha == connection.verified_sha:
+        declared = str((selected.contract.get("custom_contract") or {}).get("app_root") or ".").strip("/")
+        if ("" if declared == "." else declared) == connection.app_root:
+            # This exact root/branch has a separately certified executable
+            # contract. Provider source identity is still checked at mutations.
+            return
     if connection.app_root:
         raise WebsiteAuthorityError("APPLICATION_ROOT_VERIFICATION_REQUIRED", "This application root can be scanned, but native website changes need an adapter verified for that root.")
     metadata = read_repository_native_target(connection)
@@ -231,58 +255,99 @@ def verify_repository_head(connection, expected_sha):
 
 @contextmanager
 def authority_guard(data, *, action="read", domain="", github_repo="", require_selected=True):
-    """Serialize consent checks with disconnect and hold the fence through a DB write.
+    """Verify provider evidence outside locks, then conditionally fence persistence.
 
-    Network consumers must recheck before each external mutation; a completed
-    authorization read is not a lease allowing subsequent writes after revocation.
+    The second phase repeats consent and operation checks. A concurrent revoke,
+    source observation or rebind invalidates the provider snapshot before any
+    local write. A provider read never grants a transferable mutation lease.
     """
+    from .website_operations import validate_operation
+    from .website_rollout import require_repository_write_policy
+    from .website_contract import SHA_PATTERN
     payload = _payload_with_context(data)
+    inventory = payload.get("repository_inventory") if isinstance(payload.get("repository_inventory"), dict) else {}
+    if inventory:
+        for key in ("source_sha", "repo_head_sha"):
+            if payload.get(key) and inventory.get(key) and payload[key] != inventory[key]:
+                raise WebsiteAuthorityError("website_contract_conflict", "Conflicting repository source identities.")
+            if inventory.get(key):
+                payload.setdefault(key, inventory[key])
     contract = connection_contract(payload)
     if not contract:
-        raise WebsiteAuthorityError("website_connection_required", "Reload the web app or update MLAI, then reconnect this website to continue.")
+        raise WebsiteAuthorityError("website_connection_required", "Reconnect this website to continue.")
     domain = str(domain or payload.get("domain") or "").lower().strip()
     github_repo = str(github_repo or payload.get("github_repo") or "").strip()
+    candidate = WebsiteConnection.objects.select_related("organization").filter(pk=contract["website_connection_id"]).first()
+    if candidate is None:
+        raise WebsiteAuthorityError("website_connection_not_found", "Website connection was not found.")
+    revision = payload.get("configuration_revision")
+    if revision is not None and str(revision) != str(candidate.configuration_version):
+        raise WebsiteAuthorityError("website_configuration_changed", "Refresh the reviewed website configuration.")
+    cleanup = action in {"worker_cleanup", "restoration", "restoration_read", "cancel_operation"}
+    if cleanup:
+        validate_operation(candidate, {**payload, "action": action}, worker_cleanup=action == "worker_cleanup",
+            restoration=action in {"restoration", "restoration_read"}, cancellation=action == "cancel_operation")
+        if domain.casefold() != candidate.organization.domain.casefold() or (github_repo and github_repo.casefold() != candidate.github_repo.casefold()):
+            raise WebsiteAuthorityError("worker_cleanup_scope_mismatch", "Cleanup does not belong to this company and repository.")
+    else:
+        validate_authority(candidate, payload, action=action, domain=domain, github_repo=github_repo)
+        validate_operation(candidate, payload)
+        require_repository_write_policy(action=action, domain=candidate.organization.domain)
+    expected = str(payload.get("expected_source_sha") or payload.get("source_sha") or payload.get("repo_head_sha") or payload.get("last_scanned_sha") or "").lower()
+    if expected and not SHA_PATTERN.fullmatch(expected):
+        raise WebsiteAuthorityError("invalid_source_sha", "An exact source commit is required.", status=422)
+    observed = observed_source_sha(candidate)
+    if action in {"publish", "merge"} and observed and not expected:
+        raise WebsiteAuthorityError("website_source_required", "Current source identity is required.")
+    if action == "portable" and expected and observed and expected != observed:
+        raise WebsiteAuthorityError("website_source_changed", "The reviewed repository source changed.")
+    snapshot = (candidate.generation, candidate.configuration_version, candidate.state, candidate.installation_id, candidate.authorized_by_id, observed)
+    needs_head = not cleanup and action != "portable" and (bool(expected and observed and expected != observed) or action in {"publish", "merge"} or (action == "preview" and bool(expected)))
+    targets = payload.get("publish_targets") if isinstance(payload.get("publish_targets"), list) else []
+    target_promotion = action == "config_write" and any(isinstance(item, dict) and (item.get("verification") or {}).get("status") in {"passed", "verified", "preview_verified"} for item in targets)
+    needs_native = action in {"setup", "publish", "merge", "preview"} or target_promotion
+    needs_head = needs_head or target_promotion
+    if needs_native or needs_head:
+        require_unlocked_remote_call()
+    if needs_native:
+        verify_repository_native_target(candidate)
+    if needs_head:
+        verify_repository_head(candidate, expected or candidate.verified_sha)
     with transaction.atomic():
-        candidate = WebsiteConnection.objects.filter(pk=contract["website_connection_id"]).first()
-        if candidate is None:
-            raise WebsiteAuthorityError("website_connection_not_found", "Website connection was not found.")
-        # All write paths lock org before connection/config, including rebind.
         Organization.objects.select_for_update().get(pk=candidate.organization_id)
         connection = WebsiteConnection.objects.select_for_update().select_related("organization").get(pk=candidate.pk)
-        validate_authority(connection, payload, action=action, domain=domain, github_repo=github_repo)
-        from .website_rollout import require_repository_write_policy
-        require_repository_write_policy(action=action, domain=connection.organization.domain)
-        if action in {"setup", "publish", "merge", "preview"}:
-            verify_repository_native_target(connection)
-        if action == "portable":
-            from .website_contract import SHA_PATTERN
-            expected_source = str(payload.get("expected_source_sha") or payload.get("source_sha") or payload.get("repo_head_sha") or "").lower()
-            if expected_source and not SHA_PATTERN.fullmatch(expected_source):
-                raise WebsiteAuthorityError("invalid_source_sha", "An exact source commit is required.", status=422)
-            observed = str(observed_source_sha(connection) or "").lower()
-            if expected_source and observed and expected_source != observed:
-                raise WebsiteAuthorityError("website_source_changed", "The reviewed repository source changed. Refresh before continuing.")
+        current = (connection.generation, connection.configuration_version, connection.state, connection.installation_id, connection.authorized_by_id, observed_source_sha(connection))
+        if current != snapshot:
+            raise WebsiteAuthorityError("website_connection_changed", "Website authority changed during verification. Refresh and retry.", retryable=True)
+        if cleanup:
+            validate_operation(connection, {**payload, "action": action}, worker_cleanup=action == "worker_cleanup",
+                restoration=action in {"restoration", "restoration_read"}, cancellation=action == "cancel_operation")
         else:
-            expected_source = check_source_identity(connection, payload, required=action in {"publish", "merge"})
-        if action in {"publish", "merge"} or (action == "preview" and expected_source):
-            verify_repository_head(connection, expected_source or connection.verified_sha)
-        if require_selected and not OrganizationContentConfig.objects.filter(
-            organization_id=connection.organization_id, website_connection=connection, github_repo__iexact=connection.github_repo,
-        ).exists():
-            raise WebsiteAuthorityError("website_connection_changed", "This website is no longer selected for repository work.")
+            validate_authority(connection, payload, action=action, domain=domain, github_repo=github_repo)
+            validate_operation(connection, payload)
+            require_repository_write_policy(action=action, domain=connection.organization.domain)
+        if require_selected and not OrganizationContentConfig.objects.filter(organization_id=connection.organization_id,
+                website_connection=connection, github_repo__iexact=connection.github_repo).exists():
+            raise WebsiteAuthorityError("website_connection_changed", "This website is no longer selected.")
         target_key = contract.get("connection_target_id")
         if not target_key and action in {"publish", "merge"}:
             target_key = OrganizationContentConfig.objects.filter(website_connection=connection).values_list("default_publish_target_id", flat=True).first()
         target = connection.targets.filter(target_key=target_key, generation=connection.generation).first() if target_key else None
         if target_key and target is None:
-            raise WebsiteAuthorityError("website_target_changed", "The publishing target changed. Scan this website again.")
+            raise WebsiteAuthorityError("website_target_changed", "The publishing target changed.")
         if action in {"publish", "merge"} and (target is None or not target.verified_at or not target.capabilities.get("publishingReady") or target.source_sha != connection.verified_sha):
-            raise WebsiteAuthorityError("website_target_verification_required", "Select a verified publishing target for this repository.")
-        token = _authority_depth.set(_authority_depth.get() + 1)
+            raise WebsiteAuthorityError("website_target_verification_required", "Select a verified publishing target.")
+        heads_token = _verified_heads.set(_verified_heads.get() | {(str(connection.pk), connection.generation, expected)} if needs_head else _verified_heads.get())
+        native_token = _verified_native_targets.set(_verified_native_targets.get() | {(str(connection.pk), connection.generation)} if needs_native else _verified_native_targets.get())
+        depth_token = _authority_depth.set(_authority_depth.get() + 1)
         try:
+            if needs_head and observed and expected != observed:
+                check_source_identity(connection, payload)
             yield connection
         finally:
-            _authority_depth.reset(token)
+            _authority_depth.reset(depth_token)
+            _verified_heads.reset(heads_token)
+            _verified_native_targets.reset(native_token)
 
 
 def scoped_run_contract(run):
@@ -339,7 +404,8 @@ def guarded_service_write(action, *, only_repository=False, remote_actions=(), p
                         if run_id:
                             run = ContentFactoryRun.objects.filter(run_id=run_id).first()
                             if run:
-                                run.run_request = {**(run.run_request or {}), **connection_contract(payload)}
+                                run.run_request = {**(run.run_request or {}), **connection_contract(payload),
+                                    **{key: payload[key] for key in ("operation_id", "operation_attempt", "deletion_epoch") if key in payload}}
                                 run.save(update_fields=["run_request", "updated_at"])
                     if response is not None:
                         return response
@@ -515,7 +581,7 @@ def bind_website(config, *, user, repo, app_root="", branch="", site_url="", rec
 
 def transition_connection(config, *, action, expected, idempotency_key="", verified_reconnect=False):
     """Commit revocation before async cancellation, retaining customer content."""
-    if action not in {"pause", "disconnect", "reconnect", "reset", "cleanup", "revoke"}:
+    if action not in {"pause", "disconnect", "reconnect", "reset", "cleanup", "revoke", "purge"}:
         raise WebsiteAuthorityError("invalid_connection_action", "Unknown website action.", status=400)
     if action == "reconnect" and not verified_reconnect:
         raise WebsiteAuthorityError("github_verification_required", "Verify GitHub access before reconnecting.")
@@ -534,25 +600,38 @@ def transition_connection(config, *, action, expected, idempotency_key="", verif
             if existing.action != action:
                 raise WebsiteAuthorityError("operation_key_conflict", "This operation key was used for another action.")
             return existing
+        if expected.get("configuration_revision") is not None and str(expected["configuration_revision"]) != str(connection.configuration_version):
+            raise WebsiteAuthorityError("website_configuration_changed", "Refresh the reviewed website configuration.")
         if str(connection.pk) != contract["website_connection_id"] or connection.generation != contract["connection_generation"]:
             raise WebsiteAuthorityError("website_connection_changed", "The website connection changed. Refresh and retry.")
         if action == "cleanup":
             # A cleanup request proposes a patch; it is never authority to push
             # after disconnection or to delete untracked customer files.
             return WebsiteConnectionOperation.objects.create(connection=connection, generation=connection.generation,
-                idempotency_key=key, action=action, state="pending", payload={"mutation_ids": [str(x) for x in connection.repository_mutations.values_list("id", flat=True)]},
+                idempotency_key=key, action=action, state="pending", payload={"mutation_ids": [str(x) for x in connection.repository_mutations.values_list("id", flat=True)],
+                    "setup_run_ids": list(connection.repository_mutations.exclude(run_id="").values_list("run_id", flat=True)), "attempt": 1},
                 receipt={"status": "proposal_requested", "requires_review": True, "repository_modified": False})
         old_generation = connection.generation
-        connection.operations.filter(action="worker_followup", generation=old_generation, state="pending").update(
+        connection.operations.filter(action__in=["worker_followup", "workflow"], generation=old_generation, state__in=["pending", "running"]).update(
             state="cancelled", receipt={"status": "authority_revoked", "repository_modified": False}, updated_at=timezone.now())
         connection.generation += 1
         connection.configuration_version += 1
-        connection.state = {"pause": "paused", "disconnect": "disconnected", "revoke": "revoked", "reconnect": "connected", "reset": connection.state}[action]
-        connection.disconnected_at = timezone.now() if action in {"disconnect", "revoke"} else None
+        connection.state = {"pause": "paused", "disconnect": "disconnected", "revoke": "revoked", "reconnect": "connected", "reset": connection.state, "purge": "disconnected"}[action]
+        connection.disconnected_at = timezone.now() if action in {"disconnect", "revoke", "purge"} else None
         connection.capabilities = {**(connection.capabilities or {}), "publishingReady": False, "previewSupported": False} if action == "pause" else {}
         connection.verified_sha = ""
         connection.last_verified_at = None
+        from .website_operations import deletion_epoch
+        watermark = deletion_epoch(connection)
         connection.blockers = [{"code": "scan_required", "message": "Scan the current repository to verify its capabilities.", "retryable": False}] if action in {"reset", "reconnect"} else []
+        if action in {"disconnect", "revoke", "purge"}:
+            config.github_token_encrypted = ""
+            config.github_refresh_token_encrypted = ""
+            config.save(update_fields=["github_token_encrypted", "github_refresh_token_encrypted", "updated_at"])
+        if action == "purge":
+            watermark = max(watermark + 1, connection.configuration_version)
+        if watermark:
+            connection.blockers.append({"code": "website_data_deleted", "deletion_epoch": watermark, "message": "Previous website data was removed."})
         connection.save()
         config.publish_targets = []
         config.default_publish_target_id = None
@@ -560,9 +639,17 @@ def transition_connection(config, *, action, expected, idempotency_key="", verif
         config.daily_discovery_enabled = False
         config.article_system = {**(config.article_system or {}), "publish_disconnected_at": timezone.now().isoformat()}
         config.save(update_fields=["publish_targets", "default_publish_target_id", "auto_publish", "daily_discovery_enabled", "article_system", "updated_at"])
-        if action in {"reset", "reconnect"}:
+        if action in {"reset", "reconnect", "purge"}:
             invalidate_repository_config(config)
-        if action in {"disconnect", "revoke"}:
+        if action == "purge":
+            connection.scan_snapshots.all().delete()
+            connection.template_revisions.all().delete()
+            connection.targets.all().delete()
+            config.github_token_encrypted = ""
+            config.github_refresh_token_encrypted = ""
+            config.github_installation_id = ""
+            config.save(update_fields=["github_token_encrypted", "github_refresh_token_encrypted", "github_installation_id", "updated_at"])
+        if action in {"disconnect", "revoke", "purge"}:
             from .models import ResearchAutomation
             ResearchAutomation.objects.filter(organization=connection.organization, status="active").update(status="paused", updated_at=timezone.now())
         from workflow_runs.models import ContentFactoryRun
@@ -585,7 +672,8 @@ def transition_connection(config, *, action, expected, idempotency_key="", verif
         # cancellation, not a claim that an already-issued remote write vanished.
         ContentFactoryRun.objects.filter(run_id__in=runs).update(status="cancelled", error="Website connection changed.", resume_available=False, updated_at=timezone.now())
         return WebsiteConnectionOperation.objects.create(connection=connection, generation=connection.generation, idempotency_key=key,
-            action=action, state="pending", payload={"cancel_run_ids": runs, "stop_preview_run_ids": stop_preview_runs, "previous_generation": old_generation, "disable_auto_merge_prs": sorted(set(pending_auto_merge_prs))},
+            action=action, state="pending", payload={"cancel_run_ids": runs, "stop_preview_run_ids": stop_preview_runs, "previous_generation": old_generation, "disable_auto_merge_prs": sorted(set(pending_auto_merge_prs)), "attempt": 1, "deletion_epoch": watermark,
+                "preserve_published_articles": True},
             receipt={"authority_revoked": action != "reconnect", "repository_modified": False,
                 "retained": ["published_articles", "website_files", "company_details", "editorial_policy", "history"],
                 "artifact_retention": {"status": "retained", "erasure_performed": False,
@@ -644,7 +732,7 @@ def offboard_website_connections(organization, *, user=None, purge=False):
                 website.authorized_by = None
                 website.site_url = ""
                 website.app_root = ""
-                website.blockers = []
+                website.blockers = [item for item in website.blockers if item.get("code") == "website_data_deleted"]
                 website.save(update_fields=["authorized_by", "site_url", "app_root", "blockers", "updated_at"])
             else:
                 website.delete()
@@ -652,6 +740,12 @@ def offboard_website_connections(organization, *, user=None, purge=False):
 
 def record_scan_evidence(connection, data):
     """Promote validated snapshots only while the caller holds the consent lock."""
+    if not _authority_depth.get():
+        # Public callers follow the same two-phase path as service callbacks.
+        with authority_guard({**contract_for(connection), **data}, action="config_write") as current:
+            outcome = record_scan_evidence(current, data)
+        connection.refresh_from_db()
+        return outcome
     data = sanitized_evidence(data)
     inventory = data.get("repository_inventory") if isinstance(data.get("repository_inventory"), dict) else {}
     sha = str(data.get("source_sha") or data.get("repo_head_sha") or data.get("commit_sha") or data.get("last_scanned_sha") or inventory.get("source_sha") or inventory.get("repo_head_sha") or "")
@@ -677,7 +771,10 @@ def record_scan_evidence(connection, data):
         native_allowed = True
         if any(isinstance(target, dict) and (target.get("verification") or {}).get("status") in {"passed", "verified", "preview_verified"} for target in targets):
             try:
-                verify_repository_native_target(connection)
+                if (str(connection.pk), connection.generation) not in _verified_native_targets.get():
+                    if transaction.get_connection().in_atomic_block:
+                        raise WebsiteAuthorityError("website_target_recheck_required", "Verify the native target outside the write transaction.", retryable=True)
+                    verify_repository_native_target(connection)
             except WebsiteAuthorityError as exc:
                 if exc.code not in {"APPLICATION_ROOT_VERIFICATION_REQUIRED", "SETUP_BRANCH_VERIFICATION_REQUIRED"}:
                     raise
@@ -691,13 +788,19 @@ def record_scan_evidence(connection, data):
             verified |= bool(ready and target.get("publish_capability") in {"direct", "hook"})
             preview_ready = native_allowed and proof.get("status") == "preview_verified" and proof.get("base_sha") == sha and bool(SHA_PATTERN.fullmatch(str(proof.get("source_sha") or "")))
             preview |= bool((ready or preview_ready) and proof.get("preview_capable"))
+            previous = connection.targets.filter(target_key=str(target["target_id"]), generation=connection.generation, source_sha=sha).first()
+            custom_certified = bool(previous and previous.adapter == "custom_contract_v1" and previous.capabilities.get("adapterCertified")
+                and previous.contract.get("contract_digest") == target.get("contract_digest"))
             WebsiteConnectionTarget.objects.update_or_create(connection=connection, target_key=str(target["target_id"]), defaults={
                 "generation": connection.generation, "adapter": str(target.get("delivery_adapter") or ""),
                 "adapter_version": str(target.get("adapter_version") or ""), "source_sha": sha, "contract": target,
-                "capabilities": {"publishingReady": bool(ready)}, "verified_at": timezone.now() if ready else None})
+                "capabilities": {"publishingReady": bool(ready), "adapterCertified": custom_certified}, "verified_at": timezone.now() if ready else None})
         if verified:
             check_source_identity(connection, {"source_sha": sha}, required=True)
-            verify_repository_head(connection, sha)
+            if (str(connection.pk), connection.generation, sha) not in _verified_heads.get():
+                if transaction.get_connection().in_atomic_block:
+                    raise WebsiteAuthorityError("website_source_recheck_required", "Verify source outside the write transaction.", retryable=True)
+                verify_repository_head(connection, sha)
             connection.blockers = [item for item in connection.blockers if item.get("code") != "repository_source_changed"]
         if "publish_targets" in data:
             caps["publishingReady"] = verified and connection.state == "connected"
@@ -801,9 +904,44 @@ def guarded_backend_run_action(action):
         def wrapped(*args, **kwargs):
             run = kwargs.get("run")
             try:
-                with authority_guard(scoped_run_contract(run), action=action):
+                binding = scoped_run_contract(run)
+                with authority_guard(binding, action=action):
+                    pass
+                marker = _backend_provider_scope.set((binding, action))
+                try:
                     return method(*args, **kwargs)
+                finally:
+                    _backend_provider_scope.reset(marker)
             except WebsiteAuthorityError as exc:
                 return {"outcome": "error", "detail": str(exc), "code": exc.code, "checks": {}, "run": run}
         return wrapped
     return decorate
+
+
+def authorize_backend_provider_mutation(method, path):
+    """Recheck immediately before provider mutation without holding locks in HTTP."""
+    scope = _backend_provider_scope.get()
+    if scope is None or method.upper() in {"GET", "HEAD", "OPTIONS"}:
+        return None
+    binding, action = scope
+    with authority_guard(binding, action=action) as website:
+        identifier = binding.get("operation_id")
+        op = website.operations.filter(pk=identifier).first() if identifier else None
+        if op:
+            op.receipt = {**op.receipt, "provider_request": {"method": method.upper(), "path": path},
+                "remote_outcome_unknown": True, "repository_modified": None}
+            op.save(update_fields=["receipt", "updated_at"])
+    require_unlocked_remote_call()
+    return identifier
+
+
+def record_backend_provider_outcome(identifier, *, accepted, payload):
+    """Retain accepted or uncertain provider effects even after cancellation."""
+    if not identifier:
+        return
+    with transaction.atomic():
+        op = WebsiteConnectionOperation.objects.select_for_update().get(pk=identifier)
+        receipt = {key: payload.get(key) for key in ("sha", "merged", "html_url", "number") if isinstance(payload, dict) and key in payload}
+        op.receipt = {**op.receipt, "provider_outcome": receipt, "remote_outcome_unknown": not accepted,
+            "repository_modified": True if accepted else None, "cancellation_undoes_remote_writes": False}
+        op.save(update_fields=["receipt", "updated_at"])

@@ -41,6 +41,7 @@ def replay_with_legacy_rows():
     from django.db.migrations.executor import MigrationExecutor
     executor = MigrationExecutor(connection)
     old_targets = [(app, "0041_writtenarticle_editorial_attribution") if app == "content_factory" else (app, name) for app, name in executor.loader.graph.leaf_nodes()]
+    old_targets.append(("content_factory", "0040_backfill_github_credential_envelopes"))
     executor.migrate(old_targets)
     old_apps = executor.loader.project_state(old_targets).apps
     Organization = old_apps.get_model("organizations", "Organization")
@@ -50,7 +51,12 @@ def replay_with_legacy_rows():
     before = Config.objects.values().get(pk=cfg.pk)
     executor = MigrationExecutor(connection)
     pending = executor.migration_plan(executor.loader.graph.leaf_nodes())
-    assert [(migration.app_label, migration.name, backwards) for migration, backwards in pending] == [("content_factory", "0042_website_connection_lifecycle", False)]
+    expected = [("content_factory", "0042_website_connection_lifecycle", False), ("content_factory", "0043_merge_credentials_website", False)]
+    actual = [(migration.app_label, migration.name, backwards) for migration, backwards in pending]
+    assert actual == expected, f"Historical replay plan differs: {actual!r}"
+    # 0043 is the already approved historical merge node on main, with no schema
+    # operations. Replaying 0042 must include this existing dependency leaf.
+    assert not executor.loader.disk_migrations[("content_factory", "0043_merge_credentials_website")].operations
     # Exercise the same fresh-process Django CLI as deployment, with our
     # disposable DB/network guards and environment intact. Import diagnostics
     # vary with environment; the deployed gate preserves the exact plan block.

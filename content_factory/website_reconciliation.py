@@ -227,15 +227,20 @@ def _process_worker_followup(identifier, now):
     return state
 
 
-def process_website_connection_operations(*, limit=20, now=None):
+def process_website_connection_operations(*, limit=20, now=None, connection_id=None):
     """Retry cancellation/token revocation, and build bounded cleanup proposals."""
     from integrations import http_client
     from .vibe_marketing_views import _content_factory_remote_config, _content_factory_headers
     from .website_tokens import revoke_generation_tokens
     now = now or timezone.now()
-    ids = list(WebsiteConnectionOperation.objects.filter(Q(next_attempt_at__isnull=True) | Q(next_attempt_at__lte=now), state="pending")
-        .order_by("next_attempt_at").values_list("id", flat=True)[:limit])
+    due = WebsiteConnectionOperation.objects.filter(Q(next_attempt_at__isnull=True) | Q(next_attempt_at__lte=now), state="pending").exclude(action="workflow")
+    if connection_id:
+        due = due.filter(connection_id=connection_id)
+    ids = list(due.order_by("next_attempt_at").values_list("id", flat=True)[:limit])
     result = {"status": "completed", "processed": 0, "completed": 0, "pending": 0}
+    from .website_support import reconcile_support_verifications
+    reconcile_support_verifications(limit=limit, connection_id=connection_id)
+    monitor_cleanup_pull_requests(limit=limit, connection_id=connection_id)
     for identifier in ids:
         if WebsiteConnectionOperation.objects.filter(pk=identifier, action="worker_followup").exists():
             outcome = _process_worker_followup(identifier, now)
@@ -261,10 +266,12 @@ def process_website_connection_operations(*, limit=20, now=None):
         require_unlocked_remote_call()
         try:
             if op.action == "cleanup":
-                op.receipt = _cleanup_proposal(op)
+                from .website_restoration import worker_restoration
+                op.receipt = worker_restoration(op) or _cleanup_proposal(op)
                 op.state = "review_required"
             else:
-                tokens = revoke_generation_tokens(op.connection_id, op.payload.get("previous_generation"))
+                token_scope = f"operation:{op.payload['cancelled_operation_id']}" if op.action == "cancel-operation" else op.payload.get("previous_generation")
+                tokens = revoke_generation_tokens(op.connection_id, token_scope)
                 cancel_ids = op.payload.get("cancel_run_ids", [])
                 preview_ids = op.payload.get("stop_preview_run_ids", [])
                 pending = list(cancel_ids[20:])
@@ -274,8 +281,16 @@ def process_website_connection_operations(*, limit=20, now=None):
                     if not remote["enabled"]:
                         pending.append(run_id)
                         continue
-                    response = http_client.post(f"{remote['base_url']}/api/runs/{run_id}/cancel",
-                        headers=_content_factory_headers(), json={"reason": "website_connection_changed"}, timeout=(3, 15))
+                    if op.action == "cancel-operation":
+                        cancelled = op.connection.operations.get(pk=op.payload["cancelled_operation_id"])
+                        from .website_operations import deletion_epoch
+                        response = http_client.post(f"{remote['base_url']}/api/connections/{op.connection_id}/cancel-operation",
+                            headers=_content_factory_headers(), json={**contract_for(op.connection), "run_id": run_id,
+                                "operation_id": str(cancelled.pk), "operation_attempt": cancelled.payload.get("attempt", 1),
+                                "deletion_epoch": deletion_epoch(op.connection)}, timeout=(3, 15))
+                    else:
+                        response = http_client.post(f"{remote['base_url']}/api/runs/{run_id}/cancel",
+                            headers=_content_factory_headers(), json={"reason": "website_connection_changed"}, timeout=(3, 15))
                     try:
                         body = response.json()
                     except (ValueError, AttributeError):
@@ -283,6 +298,8 @@ def process_website_connection_operations(*, limit=20, now=None):
                     cleanup_pending = isinstance(body, dict) and (body.get("cleanup_pending") is True or body.get("cleanupPending") is True)
                     if response.status_code not in {200, 204, 404} or cleanup_pending:
                         pending.append(run_id)
+                    if op.action == "cancel-operation" and isinstance(body, dict):
+                        op.receipt["remote_outcomes"] = body.get("remote_outcomes", [])
                 for run_id in preview_ids[:20]:
                     if not remote["enabled"]:
                         preview_pending.append(run_id)
@@ -298,11 +315,39 @@ def process_website_connection_operations(*, limit=20, now=None):
                     if not confirmed:
                         preview_pending.append(run_id)
                 pending_merges = disable_pending_native_auto_merge(op.connection, op.payload.get("disable_auto_merge_prs", []))
-                op.payload = {**op.payload, "cancel_run_ids": pending, "stop_preview_run_ids": preview_pending, "disable_auto_merge_prs": pending_merges}
+                op.payload = {**op.payload, "cancel_run_ids": pending, "stop_preview_run_ids": preview_pending, "disable_auto_merge_prs": pending_merges,
+                    "purge_run_ids": op.payload.get("purge_run_ids", preview_ids)}
                 op.receipt = {**op.receipt, "tokens": tokens, "preview_cleanup_pending": bool(preview_pending),
                     "remote_cleanup_pending": bool(pending or preview_pending or pending_merges or tokens["pending"])}
+                if op.action == "purge":
+                    from .website_operations import deletion_epoch
+                    manifest = {"phase": "apply", "approved": True, "connection_generation": op.payload["previous_generation"],
+                        "operation_id": str(op.pk), "operation_attempt": op.payload.get("attempt", 1), "deletion_epoch": op.payload["deletion_epoch"],
+                        "run_ids": op.payload.get("purge_run_ids", op.payload.get("stop_preview_run_ids", [])),
+                        "domain": op.connection.organization.domain, "github_repo": op.connection.github_repo,
+                        "idempotency_key": op.idempotency_key}
+                    if remote["enabled"]:
+                        manifest["repository_id"] = op.connection.repository_id
+                        plan_response = http_client.post(f"{remote['base_url']}/api/connections/{op.connection_id}/worker-cleanup",
+                            headers=_content_factory_headers(), json={**manifest, "phase": "plan"}, timeout=(3, 20))
+                        plan_response.raise_for_status()
+                        plan = plan_response.json()
+                        if not plan.get("plan_digest") or plan.get("conflicts"):
+                            raise ValueError("Unreviewable worker cleanup scope")
+                        manifest["plan_digest"] = plan["plan_digest"]
+                        response = http_client.post(f"{remote['base_url']}/api/connections/{op.connection_id}/worker-cleanup",
+                            headers=_content_factory_headers(), json=manifest, timeout=(3, 20))
+                        response.raise_for_status()
+                        cleanup = response.json()
+                        op.receipt["artifact_cleanup"] = cleanup
+                        worker_pending = cleanup.get("status") != "completed" or bool(cleanup.get("cleanup_pending") or cleanup.get("external_pending"))
+                    else:
+                        worker_pending = True
+                    op.receipt["remote_cleanup_pending"] |= worker_pending
+                    op.receipt["deletion_epoch"] = op.payload["deletion_epoch"]
                 if not op.receipt["remote_cleanup_pending"]:
                     op.state = "completed"
+                    op.receipt["status"] = "completed"
         except Exception:
             # No transport messages can accidentally include credentials or source bodies.
             op.receipt = {**op.receipt, "last_error": "remote_reconciliation_unavailable"}
@@ -329,10 +374,58 @@ def process_website_connection_operations(*, limit=20, now=None):
     return result
 
 
+def monitor_cleanup_pull_requests(*, limit=20, connection_id=None):
+    """Observe merge/deploy stages; a removal PR is never completed removal."""
+    from integrations import http_client
+    from integrations.services.github_app import create_installation_access_token
+    from .website_connections import require_unlocked_remote_call
+    from urllib.parse import urlparse
+    require_unlocked_remote_call()
+    rows = WebsiteConnectionOperation.objects.filter(action="cleanup", state__in=["awaiting_merge", "awaiting_deployment"])
+    if connection_id:
+        rows = rows.filter(connection_id=connection_id)
+    for op in rows.select_related("connection__organization").order_by("updated_at")[:limit]:
+        parsed = urlparse(str(op.receipt.get("pr_url") or ""))
+        prefix = f"/{op.connection.github_repo}/pull/"
+        number = parsed.path.removeprefix(prefix)
+        if parsed.hostname != "github.com" or not parsed.path.startswith(prefix) or not number.isdigit():
+            continue
+        headers = {}
+        try:
+            credential = create_installation_access_token(installation_id=op.connection.installation_id,
+                repository=op.connection.github_repo, repository_id=op.connection.repository_id, permission_mode="read", use_cache=False)
+            headers = {"Authorization": f"Bearer {credential.token}", "Accept": "application/vnd.github+json"}
+            response = http_client.get(f"https://api.github.com/repos/{op.connection.github_repo}/pulls/{number}", headers=headers, timeout=(3, 15))
+            response.raise_for_status()
+            pull = response.json()
+            if ((pull.get("base") or {}).get("repo") or {}).get("id") != op.connection.repository_id or (pull.get("base") or {}).get("ref") != op.connection.branch:
+                continue
+            receipt, state = dict(op.receipt), op.state
+            if pull.get("merged"):
+                receipt.update(status="deployment_pending", default_branch_modified=True, merge_sha=pull.get("merge_commit_sha"),
+                    cleanup_complete=False, deployment_verification_required=True)
+                state = "awaiting_deployment"
+            elif pull.get("state") == "closed":
+                receipt.update(status="pull_request_closed_without_merge", default_branch_modified=False, cleanup_complete=False)
+                state = "attention_required"
+            WebsiteConnectionOperation.objects.filter(pk=op.pk, state=op.state, updated_at=op.updated_at).update(state=state, receipt=receipt, updated_at=timezone.now())
+        except Exception:
+            WebsiteConnectionOperation.objects.filter(pk=op.pk, updated_at=op.updated_at).update(
+                receipt={**op.receipt, "last_error": "cleanup_merge_status_unavailable"}, updated_at=timezone.now())
+        finally:
+            if headers:
+                try:
+                    http_client.delete("https://api.github.com/installation/token", headers=headers, timeout=(3, 8))
+                except Exception:
+                    pass
+
+
 def approve_cleanup_proposal(config, *, user, data):
     """Open a reviewed, exact-SHA removal PR without restoring ordinary access."""
-    from .website_rollout import require_repository_write_policy
-    require_repository_write_policy(action="cleanup", domain=config.organization.domain)
+    from .website_restoration import approve_worker_restoration
+    worker = approve_worker_restoration(config, user=user, data=data)
+    if worker is not None:
+        return worker
     from organizations.models import Organization
     from integrations import http_client
     from integrations.services.github_app import create_installation_access_token
@@ -356,58 +449,77 @@ def approve_cleanup_proposal(config, *, user, data):
         op = WebsiteConnectionOperation.objects.select_for_update().filter(pk=operation_id, connection=website, action='cleanup', generation=website.generation).first()
         if op is None:
             raise WebsiteAuthorityError('cleanup_proposal_required', 'Prepare a current cleanup proposal first.')
-        if op.state == 'completed' and op.receipt.get('pr_url'):
+        if op.state in {'awaiting_merge', 'awaiting_deployment', 'completed'} and op.receipt.get('pr_url'):
             return op
-        if op.state != 'review_required' or data.get('source_sha') != op.receipt.get('source_sha') or data.get('proposal_digest') != op.receipt.get('proposal_digest'):
+        if op.state not in {'review_required', 'applying'} or data.get('source_sha') != op.receipt.get('source_sha') or data.get('proposal_digest') != op.receipt.get('proposal_digest'):
             raise WebsiteAuthorityError('cleanup_proposal_changed', 'Review the current cleanup proposal before creating a pull request.')
-        fresh = _cleanup_proposal(op)
-        if fresh['proposal_digest'] != op.receipt['proposal_digest']:
-            op.receipt = fresh
-            op.save(update_fields=['receipt', 'updated_at'])
-            raise WebsiteAuthorityError('cleanup_source_changed', 'Website files changed. Prepare and review a fresh cleanup proposal.')
-        deletions = fresh['deletions']
-        if not deletions:
-            raise WebsiteAuthorityError('cleanup_no_owned_files', 'No unchanged, exclusively owned files can be removed automatically.')
-        token = create_installation_access_token(installation_id=metadata['installation_id'], repository=website.github_repo, repository_id=website.repository_id,
-            permission_mode='write', use_cache=False)
-        headers = {'Authorization': f'Bearer {token.token}', 'Accept': 'application/vnd.github+json'}
-        base = f'https://api.github.com/repos/{website.github_repo}'
-        def request(method, path, body=None):
-            response = http_client.request(method, base + path, headers=headers, json=body, timeout=(3, 20))
-            response.raise_for_status()
-            return response.json()
-        branch = f'codex/website-cleanup-{op.pk.hex}'
+        if op.state == 'applying' and op.next_attempt_at and op.next_attempt_at > timezone.now():
+            raise WebsiteAuthorityError('cleanup_in_progress', 'Cleanup is already being reconciled.', status=409, retryable=True)
+        op.state = 'applying'
+        op.attempts += 1
+        claim_attempt = op.attempts
+        op.next_attempt_at = timezone.now() + timedelta(minutes=5)
+        op.save(update_fields=['state', 'attempts', 'next_attempt_at', 'updated_at'])
+    # All GitHub reads/writes below happen after the approval transaction exits.
+    from .website_connections import require_unlocked_remote_call
+    require_unlocked_remote_call()
+    fresh = _cleanup_proposal(op)
+    if fresh['proposal_digest'] != op.receipt['proposal_digest']:
+        op.receipt = fresh
+        op.state = 'review_required'
+        op.save(update_fields=['state', 'receipt', 'updated_at'])
+        raise WebsiteAuthorityError('cleanup_source_changed', 'Website files changed. Prepare and review a fresh cleanup proposal.')
+    deletions = fresh['deletions']
+    if not deletions:
+        raise WebsiteAuthorityError('cleanup_no_owned_files', 'No unchanged, exclusively owned files can be removed automatically.')
+    token = create_installation_access_token(installation_id=metadata['installation_id'], repository=website.github_repo, repository_id=website.repository_id,
+        permission_mode='write', use_cache=False)
+    headers = {'Authorization': f'Bearer {token.token}', 'Accept': 'application/vnd.github+json'}
+    base = f'https://api.github.com/repos/{website.github_repo}'
+    def request(method, path, body=None):
+        response = http_client.request(method, base + path, headers=headers, json=body, timeout=(3, 20))
+        response.raise_for_status()
+        return response.json()
+    branch = f'codex/website-cleanup-{op.pk.hex}'
+    try:
+        base_commit = request('GET', f"/git/commits/{fresh['source_sha']}")
+        tree = request('POST', '/git/trees', {'base_tree': base_commit['tree']['sha'],
+            'tree': [{'path': path, 'mode': '100644', 'type': 'blob', 'sha': None} for path in deletions]})
+        existing = http_client.get(base + f'/git/ref/heads/{branch}', headers=headers, timeout=(3, 15))
+        if existing.status_code == 404:
+            commit = request('POST', '/git/commits', {'message': 'Remove reviewed MLAI integration files',
+                'tree': tree['sha'], 'parents': [fresh['source_sha']]})
+            request('POST', '/git/refs', {'ref': 'refs/heads/' + branch, 'sha': commit['sha']})
+        else:
+            existing.raise_for_status()
+            commit = request('GET', f"/git/commits/{existing.json()['object']['sha']}")
+            if commit['tree']['sha'] != tree['sha']:
+                raise WebsiteAuthorityError('cleanup_branch_changed', 'The cleanup branch changed. Review it before continuing.')
+        existing_prs = http_client.get(base + '/pulls', params={'head': website.github_repo.split('/')[0] + ':' + branch, 'state': 'all'}, headers=headers, timeout=(3, 15))
+        existing_prs.raise_for_status()
+        prs = existing_prs.json()
+        pr = prs[0] if prs else request('POST', '/pulls', {'title': 'Remove reviewed MLAI website integration files',
+            'head': branch, 'base': website.branch,
+            'body': 'Removes only unchanged files recorded as exclusively created by MLAI. Shared files, modified files, and retained dependencies are preserved. Review this pull request before merging.'})
+        op.state = 'awaiting_merge'
+        op.receipt = {**fresh, 'status': 'pull_request_opened', 'pr_url': pr['html_url'], 'branch': branch,
+            'head_sha': commit['sha'], 'repository_modified': True, 'default_branch_modified': False, 'approved_by_user_id': str(user.pk)}
+        with transaction.atomic():
+            Organization.objects.select_for_update().get(pk=config.organization_id)
+            current = WebsiteConnection.objects.select_for_update().get(pk=website.pk)
+            saved = WebsiteConnectionOperation.objects.select_for_update().get(pk=op.pk)
+            if current.generation != op.generation or saved.state != 'applying' or saved.attempts != claim_attempt:
+                op.state = 'attention_required'
+                op.receipt['status'] = 'authority_changed_after_pr_creation'
+            saved.state, saved.receipt = op.state, op.receipt
+            saved.save(update_fields=['state', 'receipt', 'updated_at'])
+            return saved
+    except WebsiteAuthorityError:
+        raise
+    except Exception as exc:
+        raise WebsiteAuthorityError('cleanup_pull_request_unavailable', 'Cleanup pull request could not be confirmed. Retry the same proposal to reconcile its branch.') from exc
+    finally:
         try:
-            base_commit = request('GET', f"/git/commits/{fresh['source_sha']}")
-            tree = request('POST', '/git/trees', {'base_tree': base_commit['tree']['sha'],
-                'tree': [{'path': path, 'mode': '100644', 'type': 'blob', 'sha': None} for path in deletions]})
-            existing = http_client.get(base + f'/git/ref/heads/{branch}', headers=headers, timeout=(3, 15))
-            if existing.status_code == 404:
-                commit = request('POST', '/git/commits', {'message': 'Remove reviewed MLAI integration files',
-                    'tree': tree['sha'], 'parents': [fresh['source_sha']]})
-                request('POST', '/git/refs', {'ref': 'refs/heads/' + branch, 'sha': commit['sha']})
-            else:
-                existing.raise_for_status()
-                commit = request('GET', f"/git/commits/{existing.json()['object']['sha']}")
-                if commit['tree']['sha'] != tree['sha']:
-                    raise WebsiteAuthorityError('cleanup_branch_changed', 'The cleanup branch changed. Review it before continuing.')
-            existing_prs = http_client.get(base + '/pulls', params={'head': website.github_repo.split('/')[0] + ':' + branch, 'state': 'all'}, headers=headers, timeout=(3, 15))
-            existing_prs.raise_for_status()
-            prs = existing_prs.json()
-            pr = prs[0] if prs else request('POST', '/pulls', {'title': 'Remove reviewed MLAI website integration files',
-                'head': branch, 'base': website.branch,
-                'body': 'Removes only unchanged files recorded as exclusively created by MLAI. Shared files, modified files, and retained dependencies are preserved. Review this pull request before merging.'})
-            op.state = 'completed'
-            op.receipt = {**fresh, 'status': 'pull_request_opened', 'pr_url': pr['html_url'], 'branch': branch,
-                'head_sha': commit['sha'], 'repository_modified': True, 'default_branch_modified': False, 'approved_by_user_id': str(user.pk)}
-            op.save(update_fields=['state', 'receipt', 'updated_at'])
-            return op
-        except WebsiteAuthorityError:
-            raise
-        except Exception as exc:
-            raise WebsiteAuthorityError('cleanup_pull_request_unavailable', 'Cleanup pull request could not be confirmed. Retry the same proposal to reconcile its branch.') from exc
-        finally:
-            try:
-                http_client.delete('https://api.github.com/installation/token', headers=headers, timeout=(3, 10))
-            except Exception:
-                pass
+            http_client.delete('https://api.github.com/installation/token', headers=headers, timeout=(3, 10))
+        except Exception:
+            pass

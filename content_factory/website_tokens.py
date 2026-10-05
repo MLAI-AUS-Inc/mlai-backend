@@ -23,9 +23,9 @@ def issue_website_token(request):
     if mode not in {"read", "write"}:
         return Response({"error": "invalid_permission_mode"}, status=400)
     action = str(data.get("action") or "read")
-    if action == "portable":
+    if action in {"portable", "worker_cleanup", "cancel_operation"}:
         return Response({"error": "portable_repository_access_denied"}, status=409)
-    if mode == "write" and action not in {"setup", "publish", "merge", "cleanup"}:
+    if mode == "write" and action not in {"setup", "publish", "merge", "cleanup", "restoration"}:
         return Response({"error": "invalid_write_action"}, status=400)
     try:
         return Response(mint_website_token(data, permission_mode=mode, action=action))
@@ -41,27 +41,45 @@ def mint_website_token(data, *, permission_mode="read", action="read"):
     """Issue and track one ephemeral token under the same lock as revocation."""
     from integrations.services.github_app import create_installation_access_token, GitHubAppTokenError
     from integrations.http_client import RequestException
-    if action == "portable":
+    if action in {"portable", "worker_cleanup", "cancel_operation"}:
         raise WebsiteAuthorityError("portable_repository_access_denied", "Portable drafts cannot access repository credentials.")
-    if permission_mode not in {"read", "write"} or (permission_mode == "write" and action not in {"setup", "publish", "merge", "cleanup"}):
+    if permission_mode not in {"read", "write"} or (permission_mode == "write" and action not in {"setup", "publish", "merge", "cleanup", "restoration"}):
         raise WebsiteAuthorityError("invalid_write_action", "Write credentials require an explicit repository mutation action.", status=400)
     with authority_guard(data, action=action) as connection:
         if not connection.repository_id or not connection.installation_id:
             raise WebsiteAuthorityError("github_verification_required", "Reconnect GitHub to verify repository identity.")
+        binding = {**dict(data), **contract_for(connection)}
+        installation_id, repository, repository_id = connection.installation_id, connection.github_repo, connection.repository_id
+    from .website_connections import require_unlocked_remote_call
+    require_unlocked_remote_call()
+    try:
+        token = create_installation_access_token(installation_id=installation_id, repository=repository,
+            repository_id=repository_id, permission_mode=permission_mode, use_cache=False)
+    except RequestException as exc:
+        raise WebsiteAuthorityError("github_temporarily_unavailable", "GitHub could not issue a repository credential. Retry shortly.", status=503, retryable=True) from exc
+    except GitHubAppTokenError as exc:
+        raise WebsiteAuthorityError("github_repository_unavailable", "GitHub access could not be verified. Reconnect the selected repository.") from exc
+    try:
+        with authority_guard(binding, action=action) as connection:
+            reference = str(uuid.uuid4())
+            cache.set(f"website-issued-token:{reference}", token.token, timeout=3600)
+            for index in (token_index_key(connection.pk, connection.generation),
+                    token_index_key(connection.pk, f"operation:{data.get('operation_id')}")):
+                if "operation:None" in index:
+                    continue
+                references = cache.get(index) or []
+                cache.set(index, [*references, reference], timeout=3600)
+            return {**token.as_content_factory_payload(domain=connection.organization.domain),
+                **contract_for(connection), "credential_reference": reference, "permission_mode": permission_mode}
+    except WebsiteAuthorityError:
+        # Minting can race disconnect. Do not deliver a credential after consent
+        # changed; revoke the just-created token outside the failed transaction.
+        from integrations import http_client
         try:
-            token = create_installation_access_token(installation_id=connection.installation_id,
-                repository=connection.github_repo, repository_id=connection.repository_id, permission_mode=permission_mode, use_cache=False)
-        except RequestException as exc:
-            raise WebsiteAuthorityError("github_temporarily_unavailable", "GitHub could not issue a repository credential. Retry shortly.", status=503, retryable=True) from exc
-        except GitHubAppTokenError as exc:
-            raise WebsiteAuthorityError("github_repository_unavailable", "GitHub access could not be verified. Reconnect the selected repository.") from exc
-        reference = str(uuid.uuid4())
-        cache.set(f"website-issued-token:{reference}", token.token, timeout=3600)
-        index = token_index_key(connection.pk, connection.generation)
-        references = cache.get(index) or []
-        cache.set(index, [*references, reference], timeout=3600)
-        return {**token.as_content_factory_payload(domain=connection.organization.domain),
-            **contract_for(connection), "credential_reference": reference, "permission_mode": permission_mode}
+            http_client.delete("https://api.github.com/installation/token", headers={"Authorization": f"Bearer {token.token}"}, timeout=(3, 10))
+        except Exception:
+            pass
+        raise
 
 
 def revoke_generation_tokens(connection_id, generation):

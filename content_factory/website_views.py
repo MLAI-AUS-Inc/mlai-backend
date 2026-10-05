@@ -106,7 +106,8 @@ class WebsiteConnectionView(APIView):
         context, config, error = _context(request)
         if error:
             return error
-        return Response({"websiteConnection": summary_for(config, company_id=context.company.pk)})
+        from .website_journey import journey_for_context
+        return Response({"websiteConnection": summary_for(config, company_id=context.company.pk), "websiteJourney": journey_for_context(context, config)})
 
     def post(self, request):
         context, config, error = _context(request)
@@ -126,13 +127,56 @@ class WebsiteConnectionActionView(APIView):
     """Independent pause/disconnect/reconnect/reset/cleanup consent actions."""
 
     def post(self, request, action):
-        if action not in {"pause", "disconnect", "reconnect", "reset", "cleanup"}:
+        if action not in {"pause", "disconnect", "reconnect", "reset", "cleanup", "purge", "cancel-operation", "reconcile", "verify-access", "verify", "custom-contract", "ci-attestation", "github-revoke", "verify-cleanup"}:
             return Response({"code": "invalid_connection_action", "detail": "Unknown website action."}, status=400)
         context, config, error = _context(request)
         if error:
             return error
         try:
-            if action == "cleanup" and request.data.get("approve_cleanup") is True:
+            revision = request.data.get("configuration_revision")
+            if revision is not None and config.website_connection and str(revision) != str(config.website_connection.configuration_version):
+                raise WebsiteAuthorityError("website_configuration_changed", "Refresh the current website settings before changing them.")
+            key = str(request.headers.get("Idempotency-Key") or request.data.get("idempotency_key") or request.data.get("client_request_id") or uuid.uuid4())
+            if action == "purge" and request.data.get("preserve_published_articles", True) is not True:
+                raise WebsiteAuthorityError("published_content_review_required", "Published articles require a separately reviewed removal proposal.")
+            if action == "github-revoke":
+                from .website_github_revocation import revocation_plan, apply_revocation
+                if request.data.get("phase", "plan") == "plan":
+                    return Response({"githubRevocation": revocation_plan(request.user)})
+                if request.data.get("phase") != "apply":
+                    raise WebsiteAuthorityError("github_revocation_phase_invalid", "Choose plan or apply.", status=422)
+                operation = apply_revocation(request.user, config, data=request.data, idempotency_key=key)
+                if isinstance(operation, dict):
+                    return Response({"githubRevocation": operation["githubRevocation"], "receipt": operation})
+            elif action == "verify-cleanup":
+                from .website_cleanup_verification import verify_cleanup_deployment
+                operation = verify_cleanup_deployment(config, data=request.data)
+            elif action in {"custom-contract", "ci-attestation"}:
+                from .website_support import owner_support_operation
+                operation = owner_support_operation(context, config, action=action, data=dict(request.data))
+            elif action == "cancel-operation":
+                from .website_operations import cancel_operation
+                operation = cancel_operation(config, data=request.data, idempotency_key=key)
+            elif action in {"verify-access", "verify", "reconcile"}:
+                current = config.website_connection
+                expected = connection_contract(request.data)
+                if current is None or expected != connection_contract(contract_for(current)):
+                    # repository_id is optional on owner consent tuples.
+                    if current is None or not expected or any(connection_contract(contract_for(current)).get(k) != v for k, v in expected.items()):
+                        raise WebsiteAuthorityError("website_connection_changed", "Refresh the current website connection.")
+                from .vibe_marketing_views import _article_capabilities_for_context
+                _article_capabilities_for_context(context, config, force=True)
+                if action == "verify":
+                    from .website_verification import verify_live_deployment
+                    from .website_support import current_verification_data
+                    verification = dict(request.data) if request.data.get("evidence_digest") else current_verification_data(config, dict(request.data))
+                    operation = verify_live_deployment(config, data=verification)
+                else:
+                    operation = None
+                if action == "reconcile":
+                    from .website_reconciliation import process_website_connection_operations
+                    process_website_connection_operations(limit=5, connection_id=current.pk)
+            elif action == "cleanup" and (request.data.get("approve_cleanup") is True or request.data.get("approved") is True):
                 from .website_reconciliation import approve_cleanup_proposal
                 operation = approve_cleanup_proposal(config, user=request.user, data=request.data)
             elif action == "reconnect":
@@ -144,12 +188,29 @@ class WebsiteConnectionActionView(APIView):
                 operation = None
             else:
                 operation = transition_connection(config, action=action, expected=request.data,
-                    idempotency_key=str(request.headers.get("Idempotency-Key") or request.data.get("client_request_id") or uuid.uuid4()))
+                    idempotency_key=key)
             config.refresh_from_db()
-            return Response({"websiteConnection": summary_for(config, company_id=context.company.pk),
-                "operation": {"id": str(operation.pk), "state": operation.state, "receipt": operation.receipt} if operation else None})
+            from .website_journey import journey_for_context
+            from .website_operations import operation_summary
+            return Response({"websiteConnection": summary_for(config, company_id=context.company.pk), "websiteJourney": journey_for_context(context, config),
+                "operation": operation_summary(operation) if operation else None})
         except WebsiteAuthorityError as exc:
             return Response(exc.as_dict(), status=exc.status)
+
+
+class WebsiteConnectionOperationView(APIView):
+    """Read a receipt only within the explicitly selected founder company."""
+
+    def get(self, request, operation_id):
+        context, config, error = _context(request)
+        if error:
+            return error
+        from .website_models import WebsiteConnectionOperation
+        from .website_operations import operation_summary
+        operation = WebsiteConnectionOperation.objects.filter(pk=operation_id, connection__organization=context.organization).first()
+        if operation is None:
+            return Response({"detail": "Operation not found."}, status=404)
+        return Response({"operation": operation_summary(operation)})
 
 
 class WebsiteConnectionAuthorizeView(APIView):
@@ -160,9 +221,16 @@ class WebsiteConnectionAuthorizeView(APIView):
 
     def get(self, request):
         try:
-            with authority_guard(dict(request.query_params.items()), action=str(request.query_params.get("action") or "read")) as connection:
+            action = str(request.query_params.get("action") or "read")
+            with authority_guard(dict(request.query_params.items()), action="read" if action == "ci_attestation" else action) as connection:
+                if action == "ci_attestation":
+                    from .website_verification import ci_attestation_for
+                    return Response(ci_attestation_for(connection, dict(request.query_params.items())))
                 portable = request.query_params.get("action") == "portable"
+                from .website_operations import deletion_epoch
                 return Response({"allowed": True, **contract_for(connection), "state": connection.state,
+                    "operation_id": request.query_params.get("operation_id"), "operation_attempt": request.query_params.get("operation_attempt", 1),
+                    "deletion_epoch": deletion_epoch(connection), "authorized_action": action,
                     "permission_mode": "none" if portable else "read", "capabilities": {} if portable else connection.capabilities,
                     "expected_source_sha": str(request.query_params.get("expected_source_sha") or request.query_params.get("source_sha") or request.query_params.get("repo_head_sha") or "").lower()})
         except WebsiteAuthorityError as exc:
@@ -180,8 +248,14 @@ class WebsiteMutationView(APIView):
         from .website_models import WebsiteRepositoryMutation
         data = sanitized_evidence(dict(request.data))
         try:
-            with authority_guard({**data, "expected_source_sha": data.get("expected_source_sha") or data.get("base_sha")}, action="config_write") as connection:
-                operation_id = str(data.get("operation_id") or "").strip()
+            authority = {**data, "expected_source_sha": data.get("expected_source_sha") or data.get("base_sha")}
+            mutation_id = str(data.get("mutation_id") or data.get("operation_id") or "").strip()
+            if not data.get("mutation_id"):
+                # Historical operation_id was a patch hash. Preserve that key
+                # while deriving any workflow fence from the saved run.
+                authority.pop("operation_id", None)
+            with authority_guard(authority, action="config_write") as connection:
+                operation_id = mutation_id
                 files = data.get("files")
                 if not operation_id or len(operation_id) > 160 or not SHA_PATTERN.fullmatch(str(data.get("base_sha") or "")) or not isinstance(files, list) or len(files) > 1000:
                     raise WebsiteAuthorityError("invalid_mutation_ledger", "An operation ID, exact base SHA and file ledger are required.", status=400)

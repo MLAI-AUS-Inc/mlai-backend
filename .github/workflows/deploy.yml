@@ -142,6 +142,9 @@ jobs:
           content_factory.test_reliability_contract \
           content_factory.tests_hosted_quality_issues_unit
 
+    - name: Check website journey and lifecycle contracts without database access
+      run: python scripts/test_without_database.py content_factory.tests_website_articles_reliability_unit
+
     - name: Check migrations are committed
       run: python manage.py makemigrations --check --dry-run
 
@@ -311,7 +314,7 @@ jobs:
           tests.test_linear_deployment_wiring \
           tests.test_health_check \
           tests.test_content_factory_org_config \
-          content_factory.tests_website_connections \
+          content_factory.tests_website_connections content_factory.tests_website_articles_reliability_database \
           content_factory.tests_activation_connections \
           content_factory.tests_website_portable \
           content_factory.tests_website_portable_wire \

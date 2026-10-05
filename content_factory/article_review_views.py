@@ -5,6 +5,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from . import vibe_marketing_views as views
+from .article_export import article_export
 
 
 def remote_review(run, *, payload=None):
@@ -45,13 +46,17 @@ class VibeMarketingArticleReviewView(views.VibeMarketingRunCommentsMixin, APIVie
     """Read or edit the canonical article using the existing ownership boundary."""
 
     def get(self, request, run_id):
-        _context, run, error = self._resolve_run(request, run_id)
+        context, run, error = self._resolve_run(request, run_id)
         if error is not None:
             return error
         result = remote_review(run)
         if isinstance(result, Response):
             return result
-        return Response({**result, "componentFeedback": views._component_feedback_from_run(run)})
+        latest = views._latest_review_ready_component_revision(run, context)
+        response = Response({**result, "componentFeedback": views._component_feedback_from_run(run),
+            "articleExport": article_export(result, run_id=run.run_id, latest_run_id=latest.run_id if latest else None)})
+        response["Cache-Control"] = "private, no-store"
+        return response
 
     def post(self, request, run_id):
         context, run, error = self._resolve_run(request, run_id)
