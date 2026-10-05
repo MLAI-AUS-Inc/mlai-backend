@@ -18,7 +18,7 @@ import tempfile
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
-APPROVED_INVENTORY = ROOT / "docs/refactor-release-test-migrations-2026-09-26.json"
+APPROVED_INVENTORY = ROOT / "docs/backend-refactor-migration-inventory-2026-10-05.json"
 KEYS = '{"test":"MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="}'
 
 
@@ -70,7 +70,7 @@ def replay_with_legacy_rows(*, editorial_first=False):
     from integrations.fields import encrypt_credential_value, LegacyPlaintextEncryptedTextField
     executor = MigrationExecutor(connection)
     checkpoint = (
-        "0041_writtenarticle_editorial_attribution" if editorial_first
+        "0042_website_connection_lifecycle" if editorial_first
         else "0038_delete_seo_topicmap_researchsession"
     )
     old_targets = [

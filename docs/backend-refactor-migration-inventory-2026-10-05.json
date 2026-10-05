@@ -1878,5 +1878,8 @@
       "name": "0005_contentfactoryrun_reconciled_at",
       "sha256": "bb41f031b87f2abf119250e62bad76c11766882ad8fb01789e6426322f3bf608"
     }
-  ]
+  ],
+  "approval_status": "approved",
+  "approval_date": "2026-10-05",
+  "approved_scope": "Empty content_factory.0043 merge and exact graph replay in new disposable local/GitHub CI test databases only; production migration and backfill approval excluded."
 }

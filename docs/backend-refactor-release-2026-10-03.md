@@ -34,7 +34,9 @@ The user approved creating this empty join and replaying the documented graph on
 
 ## Completed validation
 
-- 133 contracts passed on Python 3.11.14 / locked Django 5.2.17 with network and database connections blocked; no Django test runner or test database was started. They cover runtime recovery, mocked migration inventory/approval guards, shared auth, financial ownership, OAuth handoffs, Slack actions, article review and metric serialization.
+- All 704 assigned storage-free contracts pass on locked Python 3.11 / Django 5.2.17 with network and database connections blocked. These cover runtime recovery, migration guards, shared auth, financial ownership, OAuth handoffs, Slack actions, reviewed startup profiles, article review and metric serialization.
 - Dependency lock signature, CI module assignment, tracked-source credential scan, deployment shell syntax and diff whitespace checks passed.
-- CI assigns 242 full modules, 11 partial modules and retains 126 recorded baseline omissions, with zero new omissions.
+- CI assigns 267 full modules, 10 partial modules and retains 126 recorded baseline omissions, with zero new omissions.
 - Model drift checks pass. All 186 focused reward, registration, startup settings, profile, facade and website-connection tests pass on a fresh disposable SQLite database after replaying the approved graph (one PostgreSQL-only concurrency test skipped locally). Hosted CI validates PostgreSQL and the remaining regression lanes before merge.
+
+The disposable replay harness now verifies the October 5 approved inventory before connecting and can seed current main at `0042_website_connection_lifecycle`. Public vector constraint validation preserves pgvector field validation while excluding its NumPy array only from scalar constraint expressions; no schema changes are required. Bootstrap responses reuse the already serialized runs, preserving the current performance regression contract.
