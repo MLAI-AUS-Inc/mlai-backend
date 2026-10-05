@@ -875,15 +875,14 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
         fi
         unset office_manager_timezone
 
-    all_runtime_writer_services=(web scheduler memory-worker memory-scheduler community-email-worker bridge-worker bridge-reconciler bridge-retention analytics-sync)
-    runtime_services=(web scheduler memory-worker memory-scheduler community-email-worker)
+    source scripts/runtime-services.sh
     if [ "\$community_bridge_production_enabled" = "true" ] \
         && env_has_value SLACK_BRIDGE_BOT_TOKEN \
         && { env_has_value DISCORD_BRIDGE_BOT_TOKEN \
             || { env_has_value BUZZ_BRIDGE_ADAPTER_URL \
                 && env_has_value BUZZ_BRIDGE_ADAPTER_TOKEN \
                 && env_has_value BUZZ_BRIDGE_CALLBACK_SECRET; }; }; then
-        runtime_services+=(bridge-worker bridge-reconciler bridge-retention)
+        runtime_services+=("\${bridge_runtime_services[@]}")
         bridge_worker_enabled=1
     else
         bridge_worker_enabled=0
@@ -897,12 +896,19 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
         && { env_has_value UMAMI_API_TOKEN || { env_has_value UMAMI_USERNAME && env_has_value UMAMI_PASSWORD; }; } \
         && env_has_value CONTENT_ANALYTICS_TRACKER_SCRIPT_URL \
         && env_has_value CONTENT_ANALYTICS_HOST_URL; then
-        runtime_services+=(analytics-sync)
+        runtime_services+=("\${analytics_runtime_services[@]}")
         analytics_sync_enabled=1
     else
         analytics_sync_enabled=0
         echo "ℹ️ Skipping analytics-sync startup because the Umami analytics contract is not fully configured."
     fi
+
+    committee_remuneration_enabled=0
+    case "\$(read_env_value COMMITTEE_REMUNERATION_ENABLED)" in
+        true|TRUE|True|1|yes|YES|Yes|on|ON|On)
+            runtime_services+=("\${committee_runtime_services[@]}")
+            committee_remuneration_enabled=1 ;;
+    esac
 
     docker network inspect mlai-shared >/dev/null 2>&1 || docker network create mlai-shared
 
@@ -1522,6 +1528,24 @@ if parsed.username or parsed.password or parsed.query or parsed.fragment:
                 docker image tag "\$image_id" "\$image_ref"
                 restored_services+=("\$service")
             done < "\$rollback_manifest"
+            if [ "\$new_runtime_replacement_started" = "1" ] && [ "\$web_only_rollback" != "1" ]; then
+                # Writers introduced by this release have no previous image to
+                # restore. Stop them so a failed code-only rollout cannot leave
+                # new workers consuming jobs alongside the restored scheduler.
+                # The handoff candidate stays alive until old web is verified.
+                for service in "\${runtime_services[@]}"; do
+                    had_previous_image=0
+                    for restored_service in "\${restored_services[@]}"; do
+                        if [ "\$service" = "\$restored_service" ]; then
+                            had_previous_image=1
+                            break
+                        fi
+                    done
+                    if [ "\$had_previous_image" = "0" ]; then
+                        docker compose stop "\$service" || return
+                    fi
+                done
+            fi
             if [ "\${#restored_services[@]}" -gt 0 ]; then
                 if ! docker compose up -d --no-deps --force-recreate "\${restored_services[@]}"; then
                     echo "❌ Previous runtime could not be restored; writer watchdog remains paused." >&2
@@ -1611,7 +1635,6 @@ if parsed.username or parsed.password or parsed.query or parsed.fragment:
     # preserve the original failure and stop; recovery is not a successful deploy.
     trap 'deployment_status=\$?; restore_runtime_on_error; exit "\$deployment_status"' ERR
     trap 'deployment_status=\$?; if [ "\$deployment_status" != "0" ]; then restore_runtime_on_error; fi' EXIT
-
     if [ "\$migrations_pending" = "1" ]; then
         verify_current_main_release_on_host
         echo "⏸️ Pausing all runtime writers before DB migrations..."
@@ -1907,6 +1930,12 @@ PY
         echo "🧹 Stopping disabled analytics-sync service..."
         docker compose stop analytics-sync || true
         docker compose rm -f analytics-sync || true
+    fi
+
+    if [ "\$committee_remuneration_enabled" != "1" ]; then
+        echo "🧹 Stopping disabled committee remuneration service..."
+        docker compose stop "\${committee_runtime_services[@]}"
+        docker compose rm -f "\${committee_runtime_services[@]}"
     fi
 
     echo "🔁 Verifying the running web container picked up APP_RELEASE..."

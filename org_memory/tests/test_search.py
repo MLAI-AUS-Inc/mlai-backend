@@ -1,5 +1,6 @@
 import hashlib
 
+from django.core.exceptions import ValidationError
 from django.test import TestCase, override_settings
 
 from organizations.models import Organization
@@ -116,6 +117,16 @@ class MemorySearchFallbackTests(TestCase):
         self.assertFalse(first.is_current)
         self.assertTrue(second.is_current)
         self.assertEqual(MemoryChunkEmbedding.objects.filter(chunk=chunk).count(), 2)
+        # NumPy-vector compatibility must preserve the scalar database
+        # constraints during full_clean, including the one-current invariant.
+        second.dimensions = 512
+        with self.assertRaises(ValidationError):
+            second.full_clean()
+        second.dimensions = 1536
+        first.is_current = True
+        with self.assertRaises(ValidationError):
+            first.full_clean()
+        first.is_current = False
         with self.assertRaises(EmbeddingInvariantError):
             store_chunk_embedding(
                 chunk=chunk,

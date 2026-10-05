@@ -25,6 +25,8 @@ the relevant deployment runbook, not in this document.
   and integration configuration
 - `mlai/urls.py`: public URL composition
 - `Dockerfile` and `scripts/start-web.sh`: web container runtime
+- `requirements.lock`: hashed Python resolution shared by CI and runtime builds
+- `scripts/runtime-services.sh`: application writer inventory used by deployment
 - `docker-compose.local.yml`: multi-service local development topology
 - `docker-compose.yml`: deployed service topology
 
@@ -51,10 +53,16 @@ package and its tests before changing a contract.
 ## Runtime processes
 
 The deployed and full local topologies contain more than the web server. They
-include schedulers and workers for discovery, analytics, organisational memory,
-and password email. Dedicated community-bridge workers run the live MLAI Chat
+include schedulers and workers for discovery, Jobs, analytics, organisational
+memory, password email, and community email. Dedicated community-bridge workers run the live MLAI Chat
 Slack import and mirroring service. These processes share Django configuration
 and may share the same database and cache when enabled.
+
+The discovery scheduler enqueues daily Jobs runs; `jobs-worker` executes them.
+`scripts/runtime-services.sh` supplies deployment's required and optional writer
+groups, including the opt-in committee remuneration worker. See the
+[runtime contract](docs/backend-runtime.md) for health checks and limitations,
+and the [feature lifecycle register](docs/feature-lifecycle.md) for review work.
 
 Consequences for changes:
 

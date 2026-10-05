@@ -1,0 +1,231 @@
+{
+  "source_commit": "ea3dec37fcacb6665262d610492ffd392fdfc4d6",
+  "scope": "Local synthetic-data validation only; no production access, deployment, or hosted CI run",
+  "framework": "Django 5.2.17 / Python 3.11",
+  "approved_migrations": {
+    "existing_inventory": "refactor-test-migrations-2026-09-14.json",
+    "existing_count": 336,
+    "new": [
+      "content_factory.0039_encrypt_github_credentials",
+      "content_factory.0040_backfill_github_credential_envelopes"
+    ]
+  },
+  "passing_runs": {
+    "targeted_postgresql": 289,
+    "postgresql_memory_search_review_consolidation": 33,
+    "sqlite_framework_and_historical_fixtures": 63,
+    "isolated_unit": 58,
+    "isolated_scheduler_registration": 1,
+    "sqlite_migration_query_subset": {
+      "run": 11,
+      "passed": 9,
+      "skipped_postgresql_only": 2
+    }
+  },
+  "full_configured_main_ci_selection": {
+    "engine": "SQLite",
+    "run": 2111,
+    "passed": 2081,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 30,
+    "runtime_seconds": 419.127,
+    "result": "passed",
+    "log": "/tmp/mlai-refactor-ci-reviewed-final.log"
+  },
+  "audit_date": "2026-09-14",
+  "validation_completed": "2026-09-15",
+  "production_approval": {
+    "date": "2026-09-15",
+    "scope": "Production application of content_factory.0039 and 0040 after resolving the 18 failures and reviewing combined working changes",
+    "applied": false,
+    "deployment_performed": false,
+    "migration_sha256": {
+      "content_factory.0039_encrypt_github_credentials": "14d4e578e7368777e88a59a7f81024bd9ba4bf2286166f590f01bc3cf59801ce",
+      "content_factory.0040_backfill_github_credential_envelopes": "daf309dbe2febeb7da00aa569383bf0281b4fd5cb91e4696b9a4e4e872c7bc60"
+    },
+    "other_uncommitted_migrations_not_approved_for_production": [
+      "community_chat.0010_moderator",
+      "startup_updates.0022_reporting_evidence_revisions"
+    ],
+    "prerequisite_review_and_failure_resolution_completed": true
+  },
+  "followup_passing_runs": {
+    "postgresql_refactor_and_slack": 35,
+    "postgresql_existing_features": 81,
+    "editorial_unit": 136,
+    "isolated_refactor_runtime_deployment": 55
+  },
+  "review": {
+    "reference": "Saved pre-refactor working snapshot and HEAD; preserved existing uncommitted features",
+    "focus": "15 tracked files shared with pre-existing work, plus new refactor modules and callers",
+    "fixed_findings": [
+      "Unmasked writer stop errors and installed recovery trap before shutdown; migrations cannot begin after an unsuccessful stop.",
+      "Recovery handler exits with original error status despite set +e; failed migrations cannot continue into rollout."
+    ],
+    "deployment_control_flow_validation": "Executed real Bash handler/boundary with Docker and management transports stubbed; verified success, failed stop, failed migration.",
+    "hosted_ci_run": false,
+    "container_build_run": false,
+    "result": "Completed; identified deployment control-flow defects fixed and regression-tested."
+  },
+  "previous_main_ci_selection": {
+    "engine": "SQLite",
+    "run": 2111,
+    "passed": 2063,
+    "failures": 18,
+    "errors": 0,
+    "skipped": 30
+  },
+  "previous_failure_comparison": "Remaining failure IDs reproduced using the saved pre-refactor source and its 336 original migrations under the same Django 5.2 locked environment and network guard. This is not a run of the old Django 4.2 environment.",
+  "resolved_failures": [
+    {
+      "test": "community_chat.tests.test_token_usage.TokenUsageLeaderboardTests.test_caller_outside_the_cut_still_sees_their_own_rank",
+      "category": "unmocked_external_network",
+      "reproduced_in_saved_baseline": true,
+      "same_failure_tail": true,
+      "passed_in_final_configured_main_selection": true,
+      "resolution": "Added synthetic provider fixtures at the external service boundary; retained network guard and actual endpoint logic."
+    },
+    {
+      "test": "community_chat.tests.test_token_usage.TokenUsageLeaderboardTests.test_codex_cache_is_not_double_counted_in_headline_total",
+      "category": "unmocked_external_network",
+      "reproduced_in_saved_baseline": true,
+      "same_failure_tail": true,
+      "passed_in_final_configured_main_selection": true,
+      "resolution": "Added synthetic provider fixtures at the external service boundary; retained network guard and actual endpoint logic."
+    },
+    {
+      "test": "community_chat.tests.test_token_usage.TokenUsageLeaderboardTests.test_connected_account_without_reported_sessions_remains_visible",
+      "category": "unmocked_external_network",
+      "reproduced_in_saved_baseline": true,
+      "same_failure_tail": true,
+      "passed_in_final_configured_main_selection": true,
+      "resolution": "Added synthetic provider fixtures at the external service boundary; retained network guard and actual endpoint logic."
+    },
+    {
+      "test": "community_chat.tests.test_token_usage.TokenUsageLeaderboardTests.test_daily_sessions_are_distinct_across_sources",
+      "category": "unmocked_external_network",
+      "reproduced_in_saved_baseline": true,
+      "same_failure_tail": true,
+      "passed_in_final_configured_main_selection": true,
+      "resolution": "Added synthetic provider fixtures at the external service boundary; retained network guard and actual endpoint logic."
+    },
+    {
+      "test": "community_chat.tests.test_token_usage.TokenUsageLeaderboardTests.test_daily_window_keeps_other_historical_contributors_visible",
+      "category": "unmocked_external_network",
+      "reproduced_in_saved_baseline": true,
+      "same_failure_tail": true,
+      "passed_in_final_configured_main_selection": true,
+      "resolution": "Added synthetic provider fixtures at the external service boundary; retained network guard and actual endpoint logic."
+    },
+    {
+      "test": "community_chat.tests.test_token_usage.TokenUsageLeaderboardTests.test_default_window_is_today",
+      "category": "unmocked_external_network",
+      "reproduced_in_saved_baseline": true,
+      "same_failure_tail": true,
+      "passed_in_final_configured_main_selection": true,
+      "resolution": "Added synthetic provider fixtures at the external service boundary; retained network guard and actual endpoint logic."
+    },
+    {
+      "test": "community_chat.tests.test_token_usage.TokenUsageLeaderboardTests.test_hidden_members_are_excluded",
+      "category": "unmocked_external_network",
+      "reproduced_in_saved_baseline": true,
+      "same_failure_tail": true,
+      "passed_in_final_configured_main_selection": true,
+      "resolution": "Added synthetic provider fixtures at the external service boundary; retained network guard and actual endpoint logic."
+    },
+    {
+      "test": "community_chat.tests.test_token_usage.TokenUsageLeaderboardTests.test_history_sessions_use_their_start_date_in_recent_windows",
+      "category": "unmocked_external_network",
+      "reproduced_in_saved_baseline": true,
+      "same_failure_tail": true,
+      "passed_in_final_configured_main_selection": true,
+      "resolution": "Added synthetic provider fixtures at the external service boundary; retained network guard and actual endpoint logic."
+    },
+    {
+      "test": "community_chat.tests.test_token_usage.TokenUsageLeaderboardTests.test_never_returns_a_cost_field",
+      "category": "unmocked_external_network",
+      "reproduced_in_saved_baseline": true,
+      "same_failure_tail": true,
+      "passed_in_final_configured_main_selection": true,
+      "resolution": "Added synthetic provider fixtures at the external service boundary; retained network guard and actual endpoint logic."
+    },
+    {
+      "test": "community_chat.tests.test_token_usage.TokenUsageLeaderboardTests.test_ranks_by_grand_total_descending",
+      "category": "unmocked_external_network",
+      "reproduced_in_saved_baseline": true,
+      "same_failure_tail": true,
+      "passed_in_final_configured_main_selection": true,
+      "resolution": "Added synthetic provider fixtures at the external service boundary; retained network guard and actual endpoint logic."
+    },
+    {
+      "test": "community_chat.tests.test_token_usage.TokenUsageLeaderboardTests.test_sessions_are_counted_distinctly_across_models",
+      "category": "unmocked_external_network",
+      "reproduced_in_saved_baseline": true,
+      "same_failure_tail": true,
+      "passed_in_final_configured_main_selection": true,
+      "resolution": "Added synthetic provider fixtures at the external service boundary; retained network guard and actual endpoint logic."
+    },
+    {
+      "test": "community_chat.tests.test_token_usage.TokenUsageLeaderboardTests.test_unconnected_caller_gets_a_board_and_no_you_row",
+      "category": "unmocked_external_network",
+      "reproduced_in_saved_baseline": true,
+      "same_failure_tail": true,
+      "passed_in_final_configured_main_selection": true,
+      "resolution": "Added synthetic provider fixtures at the external service boundary; retained network guard and actual endpoint logic."
+    },
+    {
+      "test": "community_chat.tests.test_token_usage.TokenUsageLeaderboardTests.test_window_filters_older_rows",
+      "category": "unmocked_external_network",
+      "reproduced_in_saved_baseline": true,
+      "same_failure_tail": true,
+      "passed_in_final_configured_main_selection": true,
+      "resolution": "Added synthetic provider fixtures at the external service boundary; retained network guard and actual endpoint logic."
+    },
+    {
+      "test": "community_chat.tests.test_token_usage.TokenUsageLeaderboardTests.test_window_uses_session_start_calendar_and_returns_metadata",
+      "category": "unmocked_external_network",
+      "reproduced_in_saved_baseline": true,
+      "same_failure_tail": true,
+      "passed_in_final_configured_main_selection": true,
+      "resolution": "Added synthetic provider fixtures at the external service boundary; retained network guard and actual endpoint logic."
+    },
+    {
+      "test": "community_chat.tests.test_slack_dm_mirror.SlackDmMirrorOwnerTests.test_history_skips_outbound_message_and_reaction_then_reconciles_delete",
+      "category": "existing_slack_fixture_or_contract",
+      "reproduced_in_saved_baseline": true,
+      "same_failure_tail": false,
+      "passed_in_final_configured_main_selection": true,
+      "resolution": "Use bounded recent timestamps and exclude content-free history checkpoints from the no-message-echo assertion; preserve exact deletion checks."
+    },
+    {
+      "test": "community_chat.tests.test_slack_dm_mirror.SlackDmMirrorOwnerTests.test_same_identity_reauthorization_restarts_partial_history_epoch",
+      "category": "existing_slack_fixture_or_contract",
+      "reproduced_in_saved_baseline": true,
+      "same_failure_tail": true,
+      "passed_in_final_configured_main_selection": true,
+      "resolution": "Verify active same-window checkpoint preservation, then pause/renew, block history until rediscovery, and verify resumed history."
+    },
+    {
+      "test": "community_chat.tests.test_slack_chat_import.SlackChatImportTests.test_large_private_channel_is_named_and_visible_before_history_finishes",
+      "category": "existing_slack_fixture_or_contract",
+      "reproduced_in_saved_baseline": true,
+      "same_failure_tail": true,
+      "passed_in_final_configured_main_selection": true,
+      "resolution": "Assert current last_message_at/source_archived catalog fields and update the owning API contract."
+    },
+    {
+      "test": "integrations.tests_xero_reconciliation.ReconciliationWorkflowApiTests.test_complete_empty_scan_confirms_match_ready_posting_and_preserves_pattern",
+      "category": "unmocked_external_network",
+      "reproduced_in_saved_baseline": true,
+      "same_failure_tail": true,
+      "passed_in_final_configured_main_selection": true,
+      "resolution": "Added synthetic provider fixtures at the external service boundary; retained network guard and actual endpoint logic."
+    }
+  ],
+  "remaining_failures": [],
+  "disposable_database_cleanup": {
+    "remaining_directories": 0,
+    "existing_database_accessed": false
+  }
+}

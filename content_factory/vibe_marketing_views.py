@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 from content_factory.website_connections import guarded_backend_run_action
+from workflow_runs.status import (
+    normalize_run_status as _normalize_remote_run_status,
+    normalize_step_status as _normalize_remote_step_status,
+)
 
 import ast
 import copy
@@ -11634,19 +11638,6 @@ def _content_factory_diagnostics(config, **extra):
     }
     diagnostics.update({key: value for key, value in extra.items() if value is not None})
     return diagnostics
-
-
-def _normalize_remote_step_status(value):
-    normalized = str(value or "").strip().lower()
-    mapping = {
-        "processing": ContentFactoryStepStatus.RUNNING,
-        "in_progress": ContentFactoryStepStatus.RUNNING,
-        "blocked_verification": ContentFactoryStepStatus.BLOCKED,
-        "error": ContentFactoryStepStatus.FAILED,
-    }
-    normalized = mapping.get(normalized, normalized)
-    allowed = {choice[0] for choice in ContentFactoryStepStatus.choices}
-    return normalized if normalized in allowed else ContentFactoryStepStatus.PENDING
 
 
 def _is_retryable_sqlite_lock(exc):

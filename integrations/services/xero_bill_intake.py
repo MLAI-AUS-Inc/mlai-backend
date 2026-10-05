@@ -22,6 +22,7 @@ from django.conf import settings
 from django.utils import timezone
 
 from integrations import http_client
+from integrations.services.financial_records import upsert_financial_record
 from integrations.models import (
     ExternalFinancialRecord,
     ExternalServiceProvider,
@@ -625,7 +626,7 @@ def _mirror_authorised_bill(
     contact = row.get("Contact") if isinstance(row.get("Contact"), dict) else {}
     line_items = row.get("LineItems") if isinstance(row.get("LineItems"), list) else []
     first_line = line_items[0] if line_items and isinstance(line_items[0], dict) else {}
-    ExternalFinancialRecord.objects.update_or_create(
+    upsert_financial_record(
         provider=ExternalServiceProvider.XERO,
         external_account_id=connection.external_account_id,
         external_record_id=external_record_id,

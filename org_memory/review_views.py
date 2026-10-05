@@ -646,7 +646,9 @@ class OrgMemoryReviewResolveView(OrgMemoryReviewView):
             )
         review = (
             _review_queryset(request.org_memory_actor.organization)
-            .select_for_update()
+            # Related review metadata includes nullable joins. Lock only the
+            # review row that serializes resolution and idempotent replay.
+            .select_for_update(of=("self",))
             .filter(pk=review_id)
             .first()
         )

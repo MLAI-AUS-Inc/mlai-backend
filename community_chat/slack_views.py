@@ -12,7 +12,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from slack_sdk.errors import SlackApiError, SlackClientError
 
-from hospital.authentication import CustomJWTAuthentication
+from core.authentication import CustomJWTAuthentication
 from integrations.models import SlackDmMirrorGrant
 from community_chat.models import CommunityChatDevice
 from integrations.services.slack_dm_mirror import (

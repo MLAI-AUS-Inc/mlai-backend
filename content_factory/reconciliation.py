@@ -171,9 +171,9 @@ def _adopt_remote_payload(run: ContentFactoryRun, payload: dict) -> str:
     status the run now carries.
     """
     from content_factory.service_views import _sync_content_factory_run_snapshot
-    from content_factory.vibe_marketing_views import _normalize_remote_run_status
+    from workflow_runs.status import normalize_run_status
 
-    normalized_status = _normalize_remote_run_status(payload.get("status"))
+    normalized_status = normalize_run_status(payload.get("status"))
     sync_payload = dict(payload)
     sync_payload["workflow"] = str(payload.get("workflow") or run.workflow)
     sync_payload["status"] = normalized_status

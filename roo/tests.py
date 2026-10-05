@@ -1261,9 +1261,10 @@ class StartupUpdateRewardServiceTests(TestCase):
 
     def draft(self, month=None):
         from startup_updates.models import MonthlyUpdateDraft
+        from uuid import uuid4
         now = timezone.now()
         return MonthlyUpdateDraft.objects.create(organization=self.org, month=month or self.month,
-            published_at=now, first_published_at=now, ready_at=now)
+            published_at=now, first_published_at=now, ready_at=now, creation_key=str(uuid4()))
 
     def award(self, draft):
         return StartupUpdateRewardService.award_monthly_update_completion(

@@ -43,6 +43,26 @@ services:
           - mlai-backend-scheduler
     restart: unless-stopped
 
+  jobs-worker:
+    build: .
+    command: sh -c "until python manage.py migrate --check --noinput; do sleep 5; done; exec python manage.py run_jobs_worker"
+    environment:
+      APP_ENV: local
+      JOBS_SCRAPE_HEADLESS: ${JOBS_SCRAPE_HEADLESS:-false}
+    volumes:
+      - .:/app
+    env_file:
+      - .env
+      - .env.local-docker
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      default:
+      local-shared:
+        aliases:
+          - mlai-backend-jobs-worker
+    restart: unless-stopped
+
   analytics-sync:
     build: .
     command: >-

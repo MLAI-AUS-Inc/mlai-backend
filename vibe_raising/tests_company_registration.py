@@ -388,10 +388,12 @@ class CompanySaveContractTests(SimpleTestCase):
         company = VibeRaisingCompany(name="New startup")
         company.save = MagicMock()
         company.refresh_from_db = MagicMock()
-        profile = SimpleNamespace(role="founder", active_company_id="existing")
+        profile = SimpleNamespace(pk="profile-fixture", role="founder", active_company_id="existing")
         request = SimpleNamespace(data={"name": "MLAI", "createNew": True, **body}, user=SimpleNamespace())
         with (
             patch.object(views, "get_or_create_founder_profile", return_value=profile),
+            patch.object(views.VibeRaisingProfile.objects, "select_for_update", return_value=SimpleNamespace(get=MagicMock(return_value=profile))),
+            patch("founder_tools.services.find_company_with_domain", return_value=None),
             patch.object(views, "VibeRaisingCompany", return_value=company),
             patch.object(views, "ensure_company_organization"),
             patch.object(views, "apply_shared_startup_details"),

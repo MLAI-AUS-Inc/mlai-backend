@@ -730,17 +730,25 @@ def consolidate_claim(*, candidate: MemoryClaim, provider: Optional[Consolidatio
 
 @transaction.atomic
 def approve_consolidation(*, run: MemoryConsolidationRun, actor, winner_claim=None) -> MemoryConsolidationRun:
-    run = MemoryConsolidationRun.objects.select_for_update().select_related("candidate_claim", "matched_claim", "review_item").get(pk=run.pk)
+    # Lock mutable rows directly; matched_claim/review_item are nullable and
+    # PostgreSQL rejects an unqualified FOR UPDATE over their outer joins.
+    run = MemoryConsolidationRun.objects.select_for_update().get(pk=run.pk)
     if run.status != MemoryConsolidationStatus.REVIEW_REQUIRED or not run.review_item_id:
         raise ConsolidationInvariantError("Consolidation is not awaiting review.")
-    review = run.review_item
+    review = MemoryReviewItem.objects.select_for_update().get(pk=run.review_item_id)
+    claims = {
+        claim.pk: claim for claim in MemoryClaim.objects.select_for_update()
+        .filter(pk__in=[run.candidate_claim_id, run.matched_claim_id]).order_by("pk")
+    }
+    candidate = claims[run.candidate_claim_id]
+    matched = claims.get(run.matched_claim_id)
+    if winner_claim is not None:
+        winner_claim = claims.get(winner_claim.pk, winner_claim)
     review.status = MemoryReviewStatus.APPROVED
     review.resolved_by = actor
     review.resolved_at = timezone.now()
     review.resolution = {"operation": run.operation, "winner_claim_id": str(getattr(winner_claim, "pk", "") or "")}
     review.save(update_fields=("status", "resolved_by", "resolved_at", "resolution", "updated_at"))
-    candidate = run.candidate_claim
-    matched = run.matched_claim
     if run.operation in {MemoryConsolidationOperation.NEW, MemoryConsolidationOperation.REFINES}:
         transition_claim(claim=candidate, to_status=MemoryClaimStatus.ACTIVE, reason=f"approved_{run.operation}", actor=actor, review_item=review)
     elif run.operation == MemoryConsolidationOperation.SUPERSEDES:
@@ -1170,13 +1178,15 @@ def propose_correction(*, original_claim: MemoryClaim, correction_text: str, req
 
 @transaction.atomic
 def apply_correction(*, proposal: MemoryCorrectionProposal, actor) -> MemoryCorrectionProposal:
-    proposal = MemoryCorrectionProposal.objects.select_for_update().select_related(
-        "original_claim", "replacement_claim", "review_item"
-    ).get(pk=proposal.pk)
-    replacement = proposal.replacement_claim
+    proposal = MemoryCorrectionProposal.objects.select_for_update().get(pk=proposal.pk)
+    claims = {
+        claim.pk: claim for claim in MemoryClaim.objects.select_for_update()
+        .filter(pk__in=[proposal.original_claim_id, proposal.replacement_claim_id]).order_by("pk")
+    }
+    replacement = claims.get(proposal.replacement_claim_id)
     if proposal.status != MemoryCorrectionStatus.PROPOSED or replacement is None or not replacement.evidence.exists():
         raise ConsolidationInvariantError("Correction requires an independently evidenced replacement candidate.")
-    review = proposal.review_item
+    review = MemoryReviewItem.objects.select_for_update().get(pk=proposal.review_item_id)
     review.status = MemoryReviewStatus.APPROVED
     review.resolved_by = actor
     review.resolved_at = timezone.now()
@@ -1188,8 +1198,9 @@ def apply_correction(*, proposal: MemoryCorrectionProposal, actor) -> MemoryCorr
         replacement.save(update_fields=("valid_from", "updated_at"))
     transition_claim(claim=replacement, to_status=MemoryClaimStatus.ACTIVE, reason="approved_correction", actor=actor, review_item=review)
     _cancel_claim_activation_review(replacement, reason="activated_by_approved_correction")
-    transition_claim(claim=proposal.original_claim, to_status=MemoryClaimStatus.SUPERSEDED, reason="corrected_by_reviewed_claim", actor=actor, review_item=review, effective_at=effective_at)
-    _link(replacement, proposal.original_claim, MemoryClaimRelation.SUPERSEDES, Decimal("1.0"))
+    original = claims[proposal.original_claim_id]
+    transition_claim(claim=original, to_status=MemoryClaimStatus.SUPERSEDED, reason="corrected_by_reviewed_claim", actor=actor, review_item=review, effective_at=effective_at)
+    _link(replacement, original, MemoryClaimRelation.SUPERSEDES, Decimal("1.0"))
     proposal.status = MemoryCorrectionStatus.APPLIED
     proposal.reviewed_by = actor
     proposal.reviewed_at = timezone.now()

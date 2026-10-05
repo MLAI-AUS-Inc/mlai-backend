@@ -72,7 +72,7 @@ from core.permissions import (
 from core.slack_users import resolve_existing_user_from_profile
 from integrations.services import SlackService
 from community_chat.authentication import CommunityChatAccountAuthentication
-from hospital.authentication import CustomJWTAuthentication
+from core.authentication import CustomJWTAuthentication
 
 # Additional imports for Activity & Quests
 import logging

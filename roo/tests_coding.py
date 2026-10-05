@@ -1,5 +1,5 @@
 import hashlib
-import inspect
+import json
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -7,6 +7,7 @@ from datetime import timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest import skipUnless
+from unittest.mock import Mock, patch
 
 import jwt
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -1222,15 +1223,26 @@ class CodingInternalCallApiTests(APITestCase):
         self.assertEqual(self.turn.released_microroo, 2_000_000)
 
 
-class CodingSchedulerRegistrationTests(TestCase):
+class CodingSchedulerRegistrationTests(SimpleTestCase):
     def test_global_reconciliation_runs_from_the_production_scheduler(self):
-        from core.management.commands.run_scheduled_discovery import Command
+        from io import StringIO
+        from core.management.commands import run_scheduled_discovery as scheduler
 
-        source = inspect.getsource(Command.handle)
-        self.assertIn(
-            '("coding_reconciliation", reconcile_coding_reservations)',
-            source,
-        )
+        def run_coding_only(runners):
+            result = dict(runners)["coding_reconciliation"]()
+            return {"coding_reconciliation": result}, []
+
+        output = StringIO()
+        with (
+            patch.object(scheduler, "reconcile_coding_reservations", return_value={"released": 1}) as reconcile,
+            patch.object(scheduler, "run_runners", side_effect=run_coding_only),
+            patch.object(scheduler.ScheduledDiscoveryHeartbeat, "objects") as heartbeats,
+        ):
+            heartbeats.get_or_create.return_value = (Mock(), False)
+            scheduler.Command(stdout=output).handle()
+        reconcile.assert_called_once_with()
+        self.assertEqual(json.loads(output.getvalue())["coding_reconciliation"],
+                         {"status": "completed", "released": 1})
 
 
 @override_settings(**CODING_SETTINGS)
