@@ -50,8 +50,8 @@ class RuntimeInventoryTests(unittest.TestCase):
         deploy = (ROOT / "deploy.sh").read_text()
         start = deploy.index("    runtime_restore_attempted=0")
         end = deploy.index('    echo "🧬 Re-auditing Office Manager provenance', start)
-        boundary = deploy[start:end].replace("\\$", "$")
-        plan = "Apply app.0001_example"
+        boundary = deploy[start:end].replace("\\$", "$").replace("writer_pause_sentinel=/run/mlai-backend-writers-paused", 'writer_pause_sentinel="$2"')
+        plan = "Planned operations:\napp.0001_example\n    Create model Example"
         approved_hash = hashlib.sha256(plan.encode()).hexdigest()
         script = r'''set -euo pipefail
 source scripts/runtime-services.sh
@@ -62,16 +62,22 @@ previous_app_release=previous
 web_proxy_preexisting=1
 web_candidate_started=0
 migration_applied=0
+APP_RELEASE=synthetic-test-release
+systemctl() { :; }
+pgrep() { return 1; }
 upsert_env_value() { :; }
 verify_scheduler_recovery_tick() { :; }
 verify_current_main_release_on_host() { :; }
+restore_host_writer_watchdogs() { :; }
+pause_runtime_writers_for_migration() { runtime_pause_started=1; docker compose stop "${all_runtime_writer_services[@]}"; }
 docker() {
+    if [ "$1 $2 $3" = "compose ps --all" ]; then return 0; fi
     printf 'docker:%s\n' "$*"
     if [ "$1 $2" = 'compose stop' ]; then return "$STOP_STATUS"; fi
 }
 compose_run_web() {
     case " $* " in
-        *' --plan '*) printf '%s\n' 'Apply app.0001_example'; return 0 ;;
+        *' --plan '*) printf '%s\n' 'Planned operations:' 'app.0001_example' '    Create model Example'; return 0 ;;
         *' --check '*)
             if [ "$PENDING" = 0 ] || [ "$migration_applied" = 1 ]; then
                 return 0
@@ -100,10 +106,12 @@ compose_run_web() {
                     ["bash", "-c",
                      f"PENDING={pending}\nSTOP_STATUS={stop_status}\nMIGRATE_STATUS={migrate_status}\n"
                      + script + boundary + "\nprintf 'boundary-complete\\n'\n",
-                     "deployment-boundary-test", str(manifest)],
+                     "deployment-boundary-test", str(manifest), str(Path(directory) / "writers-paused")],
                     cwd=ROOT, text=True, capture_output=True, timeout=5,
                 )
-                expected_status = (stop_status or migrate_status) if pending else 0
+                # The writer barrier normalizes a failed stop to status 1;
+                # a migration failure retains the migration command status.
+                expected_status = (1 if stop_status else migrate_status) if pending else 0
                 self.assertEqual(result.returncode, expected_status, result.stderr)
                 if not pending:
                     self.assertNotIn("docker:", result.stdout)

@@ -104,6 +104,15 @@ jobs:
           integrations.tests_message_sync_telemetry \
           integrations.tests_message_sync_capacity
 
+    - name: Check startup facade, profile drafts and sparse settings without database access
+      run: |
+        python scripts/test_without_database.py \
+          community_chat.tests.test_my_startup_facade_unit \
+          content_factory.tests_baseline_ai_evidence_unit \
+          content_factory.tests_startup_profile_draft_unit \
+          content_factory.tests_startup_settings_unit \
+          founder_tools.tests_profile_fields_unit
+
     - name: Check startup connections and reporting months without database access
       run: |
         python scripts/test_without_database.py \
