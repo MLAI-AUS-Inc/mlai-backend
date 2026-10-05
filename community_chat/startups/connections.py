@@ -53,14 +53,14 @@ def github_settings_return(value, company_id):
         return None
     target = {"company_id": str(company_id)}
     try:
-        previous = urlsplit(query.get("returnTo", [""])[0])
+        previous = urlsplit(query.get("return_to", query.get("returnTo", [""]))[0])
     except ValueError:
         previous = urlsplit("")
     previous_query = parse_qs(previous.query)
     step = previous_query.get("step", [""])[0]
     if (not previous.scheme and not previous.netloc and previous.path == "/my-startup/onboarding"
             and previous_query.get("company_id") == [str(company_id)] and step in {"repository", "articles"}):
-        target["returnTo"] = "/my-startup/onboarding?" + urlencode({"step": step, "company_id": str(company_id)})
+        target["return_to"] = "/my-startup/onboarding?" + urlencode({"step": step, "company_id": str(company_id)})
     return "/my-startup/connections/github?" + urlencode(target)
 
 

@@ -184,13 +184,13 @@ class GitHubSettingsReturnTests(SimpleTestCase):
         from urllib.parse import parse_qs, urlencode, urlsplit
         from community_chat.startups.connections import github_settings_return
         setup = f"/my-startup/onboarding?step=repository&company_id={COMPANY}"
-        result = github_settings_return("https://foreign.example/my-startup/connections/github?" + urlencode({"company_id": COMPANY, "returnTo": setup}), COMPANY)
+        result = github_settings_return("https://foreign.example/my-startup/connections/github?" + urlencode({"company_id": COMPANY, "return_to": setup}), COMPANY)
         self.assertEqual(urlsplit(result).path, "/my-startup/connections/github")
-        self.assertEqual(parse_qs(urlsplit(result).query)["returnTo"], [setup])
+        self.assertEqual(parse_qs(urlsplit(result).query)["return_to"], [setup])
 
     def test_foreign_company_and_external_nested_return_are_discarded(self):
         from urllib.parse import parse_qs, urlencode, urlsplit
         from community_chat.startups.connections import github_settings_return
         self.assertIsNone(github_settings_return(f"/my-startup/connections/github?company_id={OTHER}", COMPANY))
-        result = github_settings_return("/my-startup/connections/github?" + urlencode({"company_id": COMPANY, "returnTo": "https://other.example/my-startup/onboarding"}), COMPANY)
-        self.assertNotIn("returnTo", parse_qs(urlsplit(result).query))
+        result = github_settings_return("/my-startup/connections/github?" + urlencode({"company_id": COMPANY, "return_to": "https://other.example/my-startup/onboarding"}), COMPANY)
+        self.assertNotIn("return_to", parse_qs(urlsplit(result).query))
