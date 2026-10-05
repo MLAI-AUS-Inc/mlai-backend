@@ -58,6 +58,6 @@ Only the established organization owner can set canonical branding. Own-company 
 
 Focused `unittest`/`SimpleTestCase` suites run through `scripts/test_without_database.py`, which removes environment credentials and rejects network/database access. Tests cover sparse/empty profile fields, optional-field round-trip, provisional promotion/retry, research non-persistence, explicit scope/authentication, repository validation/invalidation, canonical removal, alpha/limits, storage failure, and existing activation/editorial/Chat connection behavior.
 
-These checks do not prove SQL rollback/locking against a live database, Firebase upload, GitHub authorization, worker execution, or deployed routing. No migrations, database-backed tests, live provider calls, commits, or deployment were performed for this change.
+These checks do not prove SQL rollback/locking against a live database, Firebase upload, GitHub authorization, worker execution, or deployed routing. The final combined isolated run passed 198 tests. No migrations, database-backed tests, live provider calls or deployment were performed for this change. Client companion: [Chat PR #357](https://github.com/MLAI-AUS-Inc/mlai-chat/pull/357).
 
 Repository replacements use `bind_website` and unlinking disconnects the current `WebsiteConnection` generation. This preserves the existing authority checks and invalidates work for superseded connections. Shared GitHub authorization is retained. Settings responses are serialized after the atomic save commits, preserving worker reconciliation without a database lock.
