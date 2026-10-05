@@ -4,6 +4,7 @@ import os
 import re
 import shlex
 import subprocess
+import sys
 import tempfile
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -141,6 +142,61 @@ class RuntimeHardeningConfigTests(SimpleTestCase):
             'curl -fsS -o /dev/null "https://api.mlai.au\\$admin_css_path"',
             deploy,
         )
+
+    def test_static_build_and_runtime_use_manifest_storage(self):
+        script = '''
+import json
+import os
+from pathlib import Path
+from unittest.mock import patch
+with patch('dotenv.load_dotenv', return_value=False), \
+     patch('socket.socket.connect', side_effect=AssertionError('Network forbidden')), \
+     patch('django.db.backends.base.base.BaseDatabaseWrapper.ensure_connection',
+           side_effect=AssertionError('Database forbidden')):
+    import django
+    django.setup()
+    from django.conf import settings
+    settings.STATIC_ROOT = os.environ['STATIC_TEST_ROOT']
+    from django.core.files.storage import default_storage
+    from django.contrib.staticfiles.storage import staticfiles_storage
+    from django.core.management import call_command
+    from whitenoise.storage import CompressedManifestStaticFilesStorage
+    assert default_storage.__class__.__name__ == 'FileSystemStorage'
+    manifest_expected = os.environ['MANIFEST_EXPECTED'] == 'true'
+    assert isinstance(staticfiles_storage, CompressedManifestStaticFilesStorage) == manifest_expected
+    if manifest_expected:
+        call_command('collectstatic', interactive=False, verbosity=0)
+        paths = json.loads((Path(settings.STATIC_ROOT) / 'staticfiles.json').read_text())['paths']
+        for source in ('admin/css/base.css', 'rest_framework/css/bootstrap.min.css'):
+            assert source in paths
+            assert paths[source] != source
+            assert (Path(settings.STATIC_ROOT) / paths[source]).is_file()
+            assert staticfiles_storage.url(source, force=True) == settings.STATIC_URL + paths[source]
+'''
+        for debug, static_build, expected in (
+            ('true', 'true', 'true'),
+            ('false', 'false', 'true'),
+            ('true', 'false', 'false'),
+        ):
+            with self.subTest(debug=debug, static_build=static_build), tempfile.TemporaryDirectory() as temporary:
+                # The child uses synthetic settings and may only write its
+                # disposable static output; it cannot connect to a database.
+                environment = {
+                    'PATH': os.defpath,
+                    'APP_ENV': 'test',
+                    'DEBUG': debug,
+                    'DJANGO_STATIC_BUILD': static_build,
+                    'MANIFEST_EXPECTED': expected,
+                    'STATIC_TEST_ROOT': temporary,
+                    'SECRET_KEY': 'synthetic-static-build-test',
+                    'DJANGO_SETTINGS_MODULE': 'mlai.settings',
+                    'DATABASE_URL': 'sqlite:///:memory:',
+                }
+                result = subprocess.run(
+                    [sys.executable, '-c', script], cwd=ROOT,
+                    env=environment, capture_output=True, text=True,
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_healthcheck_uses_proxy_tls_header_and_closes_connection(self):
         healthcheck_test = self._web_healthcheck_test("docker-compose.yml")

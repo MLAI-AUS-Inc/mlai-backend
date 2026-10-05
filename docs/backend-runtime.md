@@ -84,6 +84,11 @@ by CI and Docker. The framework target is Django 5.2.17 with DRF 3.16.1 and
 SimpleJWT 5.5.1. The psycopg binary distribution avoids an implicit dependency on
 a machine's locally installed libpq for Python imports.
 
+Static storage uses Django's `STORAGES` configuration. Production and the
+`DJANGO_STATIC_BUILD` image-build mode select WhiteNoise's compressed manifest
+storage, while local debug mode uses ordinary static storage. Image builds verify
+hashed Django Admin and DRF assets before any deployment or migration starts.
+
 Regenerate the lock after intentionally editing either requirements input:
 
 ```sh
