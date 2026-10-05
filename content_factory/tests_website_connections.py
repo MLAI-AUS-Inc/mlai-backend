@@ -5,7 +5,7 @@ from datetime import timedelta
 import hashlib
 import threading
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 import uuid
 
 from django.db import connection, connections, close_old_connections
@@ -137,6 +137,110 @@ class WebsiteSetupProjectionTests(SimpleTestCase):
         self.assertFalse(article_setup_reset_ignores_run(self.config, self.run_fixture('topic_discovery', binding={})))
         self.config.website_connection = None
         self.assertFalse(article_setup_reset_ignores_run(self.config, self.run_fixture('repo_scan', binding={})))
+
+    def test_nested_worker_snapshot_can_retain_a_valid_string_generation(self):
+        from contextlib import contextmanager
+        from . import website_connections as lifecycle
+        run = self.run_fixture('repo_scan')
+        run.save = MagicMock()
+        request = {'workflow': 'repo_scan', 'domain': self.org.domain,
+            'run_request': {**self.binding, 'connection_generation': '2'}}
+
+        @contextmanager
+        def authorize(payload, **kwargs):
+            self.assertEqual(connection_contract(lifecycle._payload_with_context(payload)),
+                connection_contract(self.binding))
+            yield self.website
+
+        @lifecycle.guarded_service_write('config_write', only_repository=True)
+        def sync(_view, incoming, run_id):
+            run.run_request = dict(incoming.data['run_request'])
+            return SimpleNamespace(status_code=200)
+
+        with patch.object(lifecycle, 'authority_guard', side_effect=authorize), \
+             patch.object(lifecycle, 'record_scan_evidence'), \
+             patch.object(ContentFactoryRun.objects, 'filter') as rows:
+            rows.return_value.first.return_value = run
+            sync(object(), SimpleNamespace(method='PUT', data=request), run_id=run.run_id)
+        self.assertEqual(connection_contract(run.run_request), connection_contract(self.binding))
+        self.assertEqual(run.run_request['connection_generation'], '2')
+
+    def test_persisted_lookup_accepts_valid_representations_after_a_newer_old_run(self):
+        from . import vibe_marketing_views as marketing
+        old = self.run_fixture('repo_scan', binding={**self.binding, 'connection_generation': 1})
+        representations = (
+            {**self.binding, 'connection_generation': '2'},
+            {**self.binding, 'connection_generation': '002'},
+            {'connectionId': str(self.website.pk), 'connectionGeneration': '2', 'repositoryId': 123},
+        )
+        for binding in representations:
+            with self.subTest(binding=binding), patch.object(ContentFactoryRun.objects, 'filter') as rows:
+                query = rows.return_value
+                query.exclude.return_value = query
+                query.only.return_value = query
+                query.order_by.return_value = query
+                hydration = query.filter.return_value
+                hydration.prefetch_related.return_value = hydration
+                current = self.run_fixture('repo_scan', binding=binding, run_id='current-scan')
+                query.iterator.return_value = iter([old, current])
+                hydration.first.return_value = current
+                selected = marketing._latest_persisted_run_for_article_setup(self.config, {'repo_scan'})
+                self.assertIs(selected, current)
+
+    def test_durable_lookup_skips_heavy_history_and_hydrates_only_an_eligible_run(self):
+        from django.db.backends.sqlite3.base import DatabaseWrapper
+        from django.db.models.query import QuerySet
+        from . import vibe_marketing_views as marketing
+        old = self.run_fixture('repo_scan', binding={**self.binding, 'connection_generation': 1})
+        current = self.run_fixture('repo_scan', run_id='current-scan')
+        current.pk = 23
+        reads = []
+        compiler_connection = DatabaseWrapper({'ENGINE': 'django.db.backends.sqlite3', 'NAME': ':memory:'})
+
+        def candidates(query, **kwargs):
+            sql, params = query.query.get_compiler(connection=compiler_connection).as_sql()
+            for field in ('result', 'acceptance_summary', 'verification_summary', 'step_order', 'error'):
+                self.assertNotIn(f'"content_factory_run"."{field}"', sql)
+            self.assertEqual(query._prefetch_related_lookups, ())
+            self.assertIn('"content_factory_run"."organization_id" =', sql)
+            self.assertIn(self.org.pk, params)
+            self.assertIn(self.org.domain, params)
+            self.assertIn(self.website.github_repo, params)
+            reads.append('consent')
+            return iter([old, current])
+
+        def hydrate(query):
+            sql, params = query.query.get_compiler(connection=compiler_connection).as_sql()
+            self.assertIn('"content_factory_run"."result"', sql)
+            self.assertEqual(query._prefetch_related_lookups, ('steps',))
+            self.assertIn(current.pk, params)
+            reads.append('full')
+            return current
+
+        with patch.object(QuerySet, 'iterator', autospec=True, side_effect=candidates), \
+             patch.object(QuerySet, 'first', autospec=True, side_effect=hydrate):
+            selected = marketing._latest_persisted_run_for_article_setup(self.config, {'repo_scan'})
+        self.assertIs(selected, current)
+        self.assertEqual(reads, ['consent', 'full'])
+
+    def test_durable_lookup_rechecks_consent_after_hydrating_a_candidate(self):
+        from . import vibe_marketing_views as marketing
+        candidate = self.run_fixture('repo_scan', run_id='changed-scan')
+        changed = self.run_fixture('repo_scan', run_id=candidate.run_id,
+            binding={**self.binding, 'connection_generation': 1})
+        current = self.run_fixture('repo_scan', run_id='current-scan')
+        with patch.object(ContentFactoryRun.objects, 'filter') as rows:
+            query = rows.return_value
+            query.exclude.return_value = query
+            query.only.return_value = query
+            query.order_by.return_value = query
+            query.iterator.return_value = iter([candidate, current])
+            hydration = query.filter.return_value
+            hydration.prefetch_related.return_value = hydration
+            hydration.first.side_effect = [changed, current]
+            selected = marketing._latest_persisted_run_for_article_setup(self.config, {'repo_scan'})
+        self.assertIs(selected, current)
+        self.assertEqual(hydration.first.call_count, 2)
 
     def test_reset_projection_cannot_reuse_an_explicit_old_scan_or_its_setup_reference(self):
         from . import vibe_marketing_views as marketing
@@ -436,6 +540,18 @@ class WebsiteLifecycleTests(WebsiteDatabaseFixture, TestCase):
         self.assertEqual(state['scanRunId'], fresh.run_id)
         self.assertEqual(state['scanStatus'], 'completed')
         self.assertIsNone(state['setupRunId'])
+
+    def test_current_string_generation_snapshot_remains_visible_in_persisted_lookup(self):
+        from .vibe_marketing_views import _latest_persisted_run_for_article_setup
+        for binding in (
+            {**self.binding, 'connection_generation': '1'},
+            {'connectionId': str(self.website.pk), 'connectionGeneration': '1', 'repositoryId': 123},
+        ):
+            with self.subTest(binding=binding):
+                scan = ContentFactoryRun.objects.create(run_id=str(uuid.uuid4()), workflow='repo_scan',
+                    organization=self.org, domain=self.org.domain, github_repo=self.website.github_repo,
+                    run_request=binding, status='completed')
+                self.assertEqual(_latest_persisted_run_for_article_setup(self.config, {'repo_scan'}).pk, scan.pk)
 
     def test_cross_tenant_and_wrong_repository_denied(self):
         for payload in ({**self.binding, 'domain': 'other.example.test'}, {**self.binding, 'repository_id': 999}, {**self.binding, 'github_repo': 'example/other'}):

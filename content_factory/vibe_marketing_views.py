@@ -8612,6 +8612,32 @@ def _latest_persisted_run_for_article_setup(config, workflows: set[str], *, run_
         return None
     domain = getattr(config.organization, "domain", "")
     run_id = str(run_id or "").strip()
+    connection = getattr(config, "website_connection", None)
+    if connection is not None:
+        scoped_runs = ContentFactoryRun.objects.filter(organization_id=config.organization_id,
+            domain=domain, workflow__in=workflows, github_repo__iexact=connection.github_repo)
+        consent_fields = ("run_id", "organization_id", "domain", "workflow", "github_repo",
+            "run_request", "updated_at", "created_at")
+
+        def eligible_full_run(candidate):
+            if candidate is None or article_setup_reset_ignores_run(config, candidate):
+                return None
+            run = scoped_runs.filter(pk=candidate.pk).prefetch_related("steps").first()
+            return run if run is not None and not article_setup_reset_ignores_run(config, run) else None
+
+        if run_id:
+            selected = eligible_full_run(scoped_runs.filter(run_id=run_id).only(*consent_fields).first())
+            if selected is not None:
+                return selected
+        # Worker snapshots can retain numeric strings or accepted aliases. Parse
+        # only consent and identity while skipping history, then fetch the chosen
+        # run's result and steps. Recheck consent after that separate read.
+        candidates = scoped_runs.exclude(status=ContentFactoryRunStatus.CANCELLED).only(*consent_fields).order_by("-updated_at")
+        for candidate in candidates.iterator(chunk_size=50):
+            selected = eligible_full_run(candidate)
+            if selected is not None:
+                return selected
+        return None
     if run_id:
         run = ContentFactoryRun.objects.filter(run_id=run_id, domain=domain, workflow__in=workflows).prefetch_related("steps").first()
         if run is not None and not article_setup_reset_ignores_run(config, run):
@@ -8623,10 +8649,6 @@ def _latest_persisted_run_for_article_setup(config, workflows: set[str], *, run_
         .order_by("-updated_at")
     )
     repo = str(getattr(config, "github_repo", "") or "").strip()
-    connection = getattr(config, "website_connection", None)
-    if connection is not None:
-        queryset = queryset.filter(run_request__website_connection_id=str(connection.pk),
-            run_request__connection_generation=connection.generation)
     if repo:
         repo_run = queryset.filter(github_repo__iexact=repo).first()
         if repo_run is not None and not article_setup_reset_ignores_run(config, repo_run):
