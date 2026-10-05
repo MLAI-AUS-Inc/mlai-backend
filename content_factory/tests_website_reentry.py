@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 from urllib.parse import parse_qsl, urlencode, urlsplit
 
-from django.db import close_old_connections, connection, transaction
+from django.db import close_old_connections, connection, connections, transaction
 from django.test import TransactionTestCase, override_settings
 import requests
 from rest_framework.test import APIRequestFactory
@@ -56,7 +56,7 @@ class WebsiteWorkerReentryTests(WebsiteDatabaseFixture, TransactionTestCase):
                     testcase.errors.append(exc)
                     self.send_json({'error': str(exc)}, 500)
                 finally:
-                    close_old_connections()
+                    connections.close_all()
 
             def do_POST(self):
                 close_old_connections()
@@ -88,7 +88,7 @@ class WebsiteWorkerReentryTests(WebsiteDatabaseFixture, TransactionTestCase):
                             except Exception as exc:
                                 testcase.errors.append(exc)
                             finally:
-                                close_old_connections()
+                                connections.close_all()
                         deleting = threading.Thread(target=offboard, daemon=True)
                         deleting.start()
                         if not org_locked.wait(2):
@@ -117,7 +117,7 @@ class WebsiteWorkerReentryTests(WebsiteDatabaseFixture, TransactionTestCase):
                     testcase.errors.append(exc)
                     self.send_json({'error': str(exc)}, 500)
                 finally:
-                    close_old_connections()
+                    connections.close_all()
         server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()

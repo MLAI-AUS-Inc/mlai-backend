@@ -1240,83 +1240,109 @@ class CoworkingMonthlyUpdateDiscountTests(TestCase):
 
 
 class StartupUpdateRewardServiceTests(TestCase):
-    """20 roo points for a verified company's founder completing a monthly update,
-    once per company per month."""
+    """Approval-only 20/5 credits, retained across retries and reporting dates."""
 
     def setUp(self):
         from organizations.models import Organization
+        from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
+        from unittest.mock import patch
 
         self.user = User.objects.create_user(email='founder@example.com', slack_id='UFOUNDER')
         self.org = Organization.objects.create(name='Acme', domain='acme.example')
-        self.company = self._verified_company(self.org)
+        profile = VibeRaisingProfile.objects.create(user=self.user, role='founder')
+        self.company = VibeRaisingCompany.objects.create(profile=profile, organization=self.org,
+            name='Acme', registered=True, abn='89000000019', entity_type_code='OIE',
+            abr_verified_at=timezone.now())
         self.month = date(2026, 7, 1)
+        self.eligibility_patch = patch('startup_updates.reward_eligibility.startup_reward_eligibility',
+            return_value={'eligible': True})
+        self.eligibility = self.eligibility_patch.start()
+        self.addCleanup(self.eligibility_patch.stop)
 
-    def _verified_company(self, org, *, name='Acme Pty Ltd'):
-        from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
+    def draft(self, month=None):
+        from startup_updates.models import MonthlyUpdateDraft
+        from uuid import uuid4
+        now = timezone.now()
+        return MonthlyUpdateDraft.objects.create(organization=self.org, month=month or self.month,
+            published_at=now, first_published_at=now, ready_at=now, creation_key=str(uuid4()))
 
-        profile, _ = VibeRaisingProfile.objects.get_or_create(
-            user=self.user, defaults={'role': VibeRaisingProfile.ROLE_FOUNDER}
-        )
-        return VibeRaisingCompany.objects.create(
-            profile=profile, organization=org, name=name,
-            registered=True, abn='89000000019', acn='000000019', entity_type_code='PRV',
-            abr_verified_at=timezone.now(),
-        )
+    def award(self, draft):
+        return StartupUpdateRewardService.award_monthly_update_completion(
+            self.user, self.company, draft.month, draft, newly_approved=True, strict=True)
 
     def _balance(self):
         account = PointsAccount.objects.filter(user=self.user).first()
         return account.balance if account else 0
 
-    def test_first_completion_awards_20(self):
-        awarded = StartupUpdateRewardService.award_monthly_update_completion(
-            user=self.user, company=self.company, month_bucket=self.month
-        )
-        self.assertTrue(awarded)
+    def test_first_completion_awards_twenty(self):
+        self.assertTrue(self.award(self.draft()))
         self.assertEqual(self._balance(), 20)
-        self.assertTrue(
-            Ledger.objects.filter(user=self.user, source='STARTUP_UPDATE', delta=20).exists()
-        )
 
-    def test_second_completion_same_month_is_idempotent(self):
-        StartupUpdateRewardService.award_monthly_update_completion(
-            user=self.user, company=self.company, month_bucket=self.month
-        )
-        awarded_again = StartupUpdateRewardService.award_monthly_update_completion(
-            user=self.user, company=self.company, month_bucket=self.month
-        )
-        self.assertFalse(awarded_again)
+    def test_same_update_retry_is_idempotent(self):
+        draft = self.draft()
+        self.assertTrue(self.award(draft))
+        self.assertFalse(self.award(draft))
         self.assertEqual(self._balance(), 20)
-        self.assertEqual(Ledger.objects.filter(user=self.user, source='STARTUP_UPDATE').count(), 1)
 
-    def test_different_month_awards_again(self):
-        StartupUpdateRewardService.award_monthly_update_completion(
-            user=self.user, company=self.company, month_bucket=self.month
-        )
-        StartupUpdateRewardService.award_monthly_update_completion(
-            user=self.user, company=self.company, month_bucket=date(2026, 8, 1)
-        )
+    def test_additional_update_same_month_gets_five(self):
+        self.award(self.draft())
+        self.award(self.draft())
+        self.assertEqual(self._balance(), 25)
+
+    def test_different_reporting_month_does_not_reset_bonus(self):
+        self.award(self.draft())
+        self.award(self.draft(date(2026, 8, 1)))
+        self.assertEqual(self._balance(), 25)
+
+    def test_deleted_update_does_not_reopen_monthly_bonus(self):
+        draft = self.draft()
+        self.award(draft)
+        draft.delete()
+        self.award(self.draft())
+        self.assertEqual(self._balance(), 25)
+
+    def test_unverified_company_gets_five(self):
+        self.eligibility.return_value = {'eligible': False}
+        self.assertTrue(self.award(self.draft()))
+        self.assertEqual(self._balance(), 5)
+
+    def test_no_draft_cannot_mint_points(self):
+        self.assertFalse(StartupUpdateRewardService.award_monthly_update_completion(
+            self.user, self.company, self.month))
+        self.assertEqual(self._balance(), 0)
+
+    def test_credit_after_midnight_retains_prior_month_and_next_allowance(self):
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        zone = ZoneInfo("Australia/Melbourne")
+        first = self.draft()
+        first.first_published_at = datetime(2026, 9, 30, 23, 59, tzinfo=zone)
+        first.save(update_fields=["first_published_at"])
+        self.award(first)
+        Ledger.objects.filter(reference_id=str(first.pk), source="STARTUP_UPDATE").update(
+            created_at=datetime(2026, 10, 1, 0, 1, tzinfo=zone))
+        second = self.draft()
+        second.first_published_at = datetime(2026, 10, 1, 0, 2, tzinfo=zone)
+        second.save(update_fields=["first_published_at"])
+        self.award(second)
         self.assertEqual(self._balance(), 40)
 
-    def test_unverified_company_is_not_rewarded(self):
-        from founder_tools.models import VibeRaisingCompany
+    def test_legacy_credit_reference_is_preserved(self):
+        draft = self.draft()
+        PointsService.award(user=self.user, delta=20, source='STARTUP_UPDATE', description='Legacy',
+            created_by_slack_id='system', idempotency_key=f'monthly_update_reward:{self.company.pk}:2026-07',
+            reference_type='MONTHLY_UPDATE_DRAFT', reference_id=str(draft.pk))
+        self.assertFalse(self.award(draft))
+        self.assertEqual(self._balance(), 20)
 
-        unverified = VibeRaisingCompany.objects.create(
-            profile=self.company.profile, organization=self.org, name='Draft Co',
-            registered=True, abn='89000000019',  # no acn / abr_verified_at
-        )
-        awarded = StartupUpdateRewardService.award_monthly_update_completion(
-            user=self.user, company=unverified, month_bucket=self.month
-        )
-        self.assertFalse(awarded)
-        self.assertEqual(self._balance(), 0)
-
-    @override_settings(ROO_POINTS_MONTHLY_UPDATE_REWARD=0)
-    def test_zero_reward_setting_disables_award(self):
-        awarded = StartupUpdateRewardService.award_monthly_update_completion(
-            user=self.user, company=self.company, month_bucket=self.month
-        )
-        self.assertFalse(awarded)
-        self.assertEqual(self._balance(), 0)
+    def test_teammate_retry_never_credits_their_own_wallet(self):
+        draft = self.draft()
+        self.award(draft)
+        teammate = User.objects.create_user(email='teammate@example.com')
+        from startup_updates.rewards import award_completion
+        receipt = award_completion(teammate, self.company, draft, newly_approved=False)
+        self.assertFalse(receipt['creditedToCurrentUser'])
+        self.assertFalse(PointsAccount.objects.filter(user=teammate).exists())
 
 
 class PermissionTests(TestCase):

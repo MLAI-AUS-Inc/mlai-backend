@@ -422,7 +422,7 @@ class RuntimeHardeningConfigTests(SimpleTestCase):
         deploy = (ROOT / "deploy.sh").read_text()
 
         self.assertIn(
-            "all_runtime_writer_services=(web scheduler memory-worker memory-scheduler community-email-worker bridge-worker bridge-reconciler bridge-retention analytics-sync)",
+            "source scripts/runtime-services.sh",
             deploy,
         )
         self.assertIn(
@@ -447,7 +447,7 @@ class RuntimeHardeningConfigTests(SimpleTestCase):
             deploy.index("compose_run_web python manage.py deploy_postmigrate"),
         )
         self.assertIn(
-            "runtime_services=(web scheduler memory-worker memory-scheduler community-email-worker)",
+            "source scripts/runtime-services.sh",
             deploy,
         )
         self.assertIn(
@@ -461,7 +461,7 @@ class RuntimeHardeningConfigTests(SimpleTestCase):
             "run_email_code_worker", (ROOT / "docker-compose.yml").read_text()
         )
         self.assertIn(
-            "runtime_services+=(bridge-worker bridge-reconciler bridge-retention)",
+            'runtime_services+=("\\${bridge_runtime_services[@]}")',
             deploy,
         )
         self.assertIn(
@@ -574,29 +574,37 @@ class RuntimeHardeningConfigTests(SimpleTestCase):
         probe = (
             recovery_function
             + r"""
+runtime_restore_attempted=0
 migration_started=1
+schema_transition_completed=0
 runtime_pause_started=1
-all_runtime_writer_services=(web scheduler memory-worker memory-scheduler community-email-worker bridge-worker bridge-reconciler bridge-retention analytics-sync)
-rollback_manifest="$(mktemp)"
-docker_log="$(mktemp)"
+source scripts/runtime-services.sh
+rollback_manifest="$1"
 docker() {
-    printf '%s\n' "$*" >> "$docker_log"
+    printf 'docker:%s\n' "$*"
 }
-trap restore_runtime_on_error ERR
+trap 'deployment_status=$?; restore_runtime_on_error; exit "$deployment_status"' ERR
 false
-grep -Fx 'compose stop web scheduler memory-worker memory-scheduler community-email-worker bridge-worker bridge-reconciler bridge-retention analytics-sync' "$docker_log"
+printf 'unexpected-continuation\n'
 """
         )
 
-        completed = subprocess.run(
-            ["bash", "-c", probe],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
+        with tempfile.TemporaryDirectory() as directory:
+            manifest = Path(directory) / "rollback-manifest"
+            manifest.touch()
+            completed = subprocess.run(
+                ["bash", "-c", probe, "recovery-test", str(manifest)],
+                cwd=ROOT,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
 
-        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(completed.returncode, 1, completed.stderr)
         self.assertIn("keeping all runtime writers safely disabled", completed.stdout)
+        self.assertIn("docker:compose stop web scheduler jobs-worker", completed.stdout)
+        self.assertIn("committee-remuneration", completed.stdout)
+        self.assertNotIn("unexpected-continuation", completed.stdout)
 
     def test_code_only_health_failure_rolls_back_after_replacement(self):
         deploy = (ROOT / "deploy.sh").read_text()

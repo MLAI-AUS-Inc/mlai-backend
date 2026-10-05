@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 import uuid
 
-from django.db import connection, close_old_connections
+from django.db import connection, connections, close_old_connections
 from django.test import SimpleTestCase, TestCase, TransactionTestCase, override_settings
 from rest_framework.test import APIRequestFactory
 
@@ -436,7 +436,7 @@ class WebsiteConcurrentDisconnectTests(WebsiteDatabaseFixture, TransactionTestCa
             except Exception as exc:
                 errors.append(exc)
             finally:
-                close_old_connections()
+                connections.close_all()
         thread = threading.Thread(target=write); thread.start()
         self.assertTrue(started.wait(5))
         timer = threading.Timer(0.1, release.set); timer.start()

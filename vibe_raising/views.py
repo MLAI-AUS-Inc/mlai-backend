@@ -2790,6 +2790,9 @@ class VibeRaisingMonthlyUpdatePublishView(APIView):
         if organization is None:
             return Response({"detail": "Update not found."}, status=status.HTTP_404_NOT_FOUND)
 
+        # Match draft creation's lock order before approval locks its draft.
+        from organizations.models import Organization
+        Organization.objects.select_for_update().get(pk=organization.pk)
         draft = get_object_or_404(
             MonthlyUpdateDraft,
             pk=update_id,
@@ -2808,25 +2811,20 @@ class VibeRaisingMonthlyUpdatePublishView(APIView):
             return Response({"detail": str(exc)}, status=400)
         if visibility not in (["just_me"], ["community"], ["public"]):
             return Response({"detail": "Choose private, community, or public visibility."}, status=400)
+        newly_approved = not draft.published_at
         draft = approve_and_publish(draft, actor=request.user, revision_id=revision_id,
             revision_hash=revision_hash, audience_visibility=visibility,
             reviewed_agent_claims=request.data.get("reviewed") is True)
 
-        from roo.services import StartupUpdateRewardService
+        from startup_updates.rewards import award_completion
 
-        # Retry every approval safely: a previous transient award failure or
-        # later ABR verification must not permanently lose this month's reward.
         try:
-            StartupUpdateRewardService.award_monthly_update_completion(
-                user=request.user,
-                company=context["company"],
-                month_bucket=draft.month,
-                draft=draft,
-                strict=True,
-            )
+            reward = award_completion(request.user, context["company"], draft, newly_approved=newly_approved)
         except Exception as exc:
             raise MonthlyUpdateRewardUnavailable() from exc
-        return Response({"update": _serialize_monthly_update(draft)}, status=status.HTTP_200_OK)
+        value = _serialize_monthly_update(draft)
+        value["reward"] = reward
+        return Response({"update": value, "reward": reward}, status=status.HTTP_200_OK)
 
 
 class VibeRaisingStartupUpdateBootstrapView(APIView):

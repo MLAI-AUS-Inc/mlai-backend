@@ -9,7 +9,7 @@ from django.http import HttpResponseBadRequest, HttpResponse
 from django.contrib.auth import login as auth_login
 from django.utils import timezone
 from django.utils.html import escape
-from hospital.authentication import CustomJWTAuthentication
+from core.authentication import CustomJWTAuthentication
 from .models import GoogleConnection, UserIntegration
 from integrations.services.github_connections import (
     build_github_installation_url,

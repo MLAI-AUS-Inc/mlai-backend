@@ -2342,92 +2342,31 @@ class BoostPostAdmissionService:
 
 
 class StartupUpdateRewardService:
-    """Rewards founders of verified registered companies for keeping their monthly
-    update current."""
+    """Compatibility entry point for approval-only Startup Pulse credits."""
 
     REWARD_SOURCE = 'STARTUP_UPDATE'
 
     @staticmethod
     def reward_amount() -> int:
-        return int(getattr(settings, 'ROO_POINTS_MONTHLY_UPDATE_REWARD', 20))
+        from startup_updates.rewards import MONTHLY_POINTS
+        return MONTHLY_POINTS
 
     @staticmethod
-    def award_monthly_update_completion(user, company, month_bucket, draft=None, *, strict=False) -> bool:
-        """Award points the first time an ABR-verified Australian startup
-        completes a monthly update for ``month_bucket`` (a date on the first of the
-        month).
+    def award_monthly_update_completion(user, company, month_bucket, draft=None, *, strict=False, newly_approved=False) -> bool:
+        """Return whether this approved update received a new, durable credit.
 
-        Idempotent per startup + month — re-saving the same month's update never awards
-        twice. An optional draft must belong to the company/month and already
-        be approved. Approval endpoints use ``strict=True`` in their transaction
-        so a failed credit rolls back approval and can be safely retried.
+        Reporting months do not determine the reward month. New callers needing
+        the credited amount use ``startup_updates.rewards.award_completion``.
         """
-        # Imported lazily to avoid a load-order dependency between roo and vibe_raising.
-        from vibe_raising.registration import company_is_verified
+        from startup_updates.rewards import award_completion
 
-        if user is None or company is None or month_bucket is None:
+        if (draft is None or not isinstance(month_bucket, date) or month_bucket.day != 1
+                or draft.month != month_bucket):
             return False
-        if not company_is_verified(company):
-            return False
-        if not isinstance(month_bucket, date) or month_bucket.day != 1:
-            return False
-        # Match the approval period's timezone in both legacy and Volunteer
-        # award paths; turning a feature flag on must not change eligibility.
-        revision = getattr(draft, "current_revision", None) if draft is not None else None
-        period = ((revision.snapshot.payload or {}).get("period") or {}) if revision else {}
-        reporting_zone = ZoneInfo(period.get("timezone") or "Australia/Melbourne")
-        if datetime.combine(month_bucket, datetime.min.time(), tzinfo=reporting_zone) > timezone.now():
-            return False
-        if draft is not None and (
-            draft.organization_id != company.organization_id
-            or draft.month != month_bucket
-            or not draft.published_at
-        ):
-            return False
-
-        amount = StartupUpdateRewardService.reward_amount()
-        if amount <= 0:
-            return False
-
-        month_key = month_bucket.strftime('%Y-%m')
         try:
-            with transaction.atomic():
-                key = f"monthly_update_reward:{company.id}:{month_key}"
-                if draft is not None:
-                    from startup_updates.models import MonthlyUpdateDraft
-                    from startup_updates.benefits import monthly_reward_history, monthly_reward_key
-
-                    # The draft is unique per organisation/month. Lock it before
-                    # checking ledger history so a second company wrapper or
-                    # founder account cannot pay the same startup update again.
-                    MonthlyUpdateDraft.objects.select_for_update().get(pk=draft.pk)
-                    key = monthly_reward_key(draft.organization_id, month_bucket)
-                    existing = monthly_reward_history(draft.organization_id, month_bucket).first()
-                    if existing is not None:
-                        key = existing.idempotency_key
-                        if existing.reference_id != str(draft.pk):
-                            draft.ready_at = min(draft.ready_at or draft.published_at, existing.created_at)
-                            draft.save(update_fields=["ready_at"])
-                            return False
-                        if existing.user_id != user.pk:
-                            return False
-                if (getattr(settings, "COMMUNITY_CHAT_VOLUNTEER_ENABLED", False)
-                        and getattr(settings, "COMMUNITY_CHAT_VOLUNTEER_AWARDS_ENABLED", False)):
-                    from community_chat.volunteer.receipts import award_startup_update
-                    return award_startup_update(user, company, month_bucket, draft, idempotency_key=key)
-                _ledger, created = PointsService.award(
-                    user=user,
-                    delta=amount,
-                    source=StartupUpdateRewardService.REWARD_SOURCE,
-                    description=f"Monthly update completed — {month_bucket.strftime('%B %Y')}",
-                    created_by_slack_id=getattr(user, 'slack_id', '') or 'system',
-                    idempotency_key=key,
-                    reference_type='MONTHLY_UPDATE_DRAFT',
-                    reference_id=str(draft.id) if draft is not None else None,
-                )
-                return created
+            return award_completion(user, company, draft, newly_approved=newly_approved)["awarded"]
         except Exception:
-            logger.exception("Failed to award monthly-update points to user %s", getattr(user, 'id', None))
+            logger.exception("Failed to award Startup Pulse points to user %s", getattr(user, 'id', None))
             if strict:
                 raise
             return False

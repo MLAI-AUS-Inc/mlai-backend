@@ -96,7 +96,7 @@ class OAuthHandoffTests(SimpleTestCase):
 
     def test_browser_gsc_handoff_requests_website_scope_and_native_return(self):
         session = Obj(pk="session", user=self.user)
-        payload = {"session": "session", "uid": 7, "company": COMPANY, "provider": "google_search_console", "return_to": True}
+        payload = {"session": "session", "uid": 7, "company": COMPANY, "provider": "google_search_console", "return_to": "mobile"}
         request = self.request({"ticket": "synthetic"})
         with patch.object(connections, "enabled", return_value=True), patch.object(connections, "consume_ticket", return_value=payload), \
                 patch.object(connections.CommunityChatAccountSession, "objects") as sessions, \
@@ -268,7 +268,7 @@ class OAuthHandoffTests(SimpleTestCase):
         state = github.build_github_oauth_state(domain="startup.example", slack_user_id="user:7", return_url=native,
             chat_context={"user_id": 7, "chat_company_id": COMPANY, "chat_session_id": "session"})
         request = self.request({"state": state.raw, "code": "synthetic", "installation_id": "123"}, authenticated=False)
-        config = Obj(connected_slack_user_id="", github_repo="", save=MagicMock())
+        config = Obj(connected_slack_user_id="", github_repo="", website_connection_id=None, save=MagicMock())
         with patch("community_chat.startups.oauth_context.valid_chat_oauth_context", return_value=True), \
                 patch("founder_tools.models.VibeRaisingCompany.objects") as companies, \
                 patch("content_factory.models.OrganizationContentConfig.objects") as configs, \
@@ -323,6 +323,7 @@ class OAuthHandoffTests(SimpleTestCase):
         with patch.object(website_connections, "google_connection_for_org", return_value=None) as google, \
                 patch.object(website_connections, "is_provider_configured", return_value=True), \
                 patch.object(website_connections, "actor_ids_for_user", return_value=["user:7"]), \
+                patch.object(website_connections, "user_github_installations", return_value=[]), \
                 patch.object(website_connections.OrganizationContentConfig, "objects") as configs:
             configs.filter.return_value.first.return_value = None
             sources = website_connections.website_connection_sources(self.user, self.company)

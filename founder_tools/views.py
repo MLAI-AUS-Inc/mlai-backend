@@ -95,13 +95,15 @@ class FounderToolsProfileView(APIView):
 
 class FounderToolsCompanyView(APIView):
     def get(self, request):
+        from .profile_fields import visible_companies
         profile = get_or_create_founder_profile(request.user)
-        companies = profile.companies.select_related("organization").all()
+        companies = visible_companies(profile.companies.select_related("organization").all())
         return Response(FounderCompanySerializer(companies, many=True).data, status=status.HTTP_200_OK)
 
     @transaction.atomic
     def post(self, request):
         profile = get_or_create_founder_profile(request.user)
+        profile = VibeRaisingProfile.objects.select_for_update().get(pk=profile.pk)
         if profile.role != VibeRaisingProfile.ROLE_FOUNDER:
             profile.role = VibeRaisingProfile.ROLE_FOUNDER
             profile.organization_name = None
@@ -123,7 +125,11 @@ class FounderToolsCompanyView(APIView):
             if company_id:
                 company = get_object_or_404(VibeRaisingCompany, pk=company_id, profile=profile)
             elif create_new:
-                company = VibeRaisingCompany(profile=profile)
+                from .profile_fields import is_research_workspace
+                from .services import find_company_with_domain
+                provisional = find_company_with_domain(profile, plain_fields.get("domain"))
+                company = (provisional if provisional and is_research_workspace(provisional)
+                           else VibeRaisingCompany(profile=profile))
             else:
                 company = profile.companies.filter(name__iexact=data["name"]).first() or VibeRaisingCompany(
                     profile=profile
@@ -162,10 +168,12 @@ class FounderToolsCompanyView(APIView):
                 company.default_audience_visibility = data["default_audience_visibility"]
             company.save()
 
-            # Best-effort verification — unlocks perks (e.g. the coworking discount) when
-            # the ABN/ACN check out, but never blocks setup if they don't.
-            attempt_company_verification(company, abn=company.abn, acn=data.get("acn"))
+            # Verify explicitly edited identifiers only. An unrelated profile edit
+            # must not invalidate saved registration when ABR is unavailable.
+            if "abn" in data or "acn" in data:
+                attempt_company_verification(company, abn=company.abn, acn=data.get("acn"))
         except DuplicateCompanyDomainError as exc:
+            transaction.set_rollback(True)
             return Response(
                 {
                     "detail": str(exc),
@@ -176,6 +184,7 @@ class FounderToolsCompanyView(APIView):
                 status=status.HTTP_409_CONFLICT,
             )
         except CompanyDomainChangeBlocked as exc:
+            transaction.set_rollback(True)
             return Response(
                 {
                     "detail": str(exc),

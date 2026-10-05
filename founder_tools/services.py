@@ -91,8 +91,8 @@ def organization_owner_user_id(organization) -> int | None:
     """User id of the founder who owns this organization's Vibe Raising tenant.
 
     First-claim-wins: the earliest ``VibeRaisingCompany`` bound to the org.
-    Returns ``None`` when no founder has claimed it yet (e.g. a content-factory
-    only org), meaning it is still available to claim.
+    Returns ``None`` when there is no current founder claim. This does not
+    establish that the existing tenant is empty or available for reassignment.
     """
     if organization is None:
         return None
@@ -107,13 +107,13 @@ def organization_owner_user_id(organization) -> int | None:
 
 
 def user_may_use_organization(user, organization) -> bool:
-    """True if ``user`` is the rightful owner of (or first to claim) ``organization``."""
+    """Existing tenant history requires an established founder owner."""
     owner_id = organization_owner_user_id(organization)
-    return owner_id is None or owner_id == getattr(user, "id", None)
+    return owner_id is not None and owner_id == getattr(user, "id", None)
 
 
 def domain_is_available_to(user, domain) -> bool:
-    """True if ``user`` may claim ``domain`` -- unclaimed, or already theirs."""
+    """New domains may be claimed; an existing unowned tenant needs review."""
     normalized = normalize_company_domain(domain)
     if not normalized:
         return True
@@ -260,10 +260,10 @@ def offboard_company(company: VibeRaisingCompany, *, reason: str = "company_offb
     - **Org-level** data (monthly updates, article runs, content config, and the
       startup-update ingestion artifacts) is purged only when this company is the
       org's sole owner — never a co-owner's shared data.
-    - The **Organization row is retained** (it is the tenant boundary; a later
-      re-registration of the domain reuses the now-empty shell).
+    - The **Organization row is retained** (it is the tenant boundary; any later
+      reassignment requires explicit ownership review).
     - Re-points the profile's active company to a sibling (or clears it), then
-      deletes the company row — which frees the domain for re-registration.
+      deletes the company row. The retained domain is not automatically released.
 
     Best-effort and idempotent-ish: a provider hiccup is collected as a warning
     rather than aborting the offboard, since a half-connected startup is worse
@@ -286,6 +286,8 @@ def offboard_company(company: VibeRaisingCompany, *, reason: str = "company_offb
         "connectionsRemoved": 0,
         "orgShared": False,
         "orgDataPurged": False,
+        "targetedPurgeCompleted": False,
+        "domainReleased": False,
         "warnings": [],
     }
 
@@ -328,7 +330,9 @@ def offboard_company(company: VibeRaisingCompany, *, reason: str = "company_offb
                 logger.exception("offboard_startup_purge_failed company=%s", company_id)
                 summary["warnings"].append(f"Startup data purge failed: {exc}")
             _purge_org_marketing_data(organization)
-            summary["orgDataPurged"] = True
+            # The organisation and other retained records still exist. Do not
+            # claim a complete tenant purge or permit automatic domain reuse.
+            summary["targetedPurgeCompleted"] = not summary["warnings"]
 
     # 4) Re-point (or clear) the active company before removing this one.
     if profile.active_company_id == company.id:
@@ -476,10 +480,18 @@ def ensure_company_organization(company: VibeRaisingCompany) -> Organization | N
         company.domain = normalized_domain
         company_update_fields.append("domain")
 
-    organization, created = Organization.objects.get_or_create(
+    organization, created = Organization.objects.select_for_update().get_or_create(
         domain=normalized_domain,
         defaults={"name": company.name},
     )
+    if not created:
+        user = company.profile.user
+        is_admin = bool(user.is_staff or user.is_superuser)
+        if not is_admin and not user_may_use_organization(user, organization):
+            raise DomainOwnershipError(
+                "This domain has existing organisation history. "
+                "An administrator must review its ownership before it can be linked."
+            )
     if not created and not organization.name:
         organization.name = company.name
         organization.save(update_fields=["name"])
@@ -496,6 +508,9 @@ def ensure_company_organization(company: VibeRaisingCompany) -> Organization | N
 
 @transaction.atomic
 def apply_shared_startup_details(*, user, company: VibeRaisingCompany, data: dict) -> Organization | None:
+    from founder_tools.profile_fields import validate_profile_fields, save_profile_details
+
+    data = validate_profile_fields(data)
     organization = ensure_company_organization(company)
     if organization is None:
         return None
@@ -645,6 +660,7 @@ def apply_shared_startup_details(*, user, company: VibeRaisingCompany, data: dic
         startup_update_fields.append("updated_at")
         startup_profile.save(update_fields=startup_update_fields)
 
+    save_profile_details(organization, data, config=config)
     bind_user_to_startup(user=user, organization=organization, role="founder", is_default_for_gmail=True)
     return organization
 
@@ -670,7 +686,8 @@ def set_active_company(profile: VibeRaisingProfile, company: VibeRaisingCompany)
 
 @transaction.atomic
 def resolve_active_company(profile: VibeRaisingProfile) -> VibeRaisingCompany | None:
-    company = profile.active_company or profile.companies.order_by("created_at", "name").first()
+    from founder_tools.profile_fields import visible_companies
+    company = profile.active_company or visible_companies(profile.companies.all()).order_by("created_at", "name").first()
     if company and profile.active_company_id != company.id:
         profile.active_company = company
         profile.save(update_fields=["active_company", "updated_at"])

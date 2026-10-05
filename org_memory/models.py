@@ -2882,6 +2882,14 @@ class MemoryChunkEmbedding(models.Model):
         if self.organization_id != self.chunk.source_version.source.organization_id:
             raise ValidationError("Embedding organization must match its chunk.")
 
+    def validate_constraints(self, exclude=None):
+        # pgvector normalizes to a NumPy array during field validation. Django
+        # 5.2's constraint expression map truth-tests every included value,
+        # which is undefined for that array. None of this model's constraints
+        # reference vector; all scalar/ownership constraints still run, and
+        # full_clean retains vector field validation and clean().
+        return super().validate_constraints(exclude=set(exclude or ()) | {"vector"})
+
 
 class MemoryExtractionRun(ImmutableEvidenceMixin):
     """One immutable, versioned extraction outcome for a source version."""
@@ -4582,6 +4590,13 @@ class PublicKnowledgeItem(models.Model):
             raise ValidationError("Public embedding metadata requires an embedding.")
         if self.embedding is not None and not all(embedding_fields):
             raise ValidationError("A public embedding requires complete model metadata.")
+
+    def validate_constraints(self, exclude=None):
+        """Validate scalar constraints without truth-testing a pgvector array."""
+        # Field validation and clean() still validate the vector and its metadata.
+        # None of the constraints reference embedding, whose NumPy representation
+        # is incompatible with Django 5.2's expression-map truth test.
+        return super().validate_constraints(exclude=set(exclude or ()) | {"embedding"})
 
 
 class MemoryPublication(models.Model):

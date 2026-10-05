@@ -153,7 +153,7 @@ class MonthlySequenceTests(SimpleTestCase):
 
 class MonthlyOwnerReadTests(SimpleTestCase):
     def test_archive_retains_every_copy_and_filters_month_before_pagination(self):
-        request = Obj(query_params={"month": "2026-09", "offset": "50"})
+        request = Obj(query_params={"month": "2026-09", "offset": "50"}, user=Obj(pk=1))
         view = views.UpdatesView()
         view.company = Obj(organization=Obj(pk=7))
         with patch.object(views.MonthlyUpdateDraft, "objects") as drafts:
@@ -176,7 +176,7 @@ class MonthlyOwnerReadTests(SimpleTestCase):
         ) as drafts, patch.object(views, "update_payload", side_effect=lambda row, **kwargs: {"id": row.pk}):
             siblings = drafts.filter.return_value.select_related.return_value
             siblings.exclude.return_value.order_by.return_value = [newer]
-            response = view.get(Obj(query_params={}), update_id=12)
+            response = view.get(Obj(query_params={}, user=Obj(pk=1)), update_id=12)
         self.assertEqual(response.data["update"]["id"], 12)
         self.assertEqual(response.data["previousUpdates"], [{"id": 19}])
 

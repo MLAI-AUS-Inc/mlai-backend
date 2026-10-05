@@ -787,6 +787,17 @@ class VolunteerTests(TestCase):
             abr_verified_at=timezone.now(),
         )
 
+    def complete_startup(self, company, month):
+        from startup_updates.models import MonthlyUpdateDraft
+        from roo.services import StartupUpdateRewardService
+        from unittest.mock import patch
+        now = timezone.now()
+        draft, created = MonthlyUpdateDraft.objects.get_or_create(organization=company.organization,
+            month=month, defaults={"published_at": now, "first_published_at": now, "ready_at": now})
+        with patch("startup_updates.reward_eligibility.startup_reward_eligibility", return_value={"eligible": True}):
+            return StartupUpdateRewardService.award_monthly_update_completion(
+                self.member, company, month, draft, newly_approved=created, strict=True)
+
     def test_each_startup_gets_twenty_with_one_shared_personal_ranking_slot(self):
         from roo.services import StartupUpdateRewardService
         from community_chat.volunteer.policy import MELBOURNE
@@ -794,19 +805,13 @@ class VolunteerTests(TestCase):
         month = timezone.now().astimezone(MELBOURNE).date().replace(day=1)
         company = self.company()
         self.assertTrue(
-            StartupUpdateRewardService.award_monthly_update_completion(
-                self.member, company, month
-            )
+            self.complete_startup(company, month)
         )
         self.assertFalse(
-            StartupUpdateRewardService.award_monthly_update_completion(
-                self.member, company, month
-            )
+            self.complete_startup(company, month)
         )
         self.assertTrue(
-            StartupUpdateRewardService.award_monthly_update_completion(
-                self.member, self.company("two"), month
-            )
+            self.complete_startup(self.company("two"), month)
         )
         self.assertEqual(
             Ledger.objects.filter(user=self.member, source="STARTUP_UPDATE").count(), 2
@@ -831,9 +836,7 @@ class VolunteerTests(TestCase):
         )
         month = timezone.now().astimezone(MELBOURNE).date().replace(day=1)
         self.assertTrue(
-            StartupUpdateRewardService.award_monthly_update_completion(
-                self.member, self.company(), month
-            )
+            self.complete_startup(self.company(), month)
         )
         record.refresh_from_db()
         self.assertEqual(record.action_key, "monthly_startup_update")

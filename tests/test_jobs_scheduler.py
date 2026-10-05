@@ -20,6 +20,28 @@ from jobs.services.location_eligibility import apply_disqualification_scan, clas
 from jobs.services.slack import format_slack_message, post_slack_message
 
 
+class JobsHistoryQueryTests(TestCase):
+    def test_multiple_runs_use_three_queries_and_only_prefetch_public_history_items(self):
+        from jobs.services.history import recent_job_runs
+        for index in range(3):
+            run = JobRun.objects.create(run_date=f"2026-09-{index + 1:02}")
+            for top_pick in (True, False):
+                JobListing.objects.create(
+                    run=run, run_date=run.run_date, title="Synthetic AI role",
+                    source_name="fixture", job_url=f"https://example.test/{index}/{top_pick}",
+                    dedupe_key=f"{index}-{top_pick}", is_top_pick=top_pick, rank=1,
+                )
+            for status in ("completed", "error"):
+                SourceRunLog.objects.create(run=run, source_name="fixture", status=status)
+        with self.assertNumQueries(3):
+            runs = list(recent_job_runs(30))
+            self.assertEqual(len(runs), 3)
+            for run in runs:
+                self.assertEqual(len(run.history_top_jobs), 1)
+                self.assertTrue(run.history_top_jobs[0].is_top_pick)
+                self.assertEqual([log.status for log in run.history_source_errors], ["error"])
+
+
 @override_settings(
     JOBS_SCHEDULER_ENABLED=True,
     JOBS_SCHEDULE_TIMEZONE="Australia/Melbourne",
@@ -106,6 +128,7 @@ class JobsSchedulerTests(TestCase):
         output = stdout.getvalue()
         self.assertIn('"research_automations"', output)
         self.assertIn('"queued": 2', output)
+        self.assertIn('"website_connection_operations": {"completed": 0, "pending": 0, "processed": 0, "status": "completed"}', output)
         heartbeat = ScheduledDiscoveryHeartbeat.objects.get(
             name="scheduled_discovery"
         )

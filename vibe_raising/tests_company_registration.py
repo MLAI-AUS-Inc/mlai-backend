@@ -106,6 +106,12 @@ class VerifyCompanyWithAbrTests(SimpleTestCase):
         self.assertEqual(result["acn"], COMPANY_ACN)
         self.assertEqual(result["entity_type_code"], "PRV")
 
+    def test_legal_and_all_trading_names_are_available_for_identity_matching(self):
+        xml = _company_xml().replace("</mainName>", """</mainName>
+          <businessName><organisationName>First Brand</organisationName></businessName>
+          <businessName><organisationName>Second Brand</organisationName></businessName>""")
+        self.assertEqual(self._verify(xml)["names"], ["EXAMPLE PTY LTD", "First Brand", "Second Brand"])
+
     def test_pretty_printed_abr_response_is_parsed(self):
         # Real ABR responses are indented, so <ABN> carries whitespace text before its
         # inner <identifierValue>. The parser must skip the wrapper and read the leaf.
@@ -382,10 +388,12 @@ class CompanySaveContractTests(SimpleTestCase):
         company = VibeRaisingCompany(name="New startup")
         company.save = MagicMock()
         company.refresh_from_db = MagicMock()
-        profile = SimpleNamespace(role="founder", active_company_id="existing")
+        profile = SimpleNamespace(pk="profile-fixture", role="founder", active_company_id="existing")
         request = SimpleNamespace(data={"name": "MLAI", "createNew": True, **body}, user=SimpleNamespace())
         with (
             patch.object(views, "get_or_create_founder_profile", return_value=profile),
+            patch.object(views.VibeRaisingProfile.objects, "select_for_update", return_value=SimpleNamespace(get=MagicMock(return_value=profile))),
+            patch("founder_tools.services.find_company_with_domain", return_value=None),
             patch.object(views, "VibeRaisingCompany", return_value=company),
             patch.object(views, "ensure_company_organization"),
             patch.object(views, "apply_shared_startup_details"),

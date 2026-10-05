@@ -39,8 +39,17 @@ class FounderMetricTests(unittest.TestCase):
             founder_metric_changes({"revenue": "100"}, [])
 
     def test_manual_nonfinancial_changes_and_removal(self):
-        self.assertEqual(founder_metric_changes({"activeUsers": "4", "interviews": "8"}, self.metrics), {"activeUsers": "4", "interviews": "8"})
-        self.assertEqual(founder_metric_changes({"activeUsers": ""}, self.metrics), {"activeUsers": ""})
+        manual = [{**metric, "source_provider": "founder"} for metric in self.metrics]
+        self.assertEqual(founder_metric_changes({"activeUsers": "4", "interviews": "8"}, manual), {"activeUsers": "4", "interviews": "8"})
+        self.assertEqual(founder_metric_changes({"activeUsers": ""}, manual), {"activeUsers": ""})
+
+    def test_imported_nonfinancial_metrics_cannot_be_changed_or_cleared(self):
+        for provider in ("google_analytics", "luma"):
+            metric = [{"key": "activeUsers", "value": "3", "display_value": "3", "source_provider": provider}]
+            self.assertEqual(founder_metric_changes({"activeUsers": "3"}, metric), {})
+            for value in ("4", "", None):
+                with self.subTest(provider=provider, value=value), self.assertRaises(FinancialMetricEditError):
+                    founder_metric_changes({"activeUsers": value}, metric)
 
     def test_custom_imported_financial_metric_is_locked(self):
         metric = [{"key": "ticketSales", "value": "5", "display_value": "AUD 5", "unit": "AUD", "source_provider": "financial"}]

@@ -20,11 +20,11 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # Pull requests run the complete suite and record the exact Git tree that
+  # Pull requests run the configured regression lanes and record the exact Git tree that
   # passed. A main push reuses that result only when GitHub associates the
   # commit with the same PR and the deployed tree is byte-for-byte identical.
   # Everything else (direct pushes, stale-base merges, missing/expired
-  # artifacts, or API errors) fails closed to the full suite below.
+  # artifacts, or API errors) fails closed to the regression lanes below.
   validation-route:
     runs-on: ubuntu-latest
     outputs:
@@ -75,8 +75,15 @@ jobs:
 
     - name: Install dependencies
       run: |
+        python scripts/check_dependency_lock.py
         python -m pip install --upgrade pip
-        pip install -r requirements.txt -r requirements-engine.txt
+        pip install --require-hashes -r requirements.lock
+
+    - name: Check test-module assignment
+      run: python scripts/check_test_assignment.py
+
+    - name: Run isolated refactor checks without database access
+      run: python scripts/test_without_database.py tests.test_refactor_unit tests.test_refactor_django_unit tests.test_refactor_migration_inventory roo.test_event_ticket_price
 
     - name: Check unified DM directory without database access
       run: python scripts/test_without_database.py community_chat.tests.test_unified_dm_directory_unit
@@ -96,6 +103,15 @@ jobs:
           integrations.tests_message_sync_priority_routing \
           integrations.tests_message_sync_telemetry \
           integrations.tests_message_sync_capacity
+
+    - name: Check startup facade, profile drafts and sparse settings without database access
+      run: |
+        python scripts/test_without_database.py \
+          community_chat.tests.test_my_startup_facade_unit \
+          content_factory.tests_baseline_ai_evidence_unit \
+          content_factory.tests_startup_profile_draft_unit \
+          content_factory.tests_startup_settings_unit \
+          founder_tools.tests_profile_fields_unit
 
     - name: Check startup connections and reporting months without database access
       run: |
@@ -121,7 +137,9 @@ jobs:
           content_factory.tests_editorial_dispatch_unit \
           content_factory.tests_editorial_snapshot_unit \
           content_factory.tests_editorial_revision_unit \
-          content_factory.tests_article_admission_notice_unit
+          content_factory.tests_article_admission_notice_unit \
+          content_factory.test_reliability_contract \
+          content_factory.tests_hosted_quality_issues_unit
 
     - name: Check migrations are committed
       run: python manage.py makemigrations --check --dry-run
@@ -130,7 +148,7 @@ jobs:
       run: python -m unittest community_chat.tests.test_coworking_unit tests.test_article_notification_policy_unit
 
     - name: Check paid island research contracts without database access
-      run: python -m unittest content_factory.tests_island_research_unit content_factory.tests_custom_islands_unit -q
+      run: python -m unittest content_factory.tests_island_research_unit content_factory.tests_custom_islands_unit content_factory.tests_editorial_catalog_unit -q
 
     - name: Scan tracked source for credentials
       run: python scripts/check_secrets.py
@@ -221,10 +239,29 @@ jobs:
       run: python -m unittest integrations.tests_slack_dm_payload_contract integrations.tests_slack_catalog_queries integrations.tests_slack_history_scheduling integrations.tests_slack_recent_activity -v
 
     - name: Check My startup account contracts without database access
-      run: python scripts/test_my_startup.py
+      run: python scripts/test_without_database.py founder_tools.my_startup.tests
+
+    - name: Check message coverage and content workflow contracts without database access
+      run: |
+        python scripts/test_without_database.py \
+          integrations.tests_read_coverage \
+          integrations.tests_slack_shared_conversation_policy \
+          tests.test_daily_research_policy_unit \
+          tests.test_vibe_marketing_bootstrap_performance
 
     - name: Check chat background retries and preview failure caches without database access
       run: python scripts/test_without_database.py integrations.tests_community_bridge_backoff community_chat.tests.test_preview_failure_cache
+
+    - name: Check current API contracts without database access
+      run: |
+        python scripts/test_without_database.py \
+          community_chat.tests.test_connection_oauth_handoffs \
+          community_chat.tests.test_slack_message_actions \
+          content_analytics.tests_article_health_evidence_unit \
+          content_factory.tests_article_review_unit \
+          content_factory.tests_baseline_metrics_unit \
+          content_factory.tests_topic_metrics_unit \
+          integrations.tests_slack_content
 
     - name: Check article draft review contracts without database access
       run: python scripts/test_article_review.py
@@ -236,6 +273,7 @@ jobs:
           roo.tests_office_manager_channel \
           roo.tests_api.TaskViewSetTests \
           roo.tests_api.CoworkingViewSetTests \
+          tests.test_coworking_snapshot \
           roo.tests.CoworkingBookingAdminSafetyTests \
           roo.tests_kimi_usage \
           roo.tests_apple_iap \
@@ -243,6 +281,19 @@ jobs:
           roo.tests_meeting_rooms \
           core.tests.test_auth_contract \
           core.tests.test_auth_session \
+          core.tests.test_password_api \
+          founder_tools.tests \
+          founder_tools.tests_domain_change \
+          founder_tools.tests_offboarding \
+          startup_updates.tests_covers \
+          startup_updates.tests_founder_metrics \
+          startup_updates.tests_update_identity \
+          integrations.tests_financial_record_ownership \
+          content_factory.tests_github_credential_migrations \
+          tests.test_jobs_scheduler \
+          tests.test_content_island_scheduler \
+          tests.test_content_analytics \
+          roo.tests_coding \
           core.test_slack_user_creation \
           core.tests_slack_founder_links \
           core.tests_user_merge \
@@ -361,6 +412,7 @@ jobs:
           startup_updates.tests_monthly_update_reminders \
           startup_updates.tests_roo_update_reminders_unit \
           roo.tests_startup_update_benefits_unit \
+          startup_updates.tests_reward_eligibility \
           vibe_raising.tests_company_registration \
           community_chat.tests.test_startup_updates \
           community_chat.tests.test_startup_updates_database \
@@ -442,7 +494,7 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install -r requirements.txt -r requirements-engine.txt
+        pip install --require-hashes -r requirements.lock
 
     - name: Verify PostgreSQL search infrastructure
       run: |
@@ -563,7 +615,7 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install -r requirements.txt -r requirements-engine.txt
+        pip install --require-hashes -r requirements.lock
 
     - name: Run migration tests
       run: |
@@ -575,6 +627,8 @@ jobs:
           core.tests_slack_founder_links.SlackFounderActorOrphanedPrincipalGuardTests \
           core.tests_slack_founder_links.SlackFounderActorDeletedBeforeHistoryGuardTests \
           org_memory.tests.test_migrations \
+          content_factory.tests_github_credential_migrations \
+          integrations.tests_financial_record_ownership \
           content_factory.tests_customer_profile_persistence \
           content_factory.tests_article_publish_status \
           content_factory.tests_written_article_discard \
