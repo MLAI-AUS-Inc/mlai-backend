@@ -16,6 +16,8 @@ ROUTES = (
     ("vibe-marketing/github/connect", views.GitHubConnectView),
     ("vibe-marketing/github/repos", views.RepositoriesView),
     ("vibe-marketing/github/repository", views.RepositoryView),
+    ("vibe-marketing/website-connection", views.WebsiteConnectionView),
+    ("vibe-marketing/website-connection/<str:action>", views.WebsiteConnectionActionView),
     ("vibe-marketing/notifications/channels", views.NotificationChannelsView),
     ("vibe-marketing/notifications/channels/delivery", views.NotificationDeliveryView),
     ("vibe-marketing/notifications/channels/<uuid:channel_id>", views.NotificationChannelView),

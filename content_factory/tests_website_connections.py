@@ -1,6 +1,7 @@
 """Consent, tenant isolation and retention guarantees for website integrations."""
 
 from copy import deepcopy
+from datetime import timedelta
 import hashlib
 import threading
 from types import SimpleNamespace
@@ -9,6 +10,7 @@ import uuid
 
 from django.db import connection, connections, close_old_connections
 from django.test import SimpleTestCase, TestCase, TransactionTestCase, override_settings
+from django.utils import timezone
 from rest_framework.test import APIRequestFactory
 
 from organizations.models import Organization
@@ -87,6 +89,95 @@ class WebsiteContractTests(SimpleTestCase):
     def test_evidence_removes_nested_credentials(self):
         value = sanitized_evidence({'github_token': 'synthetic', 'nested': [{'authorization': 'secret', 'path': 'a'}]})
         self.assertEqual(value, {'nested': [{'path': 'a'}]})
+
+
+class WebsiteSetupProjectionTests(SimpleTestCase):
+    """Historical repository runs never restore current-generation setup state."""
+
+    def setUp(self):
+        self.org = Organization(pk=7, domain='site.example.test', name='Synthetic')
+        self.website = WebsiteConnection(organization=self.org, github_repo='example/site',
+            repository_id=123, installation_id='45', branch='main', generation=2)
+        self.config = OrganizationContentConfig(organization=self.org, github_repo=self.website.github_repo,
+            website_connection=self.website, company_context='Retained company details')
+        self.binding = contract_for(self.website)
+
+    def run_fixture(self, workflow, *, binding=None, run_id='historical', **kwargs):
+        return ContentFactoryRun(run_id=run_id, organization=self.org, domain=self.org.domain,
+            workflow=workflow, github_repo=self.website.github_repo, status='completed',
+            run_request=self.binding if binding is None else binding, **kwargs)
+
+    def test_prior_generation_and_unbound_scans_and_builds_are_ignored(self):
+        from .article_setup_reset import article_setup_reset_ignores_run
+        cases = (
+            {},
+            'invalid legacy snapshot',
+            {**self.binding, 'connection_generation': 1},
+            {**self.binding, 'website_connection_id': str(uuid.uuid4())},
+            {**self.binding, 'repository_id': 999},
+            {**self.binding, 'connection_generation': True},
+        )
+        for workflow in ('repo_scan', 'content_factory_scan', 'article_system_setup'):
+            for binding in cases:
+                with self.subTest(workflow=workflow, binding=binding):
+                    run = self.run_fixture(workflow, binding=binding)
+                    run.updated_at = timezone.now() + timedelta(hours=1)
+                    self.assertTrue(article_setup_reset_ignores_run(self.config, run))
+        run = self.run_fixture('repo_scan')
+        run.github_repo = 'example/other'
+        self.assertTrue(article_setup_reset_ignores_run(self.config, run))
+        run.github_repo = self.website.github_repo
+        run.organization_id = 99
+        self.assertTrue(article_setup_reset_ignores_run(self.config, run))
+
+    def test_current_generation_and_company_research_remain_available(self):
+        from .article_setup_reset import article_setup_reset_ignores_run
+        for workflow in ('repo_scan', 'content_factory_scan', 'article_system_setup'):
+            self.assertFalse(article_setup_reset_ignores_run(self.config, self.run_fixture(workflow)))
+        self.assertFalse(article_setup_reset_ignores_run(self.config, self.run_fixture('topic_discovery', binding={})))
+        self.config.website_connection = None
+        self.assertFalse(article_setup_reset_ignores_run(self.config, self.run_fixture('repo_scan', binding={})))
+
+    def test_reset_projection_cannot_reuse_an_explicit_old_scan_or_its_setup_reference(self):
+        from . import vibe_marketing_views as marketing
+        old = {**self.binding, 'connection_generation': 1}
+        scan = self.run_fixture('repo_scan', binding=old, result={
+            'scan_purpose': 'setup', 'setup_run_id': 'old-setup',
+            'article_system_setup': {'setup_run_id': 'old-setup', 'status': 'preview_failed'},
+        })
+        setup = self.run_fixture('article_system_setup', binding=old, run_id='old-setup')
+        with patch.object(marketing, '_latest_persisted_run_for_article_setup', return_value=None), \
+             patch.object(marketing, 'website_summary', return_value={'connectionGeneration': 2}):
+            state = marketing._article_setup_state_for_config(self.config, organization=self.org,
+                run=scan, latest_runs=[scan, setup])
+        for key in ('scanRunId', 'scanStatus', 'setupRunId', 'setupStatus', 'previewUrl'):
+            self.assertIsNone(state[key], key)
+        self.assertFalse(state['setupBlocked'])
+        self.assertFalse(state['generationReady'])
+        self.assertEqual(state['source'], 'none')
+        self.assertEqual(self.config.company_context, 'Retained company details')
+
+    def test_fresh_scan_is_visible_without_historical_setup_evidence(self):
+        from . import vibe_marketing_views as marketing
+        current = self.run_fixture('repo_scan', run_id='current-scan')
+        old = self.run_fixture('repo_scan', binding={**self.binding, 'connection_generation': 1})
+        with patch.object(marketing, '_latest_persisted_run_for_article_setup', return_value=None), \
+             patch.object(marketing, 'website_summary', return_value={'connectionGeneration': 2}):
+            state = marketing._article_setup_state_for_config(self.config, organization=self.org,
+                latest_runs=[old, current])
+        self.assertEqual(state['scanRunId'], 'current-scan')
+        self.assertEqual(state['scanStatus'], 'completed')
+        self.assertIsNone(state['setupRunId'])
+
+    def test_workflow_progress_keeps_company_research_and_omits_historical_scan(self):
+        from . import vibe_marketing_views as marketing
+        old = self.run_fixture('repo_scan', binding={**self.binding, 'connection_generation': 1})
+        current = self.run_fixture('repo_scan', run_id='current-scan')
+        research = self.run_fixture('topic_discovery', binding={}, run_id='company-research')
+        with patch.object(marketing, '_get_config', return_value=self.config):
+            result = marketing._workflow_progress_context(context=SimpleNamespace(organization=self.org),
+                latest_runs=[old, current, research], checks={})
+        self.assertEqual(result[2], [current, research])
 
 
 class WebsiteDatabaseFixture:
@@ -311,6 +402,40 @@ class WebsiteLifecycleTests(WebsiteDatabaseFixture, TestCase):
         self.assertEqual(self.config.company_context, 'Retain private company context')
         self.assertTrue(WebsiteTemplateRevision.objects.filter(status='quarantined').exists())
         self.assertTrue(ContentFactoryRun.objects.filter(run_id='old').exists())
+
+    def test_reset_excludes_retained_old_scans_and_selects_a_fresh_generation(self):
+        from .vibe_marketing_views import _article_setup_state_for_config
+        scan = ContentFactoryRun.objects.create(run_id='before-reset-scan', workflow='repo_scan',
+            organization=self.org, domain=self.org.domain, github_repo=self.website.github_repo,
+            run_request=self.binding, status='completed', result={'scan_purpose': 'setup',
+                'setup_run_id': 'before-reset-setup', 'article_system_setup': {
+                    'setup_run_id': 'before-reset-setup', 'status': 'preview_failed'}})
+        setup = ContentFactoryRun.objects.create(run_id='before-reset-setup', workflow='article_system_setup',
+            organization=self.org, domain=self.org.domain, github_repo=self.website.github_repo,
+            run_request=self.binding, status='failed')
+        operation = transition_connection(self.config, action='reset', expected=self.binding)
+        self.config.refresh_from_db()
+        self.website.refresh_from_db()
+        ContentFactoryRun.objects.filter(pk=scan.pk).update(updated_at=timezone.now() + timedelta(hours=1))
+        scan.refresh_from_db()
+        state = _article_setup_state_for_config(self.config, organization=self.org, run=scan, latest_runs=[scan, setup])
+        self.assertIsNone(state['scanRunId'])
+        self.assertIsNone(state['scanStatus'])
+        self.assertIsNone(state['setupRunId'])
+        self.assertFalse(state['setupBlocked'])
+        self.assertEqual(state['source'], 'none')
+        self.assertEqual(ContentFactoryRun.objects.filter(pk__in=[scan.pk, setup.pk]).count(), 2)
+        self.assertEqual(self.config.company_context, 'Retain private company context')
+        self.assertIn(scan.run_id, operation.payload['stop_preview_run_ids'])
+        fresh = ContentFactoryRun.objects.create(run_id='after-reset-scan', workflow='repo_scan',
+            organization=self.org, domain=self.org.domain, github_repo=self.website.github_repo,
+            run_request=contract_for(self.website), status='completed')
+        # The old scan has a newer timestamp. The persisted lookup must apply
+        # the generation filter before selecting its first candidate.
+        state = _article_setup_state_for_config(self.config, organization=self.org)
+        self.assertEqual(state['scanRunId'], fresh.run_id)
+        self.assertEqual(state['scanStatus'], 'completed')
+        self.assertIsNone(state['setupRunId'])
 
     def test_cross_tenant_and_wrong_repository_denied(self):
         for payload in ({**self.binding, 'domain': 'other.example.test'}, {**self.binding, 'repository_id': 999}, {**self.binding, 'github_repo': 'example/other'}):

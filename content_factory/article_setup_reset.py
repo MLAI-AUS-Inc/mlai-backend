@@ -122,7 +122,36 @@ def clear_article_setup_reset_markers(article_system):
 
 
 def article_setup_reset_ignores_run(config, run) -> bool:
-    if not run or getattr(run, "workflow", "") != "article_system_setup":
+    """Exclude previous website generations from the current setup projection.
+
+    Lifecycle reset retains historical scans and builds. Their mutable timestamps
+    cannot make them evidence for the selected connection's newer generation.
+    Legacy configurations still use their existing setup reset markers.
+    """
+    if not run:
+        return False
+    workflow = getattr(run, "workflow", "")
+    connection = getattr(config, "website_connection", None)
+    if connection is not None and workflow in {"repo_scan", "content_factory_scan", "article_system_setup"}:
+        from .website_contract import WebsiteAuthorityError, connection_contract
+        request = getattr(run, "run_request", None)
+        if not isinstance(request, dict):
+            return True
+        try:
+            binding = connection_contract(request)
+        except WebsiteAuthorityError:
+            return True
+        if (binding.get("website_connection_id") != str(connection.pk)
+                or binding.get("connection_generation") != connection.generation
+                or (binding.get("repository_id") and binding["repository_id"] != connection.repository_id)
+                or str(getattr(run, "github_repo", "") or "").casefold() != connection.github_repo.casefold()):
+            return True
+        organization_id = getattr(run, "organization_id", None)
+        if organization_id is not None and organization_id != config.organization_id:
+            return True
+        if str(getattr(run, "domain", "") or "").casefold() != str(config.organization.domain).casefold():
+            return True
+    if workflow != "article_system_setup":
         return False
     # Tombstoned by run id: durable against updated_at changes and marker loss.
     run_id = str(getattr(run, "run_id", "") or "").strip()

@@ -10,6 +10,7 @@ from founder_tools.my_startup.api import MyStartupAuthentication, MyStartupViewM
 from community_chat.throttles import CommunityChatScopedThrottle
 from content_factory import vibe_marketing_views as marketing
 from content_factory import notification_channel_views as notifications
+from content_factory import website_views as websites
 from content_factory.github_repository_views import VibeMarketingGitHubRepositoryView
 from core.views import CurrentUserView
 from founder_tools import views as founder
@@ -127,6 +128,14 @@ class RepositoryView(MyStartupAccess, VibeMarketingGitHubRepositoryView):
 
 class RepositoriesView(MyStartupAccess, marketing.VibeMarketingGitHubReposView):
     pass
+
+
+class WebsiteConnectionView(MyStartupAccess, websites.WebsiteConnectionView):
+    """Expose the selected company's canonical website binding to Chat sessions."""
+
+
+class WebsiteConnectionActionView(MyStartupAccess, websites.WebsiteConnectionActionView):
+    """Reuse website lifecycle consent and durable cancellation for Chat owners."""
 
 
 class GitHubConnectView(MyStartupAccess, marketing.VibeMarketingGitHubConnectView):
