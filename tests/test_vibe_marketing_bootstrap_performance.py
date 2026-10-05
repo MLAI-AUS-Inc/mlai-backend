@@ -24,11 +24,11 @@ class VibeMarketingBootstrapPerformanceTests(SimpleTestCase):
             competitors=[], seed_keywords=[],
         )
         company = SimpleNamespace(
-            id=2, name="Example", domain="example.test", location="", abn="", avatar_url="",
+            id=2, name="Example", domain="example.test", location="", abn="", avatar_url="", organization_id=None,
         )
         context = SimpleNamespace(
             organization=organization, company=company,
-            profile=SimpleNamespace(user=SimpleNamespace(id=3)),
+            profile=SimpleNamespace(user=SimpleNamespace(id=3, pk=3)),
         )
         config = SimpleNamespace(
             brand_name="", company_context="", github_repo="", daily_discovery_enabled=False,
@@ -42,7 +42,7 @@ class VibeMarketingBootstrapPerformanceTests(SimpleTestCase):
                 workflow=workflow, run_id=run_id, domain="example.test", github_repo="",
                 status="completed", current_step="", approval_state="", resume_available=False,
                 created_at=now, updated_at=now, step_order=[], acceptance_summary={},
-                result={}, error="", verification_summary={},
+                result={}, run_request={}, error="", verification_summary={},
             )
 
         runs = [
@@ -73,6 +73,7 @@ class VibeMarketingBootstrapPerformanceTests(SimpleTestCase):
             "_island_graph_for_bootstrap": None,
             "_latest_baseline_snapshot": None,
             "_profile_checks": {"scaffold": {"generationReady": False}},
+            "_article_capabilities_for_context": {},
             "_article_setup_state_for_config": bootstrap_setup_state,
             "_guided_steps": ([], None),
             "_latest_run_matching": None,

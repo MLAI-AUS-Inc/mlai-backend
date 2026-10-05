@@ -4591,6 +4591,13 @@ class PublicKnowledgeItem(models.Model):
         if self.embedding is not None and not all(embedding_fields):
             raise ValidationError("A public embedding requires complete model metadata.")
 
+    def validate_constraints(self, exclude=None):
+        """Validate scalar constraints without truth-testing a pgvector array."""
+        # Field validation and clean() still validate the vector and its metadata.
+        # None of the constraints reference embedding, whose NumPy representation
+        # is incompatible with Django 5.2's expression-map truth test.
+        return super().validate_constraints(exclude=set(exclude or ()) | {"embedding"})
+
 
 class MemoryPublication(models.Model):
     """Private review/audit bridge to a physically separate public snapshot."""
