@@ -4,6 +4,7 @@ from .website_views import WebsiteConnectionView, WebsiteConnectionActionView
 from django.urls import include, path
 
 from .custom_island_views import CustomContentIslandView
+from .github_repository_views import VibeMarketingGitHubRepositoryView
 from .island_research_views import ContentIslandResearchView, ContentIslandResearchAdoptView
 
 from .admin_views import VibeMarketingAdminUsageView
@@ -59,6 +60,8 @@ from .vibe_marketing_views import (
 
 
 urlpatterns = [
+    path("github/repository/", VibeMarketingGitHubRepositoryView.as_view(), name="vibe-marketing-github-repository"),
+    path("github/repository", VibeMarketingGitHubRepositoryView.as_view(), name="vibe-marketing-github-repository-no-slash"),
     path("website-connection", WebsiteConnectionView.as_view(), name="website-connection"),
     path("website-connection/", WebsiteConnectionView.as_view()),
     path("website-connection/<str:action>", WebsiteConnectionActionView.as_view(), name="website-connection-action"),

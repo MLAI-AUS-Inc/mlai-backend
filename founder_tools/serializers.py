@@ -1,6 +1,7 @@
 from rest_framework import serializers
 
 from .models import VibeRaisingCompany, VibeRaisingProfile
+from .profile_fields import company_avatar_url, profile_details, validate_profile_fields, visible_companies
 from .services import ensure_company_organization, normalize_company_domain, normalize_company_linkedin_url
 from vibe_raising.serializer_fields import AudienceVisibilityField
 
@@ -62,6 +63,13 @@ class FounderCompanySerializer(serializers.ModelSerializer):
             "monthlyUpdatesEnabled",
         ]
 
+    def to_representation(self, instance):
+        value = super().to_representation(instance)
+        organization = instance.organization if instance.organization_id else None
+        value.update(_serialize_startup_profile(organization) or {})
+        value["avatar_url"] = value["avatarUrl"]
+        return value
+
     def get_entityTypeName(self, obj):
         from vibe_raising.validators import entity_type_display
 
@@ -82,7 +90,7 @@ class FounderCompanySerializer(serializers.ModelSerializer):
         return obj.organization.company_linkedin_url if obj.organization_id else ""
 
     def get_avatarUrl(self, obj):
-        return obj.avatar_url or ""
+        return company_avatar_url(obj)
 
     def get_monthlyUpdatesEnabled(self, obj):
         # Opt-in lives on the founder's (user, organization) binding. Absent a
@@ -116,7 +124,7 @@ class FounderProfileSerializer(serializers.ModelSerializer):
         return str(obj.active_company_id) if obj.active_company_id else None
 
     def get_companies(self, obj):
-        companies = obj.companies.select_related("organization").all()
+        companies = visible_companies(obj.companies.select_related("organization").all())
         return FounderCompanySerializer(companies, many=True).data
 
 
@@ -150,6 +158,9 @@ class FounderCompanyUpsertSerializer(AliasInputSerializer):
         "confirmDomainChange": ("confirm_domain_change",),
         "companyLinkedInUrl": ("company_linkedin_url",),
         "organizationKind": ("organization_kind",),
+        "hasRevenue": ("has_revenue",),
+        "founderProfiles": ("founder_profiles",),
+        "defaultTimezone": ("default_timezone",),
         "shortDescription": ("short_description",),
         "problemSolved": ("problem_solved",),
         "targetAudience": ("target_audience",),
@@ -182,6 +193,8 @@ class FounderCompanyUpsertSerializer(AliasInputSerializer):
     competitors = serializers.JSONField(required=False)
     seedKeywords = serializers.JSONField(required=False)
     founderNames = serializers.JSONField(required=False)
+    founderProfiles = serializers.JSONField(required=False)
+    hasRevenue = serializers.CharField(allow_blank=True, allow_null=True, required=False)
     stage = serializers.CharField(allow_blank=True, allow_null=True, required=False)
     organizationKind = serializers.CharField(allow_blank=True, allow_null=True, required=False)
     shortDescription = serializers.CharField(allow_blank=True, allow_null=True, required=False)
@@ -195,6 +208,7 @@ class FounderCompanyUpsertSerializer(AliasInputSerializer):
     audienceVisibility = AudienceVisibilityField(required=False)
 
     def validate(self, attrs):
+        attrs = validate_profile_fields(attrs)
         attrs["name"] = attrs["name"].strip()
         if not attrs["name"]:
             raise serializers.ValidationError({"name": "This field may not be blank."})
@@ -227,10 +241,10 @@ class FounderActiveCompanySerializer(AliasInputSerializer):
 
 
 def serialize_founder_bootstrap(user, profile):
-    active_company = profile.active_company or profile.companies.order_by("created_at", "name").first()
+    companies = visible_companies(profile.companies.select_related("organization").all())
+    active_company = profile.active_company or companies.order_by("created_at", "name").first()
     if active_company and not active_company.organization_id:
         ensure_company_organization(active_company)
-    companies = profile.companies.select_related("organization").all()
 
     supported = profile.role == VibeRaisingProfile.ROLE_FOUNDER
     redirect_hint = None
@@ -285,11 +299,13 @@ def serialize_founder_bootstrap(user, profile):
 
 
 def _serialize_startup_profile(organization):
+    extra = profile_details(organization)
     try:
         profile = organization.startup_profile
     except Exception:
-        return None
+        return extra
     return {
+        **extra,
         "founderNames": list(profile.founder_names or []),
         "stage": profile.stage,
         "organizationKind": getattr(profile, "organization_kind", ""),

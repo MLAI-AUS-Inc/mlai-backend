@@ -37,5 +37,6 @@ def update_payload(draft, *, published=False, community=False, user=None):
         value["manualSummary"] = memo.get("manual_summary") or frozen_manual.get("summary", "")
         value["manualDocumentIds"] = [str(item["id"]) for item in (memo.get("manual_documents") or frozen_manual.get("documents") or []) if item.get("id")]
         value["inputSources"] = list(memo["selected_input_sources"]) if "selected_input_sources" in memo else ((revision.snapshot.payload.get("source_providers") or []) if revision else [])
-    value["startup"] = {"name": draft.organization.name}
+    from founder_tools.profile_fields import organization_branding
+    value["startup"] = {"name": draft.organization.name, **organization_branding(draft.organization)}
     return value

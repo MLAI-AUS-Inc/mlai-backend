@@ -40,6 +40,8 @@ subsystem-specific contracts and runbooks.
 - [`community-chat-coworking.md`](community-chat-coworking.md) — signed booking handoff to Public Roo
 - [`volunteer-api.md`](volunteer-api.md) — gated member journey, recognition and Roo contracts
 
+- [Startup settings profile contract](startup-settings-profile-contract.md) — sparse profile saves, reviewed research, logo branding and scoped Chat facade
+
 ## MLAI Chat bridge
 
 The bridge contract describes the live MLAI Chat integration. Dated staging and

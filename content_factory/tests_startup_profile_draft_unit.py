@@ -50,6 +50,9 @@ class StartupProfileDraftUnitTests(unittest.TestCase):
             role="founder", ROLE_FOUNDER="founder", companies=Mock(), save=Mock(),
         )
         self.profile.companies.get.return_value = self.company
+        lock = patch("founder_tools.profile_fields.lock_research_profile", return_value=self.profile)
+        lock.start()
+        self.addCleanup(lock.stop)
         self.config = SimpleNamespace(
             connected_slack_user_id="actor", brand_name="Acme", company_context="Saved context",
             pillar_strategy={}, github_repo="fixture/site", article_delivery_mode="content_only",
@@ -100,7 +103,7 @@ class StartupProfileDraftUnitTests(unittest.TestCase):
             "status": SimpleNamespace(HTTP_400_BAD_REQUEST=400, HTTP_403_FORBIDDEN=403,
                                       HTTP_404_NOT_FOUND=404, HTTP_409_CONFLICT=409,
                                       HTTP_202_ACCEPTED=202),
-            "transaction": SimpleNamespace(atomic=nullcontext),
+            "transaction": SimpleNamespace(atomic=nullcontext, set_rollback=Mock()),
             "get_or_create_founder_profile": Mock(return_value=self.profile),
             "normalize_company_domain": lambda value: str(value or "").strip(),
             "domain_is_available_to": Mock(return_value=True),
@@ -349,6 +352,13 @@ class StartupProfileDraftUnitTests(unittest.TestCase):
         self.assertTrue(payload["strict_deep_research"])
         self.assertFalse(payload["persist"])
 
+    def test_legacy_invalid_profile_requests_rollback_and_never_dispatches(self):
+        self.ns["normalize_company_linkedin_url"] = Mock(side_effect=ValueError("Invalid company URL"))
+        response = self.request(companyLinkedInUrl="invalid")
+        self.assertEqual(response.status_code, 400)
+        self.ns["transaction"].set_rollback.assert_called_once_with(True)
+        self.queue.assert_not_called()
+
     def test_legacy_mode_still_persists_submitted_shared_details(self):
         response = self.request(
             draftMode=False, shortDescription="Saved through legacy research",
@@ -423,6 +433,140 @@ class StartupProfileDraftUnitTests(unittest.TestCase):
         self.assertEqual(self.startup.positive_keywords, [])
         self.assertEqual(self.startup.founder_names, ["Saved founder"])
         self.assertEqual(self.startup.target_audience, "Saved audience")
+
+    def test_draft_only_research_uses_unsaved_values_without_profile_writes(self):
+        response = self.request(draftOnly=True, company_name="Draft name", location="",
+                                shortDescription="Unsaved description", companyContext="Draft context")
+        self.assertEqual(response.status_code, 202)
+        payload = self.queue.call_args.kwargs["payload"]
+        self.assertTrue(payload["draft_only"])
+        self.assertFalse(payload["persist"])
+        self.assertEqual(payload["company_name"], "Draft name")
+        self.assertEqual(payload["startup_profile"]["short_description"], "Unsaved description")
+        self.assertEqual(payload["existing_fields"]["companyContext"], "Draft context")
+        self.assertEqual(self.company.name, "Acme")
+        self.assertEqual(self.startup.short_description, "Saved description")
+        self.company.save.assert_not_called()
+        self.startup.save.assert_not_called()
+        self.config.save.assert_not_called()
+        self.profile.save.assert_not_called()
+        self.ns["get_founder_company_context"].assert_called_once_with(
+            self.user, company_id="company", persist_active=False)
+
+
+    def test_draft_only_domain_change_requires_save_including_name_only_startup(self):
+        for saved_domain in ("acme.example", ""):
+            with self.subTest(saved_domain=saved_domain):
+                self.company.domain = saved_domain
+                response = self.request(draftOnly=True, domain="new.example")
+                self.assertEqual(response.status_code, 409)
+                self.assertEqual(response.data["code"], "startup_research_domain_unsaved")
+                self.queue.assert_not_called()
+                self.company.save.assert_not_called()
+
+
+    def test_nested_desktop_and_flat_native_drafts_are_researched_and_fingerprinted(self):
+        self.request(draftOnly=True, existingFields={
+            "companyContext": "Unsaved context", "seedKeywords": [],
+            "profileFields": {"targetAudience": "Unsaved audience", "stage": "Idea", "hasRevenue": "No"},
+            "persist": True, "domain": "foreign.test", "company_id": "foreign",
+        })
+        desktop = self.queue.call_args.kwargs["payload"]
+        self.assertEqual(desktop["existing_fields"]["companyContext"], "Unsaved context")
+        self.assertEqual(desktop["existing_fields"]["seedKeywords"], [])
+        self.assertEqual(desktop["startup_profile"]["target_audience"], "Unsaved audience")
+        self.assertEqual(desktop["startup_profile"]["has_revenue"], "No")
+        self.assertEqual(desktop["domain"], "acme.example")
+        self.assertEqual(desktop["company_id"], "company")
+        self.assertFalse(desktop["persist"])
+        self.request(draftOnly=True, existingFields={
+            "companyContext": "Unsaved context", "seedKeywords": [],
+            "targetAudience": "Unsaved audience", "stage": "Idea", "hasRevenue": "No",
+        })
+        native = self.queue.call_args.kwargs["payload"]
+        self.assertEqual(native["draft_fingerprint"], desktop["draft_fingerprint"])
+        self.request(draftOnly=True, existingFields={"profileFields": {"stage": "Idea"}})
+        self.assertNotEqual(self.queue.call_args.kwargs["payload"]["draft_fingerprint"], desktop["draft_fingerprint"])
+        self.company.save.assert_not_called()
+        self.startup.save.assert_not_called()
+        self.config.save.assert_not_called()
+
+
+    def test_top_level_draft_aliases_and_explicit_empty_override_nested_fields(self):
+        self.request(draftOnly=True, target_audience="", company_context="Top context",
+            existing_fields={"companyContext": "Old context",
+                             "profile_fields": {"targetAudience": "Old audience"}})
+        payload = self.queue.call_args.kwargs["payload"]
+        self.assertEqual(payload["startup_profile"]["target_audience"], "")
+        self.assertEqual(payload["existing_fields"]["companyContext"], "Top context")
+
+
+    def test_invalid_nested_draft_fails_before_workspace_creation_or_points_gate(self):
+        from rest_framework.exceptions import ValidationError
+        for fields in ([], {"profileFields": []}, {"profileFields": {"hasRevenue": "Maybe"}}):
+            with self.subTest(fields=fields), self.assertRaises(ValidationError):
+                self.request(companyId="", createNew=True, draftOnly=True, existingFields=fields)
+        self.gate.assert_not_called()
+        self.queue.assert_not_called()
+        self.company.save.assert_not_called()
+
+
+    def test_draft_only_rejects_stale_active_research_instead_of_reusing_it(self):
+        self.ns["_active_startup_autofill_run_for_domain"].return_value = self.run
+        response = self.request(draftOnly=True)
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.data["code"], "startup_research_in_progress")
+        self.queue.assert_not_called()
+        self.company.save.assert_not_called()
+
+
+    def test_new_draft_research_creates_hidden_workspace_without_switching_startup(self):
+        self.ns["VibeRaisingCompany"].objects = SimpleNamespace(create=Mock(return_value=self.company))
+        response = self.request(companyId="", createNew=True, draftOnly=True, location="",
+                                shortDescription="Unsaved suggestion", abn="123")
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.data["researchCompanyId"], "company")
+        self.assertEqual(response.data["costPoints"], 0)
+        self.assertFalse(response.data["charged"])
+        created = self.ns["VibeRaisingCompany"].objects.create.call_args.kwargs
+        self.assertEqual(created["location"], "")
+        self.assertIsNone(created["abn"])
+        self.assertNotIn("shortDescription", created)
+        self.assertTrue(self.config.pillar_strategy["startup_profile_details"]["researchDraft"])
+        self.profile.save.assert_not_called()
+        self.startup.save.assert_not_called()
+
+
+    def test_identical_active_draft_retry_returns_original_run_without_dispatch(self):
+        self.request(draftOnly=True)
+        self.run.run_request = self.queue.call_args.kwargs["payload"]
+        self.ns["_active_startup_autofill_run_for_domain"].return_value = self.run
+        self.queue.reset_mock()
+        response = self.request(draftOnly=True)
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.data["runId"], "run")
+        self.queue.assert_not_called()
+
+
+    def test_lost_create_response_recovers_only_owned_hidden_workspace(self):
+        conflict = self.ns["DuplicateCompanyDomainError"]("same domain")
+        conflict.existing_company = self.company
+        self.ns["assert_company_domain_available"].side_effect = conflict
+        with patch("founder_tools.profile_fields.is_research_workspace", return_value=True):
+            response = self.request(companyId="", createNew=True, draftOnly=True)
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.data["researchCompanyId"], "company")
+        first_key = self.queue.call_args.kwargs["payload"]["client_request_id"]
+        with patch("founder_tools.profile_fields.is_research_workspace", return_value=True):
+            self.request(companyId="", createNew=True, draftOnly=True)
+        self.assertEqual(self.queue.call_args.kwargs["payload"]["client_request_id"], first_key)
+        self.profile.save.assert_not_called()
+        self.queue.reset_mock()
+        with patch("founder_tools.profile_fields.is_research_workspace", return_value=False):
+            response = self.request(companyId="", createNew=True, draftOnly=True)
+        self.assertEqual(response.status_code, 409)
+        self.queue.assert_not_called()
+
 
 
 if __name__ == "__main__":
