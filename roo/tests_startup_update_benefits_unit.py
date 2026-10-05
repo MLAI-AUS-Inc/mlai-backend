@@ -108,116 +108,171 @@ class ApprovedUpdateDiscountTests(SimpleTestCase):
         self.assertEqual(self.discount(), 8)
 
 
-@override_settings(COMMUNITY_CHAT_VOLUNTEER_ENABLED=False, ROO_POINTS_MONTHLY_UPDATE_REWARD=20)
+@override_settings(COMMUNITY_CHAT_VOLUNTEER_ENABLED=False)
 class MonthlyRewardTests(SimpleTestCase):
     def setUp(self):
+        from startup_updates import rewards
+        self.rewards = rewards
         self.user = SimpleNamespace(pk=23, id=23, slack_id="")
         self.company = verified_company()
         self.draft = SimpleNamespace(
             pk=41, id=41, organization_id=7, month=date(2026, 8, 1),
-            published_at=NOW, ready_at=NOW, current_revision_id=100, save=Mock(),
+            published_at=NOW, ready_at=NOW, first_published_at=NOW,
         )
-        self.award = Mock(return_value=(SimpleNamespace(pk=99), True))
-        self.duplicate = Mock()
-        self.duplicate.first.return_value = None
+        self.ledger = SimpleNamespace(pk=99, user_id=23, delta_microroo=20000000, created_at=NOW, idempotency_key="legacy")
+        self.existing = Mock(return_value=None)
+        self.has_previous = Mock(return_value=False)
+        self.eligibility = Mock(return_value={"eligible": True})
+        self.award = Mock(side_effect=self.credit)
+        self.org_lock = Mock()
         for replacement in (
-            patch("roo.services.transaction.atomic", side_effect=lambda: nullcontext()),
+            patch.object(rewards, "update_ledger", self.existing),
+            patch.object(rewards, "has_monthly_completion", self.has_previous),
+            patch("startup_updates.reward_eligibility.startup_reward_eligibility", self.eligibility),
             patch("roo.services.PointsService.award", self.award),
-            patch("startup_updates.benefits.monthly_reward_history", return_value=self.duplicate),
-            patch("startup_updates.models.MonthlyUpdateDraft.objects.select_for_update"),
-            patch("roo.services.timezone.now", return_value=NOW),
+            patch.object(rewards.Organization.objects, "select_for_update", self.org_lock),
         ):
             replacement.start()
             self.addCleanup(replacement.stop)
+        self.locked_draft = patch.object(rewards.MonthlyUpdateDraft.objects, "select_for_update")
+        lock = self.locked_draft.start()
+        lock.return_value.get.return_value = self.draft
+        self.addCleanup(self.locked_draft.stop)
 
-    def complete(self, **kwargs):
-        return StartupUpdateRewardService.award_monthly_update_completion(
-            self.user, self.company, self.draft.month, self.draft, **kwargs,
-        )
+    def credit(self, **kwargs):
+        self.ledger.delta_microroo = kwargs["delta"] * 1000000
+        self.ledger.idempotency_key = kwargs["idempotency_key"]
+        return self.ledger, True
 
-    def test_approved_nonprofit_receives_twenty_points(self):
-        self.assertTrue(self.complete())
+    def complete(self):
+        return self.rewards.award_completion.__wrapped__(self.user, self.company, self.draft, newly_approved=True)
+
+    def test_first_verified_approval_gets_twenty_in_completion_month(self):
+        result = self.complete()
+        self.assertEqual(result, dict(points=20, awarded=True, status="awarded", month="2026-09",
+            tier="verified_monthly", creditedToCurrentUser=True))
         self.assertEqual(self.award.call_args.kwargs["delta"], 20)
         self.assertEqual(self.award.call_args.kwargs["reference_id"], "41")
+        self.org_lock.return_value.get.assert_called_once_with(pk=7)
 
-    def test_duplicate_and_new_revision_use_the_same_company_month_key(self):
-        self.assertTrue(self.complete())
-        key = self.award.call_args.kwargs["idempotency_key"]
-        self.award.return_value = (SimpleNamespace(pk=99), False)
-        self.draft.current_revision_id = 101
-        self.assertFalse(self.complete())
-        self.assertEqual(self.award.call_args.kwargs["idempotency_key"], key)
-        self.assertEqual(key, "monthly_update_reward:organization:7:2026-08")
+    def test_second_new_update_in_month_gets_five(self):
+        self.has_previous.return_value = True
+        self.draft.pk = 42
+        self.assertEqual(self.complete()["points"], 5)
+        self.eligibility.assert_not_called()
 
-    def test_next_reporting_month_gets_a_new_reward_key(self):
-        self.complete()
-        key = self.award.call_args.kwargs["idempotency_key"]
+    def test_unverified_startup_gets_five_without_blocking_approval(self):
+        self.eligibility.return_value = {"eligible": False}
+        self.assertEqual(self.complete()["points"], 5)
+
+    def test_retry_and_new_revision_do_not_pay_again(self):
+        self.existing.return_value = self.ledger
+        self.assertEqual(self.complete()["status"], "already_awarded")
         self.draft.month = date(2026, 9, 1)
+        self.assertFalse(self.complete()["awarded"])
+        self.award.assert_not_called()
+        self.eligibility.assert_not_called()
+
+    def test_other_founder_sees_same_receipt_without_personal_credit(self):
+        self.existing.return_value = self.ledger
+        self.user.pk = 24
+        self.assertFalse(self.complete()["creditedToCurrentUser"])
+        self.award.assert_not_called()
+
+    def test_reporting_month_change_does_not_change_reward_identity(self):
+        key = self.rewards.reward_key(self.draft)
+        self.draft.month = date(2026, 1, 1)
+        self.assertEqual(self.rewards.reward_key(self.draft), key)
+
+    def test_backdated_reporting_period_does_not_change_calendar_bucket(self):
+        self.draft.month = date(2025, 1, 1)
         self.complete()
-        self.assertNotEqual(self.award.call_args.kwargs["idempotency_key"], key)
+        self.assertEqual(self.has_previous.call_args.args[1].date(), date(2026, 9, 1))
 
-    def test_unapproved_update_is_not_rewarded(self):
-        self.draft.published_at = None
-        self.assertFalse(self.complete())
+    def test_old_unpaid_reapproval_cannot_mint_points(self):
+        result = self.rewards.award_completion.__wrapped__(self.user, self.company, self.draft)
+        self.assertEqual(result["points"], 0)
+        self.assertEqual(result["status"], "unavailable")
+        self.award.assert_not_called()
+        self.eligibility.assert_not_called()
+
+    def test_unapproved_or_foreign_update_is_not_rewarded(self):
+        for field, value in (("published_at", None), ("organization_id", 99)):
+            original = getattr(self.draft, field)
+            setattr(self.draft, field, value)
+            with self.assertRaises(ValueError):
+                self.complete()
+            setattr(self.draft, field, original)
         self.award.assert_not_called()
 
-    def test_foreign_startup_draft_is_not_rewarded(self):
-        self.draft.organization_id = 8
-        self.assertFalse(self.complete())
-        self.award.assert_not_called()
+    def test_no_draft_is_not_a_completion(self):
+        self.assertFalse(StartupUpdateRewardService.award_monthly_update_completion(
+            self.user, self.company, self.draft.month))
 
-    def test_unverified_company_is_not_rewarded(self):
-        self.company.abr_verified_at = None
-        self.assertFalse(self.complete())
-        self.award.assert_not_called()
-
-    def test_future_month_is_not_rewarded(self):
-        self.draft.month = date(2026, 10, 1)
-        self.assertFalse(self.complete())
-        self.award.assert_not_called()
-
-    def test_non_month_bucket_is_not_rewarded(self):
-        self.draft.month = date(2026, 9, 2)
-        self.assertFalse(self.complete())
-        self.award.assert_not_called()
-
-    def test_second_company_wrapper_cannot_reward_same_startup_month(self):
-        self.duplicate.first.return_value = SimpleNamespace(
-            idempotency_key="monthly_update_reward:11:2026-08",
-            reference_id="41", user_id=24,
-        )
-        self.assertFalse(self.complete())
-        self.award.assert_not_called()
-
-    def test_recreated_draft_preserves_original_paid_window_without_another_credit(self):
-        original = NOW - timedelta(days=40)
-        self.duplicate.first.return_value = SimpleNamespace(
-            idempotency_key="monthly_update_reward:11:2026-08",
-            reference_id="old-deleted-draft", user_id=23, created_at=original,
-        )
-        self.assertFalse(self.complete(strict=True))
-        self.assertEqual(self.draft.ready_at, original)
-        self.award.assert_not_called()
-
-    def test_legacy_company_month_payment_reuses_its_existing_key(self):
-        key = "monthly_update_reward:11:2026-08"
-        self.duplicate.first.return_value = SimpleNamespace(
-            idempotency_key=key, reference_id="41", user_id=23,
-        )
-        self.award.return_value = (SimpleNamespace(pk=99), False)
-        self.assertFalse(self.complete(strict=True))
-        self.assertEqual(self.award.call_args.kwargs["idempotency_key"], key)
-
-    def test_strict_approval_does_not_hide_payment_failure(self):
+    def test_wallet_failure_is_propagated_for_atomic_approval_rollback(self):
         self.award.side_effect = RuntimeError("Synthetic unavailable wallet")
-        with self.assertLogs("roo.services", level="ERROR"):
-            with self.assertRaisesRegex(RuntimeError, "unavailable wallet"):
-                self.complete(strict=True)
+        with self.assertRaisesRegex(RuntimeError, "unavailable wallet"):
+            self.complete()
 
-    def test_legacy_best_effort_caller_returns_false_on_failure(self):
-        self.award.side_effect = RuntimeError("Synthetic unavailable wallet")
-        with self.assertLogs("roo.services", level="ERROR"):
-            self.assertFalse(self.complete())
+    def test_calendar_boundary_including_daylight_savings(self):
+        before = datetime(2026, 9, 30, 13, 59, tzinfo=timezone.utc)
+        after = before + timedelta(minutes=1)
+        self.assertEqual(self.rewards.reward_month_bounds(before)[0].month, 9)
+        start, end = self.rewards.reward_month_bounds(after)
+        self.assertEqual(start.month, 10)
+        self.assertEqual(start.utcoffset(), timedelta(hours=10))
+        self.assertEqual(end.utcoffset(), timedelta(hours=11))
+
+    def test_approval_month_survives_lookup_crossing_midnight(self):
+        self.draft.first_published_at = datetime(2026, 9, 30, 13, 59, tzinfo=timezone.utc)
+        self.ledger.created_at = datetime(2026, 9, 30, 14, 1, tzinfo=timezone.utc)
+        result = self.complete()
+        self.assertEqual(result["points"], 20)
+        self.assertEqual(result["month"], "2026-09")
+        self.assertTrue(self.award.call_args.kwargs["idempotency_key"].endswith(":month:2026-09"))
+        self.assertEqual(self.has_previous.call_args.args[1].month, 9)
+
+    def test_new_year_resets_calendar_month(self):
+        start, end = self.rewards.reward_month_bounds(datetime(2026, 12, 31, 13, 0, tzinfo=timezone.utc))
+        self.assertEqual(start.date(), date(2027, 1, 1))
+        self.assertEqual(end.date(), date(2027, 2, 1))
+
+    def test_historical_nullable_microroo_uses_recorded_legacy_credit(self):
+        self.ledger.delta_microroo = None
+        self.ledger.delta = 20
+        self.ledger.points_delta = None
+        self.existing.return_value = self.ledger
+        self.assertEqual(self.complete()["points"], 20)
+        self.ledger.delta = None
+        self.ledger.points_delta = 5
+        self.assertEqual(self.complete()["points"], 5)
+        self.award.assert_not_called()
+
+    def test_zero_exact_ledger_amount_is_not_replaced_by_legacy_value(self):
+        self.ledger.delta_microroo = 0
+        self.ledger.delta = 20
+        self.existing.return_value = self.ledger
+        self.assertEqual(self.complete()["points"], 0)
+        self.award.assert_not_called()
+
+    def test_owner_read_uses_actual_ledger_and_never_awards(self):
+        self.existing.return_value = self.ledger
+        receipt = self.rewards.update_reward_receipt(self.draft, user=self.user)
+        self.assertFalse(receipt["awarded"])
+        self.assertEqual(receipt["points"], 20)
+        self.award.assert_not_called()
+
+    @override_settings(COMMUNITY_CHAT_VOLUNTEER_ENABLED=True, COMMUNITY_CHAT_VOLUNTEER_AWARDS_ENABLED=True)
+    def test_volunteer_feature_flag_uses_same_five_point_amount(self):
+        self.has_previous.return_value = True
+        self.ledger.delta_microroo = 5000000
+        self.existing.side_effect = [None, self.ledger]
+        with patch("community_chat.volunteer.receipts.award_startup_update", return_value=True) as volunteer:
+            result = self.complete()
+        self.assertEqual(result["points"], 5)
+        self.assertEqual(volunteer.call_args.kwargs["reward_amount"], 5)
+        self.assertEqual(volunteer.call_args.kwargs["occurred_at"], NOW)
+        self.award.assert_not_called()
 
 
 class FirstApprovalClockTests(SimpleTestCase):
@@ -281,7 +336,7 @@ class FirstApprovalClockTests(SimpleTestCase):
 
 
 class VolunteerMonthlyWalletTests(SimpleTestCase):
-    def award(self, *, capped=False, existing=False):
+    def award(self, *, capped=False, existing=False, amount=None):
         from community_chat.volunteer import receipts
         from community_chat.volunteer.access import VolunteerError
 
@@ -308,13 +363,21 @@ class VolunteerMonthlyWalletTests(SimpleTestCase):
             patch.object(receipts.transaction, "atomic", side_effect=lambda: nullcontext()),
         ):
             history.return_value.first.return_value = ledger if existing else None
-            created = receipts.award_startup_update.__wrapped__(user, company, date(2026, 8, 1))
+            created = receipts.award_startup_update.__wrapped__(user, company, date(2026, 8, 1), reward_amount=amount)
         return created, receipt, award, mirror
 
     def test_second_startup_still_receives_payment_after_personal_ranking_cap(self):
         created, receipt, award, mirror = self.award(capped=True)
         self.assertTrue(created)
         self.assertEqual(award.call_args.kwargs["delta"], 20)
+        self.assertEqual(receipt.status, "recorded")
+        self.assertEqual(receipt.error, "monthly_recognition_cap")
+        mirror.assert_not_called()
+
+    def test_additional_update_receives_five_even_after_ranking_cap(self):
+        created, receipt, award, mirror = self.award(capped=True, amount=5)
+        self.assertTrue(created)
+        self.assertEqual(award.call_args.kwargs["delta"], 5)
         self.assertEqual(receipt.status, "recorded")
         self.assertEqual(receipt.error, "monthly_recognition_cap")
         mirror.assert_not_called()
@@ -361,3 +424,52 @@ class HistoricalApprovalAnchorTests(SimpleTestCase):
     def test_deleted_and_recreated_month_cannot_renew_original_reward_window(self):
         original = NOW - timedelta(days=40)
         self.assertEqual(self.anchor(first=NOW, original=original), original)
+
+
+class ApprovalRewardReceiptTests(SimpleTestCase):
+    """Exercise the actual approval adapter without a database or network."""
+
+    def setUp(self):
+        from vibe_raising import views
+        self.views = views
+        self.user = SimpleNamespace(pk=23)
+        self.company = SimpleNamespace(pk=11)
+        self.organization = SimpleNamespace(pk=7)
+        self.draft = SimpleNamespace(pk=41, month=date(2026, 8, 1), published_at=None)
+        self.request = SimpleNamespace(user=self.user, data={
+            "revisionId": 12, "revisionHash": "hash", "audienceVisibility": ["just_me"]})
+        self.reward = {"points": 20, "awarded": True, "status": "awarded"}
+        self.award = Mock(return_value=self.reward)
+        for replacement in (
+            patch.object(views, "_get_founder_company_context_or_response", return_value=({"domain": "example.test", "company": self.company}, None)),
+            patch.object(views, "_resolve_owned_organization", return_value=self.organization),
+            patch("organizations.models.Organization.objects.select_for_update"),
+            patch.object(views, "get_object_or_404", return_value=self.draft),
+            patch("startup_updates.update_identity.resolve_update", return_value=(self.draft, False)),
+            patch("startup_updates.revisions.approve_and_publish", return_value=self.draft),
+            patch("startup_updates.rewards.award_completion", self.award),
+            patch.object(views, "_serialize_monthly_update", return_value={"id": 41}),
+        ):
+            replacement.start()
+            self.addCleanup(replacement.stop)
+
+    def publish(self):
+        return self.views.VibeRaisingMonthlyUpdatePublishView.post.__wrapped__(
+            self.views.VibeRaisingMonthlyUpdatePublishView(), self.request, 41)
+
+    def test_actual_credit_receipt_is_returned_to_approver(self):
+        response = self.publish()
+        self.assertEqual(response.data["reward"], self.reward)
+        self.assertEqual(response.data["update"]["reward"], self.reward)
+        self.award.assert_called_once_with(self.user, self.company, self.draft, newly_approved=True)
+
+    def test_reapproval_cannot_be_mistaken_for_new_completion(self):
+        self.draft.published_at = NOW
+        self.publish()
+        self.assertFalse(self.award.call_args.kwargs["newly_approved"])
+
+    def test_credit_failure_returns_retryable_approval_error(self):
+        self.award.side_effect = RuntimeError("Synthetic wallet unavailable")
+        with self.assertRaises(self.views.MonthlyUpdateRewardUnavailable) as error:
+            self.publish()
+        self.assertEqual(error.exception.status_code, 503)

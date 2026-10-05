@@ -265,3 +265,51 @@ not evidence of deployment or a ChatGPT directory approval.
 ## Update cover selection
 
 The editor sends `displayConfig.coverImage`: watercolor artwork IDs, minimal month numbers (1–12), or a cropped HTTP(S) upload URL. Twelve watercolor designs are the default collection. Selections are validated, frozen with the reviewed revision, retained by older clients and regeneration, and included in owner and shared projections. No schema migration is required. Existing server-receipted `coverImage` assets continue to be supported.
+
+## Startup Pulse rewards — 5 October 2026
+
+Approval credits the approving founder's Roo wallet once per update. Eligible
+Australian startups earn 20 points for their first completed update in each
+Australia/Melbourne calendar month; subsequent updates and startups that cannot
+be verified earn 5 points. Reporting-month selection, later edits and reapproval
+do not reset the allowance. Existing ledger records prevent duplicate credits,
+including older awards made under company/month keys. Deleted updates retain
+their ledger history and cannot reopen the monthly bonus.
+
+A private or shared approved update qualifies. Saving or generating a draft does
+not. Approval and the wallet credit share one transaction: a wallet failure
+returns 503 and leaves approval unsaved so retry is safe. Missing or inconclusive
+registration/website evidence uses the five-point tier without blocking approval.
+
+Approval responses contain `reward` both at the top level and within `update`:
+`{points, awarded, status, month, tier, creditedToCurrentUser}`. `awarded` is true
+only for a new credit; a replay and later owner reads return `already_awarded`
+and the actual ledger amount. Historical approvals without a credit return
+`unavailable` with zero points on reapproval; editing does not backfill rewards.
+`month` is YYYY-MM in Melbourne, frozen at first approval and retained in the
+ledger key even when eligibility checks or the wallet credit cross midnight. `tier` is
+`verified_monthly` or `standard`. `creditedToCurrentUser` avoids claiming that a
+previous approval credited a different founder's current wallet. Owner archive
+and detail reads include `update.reward`; community/public reads omit it. Reads
+never create awards or contact ABR. No schema or data migration is required.
+
+
+The bonus checker performs an authoritative active ABR lookup using ABN or ACN,
+including legal and current trading names. Matching tolerates case, legal suffixes,
+spacing and small spelling differences. The branded website must match the
+registry identity or link the brand to the legal name/ABN. When a saved business
+description exists, the website must share at least one activity term after brand
+terms are removed; a missing optional description does not fail the check. This
+is a lightweight consistency check, not comprehensive semantic or fraud verification.
+Website retrieval has bounded DNS and read deadlines and rejects non-public
+addresses. Positive results are cached for six hours, inconclusive results for
+60 seconds, with every checked profile input included in the cache key.
+Unavailable or inconclusive checks select five points and do not display a
+registration error in the approval flow. The monthly allowance is scoped to the
+existing startup organisation identity, not a global ABN registry of claims.
+
+Validation uses the database-free runner for approval, receipt, reward amount,
+calendar-boundary, retry and Volunteer-cap regressions. Database-backed wallet
+and concurrency tests have been updated but not run: `AGENTS.md` requires separate
+approval before a runner constructs a database from migration state. No migration
+was created or applied, and this document does not claim deployment.

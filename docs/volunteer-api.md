@@ -197,10 +197,12 @@ Unlinked members receive terminal `202 ignored`; transient processing failures
 retain a durable pending receipt. Source replay conflicts fail closed.
 
 `retry_volunteer_receipts --limit 100` processes pending receipt rows. The
-existing startup-update award calls the canonical member/month coordinator only
-when awards are enabled; otherwise the legacy path remains unchanged. Its
-configured reward (currently default 20) is retained. Existing company/month
-ledger records are mirrored, never credited twice.
+startup-update award calls the canonical member/month coordinator only when
+awards are enabled. Both flag states credit the same amount per new approved
+update: 20 for a verified startup's first completion in a Melbourne calendar
+month, otherwise 5. Volunteer recognition keeps its personal monthly cap, but
+the cap never suppresses an update's wallet credit. Existing company/month
+ledger records are recognized by update reference and never credited twice.
 
 `sync_volunteer_attendance --event-id ...` uses the existing Luma client and
 requires attendance enablement. It maps verified account emails and linked

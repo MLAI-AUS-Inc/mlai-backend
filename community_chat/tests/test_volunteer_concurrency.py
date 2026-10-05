@@ -299,13 +299,19 @@ class VolunteerConcurrencyTests(TransactionTestCase):
         def award(company_id):
             def perform(user, reviewer):
                 company = VibeRaisingCompany.objects.get(pk=company_id)
+                from startup_updates.models import MonthlyUpdateDraft
+                now = timezone.now()
+                draft = MonthlyUpdateDraft.objects.create(organization=company.organization, month=month,
+                    published_at=now, first_published_at=now, ready_at=now)
                 return StartupUpdateRewardService.award_monthly_update_completion(
-                    user, company, month
+                    user, company, month, draft, newly_approved=True, strict=True
                 )
 
             return perform
 
-        outcomes = self.race(award(company_ids[0]), award(company_ids[1]))
+        from unittest.mock import patch
+        with patch("startup_updates.reward_eligibility.startup_reward_eligibility", return_value={"eligible": True}):
+            outcomes = self.race(award(company_ids[0]), award(company_ids[1]))
         self.assertEqual(sum(outcomes), 2)
         self.assertEqual(
             Ledger.objects.filter(user=self.member, source="STARTUP_UPDATE").count(), 2
