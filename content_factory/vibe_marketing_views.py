@@ -11262,7 +11262,7 @@ def _compute_bootstrap_payload(context, request=None, *, view="full", config=Non
         "articleCapabilities": _article_capabilities_for_context(context, config, latest_runs=latest_runs),
         "articleSetupState": article_setup_state,
         "article_setup_state": article_setup_state,
-        "latestRuns": [_serialize_run(run, context=context, latest_runs=latest_runs, checks=checks, mode=run_mode) for run in latest_runs],
+        "latestRuns": serialized_runs,
         "latestRunsByWorkflow": latest_runs_by_workflow,
         "topicCandidates": topic_candidates,
         "topicPillars": topic_pillars,
