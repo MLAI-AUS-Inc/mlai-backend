@@ -2,6 +2,7 @@ from django.contrib import admin
 from . import onboarding_admin  # noqa: F401 -- register the private review queue
 
 from .models import (
+    ChatRole,
     AccountDeletionRequest,
     AccountDeletionTask,
     AiConsentRecord,
@@ -15,6 +16,24 @@ from .models import (
     CommunityChatEmailCodeDelivery,
     CommunityChatInviteAudit,
 )
+
+
+@admin.register(ChatRole)
+class ChatRoleAdmin(admin.ModelAdmin):
+    """Inspect appointments; changes use the authenticated Chat owner controls."""
+
+    list_display = ("user", "role", "created_at", "updated_at")
+    search_fields = ("user__email",)
+    readonly_fields = ("user", "role", "created_at", "updated_at")
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
 
 
 @admin.register(AccountDeletionRequest)

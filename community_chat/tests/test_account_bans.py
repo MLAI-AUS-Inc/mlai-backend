@@ -33,6 +33,7 @@ from community_chat.models import (
     CommunityChatDevice,
     CommunityChatEmailCodeChallenge,
     Moderator,
+    ChatRole,
 )
 
 
@@ -40,6 +41,7 @@ class AccountBanTests(TestCase):
     def setUp(self):
         cache.clear()
         self.admin = User.objects.create_superuser("admin@example.test")
+        ChatRole.objects.create(user=self.admin, role="admin")
         self.user = User.objects.create_user(" Member@Example.Test ")
         self.devices = [
             CommunityChatDevice.objects.create(

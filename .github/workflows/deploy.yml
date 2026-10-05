@@ -359,6 +359,8 @@ jobs:
           community_chat.tests.test_slack_mentions \
           community_chat.tests.test_workspace_mentions_unit \
           community_chat.tests.test_account_bans \
+          community_chat.tests.test_chat_governance \
+          community_chat.tests.test_permissions \
           community_chat.tests.test_password_auth \
           community_chat.tests.test_slack_dm_ineligible_retirement \
           community_chat.tests.test_slack_dm_io_authority \

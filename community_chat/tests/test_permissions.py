@@ -14,6 +14,7 @@ from community_chat.models import (
     CommunityChatDevice,
     CommunityChatEmailCodeChallenge,
     Moderator,
+    ChatRole,
 )
 from community_chat.permission_views import (
     ChatModeratorView,
@@ -30,9 +31,7 @@ class ChatPermissionsTests(TestCase):
     def setUp(self):
         self.user = get_user_model().objects.create_user(email="member@example.test")
         self.admin = get_user_model().objects.create_user(email="admin@example.test")
-        PointsAdmin.objects.create(
-            user=self.admin, slack_user_id="UTESTADMIN", role="committee"
-        )
+        ChatRole.objects.create(user=self.admin, role="admin")
         self.key, self.admin_key = "a" * 64, "b" * 64
         self.device = CommunityChatDevice.objects.create(
             user=self.user, public_key=self.key, status="verified"
@@ -71,21 +70,28 @@ class ChatPermissionsTests(TestCase):
                 "can_manage_channels": False,
                 "can_manage_members": False,
                 "can_moderate": False,
+                "can_manage_admins": False,
             },
         )
 
-    def test_only_active_admin_and_committee_roles_map_to_chat_admin(self):
-        record = PointsAdmin.objects.get(user=self.admin)
+    def test_points_and_backend_roles_do_not_grant_chat_admin(self):
+        record = PointsAdmin.objects.create(
+            user=self.user, slack_user_id="UTEST", role="committee"
+        )
         for role in ("admin", "committee", "portfolio_lead", "partner"):
             record.role = role
             record.save()
             self.assertEqual(
-                chat_role(self.admin),
-                "admin" if role in ("admin", "committee") else "member",
+                chat_role(self.user),
+                "member",
             )
         record.role, record.is_active = "admin", False
         record.save()
-        self.assertEqual(chat_role(self.admin), "member")
+        self.assertEqual(chat_role(self.user), "member")
+        self.user.is_staff = self.user.is_superuser = True
+        self.user.save()
+        self.assertEqual(chat_role(self.user), "member")
+        self.assertEqual(chat_role(self.admin), "admin")
 
     def test_revocation_and_unverified_bindings_remove_authority_immediately(self):
         appointment = Moderator.objects.create(user=self.user)
@@ -142,7 +148,9 @@ class ChatPermissionsTests(TestCase):
         )
         response = view(request, public_key=self.admin_key)
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(set(response.data), {"role", "public_key", "relay_url"})
+        self.assertEqual(
+            set(response.data), {"role", "public_key", "relay_url", "protection_role"}
+        )
         self.assertEqual(response.data["role"], "admin")
         self.assertEqual(response["Cache-Control"], "no-store")
 
@@ -252,15 +260,48 @@ class ChatPermissionsTests(TestCase):
         credentials.session.installation_id = admin_device.installation_id
         credentials.session.save(update_fields=["public_key", "installation_id"])
         response = client.get(reverse("community_chat_permissions"))
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data["role"], "member")
+        self.assertEqual(response.status_code, 401)
         response = client.post(
             reverse("community_chat_moderator", kwargs={"public_key": self.key}),
             {"enabled": True},
             format="json",
         )
-        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.status_code, 401)
         self.assertFalse(Moderator.objects.exists())
+
+    @override_settings(COMMUNITY_CHAT_ALLOWED_ORIGINS=["https://chat.mlai.au"])
+    def test_admin_appointment_requires_owner_account_auth_and_cookie_origin(self):
+        from community_chat.account_cookies import ACCESS_COOKIE
+
+        ChatRole.objects.filter(user=self.admin).update(role="owner")
+        _, credentials = self.account_client(self.admin, self.admin_key)
+        url = reverse("community_chat_admin", kwargs={"public_key": self.key})
+        client = APIClient()
+        client.credentials(HTTP_AUTHORIZATION="Bearer test-role-service-" + "x" * 32)
+        self.assertEqual(
+            client.post(url, {"enabled": True}, format="json").status_code, 401
+        )
+        client.credentials()
+        client.cookies[ACCESS_COOKIE] = credentials.access_token
+        for origin in (None, "https://evil.example"):
+            kwargs = {"HTTP_ORIGIN": origin} if origin else {}
+            self.assertEqual(
+                client.post(
+                    url, {"enabled": True}, format="json", **kwargs
+                ).status_code,
+                401,
+            )
+        self.assertFalse(ChatRole.objects.filter(user=self.user).exists())
+        self.assertEqual(
+            client.post(
+                url,
+                {"enabled": True},
+                format="json",
+                HTTP_ORIGIN="https://chat.mlai.au",
+            ).status_code,
+            200,
+        )
+        self.assertEqual(chat_role(self.user), "admin")
 
     def test_account_permission_requires_matching_installation(self):
         client, credentials = self.account_client(self.admin, self.admin_key)

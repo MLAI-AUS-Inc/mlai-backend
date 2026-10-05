@@ -22,7 +22,7 @@ from .models import (
     CommunityChatBootstrapToken,
     CommunityChatDevice,
 )
-from .permissions import chat_role
+from .permissions import chat_role, appointed_chat_role, is_chat_admin
 
 logger = logging.getLogger(__name__)
 
@@ -40,15 +40,25 @@ def _audit(ban, actor, message):
 
 def ban_account(*, actor, user_id, reason=""):
     """Disable access first; keep remote revocations durable until acknowledged."""
-    if chat_role(actor) != "admin":
+    if not is_chat_admin(chat_role(actor)):
         raise PermissionDenied("Only MLAI administrators can ban accounts.")
     if not isinstance(reason, str) or len(reason) > 1000:
         raise ValidationError({"reason": "Use at most 1,000 characters."})
     with transaction.atomic():
-        user = User.objects.select_for_update().get(pk=user_id)
+        users = {
+            u.pk: u
+            for u in User.objects.select_for_update()
+            .filter(pk__in=(actor.pk, user_id))
+            .order_by("pk")
+        }
+        user = users[user_id]
+        actor_role = chat_role(users[actor.pk])
+        if not is_chat_admin(actor_role):
+            raise PermissionDenied("Only MLAI administrators can ban accounts.")
         if (
             user.pk == actor.pk
-            or chat_role(user) == "admin"
+            or appointed_chat_role(user) == "owner"
+            or (appointed_chat_role(user) == "admin" and actor_role != "owner")
             or user.is_staff
             or user.is_superuser
         ):
@@ -136,11 +146,24 @@ def process_account_ban_revocations(limit=20):
 
 def lift_account_ban(*, actor, ban_id):
     """Restore eligibility, requiring fresh login and device enrollment."""
-    if chat_role(actor) != "admin":
+    if not is_chat_admin(chat_role(actor)):
         raise PermissionDenied("Only MLAI administrators can lift account bans.")
     user_id = AccountBan.objects.values_list("user_id", flat=True).get(pk=ban_id)
     with transaction.atomic():
-        user = User.objects.select_for_update().get(pk=user_id)
+        users = {
+            u.pk: u
+            for u in User.objects.select_for_update()
+            .filter(pk__in=(actor.pk, user_id))
+            .order_by("pk")
+        }
+        user = users[user_id]
+        actor_role = chat_role(users[actor.pk])
+        if not is_chat_admin(actor_role) or (
+            is_chat_admin(appointed_chat_role(user)) and actor_role != "owner"
+        ):
+            raise PermissionDenied(
+                "Only the Chat superadmin can change an admin's access."
+            )
         ban = AccountBan.objects.select_for_update().get(pk=ban_id)
         if ban.revoked_at is not None:
             return ban

@@ -12,7 +12,7 @@ from core.models import AccountBan
 from .account_bans import ban_account, lift_account_ban
 from .authentication import CommunityChatAccountAuthentication
 from .models import CommunityChatDevice
-from .permissions import account_chat_role
+from .permissions import account_chat_role, is_chat_admin
 from .throttles import CommunityChatScopedThrottle
 
 
@@ -37,13 +37,12 @@ class AccountBanView(APIView):
     community_chat_throttle_scope = "community_chat_home"
 
     def _require_admin(self, request):
-        if (
+        if not is_chat_admin(
             account_chat_role(
                 request.user,
                 request.community_chat_public_key,
                 request.community_chat_installation_id,
             )
-            != "admin"
         ):
             raise PermissionDenied("Only MLAI administrators can manage account bans.")
 

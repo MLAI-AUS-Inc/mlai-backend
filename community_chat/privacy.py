@@ -97,6 +97,12 @@ def request_account_deletion(*, authenticated_session, scope, policy_version):
     if scope not in AccountDeletionRequest.Scope.values or policy_version != policy["version"]:
         raise ValidationError({"code": "deletion_policy_changed", "detail": "Reload the deletion information."})
     with locked_privacy_session(authenticated_session) as (user, session):
+        from .permissions import appointed_chat_role
+        if appointed_chat_role(user) == "owner":
+            raise PermissionDenied({
+                "code": "chat_ownership_transfer_required",
+                "detail": "Transfer Chat ownership before requesting account or Chat deletion.",
+            })
         existing = AccountDeletionRequest.objects.filter(user=user, scope=scope).exclude(
             status=AccountDeletionRequest.Status.COMPLETED,
         ).first()

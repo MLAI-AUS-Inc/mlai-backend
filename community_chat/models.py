@@ -95,6 +95,36 @@ class AiConsentRecord(models.Model):
         constraints = [models.UniqueConstraint(fields=("user", "purpose"), name="chat_ai_consent_purpose")]
 
 
+class ChatRole(models.Model):
+    """Explicit Chat authority, independent of staff, superusers and Roo roles."""
+
+    class Role(models.TextChoices):
+        OWNER = "owner", "Superadmin"
+        ADMIN = "admin", "Admin"
+
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="chat_role_appointment",
+    )
+    role = models.CharField(max_length=16, choices=Role.choices)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=("role",), condition=Q(role="owner"), name="chat_single_owner"
+            ),
+            models.CheckConstraint(
+                check=Q(role__in=("owner", "admin")), name="chat_valid_role"
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.user_id} ({self.get_role_display()})"
+
+
 class Moderator(models.Model):
     """Chat-only appointment: channel creation and channel-wide announcements.
 
