@@ -135,6 +135,7 @@ from content_factory.vibe_marketing_workflows import (
     DISCOVERY_WORKFLOWS,
     VIBE_MARKETING_WORKFLOWS,
 )
+from founder_tools.profile_fields import company_avatar_url
 from founder_tools.models import VibeRaisingCompany
 from founder_tools.services import (
     CompanyDomainChangeBlocked,
@@ -601,7 +602,7 @@ def _resolve_context_or_response(request, *, require_domain=True):
             return None, Response({"detail": str(exc) or "Company domain is required."}, status=status.HTTP_400_BAD_REQUEST)
         return None, Response({"detail": str(exc) or "Unable to resolve company."}, status=status.HTTP_400_BAD_REQUEST)
 
-    if require_domain and not context.organization.domain:
+    if require_domain and not normalize_company_domain(context.company.domain):
         return None, Response({"detail": "Company domain is required."}, status=status.HTTP_400_BAD_REQUEST)
     return context, None
 
@@ -7384,10 +7385,14 @@ def _google_baseline_connect_url(request, context=None):
 
 
 def _serialize_startup_profile(organization):
+    from founder_tools.profile_fields import profile_details
+
+    extra = profile_details(organization)
     try:
         profile = organization.startup_profile
     except Exception:
         return {
+            **extra,
             "shortDescription": "",
             "problemSolved": "",
             "targetAudience": "",
@@ -7399,6 +7404,7 @@ def _serialize_startup_profile(organization):
             "domainAliases": [],
         }
     return {
+        **extra,
         "shortDescription": profile.short_description,
         "problemSolved": profile.problem_solved,
         "targetAudience": profile.target_audience,
@@ -11217,8 +11223,8 @@ def _compute_bootstrap_payload(context, request=None, *, view="full", config=Non
             "acn": getattr(context.company, "acn", None),
             "abrVerifiedAt": context.company.abr_verified_at.isoformat() if getattr(context.company, "abr_verified_at", None) else None,
             "registrationVerification": company_registration_status(context.company),
-            "avatarUrl": context.company.avatar_url,
-            "avatar_url": context.company.avatar_url,
+            "avatarUrl": company_avatar_url(context.company),
+            "avatar_url": company_avatar_url(context.company),
             "organizationId": context.organization.id,
             "companyLinkedInUrl": context.organization.company_linkedin_url,
         },
@@ -11304,7 +11310,7 @@ def _serialize_bootstrap_without_domain(company):
         "dailyAutomation": {"passed": False},
     }
     guided_steps, current_guided_step = _guided_steps(checks)
-    return {
+    payload = {
         "company": {
             "id": str(company.id),
             "name": company.name,
@@ -11314,8 +11320,8 @@ def _serialize_bootstrap_without_domain(company):
             "acn": getattr(company, "acn", None),
             "abrVerifiedAt": company.abr_verified_at.isoformat() if getattr(company, "abr_verified_at", None) else None,
             "registrationVerification": company_registration_status(company),
-            "avatarUrl": company.avatar_url,
-            "avatar_url": company.avatar_url,
+            "avatarUrl": company_avatar_url(company),
+            "avatar_url": company_avatar_url(company),
             "organizationId": None,
             "companyLinkedInUrl": "",
         },
@@ -11396,6 +11402,24 @@ def _serialize_bootstrap_without_domain(company):
         "hasCompletedArticleFlow": False,
         "startPageMode": "first_article_setup",
     }
+
+    # Name-only startups retain profile/context under their synthetic organization.
+    # The website-dependent capability gates above remain closed.
+    organization = company.organization if company.organization_id else None
+    if organization is not None:
+        from founder_tools.serializers import _serialize_marketing_settings
+        payload["startupProfile"].update(_serialize_startup_profile(organization) or {})
+        saved_settings = _serialize_marketing_settings(organization) or {}
+        payload["settings"].update(saved_settings)
+        payload["settings"]["githubConnectionState"] = "missing_domain"
+        payload["settings"]["articleDeliveryModeEffective"] = "content_only"
+        payload["company"].update({"organizationId": organization.pk,
+            "companyLinkedInUrl": organization.company_linkedin_url or ""})
+        payload["organization"].update({"id": organization.pk,
+            "companyLinkedInUrl": organization.company_linkedin_url or "",
+            "competitors": list(organization.competitors or []),
+            "seedKeywords": list(organization.seed_keywords or [])})
+    return payload
 
 
 def _timed_vibe_response(payload, *, started_at, metric_name, view=None, response_status=status.HTTP_200_OK):
@@ -13377,6 +13401,8 @@ def _autofill_start_payload(run):
         "status": run.status,
         "error": error,
         "errors": errors,
+        "costPoints": 0,
+        "charged": False,
     }
 
 
@@ -14090,80 +14116,59 @@ class VibeMarketingCompanyAvatarView(APIView):
     parser_classes = (MultiPartParser, FormParser)
     max_avatar_size_bytes = 10 * 1024 * 1024
 
+    def _company(self, request):
+        if not _company_id_from_request(request):
+            return None, Response({"detail": "Choose a startup.", "field": "companyId"}, status=400)
+        _profile, company, error = _resolve_profile_company_or_response(request)
+        if error:
+            return None, error
+        from founder_tools.services import user_may_use_organization
+        if company.organization_id and not user_may_use_organization(request.user, company.organization):
+            return None, Response({"detail": "Only this startup's organization owner can change its shared logo."}, status=403)
+        return company, None
+
+    @staticmethod
+    def _response(company):
+        return Response({"company": {"id": str(company.id), "name": company.name,
+                        "domain": company.domain, "avatarUrl": company.avatar_url or "",
+                        "avatar_url": company.avatar_url or ""}}, status=200)
+
     def post(self, request):
-        if not request.user or not request.user.is_authenticated:
-            return Response({"detail": "Authentication credentials were not provided."}, status=status.HTTP_401_UNAUTHORIZED)
-
-        _profile, company, error_response = _resolve_profile_company_or_response(request)
-        if error_response:
-            return error_response
-
+        company, error = self._company(request)
+        if error:
+            return error
         avatar_file = request.FILES.get("avatar")
         if not avatar_file:
-            return Response({"detail": "Upload an avatar image."}, status=status.HTTP_400_BAD_REQUEST)
-        if getattr(avatar_file, "size", 0) > self.max_avatar_size_bytes:
-            return Response({"detail": "Avatar image must be 10MB or smaller."}, status=status.HTTP_400_BAD_REQUEST)
-
+            return Response({"detail": "Upload a logo image."}, status=400)
+        from founder_tools.logo_images import encode_company_logo
+        from founder_tools.profile_fields import save_company_branding
         try:
-            from PIL import Image, ImageOps, UnidentifiedImageError
+            output = encode_company_logo(avatar_file)
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=400)
         except ImportError:
-            logger.exception("Pillow is unavailable for company avatar upload")
-            return Response({"detail": "Avatar upload is temporarily unavailable."}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
-
+            logger.exception("Pillow is unavailable for company logo upload")
+            return Response({"detail": "Logo upload is temporarily unavailable."}, status=503)
         try:
-            image = Image.open(avatar_file)
-            image = ImageOps.exif_transpose(image)
-            resampling = getattr(getattr(Image, "Resampling", Image), "LANCZOS", Image.LANCZOS)
-            image.thumbnail((512, 512), resampling)
-            if image.mode in {"RGBA", "LA", "P"}:
-                background = Image.new("RGB", image.size, (255, 255, 255))
-                if image.mode == "P":
-                    image = image.convert("RGBA")
-                alpha = image.getchannel("A") if "A" in image.getbands() else None
-                background.paste(image.convert("RGB"), mask=alpha)
-                image = background
-            elif image.mode != "RGB":
-                image = image.convert("RGB")
-
-            output_buffer = BytesIO()
-            image.save(output_buffer, format="JPEG", quality=90, optimize=True)
-            output_buffer.seek(0)
-        except (UnidentifiedImageError, OSError, ValueError):
-            return Response({"detail": "Upload a valid image file."}, status=status.HTTP_400_BAD_REQUEST)
-
-        try:
+            from uuid import uuid4
             from core.firebase_utils import upload_file_to_storage
-
-            destination_path = f"company-avatars/{company.id}_{int(timezone.now().timestamp())}.jpg"
-            avatar_url = upload_file_to_storage(output_buffer, destination_path, content_type="image/jpeg")
+            destination = f"company-avatars/{company.id}/{uuid4().hex}.png"
+            avatar_url = upload_file_to_storage(output, destination, content_type="image/png")
+            if not avatar_url:
+                raise ValueError("Storage returned no logo URL")
         except Exception:
             logger.exception("company_avatar_upload_failed company_id=%s user_id=%s", company.id, request.user.id)
-            return Response({"detail": "Avatar upload failed. Please try again."}, status=status.HTTP_502_BAD_GATEWAY)
+            return Response({"detail": "Logo upload failed. Please try again."}, status=502)
+        save_company_branding(company, request.user, avatar_url)
+        return self._response(company)
 
-        company.avatar_url = avatar_url
-        company.save(update_fields=["avatar_url", "updated_at"])
-
-        try:
-            if not normalize_company_domain(company.domain):
-                return Response(_serialize_bootstrap_without_domain(company), status=status.HTTP_200_OK)
-            context, error_response = _resolve_context_or_response(request, require_domain=True)
-            if error_response:
-                return error_response
-            return Response(_serialize_bootstrap(context, request=request, view="summary"), status=status.HTTP_200_OK)
-        except Exception:
-            logger.exception("company_avatar_bootstrap_refresh_failed company_id=%s user_id=%s", company.id, request.user.id)
-            return Response(
-                {
-                    "company": {
-                        "id": str(company.id),
-                        "name": company.name,
-                        "domain": company.domain,
-                        "avatarUrl": company.avatar_url,
-                        "avatar_url": company.avatar_url,
-                    }
-                },
-                status=status.HTTP_200_OK,
-            )
+    def delete(self, request):
+        company, error = self._company(request)
+        if error:
+            return error
+        from founder_tools.profile_fields import save_company_branding
+        save_company_branding(company, request.user, "")
+        return self._response(company)
 
 
 class VibeMarketingTopicFeedbackView(APIView):
@@ -14510,6 +14515,13 @@ class VibeMarketingWrittenArticleDiscardView(APIView):
 
 class VibeMarketingSettingsView(APIView):
     def put(self, request):
+        from founder_tools.profile_fields import validate_profile_fields
+        from rest_framework.exceptions import ValidationError
+
+        validate_profile_fields(request.data)
+        mode = request.data.get("articleDeliveryMode", request.data.get("article_delivery_mode"))
+        if mode is not None and mode not in {"review_draft", "publish_code", "content_only"}:
+            raise ValidationError({"articleDeliveryMode": "Choose a supported article delivery mode."})
         saved = self._save_settings(request)
         if isinstance(saved, Response):
             return saved
@@ -14538,6 +14550,7 @@ class VibeMarketingSettingsView(APIView):
                     confirmed=_request_flag(request, "confirm_domain_change", "confirmDomainChange"),
                 )
             except CompanyDomainChangeBlocked as exc:
+                transaction.set_rollback(True)
                 return Response(
                     {
                         "detail": str(exc),
@@ -14564,6 +14577,7 @@ class VibeMarketingSettingsView(APIView):
             company.save()
             organization = ensure_company_organization(company)
         else:
+            transaction.set_rollback(True)
             return Response({"detail": "Domain is required before saving Vibe Marketing settings."}, status=status.HTTP_400_BAD_REQUEST)
 
         if request.data.get("brand_name") or request.data.get("brandName"):
@@ -14576,6 +14590,7 @@ class VibeMarketingSettingsView(APIView):
                     request.data.get("company_linkedin_url", request.data.get("companyLinkedInUrl"))
                 )
             except ValueError as exc:
+                transaction.set_rollback(True)
                 return Response({"detail": str(exc), "field": "companyLinkedInUrl"}, status=status.HTTP_400_BAD_REQUEST)
 
         if "competitors" in request.data:
@@ -14585,7 +14600,7 @@ class VibeMarketingSettingsView(APIView):
         organization.save(update_fields=["competitors", "seed_keywords", "company_linkedin_url"])
 
         config = _get_config(organization)
-        _assign_config_actor(config, request.user)
+        config_fields = _assign_config_actor(config, request.user)
         config.brand_name = request.data.get("brand_name", request.data.get("brandName", config.brand_name))
         config.company_context = request.data.get("company_context", request.data.get("companyContext", config.company_context))
         requested_repo = str(request.data.get("github_repo", request.data.get("githubRepo", config.github_repo)) or "").strip()
@@ -14613,6 +14628,11 @@ class VibeMarketingSettingsView(APIView):
                 request.data.get("default_author_id", request.data.get("defaultAuthorId")) or ""
             ).strip()
         if daily_enabled_submitted and config.daily_discovery_enabled:
+            quote_error = _quoted_price_response(request,
+                cost_points=get_content_factory_research_cost_points(organization.domain, 3))
+            if quote_error is not None:
+                transaction.set_rollback(True)
+                return quote_error
             checks = _profile_checks(
                 organization,
                 config,
@@ -14620,11 +14640,25 @@ class VibeMarketingSettingsView(APIView):
                 _latest_baseline_snapshot(organization),
             )
             if not checks["dailyAutomation"]["passed"]:
+                transaction.set_rollback(True)
                 return Response(
                     {"detail": "Daily generation prerequisites are not complete.", "checks": checks},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
-        config.save()
+        field_aliases = {
+            "brand_name": ("brand_name", "brandName"),
+            "company_context": ("company_context", "companyContext"),
+            "github_repo": ("github_repo", "githubRepo"),
+            "article_delivery_mode": ("article_delivery_mode", "articleDeliveryMode"),
+            "daily_discovery_enabled": ("daily_discovery_enabled", "dailyDiscoveryEnabled"),
+            "default_timezone": ("default_timezone", "defaultTimezone"),
+            "authors": ("authors", "authorsData"),
+            "default_author_id": ("default_author_id", "defaultAuthorId"),
+        }
+        config_fields.extend(field for field, aliases in field_aliases.items()
+                             if any(alias in request.data for alias in aliases))
+        if config_fields:
+            config.save(update_fields=list(dict.fromkeys([*config_fields, "updated_at"])))
         if daily_enabled_submitted:
             # Keep the channel-backed automation in lock-step with the legacy
             # boolean so the two daily schedulers never disagree.
@@ -14663,11 +14697,15 @@ class VibeMarketingAutofillView(APIView):
         company_name = str(request.data.get("company_name") or request.data.get("companyName") or "").strip()
         domain = normalize_company_domain(request.data.get("domain"))
         draft_mode = _request_flag(request, "draft_mode", "draftMode")
+        draft_only = _request_flag(request, "draft_only", "draftOnly")
+        if draft_only:
+            from content_factory.startup_research_draft import research_draft_values
+            research_draft_values(request.data)
         if not company_name:
             return Response({"detail": "Company name is required for autofill."}, status=status.HTTP_400_BAD_REQUEST)
         if not domain:
             return Response({"detail": "Website domain is required for autofill."}, status=status.HTTP_400_BAD_REQUEST)
-        if draft_mode and not str(request.data.get("location") or "").strip():
+        if draft_mode and not draft_only and not str(request.data.get("location") or "").strip():
             return Response(
                 {"detail": "Startup location is required to draft your profile.", "field": "location"},
                 status=status.HTTP_400_BAD_REQUEST,
@@ -14687,6 +14725,9 @@ class VibeMarketingAutofillView(APIView):
             return gate_response
 
         with transaction.atomic():
+            if draft_only:
+                from founder_tools.profile_fields import lock_research_profile
+                profile = lock_research_profile(profile)
             company_id = _company_id_from_request(request)
             create_new = _request_flag(request, "create_new", "createNew")
             confirm_domain_change = _request_flag(request, "confirm_domain_change", "confirmDomainChange")
@@ -14706,6 +14747,10 @@ class VibeMarketingAutofillView(APIView):
             # an explicit confirmation (or create_new to register a sibling).
             if company is not None:
                 existing_domain = normalize_company_domain(company.domain)
+                if draft_only and existing_domain != domain:
+                    return Response({"detail": "Save the changed website before researching this startup.",
+                                     "code": "startup_research_domain_unsaved", "field": "domain"},
+                                    status=status.HTTP_409_CONFLICT)
                 if existing_domain and existing_domain != domain and not confirm_domain_change:
                     return Response(
                         {
@@ -14729,15 +14774,16 @@ class VibeMarketingAutofillView(APIView):
                     profile, domain, exclude_company_id=company.id if company else None
                 )
             except DuplicateCompanyDomainError as exc:
-                return Response(
-                    {
-                        "detail": str(exc),
-                        "code": "duplicate_company_domain",
-                        "field": "domain",
-                        "companyId": str(exc.existing_company.id),
-                    },
-                    status=status.HTTP_409_CONFLICT,
-                )
+                from founder_tools.profile_fields import is_research_workspace
+                if draft_only and create_new and is_research_workspace(exc.existing_company):
+                    # Recover the same owned hidden workspace if a start response
+                    # was lost. Never adopt a saved startup via createNew.
+                    company = exc.existing_company
+                else:
+                    return Response(
+                        {"detail": str(exc), "code": "duplicate_company_domain", "field": "domain",
+                         "companyId": str(exc.existing_company.id)}, status=status.HTTP_409_CONFLICT,
+                    )
 
             if company is None:
                 company = VibeRaisingCompany.objects.create(
@@ -14747,9 +14793,20 @@ class VibeMarketingAutofillView(APIView):
                     location=str(request.data.get("location") or "").strip(),
                     abn=None if draft_mode else str(request.data.get("abn") or "").strip() or None,
                 )
-                profile.active_company = company
-                profile.save(update_fields=["active_company", "updated_at"])
-            else:
+                if not draft_only:
+                    profile.active_company = company
+                    profile.save(update_fields=["active_company", "updated_at"])
+                else:
+                    # Research needs an owned workspace for run scoping. It is
+                    # not a saved startup until the profile is explicitly saved.
+                    organization = ensure_company_organization(company)
+                    config = _get_config(organization)
+                    from founder_tools.profile_fields import PROFILE_KEY
+                    strategy = dict(config.pillar_strategy or {})
+                    strategy[PROFILE_KEY] = {**(strategy.get(PROFILE_KEY) or {}), "researchDraft": True}
+                    config.pillar_strategy = strategy
+                    config.save(update_fields=["pillar_strategy", "updated_at"])
+            elif not draft_only:
                 # The founder confirmed this domain change (or it is unchanged):
                 # rename the org in place when safe so connections/runs/updates
                 # follow; a confirmed re-point is logged as stranding.
@@ -14776,23 +14833,25 @@ class VibeMarketingAutofillView(APIView):
 
             organization = ensure_company_organization(company)
             if organization is None:
+                transaction.set_rollback(True)
                 return Response({"detail": "Website domain is required for autofill."}, status=status.HTTP_400_BAD_REQUEST)
 
-            if not draft_mode:
-                try:
+            try:
+                if not draft_only and not draft_mode:
                     apply_shared_startup_details(user=request.user, company=company, data=request.data)
-                except ValueError as exc:
-                    return Response({"detail": str(exc), "field": "companyLinkedInUrl"}, status=status.HTTP_400_BAD_REQUEST)
+            except ValueError as exc:
+                transaction.set_rollback(True)
+                return Response({"detail": str(exc), "field": "companyLinkedInUrl"}, status=status.HTTP_400_BAD_REQUEST)
 
         context = get_founder_company_context(
-            request.user, company_id=company.id, persist_active=True
+            request.user, company_id=company.id, persist_active=not draft_only
         )
         company = context.company
         organization = context.organization
         config = _get_config(organization)
         actor_id = founder_actor_id_for_user(request.user)
         active_run = _active_startup_autofill_run_for_domain(organization.domain)
-        if active_run is not None:
+        if active_run is not None and not draft_only:
             return _autofill_start_response(
                 active_run, reused_active_run=True, research_company_id=company.id
             )
@@ -14813,6 +14872,7 @@ class VibeMarketingAutofillView(APIView):
             try:
                 existing_fields = _autofill_draft_existing_fields(existing_fields, request.data)
             except ValueError as exc:
+                transaction.set_rollback(True)
                 return Response({"detail": str(exc), "field": "companyLinkedInUrl"}, status=status.HTTP_400_BAD_REQUEST)
         payload = {
             "domain": organization.domain,
@@ -14837,6 +14897,19 @@ class VibeMarketingAutofillView(APIView):
             "requested_by_slack_user_id": actor_id,
             "request_source": CONTENT_FACTORY_REQUEST_SOURCE,
         }
+        if draft_only:
+            from content_factory.startup_research_draft import research_draft_payload
+            payload = research_draft_payload(payload, request.data)
+            if create_new:
+                payload["client_request_id"] = f"startup-profile-draft:{company.id}:{payload['draft_fingerprint']}"
+            if active_run is not None:
+                saved_request = active_run.run_request if isinstance(active_run.run_request, dict) else {}
+                if saved_request.get("draft_fingerprint") == payload["draft_fingerprint"]:
+                    return _autofill_start_response(active_run, reused_active_run=True, research_company_id=company.id)
+                return Response({"detail": "Research is already running for this startup. Wait for it to finish before researching a new draft.",
+                    "code": "startup_research_in_progress", "runId": active_run.run_id,
+                    "researchCompanyId": str(company.id), "companyId": str(company.id)}, status=status.HTTP_409_CONFLICT)
+
         if draft_mode:
             # Profile drafts use the worker's faster evidence-grounded pass.
             # Generated answers remain reviewable client drafts until Save.

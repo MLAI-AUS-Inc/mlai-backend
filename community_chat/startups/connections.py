@@ -1,7 +1,7 @@
 """Single-use company-bound browser handoff into existing provider OAuth."""
 import hashlib
 import secrets
-from urllib.parse import urlencode
+from urllib.parse import parse_qs, urlencode, urlsplit
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.core import signing
@@ -40,6 +40,30 @@ def consume_ticket(ticket):
     return payload
 
 
+def github_settings_return(value, company_id):
+    """Keep GitHub consent in its editor, with an owned website setup return."""
+    if not isinstance(value, str) or len(value) > 2000:
+        return None
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return None
+    query = parse_qs(parsed.query)
+    if parsed.path != "/my-startup/connections/github" or query.get("company_id") != [str(company_id)]:
+        return None
+    target = {"company_id": str(company_id)}
+    try:
+        previous = urlsplit(query.get("returnTo", [""])[0])
+    except ValueError:
+        previous = urlsplit("")
+    previous_query = parse_qs(previous.query)
+    step = previous_query.get("step", [""])[0]
+    if (not previous.scheme and not previous.netloc and previous.path == "/my-startup/onboarding"
+            and previous_query.get("company_id") == [str(company_id)] and step in {"repository", "articles"}):
+        target["returnTo"] = "/my-startup/onboarding?" + urlencode({"step": step, "company_id": str(company_id)})
+    return "/my-startup/connections/github?" + urlencode(target)
+
+
 class ConnectView(ChatStartupAccess, APIView):
     def post(self, request, provider):
         provider = PROVIDER_ALIASES.get(provider, provider)
@@ -55,6 +79,7 @@ class ConnectView(ChatStartupAccess, APIView):
         ticket = signing.dumps({"uid": request.user.pk, "company": str(self.company.pk),
             "session": str(request.auth.pk), "provider": provider,
             "return_to": getattr(request, "data", {}).get("returnTo") if getattr(request, "data", {}).get("returnTo") in {"mobile", "desktop-dev"} else None,
+            "github_settings_return": github_settings_return(getattr(request, "data", {}).get("returnUrl"), self.company.pk) if provider == "github" else None,
             "nonce": secrets.token_urlsafe(24)}, salt=SALT)
         url = request.build_absolute_uri(reverse("chat_startups_connect_browser"))
         return Response({"authorizationUrl": f"{url}?{urlencode({'ticket': ticket})}"})
@@ -106,6 +131,9 @@ def connect_browser(request):
     query = QueryDict(mutable=True)
     frontend = settings.COMMUNITY_CHAT_FRONTEND_URL.rstrip("/")
     return_url = f"{frontend}/my-startup/connections?" + urlencode({"company_id": str(company.pk), "connected": provider})
+    editor_return = github_settings_return(payload.get("github_settings_return"), company.pk)
+    if provider == "github" and editor_return:
+        return_url = f"{frontend}{editor_return}"
     if payload.get("return_to") in {"mobile", "desktop-dev"}:
         scheme = "mlaichat-dev" if payload["return_to"] == "desktop-dev" else "mlaichat"
         return_url = f"{scheme}://connections?" + urlencode({"company_id": str(company.pk), "provider": provider})

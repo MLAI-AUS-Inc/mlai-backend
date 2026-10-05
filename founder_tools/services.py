@@ -496,6 +496,9 @@ def ensure_company_organization(company: VibeRaisingCompany) -> Organization | N
 
 @transaction.atomic
 def apply_shared_startup_details(*, user, company: VibeRaisingCompany, data: dict) -> Organization | None:
+    from founder_tools.profile_fields import validate_profile_fields, save_profile_details
+
+    data = validate_profile_fields(data)
     organization = ensure_company_organization(company)
     if organization is None:
         return None
@@ -645,6 +648,7 @@ def apply_shared_startup_details(*, user, company: VibeRaisingCompany, data: dic
         startup_update_fields.append("updated_at")
         startup_profile.save(update_fields=startup_update_fields)
 
+    save_profile_details(organization, data, config=config)
     bind_user_to_startup(user=user, organization=organization, role="founder", is_default_for_gmail=True)
     return organization
 
@@ -670,7 +674,8 @@ def set_active_company(profile: VibeRaisingProfile, company: VibeRaisingCompany)
 
 @transaction.atomic
 def resolve_active_company(profile: VibeRaisingProfile) -> VibeRaisingCompany | None:
-    company = profile.active_company or profile.companies.order_by("created_at", "name").first()
+    from founder_tools.profile_fields import visible_companies
+    company = profile.active_company or visible_companies(profile.companies.all()).order_by("created_at", "name").first()
     if company and profile.active_company_id != company.id:
         profile.active_company = company
         profile.save(update_fields=["active_company", "updated_at"])
