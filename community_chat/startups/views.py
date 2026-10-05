@@ -9,7 +9,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from community_chat.authentication import CommunityChatAccountAuthentication
-from community_chat.throttles import CommunityChatScopedThrottle
+from community_chat.throttles import StartupThrottleMixin
 from founder_tools.models import VibeRaisingCompany
 from founder_tools.serializers import FounderProfileSerializer
 from founder_tools.services import get_or_create_founder_profile
@@ -30,12 +30,10 @@ def enabled():
     return bool(getattr(settings, "COMMUNITY_CHAT_STARTUP_UPDATES_ENABLED", False))
 
 
-class ChatStartupAccess:
+class ChatStartupAccess(StartupThrottleMixin):
     """Accept only revocable Chat sessions and require explicit company ownership."""
     authentication_classes = (CommunityChatAccountAuthentication,)
     permission_classes = (IsAuthenticated,)
-    throttle_classes = (CommunityChatScopedThrottle,)
-    community_chat_throttle_scope = "community_chat_home"
     requires_company = True
 
     def initial(self, request, *args, **kwargs):
@@ -67,6 +65,7 @@ class ChatStartupAccess:
 
 
 class BootstrapView(ChatStartupAccess, APIView):
+    startup_read_bucket = "bootstrap"
     requires_company = False
 
     def get(self, request):
@@ -210,6 +209,8 @@ class GenerateView(ChatStartupAccess, founder.VibeRaisingEmailDraftStartView):
 
 
 class ActiveRunView(ChatStartupAccess, founder.VibeRaisingEmailDraftActiveRunView):
+    startup_read_bucket = "poll"
+
     def get(self, request):
         response = super().get(request)
         # DRF renders Response(None) as an empty body. Chat's query client
@@ -220,7 +221,7 @@ class ActiveRunView(ChatStartupAccess, founder.VibeRaisingEmailDraftActiveRunVie
 
 
 class RunView(ChatStartupAccess, founder.VibeRaisingEmailDraftStatusView):
-    pass
+    startup_read_bucket = "poll"
 
 
 class ResultsView(ChatStartupAccess, founder.VibeRaisingEmailDraftResultsView):

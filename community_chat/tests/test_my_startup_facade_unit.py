@@ -11,6 +11,7 @@ from rest_framework.test import APIRequestFactory, force_authenticate
 from community_chat import my_startup_views as views
 from content_factory.website_contract import WebsiteAuthorityError
 from founder_tools.my_startup.api import MyStartupAuthentication
+from community_chat.throttles import StartupScopedThrottle
 
 COMPANY = "12345678-1234-1234-1234-123456789abc"
 OTHER = "abcdefab-1234-1234-1234-123456789abc"
@@ -28,7 +29,7 @@ class MyStartupFacadeTests(SimpleTestCase):
         patcher = patch.object(views.VibeRaisingCompany.objects, "select_related")
         patcher.start()
         self.addCleanup(patcher.stop)
-        patcher = patch.object(views.CommunityChatScopedThrottle, "allow_request", return_value=True)
+        patcher = patch.object(StartupScopedThrottle, "allow_request", return_value=True)
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -135,7 +136,7 @@ class MyStartupFacadeTests(SimpleTestCase):
                     actual = resolve("/api/v1/my-startup/" + route + slash).func.view_class
                     self.assertIs(actual, expected)
                     self.assertEqual(actual.authentication_classes, (MyStartupAuthentication,))
-                    self.assertEqual(actual.throttle_classes, (views.CommunityChatScopedThrottle,))
+                    self.assertIn(StartupScopedThrottle, [type(item) for item in actual().get_throttles()])
                     self.assertTrue(actual.requires_company)
         self.assertIs(resolve("/api/v1/vibe-marketing/website-connection/reset").func.view_class,
                       views.websites.WebsiteConnectionActionView)

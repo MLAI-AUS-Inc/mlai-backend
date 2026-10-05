@@ -8,6 +8,7 @@ from rest_framework.permissions import IsAuthenticated
 
 from community_chat.account_sessions import ACCESS_TOKEN_PREFIX
 from community_chat.authentication import CommunityChatAccountAuthentication
+from community_chat.throttles import StartupThrottleMixin
 
 from .links import API_PREFIX, rewrite_payload
 
@@ -22,7 +23,7 @@ class MyStartupAuthentication(CommunityChatAccountAuthentication):
         return super().authenticate(request)
 
 
-class MyStartupViewMixin:
+class MyStartupViewMixin(StartupThrottleMixin):
     authentication_classes = (MyStartupAuthentication,)
 
     def dispatch(self, request, *args, **kwargs):
@@ -79,12 +80,21 @@ class MyStartupViewMixin:
 
 def startup_view(view_class, initkwargs=None):
     """Reuse a reviewed APIView without mutating its legacy authentication."""
+    bootstrap_views = {
+        "CurrentUserView", "CurrentUserBalanceView", "FounderToolsBootstrapView",
+        "FounderToolsProfileView", "VibeMarketingBootstrapView",
+    }
+    poll_views = {"VibeMarketingRunView", "VibeMarketingResearchAutomationRunStatusView"}
+    read_bucket = "bootstrap" if view_class.__name__ in bootstrap_views else (
+        "poll" if view_class.__name__ in poll_views else "read"
+    )
     adapted = type(
         f"MyStartup{view_class.__name__}",
         (MyStartupViewMixin, view_class),
         {
             "__module__": __name__,
             "__doc__": f"Chat account adapter for {view_class.__name__}.",
+            "startup_read_bucket": read_bucket,
         },
     )
     return adapted.as_view(**(initkwargs or {}))

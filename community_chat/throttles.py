@@ -10,6 +10,33 @@ class CommunityChatScopedThrottle(ScopedRateThrottle):
     scope_attr = "community_chat_throttle_scope"
 
 
+class StartupScopedThrottle(ScopedRateThrottle):
+    """Bound startup work per account without consuming Chat's home budget."""
+
+    scope_attr = "startup_throttle_scope"
+
+
+class StartupThrottleMixin:
+    """Keep page loading, other reads, polling and mutations in bounded buckets.
+
+    ScopedRateThrottle keys authenticated requests by account, so selecting
+    another company or device cannot replenish a bucket. Domain throttles are
+    additive: an expensive operation keeps its original restrictions.
+    """
+
+    startup_read_bucket = "read"
+
+    @property
+    def startup_throttle_scope(self):
+        """Choose a trusted operation bucket; client parameters cannot alter it."""
+        bucket = self.startup_read_bucket if self.request.method in ("GET", "HEAD", "OPTIONS") else "write"
+        return f"my_startup_{bucket}"
+
+    def get_throttles(self):
+        """Add the account budget while retaining the owning API's throttles."""
+        return [*super().get_throttles(), StartupScopedThrottle()]
+
+
 class SlackSnapshotDeviceThrottle(CommunityChatScopedThrottle):
     """Bound snapshot polling per authenticated device, independently of writes."""
 
