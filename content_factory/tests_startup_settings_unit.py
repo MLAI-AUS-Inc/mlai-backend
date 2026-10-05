@@ -25,6 +25,9 @@ class RepositorySelectionTests(SimpleTestCase):
         self.config._meta.get_field.return_value.get_default.return_value = None
         self.config.objects.select_for_update.return_value.get.return_value = self.config
         self.context = Obj(organization=Obj(pk=2))
+        patcher = patch.object(repositories.Organization.objects, "select_for_update")
+        self.organization_lock = patcher.start()
+        self.addCleanup(patcher.stop)
         for name in ("bind_website", "transition_connection", "contract_for"):
             patcher = patch.object(repositories, name)
             setattr(self, name, patcher.start())
@@ -78,10 +81,17 @@ class RepositorySelectionTests(SimpleTestCase):
         self.assertFalse(response.data["requiresVerification"])
 
     def test_reselect_same_repo_keeps_existing_setup(self):
+        self.config.website_connection_id = 42
         response = self.call("old/site")
         self.assertFalse(response.data["repositoryChanged"])
         self.reset.assert_not_called()
         self.config.save.assert_not_called()
+
+    def test_legacy_repository_without_connection_binds_before_reverification(self):
+        response = self.call("old/site")
+        self.bind_website.assert_called_once()
+        self.organization_lock.return_value.get.assert_called_once_with(pk=2)
+        self.assertTrue(response.data["requiresVerification"])
 
     def test_unlink_revokes_existing_connection_generation(self):
         self.config.website_connection_id = 42
