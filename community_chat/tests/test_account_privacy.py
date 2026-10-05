@@ -15,7 +15,7 @@ from rest_framework.test import APIClient
 from rest_framework.exceptions import AuthenticationFailed
 
 from community_chat.account_sessions import rotate_account_session
-from community_chat.models import AccountDeletionRequest, AiConsentRecord, CommunityChatAccountSession
+from community_chat.models import AccountDeletionRequest, AiConsentRecord, CommunityChatAccountSession, ChatRole
 from community_chat.privacy import ai_disclosure, has_ai_consent, set_ai_consent, request_account_deletion
 from community_chat.tests.test_account_profiles import credentials_for, ORIGIN
 from integrations.services.slack_dm_mirror import _verify_ai_recipients_before_send, SlackDmMirrorAuthorizationError
@@ -112,6 +112,14 @@ class AccountPrivacyTests(TestCase):
         self.assertEqual(AccountDeletionRequest.objects.count(), 1)
         self.user.refresh_from_db()
         self.assertTrue(self.user.is_active)
+
+    def test_owner_must_transfer_ownership_before_account_or_chat_deletion(self):
+        ChatRole.objects.create(user=self.user, role="owner")
+        for scope in ("shared_mlai_account", "chat_data"):
+            response = self.deletion(scope=scope)
+            self.assertEqual(response.status_code, 403)
+            self.assertEqual(response.data["code"], "chat_ownership_transfer_required")
+        self.assertFalse(AccountDeletionRequest.objects.exists())
 
     def test_new_deletion_requires_recent_sign_in_not_token_refresh(self):
         CommunityChatAccountSession.objects.filter(pk=self.credentials.session.pk).update(created_at=timezone.now()-timedelta(minutes=11))

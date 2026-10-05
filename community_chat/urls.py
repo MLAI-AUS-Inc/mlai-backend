@@ -3,7 +3,7 @@ from .apple_iap_views import AppleIapView, AppleIapTransactionView, AppleIapNoti
 from .privacy_views import AccountDeletionView, AiConsentView
 from .onboarding_views import MemberOnboardingView
 from .account_ban_views import AccountBanView
-from .permission_views import ChatPermissionsView, RelayChatRoleView, ChatModeratorView, ChatMemberRolesView
+from .permission_views import ChatPermissionsView, RelayChatRoleView, ChatModeratorView, ChatMemberRolesView, ChatAdminView
 
 from .views import (
     AccountSessionLogoutView,
@@ -57,6 +57,7 @@ urlpatterns = [
     path("account/ai-consent/", AiConsentView.as_view(), name="community_chat_ai_consent"),
     path("startups/", include("community_chat.startups.urls")),
     path("permissions/", ChatPermissionsView.as_view(), name="community_chat_permissions"),
+    path("admins/<str:public_key>/", ChatAdminView.as_view(), name="community_chat_admin"),
     path("member-roles/", ChatMemberRolesView.as_view(), name="community_chat_member_roles"),
     path("moderators/<str:public_key>/", ChatModeratorView.as_view(), name="community_chat_moderator"),
     path("relay-roles/<str:public_key>/", RelayChatRoleView.as_view(), name="community_chat_relay_role"),

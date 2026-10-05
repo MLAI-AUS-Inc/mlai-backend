@@ -53,7 +53,7 @@ def check_migration_and_replay():
     print("0068 → 0069 migration passed; existing account unchanged and email constraint present.", flush=True)
 
 
-def run_checks(database, labels):
+def run_checks(database, labels, migration_check=check_migration_and_replay):
     sys.path.insert(0, str(ROOT))
     from django.db.backends.base.base import BaseDatabaseWrapper
     original = BaseDatabaseWrapper.ensure_connection
@@ -90,7 +90,7 @@ def run_checks(database, labels):
         from django.core.management import call_command
         from django.db import connections
         try:
-            check_migration_and_replay()
+            migration_check()
             call_command("test", *labels, interactive=False, verbosity=2)
             call_command("check")
             call_command("makemigrations", check=True, dry_run=True, interactive=False)
@@ -98,11 +98,11 @@ def run_checks(database, labels):
             connections.close_all()
 
 
-def main():
+def main(migration_check=check_migration_and_replay, default_labels=None):
     programs = {name: shutil.which(name) for name in ("initdb", "pg_ctl", "createdb")}
     if not all(programs.values()):
         raise SystemExit("Add local PostgreSQL initdb, pg_ctl and createdb to PATH.")
-    labels = sys.argv[1:] or ["community_chat.tests.test_account_bans"]
+    labels = sys.argv[1:] or default_labels or ["community_chat.tests.test_account_bans"]
     environment = {
         "PATH": os.defpath, "LC_ALL": "C", "APP_ENV": "test", "DEBUG": "true",
         "APP_RELEASE": "disposable-account-ban-tests",
@@ -131,7 +131,7 @@ def main():
                     "ENGINE": "django.db.backends.postgresql", "NAME": "account_bans",
                     "HOST": str(sockets), "PORT": "55439", "USER": "ban_tests",
                     "TEST": {"NAME": "test_account_bans"},
-                }, labels)
+                }, labels, migration_check=migration_check)
             except subprocess.CalledProcessError:
                 for name in ("setup.log", "postgres.log"):
                     path = directory / name

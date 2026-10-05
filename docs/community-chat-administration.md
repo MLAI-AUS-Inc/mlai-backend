@@ -2,8 +2,14 @@
 
 `community_chat.Moderator` is a chat-only appointment with a unique user,
 active flag and timestamps. It must not be represented as a PointsAdmin or a
-Django staff account. Active linked PointsAdmin `admin`/`committee` accounts and
-Django superusers retain Chat administration; other PointsAdmin roles do not.
+Django staff account. Explicit `community_chat.ChatRole` appointments grant
+`owner` (Superadmin) and `admin` authority. PointsAdmin, committee, staff and
+Django superuser status do not implicitly grant Chat administration.
+
+A conditional database constraint permits at most one owner. The owner alone
+appoints/demotes admins. Admins manage ordinary members and moderators but cannot
+change a fellow admin's or owner's access. Appointments cover every verified,
+non-revoked installation. Owner account/Chat deletion requires ownership transfer.
 
 Account endpoints use CommunityChatAccountAuthentication and require a verified
 binding matching the session's user, public key and installation. A stale
@@ -17,9 +23,14 @@ All paths below are relative to `/api/v1/community-chat/`:
 - `POST moderators/<public_key>/`: body `{"enabled": true|false}`. Chat admins
   can appoint or disable a Moderator for the account owning the verified key.
   Self/administrator appointments are protected. Changes are in Django LogEntry.
+- `POST admins/<public_key>/`: body `{"enabled": true|false}`. Only a verified
+  owner installation can appoint/demote an admin. Self/owner changes are refused.
+  Account locks serialize appointments with restrictions; actor authority is
+  rechecked after locking. Changes are recorded in Django LogEntry.
 - `POST account-bans/`: body `{"public_key": "<verified-key>", "reason": "optional"}`.
   Admin-only account-wide denial, preserving the account and canonical email.
-  Self, staff and administrator targets are protected. Returns a ban record;
+  Self, staff and owner targets are protected; only owner can restrict admins.
+  Returns a ban record;
   HTTP 202 and `revocation_pending: true` mean account authentication is blocked
   but Chat device revocation is still retrying. HTTP 200 confirms that cleanup.
 - `GET account-bans/?after=<id>`: admin-only active bans, including retained email,
@@ -27,16 +38,50 @@ All paths below are relative to `/api/v1/community-chat/`:
   (null when complete). Responses use `Cache-Control: no-store`.
 - `POST account-bans/<id>/`: body `{"enabled": false}` lifts a ban after device
   revocation completes. It does not revive old sessions, imports or devices.
-- `GET relay-roles/<public_key>/`: read-only service lookup returning only role,
-  key and relay URL. Requires `Bearer COMMUNITY_CHAT_ROLE_SERVICE_TOKEN`, an
+- `GET relay-roles/<public_key>/`: read-only service lookup returning role,
+  key, relay URL and `protection_role`. The latter only denies peer changes to
+  administrator targets, including revoked installations; it never grants actor
+  authority. A current key binding supersedes historical ownership.
+  Requires `Bearer COMMUNITY_CHAT_ROLE_SERVICE_TOKEN`, an
   independent secret of at least 32 bytes; defaults to disabled. Unknown,
   pending, revoked and inactive account/device bindings resolve to `member`.
 
-The Chat relay pins its authority service to one tenant host, rechecks each
+The Chat relay accepts `owner`, `admin`, `moderator` and `member`, pins its
+authority service to one tenant host, rechecks each
 privileged action and fails closed on service errors. No role sync writes to the
 relay membership table are required, so the existing member-only bootstrap and
-device revocation boundary remains intact. Account permissions are never
+device revocation boundary remains intact. Native relay ownership cannot override
+managed account authority. Account permissions are never
 accepted from caller-controlled profile metadata or client-supplied role tags.
+
+Migration `0014_chat_roles` creates only ChatRole, its unique account binding,
+valid-role check and single-owner constraint. The user approved its creation and
+disposable local database testing on 2026-10-05. It was generated with Django's
+migration builder; production execution is separate.
+Provision the reviewed roster by exact account IDs with `bootstrap_chat_roles`:
+`--owner-user-id`, repeated `--admin-user-id`, and `--apply` only after inspecting
+the default preview. It requires active accounts with verified installations,
+refuses conflicting existing appointments, and does not modify Roo/staff flags.
+Future `transfer_chat_owner` operations require both the expected current owner
+ID and the new owner's ID; preview first, then `--apply`. The atomic, audited
+transfer leaves exactly one owner. No production migration or provisioning has
+been performed for this change.
+
+`scripts/test_chat_roles_disposable.py` replays `0013` → `0014` in a fresh
+socket-only PostgreSQL cluster. It verifies that existing synthetic accounts,
+Roo roles, moderators and installations are unchanged, the migration grants no
+implicit appointments, and the database rejects a second owner or invalid role.
+The runner blocks `.env` loading and external network access, restricts database
+connections to that cluster, and removes all temporary data afterward. Its
+default suite covers Chat governance, permissions, account bans and privacy;
+additional Django test labels can be supplied for related regressions.
+
+The 2026-10-05 PostgreSQL regression run passed all 121 tests across governance,
+permissions, account bans/privacy, account sessions, session/device binding,
+device authentication, bootstrap APIs, throttles and deletion tasks, including
+the row-locking concurrency cases. Django system checks passed and migration
+drift reported no changes. Governance and permission modules are included in
+the main CI test list. Production appointments remain unchanged.
 
 Migration `community_chat.0010_moderator` was created with explicit approval and
 applied to disposable SQLite test databases on 2026-09-09. The permission,
