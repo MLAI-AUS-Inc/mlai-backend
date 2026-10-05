@@ -8,6 +8,54 @@ Company identity is explicit in frontend queries. The existing business views st
 
 ## Additional endpoints
 
+### Request budgets
+
+Authenticated My startup facades, reviewed legacy aliases and Chat startup
+updates use separate per-account sliding-window budgets. Chat home, permissions
+and Slack inventory requests cannot consume these budgets. Company and device
+selection do not change the account key. Existing domain throttles remain
+additive, and authentication, origin and company ownership checks still apply.
+
+| Environment setting | Default | Operations |
+| --- | --- | --- |
+| `MY_STARTUP_BOOTSTRAP_RATE` | `120/minute` | Account (`auth/me`), balance, founder profile/bootstrap and marketing/startup bootstrap reads |
+| `MY_STARTUP_READ_RATE` | `120/minute` | Other authenticated startup reads |
+| `MY_STARTUP_POLL_RATE` | `120/minute` | Marketing run/research automation status and startup update active-run/status reads |
+| `MY_STARTUP_WRITE_RATE` | `30/minute` | All authenticated startup mutations, including profile/bootstrap endpoints when mutated |
+
+These limits are bounded across an account's companies and devices. A denied
+request returns HTTP 429 with DRF's `Retry-After` header and a private/no-store
+response. Clients should wait for that delay before retrying an idempotent read;
+mutation retries must retain the operation's existing consent/idempotency rules.
+The origin-checked, unauthenticated Roo token capture route keeps its existing
+contract. Public startup update routes keep their existing public throttle.
+
+The production incident observed on 5 October 2026 at approximately 23:32
+Melbourne time was caused by startup loading sharing the `community_chat_home`
+budget (`60/minute`) with Chat fan-out and run polling. A read-only inspection
+of the current web container from 12:10 to 13:27 UTC (23:10 on 5 October to 00:27
+on 6 October in Melbourne) counted 47 completed HTTP 429 responses: 20 My
+startup requests, one Chat startup bootstrap request, 16 Slack user inventory
+requests, six permission requests and four home requests. The 12:31 UTC burst
+included nine My startup `auth/me` denials plus balance, bootstrap, profile and
+run-status denials. At 12:30 UTC the log showed 15 successful account reads,
+15 profile reads, seven balance reads, seven marketing bootstrap reads and
+five run-status reads; these were all charged to the same account scope.
+Request logs do not identify the account, so these traffic counts are aggregate,
+not a claim that every request belonged to one session. Code and production
+settings establish the shared bucket; the frontend's repeated page loads and
+run polling explain how ordinary startup navigation could exhaust it. Frontend
+inspection found run loaders issuing account, profile and status reads on each
+poll. The intended 2.5-second cadence alone could charge 72 requests per minute
+to the old shared bucket; a three-second cadence could charge 60 before other
+Chat requests. Response-dependent effects could restart sooner still. Clients
+must schedule the next poll after the previous request completes and respect
+`Retry-After`; the separate backend budgets provide a bounded backstop rather
+than replacing that requirement. A later
+13:27–13:29 UTC retry returned HTTP 200 for startup reads after the window
+expired. No health failure, database repair or migration was required for this
+throttle fix. This record intentionally excludes raw logs and private identifiers.
+
 Desktop Chat uses its protected native Chat account bearer session and omits cookies.
 The exact Tauri origins `tauri://localhost` and `http://tauri.localhost` are allowed
 through `DesktopAuthCorsMiddleware` for this namespace, including PUT catalogue

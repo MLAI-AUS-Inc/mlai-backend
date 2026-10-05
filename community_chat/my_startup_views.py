@@ -7,7 +7,6 @@ from rest_framework.exceptions import NotFound, ValidationError
 from rest_framework.permissions import IsAuthenticated
 
 from founder_tools.my_startup.api import MyStartupAuthentication, MyStartupViewMixin
-from community_chat.throttles import CommunityChatScopedThrottle
 from content_factory import vibe_marketing_views as marketing
 from content_factory import notification_channel_views as notifications
 from content_factory import website_views as websites
@@ -24,8 +23,6 @@ class MyStartupAccess(MyStartupViewMixin):
     """Reject ambiguous scope before calling the existing domain API."""
     authentication_classes = (MyStartupAuthentication,)
     permission_classes = (IsAuthenticated,)
-    throttle_classes = (CommunityChatScopedThrottle,)
-    community_chat_throttle_scope = "community_chat_home"
     requires_company = True
 
     def initial(self, request, *args, **kwargs):
@@ -63,18 +60,22 @@ class MyStartupAccess(MyStartupViewMixin):
 
 
 class AccountView(MyStartupAccess, CurrentUserView):
+    startup_read_bucket = "bootstrap"
     requires_company = False
 
 
 class BalanceView(MyStartupAccess, CurrentUserBalanceView):
+    startup_read_bucket = "bootstrap"
     requires_company = False
 
 
 class FounderBootstrapView(MyStartupAccess, founder.FounderToolsBootstrapView):
+    startup_read_bucket = "bootstrap"
     requires_company = False
 
 
 class ProfileView(MyStartupAccess, founder.FounderToolsProfileView):
+    startup_read_bucket = "bootstrap"
     requires_company = False
 
 
@@ -99,7 +100,7 @@ class ActiveCompanyView(MyStartupAccess, founder.FounderToolsActiveCompanyView):
 
 
 class BootstrapView(MyStartupAccess, marketing.VibeMarketingBootstrapView):
-    pass
+    startup_read_bucket = "bootstrap"
 
 
 class SettingsView(MyStartupAccess, marketing.VibeMarketingSettingsView):
@@ -164,7 +165,7 @@ class AbnsView(MyStartupAccess, marketing.VibeMarketingAbnLookupView):
 
 
 class RunView(MyStartupAccess, marketing.VibeMarketingRunView):
-    pass
+    startup_read_bucket = "poll"
 
 
 class CancelRunView(MyStartupAccess, marketing.VibeMarketingRunControlView):
