@@ -1,6 +1,6 @@
 """Exercise the Chat facade at HTTP dispatch without database/network access."""
 from types import SimpleNamespace as Obj
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from django.http import Http404
 from django.test import SimpleTestCase
@@ -9,6 +9,7 @@ from rest_framework.response import Response
 from rest_framework.test import APIRequestFactory, force_authenticate
 
 from community_chat import my_startup_views as views
+from content_factory.website_contract import WebsiteAuthorityError
 from founder_tools.my_startup.api import MyStartupAuthentication
 
 COMPANY = "12345678-1234-1234-1234-123456789abc"
@@ -123,6 +124,95 @@ class MyStartupFacadeTests(SimpleTestCase):
                     self.assertIs(actual, expected)
                     self.assertEqual(actual.authentication_classes, (MyStartupAuthentication,))
                     self.assertTrue(actual.requires_company)
+
+    def test_website_lifecycle_routes_resolve_to_chat_company_facades(self):
+        routes = {"vibe-marketing/website-connection": views.WebsiteConnectionView}
+        routes.update({f"vibe-marketing/website-connection/{action}": views.WebsiteConnectionActionView
+                       for action in ("pause", "disconnect", "reconnect", "reset", "cleanup")})
+        for route, expected in routes.items():
+            for slash in ("", "/"):
+                with self.subTest(route=route, slash=slash):
+                    actual = resolve("/api/v1/my-startup/" + route + slash).func.view_class
+                    self.assertIs(actual, expected)
+                    self.assertEqual(actual.authentication_classes, (MyStartupAuthentication,))
+                    self.assertEqual(actual.throttle_classes, (views.CommunityChatScopedThrottle,))
+                    self.assertTrue(actual.requires_company)
+        self.assertIs(resolve("/api/v1/vibe-marketing/website-connection/reset").func.view_class,
+                      views.websites.WebsiteConnectionActionView)
+
+    def test_website_actions_require_auth_and_unambiguous_owned_company_before_transition(self):
+        with patch.object(views.websites, "transition_connection") as transition:
+            self.assertEqual(self.call(views.WebsiteConnectionActionView, method="post", action="reset", authenticated=False).status_code, 401)
+            self.assertEqual(self.call(views.WebsiteConnectionActionView, method="post", action="reset", data={"companyId": OTHER}).status_code, 400)
+            request = self.factory.post("/", {}, format="json")
+            force_authenticate(request, self.user)
+            self.assertEqual(views.WebsiteConnectionActionView.as_view()(request, action="reset").status_code, 400)
+            self.get_object_or_404.side_effect = Http404
+            self.assertEqual(self.call(views.WebsiteConnectionActionView, method="post", action="reset").status_code, 404)
+            self.get_object_or_404.side_effect = None
+            self.user_may_use_organization.return_value = False
+            self.assertEqual(self.call(views.WebsiteConnectionActionView, method="post", action="disconnect").status_code, 404)
+        transition.assert_not_called()
+
+    def test_website_reset_dispatches_exact_reviewed_tuple_and_idempotency_key(self):
+        binding = {"website_connection_id": OTHER, "connection_generation": 1, "repository_id": 123}
+        operation = Obj(pk="reset-receipt", state="pending", receipt={"repository_modified": False,
+                        "retained": ["company_details", "editorial_policy", "history"]})
+        config = Obj(refresh_from_db=MagicMock())
+        request = self.factory.post(f"/?company_id={COMPANY}", binding, format="json",
+                                    HTTP_IDEMPOTENCY_KEY="reviewed-reset")
+        force_authenticate(request, self.user)
+        with patch.object(views.websites, "_context", return_value=(Obj(company=self.company), config, None)), \
+             patch.object(views.websites, "transition_connection", return_value=operation) as transition, \
+             patch.object(views.websites, "summary_for", return_value={"connectionGeneration": 2}) as summary:
+            match = resolve("/api/v1/my-startup/vibe-marketing/website-connection/reset")
+            response = match.func(request, **match.kwargs)
+        self.assertEqual(response.status_code, 200)
+        transition.assert_called_once_with(config, action="reset", expected=binding, idempotency_key="reviewed-reset")
+        config.refresh_from_db.assert_called_once_with()
+        summary.assert_called_once_with(config, company_id=COMPANY)
+        self.assertEqual(response.data["websiteConnection"]["connectionGeneration"], 2)
+        self.assertEqual(response.data["operation"]["receipt"], operation.receipt)
+        self.assertEqual(response["Cache-Control"], "private, no-store")
+
+    def test_website_reset_preserves_stale_tuple_conflict_without_remote_calls(self):
+        binding = {"website_connection_id": OTHER, "connection_generation": 1}
+        config = Obj(refresh_from_db=MagicMock())
+        with patch.object(views.websites, "_context", return_value=(Obj(company=self.company), config, None)), \
+             patch.object(views.websites, "transition_connection", side_effect=WebsiteAuthorityError(
+                 "website_connection_changed", "Refresh and retry.")) as transition, \
+             patch.object(views.websites, "bind_website") as bind, \
+             patch("content_factory.website_reconciliation.approve_cleanup_proposal") as cleanup:
+            response = self.call(views.WebsiteConnectionActionView, method="post", action="reset", data=binding)
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.data["code"], "website_connection_changed")
+        self.assertEqual(transition.call_args.kwargs["expected"], binding)
+        config.refresh_from_db.assert_not_called()
+        bind.assert_not_called()
+        cleanup.assert_not_called()
+
+    def test_website_cleanup_still_requires_explicit_reviewed_approval(self):
+        config = Obj(refresh_from_db=MagicMock())
+        operation = Obj(pk="cleanup-receipt", state="pending", receipt={"requires_review": True})
+        binding = {"website_connection_id": OTHER, "connection_generation": 2}
+        reviewed = {**binding, "approve_cleanup": True, "operation_id": "proposal-1",
+                    "source_sha": "a" * 40, "proposal_digest": "b" * 64}
+        with patch.object(views.websites, "_context", return_value=(Obj(company=self.company), config, None)), \
+             patch.object(views.websites, "summary_for", return_value={}), \
+             patch.object(views.websites, "transition_connection", return_value=operation) as transition, \
+             patch("content_factory.website_reconciliation.approve_cleanup_proposal", return_value=operation) as cleanup:
+            self.assertEqual(self.call(views.WebsiteConnectionActionView, method="post", action="cleanup", data=binding).status_code, 200)
+            cleanup.assert_not_called()
+            self.assertEqual(self.call(views.WebsiteConnectionActionView, method="post", action="cleanup", data=reviewed).status_code, 200)
+        transition.assert_called_once()
+        cleanup.assert_called_once_with(config, user=self.user, data=reviewed)
+
+    def test_website_action_route_cannot_invoke_worker_authorization(self):
+        with patch.object(views.websites, "_context") as context:
+            response = self.call(views.WebsiteConnectionActionView, method="post", action="authorize")
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data["code"], "invalid_connection_action")
+        context.assert_not_called()
 
     def test_foreign_notification_channel_cannot_be_verified_removed_or_toggled(self):
         context = Obj(organization=self.company.organization)

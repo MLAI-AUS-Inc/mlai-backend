@@ -2,7 +2,7 @@
 
 `/api/v1/my-startup/` exposes the reviewed marketing, company, connector, account and points operations to MLAI Chat account sessions. Existing JWT routes and Content Factory worker contracts remain unchanged. No database schema change is introduced.
 
-The allowlist is `founder_tools/my_startup/registry.py`; `urls.py` copies only those registered views. The mixin preserves their permission and throttle behavior and adds authenticated Chat account requirements. Foreign explicit Authorization credentials cannot fall back to a Chat cookie. Cookie mutations retain the Chat session's exact-origin checks. Never add administrative or worker/service-key endpoints to the allowlist.
+The allowlist is `founder_tools/my_startup/registry.py`; its `urls.py` copies only those registered views. `community_chat/my_startup_urls.py` supplies explicit company-scoped facades before those aliases. The mixin preserves their permission and throttle behavior and adds authenticated Chat account requirements. Foreign explicit Authorization credentials cannot fall back to a Chat cookie. Cookie mutations retain the Chat session's exact-origin checks. Never add administrative or worker/service-key endpoints to the allowlist.
 
 Company identity is explicit in frontend queries. The existing business views still enforce ownership. Private preview resources additionally encode the company in `/api/v1/my-startup/companies/<uuid>/vibe-marketing/runs/<run-id>/live-preview/…`, so iframe subresources keep their company scope without custom headers. Conflicting query scope is rejected. Responses and handoff material use private/no-store and no-referrer policies.
 
@@ -18,6 +18,7 @@ workspace because those operations depend on its cookies.
 
 | Endpoint | Contract |
 | --- | --- |
+| `GET/POST /vibe-marketing/website-connection`, `POST /vibe-marketing/website-connection/{pause\|disconnect\|reconnect\|reset\|cleanup}` | Require the owned selected company. Lifecycle mutations require the reviewed website connection tuple and delegate to the canonical handler, including generation changes, durable cancellation, repository projection invalidation and separately approved cleanup. Reset retains company/editorial data and history; cleanup never receives approval from reset. Both trailing-slash forms are accepted. |
 | `POST /connectors/<provider>/connect/` | Initiate Google Search Console, Google Analytics or Slack OAuth as the Chat user; require an owned company and a return URL under the configured Chat `/my-startup` origin. Provider callbacks stay at the existing backend URLs. |
 | `DELETE /integrations/sources/connections/<id>?company_id=<uuid>` | Require an owned selected company, its organization and the user's Google Analytics or Slack connection before disconnecting. |
 | `POST /points/me/purchases/` | Preserve existing packs/terms/checkout behavior and tag the purchase with the My startup surface. |

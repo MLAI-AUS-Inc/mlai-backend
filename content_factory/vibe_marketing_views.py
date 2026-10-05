@@ -8612,8 +8612,34 @@ def _latest_persisted_run_for_article_setup(config, workflows: set[str], *, run_
         return None
     domain = getattr(config.organization, "domain", "")
     run_id = str(run_id or "").strip()
+    connection = getattr(config, "website_connection", None)
+    if connection is not None:
+        scoped_runs = ContentFactoryRun.objects.filter(organization_id=config.organization_id,
+            domain=domain, workflow__in=workflows, github_repo__iexact=connection.github_repo)
+        consent_fields = ("run_id", "organization_id", "domain", "workflow", "github_repo",
+            "run_request", "updated_at", "created_at")
+
+        def eligible_full_run(candidate):
+            if candidate is None or article_setup_reset_ignores_run(config, candidate):
+                return None
+            run = scoped_runs.filter(pk=candidate.pk).prefetch_related("steps").first()
+            return run if run is not None and not article_setup_reset_ignores_run(config, run) else None
+
+        if run_id:
+            selected = eligible_full_run(scoped_runs.filter(run_id=run_id).only(*consent_fields).first())
+            if selected is not None:
+                return selected
+        # Worker snapshots can retain numeric strings or accepted aliases. Parse
+        # only consent and identity while skipping history, then fetch the chosen
+        # run's result and steps. Recheck consent after that separate read.
+        candidates = scoped_runs.exclude(status=ContentFactoryRunStatus.CANCELLED).only(*consent_fields).order_by("-updated_at")
+        for candidate in candidates.iterator(chunk_size=50):
+            selected = eligible_full_run(candidate)
+            if selected is not None:
+                return selected
+        return None
     if run_id:
-        run = ContentFactoryRun.objects.filter(run_id=run_id).prefetch_related("steps").first()
+        run = ContentFactoryRun.objects.filter(run_id=run_id, domain=domain, workflow__in=workflows).prefetch_related("steps").first()
         if run is not None and not article_setup_reset_ignores_run(config, run):
             return run
     queryset = (
@@ -8690,6 +8716,8 @@ def _article_setup_state_for_config(config, *, latest_runs=None, run=None, organ
     latest_runs = _dedupe_runs([run] if run else [], latest_runs or [])
     raw_article_system = config.article_system if isinstance(getattr(config, "article_system", None), dict) else {}
     latest_runs = [candidate for candidate in latest_runs if not article_setup_reset_ignores_run(config, candidate)]
+    if article_setup_reset_ignores_run(config, run):
+        run = None
     article_system = resolve_article_system(config) if config else {}
     pending = _pending_article_system_setup_from_config(config) if config else {}
     pending_setup_run_id = str(
@@ -8759,7 +8787,7 @@ def _article_setup_state_for_config(config, *, latest_runs=None, run=None, organ
         scan_completed_at
         or last_scanned_sha
         or getattr(config, "scan_summary", None)
-        or article_system
+        or raw_article_system
         or getattr(config, "publish_targets", None)
         or pending_source_scan_run_id
     )
@@ -9002,6 +9030,7 @@ def _workflow_progress_context(*, context=None, run=None, latest_runs=None, chec
         source_run = ContentFactoryRun.objects.filter(run_id=source_run_id).prefetch_related("steps").first()
         if source_run is not None:
             latest_runs.append(source_run)
+    latest_runs = [candidate for candidate in latest_runs if not article_setup_reset_ignores_run(config, candidate)]
     if checks is None and organization is not None and config is not None:
         checks = _profile_checks(organization, config, latest_runs, _latest_baseline_snapshot(organization))
     return organization, config, latest_runs, checks or {}
@@ -9507,7 +9536,8 @@ def _workflow_progress(*, context=None, run=None, latest_runs=None, checks=None,
         latest_runs=latest_runs,
         checks=checks,
     )
-    scan_run = run if run and run.workflow in SCAN_WORKFLOWS else _latest_run_matching(latest_runs, SCAN_WORKFLOWS)
+    scan_run = (run if run and run.workflow in SCAN_WORKFLOWS and not article_setup_reset_ignores_run(config, run)
+        else _latest_run_matching(latest_runs, SCAN_WORKFLOWS))
     discovery_run = run if run and run.workflow in DISCOVERY_WORKFLOWS else _latest_run_matching(latest_runs, DISCOVERY_WORKFLOWS)
     article_run = run if run and run.workflow in ARTICLE_WORKFLOWS else _latest_run_matching(latest_runs, ARTICLE_WORKFLOWS)
     active_run_source_id = _run_source_run_id(run) if run else ""
