@@ -16,6 +16,7 @@ from .models import OrganizationContentConfig
 from .portable_drafts import explicit_portable_request, original_portable_run
 from .service_views import ContentFactoryOrgConfigView
 from .vibe_marketing_views import VibeMarketingArticleView, VibeMarketingRunControlView, _queue_content_factory_run, _setup_blocked_response_for_generation
+from .vibe_marketing_views import _sync_local_run_from_remote
 from .website_connections import authority_guard, contract_for
 from .website_contract import WebsiteAuthorityError
 from .website_models import WebsiteConnection, WebsiteConnectionTarget, WebsiteScanSnapshot
@@ -253,3 +254,54 @@ class ActivationConnectionTests(TestCase):
             run.refresh_from_db()
             self.assertEqual(run.result, {})
             self.assertEqual(run.run_request['delivery_mode'], 'content_only')
+
+    def test_portable_resume_uses_owner_api_and_existing_paid_intent_without_repository(self):
+        original = {'delivery_mode': 'content_only', 'delivery_mode_confirmed': True,
+                    'roo_points_ledger_id': 'synthetic-existing-charge', 'roo_points_cost': 6}
+        run = ContentFactoryRun.objects.create(run_id='portable-paid-resume', domain=self.org.domain,
+            organization=self.org, workflow='direct_generate', status='failed', error='Corpus failed',
+            run_request=original, github_repo='', result={})
+        request = self.factory.post('/synthetic', {}, format='json')
+        force_authenticate(request, user=self.user)
+        remote = SimpleNamespace(status_code=202, content=b'{}', json=lambda: {'status': 'queued', 'run_id': run.run_id})
+        with patch('content_factory.vibe_marketing_views._resolve_context_or_response', return_value=(self.context, None)), \
+             patch('content_factory.vibe_marketing_views._get_config', return_value=self.config), \
+             patch('content_factory.vibe_marketing_views._content_factory_remote_config', return_value={'enabled': True, 'base_url': 'https://factory.example'}), \
+             patch('content_factory.vibe_marketing_views._content_factory_headers', return_value={}), \
+             patch('content_factory.vibe_marketing_views.http_client.post', return_value=remote) as post, \
+             patch('content_factory.vibe_marketing_views.scoped_run_contract', side_effect=AssertionError('No website authority')), \
+             patch('content_factory.vibe_marketing_views._serialize_run', return_value={'runId': run.run_id}):
+            response = VibeMarketingRunControlView.as_view(authentication_classes=[])(request, run_id=run.run_id, action='resume')
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(post.call_args.args[0], f'https://factory.example/api/runs/{run.run_id}/resume')
+        run.refresh_from_db()
+        self.assertEqual(run.status, 'queued')
+        self.assertEqual(run.run_request, original)
+        self.assertIsNone(self.config.website_connection_id)
+
+    def test_rejected_portable_resume_keeps_persisted_failure_and_poll_repairs_phantom_queue(self):
+        run = ContentFactoryRun.objects.create(run_id='portable-rejected-resume', domain=self.org.domain,
+            organization=self.org, workflow='direct_generate', status='failed', error='Corpus failed', github_repo='',
+            run_request={'delivery_mode': 'content_only', 'delivery_mode_confirmed': True}, result={})
+        request = self.factory.post('/synthetic', {}, format='json')
+        force_authenticate(request, user=self.user)
+        rejection = {'status': 'blocked', 'allowed': False, 'code': 'admission_denied',
+                     'detail': 'Admission needs review.', 'content_factory_status_code': 409}
+        with patch('content_factory.vibe_marketing_views._resolve_context_or_response', return_value=(self.context, None)), \
+             patch('content_factory.vibe_marketing_views._get_config', return_value=self.config), \
+             patch('content_factory.vibe_marketing_views._call_content_factory_run_action', return_value=rejection):
+            response = VibeMarketingRunControlView.as_view(authentication_classes=[])(request, run_id=run.run_id, action='resume')
+        self.assertEqual(response.status_code, 409, response.data)
+        run.refresh_from_db()
+        self.assertEqual(run.status, 'failed')
+        self.assertEqual(run.error, 'Corpus failed')
+        self.assertEqual(run.result, {})
+        run.status = 'queued'
+        run.save(update_fields=['status'])
+        with patch('content_factory.vibe_marketing_views.scoped_run_contract', side_effect=AssertionError('No website authority')):
+            _sync_local_run_from_remote(run, {'workflow': 'direct_generate', 'domain': self.org.domain,
+                'status': 'failed', 'current_step': 'plan_article', 'error': 'Corpus failed', 'resume_available': True})
+        run.refresh_from_db()
+        self.assertEqual(run.status, 'failed')
+        self.assertEqual(run.current_step, 'plan_article')
+        self.assertTrue(run.resume_available)
