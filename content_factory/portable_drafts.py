@@ -2,7 +2,7 @@
 
 import re
 
-from .website_contract import CONNECTION_FIELDS, connection_contract
+from .website_contract import CONNECTION_FIELDS, WebsiteAuthorityError, connection_contract
 
 REPOSITORY_CONFIG_FIELDS = frozenset({
     "article_template", "design_guide", "resource_prompt", "scan_summary", "tech_stack",
@@ -20,13 +20,19 @@ PORTABLE_CALLBACK_EVENTS = frozenset({
     "article_admission_attention", "error",
 })
 PORTABLE_WORKFLOWS = frozenset({"article_generation", "direct_generate", "confirmed_topic", "article_revision", "component_revision"})
+PORTABLE_RUN_CONTROLS = frozenset({"resume", "cancel", "deny", "revise", "regenerate-image", "regenerate-images"})
+
+
+def portable_run_control_allowed(run, action, payload):
+    """Permit editorial controls from original intent without website authority."""
+    return action in PORTABLE_RUN_CONTROLS and portable_run_update_allowed(run, payload)
 
 
 def portable_run_update_allowed(run, payload, *, event_type=""):
     """Allow draft-only updates from original durable intent, never sender claims.
 
     This grants no repository configuration, preview, publication or token access.
-    Only the callback and run-snapshot surfaces opt in to this exception.
+    Only editorial controls, callbacks and run snapshots opt in to this exception.
     """
     if not original_portable_run(run):
         return False
@@ -83,6 +89,10 @@ def explicit_portable_request(payload):
 def original_portable_run(run):
     """Only original persisted unbound draft intent can bypass repository work."""
     original = getattr(run, "run_request", None)
-    return (isinstance(original, dict) and explicit_portable_request(original)
-            and not connection_contract(original)
-            and original.get("resolved_delivery_mode") in (None, "", "content_only"))
+    try:
+        return (isinstance(original, dict) and explicit_portable_request(original)
+                and not connection_contract(original)
+                and original.get("resolved_delivery_mode") in (None, "", "content_only"))
+    except WebsiteAuthorityError:
+        # Malformed stored authority is never permission to bypass its fence.
+        return False

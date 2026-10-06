@@ -12719,10 +12719,13 @@ def _sync_steps_from_remote(run, remote_data):
 
 def _sync_local_run_from_remote(run, remote_data):
     from content_factory.run_state import stale_execution_event
+    from .portable_drafts import portable_run_update_allowed
     if not isinstance(remote_data, dict) or not remote_data:
         return run
-    fence = authority_guard(scoped_run_contract(run), action="config_write") if run.workflow in REPOSITORY_WORKFLOWS else nullcontext()
     try:
+        fence = (authority_guard(scoped_run_contract(run), action="config_write")
+                 if run.workflow in REPOSITORY_WORKFLOWS and not portable_run_update_allowed(run, remote_data)
+                 else nullcontext())
         with fence, transaction.atomic():
             ContentFactoryRun.objects.select_for_update().get(pk=run.pk)
             run.refresh_from_db()
@@ -13503,8 +13506,10 @@ def _call_content_factory_run_action(
 ):
     require_unlocked_remote_call()
     if action not in {"cancel", "deny"}:
+        from .portable_drafts import portable_run_control_allowed
         scoped_run = ContentFactoryRun.objects.filter(run_id=run_id).first()
-        if scoped_run and scoped_run.workflow in REPOSITORY_WORKFLOWS:
+        if (scoped_run and scoped_run.workflow in REPOSITORY_WORKFLOWS
+                and not portable_run_control_allowed(scoped_run, action, payload)):
             try:
                 saved = scoped_run_contract(scoped_run)
                 from .website_connections import run_action_authority
@@ -17821,6 +17826,21 @@ class VibeMarketingRunControlView(APIView):
             if remote_run.pk != run.pk:
                 remote_run.refresh_from_db()
             remote_status_code = int(remote_data.get("content_factory_status_code") or 0)
+            if action != "approve" and (
+                remote_status_code >= 400 or remote_data.get("allowed") is False
+                or (remote_data.get("error") and not _content_factory_action_transport_pending(remote_data))
+                or (action == "resume" and remote_data.get("status") == "noop")
+            ):
+                # A rejected control is not a dispatch. Preserve the saved run
+                # and its failure instead of projecting a phantom queued job.
+                detail = str(remote_data.get("detail") or remote_data.get("error")
+                             or remote_data.get("message") or "Content Factory rejected this run action.")
+                response_status = remote_status_code if 400 <= remote_status_code < 600 else (
+                    status.HTTP_409_CONFLICT if remote_data.get("allowed") is False or remote_data.get("status") == "noop"
+                    else status.HTTP_502_BAD_GATEWAY)
+                return Response({"detail": detail, "error": detail, "code": remote_data.get("code"),
+                                 "runId": run.run_id, "contentFactoryStatusCode": remote_status_code or None},
+                                status=response_status)
             if action == "approve" and remote_status_code in {400, 404, 409, 422}:
                 # Approval is a gate, not a fire-and-forget command. Preserve Content
                 # Factory's rejection verbatim and keep the local run awaiting review;
