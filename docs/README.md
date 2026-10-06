@@ -91,6 +91,7 @@ rollout sequence.
 
 ## Roo
 
+- [Roo rate-card reads](roo-rate-card.md) — authentication, active rates, and empty/error responses
 - [`meeting-room-booking.md`](meeting-room-booking.md)
 - [`coworking-booking.md`](coworking-booking.md)
 - [`office-manager.md`](office-manager.md) includes the backend-first rollout,
