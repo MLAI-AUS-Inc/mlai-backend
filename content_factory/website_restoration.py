@@ -86,7 +86,11 @@ def approve_worker_restoration(config, *, user, data):
         claim = op.attempts
         op.next_attempt_at = timezone.now() + timedelta(minutes=5)
         op.payload = {**op.payload, "setup_run_id": op.receipt["setup_run_id"],
-            "approved_restoration": {"plan_digest": op.receipt["proposal_digest"], "expected_base_sha": op.receipt["source_sha"], "approved_by_user_id": str(user.pk)}}
+            "approved_restoration": {"plan_digest": op.receipt["proposal_digest"], "expected_base_sha": op.receipt["source_sha"],
+                "approved_by_user_id": str(user.pk), "workflow_paths": sorted({item["path"]
+                    for item in (op.receipt.get("changes") or []) if isinstance(item, dict)
+                    and item.get("operation") in {"delete", "restore"}
+                    and item.get("path") == ".github/workflows/mlai-articles-verification.yml"})}}
         op.save(update_fields=["state", "attempts", "next_attempt_at", "payload", "updated_at"])
     try:
         receipt = worker_restoration(op, apply=True)

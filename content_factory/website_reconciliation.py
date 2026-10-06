@@ -459,7 +459,10 @@ def approve_cleanup_proposal(config, *, user, data):
         op.attempts += 1
         claim_attempt = op.attempts
         op.next_attempt_at = timezone.now() + timedelta(minutes=5)
-        op.save(update_fields=['state', 'attempts', 'next_attempt_at', 'updated_at'])
+        op.payload = {**op.payload, 'approved_cleanup': {
+            'source_sha': op.receipt['source_sha'], 'proposal_digest': op.receipt['proposal_digest'],
+            'deletions': list(op.receipt.get('deletions') or []), 'approved_by_user_id': str(user.pk)}}
+        op.save(update_fields=['state', 'attempts', 'next_attempt_at', 'payload', 'updated_at'])
     # All GitHub reads/writes below happen after the approval transaction exits.
     from .website_connections import require_unlocked_remote_call
     require_unlocked_remote_call()
