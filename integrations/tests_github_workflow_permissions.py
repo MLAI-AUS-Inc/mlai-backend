@@ -353,7 +353,8 @@ class WebsiteWorkflowPermissionTests(WebsiteDatabaseFixture, TestCase):
         changes = {'action': 'cleanup', 'source_sha': SHA, 'proposal_digest': 'reviewed-digest', 'preflight': '1'}
         self.assertEqual(self.request(**changes).status_code, 200)
         self.get.reset_mock()
-        for denied in ({'source_sha': 'b' * 40}, {'proposal_digest': 'different'}, {'source_sha': ''}, {'proposal_digest': ''}):
+        for denied in ({'source_sha': 'b' * 40}, {'expected_source_sha': 'b' * 40}, {'proposal_digest': 'different'},
+                       {'source_sha': '', 'expected_source_sha': ''}, {'proposal_digest': ''}):
             with self.subTest(denied=denied):
                 self.assertEqual(self.request(**{**changes, **denied}).status_code, 409)
         for invalid in ({}, {**approved, 'deletions': ['integration/support.md']},
@@ -367,7 +368,8 @@ class WebsiteWorkflowPermissionTests(WebsiteDatabaseFixture, TestCase):
 
     def test_restoration_requires_original_setup_and_exact_owner_approved_plan(self):
         self.operation.action, self.operation.state = 'cleanup', 'applying'
-        approved = {'expected_base_sha': SHA, 'plan_digest': 'reviewed-plan', 'approved_by_user_id': '17'}
+        approved = {'expected_base_sha': SHA, 'plan_digest': 'reviewed-plan', 'approved_by_user_id': '17',
+                    'workflow_paths': ['.github/workflows/mlai-articles-verification.yml']}
         self.operation.payload = {**self.operation.payload, 'setup_run_ids': [self.run_id], 'approved_restoration': approved}
         self.operation.save(update_fields=['action', 'state', 'payload'])
         changes = {'action': 'restoration', 'setup_run_id': self.run_id, 'expected_base_sha': SHA,
@@ -377,12 +379,35 @@ class WebsiteWorkflowPermissionTests(WebsiteDatabaseFixture, TestCase):
         for denied in ({'setup_run_id': str(uuid.uuid4())}, {'expected_base_sha': 'b' * 40}, {'plan_digest': 'different'}):
             with self.subTest(denied=denied):
                 self.assertEqual(self.request(**{**changes, **denied}).status_code, 409)
-        for invalid in ({}, {**approved, 'approved_by_user_id': ''}, ['malformed']):
+        for invalid in ({}, {**approved, 'approved_by_user_id': ''}, {**approved, 'workflow_paths': []},
+                        {**approved, 'workflow_paths': ['app/articles/page.tsx']}, ['malformed']):
             with self.subTest(invalid=invalid):
                 self.operation.payload = {**self.operation.payload, 'approved_restoration': invalid}
                 self.operation.save(update_fields=['payload'])
                 self.assertEqual(self.request(**changes).status_code, 409)
         self.get.assert_not_called()
+        self.post.assert_not_called()
+
+    def test_owner_restoration_approval_records_only_reviewed_workflow_inverse_paths(self):
+        from content_factory.website_restoration import approve_worker_restoration
+        workflow_path = '.github/workflows/mlai-articles-verification.yml'
+        for changes, expected in (([{'path': workflow_path, 'operation': 'restore'},
+                                    {'path': 'app/articles/page.tsx', 'operation': 'delete'}], [workflow_path]),
+                                  ([{'path': workflow_path, 'operation': 'create'}], []),
+                                  ([{'path': 'app/articles/page.tsx', 'operation': 'delete'}], [])):
+            with self.subTest(changes=changes):
+                self.operation.action, self.operation.state = 'cleanup', 'review_required'
+                self.operation.next_attempt_at = None
+                self.operation.payload = {**self.operation.payload, 'setup_run_ids': [self.run_id]}
+                self.operation.receipt = {'setup_run_id': self.run_id, 'source_sha': SHA,
+                    'proposal_digest': 'reviewed-plan', 'changes': changes}
+                self.operation.save()
+                with patch('content_factory.website_connections.verify_repository_access', return_value={'repository_id': 123}), \
+                     patch('content_factory.website_restoration.worker_restoration', return_value={'status': 'no_op'}):
+                    result = approve_worker_restoration(self.config, user=SimpleNamespace(pk=17),
+                        data={**self.binding, 'operation_id': str(self.operation.pk), 'source_sha': SHA, 'proposal_digest': 'reviewed-plan'})
+                self.assertEqual(result.payload['approved_restoration'], {'plan_digest': 'reviewed-plan',
+                    'expected_base_sha': SHA, 'approved_by_user_id': '17', 'workflow_paths': expected})
         self.post.assert_not_called()
 
     def test_cancelled_and_stale_operation_attempts_never_reach_grant_lookup(self):

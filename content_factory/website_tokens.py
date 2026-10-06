@@ -32,14 +32,17 @@ def _workflow_operation(connection, data, action):
                      and isinstance(approved, dict) and bool(approved.get("approved_by_user_id"))
                      and bool(approved.get("proposal_digest")) and bool(approved.get("source_sha"))
                      and data.get("proposal_digest") == approved.get("proposal_digest")
-                     and data.get("source_sha") == approved.get("source_sha")
+                     and (data.get("source_sha") or data.get("expected_source_sha")) == approved.get("source_sha")
+                     and all(data.get(key) in (None, "", approved.get("source_sha")) for key in ("source_sha", "expected_source_sha"))
                      and isinstance(approved.get("deletions"), list)
                      and ".github/workflows/mlai-articles-verification.yml" in approved["deletions"])
         else:
             approved = operation.payload.get("approved_restoration") or {}
             valid = (valid and operation.state in {"applying", "awaiting_merge", "awaiting_deployment", "completed"}
                      and isinstance(approved, dict) and bool(approved.get("approved_by_user_id"))
-                     and bool(approved.get("plan_digest")) and bool(approved.get("expected_base_sha")))
+                     and bool(approved.get("plan_digest")) and bool(approved.get("expected_base_sha"))
+                     and isinstance(approved.get("workflow_paths"), list)
+                     and ".github/workflows/mlai-articles-verification.yml" in approved["workflow_paths"])
     if not valid:
         raise WebsiteAuthorityError("website_operation_changed", "Workflow files require the original setup or approved cleanup operation.")
 
