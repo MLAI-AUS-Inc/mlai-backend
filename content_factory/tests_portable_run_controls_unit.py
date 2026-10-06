@@ -34,6 +34,7 @@ class PortableRunControlTests(SimpleTestCase):
             {"deliveryMode": "publish_code"}, {"github_repo": "other/site"},
             {"domain": "other.example"}, {"connectionGeneration": 3},
             {"result": {"defaultPublishTargetId": "native"}},
+            {"result": {"connection_id": "fbc09c73-e449-4c43-88ea-385b249a7a20"}},
         ):
             with self.subTest(payload=payload):
                 self.assertFalse(portable_run_control_allowed(run, "resume", payload))
@@ -96,12 +97,13 @@ class PortableRunControlTests(SimpleTestCase):
             {"status": "blocked", "allowed": False, "code": "website_connection_required", "detail": "Reconnect.", "content_factory_status_code": 409},
             {"error": "Worker unavailable", "content_factory_status_code": 503},
             {"status": "noop", "message": "No resumable required step."},
+            {"status": "action_pending", "error": "Lost resume response", "content_factory_transport_error": True},
         ):
             run = draft_run()
             original = deepcopy(run.run_request)
             with self.subTest(rejection=rejection):
                 response = self.control(run, rejection)
-                self.assertIn(response.status_code, (409, 503))
+                self.assertIn(response.status_code, (409, 502, 503))
                 self.assertEqual(run.status, "failed")
                 self.assertEqual(run.error, "Original corpus diagnostic")
                 self.assertEqual(run.run_request, original)

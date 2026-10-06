@@ -17828,7 +17828,8 @@ class VibeMarketingRunControlView(APIView):
             remote_status_code = int(remote_data.get("content_factory_status_code") or 0)
             if action != "approve" and (
                 remote_status_code >= 400 or remote_data.get("allowed") is False
-                or (remote_data.get("error") and not _content_factory_action_transport_pending(remote_data))
+                or (remote_data.get("error") and not (
+                    action in {"promote-bundle", "publish-pr"} and _content_factory_action_transport_pending(remote_data)))
                 or (action == "resume" and remote_data.get("status") == "noop")
             ):
                 # A rejected control is not a dispatch. Preserve the saved run

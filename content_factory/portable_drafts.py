@@ -52,7 +52,7 @@ def portable_run_update_allowed(run, payload, *, event_type=""):
         "live_preview", "live_preview_url", "preview_url", "preview_commit_sha", "verified_sha", "capabilities",
         "publishingReady", "previewSupported", "build_verified", "route_is_live", "preview_content_verified",
         "website_connection", "article_system_setup", "publish_child_run_id", "setup_run_id",
-        "connectionId", "connectionGeneration", "connectionTargetId", "repositoryId",
+        "connection_id", "connectionId", "connectionGeneration", "connectionTargetId", "repositoryId",
         "websiteConnectionId", "websiteConnection", "livePreview", "previewUrl", "livePreviewUrl", "prUrl",
     }
     def safe(value):
