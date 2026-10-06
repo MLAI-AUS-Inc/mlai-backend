@@ -10804,7 +10804,9 @@ def _profile_checks(organization, config, latest_runs=None, baseline_snapshot=No
         setup_gate["generationReady"] = True
     article_system_setup_ready = bool((setup_gate.get("published") or generation_ready) and not setup_gate.get("setupBlocked"))
     setup_pr_merged = bool(setup_gate.get("setupMerged"))
-    missing_featured_components = _missing_mlai_featured_components(organization=organization, config=config)
+    # Bound integrations carry their own current-generation template/build proof.
+    # The old MLAI component catalog applies only to unbound legacy scaffolds.
+    missing_featured_components = [] if config.website_connection_id else _missing_mlai_featured_components(organization=organization, config=config)
     component_catalog_ready = not missing_featured_components
     article_ready = article_system_setup_ready and component_catalog_ready
     scan_ready = bool(config.last_scanned_at or config.scan_summary or config.article_system or config.publish_targets)
@@ -11583,6 +11585,10 @@ def _article_capabilities_for_context(context, config, *, latest_runs=None, forc
     account = _github_account_for_context(context, config, force=force)
     gate = _article_system_setup_gate(config, runs, resolve_article_system(config))
     evidence = integration_evidence(config, runs, setup_gate=gate)
+    if not config.website_connection_id and _missing_mlai_featured_components(organization=context.organization, config=config):
+        # Legacy scaffold flags still need their original component contract;
+        # a cached bootstrap overlay cannot promote an incomplete integration.
+        evidence = {**evidence, "verified": False, "reasonCode": "integration_required"}
     access = _verify_github_repository_access(context, config, force=force) if account.get("saved") and getattr(config, "github_repo", "") else {}
     if evidence.get("verified") and access.get("verified") and (access.get("branch") != evidence.get("branch") or access.get("sha") != evidence.get("sha")):
         evidence = {**evidence, "verified": False, "reasonCode": "verification_stale"}

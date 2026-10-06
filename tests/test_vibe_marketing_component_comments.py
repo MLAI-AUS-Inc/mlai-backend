@@ -625,9 +625,11 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
 
     def test_bootstrap_blocks_mlai_article_system_when_featured_catalog_missing(self):
         config = OrganizationContentConfig.objects.get(organization=self.organization)
+        # This is a legacy scaffold, without the newer certified target proof.
+        config.website_connection = None
         config.article_system = {"state": "existing", "confidence": "high"}
         config.scan_summary = "{\"generated_components\": [{\"name\": \"ArticleHeroHeader\"}]}"
-        config.save(update_fields=["article_system", "scan_summary", "updated_at"])
+        config.save(update_fields=["website_connection", "article_system", "scan_summary", "updated_at"])
 
         with patch("content_factory.vibe_marketing_views.google_baseline_connection_status", return_value={}):
             response = self.client.get("/api/v1/vibe-marketing/bootstrap/")
@@ -636,8 +638,22 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         scaffold = response.data["checks"]["scaffold"]
         self.assertFalse(scaffold["passed"])
         self.assertFalse(scaffold["componentCatalogReady"])
+        self.assertFalse(response.data["articleCapabilities"]["canGenerateArticle"])
         self.assertIn("ArticleDisclaimer", scaffold["missingComponents"])
         self.assertNotIn("ArticleHeroHeader", scaffold["missingComponents"])
+
+    def test_certified_target_does_not_require_the_legacy_mlai_component_catalog(self):
+        config = OrganizationContentConfig.objects.get(organization=self.organization)
+        config.scan_summary = {"generated_components": [{"name": "ArticleHeroHeader"}]}
+        config.save(update_fields=["scan_summary", "updated_at"])
+
+        with patch("content_factory.vibe_marketing_views.google_baseline_connection_status", return_value={}):
+            response = self.client.get("/api/v1/vibe-marketing/bootstrap/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data["articleCapabilities"]["canGenerateArticle"])
+        self.assertTrue(response.data["checks"]["scaffold"]["passed"])
+        self.assertEqual(response.data["checks"]["scaffold"]["missingComponents"], [])
 
     def test_bootstrap_allows_mlai_article_system_when_featured_catalog_present(self):
         config = OrganizationContentConfig.objects.get(organization=self.organization)

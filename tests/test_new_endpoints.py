@@ -1252,8 +1252,8 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
             format='json',
         )
 
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data["status"], "ignored")
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(response.data["code"], "website_operation_cancelled")
         job = ContentFactoryJob.objects.get(job_id="scan-run-cancelled")
         self.assertEqual(job.status, "cancelled")
         run = ContentFactoryRun.objects.get(run_id="scan-run-cancelled")

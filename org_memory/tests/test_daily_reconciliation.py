@@ -1,6 +1,6 @@
 import hashlib
 import os
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone as datetime_timezone
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
@@ -154,7 +154,11 @@ class DailyReconciliationTests(TestCase):
         self.enabled_patch.stop()
         super().tearDown()
 
-    def test_daily_catch_up_runs_once_and_finishes_as_a_noop(self):
+    @patch("django.utils.timezone.now")
+    def test_daily_catch_up_runs_once_and_finishes_as_a_noop(self, clock):
+        # Exercise one daily window even when CI runs across UTC midnight.
+        # A future noon also keeps model defaults bound before this patch due.
+        clock.return_value = datetime.now(datetime_timezone.utc).replace(hour=12, minute=0, second=0, microsecond=0) + timedelta(days=1)
         now = timezone.now()
         first = run_daily_reconciliation(now=now, force=True)
         report = MemoryDailyReconciliationReport.objects.get(
