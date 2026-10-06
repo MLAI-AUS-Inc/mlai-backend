@@ -20,6 +20,32 @@ CI_PERMISSIONS = {'contents': 'read', 'pull_requests': 'read', 'checks': 'read',
 GRANTS = {**CI_PERMISSIONS, 'contents': 'write', 'pull_requests': 'write'}
 
 
+def invalid_check_payloads():
+    """Malformed provider responses must never certify native or cleanup proof."""
+    row = {'name': 'check', 'head_sha': SHA, 'status': 'completed', 'conclusion': 'success',
+           'app': {'slug': 'github-actions', 'id': 15368}, 'output': {}}
+    yield from (None, [], 'invalid', True, {}, {'check_runs': None}, {'check_runs': {}},
+                {'check_runs': 'invalid'}, {'check_runs': [None]}, {'check_runs': [True]},
+                {'check_runs': [[]]}, {'check_runs': [row] * 101})
+    for field in ('name', 'head_sha', 'status', 'conclusion'):
+        for value in ([], {}, True, 42):
+            yield {'check_runs': [{**row, field: value}]}
+    for field in ('status', 'conclusion'):
+        yield {'check_runs': [{**row, field: 'unknown-provider-state'}]}
+    for sha in ('', 'not-a-commit', 'a' * 39, 'g' * 40):
+        yield {'check_runs': [{**row, 'head_sha': sha}]}
+    for app in ([], True, 'invalid', {'slug': []}, {'slug': True}, {'id': []},
+                {'id': True}, {'id': '15368'}, {'id': 0}, {'id': -1}):
+        yield {'check_runs': [{**row, 'app': app}]}
+    for output in ([], True, 'invalid'):
+        yield {'check_runs': [{**row, 'output': output}]}
+    for field in ('title', 'summary', 'text'):
+        for value in ([], {}, True, 42):
+            yield {'check_runs': [{**row, 'output': {field: value}}]}
+    for count in (None, True, False, '1', 1.0, [], {}, -1, 0, 2):
+        yield {'check_runs': [row], 'total_count': count}
+
+
 @override_settings(CACHES={'default': {'BACKEND': 'django.core.cache.backends.locmem.LocMemCache'}})
 class CIEvidenceIssuerTests(SimpleTestCase):
     def setUp(self):
@@ -158,11 +184,10 @@ class CIEvidenceIssuerTests(SimpleTestCase):
                   (response(200, {'check_runs': [{'app': ['invalid']}]}), 'github_ci_evidence_unavailable', 503, True),
                   (SimpleNamespace(status_code=200, json=lambda: (_ for _ in ()).throw(ValueError('private-json-detail'))),
                    'github_ci_evidence_unavailable', 503, True)]
-        for malformed in ({'conclusion': []}, {'conclusion': {}}, {'status': []}, {'head_sha': []}, {'name': []},
-                          {'app': {'slug': []}}, {'output': {'summary': {}}}, {'output': {'text': []}}):
-            row = {'name': 'check', 'head_sha': SHA, 'status': 'completed', 'conclusion': 'success',
-                   'app': {'slug': 'github-actions'}, 'output': {}, **malformed}
-            cases.append((response(200, {'check_runs': [row]}), 'github_ci_evidence_unavailable', 503, True))
+        cases += [(response(200, payload), 'github_ci_evidence_unavailable', 503, True)
+                  for payload in invalid_check_payloads()]
+        cases.append((SimpleNamespace(status_code=403, headers={'X-RateLimit-Remaining': '0'}, json=lambda: {}),
+                      'github_temporarily_unavailable', 503, True))
         for failed_reply, code, status, retryable in cases:
             def provider(url, **kwargs):
                 if url.startswith('https://api.github.com/app'):
@@ -177,6 +202,37 @@ class CIEvidenceIssuerTests(SimpleTestCase):
             self.assertEqual((caught.exception.code, caught.exception.status, caught.exception.retryable), (code, status, retryable))
             self.assertNotIn('private-', str(caught.exception))
             self.delete.assert_called_once()
+
+    def test_documented_incomplete_checks_never_certify_native_attestation(self):
+        from content_factory.website_verification import read_ci_proof
+        from content_factory.website_contract import WebsiteAuthorityError
+        website = SimpleNamespace(installation_id='45', github_repo='example/private', repository_id=123)
+        states = [(status, None) for status in ('queued', 'in_progress', 'requested', 'waiting', 'pending', None)]
+        states += [('completed', conclusion) for conclusion in
+                   ('action_required', 'cancelled', 'timed_out', 'failure', 'neutral', 'skipped', 'stale', 'startup_failure')]
+        for status, conclusion in states:
+            row = {'name': 'check', 'head_sha': SHA, 'status': status, 'conclusion': conclusion,
+                   'app': {'slug': None, 'id': None}, 'output': {'title': None, 'summary': None, 'text': None}}
+            self.get.side_effect = lambda url, **kwargs: response(200, {'permissions': GRANTS} if url.startswith('https://api.github.com/app')
+                                                                 else {'total_count': 1, 'check_runs': [row]})
+            self.delete.reset_mock()
+            with self.subTest(status=status, conclusion=conclusion), self.assertRaises(WebsiteAuthorityError) as caught:
+                read_ci_proof(website, {'source_sha': SHA})
+            self.assertEqual(caught.exception.code, 'ci_attestation_required')
+            self.delete.assert_called_once()
+
+    def test_native_exact_attestation_remains_valid_on_full_paginated_check_page(self):
+        from content_factory.website_verification import read_ci_proof, CHECK_NAME
+        proof = json.loads((Path(__file__).parents[1] / 'content_factory/fixtures/native_evidence_v2.json').read_text())
+        row = {'name': CHECK_NAME, 'head_sha': proof['source_sha'], 'status': 'completed', 'conclusion': 'success',
+               'app': {'slug': 'github-actions', 'id': 15368},
+               'output': {'summary': 'MLAI_ARTICLES_ATTESTATION:' + base64.b64encode(json.dumps(proof).encode()).decode()}}
+        rows = [row] + [{'name': 'other', 'status': 'pending', 'conclusion': None}] * 99
+        self.get.side_effect = lambda url, **kwargs: response(200, {'permissions': GRANTS} if url.startswith('https://api.github.com/app')
+                                                             else {'total_count': 101, 'check_runs': rows})
+        website = SimpleNamespace(installation_id='45', github_repo=proof['github_repo'], repository_id=proof['repository_id'])
+        self.assertEqual(read_ci_proof(website, proof), proof)
+        self.delete.assert_called_once()
 
 
 @override_settings(ROO_API_KEY='synthetic-test-key', INTERNAL_API_KEY='synthetic-test-key',
@@ -259,7 +315,7 @@ class WebsiteCIEvidenceTests(WebsiteDatabaseFixture, TestCase):
             if url.startswith('https://api.github.com/app'):
                 return response(200, {'permissions': GRANTS})
             self.assertEqual(self.post.call_args.kwargs['json']['permissions'], CI_PERMISSIONS)
-            value = {'check_runs': [{'head_sha': SHA, 'status': 'completed', 'conclusion': 'success',
+            value = {'total_count': 1, 'check_runs': [{'head_sha': SHA, 'status': 'completed', 'conclusion': 'success',
                                     'app': {'slug': 'github-actions'}}]} if '/check-runs' in url else {'sha': SHA}
             return response(200, value)
         self.get.side_effect = provider
@@ -298,6 +354,30 @@ class WebsiteCIEvidenceTests(WebsiteDatabaseFixture, TestCase):
         self.assertEqual(self.post.call_args.kwargs['json']['permissions'], CI_PERMISSIONS)
         self.delete.assert_called_once()
 
+    def test_cleanup_pending_or_paginated_checks_never_certify_completion(self):
+        from content_factory.website_cleanup_verification import verify_cleanup_deployment
+        from content_factory.website_contract import WebsiteAuthorityError
+        operation = WebsiteConnectionOperation.objects.create(connection=self.website, generation=self.website.generation,
+            action='cleanup', state='awaiting_deployment', idempotency_key=str(uuid.uuid4()),
+            receipt={'merge_sha': SHA, 'verification_routes': [{'path': '/articles', 'expected_status': 404}]})
+        success = {'head_sha': SHA, 'status': 'completed', 'conclusion': 'success', 'app': {'slug': 'github-actions'}}
+        payloads = [{'total_count': 101, 'check_runs': [success] * 100}]
+        payloads += [{'total_count': 2, 'check_runs': [success, {'head_sha': SHA, 'status': status, 'conclusion': None}]}
+                     for status in ('queued', 'in_progress', 'requested', 'waiting', 'pending')]
+        for payload in payloads:
+            self.get.side_effect = lambda url, **kwargs: response(200, {'permissions': GRANTS} if url.startswith('https://api.github.com/app')
+                                                                 else payload if '/check-runs' in url else {'sha': SHA})
+            self.delete.reset_mock()
+            with self.subTest(payload=payload), patch('content_factory.website_live_fetch.fetch_live_route') as live, \
+                 self.assertRaises(WebsiteAuthorityError) as caught:
+                verify_cleanup_deployment(self.config, data={**self.binding, 'operation_id': str(operation.pk)})
+            self.assertEqual(caught.exception.code, 'cleanup_build_verification_required')
+            operation.refresh_from_db()
+            self.assertEqual(operation.state, 'awaiting_deployment')
+            self.assertNotEqual(operation.receipt.get('cleanup_complete'), True)
+            self.delete.assert_called_once()
+            live.assert_not_called()
+
     def test_cleanup_provider_errors_after_mint_never_certify_or_escape_untyped(self):
         from content_factory.website_cleanup_verification import verify_cleanup_deployment
         from content_factory.website_contract import WebsiteAuthorityError
@@ -310,9 +390,7 @@ class WebsiteCIEvidenceTests(WebsiteDatabaseFixture, TestCase):
         failures += [(RequestException('private-transport-detail'), 503), (response(200, []), 503),
                      (response(200, {'check_runs': 'invalid'}), 503),
                      (SimpleNamespace(status_code=200, json=lambda: (_ for _ in ()).throw(ValueError('private-json-detail'))), 503)]
-        for malformed in ([], {}):
-            failures.append((response(200, {'check_runs': [{'head_sha': SHA, 'status': 'completed',
-                'conclusion': malformed, 'app': {'slug': 'github-actions'}}]}), 503))
+        failures += [(response(200, payload), 503) for payload in invalid_check_payloads()]
         for phase in ('head', 'checks'):
             for failed_reply, status in failures:
                 def provider(url, **kwargs):

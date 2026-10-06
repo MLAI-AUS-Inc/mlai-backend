@@ -5,7 +5,7 @@ import uuid
 from django.core.cache import cache
 from rest_framework.response import Response
 
-from .website_contract import WebsiteAuthorityError, connection_contract
+from .website_contract import WebsiteAuthorityError, connection_contract, SHA_PATTERN
 from .website_connections import authority_guard, contract_for
 
 
@@ -111,8 +111,16 @@ def _valid_ci_check_row(row):
     text_or_null = lambda value: value is None or isinstance(value, str)
     if any(not text_or_null(row.get(key)) for key in ("name", "head_sha", "status", "conclusion")):
         return False
+    if row.get("head_sha") is not None and not SHA_PATTERN.fullmatch(row["head_sha"]):
+        return False
+    if row.get("status") not in {None, "queued", "in_progress", "requested", "waiting", "pending", "completed"}:
+        return False
+    if row.get("conclusion") not in {None, "success", "failure", "neutral", "cancelled", "skipped", "timed_out", "action_required", "stale", "startup_failure"}:
+        return False
     app, output = row.get("app"), row.get("output")
     if app is not None and (not isinstance(app, dict) or not text_or_null(app.get("slug"))):
+        return False
+    if app is not None and app.get("id") is not None and (type(app["id"]) is not int or app["id"] <= 0):
         return False
     if output is not None and (not isinstance(output, dict)
             or any(not text_or_null(output.get(key)) for key in ("title", "summary", "text"))):
@@ -124,7 +132,13 @@ def read_ci_provider_checks(url, *, headers):
     """Require a bounded provider Checks envelope before inspecting attestation."""
     payload = read_ci_provider_json(url, headers=headers)
     rows = payload.get("check_runs")
-    if not isinstance(rows, list) or len(rows) > 100 or any(not _valid_ci_check_row(row) for row in rows):
+    count = payload.get("total_count", len(rows) if isinstance(rows, list) else 0)
+    # A full page may omit later checks; cleanup separately requires the full
+    # inventory, while native attestation can inspect its exact check on this page.
+    valid_count = (type(count) is int and count >= 0 and isinstance(rows, list)
+        and (count == len(rows) or (len(rows) == 100 and count > len(rows))))
+    if (not isinstance(rows, list) or len(rows) > 100 or not valid_count
+            or any(not _valid_ci_check_row(row) for row in rows)):
         raise WebsiteAuthorityError("github_ci_evidence_unavailable", "GitHub returned invalid CI evidence. Retry shortly.", status=503, retryable=True)
     return payload
 
